@@ -7,12 +7,23 @@ import {
   IconChevronRight,
   IconClipboard,
   IconGrid,
+  IconList,
   IconPlus,
   IconUsers,
 } from '../components/icons'
 import { Button, PageHead, Panel, Sect } from '../components/ui'
+import { WordImport } from '../components/WordImport'
 import { useStore, useToast } from '../data/store'
 import { ensureISO, isoOffset } from '../lib/date'
+import { docxToText } from '../lib/docx'
+import {
+  KIND_TEXT,
+  parseExam,
+  toQuestionMeta,
+  toSubQuestions,
+  type ParsedExam,
+  type ParsedQuestion,
+} from '../lib/examParse'
 
 export default function AssignmentNew() {
   const classes = useStore((s) => s.classes)
@@ -31,14 +42,73 @@ export default function AssignmentNew() {
   const [templateId, setTemplateId] = useState<string | undefined>(undefined)
   const [alsoTemplate, setAlsoTemplate] = useState(false)
 
+  /* ---- Word 稿导入 ---- */
+  const [parsed, setParsed] = useState<ParsedExam | null>(null)
+  const [questions, setQuestions] = useState<ParsedQuestion[] | null>(null)
+  const [parseErr, setParseErr] = useState('')
+  const [parsing, setParsing] = useState(false)
+  const [adopted, setAdopted] = useState(false)
+
   const klass = classes.find((c) => c.id === classId)
   const n = Math.max(1, Math.min(60, Number(questionCount) || 0))
+
+  const handleFile = async (f: File) => {
+    setParsing(true)
+    setParseErr('')
+    setParsed(null)
+    setQuestions(null)
+    setAdopted(false)
+    try {
+      const text = await docxToText(f)
+      const r = parseExam(text, f.name.replace(/\.docx$/i, ''))
+      if (r.questions.length === 0) {
+        setParseErr(r.warnings[0] ?? '没有从这份稿子里识别出题目。')
+      } else {
+        setParsed(r)
+        setQuestions(r.questions)
+      }
+    } catch (e) {
+      setParseErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setParsing(false)
+    }
+  }
+
+  const patchQuestion = (no: number, patch: Partial<ParsedQuestion>) =>
+    setQuestions((prev) => prev?.map((q) => (q.no === no ? { ...q, ...patch } : q)) ?? prev)
+
+  const adopt = () => {
+    if (!questions?.length) return
+    if (parsed?.title) setTitle(parsed.title)
+    setQuestionCount(String(questions.length))
+    setTemplateId(undefined)
+    setAdopted(true)
+    push({ text: `已采用 ${questions.length} 题的结构`, tone: 'ok' })
+  }
+
+  /** 只取前 n 题的结构，教师改了题量也不会对不上 */
+  const structure = questions?.length
+    ? {
+        subQuestions: toSubQuestions(questions.filter((q) => q.no <= n)),
+        questionMeta: toQuestionMeta(questions.filter((q) => q.no <= n)),
+      }
+    : {}
+
+  /** 采用的题型分布，例：单选 5 · 多选 2 · 计算 3 */
+  const kindSummary = (() => {
+    const use = (questions ?? []).filter((q) => q.no <= n)
+    if (!use.length) return ''
+    const count = new Map<string, number>()
+    for (const q of use) count.set(q.kind, (count.get(q.kind) ?? 0) + 1)
+    return [...count.entries()].map(([k, c]) => `${KIND_TEXT[k as keyof typeof KIND_TEXT]} ${c}`).join(' · ')
+  })()
+  const subCount = (questions ?? []).filter((q) => q.no <= n && q.subCount > 1).length
 
   return (
     <>
       <PageHead
         title="新建作业档案"
-        sub="题号结构来自模板，不需要识别图片"
+        sub="有 Word 稿就导入，没有就手工填题量"
         onBack={() => navigate('/assignments')}
       />
 
@@ -59,9 +129,30 @@ export default function AssignmentNew() {
           </Panel>
         ) : (
           <>
+            {/* 第 1 步 · Word 稿导入 */}
+            <div className="mb-4">
+              <Sect>第 1 步 · 导入练习册电子稿（推荐）</Sect>
+              <WordImport
+                questions={questions}
+                parsed={parsed}
+                error={parseErr}
+                busy={parsing}
+                adopted={adopted}
+                onFile={handleFile}
+                onPatch={patchQuestion}
+                onAdopt={adopt}
+                onReset={() => {
+                  setParsed(null)
+                  setQuestions(null)
+                  setParseErr('')
+                  setAdopted(false)
+                }}
+              />
+            </div>
+
             {/* 模板 */}
             <div className="mb-4">
-              <Sect>第 1 步 · 选择练习册模板（可跳过）</Sect>
+              <Sect>第 2 步 · 或选练习册模板（可跳过）</Sect>
               <Panel bodyClass="p-3">
                 <div className="flex flex-wrap gap-2">
                   {templates.map((t) => {
@@ -109,7 +200,7 @@ export default function AssignmentNew() {
 
             {/* 基本信息 */}
             <div className="mb-4">
-              <Sect>第 2 步 · 档案信息</Sect>
+              <Sect>第 3 步 · 档案信息</Sect>
               <Panel bodyClass="p-4">
                 <label className="block">
                   <span className="label">作业名称</span>
@@ -176,7 +267,7 @@ export default function AssignmentNew() {
 
             {/* 班级 */}
             <div className="mb-4">
-              <Sect>第 3 步 · 布置班级</Sect>
+              <Sect>第 4 步 · 布置班级</Sect>
               <Panel bodyClass="p-3">
                 <div className="flex flex-wrap gap-2">
                   {classes.map((c) => {
@@ -226,6 +317,18 @@ export default function AssignmentNew() {
                   <IconUsers size={14} />
                   应交 <span className="num">{klass?.students.filter((s) => s.status === 'active').length ?? 0}</span> 人
                 </span>
+                {kindSummary ? (
+                  <span className="flex items-center gap-1.5" style={{ color: 'var(--color-ink3)' }}>
+                    <IconList size={14} />
+                    {kindSummary}
+                  </span>
+                ) : null}
+                {subCount > 0 ? (
+                  <span className="flex items-center gap-1.5" style={{ color: 'var(--color-ink3)' }}>
+                    <IconGrid size={14} />
+                    <span className="num">{subCount}</span> 题含小问
+                  </span>
+                ) : null}
               </div>
             </Panel>
 
@@ -246,7 +349,14 @@ export default function AssignmentNew() {
                 block
                 onClick={() => {
                   if (!classId || !title.trim()) return
-                  addAssignment({ title, classId, assignDate, questionCount: n, templateId })
+                  addAssignment({
+                    title,
+                    classId,
+                    assignDate,
+                    questionCount: n,
+                    templateId,
+                    ...structure,
+                  })
                   push({ text: '档案已建立', tone: 'ok' })
                   navigate('/assignments')
                 }}
@@ -267,6 +377,7 @@ export default function AssignmentNew() {
                     assignDate,
                     questionCount: n,
                     templateId,
+                    ...structure,
                   })
                   if (alsoTemplate) {
                     saveTemplate({

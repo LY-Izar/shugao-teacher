@@ -11,6 +11,7 @@ import type {
   ClassroomClient,
   ImportRow,
   Klass,
+  QuestionMeta,
   ScheduleItem,
   Student,
   StudentStatus,
@@ -95,6 +96,9 @@ type State = {
     questionCount: number
     templateId?: string
     subject?: string
+    /** 从 Word 稿识别出的结构，可直接带上 */
+    subQuestions?: Record<string, number>
+    questionMeta?: Record<string, QuestionMeta>
   }) => string
   updateAssignment: (id: string, patch: Partial<Assignment>) => void
   removeAssignment: (id: string) => void
@@ -372,7 +376,16 @@ export const useStore = create<State>()(
 
       /* ---- S2：作业档案 ---- */
 
-      addAssignment: ({ title, classId, assignDate, questionCount, templateId, subject }) => {
+      addAssignment: ({
+        title,
+        classId,
+        assignDate,
+        questionCount,
+        templateId,
+        subject,
+        subQuestions,
+        questionMeta,
+      }) => {
         const id = uid()
         const item: Assignment = {
           id,
@@ -387,9 +400,10 @@ export const useStore = create<State>()(
           collected: false,
           missingNos: [],
           lateNos: [],
-          subQuestions: {},
+          subQuestions: subQuestions ?? {},
           wrong: {},
           confirmedNos: [],
+          questionMeta: questionMeta ?? {},
         }
         set((s) => ({ isDemo: false, assignments: [item, ...s.assignments] }))
         const tid = get().teacher?.id

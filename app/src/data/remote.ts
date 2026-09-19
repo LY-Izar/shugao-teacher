@@ -6,6 +6,7 @@ import type {
   CallState,
   ClassroomClient,
   Klass,
+  QuestionMeta,
   ScheduleItem,
   ScheduleKind,
   Student,
@@ -52,6 +53,7 @@ type AssignmentRow = {
   sub_questions: Record<string, number>
   wrong: Record<string, string[]>
   confirmed_nos: string[]
+  question_meta: Record<string, QuestionMeta>
   grade_seconds: number | null
   graded_at: string | null
   /** 由数据库默认值生成，只在读取时才有 */
@@ -142,6 +144,7 @@ export const assignmentToRow = (a: Assignment, teacherId: string): AssignmentRow
   sub_questions: a.subQuestions ?? {},
   wrong: a.wrong ?? {},
   confirmed_nos: a.confirmedNos ?? [],
+  question_meta: a.questionMeta ?? {},
   grade_seconds: a.gradeSeconds ?? null,
   graded_at: ts(a.gradedAt),
 })
@@ -206,6 +209,7 @@ const rowToAssignment = (r: AssignmentRow): Assignment => ({
   subQuestions: r.sub_questions ?? {},
   wrong: r.wrong ?? {},
   confirmedNos: r.confirmed_nos ?? [],
+  questionMeta: r.question_meta ?? {},
   gradeSeconds: r.grade_seconds ?? undefined,
   gradedAt: ms(r.graded_at),
 })

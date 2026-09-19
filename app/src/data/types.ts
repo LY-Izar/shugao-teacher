@@ -64,6 +64,42 @@ export type AssignmentTemplate = {
 
 export type AssignmentStatus = 'open' | 'collected' | 'graded' | 'reviewed' | 'archived'
 
+/* ---- 题目结构（从练习册 Word 稿识别而来，教师可改） ---- */
+
+export type QuestionKind = 'single' | 'multiple' | 'blank' | 'calc' | 'experiment' | 'other'
+
+export const KIND_TEXT: Record<QuestionKind, string> = {
+  single: '单选',
+  multiple: '多选',
+  blank: '填空',
+  calc: '计算',
+  experiment: '实验',
+  other: '待定',
+}
+
+export const KIND_ORDER: QuestionKind[] = [
+  'single',
+  'multiple',
+  'blank',
+  'calc',
+  'experiment',
+  'other',
+]
+
+export type QuestionMeta = {
+  kind: QuestionKind
+  /** 分值；稿子里没写就没有 */
+  score?: number
+  /** 小问数，>1 才存 */
+  subCount?: number
+  /** 选项数，选择题用 */
+  optionCount?: number
+  /** 难度星数 */
+  stars?: number
+  /** 题干摘要，用于核对 */
+  stem?: string
+}
+
 export type Assignment = {
   id: string
   title: string
@@ -90,6 +126,11 @@ export type Assignment = {
    * 例：{ "3": 2 } 表示第 3 题拆成 (1)(2)。
    */
   subQuestions: Record<string, number>
+  /**
+   * 题目结构：题号 → 题型/分值/小问数/难度。来自练习册 Word 稿的识别结果，
+   * 教师可以在建档时改。用于讲评时标注题型、以及后续按题型自动判分。
+   */
+  questionMeta?: Record<string, QuestionMeta>
   /**
    * 错题记录，同样「只记例外」——默认全对，只存错的。
    * 键为学号，值为错题键数组：无小题是 "3"，有小题是 "3.1"。
