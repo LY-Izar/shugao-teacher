@@ -2,20 +2,44 @@ import { useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { Logo, IconChevronRight, IconWifi } from '../components/icons'
 import { Button } from '../components/ui'
-import { useStore } from '../data/store'
+import { useStore, useToast } from '../data/store'
+import { getSupabase, isRemote } from '../lib/supabase'
 
 export default function Login() {
   const signIn = useStore((s) => s.signIn)
+  const hydrate = useStore((s) => s.hydrate)
   const navigate = useNavigate()
   const loc = useLocation() as { state?: { from?: string } }
+  const push = useToast((s) => s.push)
   const [account, setAccount] = useState('')
   const [pwd, setPwd] = useState('')
   const [busy, setBusy] = useState(false)
 
-  const submit = (e: React.FormEvent) => {
+  const submit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (busy) return
     setBusy(true)
+
+    if (isRemote) {
+      const sb = getSupabase()
+      const { error } = await sb!.auth.signInWithPassword({
+        email: account.trim(),
+        password: pwd,
+      })
+      if (error) {
+        setBusy(false)
+        push({
+          text: '登录失败',
+          tone: 'bad',
+          desc: error.message === 'Invalid login credentials' ? '邮箱或密码不正确' : error.message,
+        })
+        return
+      }
+      await hydrate()
+      navigate(loc.state?.from ?? '/', { replace: true })
+      return
+    }
+
     setTimeout(() => {
       signIn(account)
       navigate(loc.state?.from ?? '/', { replace: true })
@@ -78,12 +102,12 @@ export default function Login() {
 
           <div className="flex flex-col gap-4 p-4">
             <label>
-              <span className="label">账号 / 工号</span>
+              <span className="label">{isRemote ? '邮箱' : '账号 / 工号'}</span>
               <input
                 className="input"
                 value={account}
                 onChange={(e) => setAccount(e.target.value)}
-                placeholder="输入账号"
+                placeholder={isRemote ? 'teacher@example.com' : '输入账号'}
                 autoComplete="username"
                 autoFocus
               />
@@ -132,9 +156,9 @@ export default function Login() {
                 lineHeight: 1.65,
               }}
             >
-              当前为演示环境，任意账号密码均可进入。
-              <br />
-              账号由管理员批量创建，不做自助注册。
+              {isRemote
+                ? '账号由管理员创建，不支持自助注册。'
+                : '当前为演示环境，任意账号密码均可进入。'}
             </p>
           </div>
         </form>
@@ -145,7 +169,9 @@ export default function Login() {
           style={{ fontSize: 11.5, color: 'var(--color-ink4)' }}
         >
           <IconWifi size={14} />
-          <span>本地存储模式 · 尚未连接 Supabase</span>
+          <span>
+            {isRemote ? '已连接云端 · 手机与教室端共享数据' : '本地存储模式 · 尚未连接 Supabase'}
+          </span>
           <span className="flex-1" />
           <span className="num">v0.2.0</span>
         </div>

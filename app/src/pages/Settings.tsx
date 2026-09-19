@@ -13,6 +13,8 @@ import {
 import { Button, KV, PageHead, Panel, Sect, Tag } from '../components/ui'
 import { IconAlert } from '../components/icons'
 import { activeStudents, useStore, useToast } from '../data/store'
+import { signOutEverywhere } from '../hooks/useAuthBootstrap'
+import { connectionMode } from '../lib/supabase'
 import { REMIND_BEFORE, itemsForDate } from '../lib/schedule'
 import { beijingNow, holidayDataInfo, ymdOf } from '../lib/holiday'
 
@@ -22,11 +24,11 @@ export default function Settings() {
   const schedule = useStore((s) => s.schedule)
   const currentClassId = useStore((s) => s.currentClassId)
   const setCurrentClass = useStore((s) => s.setCurrentClass)
-  const signOut = useStore((s) => s.signOut)
   const resetDemo = useStore((s) => s.resetDemo)
   const clearAll = useStore((s) => s.clearAll)
   const navigate = useNavigate()
   const push = useToast((s) => s.push)
+  const mode = connectionMode()
 
   const total = classes.reduce((n, c) => n + activeStudents(c).length, 0)
   const todayCount = itemsForDate(schedule).length
@@ -233,6 +235,16 @@ export default function Settings() {
           <Sect>节假日与调休</Sect>
           <Panel bodyClass="px-4 py-2">
             <KV
+              k="数据存储"
+              v={
+                mode === 'remote' ? (
+                  <Tag tone="ok">云端 · 跨设备同步</Tag>
+                ) : (
+                  <Tag tone="warn">本机浏览器 · 未连云端</Tag>
+                )
+              }
+            />
+            <KV
               k="数据来源"
               v={
                 holidayInfo.latest ? (
@@ -358,7 +370,7 @@ export default function Settings() {
           block
           icon={<IconLogout size={16} />}
           onClick={() => {
-            signOut()
+            void signOutEverywhere()
             navigate('/login', { replace: true })
           }}
         >

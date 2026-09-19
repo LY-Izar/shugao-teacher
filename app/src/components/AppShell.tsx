@@ -216,6 +216,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const setCurrentClass = useStore((s) => s.setCurrentClass)
   const isDemo = useStore((s) => s.isDemo)
   const touchStreak = useStore((s) => s.touchStreak)
+  const syncError = useStore((s) => s.syncError)
+  const clearSyncError = useStore((s) => s.clearSyncError)
   const { pathname } = useLocation()
   const navigate = useNavigate()
   const current = classes.find((c) => c.id === currentClassId)
@@ -492,6 +494,31 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </header>
 
         <main key={pathname} className="page-enter flex-1 pb-24 lg:pb-8">
+          {syncError ? (
+            <button
+              type="button"
+              onClick={clearSyncError}
+              className="anim-in mb-3 flex w-full items-start gap-2.5 p-3 text-left"
+              style={{
+                background: 'var(--color-warnsoft)',
+                border: '1px solid ***REMOVED***ecd9ae',
+                borderRadius: 6,
+              }}
+            >
+              <span style={{ color: 'var(--color-warn)', marginTop: 1, flexShrink: 0 }}>
+                <IconAlert size={16} />
+              </span>
+              <span style={{ flex: 1 }}>
+                <span style={{ display: 'block', fontSize: 13, fontWeight: 620, color: '***REMOVED***8a5a12' }}>
+                  数据没能存到服务器
+                </span>
+                <span style={{ display: 'block', fontSize: 11.5, color: '***REMOVED***96702f', marginTop: 2 }}>
+                  {syncError} · 网络恢复后重新操作一次即可，本地已保留
+                </span>
+              </span>
+              <span style={{ fontSize: 11.5, color: '***REMOVED***96702f', flexShrink: 0 }}>知道了</span>
+            </button>
+          ) : null}
           {children}
         </main>
       </div>

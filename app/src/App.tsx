@@ -1,6 +1,7 @@
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { AppShell, ToastHost } from './components/AppShell'
 import { useStore } from './data/store'
+import { useAuthBootstrap } from './hooks/useAuthBootstrap'
 import AssignmentCall from './pages/AssignmentCall'
 import AssignmentCollect from './pages/AssignmentCollect'
 import AssignmentGrade from './pages/AssignmentGrade'
@@ -22,12 +23,37 @@ import Workbench from './pages/Workbench'
 
 function Guard({ children }: { children: React.ReactNode }) {
   const teacher = useStore((s) => s.teacher)
+  const hydrated = useStore((s) => s.hydrated)
   const loc = useLocation()
+  // 连了后端时，先等会话与数据就绪，否则会误判成「未登录」被踢回登录页
+  if (!hydrated) return <BootScreen />
   if (!teacher) return <Navigate to="/login" replace state={{ from: loc.pathname }} />
   return <AppShell>{children}</AppShell>
 }
 
+/** 后端模式下的首次加载（通常一闪而过） */
+function BootScreen() {
+  return (
+    <div className="grid min-h-full place-items-center px-6">
+      <div className="flex flex-col items-center gap-3">
+        <span
+          className="live-dot"
+          style={{
+            width: 10,
+            height: 10,
+            borderRadius: 99,
+            background: 'var(--color-accent)',
+            display: 'inline-block',
+          }}
+        />
+        <span style={{ fontSize: 13, color: 'var(--color-ink3)' }}>正在同步数据…</span>
+      </div>
+    </div>
+  )
+}
+
 export default function App() {
+  useAuthBootstrap()
   return (
     <BrowserRouter>
       <ToastHost />

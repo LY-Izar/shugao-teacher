@@ -222,7 +222,7 @@ const rowToSchedule = (r: ScheduleRow): ScheduleItem => ({
   notify: r.notify,
 })
 
-const rowToClassroom = (r: ClassroomRow): ClassroomClient => ({
+export const rowToClassroom = (r: ClassroomRow): ClassroomClient => ({
   id: r.id,
   classId: r.class_id,
   name: r.name,
@@ -230,7 +230,7 @@ const rowToClassroom = (r: ClassroomRow): ClassroomClient => ({
   lastSeenAt: ms(r.last_seen_at) ?? Date.now(),
 })
 
-const rowToCall = (r: CallRow): CallRecord => ({
+export const rowToCall = (r: CallRow): CallRecord => ({
   id: r.id,
   assignmentId: r.assignment_id,
   classId: r.class_id,
@@ -362,3 +362,21 @@ export const saveClassroom = (c: ClassroomClient, teacherId: string) =>
   upsert('classrooms', classroomToRow(c, teacherId))
 
 export const saveCall = (c: CallRecord, teacherId: string) => upsert('calls', callToRow(c, teacherId))
+
+/** 清空该教师的全部业务数据。teachers 那一行保留（它绑定 auth 用户，删了不会再自动生成）。 */
+export async function purgeAll(teacherId: string) {
+  const sb = getSupabase()
+  if (!sb) return
+  try {
+    // classes 上有 on delete cascade，会连带清掉 students / assignments / classrooms
+    for (const table of ['classes', 'schedule_items', 'calls'] as const) {
+      const { error } = await sb.from(table).delete().eq('teacher_id', teacherId)
+      if (error) {
+        fail(`${table} 清空`, error)
+        return
+      }
+    }
+  } catch (e) {
+    fail('清空数据', e)
+  }
+}

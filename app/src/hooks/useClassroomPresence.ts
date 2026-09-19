@@ -10,9 +10,22 @@ import { OFFLINE_AFTER_MS, subscribe } from '../lib/realtime'
 export function useClassroomPresence() {
   useEffect(() => {
     const off = subscribe((m) => {
-      if (m.type !== 'heartbeat') return
-      const c = useStore.getState().classrooms.find((x) => x.id === m.classroomId)
-      if (c && !c.online) useStore.getState().setClassroomOnline(c.id, true)
+      if (m.type === 'heartbeat') {
+        const c = useStore.getState().classrooms.find((x) => x.id === m.classroomId)
+        if (c && !c.online) useStore.getState().setClassroomOnline(c.id, true)
+        return
+      }
+      // 后端模式：教室端把 last_seen_at 写到库里，Realtime 推过来。
+      // 这里**只镜像到本地**，不回调 setClassroomOnline —— 否则会和教室端的写入互相触发，形成回环。
+      if (m.type === 'classroom') {
+        useStore.setState((s) => ({
+          classrooms: s.classrooms.map((c) =>
+            c.id === m.classroom.id
+              ? { ...c, online: m.classroom.online, lastSeenAt: m.classroom.lastSeenAt }
+              : c,
+          ),
+        }))
+      }
     })
 
     const timer = window.setInterval(() => {

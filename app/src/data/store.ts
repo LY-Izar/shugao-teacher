@@ -1,5 +1,7 @@
 import { create } from 'zustand'
-import { persist } from 'zustand/middleware'
+import { createJSONStorage, persist, type StateStorage } from 'zustand/middleware'
+import { isRemote } from '../lib/supabase'
+import * as remote from './remote'
 import { makeClassrooms, makeDemoAssignments, makeDemoClasses, makeDemoSchedule, makeTemplates } from './seed'
 import type {
   Assignment,
@@ -34,6 +36,16 @@ type State = {
   isDemo: boolean
   lastSeenAt: number
   streakDays: number
+  /* ---- 后端 ---- */
+  /** 已连后端时的登录用户 id；本地模式为 null */
+  userId: string | null
+  /** 首次数据就绪（本地模式立即为 true） */
+  hydrated: boolean
+  /** 最近一次同步失败的原因，非空时界面顶部会提示 */
+  syncError: string | null
+
+  hydrate: () => Promise<void>
+  clearSyncError: () => void
 
   signIn: (name: string) => void
   signOut: () => void
@@ -70,6 +82,18 @@ type State = {
     data: { missingNos?: string[]; lateNos?: string[]; collected?: boolean },
   ) => void
   saveTemplate: (t: Omit<AssignmentTemplate, 'id'>) => string
+  /** S3：批改录入的整档保存 */
+  setGrade: (
+    id: string,
+    data: {
+      wrong?: Record<string, string[]>
+      confirmedNos?: string[]
+      subQuestions?: Record<string, number>
+      status?: Assignment['status']
+      gradeSeconds?: number
+    },
+  ) => void
+
   /* ---- S4 ---- */
   sendCall: (input: {
     assignmentId: string
@@ -85,17 +109,6 @@ type State = {
   addSchedule: (item: Omit<ScheduleItem, 'id'>) => string
   updateSchedule: (id: string, patch: Partial<ScheduleItem>) => void
   removeSchedule: (id: string) => void
-  /** S3：批改录入的整档保存 */
-  setGrade: (
-    id: string,
-    data: {
-      wrong?: Record<string, string[]>
-      confirmedNos?: string[]
-      subQuestions?: Record<string, number>
-      status?: Assignment['status']
-      gradeSeconds?: number
-    },
-  ) => void
 
   resetDemo: () => void
   clearAll: () => void
@@ -116,13 +129,67 @@ function freshDemo() {
   }
 }
 
+/** 连了后端就从空开始 —— 数据在服务器上，不能再撒演示数据 */
+function initialState() {
+  if (!isRemote) return freshDemo()
+  return {
+    classes: [] as Klass[],
+    currentClassId: null,
+    templates: makeTemplates(),
+    assignments: [] as Assignment[],
+    classrooms: [] as ClassroomClient[],
+    calls: [] as CallRecord[],
+    schedule: [] as ScheduleItem[],
+    isDemo: false,
+  }
+}
+
+/** 后端模式下不走 localStorage：数据以服务器为准，避免换账号后看到上一个人的缓存 */
+const noopStorage: StateStorage = {
+  getItem: () => null,
+  setItem: () => {},
+  removeItem: () => {},
+}
+
 export const useStore = create<State>()(
   persist(
     (set, get) => ({
       teacher: null,
-      ...freshDemo(),
+      ...initialState(),
       lastSeenAt: 0,
       streakDays: 1,
+      userId: null,
+      hydrated: !isRemote,
+      syncError: null,
+
+      /* ---------------- 后端 ---------------- */
+
+      hydrate: async () => {
+        if (!isRemote) {
+          set({ hydrated: true })
+          return
+        }
+        const snap = await remote.loadSnapshot()
+        if (!snap) {
+          set({ hydrated: true })
+          return
+        }
+        set({
+          userId: snap.userId,
+          teacher: snap.teacher,
+          classes: snap.classes,
+          assignments: snap.assignments,
+          schedule: snap.schedule,
+          classrooms: snap.classrooms,
+          calls: snap.calls,
+          currentClassId: snap.classes[0]?.id ?? null,
+          isDemo: false,
+          hydrated: true,
+          lastSeenAt: Date.now(),
+        })
+      },
+
+      clearSyncError: () => set({ syncError: null }),
 
       signIn: (name) =>
         set((s) => ({
@@ -136,25 +203,44 @@ export const useStore = create<State>()(
           streakDays: s.streakDays || 1,
         })),
 
-      signOut: () => set({ teacher: null }),
+      signOut: () => {
+        set({
+          teacher: null,
+          userId: null,
+          classes: [],
+          currentClassId: null,
+          assignments: [],
+          classrooms: [],
+          calls: [],
+          schedule: [],
+          hydrated: !isRemote,
+        })
+      },
 
       addClass: ({ name, grade, year }) => {
         const id = `c-${uid()}`
+        const klass: Klass = { id, name, grade, year, createdAt: Date.now(), students: [] }
         set((s) => ({
-          classes: [...s.classes, { id, name, grade, year, createdAt: Date.now(), students: [] }],
+          classes: [...s.classes, klass],
           currentClassId: s.currentClassId ?? id,
           isDemo: false,
         }))
+        const tid = get().teacher?.id
+        if (tid) void remote.saveClass(klass, tid)
         return id
       },
 
-      updateClass: (id, patch) =>
+      updateClass: (id, patch) => {
         set((s) => ({
           classes: s.classes.map((c) => (c.id === id ? { ...c, ...patch } : c)),
           isDemo: false,
-        })),
+        }))
+        const k = get().classes.find((c) => c.id === id)
+        const tid = get().teacher?.id
+        if (k && tid) void remote.saveClass(k, tid)
+      },
 
-      removeClass: (id) =>
+      removeClass: (id) => {
         set((s) => {
           const classes = s.classes.filter((c) => c.id !== id)
           return {
@@ -162,13 +248,16 @@ export const useStore = create<State>()(
             currentClassId: s.currentClassId === id ? (classes[0]?.id ?? null) : s.currentClassId,
             isDemo: false,
           }
-        }),
+        })
+        void remote.deleteClass(id)
+      },
 
       setCurrentClass: (id) => set({ currentClassId: id }),
 
       addStudents: (classId, rows, mode) => {
         let added = 0
         let updated = 0
+        const touched: Student[] = []
         set((s) => ({
           isDemo: false,
           classes: s.classes.map((c) => {
@@ -184,6 +273,7 @@ export const useStore = create<State>()(
                 if (hit.name !== name) {
                   hit.name = name
                   updated++
+                  touched.push({ ...hit })
                 }
                 continue
               }
@@ -196,16 +286,20 @@ export const useStore = create<State>()(
               }
               base.push(st)
               byNo.set(st.studentNo, st)
+              touched.push(st)
               added++
             }
-            base.sort((a, b) => Number(a.studentNo) - Number(b.studentNo) || a.name.localeCompare(b.name))
+            base.sort(
+              (a, b) => Number(a.studentNo) - Number(b.studentNo) || a.name.localeCompare(b.name),
+            )
             return { ...c, students: base }
           }),
         }))
+        void remote.saveStudents(classId, touched)
         return { added, updated }
       },
 
-      updateStudent: (classId, studentId, patch) =>
+      updateStudent: (classId, studentId, patch) => {
         set((s) => ({
           isDemo: false,
           classes: s.classes.map((c) =>
@@ -216,12 +310,15 @@ export const useStore = create<State>()(
                 }
               : c,
           ),
-        })),
+        }))
+        const st = get().classes.find((c) => c.id === classId)?.students.find((x) => x.id === studentId)
+        if (st) void remote.saveStudent(st, classId)
+      },
 
       setStudentStatus: (classId, studentId, status) =>
         get().updateStudent(classId, studentId, { status }),
 
-      removeStudent: (classId, studentId) =>
+      removeStudent: (classId, studentId) => {
         set((s) => ({
           isDemo: false,
           classes: s.classes.map((c) =>
@@ -229,70 +326,70 @@ export const useStore = create<State>()(
               ? { ...c, students: c.students.filter((st) => st.id !== studentId) }
               : c,
           ),
-        })),
+        }))
+        void remote.deleteStudent(studentId)
+      },
 
-      transferStudent: (studentId, fromClassId, toClassId) =>
-        set((s) => {
-          const from = s.classes.find((c) => c.id === fromClassId)
-          const moved = from?.students.find((st) => st.id === studentId)
-          if (!moved || fromClassId === toClassId) return {}
-          return {
-            isDemo: false,
-            classes: s.classes.map((c) => {
-              if (c.id === fromClassId) {
-                return { ...c, students: c.students.filter((st) => st.id !== studentId) }
-              }
-              if (c.id === toClassId) {
-                return { ...c, students: [...c.students, moved] }
-              }
-              return c
-            }),
-          }
-        }),
+      transferStudent: (studentId, fromClassId, toClassId) => {
+        const from = get().classes.find((c) => c.id === fromClassId)
+        const moved = from?.students.find((st) => st.id === studentId)
+        if (!moved || fromClassId === toClassId) return
+        set((s) => ({
+          isDemo: false,
+          classes: s.classes.map((c) => {
+            if (c.id === fromClassId) {
+              return { ...c, students: c.students.filter((st) => st.id !== studentId) }
+            }
+            if (c.id === toClassId) return { ...c, students: [...c.students, moved] }
+            return c
+          }),
+        }))
+        void remote.saveStudent(moved, toClassId)
+      },
 
       /* ---- S2：作业档案 ---- */
 
       addAssignment: ({ title, classId, assignDate, questionCount, templateId, subject }) => {
         const id = `a-${uid()}`
-        set((s) => ({
-          isDemo: false,
-          assignments: [
-            {
-              id,
-              title: title.trim() || '未命名作业',
-              classId,
-              subject: subject ?? s.teacher?.subject ?? '物理',
-              assignDate,
-              questionCount: Math.max(1, Number(questionCount) || 1),
-              status: 'open',
-              templateId,
-              createdAt: Date.now(),
-              collected: false,
-              missingNos: [],
-              lateNos: [],
-              subQuestions: {},
-              wrong: {},
-              confirmedNos: [],
-            },
-            ...s.assignments,
-          ],
-        }))
+        const item: Assignment = {
+          id,
+          title: title.trim() || '未命名作业',
+          classId,
+          subject: subject ?? get().teacher?.subject ?? '物理',
+          assignDate,
+          questionCount: Math.max(1, Number(questionCount) || 1),
+          status: 'open',
+          templateId,
+          createdAt: Date.now(),
+          collected: false,
+          missingNos: [],
+          lateNos: [],
+          subQuestions: {},
+          wrong: {},
+          confirmedNos: [],
+        }
+        set((s) => ({ isDemo: false, assignments: [item, ...s.assignments] }))
+        const tid = get().teacher?.id
+        if (tid) void remote.saveAssignment(item, tid)
         return id
       },
 
-      updateAssignment: (id, patch) =>
+      updateAssignment: (id, patch) => {
         set((s) => ({
           isDemo: false,
           assignments: s.assignments.map((a) => (a.id === id ? { ...a, ...patch } : a)),
-        })),
+        }))
+        const a = get().assignments.find((x) => x.id === id)
+        const tid = get().teacher?.id
+        if (a && tid) void remote.saveAssignment(a, tid)
+      },
 
-      removeAssignment: (id) =>
-        set((s) => ({
-          isDemo: false,
-          assignments: s.assignments.filter((a) => a.id !== id),
-        })),
+      removeAssignment: (id) => {
+        set((s) => ({ isDemo: false, assignments: s.assignments.filter((a) => a.id !== id) }))
+        void remote.deleteAssignment(id)
+      },
 
-      setCollection: (id, data) =>
+      setCollection: (id, data) => {
         set((s) => ({
           isDemo: false,
           assignments: s.assignments.map((a) =>
@@ -306,7 +403,11 @@ export const useStore = create<State>()(
                 }
               : a,
           ),
-        })),
+        }))
+        const a = get().assignments.find((x) => x.id === id)
+        const tid = get().teacher?.id
+        if (a && tid) void remote.saveAssignment(a, tid)
+      },
 
       saveTemplate: ({ name, questionCount, subject, score }) => {
         const id = `t-${uid()}`
@@ -317,7 +418,7 @@ export const useStore = create<State>()(
         return id
       },
 
-      setGrade: (id, data) =>
+      setGrade: (id, data) => {
         set((s) => ({
           isDemo: false,
           assignments: s.assignments.map((a) =>
@@ -336,7 +437,11 @@ export const useStore = create<State>()(
                 }
               : a,
           ),
-        })),
+        }))
+        const a = get().assignments.find((x) => x.id === id)
+        const tid = get().teacher?.id
+        if (a && tid) void remote.saveAssignment(a, tid)
+      },
 
       /* ---- S4：呼叫 ---- */
 
@@ -352,62 +457,96 @@ export const useStore = create<State>()(
           states: Object.fromEntries(studentNos.map((n) => [n, 'called' as CallState])),
         }
         set((s) => ({ isDemo: false, calls: [record, ...s.calls] }))
+        const tid = get().teacher?.id
+        if (tid) void remote.saveCall(record, tid)
         return record
       },
 
-      repeatCall: (callId) =>
+      repeatCall: (callId) => {
         set((s) => ({
           calls: s.calls.map((c) =>
             c.id === callId ? { ...c, sentAt: [...c.sentAt, Date.now()] } : c,
           ),
-        })),
+        }))
+        const c = get().calls.find((x) => x.id === callId)
+        const tid = get().teacher?.id
+        if (c && tid) void remote.saveCall(c, tid)
+      },
 
-      setCallState: (callId, studentNo, state) =>
+      setCallState: (callId, studentNo, state) => {
         set((s) => ({
           calls: s.calls.map((c) =>
             c.id === callId ? { ...c, states: { ...c.states, [studentNo]: state } } : c,
           ),
-        })),
+        }))
+        const c = get().calls.find((x) => x.id === callId)
+        const tid = get().teacher?.id
+        if (c && tid) void remote.saveCall(c, tid)
+      },
 
-      setClassroomOnline: (id, online) =>
+      setClassroomOnline: (id, online) => {
         set((s) => ({
           classrooms: s.classrooms.map((c) =>
             c.id === id ? { ...c, online, lastSeenAt: Date.now() } : c,
           ),
-        })),
+        }))
+        const c = get().classrooms.find((x) => x.id === id)
+        const tid = get().teacher?.id
+        if (c && tid) void remote.saveClassroom(c, tid)
+      },
 
       /* ---- 课表 ---- */
 
       addSchedule: (item) => {
         const id = `sch-${uid()}`
-        set((s) => ({ isDemo: false, schedule: [...s.schedule, { ...item, id }] }))
+        const full: ScheduleItem = { ...item, id }
+        set((s) => ({ isDemo: false, schedule: [...s.schedule, full] }))
+        const tid = get().teacher?.id
+        if (tid) void remote.saveSchedule(full, tid)
         return id
       },
 
-      updateSchedule: (id, patch) =>
+      updateSchedule: (id, patch) => {
         set((s) => ({
           isDemo: false,
           schedule: s.schedule.map((x) => (x.id === id ? { ...x, ...patch } : x)),
-        })),
+        }))
+        const item = get().schedule.find((x) => x.id === id)
+        const tid = get().teacher?.id
+        if (item && tid) void remote.saveSchedule(item, tid)
+      },
 
-      removeSchedule: (id) =>
-        set((s) => ({ isDemo: false, schedule: s.schedule.filter((x) => x.id !== id) })),
+      removeSchedule: (id) => {
+        set((s) => ({ isDemo: false, schedule: s.schedule.filter((x) => x.id !== id) }))
+        void remote.deleteSchedule(id)
+      },
 
-      resetDemo: () => set({ ...freshDemo() }),
+      resetDemo: () => {
+        if (isRemote) {
+          void get().hydrate()
+          return
+        }
+        set({ ...freshDemo() })
+      },
 
-      clearAll: () =>
+      clearAll: () => {
+        const tid = get().teacher?.id
+        if (isRemote && tid) void remote.purgeAll(tid)
         set({
           teacher: null,
+          userId: null,
           classes: [],
           currentClassId: null,
-          templates: [],
+          templates: isRemote ? [] : [],
           assignments: [],
           classrooms: [],
           calls: [],
           schedule: [],
           isDemo: false,
           streakDays: 1,
-        }),
+          hydrated: !isRemote,
+        })
+      },
 
       touchStreak: () =>
         set((s) => {
@@ -421,9 +560,31 @@ export const useStore = create<State>()(
     {
       name: 'shugao.teacher.v1',
       version: 1,
+      // 后端模式不落 localStorage：数据以服务器为准
+      storage: createJSONStorage(() => (isRemote ? noopStorage : localStorage)),
+      partialize: (s) =>
+        ({
+          teacher: s.teacher,
+          classes: s.classes,
+          currentClassId: s.currentClassId,
+          templates: s.templates,
+          assignments: s.assignments,
+          classrooms: s.classrooms,
+          calls: s.calls,
+          schedule: s.schedule,
+          isDemo: s.isDemo,
+          lastSeenAt: s.lastSeenAt,
+          streakDays: s.streakDays,
+        }) as unknown as State,
     },
   ),
 )
+
+/* ---------------- 同步失败提示 ---------------- */
+
+remote.setSyncErrorHandler((where, detail) => {
+  useStore.setState({ syncError: `${where}失败：${detail ?? '未知错误'}` })
+})
 
 /* ---------------- 派生选择器 ---------------- */
 

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { useNavigate } from 'react-router-dom'
 import { PipPanel } from '../components/PipPanel'
 import {
   IconAlert,
@@ -16,6 +17,7 @@ import { collectStats } from '../lib/assignments'
 import { BAND_META, gradeStats } from '../lib/grading'
 import { closePip, openPip, pipSupported } from '../lib/pip'
 import { HEARTBEAT_MS, emit, subscribe } from '../lib/realtime'
+import { isRemote } from '../lib/supabase'
 import { chime, speak, stopSpeaking, unlockAudio } from '../lib/tts'
 import { friendlyDate } from '../lib/date'
 import type { CallRecord } from '../data/types'
@@ -27,6 +29,9 @@ export default function Classroom() {
   const assignments = useStore((s) => s.assignments)
   const classrooms = useStore((s) => s.classrooms)
   const setClassroomOnline = useStore((s) => s.setClassroomOnline)
+  const hydrated = useStore((s) => s.hydrated)
+  const teacher = useStore((s) => s.teacher)
+  const navigate = useNavigate()
 
   const [classId, setClassId] = useState(() => {
     try {
@@ -91,11 +96,17 @@ export default function Classroom() {
   /* 心跳：教师端据此显示「在线 / 离线」 */
   useEffect(() => {
     if (!client) return
-    const beat = () =>
-      emit({ type: 'heartbeat', classroomId: client.id, at: Date.now() })
+    const beat = () => {
+      if (isRemote) {
+        // 后端模式：心跳就是更新 classrooms.last_seen_at，教师端靠 Realtime 收到
+        setClassroomOnline(client.id, true)
+      } else {
+        // 本地模式：两个标签页各有各的 store，必须靠广播
+        emit({ type: 'heartbeat', classroomId: client.id, at: Date.now() })
+        if (!client.online) setClassroomOnline(client.id, true)
+      }
+    }
     beat()
-    // 主动把状态置为在线（本机演示时不依赖教师端收到心跳）
-    if (!client.online) setClassroomOnline(client.id, true)
     const t = window.setInterval(beat, HEARTBEAT_MS)
     return () => window.clearInterval(t)
   }, [client?.id]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -138,6 +149,38 @@ export default function Classroom() {
 
   const cur = stats?.questions[seq - 1]
   const pad = (n: number) => String(n).padStart(2, '0')
+
+  /* ---------- 后端模式下教室端需要一次登录 ---------- */
+  if (isRemote && !hydrated) {
+    return (
+      <Shell>
+        <Panel bodyClass="p-8 text-center" className="anim-in">
+          <div style={{ fontSize: 15, fontWeight: 640 }}>正在同步数据…</div>
+        </Panel>
+      </Shell>
+    )
+  }
+  if (isRemote && !teacher) {
+    return (
+      <Shell>
+        <Panel bodyClass="p-8 text-center" className="anim-in">
+          <div style={{ fontSize: 16, fontWeight: 640 }}>教室端还没有登录</div>
+          <div style={{ fontSize: 13, color: 'var(--color-ink3)', marginTop: 6, lineHeight: 1.7 }}>
+            这台一体机需要用教师账号登录一次，之后会一直保持登录。
+            <br />
+            登录后回到本页即可。
+          </div>
+          <Button
+            variant="primary"
+            className="mt-4"
+            onClick={() => navigate('/login')}
+          >
+            去登录
+          </Button>
+        </Panel>
+      </Shell>
+    )
+  }
 
   /* ---------- 没有班级 ---------- */
   if (!klass) {
