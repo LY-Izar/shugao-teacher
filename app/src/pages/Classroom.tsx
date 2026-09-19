@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom'
 import { PipPanel } from '../components/PipPanel'
 import {
   IconAlert,
+  IconBellOff,
   IconCheck,
   IconClock,
   IconDownload,
@@ -21,7 +22,8 @@ import { BAND_META, gradeStats } from '../lib/grading'
 import { closePip, openPip, pipSupported } from '../lib/pip'
 import { HEARTBEAT_MS, emit, subscribe } from '../lib/realtime'
 import { isRemote } from '../lib/supabase'
-import { awayText, dayState, toMinutes, weekdayOf } from '../lib/schedule'
+import { awayText, dayState, maybeShift, toMinutes, weekdayOf } from '../lib/schedule'
+import { dayKind, ymdOf } from '../lib/holiday'
 import { parseScheduleText } from '../lib/scheduleParse'
 import { preparePhoto } from '../lib/photo'
 import { recognize } from '../lib/ocr'
@@ -44,7 +46,7 @@ import {
   saveToDisk,
   type LocalFile,
 } from '../lib/localStore'
-import { chime, speak, stopSpeaking, unlockAudio } from '../lib/tts'
+import { chime, setExamMuted, softChime, speak, stopSpeaking, unlockAudio } from '../lib/tts'
 import { friendlyDate } from '../lib/date'
 import type { CallRecord } from '../data/types'
 
@@ -193,15 +195,24 @@ export default function Classroom() {
   const schedRef = useRef<HTMLInputElement>(null)
   const [schedBusy, setSchedBusy] = useState(false)
   const [schedErr, setSchedErr] = useState('')
-  const day = useMemo(
-    () =>
-      dayState(
-        // 教室里要显示的是**这个班全部科目的课表**，不是物理老师自己的排课表
-        schedule.filter((s) => s.scope === 'class' && s.classId === klass?.id),
-        now,
-      ),
-    [schedule, klass?.id, now],
-  )
+  /**
+   * 调休那天各校安排不一样（有的按周五上、有的按周一上），
+   * 所以给教师一个当天可切换的口子 —— **只影响显示，不改课表数据**。
+   */
+  const [weekOverride, setWeekOverride] = useState<number | null>(null)
+  const isMakeup = dayKind(ymdOf(now)) === 'makeup'
+  const useWeekday = isMakeup && weekOverride !== null ? weekOverride : weekdayOf(now)
+
+  const dayItems = useMemo(() => {
+    const raw = schedule.filter(
+      (s) => s.scope === 'class' && s.classId === klass?.id && s.weekday === useWeekday,
+    )
+    // 朝会只在真正的周一早上，所以顺延看的是「今天是不是周一」，
+    // 而不是「借用了哪一天的课表」—— 调休借周一的课不代表今天要顺延。
+    return maybeShift(raw, weekdayOf(now))
+  }, [schedule, klass?.id, useWeekday, now])
+
+  const day = useMemo(() => dayState(dayItems.items, now), [dayItems.items, now])
   const nowMin = now.getHours() * 60 + now.getMinutes()
 
   const scanSchedule = async (f: File) => {
@@ -243,6 +254,41 @@ export default function Classroom() {
       setSchedBusy(false)
     }
   }
+
+  /* 考试模式：全屏黑底时钟，所有声音停掉 */
+  const [exam, setExam] = useState(false)
+  useEffect(() => {
+    setExamMuted(exam)
+    return () => setExamMuted(false)
+  }, [exam])
+
+  /**
+   * 下课铃：下一节课**开始前 5 分钟**响一声很轻的「叮」。
+   * 用 rungRef 记住已经响过的 `日期-课id`，避免在同一分钟内重复响。
+   */
+  const rungRef = useRef('')
+  useEffect(() => {
+    const tick = () => {
+      const n = new Date()
+      const m = n.getHours() * 60 + n.getMinutes()
+      const day = maybeShift(
+        schedule.filter(
+          (s) => s.scope === 'class' && s.classId === klass?.id && s.weekday === weekdayOf(n),
+        ),
+        weekdayOf(n),
+      ).items
+      for (const it of day) {
+        if (toMinutes(it.start) - m !== 5) continue
+        const key = `${ymdOf(n)}-${it.id}`
+        if (rungRef.current === key) continue
+        rungRef.current = key
+        softChime()
+      }
+    }
+    tick()
+    const t = window.setInterval(tick, 20_000)
+    return () => window.clearInterval(t)
+  }, [schedule, klass?.id])
 
   /* 心跳：教师端据此显示「在线 / 离线」 */
   useEffect(() => {
@@ -550,6 +596,70 @@ export default function Classroom() {
                   </button>
                 </div>
 
+                {isMakeup ? (
+                  <div
+                    className="mb-2 flex flex-wrap items-center gap-1.5 p-2"
+                    style={{
+                      background: 'var(--color-warnsoft)',
+                      border: '1px solid ***REMOVED***ecd9ae',
+                      borderRadius: 4,
+                      fontSize: 11.5,
+                      color: '***REMOVED***8a5a12',
+                    }}
+                  >
+                    <span>今天是调休上班日，按</span>
+                    {[1, 2, 3, 4, 5].map((w) => (
+                      <button
+                        key={w}
+                        type="button"
+                        onClick={() => setWeekOverride(w)}
+                        style={{
+                          padding: '1px 7px',
+                          borderRadius: 3,
+                          fontSize: 11.5,
+                          fontWeight: useWeekday === w && weekOverride !== null ? 700 : 500,
+                          background:
+                            useWeekday === w && weekOverride !== null
+                              ? 'var(--color-warn)'
+                              : 'rgb(255 255 255 / .6)',
+                          color:
+                            useWeekday === w && weekOverride !== null ? '***REMOVED***fff' : 'inherit',
+                        }}
+                      >
+                        {WEEKDAY_TEXT[w - 1]}
+                      </button>
+                    ))}
+                    <span>的课表上</span>
+                    {weekOverride !== null ? (
+                      <button
+                        type="button"
+                        onClick={() => setWeekOverride(null)}
+                        style={{ color: 'var(--color-ink3)', textDecoration: 'underline' }}
+                      >
+                        还原
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                {dayItems.conflicts.length ? (
+                  <div
+                    className="mb-2 p-2"
+                    style={{
+                      background: 'var(--color-badsoft)',
+                      border: '1px solid ***REMOVED***f0c9c9',
+                      borderRadius: 4,
+                      fontSize: 11.5,
+                      color: '***REMOVED***8f2b2b',
+                      lineHeight: 1.6,
+                    }}
+                  >
+                    {dayItems.conflicts.map((c) => (
+                      <div key={c}>⚠ {c}</div>
+                    ))}
+                  </div>
+                ) : null}
+
                 {day.items.length === 0 ? (
                   <div
                     className="mt-2"
@@ -630,7 +740,65 @@ export default function Classroom() {
                 >
                   试播一句
                 </Button>
+                <Button
+                  size="sm"
+                  block
+                  className="mt-2"
+                  variant={exam ? 'primary' : 'ghost'}
+                  icon={exam ? <IconCheck size={15} /> : <IconBellOff size={15} />}
+                  onClick={() => {
+                    unlockAudio()
+                    setExam((v) => !v)
+                  }}
+                >
+                  {exam ? '结束考试' : '考试静音'}
+                </Button>
               </Panel>
+
+              {/* 考试模式：全屏黑底时钟，所有声音停掉 */}
+              {exam ? (
+                <div
+                  className="fixed inset-0 z-[90] flex flex-col items-center justify-center"
+                  style={{ background: '***REMOVED***000' }}
+                >
+                  <div
+                    className="num"
+                    style={{
+                      fontSize: 'clamp(72px, 17vw, 190px)',
+                      fontWeight: 200,
+                      color: '***REMOVED***fff',
+                      lineHeight: 1,
+                      letterSpacing: '.02em',
+                    }}
+                  >
+                    {String(now.getHours()).padStart(2, '0')}
+                    <span style={{ opacity: 0.35 }}>:</span>
+                    {String(now.getMinutes()).padStart(2, '0')}
+                  </div>
+                  <div
+                    style={{
+                      marginTop: 18,
+                      fontSize: 14,
+                      letterSpacing: '.24em',
+                      color: 'rgb(255 255 255 / .42)',
+                    }}
+                  >
+                    考试进行中 · 已静音
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setExam(false)}
+                    style={{
+                      marginTop: 46,
+                      fontSize: 13,
+                      color: 'rgb(255 255 255 / .34)',
+                      textDecoration: 'underline',
+                    }}
+                  >
+                    结束考试
+                  </button>
+                </div>
+              ) : null}
 
               {/* 小窗同款面板：不支持置顶小窗时，这就是兜底 */}
               {cur ? (

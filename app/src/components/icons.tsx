@@ -271,6 +271,15 @@ export const IconBell = (p: IconProps) => (
   </Svg>
 )
 
+/** 静音铃：铃铛加一道斜杠 —— 考试模式用 */
+export const IconBellOff = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M6.1 16.4V10.7a5.9 5.9 0 0 1 8.6-5.2M17.9 10.7v5.7l1.1 1.9a.55.55 0 0 1-.47.83H9.2" />
+    <path d="M10.2 19.4a2 2 0 0 0 3.6 0" />
+    <path d="M4 4l16 16" />
+  </Svg>
+)
+
 export const IconSun = (p: IconProps) => (
   <Svg {...p}>
     <circle cx="12" cy="12" r="4.1" />
