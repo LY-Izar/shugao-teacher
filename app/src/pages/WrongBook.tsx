@@ -13,44 +13,31 @@ import {
 import { Button, PageHead, Panel, Sect, Sheet, Tag } from '../components/ui'
 import { useStore, useToast } from '../data/store'
 import { downloadPracticeDocx } from '../lib/examDoc'
-import { buildClassWrongBook, buildWrongBook } from '../lib/wrongbook'
+import { buildClassWrongBook, buildWrongBook, type WrongItem } from '../lib/wrongbook'
 
-/** 横向条：一眼看出哪个知识点掉分最多 */
-function Bar({ label, value, max, suffix }: { label: string; value: number; max: number; suffix: string }) {
-  const pct = max > 0 ? Math.max(3, Math.round((value / max) * 100)) : 0
-  return (
-    <div className="flex items-center gap-2.5 py-1.5">
-      <span className="truncate" style={{ width: 104, fontSize: 12, flexShrink: 0 }}>
-        {label}
-      </span>
-      <span
-        style={{
-          flex: 1,
-          height: 8,
-          background: 'var(--color-surface3)',
-          borderRadius: 3,
-          overflow: 'hidden',
-        }}
-      >
-        <i
-          style={{
-            display: 'block',
-            height: '100%',
-            width: `${pct}%`,
-            background: 'var(--color-bad)',
-            borderRadius: 3,
-          }}
-        />
-      </span>
-      <span
-        className="num"
-        style={{ fontSize: 12, width: 62, textAlign: 'right', flexShrink: 0, fontWeight: 600 }}
-      >
-        {value.toFixed(1)}
-        {suffix}
-      </span>
-    </div>
-  )
+/** 勾选：空集合表示"全选"。这样不用在打开时做状态同步，少一类 bug */
+function usePicked() {
+  const [picked, setPicked] = useState<Set<string> | null>(null)
+  const all = (ids: string[]) => new Set(ids)
+  const isOn = (id: string, ids: string[]) => (picked ?? all(ids)).has(id)
+  const toggle = (id: string, ids: string[]) => {
+    const cur = new Set(picked ?? ids)
+    if (cur.has(id)) cur.delete(id)
+    else cur.add(id)
+    setPicked(cur)
+  }
+  const reset = () => setPicked(null)
+  /** 从勾中的知识点里取出题目（去重 —— 一道题可能挂多个知识点） */
+  const itemsOf = (points: Array<{ pointId: string; items: WrongItem[] }>, ids: string[]) => {
+    const use = picked ?? all(ids)
+    const map = new Map<string, WrongItem>()
+    for (const p of points) {
+      if (!use.has(p.pointId)) continue
+      for (const it of p.items) map.set(`${it.assignmentId}-${it.seq}`, it)
+    }
+    return [...map.values()]
+  }
+  return { picked, isOn, toggle, reset, itemsOf }
 }
 
 export default function WrongBook() {
@@ -62,6 +49,7 @@ export default function WrongBook() {
 
   const [tab, setTab] = useState<'person' | 'class'>('person')
   const [openNo, setOpenNo] = useState<string | null>(null)
+  const pick = usePicked()
 
   const klass = classes.find((c) => c.id === currentClassId) ?? classes[0]
   const students = useMemo(
@@ -170,7 +158,10 @@ export default function WrongBook() {
                           borderBottom: i === books.length - 1 ? undefined : '1px solid var(--color-line)',
                           opacity: b.totalWrong ? 1 : 0.5,
                         }}
-                        onClick={() => setOpenNo(b.studentNo)}
+                        onClick={() => {
+                          pick.reset()
+                          setOpenNo(b.studentNo)
+                        }}
                       >
                         <span
                           className="num grid shrink-0 place-items-center"
@@ -217,12 +208,21 @@ export default function WrongBook() {
                     <div style={{ fontSize: 12.5, color: 'var(--color-ink3)' }}>还没有数据。</div>
                   ) : (
                     <>
-                      {cls.points.slice(0, 12).map((p) => (
+                      {cls.points.slice(0, 12).map((p) => {
+                        const ids = cls.points.map((x) => x.pointId)
+                        const on = pick.isOn(p.pointId, ids)
+                        return (
                         <div
                           key={p.pointId}
                           className="flex items-center gap-2.5 py-2"
-                          style={{ borderTop: '1px solid var(--color-line)' }}
+                          style={{ borderTop: '1px solid var(--color-line)', opacity: on ? 1 : 0.45 }}
                         >
+                          <input
+                            type="checkbox"
+                            checked={on}
+                            onChange={() => pick.toggle(p.pointId, ids)}
+                            style={{ width: 15, height: 15, accentColor: 'var(--color-accent)', flexShrink: 0 }}
+                          />
                           <span className="min-w-0 flex-1">
                             <span className="truncate" style={{ fontSize: 13, fontWeight: 600, display: 'block' }}>
                               {p.name}
@@ -241,12 +241,44 @@ export default function WrongBook() {
                             {p.classLost.toFixed(0)} 分
                           </span>
                         </div>
-                      ))}
+                        )
+                      })}
                     </>
                   )}
                 </Panel>
               </div>
             )}
+
+            <Button
+              block
+              variant="primary"
+              className="mb-3"
+              icon={<IconDownload size={16} />}
+              onClick={async () => {
+                const ids = cls.points.map((x) => x.pointId)
+                const use = pick.itemsOf(cls.points, ids)
+                if (!use.length) {
+                  push({ text: '一个知识点都没勾，没法出卷', tone: 'warn' })
+                  return
+                }
+                try {
+                  const n = await downloadPracticeDocx(
+                    use,
+                    {
+                      title: `班级错题重练 · ${klass?.name ?? ''}`,
+                      subtitle: `按知识点整理 · 共 ${ids.filter((i) => pick.isOn(i, ids)).length} 个知识点、${use.length} 道题`,
+                      answerSpace: false,
+                    },
+                    `班级错题重练-${klass?.name ?? ''}.docx`,
+                  )
+                  push({ text: `已生成 ${n} 题的练习卷`, tone: 'ok' })
+                } catch (e) {
+                  push({ text: e instanceof Error ? e.message : '生成失败', tone: 'bad' })
+                }
+              }}
+            >
+              生成班级错题重练卷
+            </Button>
 
             <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.7 }}>
               丢分 = 错误率 × 该题分值。一道题挂了多个知识点时，丢分按个数均摊 ——
@@ -276,17 +308,59 @@ export default function WrongBook() {
                 </span>
               </div>
 
-              <Sect>哪个知识点掉分最多</Sect>
+              <Sect>哪个知识点掉分最多 · 勾掉不想练的</Sect>
               <Panel className="mb-4" bodyClass="p-3">
-                {open.points.slice(0, 8).map((p) => (
-                  <Bar
-                    key={p.pointId}
-                    label={p.name}
-                    value={p.lost}
-                    max={open.points[0]?.lost ?? 1}
-                    suffix=" 分"
-                  />
-                ))}
+                {open.points.slice(0, 8).map((p) => {
+                  const ids = open.points.map((x) => x.pointId)
+                  const on = pick.isOn(p.pointId, ids)
+                  const max = open.points[0]?.lost ?? 1
+                  const pct = max > 0 ? Math.max(3, Math.round((p.lost / max) * 100)) : 0
+                  return (
+                    <label
+                      key={p.pointId}
+                      className="flex items-center gap-2.5 py-1.5"
+                      style={{ cursor: 'pointer' }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={on}
+                        onChange={() => pick.toggle(p.pointId, ids)}
+                        style={{ width: 15, height: 15, accentColor: 'var(--color-accent)', flexShrink: 0 }}
+                      />
+                      <span
+                        className="truncate"
+                        style={{ width: 92, fontSize: 12, flexShrink: 0, opacity: on ? 1 : 0.45 }}
+                      >
+                        {p.name}
+                      </span>
+                      <span
+                        style={{
+                          flex: 1,
+                          height: 8,
+                          background: 'var(--color-surface3)',
+                          borderRadius: 3,
+                          overflow: 'hidden',
+                        }}
+                      >
+                        <i
+                          style={{
+                            display: 'block',
+                            height: '100%',
+                            width: `${pct}%`,
+                            background: on ? 'var(--color-bad)' : 'var(--color-line3)',
+                            borderRadius: 3,
+                          }}
+                        />
+                      </span>
+                      <span
+                        className="num"
+                        style={{ fontSize: 12, width: 54, textAlign: 'right', flexShrink: 0, fontWeight: 600 }}
+                      >
+                        {p.lost.toFixed(1)} 分
+                      </span>
+                    </label>
+                  )
+                })}
               </Panel>
 
               <Sect>错过的题</Sect>
@@ -363,12 +437,18 @@ export default function WrongBook() {
                 className="mt-3"
                 icon={<IconDownload size={16} />}
                 onClick={async () => {
+                  const ids = open.points.map((x) => x.pointId)
+                  const use = pick.itemsOf(open.points, ids)
+                  if (!use.length) {
+                    push({ text: '一个知识点都没勾，没法出卷', tone: 'warn' })
+                    return
+                  }
                   try {
                     const n = await downloadPracticeDocx(
-                      open.items,
+                      use,
                       {
                         title: `错题重练 · ${klass?.name ?? ''} ${open.name}`,
-                        subtitle: `按知识点整理 · 共 ${open.items.length} 处错题`,
+                        subtitle: `按知识点整理 · 共 ${ids.filter((i) => pick.isOn(i, ids)).length} 个知识点、${use.length} 道题`,
                       },
                       `错题重练-${open.name}-${open.studentNo}.docx`,
                     )
@@ -378,7 +458,7 @@ export default function WrongBook() {
                   }
                 }}
               >
-                生成错题重练卷（{open.items.length} 题）
+                生成错题重练卷
               </Button>
             </>
           )
