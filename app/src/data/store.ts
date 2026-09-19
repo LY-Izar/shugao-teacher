@@ -17,7 +17,28 @@ import type {
   Teacher,
 } from './types'
 
-const uid = () => Math.random().toString(36).slice(2, 10)
+/**
+ * 生成主键。
+ *
+ * ⚠️ 必须是**标准 UUID**：数据库里这些列是 uuid 类型，`c-abc123` 这种短串会被直接拒绝
+ * （invalid input syntax for type uuid）。而且跨设备各自新建时，UUID 天然不会撞。
+ *
+ * 另：`crypto.randomUUID` 只在安全上下文（https / localhost）存在。
+ * 手机通过局域网 http 访问开发服务器时它是 undefined，所以这里手写一个 v4 兜底。
+ */
+function uuid(): string {
+  const c = globalThis.crypto
+  if (c && typeof c.randomUUID === 'function') return c.randomUUID()
+  const b = new Uint8Array(16)
+  if (c && typeof c.getRandomValues === 'function') c.getRandomValues(b)
+  else for (let i = 0; i < 16; i++) b[i] = Math.floor(Math.random() * 256)
+  b[6] = (b[6] & 0x0f) | 0x40
+  b[8] = (b[8] & 0x3f) | 0x80
+  const h = Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('')
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`
+}
+
+const uid = uuid
 
 export type ImportMode = 'merge' | 'replace' | 'append'
 
@@ -105,6 +126,8 @@ type State = {
   repeatCall: (callId: string) => void
   setCallState: (callId: string, studentNo: string, state: CallState) => void
   setClassroomOnline: (id: string, online: boolean) => void
+  /** 教室端首次打开时给自己登记一台设备（后端模式下没有种子数据，必须自建） */
+  ensureClassroom: (classId: string, name: string) => void
   /* ---- 课表 ---- */
   addSchedule: (item: Omit<ScheduleItem, 'id'>) => string
   updateSchedule: (id: string, patch: Partial<ScheduleItem>) => void
@@ -218,7 +241,7 @@ export const useStore = create<State>()(
       },
 
       addClass: ({ name, grade, year }) => {
-        const id = `c-${uid()}`
+        const id = uid()
         const klass: Klass = { id, name, grade, year, createdAt: Date.now(), students: [] }
         set((s) => ({
           classes: [...s.classes, klass],
@@ -278,7 +301,7 @@ export const useStore = create<State>()(
                 continue
               }
               const st: Student = {
-                id: `s-${uid()}`,
+                id: uid(),
                 studentNo: no || String(base.length + 1),
                 name,
                 status: 'active',
@@ -350,7 +373,7 @@ export const useStore = create<State>()(
       /* ---- S2：作业档案 ---- */
 
       addAssignment: ({ title, classId, assignDate, questionCount, templateId, subject }) => {
-        const id = `a-${uid()}`
+        const id = uid()
         const item: Assignment = {
           id,
           title: title.trim() || '未命名作业',
@@ -447,7 +470,7 @@ export const useStore = create<State>()(
 
       sendCall: ({ assignmentId, classId, studentNos, text, room }) => {
         const record: CallRecord = {
-          id: `call-${uid()}`,
+          id: uid(),
           assignmentId,
           classId,
           studentNos,
@@ -495,10 +518,24 @@ export const useStore = create<State>()(
         if (c && tid) void remote.saveClassroom(c, tid)
       },
 
+      ensureClassroom: (classId, name) => {
+        if (get().classrooms.some((c) => c.classId === classId)) return
+        const item: ClassroomClient = {
+          id: uid(),
+          classId,
+          name,
+          online: true,
+          lastSeenAt: Date.now(),
+        }
+        set((s) => ({ classrooms: [...s.classrooms, item] }))
+        const tid = get().teacher?.id
+        if (tid) void remote.saveClassroom(item, tid)
+      },
+
       /* ---- 课表 ---- */
 
       addSchedule: (item) => {
-        const id = `sch-${uid()}`
+        const id = uid()
         const full: ScheduleItem = { ...item, id }
         set((s) => ({ isDemo: false, schedule: [...s.schedule, full] }))
         const tid = get().teacher?.id

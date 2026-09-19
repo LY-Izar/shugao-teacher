@@ -29,6 +29,7 @@ export default function Classroom() {
   const assignments = useStore((s) => s.assignments)
   const classrooms = useStore((s) => s.classrooms)
   const setClassroomOnline = useStore((s) => s.setClassroomOnline)
+  const ensureClassroom = useStore((s) => s.ensureClassroom)
   const hydrated = useStore((s) => s.hydrated)
   const teacher = useStore((s) => s.teacher)
   const navigate = useNavigate()
@@ -92,6 +93,12 @@ export default function Classroom() {
     const t = window.setInterval(() => setNow(new Date()), 1000)
     return () => window.clearInterval(t)
   }, [])
+
+  /* 教室端自我登记：后端模式没有种子数据，第一次打开时要把这台设备建出来 */
+  useEffect(() => {
+    if (!klass) return
+    ensureClassroom(klass.id, '一体机')
+  }, [klass?.id, ensureClassroom]) // eslint-disable-line react-hooks/exhaustive-deps
 
   /* 心跳：教师端据此显示「在线 / 离线」 */
   useEffect(() => {
