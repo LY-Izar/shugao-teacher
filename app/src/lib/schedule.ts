@@ -88,6 +88,73 @@ export function durationText(start: string, end: string): string {
   return d > 0 ? `${d} 分钟` : '时间有误'
 }
 
+/* ---------------- 周一前三节顺延 ---------------- */
+
+/**
+ * 周一早上第 1–3 节整体顺延（校会 / 升旗占用）。
+ * 只动这三节，其余按学校原表不动 —— 这是学校明确的规矩。
+ */
+export const MONDAY_SHIFT = { weekday: 1, count: 3, minutes: 20 }
+
+const pad2 = (n: number) => String(n).padStart(2, '0')
+const fromMin = (m: number) => `${pad2(Math.floor(m / 60))}:${pad2(m % 60)}`
+
+/**
+ * 应用顺延。
+ *
+ * 会返回 conflicts：如果顺延后出现**上一节还没下课、下一节已经开始**，
+ * 就把冲突原样交出来让界面提示。宁可让教师看见冲突，
+ * 也不能在教室大屏上显示一份物理上不可能的课表。
+ */
+export function applyMondayShift(items: ScheduleItem[]): {
+  items: ScheduleItem[]
+  shifted: number
+  conflicts: string[]
+} {
+  const sorted = [...items].sort((a, b) => toMinutes(a.start) - toMinutes(b.start))
+  if (sorted.length === 0) return { items, shifted: 0, conflicts: [] }
+
+  const out = sorted.map((it, i) => {
+    if (i >= MONDAY_SHIFT.count) return it
+    const s = toMinutes(it.start) + MONDAY_SHIFT.minutes
+    const e = toMinutes(it.end) + MONDAY_SHIFT.minutes
+    return { ...it, start: fromMin(s), end: fromMin(e) }
+  })
+
+  const conflicts: string[] = []
+  for (let i = 1; i < out.length; i++) {
+    if (toMinutes(out[i].start) < toMinutes(out[i - 1].end)) {
+      conflicts.push(
+        `第 ${i + 1} 节 ${out[i].start} 开始，但第 ${i} 节 ${out[i - 1].end} 才下课 —— 时间重叠`,
+      )
+    }
+  }
+  return { items: out, shifted: Math.min(MONDAY_SHIFT.count, sorted.length), conflicts }
+}
+
+export function maybeShift(
+  items: ScheduleItem[],
+  weekday: number,
+): { items: ScheduleItem[]; shifted: number; conflicts: string[] } {
+  if (weekday !== MONDAY_SHIFT.weekday) return { items, shifted: 0, conflicts: [] }
+  return applyMondayShift(items)
+}
+
+/**
+ * 某一天、某个班要展示的课表（含周一顺延）。
+ * 教室端和教师端走同一处逻辑，免得两边算出两套时间。
+ */
+export function displayItemsForDate(
+  schedule: ScheduleItem[],
+  opts: { weekday: number; classId?: string; scope?: 'mine' | 'class' },
+): { items: ScheduleItem[]; shifted: number; conflicts: string[] } {
+  const base = schedule.filter(
+    (s) => s.weekday === opts.weekday && (!opts.scope || (s.scope ?? 'mine') === opts.scope),
+  )
+  const list = opts.classId ? base.filter((s) => s.classId === opts.classId) : base
+  return maybeShift(list, opts.weekday)
+}
+
 /**
  * 「还有多久」的口语说法。
  * 隔得远的时候说「190 分后」没人会在脑子里换算，所以超过 90 分钟改用小时。
