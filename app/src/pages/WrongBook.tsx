@@ -48,10 +48,6 @@ export default function WrongBook() {
           </span>
           <div>
             <div style={{ fontSize: 15, fontWeight: 680, color: '***REMOVED***8a5a12' }}>这个功能还在开发中</div>
-            <div style={{ fontSize: 12.5, color: '***REMOVED***96702f', marginTop: 4, lineHeight: 1.7 }}>
-              先把入口放在这里，免得你找不到。下面是它打算做成什么样 ——
-              如果和你想的不一样，直接告诉我，现在改还来得及。
-            </div>
           </div>
         </div>
 
