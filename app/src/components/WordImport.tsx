@@ -111,8 +111,7 @@ export function WordImport({
             {withSubs > 0 ? <span className="num">{withSubs} 题含小问</span> : null}
           </div>
 
-          {parsed?.warnings.length ? (
-            <div
+          {parsed?.warnings.length ? (            <div
               className="mb-2.5 flex items-start gap-2 p-2.5"
               style={{
                 background: 'var(--color-warnsoft)',
@@ -148,6 +147,58 @@ export function WordImport({
                   >
                     {q.no}
                   </span>
+
+                  {/* 配图：给一眼看的机会 —— 图挂错题了，只有人看得出来 */}
+                  {q.imgs.length ? (
+                    <span className="relative shrink-0" style={{ lineHeight: 0 }}>
+                      <img
+                        src={q.imgs[0]}
+                        alt=""
+                        style={{
+                          width: 34,
+                          height: 34,
+                          objectFit: 'contain',
+                          border: '1px solid var(--color-line2)',
+                          borderRadius: 3,
+                          background: '***REMOVED***fff',
+                        }}
+                      />
+                      {q.imgs.length > 1 ? (
+                        <span
+                          className="num absolute"
+                          style={{
+                            right: -3,
+                            bottom: -3,
+                            fontSize: 9.5,
+                            fontWeight: 700,
+                            padding: '0 3px',
+                            borderRadius: 3,
+                            background: 'var(--color-accent)',
+                            color: '***REMOVED***fff',
+                          }}
+                        >
+                          {q.imgs.length}
+                        </span>
+                      ) : null}
+                    </span>
+                  ) : q.figRefs > 0 ? (
+                    <span
+                      className="grid shrink-0 place-items-center"
+                      style={{
+                        width: 34,
+                        height: 34,
+                        border: '1px solid ***REMOVED***f0c9c9',
+                        borderRadius: 3,
+                        background: 'var(--color-badsoft)',
+                        color: 'var(--color-bad)',
+                      }}
+                      title={`正文提到 ${q.figRefs} 张图，但这段里没找到图 —— 可能排版特殊，请核对原稿`}
+                    >
+                      <IconAlert size={15} />
+                    </span>
+                  ) : (
+                    <span className="shrink-0" style={{ width: 34 }} />
+                  )}
 
                   <button
                     type="button"

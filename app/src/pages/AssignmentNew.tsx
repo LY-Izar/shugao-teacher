@@ -62,6 +62,18 @@ export default function AssignmentNew() {
     try {
       const parts = await docxToParts(f)
       const r = parseExam(parts.text, f.name.replace(/\.docx$/i, ''))
+      // 浮动锚定的图，XML 顺序和视觉顺序可能不一致 —— 必须让教师核对，不能默认它对
+      if (parts.anchored > 0) {
+        r.warnings.push(
+          `这份稿子里有 ${parts.anchored} 张图是「浮动」排版，图与题号的对应关系可能不准，请对着下面的缩略图核对`,
+        )
+      }
+      const lostFig = r.questions.filter((q) => q.imgs.length === 0 && q.figRefs > 0)
+      if (lostFig.length) {
+        r.warnings.push(
+          `第 ${lostFig.map((q) => q.no).join('、')} 题的正文提到了图，但没找到对应图片 —— 请核对原稿`,
+        )
+      }
       if (r.questions.length === 0) {
         setParseErr(r.warnings[0] ?? '没有从这份稿子里识别出题目。')
       } else {

@@ -113,10 +113,18 @@ export async function docxToText(file: File | Blob): Promise<string> {
    ============================================================ */
 
 export type DocxParts = {
-  /** 正文文本，图片位置是 \u0000rIdN\u0000 占位符 */
+  /** 正文文本，图片位置是哨兵占位符 */
   text: string
   /** rId → data URL */
   images: Map<string, string>
+  /**
+   * 浮动锚定的图片数量（wp:anchor）。
+   *
+   * 随文图片（wp:inline）在 XML 里的先后顺序 = 视觉顺序，按位置归属可靠；
+   * 浮动图片的位置是「锚在某个段落上、但画在别处」，XML 顺序与视觉顺序**可能不一致** ——
+   * 这时候必须让教师人工核对，不能默认它对。
+   */
+  anchored: number
 }
 
 /** 图片占位符用的哨兵字符：私有区 U+E000，正文里不可能自然出现 */
@@ -201,6 +209,7 @@ export async function docxToParts(file: File | Blob): Promise<DocxParts> {
   }
 
   /* 把每个 drawing / pict 整段换成一个占位符，位置就留住了 */
+  const anchored = [...docXml.matchAll(/<wp:anchor\b/g)].length
   const used = new Set<string>()
   const marked = docXml
     .replace(/<w:drawing\b[\s\S]*?<\/w:drawing>/g, (seg) => {
@@ -230,5 +239,5 @@ export async function docxToParts(file: File | Blob): Promise<DocxParts> {
     images.set(rid, `data:${mime};base64,${toBase64(data)}`)
   }
 
-  return { text: xmlToText(marked), images }
+  return { text: xmlToText(marked), images, anchored }
 }

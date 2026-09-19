@@ -33,6 +33,23 @@ export type ParsedQuestion = {
   points: string[]
   /** 这道题的配图（Word 稿里的 rId，位置已对齐到题号） */
   imgs: string[]
+  /**
+   * 正文里提到的图纸数量。
+   * 注意：一张图片文件里可能画了「图甲 图乙」两个面板，
+   * 所以 refs > imgs 不一定是错；但 **refs > 0 而 imgs = 0 一定是漏了图**。
+   */
+  figRefs: number
+}
+
+/** 数一段文字里提到了几张图：「图甲/图乙」「图1/图2」「如图 a」「如图所示」 */
+export function countFigureRefs(text: string): number {
+  const marks = new Set<string>()
+  for (const m of text.matchAll(/图\s*([甲乙丙丁戊己])/g)) marks.add(`cn:${m[1]}`)
+  for (const m of text.matchAll(/图\s*(\d{1,2})/g)) marks.add(`n:${m[1]}`)
+  for (const m of text.matchAll(/图\s*([a-dA-D])(?![a-zA-Z])/g)) marks.add(`l:${m[1]}`)
+  if (marks.size > 0) return marks.size
+  // 只写了「如图所示」没分甲乙 —— 至少一张
+  return /如图/.test(text) ? 1 : 0
 }
 
 export type ParsedExam = {
@@ -203,6 +220,7 @@ export function parseExam(text: string, fallbackTitle = ''): ParsedExam {
       points: tagQuestion(block),
       // U+E000 是 docx 抽取时留的图片占位符，它落在哪一段就属于哪一题
       imgs: [...block.matchAll(/\uE000(rId\d+)\uE000/g)].map((m) => m[1]),
+      figRefs: countFigureRefs(block),
     })
   })
 
