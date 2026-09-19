@@ -1,0 +1,364 @@
+import { getSupabase } from '../lib/supabase'
+import type {
+  Assignment,
+  AssignmentStatus,
+  CallRecord,
+  CallState,
+  ClassroomClient,
+  Klass,
+  ScheduleItem,
+  ScheduleKind,
+  Student,
+  StudentStatus,
+  Teacher,
+} from './types'
+
+/* ============================================================
+   本地模型 ←→ Supabase 表 的映射与读写
+   ------------------------------------------------------------
+   本地模型是 camelCase + 学生嵌在班级里；
+   数据库是 snake_case + 学生独立成表。这里做双向转换。
+   ============================================================ */
+
+/* ---------------- 行类型 ---------------- */
+
+type ClassRow = {
+  id: string
+  teacher_id: string
+  name: string
+  grade: string
+  year: string
+}
+type StudentRow = {
+  id: string
+  class_id: string
+  student_no: string
+  name: string
+  status: string
+}
+type AssignmentRow = {
+  id: string
+  class_id: string
+  teacher_id: string
+  title: string
+  subject: string
+  assign_date: string
+  question_count: number
+  status: string
+  template_id: string | null
+  collected: boolean
+  missing_nos: string[]
+  late_nos: string[]
+  sub_questions: Record<string, number>
+  wrong: Record<string, string[]>
+  confirmed_nos: string[]
+  grade_seconds: number | null
+  graded_at: string | null
+  /** 由数据库默认值生成，只在读取时才有 */
+  created_at?: string | null
+}
+type ScheduleRow = {
+  id: string
+  teacher_id: string
+  weekday: number
+  start_time: string
+  end_time: string
+  title: string
+  class_id: string | null
+  room: string | null
+  kind: string
+  notify: boolean
+}
+type ClassroomRow = {
+  id: string
+  teacher_id: string
+  class_id: string
+  name: string
+  online: boolean
+  last_seen_at: string
+}
+type CallRow = {
+  id: string
+  teacher_id: string
+  assignment_id: string
+  class_id: string
+  student_nos: string[]
+  text: string
+  room: string
+  sent_at: string[]
+  states: Record<string, CallState>
+}
+
+/* ---------------- 错误上报 ---------------- */
+
+let onError: ((message: string, detail?: string) => void) | null = null
+export function setSyncErrorHandler(fn: (message: string, detail?: string) => void) {
+  onError = fn
+}
+function fail(where: string, e: unknown) {
+  const detail = e && typeof e === 'object' && 'message' in e ? String((e as { message: unknown }).message) : String(e)
+  console.error(`[sync] ${where} 失败:`, detail)
+  onError?.(where, detail)
+}
+
+/* ---------------- 时间转换 ---------------- */
+
+const ts = (ms?: number | null) => (ms ? new Date(ms).toISOString() : null)
+const ms = (iso?: string | null) => (iso ? new Date(iso).getTime() : undefined)
+/** Postgres 的 time 会返回 HH:MM:SS，界面只用 HH:MM */
+const hhmm = (t: string) => (t ?? '').slice(0, 5)
+
+/* ---------------- 本地 → 行 ---------------- */
+
+export const classToRow = (k: Klass, teacherId: string): ClassRow => ({
+  id: k.id,
+  teacher_id: teacherId,
+  name: k.name,
+  grade: k.grade,
+  year: k.year,
+})
+
+export const studentToRow = (s: Student, classId: string): StudentRow => ({
+  id: s.id,
+  class_id: classId,
+  student_no: s.studentNo,
+  name: s.name,
+  status: s.status,
+})
+
+export const assignmentToRow = (a: Assignment, teacherId: string): AssignmentRow => ({
+  id: a.id,
+  class_id: a.classId,
+  teacher_id: teacherId,
+  title: a.title,
+  subject: a.subject,
+  assign_date: a.assignDate,
+  question_count: a.questionCount,
+  status: a.status,
+  template_id: a.templateId ?? null,
+  collected: a.collected,
+  missing_nos: a.missingNos ?? [],
+  late_nos: a.lateNos ?? [],
+  sub_questions: a.subQuestions ?? {},
+  wrong: a.wrong ?? {},
+  confirmed_nos: a.confirmedNos ?? [],
+  grade_seconds: a.gradeSeconds ?? null,
+  graded_at: ts(a.gradedAt),
+})
+
+export const scheduleToRow = (s: ScheduleItem, teacherId: string): ScheduleRow => ({
+  id: s.id,
+  teacher_id: teacherId,
+  weekday: s.weekday,
+  start_time: s.start,
+  end_time: s.end,
+  title: s.title,
+  class_id: s.classId ?? null,
+  room: s.room ?? null,
+  kind: s.kind,
+  notify: s.notify,
+})
+
+export const classroomToRow = (c: ClassroomClient, teacherId: string): ClassroomRow => ({
+  id: c.id,
+  teacher_id: teacherId,
+  class_id: c.classId,
+  name: c.name,
+  online: c.online,
+  last_seen_at: ts(c.lastSeenAt) ?? new Date().toISOString(),
+})
+
+export const callToRow = (c: CallRecord, teacherId: string): CallRow => ({
+  id: c.id,
+  teacher_id: teacherId,
+  assignment_id: c.assignmentId,
+  class_id: c.classId,
+  student_nos: c.studentNos,
+  text: c.text,
+  room: c.room,
+  sent_at: c.sentAt.map((t) => new Date(t).toISOString()),
+  states: c.states,
+})
+
+/* ---------------- 行 → 本地 ---------------- */
+
+const rowToStudent = (r: StudentRow): Student => ({
+  id: r.id,
+  studentNo: r.student_no,
+  name: r.name,
+  status: (r.status as StudentStatus) ?? 'active',
+  createdAt: Date.now(),
+})
+
+const rowToAssignment = (r: AssignmentRow): Assignment => ({
+  id: r.id,
+  classId: r.class_id,
+  title: r.title,
+  subject: r.subject,
+  assignDate: r.assign_date,
+  questionCount: r.question_count,
+  status: r.status as AssignmentStatus,
+  templateId: r.template_id ?? undefined,
+  createdAt: ms(r.created_at) ?? Date.now(),
+  collected: r.collected,
+  missingNos: r.missing_nos ?? [],
+  lateNos: r.late_nos ?? [],
+  subQuestions: r.sub_questions ?? {},
+  wrong: r.wrong ?? {},
+  confirmedNos: r.confirmed_nos ?? [],
+  gradeSeconds: r.grade_seconds ?? undefined,
+  gradedAt: ms(r.graded_at),
+})
+
+const rowToSchedule = (r: ScheduleRow): ScheduleItem => ({
+  id: r.id,
+  weekday: r.weekday,
+  start: hhmm(r.start_time),
+  end: hhmm(r.end_time),
+  title: r.title,
+  classId: r.class_id ?? undefined,
+  room: r.room ?? undefined,
+  kind: (r.kind as ScheduleKind) ?? 'class',
+  notify: r.notify,
+})
+
+const rowToClassroom = (r: ClassroomRow): ClassroomClient => ({
+  id: r.id,
+  classId: r.class_id,
+  name: r.name,
+  online: r.online,
+  lastSeenAt: ms(r.last_seen_at) ?? Date.now(),
+})
+
+const rowToCall = (r: CallRow): CallRecord => ({
+  id: r.id,
+  assignmentId: r.assignment_id,
+  classId: r.class_id,
+  studentNos: r.student_nos ?? [],
+  text: r.text,
+  room: r.room,
+  sentAt: (r.sent_at ?? []).map((t) => new Date(t).getTime()),
+  states: r.states ?? {},
+})
+
+/* ---------------- 读 ---------------- */
+
+export type Snapshot = {
+  teacher: Teacher | null
+  classes: Klass[]
+  assignments: Assignment[]
+  schedule: ScheduleItem[]
+  classrooms: ClassroomClient[]
+  calls: CallRecord[]
+  userId: string
+}
+
+export async function loadSnapshot(): Promise<Snapshot | null> {
+  const sb = getSupabase()
+  if (!sb) return null
+
+  const {
+    data: { user },
+  } = await sb.auth.getUser()
+  if (!user) return null
+
+  const [t, c, s, a, sch, room, calls] = await Promise.all([
+    sb.from('teachers').select('*').eq('id', user.id).maybeSingle(),
+    sb.from('classes').select('*').order('created_at', { ascending: true }),
+    sb.from('students').select('*'),
+    sb.from('assignments').select('*').order('assign_date', { ascending: false }),
+    sb.from('schedule_items').select('*').order('weekday', { ascending: true }),
+    sb.from('classrooms').select('*'),
+    sb.from('calls').select('*').order('created_at', { ascending: false }).limit(200),
+  ])
+
+  const firstErr = [t, c, s, a, sch, room, calls].find((r) => r.error)?.error
+  if (firstErr) {
+    fail('读取数据', firstErr)
+    return null
+  }
+
+  const studentsByClass = new Map<string, Student[]>()
+  for (const row of (s.data ?? []) as StudentRow[]) {
+    const list = studentsByClass.get(row.class_id) ?? []
+    list.push(rowToStudent(row))
+    studentsByClass.set(row.class_id, list)
+  }
+
+  const classes: Klass[] = ((c.data ?? []) as ClassRow[]).map((row) => ({
+    id: row.id,
+    name: row.name,
+    grade: row.grade,
+    year: row.year,
+    createdAt: Date.now(),
+    students: (studentsByClass.get(row.id) ?? []).sort(
+      (x, y) => Number(x.studentNo) - Number(y.studentNo),
+    ),
+  }))
+
+  const tRow = t.data as { name?: string; subject?: string; school?: string } | null
+
+  return {
+    userId: user.id,
+    teacher: {
+      id: user.id,
+      name: tRow?.name ?? user.email?.split('@')[0] ?? '老师',
+      subject: tRow?.subject ?? '物理',
+      school: tRow?.school ?? '',
+    },
+    classes,
+    assignments: ((a.data ?? []) as AssignmentRow[]).map(rowToAssignment),
+    schedule: ((sch.data ?? []) as ScheduleRow[]).map(rowToSchedule),
+    classrooms: ((room.data ?? []) as ClassroomRow[]).map(rowToClassroom),
+    calls: ((calls.data ?? []) as CallRow[]).map(rowToCall),
+  }
+}
+
+/* ---------------- 写（乐观更新后后台落库，失败只提示不阻塞） ---------------- */
+
+async function upsert(table: string, rows: object | object[]) {
+  const sb = getSupabase()
+  if (!sb) return
+  try {
+    const { error } = await sb.from(table).upsert(rows as never, { onConflict: 'id' })
+    if (error) fail(`${table} 保存`, error)
+  } catch (e) {
+    fail(`${table} 保存`, e)
+  }
+}
+
+async function remove(table: string, id: string) {
+  const sb = getSupabase()
+  if (!sb) return
+  try {
+    const { error } = await sb.from(table).delete().eq('id', id)
+    if (error) fail(`${table} 删除`, error)
+  } catch (e) {
+    fail(`${table} 删除`, e)
+  }
+}
+
+export const saveTeacher = (t: Teacher) =>
+  upsert('teachers', { id: t.id, name: t.name, subject: t.subject, school: t.school })
+
+export const saveClass = (k: Klass, teacherId: string) => upsert('classes', classToRow(k, teacherId))
+export const deleteClass = (id: string) => remove('classes', id)
+
+export const saveStudent = (s: Student, classId: string) =>
+  upsert('students', studentToRow(s, classId))
+export const saveStudents = (classId: string, list: Student[]) =>
+  list.length ? upsert('students', list.map((s) => studentToRow(s, classId))) : Promise.resolve()
+export const deleteStudent = (id: string) => remove('students', id)
+
+export const saveAssignment = (a: Assignment, teacherId: string) =>
+  upsert('assignments', assignmentToRow(a, teacherId))
+export const deleteAssignment = (id: string) => remove('assignments', id)
+
+export const saveSchedule = (s: ScheduleItem, teacherId: string) =>
+  upsert('schedule_items', scheduleToRow(s, teacherId))
+export const deleteSchedule = (id: string) => remove('schedule_items', id)
+
+export const saveClassroom = (c: ClassroomClient, teacherId: string) =>
+  upsert('classrooms', classroomToRow(c, teacherId))
+
+export const saveCall = (c: CallRecord, teacherId: string) => upsert('calls', callToRow(c, teacherId))
