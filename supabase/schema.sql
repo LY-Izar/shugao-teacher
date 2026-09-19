@@ -1,0 +1,237 @@
+-- ============================================================
+--  树高教师平台 · Supabase 数据库结构
+--
+--  用法：Supabase 控制台 → SQL Editor → 新建查询 → 粘贴全文 → Run
+--  可重复执行（全部是 if not exists / drop policy if exists）
+--
+--  安全模型：所有表开启 RLS，教师只能读写「自己」的数据。
+--  前端只用 anon key；service_role key 绝不能出现在前端或仓库里。
+-- ============================================================
+
+-- ---------- 0. 扩展 ----------
+create extension if not exists "pgcrypto";   -- gen_random_uuid()
+
+-- ============================================================
+--  1. 教师
+-- ============================================================
+create table if not exists teachers (
+  id          uuid primary key references auth.users (id) on delete cascade,
+  name        text not null default '',
+  subject     text not null default '物理',
+  school      text not null default '',
+  created_at  timestamptz not null default now()
+);
+
+-- 注册后自动建一行 teachers
+create or replace function public.handle_new_user()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  insert into public.teachers (id, name, subject, school)
+  values (
+    new.id,
+    coalesce(new.raw_user_meta_data ->> 'name', split_part(new.email, '@', 1)),
+    coalesce(new.raw_user_meta_data ->> 'subject', '物理'),
+    coalesce(new.raw_user_meta_data ->> 'school', '')
+  )
+  on conflict (id) do nothing;
+  return new;
+end;
+$$;
+
+drop trigger if exists on_auth_user_created on auth.users;
+create trigger on_auth_user_created
+  after insert on auth.users
+  for each row execute function public.handle_new_user();
+
+-- ============================================================
+--  2. 班级与学生
+-- ============================================================
+create table if not exists classes (
+  id          uuid primary key default gen_random_uuid(),
+  teacher_id  uuid not null references teachers (id) on delete cascade,
+  name        text not null,
+  grade       text not null default '',
+  year        text not null default '',
+  created_at  timestamptz not null default now()
+);
+create index if not exists classes_teacher_idx on classes (teacher_id);
+
+create table if not exists students (
+  id          uuid primary key default gen_random_uuid(),
+  class_id    uuid not null references classes (id) on delete cascade,
+  student_no  text not null,
+  name        text not null default '',
+  -- active = 在读；left = 已转出（保留历史，不做物理删除）
+  status      text not null default 'active' check (status in ('active', 'left')),
+  created_at  timestamptz not null default now(),
+  -- 学号是系统的唯一索引，班内不可重复
+  unique (class_id, student_no)
+);
+create index if not exists students_class_idx on students (class_id);
+
+-- ============================================================
+--  3. 作业档案
+--    收缴与批改都采用「只记例外」：默认全班已交 / 全对，只存例外的学号
+-- ============================================================
+create table if not exists assignments (
+  id              uuid primary key default gen_random_uuid(),
+  class_id        uuid not null references classes (id) on delete cascade,
+  teacher_id      uuid not null references teachers (id) on delete cascade,
+  title           text not null,
+  subject         text not null default '物理',
+  assign_date     date not null,
+  question_count  int  not null default 1 check (question_count between 1 and 60),
+  status          text not null default 'open'
+                  check (status in ('open', 'collected', 'graded', 'reviewed', 'archived')),
+  template_id     text,
+  -- 收缴
+  collected       boolean not null default false,
+  missing_nos     text[]  not null default '{}',
+  late_nos        text[]  not null default '{}',
+  -- 批改：题号 -> 小题数；学号 -> 错题键数组（"3" 或 "3.1"）
+  sub_questions   jsonb   not null default '{}'::jsonb,
+  wrong           jsonb   not null default '{}'::jsonb,
+  confirmed_nos   text[]  not null default '{}',
+  grade_seconds   int,
+  graded_at       timestamptz,
+  created_at      timestamptz not null default now()
+);
+create index if not exists assignments_class_idx on assignments (class_id, assign_date desc);
+create index if not exists assignments_teacher_idx on assignments (teacher_id);
+
+-- ============================================================
+--  4. 教师课表（每周重复）
+-- ============================================================
+create table if not exists schedule_items (
+  id          uuid primary key default gen_random_uuid(),
+  teacher_id  uuid not null references teachers (id) on delete cascade,
+  weekday     int  not null check (weekday between 1 and 7),   -- 1 = 周一
+  start_time  time not null,
+  end_time    time not null,
+  title       text not null,
+  class_id    uuid references classes (id) on delete set null,
+  room        text,
+  kind        text not null default 'class' check (kind in ('class', 'other')),
+  notify      boolean not null default true,
+  created_at  timestamptz not null default now()
+);
+create index if not exists schedule_teacher_idx on schedule_items (teacher_id, weekday);
+
+-- ============================================================
+--  5. 教室端与呼叫
+-- ============================================================
+create table if not exists classrooms (
+  id            uuid primary key default gen_random_uuid(),
+  teacher_id    uuid not null references teachers (id) on delete cascade,
+  class_id      uuid not null references classes (id) on delete cascade,
+  name          text not null default '',
+  online        boolean not null default false,
+  last_seen_at  timestamptz not null default now(),
+  unique (class_id)
+);
+
+create table if not exists calls (
+  id             uuid primary key default gen_random_uuid(),
+  teacher_id     uuid not null references teachers (id) on delete cascade,
+  assignment_id  uuid not null references assignments (id) on delete cascade,
+  class_id       uuid not null references classes (id) on delete cascade,
+  student_nos    text[] not null default '{}',
+  text           text not null,
+  room           text not null default '',
+  -- 每次「再播一遍」追加一个时间戳
+  sent_at        timestamptz[] not null default '{}',
+  -- 学号 -> called | arrived | corrected
+  states         jsonb not null default '{}'::jsonb,
+  created_at     timestamptz not null default now()
+);
+create index if not exists calls_assignment_idx on calls (assignment_id, created_at desc);
+
+-- ============================================================
+--  6. 行级安全（RLS）—— 每张表都要开，漏一张就等于全校数据裸奔
+-- ============================================================
+alter table teachers       enable row level security;
+alter table classes        enable row level security;
+alter table students       enable row level security;
+alter table assignments    enable row level security;
+alter table schedule_items enable row level security;
+alter table classrooms     enable row level security;
+alter table calls          enable row level security;
+
+-- 教师：只能读写自己那一行
+drop policy if exists teachers_self on teachers;
+create policy teachers_self on teachers
+  for all to authenticated
+  using (id = auth.uid())
+  with check (id = auth.uid());
+
+-- 班级：只能操作自己的班
+drop policy if exists classes_own on classes;
+create policy classes_own on classes
+  for all to authenticated
+  using (teacher_id = auth.uid())
+  with check (teacher_id = auth.uid());
+
+-- 学生：通过所属班级间接归属
+drop policy if exists students_own on students;
+create policy students_own on students
+  for all to authenticated
+  using (exists (select 1 from classes c where c.id = students.class_id and c.teacher_id = auth.uid()))
+  with check (exists (select 1 from classes c where c.id = students.class_id and c.teacher_id = auth.uid()));
+
+-- 作业档案
+drop policy if exists assignments_own on assignments;
+create policy assignments_own on assignments
+  for all to authenticated
+  using (teacher_id = auth.uid())
+  with check (teacher_id = auth.uid());
+
+-- 课表
+drop policy if exists schedule_own on schedule_items;
+create policy schedule_own on schedule_items
+  for all to authenticated
+  using (teacher_id = auth.uid())
+  with check (teacher_id = auth.uid());
+
+-- 教室端设备
+drop policy if exists classrooms_own on classrooms;
+create policy classrooms_own on classrooms
+  for all to authenticated
+  using (teacher_id = auth.uid())
+  with check (teacher_id = auth.uid());
+
+-- 呼叫记录
+drop policy if exists calls_own on calls;
+create policy calls_own on calls
+  for all to authenticated
+  using (teacher_id = auth.uid())
+  with check (teacher_id = auth.uid());
+
+-- ============================================================
+--  7. 实时推送
+--    教师端发出呼叫 → 教室端立刻收到（替代现在的 BroadcastChannel）
+-- ============================================================
+do $$
+begin
+  begin
+    alter publication supabase_realtime add table calls;
+  exception when duplicate_object then null;
+  end;
+  begin
+    alter publication supabase_realtime add table classrooms;
+  exception when duplicate_object then null;
+  end;
+end $$;
+
+-- 让 Realtime 的 UPDATE/DELETE 事件带上完整旧行，便于前端对账
+alter table calls replica identity full;
+
+-- ============================================================
+--  8. 自检：确认每张表都开了 RLS
+--     跑完应返回 0 行；返回任何一行都说明有表漏开
+-- ============================================================
+-- select tablename from pg_tables
+--  where schemaname = 'public' and rowsecurity = false;
