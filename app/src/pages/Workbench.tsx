@@ -7,7 +7,6 @@ import {
   IconCheck,
   IconChevronRight,
   IconClipboard,
-  IconGauge,
   IconHash,
   IconInfo,
   IconPlus,
@@ -25,15 +24,6 @@ import { awayText, weekdayOf } from '../lib/schedule'
 import { collectStats } from '../lib/assignments'
 import { friendlyDate } from '../lib/date'
 import { analyzeRoster } from '../lib/roster'
-
-const ROADMAP: Array<{ stage: string; title: string; state: 'done' | 'now' | 'next' }> = [
-  { stage: 'S1', title: '登录 · 班级 · 花名册导入', state: 'done' },
-  { stage: 'S2', title: '作业档案 · 收作业查缺', state: 'done' },
-  { stage: 'S3', title: '快速批改录入 · 完成批改', state: 'done' },
-  { stage: 'S4', title: '逐题统计 · 改错与一键呼叫', state: 'done' },
-  { stage: 'S5', title: '教室端 · 置顶小窗 · 语音播报', state: 'done' },
-  { stage: 'S6', title: '云端同步 · Word 导入 · 题型统计 · 课表', state: 'done' },
-]
 
 const todoPath = (a: { id: string; status: string }) =>
   a.status === 'collected' ? `/assignments/${a.id}/grade` : `/assignments/${a.id}/collect`
@@ -81,10 +71,6 @@ export default function Workbench() {
   )
 
   const health = useMemo(() => classes.map((c) => ({ c, h: analyzeRoster(c.students) })), [classes])
-  const problems = health.reduce(
-    (n, x) => n + x.h.gaps.length + x.h.dupNos.length + x.h.dupNames.length,
-    0,
-  )
 
   const today = new Date()
   const dateText = `${today.getMonth() + 1} 月 ${today.getDate()} 日 · 周${
@@ -449,103 +435,6 @@ export default function Workbench() {
               })}
             </div>
           )}
-        </Panel>
-      </div>
-
-      {/* 建设进度 */}
-      <div className="mb-2">
-        <Sect>建设进度</Sect>
-        <Panel bodyClass="p-3">
-          <div className="flex flex-col">
-            {ROADMAP.map((r, i) => (
-              <div key={r.stage} className="flex items-start gap-3">
-                <div className="flex flex-col items-center">
-                  <span
-                    className="grid place-items-center shrink-0"
-                    style={{
-                      width: 22,
-                      height: 22,
-                      borderRadius: 99,
-                      border: `1px solid ${
-                        r.state === 'done'
-                          ? 'var(--color-ok)'
-                          : r.state === 'now'
-                            ? 'var(--color-accent)'
-                            : 'var(--color-line2)'
-                      }`,
-                      background:
-                        r.state === 'done'
-                          ? 'var(--color-oksoft)'
-                          : r.state === 'now'
-                            ? 'var(--color-accentsoft)'
-                            : 'var(--color-surface)',
-                      color:
-                        r.state === 'done'
-                          ? 'var(--color-ok)'
-                          : r.state === 'now'
-                            ? 'var(--color-accent)'
-                            : 'var(--color-ink4)',
-                    }}
-                  >
-                    {r.state === 'done' ? (
-                      <IconCheck size={12} strokeWidth={2.4} />
-                    ) : (
-                      <span
-                        className={r.state === 'now' ? 'live-dot' : ''}
-                        style={{
-                          width: 6,
-                          height: 6,
-                          borderRadius: 99,
-                          background: 'currentColor',
-                        }}
-                      />
-                    )}
-                  </span>
-                  {i < ROADMAP.length - 1 ? (
-                    <span
-                      style={{ width: 1, flex: 1, minHeight: 16, background: 'var(--color-line)' }}
-                    />
-                  ) : null}
-                </div>
-                <div className="flex-1 pb-3">
-                  <div className="flex items-center gap-2">
-                    <span className="num" style={{ fontSize: 11, color: 'var(--color-ink3)' }}>
-                      {r.stage}
-                    </span>
-                    <span
-                      style={{
-                        fontSize: 13.5,
-                        fontWeight: r.state === 'now' ? 640 : 500,
-                        color: r.state === 'next' ? 'var(--color-ink3)' : 'var(--color-ink)',
-                      }}
-                    >
-                      {r.title}
-                    </span>
-                  </div>
-                  {r.state === 'now' ? (
-                    <div style={{ fontSize: 11.5, color: 'var(--color-accent)', marginTop: 1 }}>
-                      当前阶段 · 正在构建
-                    </div>
-                  ) : null}
-                </div>
-              </div>
-            ))}
-          </div>
-          <div
-            className="mt-1 flex items-center gap-2 pt-3"
-            style={{
-              borderTop: '1px solid var(--color-line)',
-              fontSize: 12,
-              color: 'var(--color-ink3)',
-            }}
-          >
-            <IconGauge size={15} />
-            <span className="flex-1">
-              {problems === 0
-                ? 'S1–S6 全部完成 · 名单体检全部通过'
-                : `S1–S6 全部完成 · 名单还有 ${problems} 处待核对，越早修正越不会污染统计`}
-            </span>
-          </div>
         </Panel>
       </div>
 

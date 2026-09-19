@@ -17,6 +17,7 @@ import ImportPaste from './pages/ImportPaste'
 import ImportPhoto from './pages/ImportPhoto'
 import Login from './pages/Login'
 import NotFound from './pages/NotFound'
+import WrongBook from './pages/WrongBook'
 import Schedule from './pages/Schedule'
 import Settings from './pages/Settings'
 import Workbench from './pages/Workbench'
@@ -170,6 +171,14 @@ export default function App() {
           element={
             <Guard>
               <Schedule />
+            </Guard>
+          }
+        />
+        <Route
+          path="/wrong"
+          element={
+            <Guard>
+              <WrongBook />
             </Guard>
           }
         />

@@ -19,6 +19,7 @@ import {
   IconGauge,
   IconHash,
   IconInfo,
+  IconTarget,
   IconUser,
   IconUsers,
   Logo,
@@ -30,6 +31,7 @@ const NAV = [
   { to: '/', label: '工作台', icon: IconGauge, end: true },
   { to: '/classes', label: '班级', icon: IconUsers, end: false },
   { to: '/assignments', label: '作业', icon: IconClipboard, end: false },
+  { to: '/wrong', label: '错题集', icon: IconTarget, end: false },
   { to: '/settings', label: '我的', icon: IconUser, end: false },
 ]
 

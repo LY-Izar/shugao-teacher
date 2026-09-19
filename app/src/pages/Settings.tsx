@@ -10,13 +10,13 @@ import {
   IconLogout,
   IconPencil,
   IconRefresh,
-  IconUsers,
   IconWifi,
 } from '../components/icons'
 import { Button, KV, PageHead, Panel, Sect, Sheet, Tag } from '../components/ui'
 import { activeStudents, useStore, useToast } from '../data/store'
 import { signOutEverywhere } from '../hooks/useAuthBootstrap'
 import { connectionMode } from '../lib/supabase'
+import { APP_VERSION } from '../lib/version'
 import { REMIND_BEFORE, itemsForDate } from '../lib/schedule'
 import { beijingNow, holidayDataInfo, ymdOf } from '../lib/holiday'
 
@@ -312,74 +312,74 @@ export default function Settings() {
           <Sect>关于</Sect>
           <Panel bodyClass="px-4 py-2">
             <KV k="平台" v="树高教师平台" />
-            <KV k="当前阶段" v="S2 · 作业档案与收缴" />
-            <KV k="版本" v={<span className="num">v0.2.0</span>} />
+            <KV k="版本" v={<span className="num">v{APP_VERSION}</span>} />
             <KV k="学段学科" v="高中 · 物理（教科版）" />
-            <KV k="存储" v="本地 localStorage" />
+            <KV
+              k="存储"
+              v={mode === 'remote' ? '云端 · 手机与教室端共用一份' : '本机浏览器 · 未连云端'}
+            />
           </Panel>
         </div>
 
-        {/* S1 范围说明 */}
+        {/* 更新日志 */}
         <div className="mb-4">
-          <Sect>已实现范围</Sect>
+          <Sect>更新日志</Sect>
           <Panel bodyClass="p-3">
-            <div className="num" style={{ fontSize: 11, color: 'var(--color-ink3)', letterSpacing: '.1em' }}>
-              S1 · 班级与花名册
-            </div>
-            <ul
-              style={{
-                fontSize: 12.5,
-                color: 'var(--color-ink2)',
-                lineHeight: 1.95,
-                paddingLeft: 16,
-                listStyle: 'disc',
-                marginTop: 4,
-              }}
-            >
-              <li>账号登录与教师身份（学科 · 学校）</li>
-              <li>班级创建、编辑、删除，当前班级上下文切换</li>
-              <li>学生名单：增删改、转班、转出保留历史</li>
-              <li>拍照录名单：识别 → 逐行校对 → 序列校验 → 导入</li>
-              <li>粘贴导入：自动解析学号与姓名两列</li>
-              <li>名单体检：缺号、重号、重名、非数字学号</li>
-              <li>数据导出与清空</li>
-            </ul>
-
-            <div
-              className="num mt-3"
-              style={{ fontSize: 11, color: 'var(--color-ink3)', letterSpacing: '.1em' }}
-            >
-              S2 · 作业档案与收缴
-            </div>
-            <ul
-              style={{
-                fontSize: 12.5,
-                color: 'var(--color-ink2)',
-                lineHeight: 1.95,
-                paddingLeft: 16,
-                listStyle: 'disc',
-                marginTop: 4,
-              }}
-            >
-              <li>练习册模板（作业21 = 1–6 题），题号不依赖图像识别</li>
-              <li>作业档案：名称、题目数量、班级、日期（默认前一天）</li>
-              <li>收作业查缺：拍一摞作业的侧面识别已交学号</li>
-              <li>序列自检：重复号与相邻跳号配对，推断「把某号读成了某号」</li>
-              <li>登记表默认全班已交，只标例外；识别结果可随时手工修正</li>
-              <li>迟交与未交分开记录</li>
-            </ul>
-
-            <div
-              className="mt-2 flex items-center gap-2 pt-3"
-              style={{
-                borderTop: '1px solid var(--color-line)',
-                fontSize: 12,
-                color: 'var(--color-ink3)',
-              }}
-            >
-              <IconUsers size={15} />
-              <span>下一步 S3：快速模式批改录入 + 完成批改</span>
-            </div>
+            {[
+              {
+                v: '0.7.0',
+                at: '9 月 19 日',
+                items: [
+                  '云端同步：手机与教室端共用一份数据，呼叫真的能跨设备送达',
+                  'Word 稿一键导入建立作业档案（题量 / 题型 / 分值 / 小问自动识别，可逐题改）',
+                  '作业情况新增「题型掌握情况」：每个题型丢几分、正确率多少',
+                  '课表支持批量录入与课表文件导入，上课前 10 分钟提醒',
+                  '拍照查缺改为真识别：先数本数，够数直接判全过',
+                  '法定假期与调休按官方安排自动判定（含调休上班日）',
+                ],
+              },
+              {
+                v: '0.5.0',
+                at: '9 月 18 日',
+                items: [
+                  '逐题错误率与讲评优先级（30–70% 优先精讲）',
+                  '改错一键呼叫：教室端全屏播报 + 置顶小窗',
+                  '教室端：系统语音播报、逐题正确率、压在全屏应用之上的小窗',
+                  '快速批改录入：点学号就地展开题号，默认全对只记错的',
+                ],
+              },
+              {
+                v: '0.2.0',
+                at: '9 月 17 日',
+                items: [
+                  '班级与花名册：拍照/粘贴导入、序列自检、名单体检',
+                  '作业档案与收作业查缺、未交与迟交分开记录',
+                ],
+              },
+            ].map((log) => (
+              <div key={log.v} className="mb-3 last:mb-0">
+                <div className="flex items-baseline gap-2">
+                  <span className="num" style={{ fontSize: 12.5, fontWeight: 700 }}>
+                    v{log.v}
+                  </span>
+                  <span style={{ fontSize: 11.5, color: 'var(--color-ink4)' }}>{log.at}</span>
+                </div>
+                <ul
+                  style={{
+                    fontSize: 12.5,
+                    color: 'var(--color-ink2)',
+                    lineHeight: 1.9,
+                    paddingLeft: 16,
+                    listStyle: 'disc',
+                    marginTop: 2,
+                  }}
+                >
+                  {log.items.map((t) => (
+                    <li key={t}>{t}</li>
+                  ))}
+                </ul>
+              </div>
+            ))}
           </Panel>
         </div>
 
