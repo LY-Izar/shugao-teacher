@@ -5,6 +5,8 @@ import { PipPanel } from '../components/PipPanel'
 import {
   IconAlert,
   IconCheck,
+  IconDownload,
+  IconEye,
   IconInfo,
   IconMegaphone,
   IconTarget,
@@ -18,6 +20,15 @@ import { BAND_META, gradeStats } from '../lib/grading'
 import { closePip, openPip, pipSupported } from '../lib/pip'
 import { HEARTBEAT_MS, emit, subscribe } from '../lib/realtime'
 import { isRemote } from '../lib/supabase'
+import {
+  KIND_TEXT,
+  canViewInline,
+  humanSize,
+  kindOf,
+  listFiles,
+  signedUrl,
+  type SharedFile,
+} from '../lib/files'
 import { chime, speak, stopSpeaking, unlockAudio } from '../lib/tts'
 import { friendlyDate } from '../lib/date'
 import type { CallRecord } from '../data/types'
@@ -99,6 +110,24 @@ export default function Classroom() {
     if (!klass) return
     ensureClassroom(klass.id, '一体机')
   }, [klass?.id, ensureClassroom]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  /* 教师传来的文件 */
+  const [files, setFiles] = useState<SharedFile[]>([])
+  useEffect(() => {
+    if (!isRemote) return
+    let alive = true
+    void (async () => {
+      try {
+        const all = await listFiles()
+        if (alive) setFiles(all.filter((f) => !f.classId || f.classId === klass?.id))
+      } catch {
+        /* 教室端拿不到文件列表不影响上课 */
+      }
+    })()
+    return () => {
+      alive = false
+    }
+  }, [klass?.id])
 
   /* 心跳：教师端据此显示「在线 / 离线」 */
   useEffect(() => {
@@ -556,6 +585,60 @@ export default function Classroom() {
                         )
                       })}
                     </div>
+                  </Panel>
+
+                  <Sect>老师传来的文件</Sect>
+                  <Panel className="overflow-hidden">
+                    {files.length === 0 ? (
+                      <div
+                        className="px-3 py-4"
+                        style={{ fontSize: 12.5, color: 'var(--color-ink3)' }}
+                      >
+                        还没有文件。教师端在「我的 → 教室端文件」里上传。
+                      </div>
+                    ) : (
+                      files.map((f, i) => {
+                        const k = kindOf(f.name, f.mime)
+                        return (
+                          <div
+                            key={f.id}
+                            className="flex items-center gap-3 px-3 py-2.5"
+                            style={{
+                              borderBottom:
+                                i === files.length - 1 ? undefined : '1px solid var(--color-line)',
+                            }}
+                          >
+                            <span className="min-w-0 flex-1">
+                              <span
+                                className="block truncate"
+                                style={{ fontSize: 13.5, fontWeight: 550 }}
+                              >
+                                {f.name}
+                              </span>
+                              <span style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
+                                <Tag tone={canViewInline(k) ? 'accent' : 'idle'}>
+                                  {KIND_TEXT[k]}
+                                </Tag>{' '}
+                                <span className="num">{humanSize(f.size)}</span>
+                              </span>
+                            </span>
+                            <Button
+                              size="sm"
+                              variant={canViewInline(k) ? 'primary' : 'ghost'}
+                              icon={
+                                canViewInline(k) ? <IconEye size={15} /> : <IconDownload size={15} />
+                              }
+                              onClick={async () => {
+                                const url = await signedUrl(f.storagePath)
+                                if (url) window.open(url, '_blank', 'noopener')
+                              }}
+                            >
+                              {canViewInline(k) ? '打开' : '下载'}
+                            </Button>
+                          </div>
+                        )
+                      })
+                    )}
                   </Panel>
 
                   <Sect>小窗操作</Sect>

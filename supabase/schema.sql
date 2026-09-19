@@ -260,7 +260,63 @@ end $$;
 alter table calls replica identity full;
 
 -- ============================================================
---  9. 自检：确认每张表都开了 RLS
+--  9. 教师端 → 教室端 的文件互传
+--
+--  场景：教师把讲评要用的题图、答案 PDF、HTML、PPT 传上来，
+--  教室一体机上直接打开或下载。
+--  文件放 Supabase Storage 的**私有桶**，路径约定：
+--    {teacher_id}/{uuid}-{原文件名}
+--  这样存储策略只用路径第一段就能判断归属，不必额外查表。
+--
+--  ⚠️ 免费版存储只有 1 GB —— PPT 这类大文件要节制，
+--     建议单文件 20 MB 以内，用完就删。
+-- ============================================================
+create table if not exists shared_files (
+  id            uuid primary key default gen_random_uuid(),
+  teacher_id    uuid not null references teachers (id) on delete cascade,
+  -- 为空 = 所有班级可见；否则只给这个班
+  class_id      uuid references classes (id) on delete cascade,
+  name          text not null,
+  mime          text not null default '',
+  size          bigint not null default 0,
+  storage_path  text not null,
+  created_at    timestamptz not null default now()
+);
+create index if not exists shared_files_teacher_idx on shared_files (teacher_id, created_at desc);
+
+alter table shared_files enable row level security;
+drop policy if exists shared_files_own on shared_files;
+create policy shared_files_own on shared_files
+  for all to authenticated
+  using (teacher_id = auth.uid())
+  with check (teacher_id = auth.uid());
+
+grant select, insert, update, delete on shared_files to authenticated;
+revoke all on shared_files from anon;
+
+-- 私有桶（已存在就跳过）
+insert into storage.buckets (id, name, public)
+values ('classroom-files', 'classroom-files', false)
+on conflict (id) do nothing;
+
+-- 存储策略：只能读写自己目录下的文件
+drop policy if exists classroom_files_read on storage.objects;
+create policy classroom_files_read on storage.objects
+  for select to authenticated
+  using (bucket_id = 'classroom-files' and (storage.foldername(name))[1] = auth.uid()::text);
+
+drop policy if exists classroom_files_insert on storage.objects;
+create policy classroom_files_insert on storage.objects
+  for insert to authenticated
+  with check (bucket_id = 'classroom-files' and (storage.foldername(name))[1] = auth.uid()::text);
+
+drop policy if exists classroom_files_delete on storage.objects;
+create policy classroom_files_delete on storage.objects
+  for delete to authenticated
+  using (bucket_id = 'classroom-files' and (storage.foldername(name))[1] = auth.uid()::text);
+
+-- ============================================================
+--  10. 自检：确认每张表都开了 RLS
 --     跑完应返回 0 行；返回任何一行都说明有表漏开
 -- ============================================================
 -- select tablename from pg_tables

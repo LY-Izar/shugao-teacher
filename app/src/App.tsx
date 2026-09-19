@@ -18,6 +18,7 @@ import ImportPhoto from './pages/ImportPhoto'
 import Login from './pages/Login'
 import NotFound from './pages/NotFound'
 import WrongBook from './pages/WrongBook'
+import Files from './pages/Files'
 import Schedule from './pages/Schedule'
 import Settings from './pages/Settings'
 import Workbench from './pages/Workbench'
@@ -171,6 +172,14 @@ export default function App() {
           element={
             <Guard>
               <Schedule />
+            </Guard>
+          }
+        />
+        <Route
+          path="/files"
+          element={
+            <Guard>
+              <Files />
             </Guard>
           }
         />

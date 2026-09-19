@@ -10,6 +10,7 @@ import {
   IconLogout,
   IconPencil,
   IconRefresh,
+  IconUpload,
   IconWifi,
 } from '../components/icons'
 import { Button, KV, PageHead, Panel, Sect, Sheet, Tag } from '../components/ui'
@@ -123,6 +124,28 @@ export default function Settings() {
         <div className="mb-4">
           <Sect>我的</Sect>
           <Panel className="overflow-hidden">
+            <button type="button" className="row" style={{ padding: 14 }} onClick={() => navigate('/files')}>
+              <span
+                className="grid place-items-center shrink-0"
+                style={{
+                  width: 36,
+                  height: 36,
+                  border: '1px solid var(--color-line2)',
+                  borderRadius: 4,
+                  background: 'var(--color-surface2)',
+                  color: 'var(--color-accent)',
+                }}
+              >
+                <IconUpload size={18} />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span style={{ fontSize: 14.5, fontWeight: 620 }}>教室端文件</span>
+                <span className="mt-0.5 block" style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
+                  把题图、PDF、HTML、PPT 传到教室一体机上打开
+                </span>
+              </span>
+              <IconChevronRight size={16} />
+            </button>
             <button type="button" className="row" style={{ padding: 14 }} onClick={() => navigate('/schedule')}>
               <span
                 className="grid place-items-center shrink-0"
