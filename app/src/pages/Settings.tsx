@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Page } from '../components/AppShell'
 import {
@@ -18,6 +18,14 @@ import { activeStudents, useStore, useToast } from '../data/store'
 import { signOutEverywhere } from '../hooks/useAuthBootstrap'
 import { connectionMode } from '../lib/supabase'
 import { APP_VERSION } from '../lib/version'
+import {
+  backupSummary,
+  downloadJson,
+  makeBackup,
+  pushBackupToCloud,
+  readJsonFile,
+  validateBackup,
+} from '../lib/backup'
 import { REMIND_BEFORE, itemsForDate } from '../lib/schedule'
 import { beijingNow, holidayDataInfo, ymdOf } from '../lib/holiday'
 
@@ -29,6 +37,8 @@ export default function Settings() {
   const setCurrentClass = useStore((s) => s.setCurrentClass)
   const resetDemo = useStore((s) => s.resetDemo)
   const clearAll = useStore((s) => s.clearAll)
+  const restoreBackup = useStore((s) => s.restoreBackup)
+  const bkRef = useRef<HTMLInputElement>(null)
   const navigate = useNavigate()
   const push = useToast((s) => s.push)
   const mode = connectionMode()
@@ -172,6 +182,60 @@ export default function Settings() {
               <Tag tone={todayCount > 0 ? 'accent' : 'idle'}>今天 {todayCount} 项</Tag>
               <IconChevronRight size={16} />
             </button>
+          </Panel>
+        </div>
+
+        {/* 备份与恢复 */}
+        <div className="mb-4">
+          <Sect>备份与恢复</Sect>
+          <Panel bodyClass="p-3">
+            <input
+              ref={bkRef}
+              type="file"
+              accept=".json,application/json"
+              className="hidden"
+              onChange={async (e) => {
+                const f = e.target.files?.[0]
+                e.target.value = ''
+                if (!f) return
+                try {
+                  const v = validateBackup(await readJsonFile(f))
+                  if (!v.ok) {
+                    push({ text: v.why, tone: 'bad' })
+                    return
+                  }
+                  const yes = window.confirm(
+                    `确定用这份备份覆盖当前数据吗？\n\n${backupSummary(v.data)}\n备份时间：${new Date(v.data.at).toLocaleString()}\n\n当前数据会被替换，此操作不可撤销。`,
+                  )
+                  if (!yes) return
+                  restoreBackup(v.data)
+                  const msg = await pushBackupToCloud(v.data, teacher?.id ?? '')
+                  push({ text: msg, tone: 'ok' })
+                } catch (err) {
+                  push({ text: err instanceof Error ? err.message : '这个文件读不了', tone: 'bad' })
+                }
+              }}
+            />
+            <div className="flex flex-col gap-2">
+              <Button
+                block
+                icon={<IconDownload size={16} />}
+                onClick={() => {
+                  const b = makeBackup(useStore.getState())
+                  downloadJson(b, `树高备份-${ymdOf(beijingNow())}.json`)
+                  push({ text: `已导出：${backupSummary(b)}`, tone: 'ok' })
+                }}
+              >
+                导出备份文件
+              </Button>
+              <Button block icon={<IconUpload size={16} />} onClick={() => bkRef.current?.click()}>
+                从备份文件恢复
+              </Button>
+            </div>
+            <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 10, lineHeight: 1.7 }}>
+              云端是主副本，这份备份是<b>额外</b>一道保险。主要防两件事：
+              误点下面的「清空全部数据」、以及换账号时把数据搬过去。
+            </p>
           </Panel>
         </div>
 

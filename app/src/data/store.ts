@@ -155,6 +155,15 @@ type State = {
   removeSchedule: (id: string) => void
 
   resetDemo: () => void
+  /** 从备份文件恢复（覆盖当前数据，调用前必须让用户确认） */
+  restoreBackup: (b: {
+    teacher?: Teacher | null
+    classes: Klass[]
+    assignments: Assignment[]
+    schedule: ScheduleItem[]
+    calls: CallRecord[]
+    classrooms: ClassroomClient[]
+  }) => void
   clearAll: () => void
   touchStreak: () => void
 }
@@ -614,6 +623,19 @@ export const useStore = create<State>()(
       removeSchedule: (id) => {
         set((s) => ({ isDemo: false, schedule: s.schedule.filter((x) => x.id !== id) }))
         void remote.deleteSchedule(id)
+      },
+
+      restoreBackup: (b) => {
+        set({
+          teacher: b.teacher ?? get().teacher,
+          classes: b.classes,
+          currentClassId: b.classes[0]?.id ?? null,
+          assignments: b.assignments,
+          schedule: b.schedule,
+          calls: b.calls,
+          classrooms: b.classrooms,
+          isDemo: false,
+        })
       },
 
       resetDemo: () => {
