@@ -64,7 +64,7 @@ await shot('04-class-detail', { full: true })
 await page.goto(`${BASE}/classes/c-demo-1/import/photo`, { waitUntil: 'networkidle' })
 await shot('05-photo-capture', { full: true })
 
-await page.getByRole('button', { name: /用示意图演示/ }).click()
+await page.getByRole('button', { name: /演示（模拟结果）/ }).click()
 await shot('06-photo-scanning', { wait: 700 })
 
 await shot('07-photo-review', { full: true, wait: 2300 })
@@ -87,7 +87,7 @@ await shot('12-assignment-new', { full: true })
 await page.goto(`${BASE}/assignments/a-demo-2/collect`, { waitUntil: 'networkidle' })
 await shot('13-collect-idle', { full: true })
 
-await page.getByRole('button', { name: /用示意图演示/ }).click()
+await page.getByRole('button', { name: /演示（模拟结果）/ }).click()
 await shot('14-collect-scanning', { wait: 700 })
 
 await shot('15-collect-result', { full: true, wait: 2400 })

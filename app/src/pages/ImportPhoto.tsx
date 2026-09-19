@@ -15,8 +15,11 @@ import { Button, PageHead, Panel, Portal, Sect, StatStrip, Tag } from '../compon
 import { useStore, useToast } from '../data/store'
 import type { ParsedRow } from '../lib/roster'
 import { FLAG_TEXT, simulateScan, validateRows } from '../lib/roster'
+import { recognize } from '../lib/ocr'
+import { preparePhoto, type PreparedPhoto, type Rotate } from '../lib/photo'
+import { isRemote } from '../lib/supabase'
 
-type Stage = 'capture' | 'scanning' | 'review'
+type Stage = 'capture' | 'preview' | 'scanning' | 'review'
 
 const SCAN_STEPS = ['定位名单区域', '识别学号列', '识别姓名列', '序列连续性校验']
 
@@ -68,6 +71,15 @@ export default function ImportPhoto() {
   const [zoom, setZoom] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
 
+  /* ---- 真识别 ---- */
+  const [source, setSource] = useState<Blob | null>(null)
+  const [prep, setPrep] = useState<PreparedPhoto | null>(null)
+  const [enhance, setEnhance] = useState(true)
+  const [rotate, setRotate] = useState<Rotate>(0)
+  const [lowConf, setLowConf] = useState<Set<string>>(new Set())
+  const [ocrErr, setOcrErr] = useState('')
+  const [ocrNotes, setOcrNotes] = useState('')
+
   const rows = useMemo(() => validateRows(raw, klass?.students ?? []), [raw, klass])
   const bad = rows.filter((r) => r.flag).length
 
@@ -77,21 +89,57 @@ export default function ImportPhoto() {
     }
   }, [photo])
 
-  const runScan = (src: string | null) => {
-    setPhoto(src)
+  /** 选到照片后先本机预处理，让教师看一眼再识别 */
+  const pickPhoto = async (f: Blob, opts?: { enhance?: boolean; rotate?: Rotate }) => {
+    const en = opts?.enhance ?? enhance
+    const rot = opts?.rotate ?? rotate
+    setOcrErr('')
+    try {
+      const p = await preparePhoto(f, { enhance: en, rotate: rot })
+      setSource(f)
+      setPrep(p)
+      setPhoto(p.dataUrl)
+      setStage('preview')
+    } catch (e) {
+      setOcrErr(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  /** 真识别：花名册照片 → 学号 + 姓名 */
+  const runScan = async () => {
+    if (!prep) return
+    setOcrErr('')
     setStage('scanning')
     setStep(0)
-    const t: number[] = []
-    SCAN_STEPS.forEach((_, i) => {
-      t.push(window.setTimeout(() => setStep(i + 1), 380 * (i + 1)))
+    SCAN_STEPS.forEach((_, i) => window.setTimeout(() => setStep(i + 1), 600 * (i + 1)))
+
+    const out = await recognize(prep.dataUrl, {
+      scene: 'roster',
+      className: klass?.name,
+      nos: klass?.students.map((s) => s.studentNo),
     })
-    t.push(
-      window.setTimeout(() => {
-        setRaw(simulateScan(klass?.id ?? 'x').map((r) => ({ studentNo: r.studentNo, name: r.name })))
-        setStage('review')
-      }, 380 * SCAN_STEPS.length + 420),
-    )
-    return () => t.forEach(clearTimeout)
+
+    if (out.status !== 'ok') {
+      setOcrErr(out.message)
+      setStage('preview')
+      return
+    }
+
+    const rows = out.students
+      .map((s) => ({ studentNo: s.studentNo, name: s.name }))
+      .filter((r) => r.studentNo || r.name)
+
+    if (!rows.length) {
+      setOcrErr('没从这张照片里认出学生。试试拍正一点、光线均匀一些，或改用「粘贴导入」。')
+      setStage('preview')
+      return
+    }
+
+    setRaw(rows)
+    setLowConf(new Set(out.students.filter((s) => s.confidence === 'low').map((s) => s.studentNo)))
+    setOcrNotes(out.notes)
+    setStep(SCAN_STEPS.length)
+    setStage('review')
   }
 
   if (!klass) {
@@ -127,7 +175,7 @@ export default function ImportPhoto() {
 
       <Page>
         {/* ---------- 取景 ---------- */}
-        {stage === 'capture' ? (
+        {stage === 'capture' || stage === 'preview' ? (
           <>
             <div className="mb-2">
               <Sect>第 1 步 · 拍摄花名册</Sect>
@@ -195,23 +243,123 @@ export default function ImportPhoto() {
                   onChange={(e) => {
                     const f = e.target.files?.[0]
                     if (!f) return
-                    runScan(URL.createObjectURL(f))
+                    void pickPhoto(f)
+                    e.target.value = ''
                   }}
                 />
 
-                <div className="mt-3 flex gap-2">
-                  <Button
-                    block
-                    variant="primary"
-                    icon={<IconCamera size={16} />}
-                    onClick={() => fileRef.current?.click()}
-                  >
-                    拍照 / 选照片
-                  </Button>
-                  <Button block icon={<IconUpload size={16} />} onClick={() => runScan(null)}>
-                    用示意图演示
-                  </Button>
-                </div>
+                {stage === 'preview' ? (
+                  <>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <Button
+                        size="sm"
+                        onClick={() => {
+                          const next = !enhance
+                          setEnhance(next)
+                          if (source) void pickPhoto(source, { enhance: next, rotate })
+                        }}
+                      >
+                        {enhance ? '对比度已增强' : '原始亮度'}
+                      </Button>
+                      <Button
+                        size="sm"
+                        icon={<IconRefresh size={14} />}
+                        onClick={() => {
+                          const next = ((rotate + 90) % 360) as Rotate
+                          setRotate(next)
+                          if (source) void pickPhoto(source, { enhance, rotate: next })
+                        }}
+                      >
+                        旋转
+                      </Button>
+                      <Button size="sm" onClick={() => fileRef.current?.click()}>
+                        重选
+                      </Button>
+                    </div>
+
+                    {prep && (prep.tooDark || prep.tooBright || prep.lowContrast) ? (
+                      <div
+                        className="mt-2.5 flex items-start gap-2 p-2.5"
+                        style={{
+                          background: 'var(--color-warnsoft)',
+                          border: '1px solid ***REMOVED***ecd9ae',
+                          borderRadius: 4,
+                          fontSize: 11.5,
+                          color: '***REMOVED***8a5a12',
+                          lineHeight: 1.6,
+                        }}
+                      >
+                        <span style={{ marginTop: 1, flexShrink: 0 }}>
+                          <IconAlert size={14} />
+                        </span>
+                        <span>
+                          {prep.tooDark
+                            ? '这张偏暗，识别率会下降。到窗边或补个光重拍。'
+                            : prep.tooBright
+                              ? '这张偏亮、可能有反光。躲开顶灯直射再拍一张。'
+                              : '画面偏灰、字迹对比弱。已自动增强，若还看不清建议补光重拍。'}
+                        </span>
+                      </div>
+                    ) : null}
+
+                    {ocrErr ? (
+                      <div
+                        className="mt-2.5 flex items-start gap-2 p-2.5"
+                        style={{
+                          background: 'var(--color-badsoft)',
+                          border: '1px solid ***REMOVED***f0c9c9',
+                          borderRadius: 4,
+                          fontSize: 11.5,
+                          color: '***REMOVED***8f2b2b',
+                          lineHeight: 1.6,
+                        }}
+                      >
+                        <span style={{ marginTop: 1, flexShrink: 0 }}>
+                          <IconAlert size={14} />
+                        </span>
+                        <span>
+                          {ocrErr}
+                          <br />
+                          识别不了也不影响建班 —— 可以改用「粘贴导入」，或先手工建班再逐个加学生。
+                        </span>
+                      </div>
+                    ) : null}
+
+                    <Button block className="mt-3" variant="primary" onClick={() => void runScan()}>
+                      开始识别
+                    </Button>
+                  </>
+                ) : (
+                  <div className="mt-3 flex gap-2">
+                    <Button
+                      block
+                      variant="primary"
+                      icon={<IconCamera size={16} />}
+                      onClick={() => fileRef.current?.click()}
+                    >
+                      拍照 / 选照片
+                    </Button>
+                    {!isRemote ? (
+                      <Button
+                        block
+                        icon={<IconUpload size={16} />}
+                        onClick={() => {
+                          // 仅本地演示模式：没配识别服务时用来看界面流程
+                          setRaw(
+                            simulateScan(klass?.id ?? 'x').map((r) => ({
+                              studentNo: r.studentNo,
+                              name: r.name,
+                            })),
+                          )
+                          setLowConf(new Set())
+                          setStage('review')
+                        }}
+                      >
+                        演示（模拟结果）
+                      </Button>
+                    ) : null}
+                  </div>
+                )}
               </Panel>
             </div>
 
@@ -328,6 +476,34 @@ export default function ImportPhoto() {
         {/* ---------- 校对 ---------- */}
         {stage === 'review' ? (
           <div className="anim-in">
+            {lowConf.size > 0 || ocrNotes ? (
+              <div
+                className="mb-3 flex items-start gap-2.5 p-3"
+                style={{
+                  background: 'var(--color-warnsoft)',
+                  border: '1px solid ***REMOVED***ecd9ae',
+                  borderRadius: 6,
+                }}
+              >
+                <span style={{ color: 'var(--color-warn)', marginTop: 1, flexShrink: 0 }}>
+                  <IconAlert size={16} />
+                </span>
+                <div style={{ fontSize: 12.5, color: '***REMOVED***8a5a12', lineHeight: 1.65 }}>
+                  {lowConf.size > 0 ? (
+                    <>
+                      有 <b className="num">{lowConf.size}</b> 行识别得不够确定，
+                      <b>请在下面的校对表里核对原图</b>。
+                    </>
+                  ) : null}
+                  {ocrNotes ? (
+                    <>
+                      {lowConf.size > 0 ? <br /> : null}
+                      识别备注：{ocrNotes}
+                    </>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
             <Panel className="mb-3 overflow-hidden">
               <StatStrip
                 items={[

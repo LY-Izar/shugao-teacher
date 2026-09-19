@@ -8,6 +8,7 @@ import {
   IconChevronRight,
   IconHash,
   IconInfo,
+  IconRefresh,
   IconScan,
   IconStack,
   IconUpload,
@@ -17,12 +18,16 @@ import { Button, PageHead, Panel, Portal, Sect, StatStrip, Tag } from '../compon
 import { useStore, useToast } from '../data/store'
 import type { Assignment, Student } from '../data/types'
 import { analyzeScan, simulateCollectScan, type ScanAnalysis } from '../lib/assignments'
+import { recognize, splitByConfidence } from '../lib/ocr'
+import { preparePhoto, type PreparedPhoto, type Rotate } from '../lib/photo'
+import { isRemote } from '../lib/supabase'
 import { friendlyDate } from '../lib/date'
 
 type Mark = 'submitted' | 'missing' | 'late'
-type Stage = 'idle' | 'scanning' | 'done'
+type Stage = 'idle' | 'preview' | 'scanning' | 'done'
 
-const SCAN_STEPS = ['定位侧面区域', '逐行识别学号', '序列连续性校验']
+/** 识别过程中的进度文案 —— 现在是真在跑，不再是演的 */
+const SCAN_STEPS = ['预处理照片（压缩 · 纠偏 · 提对比）', '识别手写学号', '与花名册对账']
 
 /** 收缴采用「只记例外」：默认全班已交，只存未交与迟交 */
 function initMark(a?: Assignment): Record<string, Mark> {
@@ -129,6 +134,15 @@ export default function AssignmentCollect() {
   const [detectedCount, setDetectedCount] = useState(0)
   const [photo, setPhoto] = useState<string | null>(null)
   const [zoom, setZoom] = useState(false)
+
+  /* ---- 真识别相关 ---- */
+  const [source, setSource] = useState<Blob | null>(null)
+  const [prep, setPrep] = useState<PreparedPhoto | null>(null)
+  const [enhance, setEnhance] = useState(true)
+  const [rotate, setRotate] = useState<Rotate>(0)
+  const [lowConf, setLowConf] = useState<Set<string>>(new Set())
+  const [ocrErr, setOcrErr] = useState<{ msg: string; detail?: string } | null>(null)
+  const [ocrNotes, setOcrNotes] = useState('')
   const fileRef = useRef<HTMLInputElement>(null)
 
   /* 用档案里已有的收缴记录初始化（只记例外，默认全班已交） */
@@ -157,28 +171,58 @@ export default function AssignmentCollect() {
   const late = students.filter((s) => mark[s.studentNo] === 'late')
   const submitted = students.length - missing.length
 
-  const runScan = (src: string | null) => {
-    setPhoto(src)
+  /** 选到照片后先做本机预处理，让教师看一眼再决定要不要识别 */
+  const pickPhoto = async (f: Blob, opts?: { enhance?: boolean; rotate?: Rotate }) => {
+    const en = opts?.enhance ?? enhance
+    const rot = opts?.rotate ?? rotate
+    setOcrErr(null)
+    setOcrNotes('')
+    try {
+      const p = await preparePhoto(f, { enhance: en, rotate: rot })
+      setSource(f)
+      setPrep(p)
+      setPhoto(p.dataUrl)
+      setStage('preview')
+    } catch (e) {
+      setOcrErr({ msg: e instanceof Error ? e.message : String(e) })
+    }
+  }
+
+  /** 真正调用识别 */
+  const runScan = async () => {
+    if (!prep) return
+    setOcrErr(null)
     setStage('scanning')
     setStep(0)
     const timers: number[] = []
-    SCAN_STEPS.forEach((_, i) => timers.push(window.setTimeout(() => setStep(i + 1), 400 * (i + 1))))
-    timers.push(
-      window.setTimeout(
-        () => {
-          const { detected } = simulateCollectScan(allNos)
-          const analysis = analyzeScan(detected, allNos)
+    SCAN_STEPS.forEach((_, i) => timers.push(window.setTimeout(() => setStep(i + 1), 600 * (i + 1))))
 
-          const next: Record<string, Mark> = {}
-          for (const n of analysis.unreadable) next[n] = 'missing'
-          setMark(next)
-          setScan(analysis)
-          setDetectedCount(detected.length)
-          setStage('done')
-        },
-        400 * SCAN_STEPS.length + 380,
-      ),
-    )
+    const out = await recognize(prep.dataUrl, {
+      scene: 'collect',
+      className: klass?.name,
+      nos: allNos,
+    })
+
+    timers.forEach((t) => window.clearTimeout(t))
+
+    if (out.status !== 'ok') {
+      setOcrErr({ msg: out.message, detail: 'detail' in out ? out.detail : undefined })
+      setStage('preview')
+      return
+    }
+
+    const { all, lowConfidence } = splitByConfidence(out.numbers)
+    const analysis = analyzeScan(all, allNos)
+
+    const next: Record<string, Mark> = {}
+    for (const n of analysis.unreadable) next[n] = 'missing'
+    setMark(next)
+    setScan(analysis)
+    setDetectedCount(all.length)
+    setLowConf(lowConfidence)
+    setOcrNotes(out.notes)
+    setStep(SCAN_STEPS.length)
+    setStage('done')
   }
 
   const toggle = (no: string) => {
@@ -302,7 +346,8 @@ export default function AssignmentCollect() {
                 onChange={(e) => {
                   const f = e.target.files?.[0]
                   if (!f) return
-                  runScan(URL.createObjectURL(f))
+                  void pickPhoto(f)
+                  e.target.value = ''
                 }}
               />
 
@@ -361,6 +406,102 @@ export default function AssignmentCollect() {
                     </div>
                   </div>
                 </div>
+              ) : stage === 'preview' ? (
+                <>
+                  {/* 预处理结果的样子给教师看一眼，可调 */}
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <Button
+                      size="sm"
+                      onClick={() => {
+                        const next = !enhance
+                        setEnhance(next)
+                        if (source) void pickPhoto(source, { enhance: next, rotate })
+                      }}
+                    >
+                      {enhance ? '对比度已增强' : '原始亮度'}
+                    </Button>
+                    <Button
+                      size="sm"
+                      icon={<IconRefresh size={14} />}
+                      onClick={() => {
+                        const next = (((rotate + 90) % 360) as Rotate)
+                        setRotate(next)
+                        if (source) void pickPhoto(source, { enhance, rotate: next })
+                      }}
+                    >
+                      旋转
+                    </Button>
+                    <Button size="sm" onClick={() => fileRef.current?.click()}>
+                      重选
+                    </Button>
+                  </div>
+
+                  {prep && (prep.tooDark || prep.tooBright || prep.lowContrast) ? (
+                    <div
+                      className="mt-2.5 flex items-start gap-2 p-2.5"
+                      style={{
+                        background: 'var(--color-warnsoft)',
+                        border: '1px solid ***REMOVED***ecd9ae',
+                        borderRadius: 4,
+                        fontSize: 11.5,
+                        color: '***REMOVED***8a5a12',
+                        lineHeight: 1.6,
+                      }}
+                    >
+                      <span style={{ marginTop: 1, flexShrink: 0 }}>
+                        <IconAlert size={14} />
+                      </span>
+                      <span>
+                        {prep.tooDark
+                          ? '这张偏暗，识别率会下降。换个角度避开阴影，或对着窗口方向重拍。'
+                          : prep.tooBright
+                            ? '这张偏亮、可能有反光。躲开顶灯直射再拍一张。'
+                            : '画面偏灰、字迹对比弱。已经自动增强过，若还看不清建议补光重拍。'}
+                      </span>
+                    </div>
+                  ) : null}
+
+                  {ocrErr ? (
+                    <div
+                      className="mt-2.5 flex items-start gap-2 p-2.5"
+                      style={{
+                        background:
+                          ocrErr.msg.includes('没有班级') || ocrErr.msg.includes('没配置')
+                            ? 'var(--color-warnsoft)'
+                            : 'var(--color-badsoft)',
+                        border: '1px solid ***REMOVED***f0c9c9',
+                        borderRadius: 4,
+                        fontSize: 11.5,
+                        color: '***REMOVED***8f2b2b',
+                        lineHeight: 1.6,
+                      }}
+                    >
+                      <span style={{ marginTop: 1, flexShrink: 0 }}>
+                        <IconAlert size={14} />
+                      </span>
+                      <span>
+                        {ocrErr.msg}
+                        {ocrErr.detail ? (
+                          <>
+                            <br />
+                            <span style={{ opacity: 0.75 }}>{ocrErr.detail}</span>
+                          </>
+                        ) : null}
+                        <br />
+                        识别不了也不影响登记 —— 下面的表格可以手动标未交。
+                      </span>
+                    </div>
+                  ) : null}
+
+                  <Button
+                    block
+                    className="mt-3"
+                    variant="primary"
+                    onClick={() => void runScan()}
+                  >
+                    开始识别
+                  </Button>
+                </>
               ) : (
                 <div className="mt-3 flex gap-2">
                   <Button
@@ -371,9 +512,26 @@ export default function AssignmentCollect() {
                   >
                     拍照查缺
                   </Button>
-                  <Button block icon={<IconUpload size={16} />} onClick={() => runScan(null)}>
-                    用示意图演示
-                  </Button>
+                  {!isRemote ? (
+                    <Button
+                      block
+                      icon={<IconUpload size={16} />}
+                      onClick={() => {
+                        // 仅本地演示模式保留：没有配识别服务时用来看界面流程
+                        const { detected } = simulateCollectScan(allNos)
+                        const analysis = analyzeScan(detected, allNos)
+                        const next: Record<string, Mark> = {}
+                        for (const n of analysis.unreadable) next[n] = 'missing'
+                        setMark(next)
+                        setScan(analysis)
+                        setDetectedCount(detected.length)
+                        setLowConf(new Set())
+                        setStage('done')
+                      }}
+                    >
+                      演示（模拟结果）
+                    </Button>
+                  ) : null}
                 </div>
               )}
             </Panel>
@@ -437,6 +595,37 @@ export default function AssignmentCollect() {
                 </span>
               </div>
             )}
+
+            {lowConf.size > 0 || ocrNotes ? (
+              <div
+                className="mb-3 flex items-start gap-2.5 p-3"
+                style={{
+                  background: 'var(--color-warnsoft)',
+                  border: '1px solid ***REMOVED***ecd9ae',
+                  borderRadius: 6,
+                }}
+              >
+                <span style={{ color: 'var(--color-warn)', marginTop: 1, flexShrink: 0 }}>
+                  <IconAlert size={16} />
+                </span>
+                <div style={{ fontSize: 12.5, color: '***REMOVED***8a5a12', lineHeight: 1.65 }}>
+                  {lowConf.size > 0 ? (
+                    <>
+                      有 <b className="num">{lowConf.size}</b> 个号识别得不够确定
+                      （<span className="num">{[...lowConf].slice(0, 12).join('、')}</span>
+                      {lowConf.size > 12 ? ' 等' : ''}）。
+                      <b>这些号已经标在下面的名单里了，请顺手扫一眼本子核对。</b>
+                    </>
+                  ) : null}
+                  {ocrNotes ? (
+                    <>
+                      {lowConf.size > 0 ? <br /> : null}
+                      识别备注：{ocrNotes}
+                    </>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
 
             <Panel bodyClass="p-3">
               <div
