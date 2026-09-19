@@ -149,6 +149,8 @@ type State = {
   ensureClassroom: (classId: string, name: string) => void
   /* ---- 课表 ---- */
   addSchedule: (item: Omit<ScheduleItem, 'id'>) => string
+  /** 批量加入（一次 upsert，别发 N 个请求） */
+  addScheduleMany: (items: Omit<ScheduleItem, 'id'>[]) => number
   updateSchedule: (id: string, patch: Partial<ScheduleItem>) => void
   removeSchedule: (id: string) => void
 
@@ -588,6 +590,15 @@ export const useStore = create<State>()(
         const tid = get().teacher?.id
         if (tid) void remote.saveSchedule(full, tid)
         return id
+      },
+
+      addScheduleMany: (items) => {
+        if (!items.length) return 0
+        const full: ScheduleItem[] = items.map((it) => ({ ...it, id: uid() }))
+        set((s) => ({ isDemo: false, schedule: [...s.schedule, ...full] }))
+        const tid = get().teacher?.id
+        if (tid) void remote.saveSchedules(full, tid)
+        return full.length
       },
 
       updateSchedule: (id, patch) => {

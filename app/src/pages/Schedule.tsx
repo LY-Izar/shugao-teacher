@@ -10,6 +10,7 @@ import {
   IconTrash,
   IconUsers,
 } from '../components/icons'
+import { ScheduleBatch } from '../components/ScheduleBatch'
 import { Button, PageHead, Panel, Sect, Sheet, Tag } from '../components/ui'
 import { useStore, useToast } from '../data/store'
 import { WEEKDAY_TEXT, type ScheduleItem, type ScheduleKind } from '../data/types'
@@ -40,6 +41,7 @@ export default function Schedule() {
   const schedule = useStore((s) => s.schedule)
   const classes = useStore((s) => s.classes)
   const addSchedule = useStore((s) => s.addSchedule)
+  const addScheduleMany = useStore((s) => s.addScheduleMany)
   const updateSchedule = useStore((s) => s.updateSchedule)
   const removeSchedule = useStore((s) => s.removeSchedule)
   const navigate = useNavigate()
@@ -47,6 +49,7 @@ export default function Schedule() {
 
   const [editing, setEditing] = useState<string | null>(null)
   const [open, setOpen] = useState(false)
+  const [batchOpen, setBatchOpen] = useState(false)
   const [form, setForm] = useState<Omit<ScheduleItem, 'id'>>(BLANK)
   const [perm, setPerm] = useState(() => notifyPermission())
 
@@ -99,7 +102,12 @@ export default function Schedule() {
         sub={`每周 ${schedule.length} 项 · 今天 ${state.items.length} 项`}
         onBack={() => navigate('/settings')}
         right={
-          <Button size="sm" variant="primary" icon={<IconPlus size={15} />} onClick={() => startNew()}>
+          <Button
+            size="sm"
+            variant="primary"
+            icon={<IconPlus size={15} />}
+            onClick={() => setBatchOpen(true)}
+          >
             添加
           </Button>
         }
@@ -317,7 +325,20 @@ export default function Schedule() {
         </div>
       </Page>
 
-      {/* 新增 / 编辑 */}
+      {/* 批量录入 —— 手工多条 / 粘贴文字 / 上传课表文件，都汇到同一张清单 */}
+      <ScheduleBatch
+        open={batchOpen}
+        onClose={() => setBatchOpen(false)}
+        classes={classes}
+        today={today}
+        onSave={(items) => {
+          const n = addScheduleMany(items)
+          setBatchOpen(false)
+          push({ text: `已加入 ${n} 条日程`, tone: 'ok' })
+        }}
+      />
+
+      {/* 新增 / 编辑单条 */}
       <Sheet
         open={open}
         onClose={() => setOpen(false)}

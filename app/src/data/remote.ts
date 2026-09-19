@@ -360,6 +360,8 @@ export const deleteAssignment = (id: string) => remove('assignments', id)
 
 export const saveSchedule = (s: ScheduleItem, teacherId: string) =>
   upsert('schedule_items', scheduleToRow(s, teacherId))
+export const saveSchedules = (list: ScheduleItem[], teacherId: string) =>
+  list.length ? upsert('schedule_items', list.map((s) => scheduleToRow(s, teacherId))) : Promise.resolve()
 export const deleteSchedule = (id: string) => remove('schedule_items', id)
 
 export const saveClassroom = (c: ClassroomClient, teacherId: string) =>
