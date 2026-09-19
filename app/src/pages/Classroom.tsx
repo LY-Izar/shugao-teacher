@@ -15,7 +15,7 @@ import {
   IconWifi,
   Logo,
 } from '../components/icons'
-import { Button, Panel, Sect, Tag } from '../components/ui'
+import { Button, Panel, Sect, Sheet, Tag } from '../components/ui'
 import { useStore, useToast } from '../data/store'
 import { collectStats } from '../lib/assignments'
 import { BAND_META, gradeStats } from '../lib/grading'
@@ -24,7 +24,7 @@ import { HEARTBEAT_MS, emit, subscribe } from '../lib/realtime'
 import { isRemote } from '../lib/supabase'
 import { awayText, dayState, maybeShift, toMinutes, weekdayOf } from '../lib/schedule'
 import { dayKind, nextHoliday, ymdOf } from '../lib/holiday'
-import { parseScheduleText } from '../lib/scheduleParse'
+import { parseScheduleText, type ParsedScheduleItem } from '../lib/scheduleParse'
 import { preparePhoto } from '../lib/photo'
 import { recognize } from '../lib/ocr'
 import { WEEKDAY_TEXT } from '../data/types'
@@ -195,6 +195,12 @@ export default function Classroom() {
   const schedRef = useRef<HTMLInputElement>(null)
   const [schedBusy, setSchedBusy] = useState(false)
   const [schedErr, setSchedErr] = useState('')
+  /** 照片识别结果，等教师核对/改完时间再入库 */
+  const [schedReview, setSchedReview] = useState<ParsedScheduleItem[] | null>(null)
+
+  /** 改一行（时间最容易认错，所以每一格都能直接编辑） */
+  const patchRow = (i: number, patch: Partial<ParsedScheduleItem>) =>
+    setSchedReview((rows) => (rows ? rows.map((r, k) => (k === i ? { ...r, ...patch } : r)) : rows))
   /**
    * 调休那天各校安排不一样（有的按周五上、有的按周一上），
    * 所以给教师一个当天可切换的口子 —— **只影响显示，不改课表数据**。
@@ -234,20 +240,9 @@ export default function Classroom() {
         setSchedErr('识别到的内容没解析成课程。可以换一张更清楚的课表图。')
         return
       }
-      addScheduleMany(
-        parsed.items.map((it) => ({
-          weekday: it.weekday,
-          start: it.start,
-          end: it.end,
-          title: it.title,
-          room: it.room,
-          classId: it.classId,
-          kind: it.kind,
-          notify: it.notify,
-          scope: 'class' as const,
-        })),
-      )
-      push({ text: `已从照片加入 ${parsed.items.length} 条课`, tone: 'ok' })
+      // 不直接入库 —— 照片识别的时间最容易出错，必须让教师过一眼再存
+      setSchedReview(parsed.items)
+      push({ text: `认出 ${parsed.items.length} 条课，请核对时间`, tone: 'ok' })
     } catch (e) {
       setSchedErr(e instanceof Error ? e.message : String(e))
     } finally {
@@ -417,6 +412,122 @@ export default function Classroom() {
 
   return (
     <Shell>
+      {/* 照片识别的结果先给教师核对 —— 时间最容易认错，不能直接入库 */}
+      <Sheet open={Boolean(schedReview)} onClose={() => setSchedReview(null)} title="核对课表">
+        {schedReview ? (
+          <>
+            <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.7, marginBottom: 10 }}>
+              照片识别最容易在<b>时间</b>上出错。一条条对着原表核一遍，改完再导入。
+            </p>
+
+            <div className="flex flex-col gap-2">
+              {schedReview.map((r, i) => (
+                <div
+                  key={`${r.weekday}-${r.start}-${i}`}
+                  style={{ border: '1px solid var(--color-line2)', borderRadius: 4, padding: 8 }}
+                >
+                  <div className="flex items-center gap-1.5">
+                    <select
+                      className="input"
+                      style={{ width: 74, flexShrink: 0 }}
+                      value={r.weekday}
+                      onChange={(e) => patchRow(i, { weekday: Number(e.target.value) })}
+                    >
+                      {[1, 2, 3, 4, 5, 6, 7].map((w) => (
+                        <option key={w} value={w}>
+                          {WEEKDAY_TEXT[w - 1]}
+                        </option>
+                      ))}
+                    </select>
+                    <input
+                      className="input num"
+                      type="time"
+                      value={r.start}
+                      onChange={(e) => patchRow(i, { start: e.target.value })}
+                    />
+                    <span style={{ color: 'var(--color-ink3)', flexShrink: 0 }}>–</span>
+                    <input
+                      className="input num"
+                      type="time"
+                      value={r.end}
+                      onChange={(e) => patchRow(i, { end: e.target.value })}
+                    />
+                    <button
+                      type="button"
+                      className="shrink-0"
+                      style={{ marginLeft: 'auto', color: 'var(--color-bad)', fontSize: 12 }}
+                      onClick={() => setSchedReview((rows) => rows?.filter((_, k) => k !== i) ?? null)}
+                    >
+                      删除
+                    </button>
+                  </div>
+                  <input
+                    className="input mt-1.5"
+                    value={r.title}
+                    placeholder="课程名"
+                    onChange={(e) => patchRow(i, { title: e.target.value })}
+                  />
+                  {r.raw ? (
+                    <div
+                      style={{ fontSize: 10.5, color: 'var(--color-ink4)', marginTop: 4, lineHeight: 1.5 }}
+                    >
+                      原表内容：{r.raw.slice(0, 70)}
+                    </div>
+                  ) : null}
+                  {toMinutes(r.end) <= toMinutes(r.start) ? (
+                    <div style={{ fontSize: 11, color: 'var(--color-bad)', marginTop: 4 }}>
+                      ⚠ 结束时间不晚于开始时间
+                    </div>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+
+            {schedReview.length === 0 ? (
+              <div style={{ fontSize: 12.5, color: 'var(--color-ink3)', padding: '8px 0' }}>
+                都删光了，换一张图重来吧。
+              </div>
+            ) : null}
+
+            <div className="mt-4 flex gap-2">
+              <Button block onClick={() => setSchedReview(null)}>
+                取消
+              </Button>
+              <Button
+                block
+                variant="primary"
+                onClick={() => {
+                  const rows = schedReview.filter(
+                    (r) => r.title.trim() && toMinutes(r.end) > toMinutes(r.start),
+                  )
+                  if (!rows.length) {
+                    push({ text: '没有可导入的课', tone: 'warn' })
+                    return
+                  }
+                  addScheduleMany(
+                    rows.map((it) => ({
+                      weekday: it.weekday,
+                      start: it.start,
+                      end: it.end,
+                      title: it.title.trim(),
+                      room: it.room,
+                      classId: it.classId,
+                      kind: it.kind,
+                      notify: it.notify,
+                      scope: 'class' as const,
+                    })),
+                  )
+                  setSchedReview(null)
+                  push({ text: `已导入 ${rows.length} 条课`, tone: 'ok' })
+                }}
+              >
+                确认导入（{schedReview.length} 条）
+              </Button>
+            </div>
+          </>
+        ) : null}
+      </Sheet>
+
       <div ref={rootRef}>
         {/* 顶栏 */}
         <div
@@ -884,6 +995,48 @@ export default function Classroom() {
                 </Panel>
               ) : (
                 <>
+                  {/* 按日期筛选：一天可能不止一份作业，所以筛选的是"日期"而不是作业 */}
+                  {graded.length > 1 ? (
+                    <div className="mb-2 flex flex-wrap items-center gap-1.5">
+                      {[...new Set(graded.map((a) => a.assignDate))]
+                        .sort((x, y) => (x < y ? 1 : -1))
+                        .slice(0, 10)
+                        .map((d) => {
+                          const on = assignment.assignDate === d
+                          const n = graded.filter((a) => a.assignDate === d).length
+                          return (
+                            <button
+                              key={d}
+                              type="button"
+                              onClick={() => {
+                                const first = graded.find((a) => a.assignDate === d)
+                                if (first) {
+                                  setAssignmentId(first.id)
+                                  setSeq(1)
+                                }
+                              }}
+                              className="num"
+                              style={{
+                                padding: '3px 9px',
+                                borderRadius: 4,
+                                fontSize: 12,
+                                border: `1px solid ${on ? 'var(--color-accent)' : 'var(--color-line2)'}`,
+                                background: on ? 'var(--color-accentsoft)' : 'var(--color-surface)',
+                                color: on ? 'var(--color-accentink)' : 'var(--color-ink2)',
+                                fontWeight: on ? 650 : 500,
+                              }}
+                            >
+                              {d.slice(5).replace('-', '/')}
+                              {n > 1 ? ` (${n})` : ''}
+                            </button>
+                          )
+                        })}
+                      <span style={{ fontSize: 11.5, color: 'var(--color-ink4)', marginLeft: 2 }}>
+                        按日期
+                      </span>
+                    </div>
+                  ) : null}
+
                   <div className="flex flex-wrap items-center gap-3">
                     <select
                       className="input"
