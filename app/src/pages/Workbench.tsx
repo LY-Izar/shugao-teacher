@@ -32,6 +32,7 @@ const ROADMAP: Array<{ stage: string; title: string; state: 'done' | 'now' | 'ne
   { stage: 'S3', title: '快速批改录入 · 完成批改', state: 'done' },
   { stage: 'S4', title: '逐题统计 · 改错与一键呼叫', state: 'done' },
   { stage: 'S5', title: '教室端 · 置顶小窗 · 语音播报', state: 'done' },
+  { stage: 'S6', title: '云端同步 · Word 导入 · 题型统计 · 课表', state: 'done' },
 ]
 
 const todoPath = (a: { id: string; status: string }) =>
@@ -541,8 +542,8 @@ export default function Workbench() {
             <IconGauge size={15} />
             <span className="flex-1">
               {problems === 0
-                ? '首期 S1–S5 已全部完成 · 名单体检全部通过'
-                : `首期 S1–S5 已全部完成 · 名单还有 ${problems} 处待核对，越早修正越不会污染统计`}
+                ? 'S1–S6 全部完成 · 名单体检全部通过'
+                : `S1–S6 全部完成 · 名单还有 ${problems} 处待核对，越早修正越不会污染统计`}
             </span>
           </div>
         </Panel>

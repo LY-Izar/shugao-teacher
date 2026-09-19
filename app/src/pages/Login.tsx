@@ -4,6 +4,7 @@ import { Logo, IconChevronRight, IconWifi } from '../components/icons'
 import { Button } from '../components/ui'
 import { useStore, useToast } from '../data/store'
 import { getSupabase, isRemote } from '../lib/supabase'
+import { APP_VERSION } from '../lib/version'
 
 export default function Login() {
   const signIn = useStore((s) => s.signIn)
@@ -173,7 +174,7 @@ export default function Login() {
             {isRemote ? '已连接云端 · 手机与教室端共享数据' : '本地存储模式 · 尚未连接 Supabase'}
           </span>
           <span className="flex-1" />
-          <span className="num">v0.2.0</span>
+          <span className="num">v{APP_VERSION}</span>
         </div>
       </div>
     </div>

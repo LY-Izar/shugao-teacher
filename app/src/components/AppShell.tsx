@@ -7,6 +7,8 @@ import { useMood } from '../hooks/useMood'
 import { useScheduleReminder } from '../hooks/useScheduleReminder'
 import { analyzeRoster } from '../lib/roster'
 import { awayText, toMinutes, weekdayOf } from '../lib/schedule'
+import { connectionMode } from '../lib/supabase'
+import { APP_VERSION } from '../lib/version'
 import { DoneCelebration, MorningWelcome } from './MoodModals'
 import {
   IconAlert,
@@ -223,6 +225,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const touchStreak = useStore((s) => s.touchStreak)
   const syncError = useStore((s) => s.syncError)
   const clearSyncError = useStore((s) => s.clearSyncError)
+  const mode = connectionMode()
+  const totalStudents = classes.reduce(
+    (n, c) => n + c.students.filter((s) => s.status === 'active').length,
+    0,
+  )
   const { pathname } = useLocation()
   const navigate = useNavigate()
   const current = classes.find((c) => c.id === currentClassId)
@@ -456,24 +463,31 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             className="mt-3 flex flex-col gap-2 px-1 pt-3"
             style={{ borderTop: '1px solid var(--color-line)' }}
           >
-            <div
-              className="flex items-center gap-2"
+            <button
+              type="button"
+              onClick={() => navigate('/settings')}
+              className="flex items-center gap-2 text-left"
               style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}
             >
               <span
-                className="live-dot"
+                className={mode === 'remote' ? 'live-dot' : undefined}
                 style={{
                   width: 6,
                   height: 6,
                   borderRadius: 99,
-                  background: isDemo ? 'var(--color-warn)' : 'var(--color-ok)',
                   display: 'inline-block',
+                  background:
+                    mode === 'remote'
+                      ? 'var(--color-ok)'
+                      : isDemo
+                        ? 'var(--color-warn)'
+                        : 'var(--color-ink4)',
                 }}
               />
-              {isDemo ? '本地演示数据' : '本地存储 · 未接后端'}
-            </div>
+              {mode === 'remote' ? '已连接云端' : isDemo ? '本地演示数据' : '本地存储 · 未接后端'}
+            </button>
             <div style={{ fontSize: 11, color: 'var(--color-ink4)' }}>
-              S1–S5 全部完成 · {current?.students.length ?? 0} 名学生
+              {classes.length} 个班级 · {totalStudents} 名学生
             </div>
           </div>
         </div>
@@ -671,7 +685,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             style={{ fontSize: 11, color: 'var(--color-ink4)' }}
           >
             <IconInfo size={13} />
-            <span>v0.6.0 · S1–S5</span>
+            <span>v{APP_VERSION}</span>
           </div>
         </div>
       </aside>
