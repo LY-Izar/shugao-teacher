@@ -1,155 +1,362 @@
+import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Page } from '../components/AppShell'
-import { IconAlert, IconChart, IconClipboard, IconTarget, IconUsers } from '../components/icons'
-import { Button, PageHead, Panel, Sect } from '../components/ui'
+import {
+  IconAlert,
+  IconChart,
+  IconCheck,
+  IconChevronRight,
+  IconTarget,
+  IconUsers,
+} from '../components/icons'
+import { Button, PageHead, Panel, Sect, Sheet, Tag } from '../components/ui'
 import { useStore } from '../data/store'
+import { buildClassWrongBook, buildWrongBook } from '../lib/wrongbook'
 
-/**
- * 错题集（开发中）。
- *
- * 导航栏先占位，让教师知道这个东西在规划里；点进来把「将来会做什么、
- * 需要什么数据」讲清楚，而不是一句干巴巴的「敬请期待」。
- */
+/** 横向条：一眼看出哪个知识点掉分最多 */
+function Bar({ label, value, max, suffix }: { label: string; value: number; max: number; suffix: string }) {
+  const pct = max > 0 ? Math.max(3, Math.round((value / max) * 100)) : 0
+  return (
+    <div className="flex items-center gap-2.5 py-1.5">
+      <span className="truncate" style={{ width: 104, fontSize: 12, flexShrink: 0 }}>
+        {label}
+      </span>
+      <span
+        style={{
+          flex: 1,
+          height: 8,
+          background: 'var(--color-surface3)',
+          borderRadius: 3,
+          overflow: 'hidden',
+        }}
+      >
+        <i
+          style={{
+            display: 'block',
+            height: '100%',
+            width: `${pct}%`,
+            background: 'var(--color-bad)',
+            borderRadius: 3,
+          }}
+        />
+      </span>
+      <span
+        className="num"
+        style={{ fontSize: 12, width: 62, textAlign: 'right', flexShrink: 0, fontWeight: 600 }}
+      >
+        {value.toFixed(1)}
+        {suffix}
+      </span>
+    </div>
+  )
+}
+
 export default function WrongBook() {
   const navigate = useNavigate()
   const classes = useStore((s) => s.classes)
+  const currentClassId = useStore((s) => s.currentClassId)
   const assignments = useStore((s) => s.assignments)
-  const graded = assignments.filter((a) => a.status === 'graded' || a.status === 'reviewed')
-  const totalStudents = classes.reduce(
-    (n, c) => n + c.students.filter((s) => s.status === 'active').length,
-    0,
+
+  const [tab, setTab] = useState<'person' | 'class'>('person')
+  const [openNo, setOpenNo] = useState<string | null>(null)
+
+  const klass = classes.find((c) => c.id === currentClassId) ?? classes[0]
+  const students = useMemo(
+    () => (klass?.students ?? []).filter((s) => s.status === 'active'),
+    [klass],
   )
+
+  const books = useMemo(
+    () =>
+      students
+        .map((s) => buildWrongBook(s, klass, assignments))
+        .sort((a, b) => b.totalLost - a.totalLost || b.totalWrong - a.totalWrong),
+    [students, klass, assignments],
+  )
+
+  const cls = useMemo(() => buildClassWrongBook(klass, assignments), [klass, assignments])
+
+  const gradedCount = assignments.filter(
+    (a) => a.classId === klass?.id && (a.status === 'graded' || a.status === 'reviewed'),
+  ).length
+
+  const open = books.find((b) => b.studentNo === openNo) ?? null
 
   return (
     <>
-      <PageHead title="错题集" sub="按学生汇总历次错题" onBack={() => navigate('/')} />
+      <PageHead
+        title="错题集"
+        sub={`${klass?.name ?? '—'} · 基于 ${gradedCount} 份已批改的作业`}
+        onBack={() => navigate('/')}
+      />
 
       <Page>
+        {/* 还在开发中，先把话说清楚，别让教师以为已经完工 */}
         <div
-          className="anim-in mb-4 flex items-start gap-3 p-4"
+          className="anim-in mb-3 flex items-center gap-2.5 p-2.5"
           style={{
-            background: 'linear-gradient(140deg, var(--color-warnsoft), rgb(255 255 255 / 0))',
+            background: 'var(--color-warnsoft)',
             border: '1px solid ***REMOVED***ecd9ae',
             borderRadius: 6,
+            fontSize: 12.5,
+            color: '***REMOVED***8a5a12',
           }}
         >
-          <span
-            className="grid place-items-center shrink-0"
-            style={{
-              width: 34,
-              height: 34,
-              borderRadius: 99,
-              background: 'var(--color-surface)',
-              border: '1px solid var(--color-line2)',
-              color: 'var(--color-warn)',
-            }}
-          >
-            <IconAlert size={18} />
-          </span>
-          <div>
-            <div style={{ fontSize: 15, fontWeight: 680, color: '***REMOVED***8a5a12' }}>这个功能还在开发中</div>
-          </div>
+          <IconAlert size={15} />
+          <span>这个功能还在开发中</span>
         </div>
 
-        <div className="mb-4">
-          <Sect>它打算做什么</Sect>
-          <Panel bodyClass="p-3">
-            {[
-              [
-                IconUsers,
-                '每个学生一本错题账',
-                '把历次作业里他错过的题按知识点攒起来，谁老在同一个地方摔跤一眼看得出',
-              ],
-              [
-                IconTarget,
-                '按人出一份「该重做的题」',
-                '不用翻旧本子 —— 直接从他自己的错题里挑几道，打印成一张小卷',
-              ],
-              [
-                IconChart,
-                '班级层面的反复错',
-                '同一道题或同一个知识点，两周内错了两次以上的，讲评时优先处理',
-              ],
-              [
-                IconClipboard,
-                '和现有批改数据打通',
-                '不额外增加录入 —— 用的就是你批改时点的那几下',
-              ],
-            ].map(([Icon, title, desc]) => {
-              const I = Icon as typeof IconUsers
-              return (
-                <div key={title as string} className="flex gap-3 py-2.5">
-                  <span
-                    className="grid place-items-center shrink-0"
+        {gradedCount === 0 ? (
+          <Panel bodyClass="p-6 text-center">
+            <div style={{ fontSize: 14, color: 'var(--color-ink3)', lineHeight: 1.8 }}>
+              还没有批改过的作业，错题集暂时没有数据。
+            </div>
+            <Button className="mt-3" size="sm" variant="primary" onClick={() => navigate('/assignments')}>
+              去批一份作业
+            </Button>
+          </Panel>
+        ) : (
+          <>
+            {/* 个人 / 班级 */}
+            <div className="mb-4 flex gap-2">
+              {(
+                [
+                  ['person', '个人', IconUsers],
+                  ['class', '班级', IconChart],
+                ] as const
+              ).map(([k, label, Icon]) => {
+                const on = tab === k
+                return (
+                  <button
+                    key={k}
+                    type="button"
+                    onClick={() => setTab(k)}
+                    className="flex flex-1 items-center justify-center gap-2 py-2.5"
                     style={{
-                      width: 30,
-                      height: 30,
-                      border: '1px solid var(--color-line2)',
+                      border: `1px solid ${on ? 'var(--color-accent)' : 'var(--color-line2)'}`,
+                      background: on ? 'var(--color-accentsoft)' : 'var(--color-surface)',
+                      color: on ? 'var(--color-accentink)' : 'var(--color-ink2)',
                       borderRadius: 4,
-                      background: 'var(--color-surface2)',
-                      color: 'var(--color-ink3)',
+                      fontSize: 13.5,
+                      fontWeight: on ? 640 : 500,
                     }}
                   >
-                    <I size={15} />
-                  </span>
-                  <span>
-                    <span style={{ display: 'block', fontSize: 13.5, fontWeight: 600 }}>
-                      {title as string}
-                    </span>
-                    <span
-                      style={{
-                        display: 'block',
-                        fontSize: 12,
-                        color: 'var(--color-ink3)',
-                        lineHeight: 1.7,
-                        marginTop: 1,
-                      }}
-                    >
-                      {desc as string}
-                    </span>
-                  </span>
-                </div>
-              )
-            })}
-          </Panel>
-        </div>
-
-        <div className="mb-4">
-          <Sect>现在已经攒下的料</Sect>
-          <Panel bodyClass="p-3">
-            <div
-              className="flex flex-wrap items-center gap-x-6 gap-y-2"
-              style={{ fontSize: 13, color: 'var(--color-ink2)' }}
-            >
-              <span className="flex items-center gap-1.5">
-                <IconUsers size={15} />
-                <b className="num">{totalStudents}</b> 名学生的错题记录
-              </span>
-              <span className="flex items-center gap-1.5">
-                <IconClipboard size={15} />
-                来自 <b className="num">{graded.length}</b> 份已批改的作业
-              </span>
+                    <Icon size={15} />
+                    {label}
+                  </button>
+                )
+              })}
             </div>
-            <p
-              style={{
-                fontSize: 11.5,
-                color: 'var(--color-ink3)',
-                marginTop: 10,
-                lineHeight: 1.7,
-              }}
-            >
-              数据都已经在云端了，功能接上就能用 —— 缺的只是界面。
-              {graded.length === 0 ? '现在还没有已批改的作业，先去批一份试试。' : ''}
-            </p>
-          </Panel>
-        </div>
 
-        <div className="flex gap-2">
-          <Button block variant="primary" onClick={() => navigate('/assignments')}>
-            去看作业档案
-          </Button>
-        </div>
+            {tab === 'person' ? (
+              <div className="mb-4">
+                <Sect>每个人的错题账 · 按丢分排序</Sect>
+                <Panel className="overflow-hidden">
+                  {books.every((b) => b.totalWrong === 0) ? (
+                    <div className="px-3 py-5 text-center" style={{ fontSize: 12.5, color: 'var(--color-ink3)' }}>
+                      这段时间没有人错题。
+                    </div>
+                  ) : (
+                    books.map((b, i) => (
+                      <button
+                        key={b.studentNo}
+                        type="button"
+                        className="row w-full"
+                        style={{
+                          padding: '11px 12px',
+                          borderBottom: i === books.length - 1 ? undefined : '1px solid var(--color-line)',
+                          opacity: b.totalWrong ? 1 : 0.5,
+                        }}
+                        onClick={() => setOpenNo(b.studentNo)}
+                      >
+                        <span
+                          className="num grid shrink-0 place-items-center"
+                          style={{
+                            width: 34,
+                            height: 34,
+                            border: '1px solid var(--color-line2)',
+                            borderRadius: 4,
+                            background: 'var(--color-surface2)',
+                            fontSize: 12.5,
+                            fontWeight: 700,
+                            color: b.totalWrong ? 'var(--color-ink)' : 'var(--color-ink4)',
+                          }}
+                        >
+                          {b.studentNo}
+                        </span>
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate" style={{ fontSize: 14, fontWeight: 560 }}>
+                            {b.name}
+                          </span>
+                          <span style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
+                            {b.totalWrong ? (
+                              <>
+                                错 <span className="num">{b.totalWrong}</span> 处 · 丢{' '}
+                                <span className="num">{b.totalLost.toFixed(1)}</span> 分
+                                {b.points[0] ? ` · 最弱：${b.points[0].name}` : ''}
+                              </>
+                            ) : (
+                              '全对'
+                            )}
+                          </span>
+                        </span>
+                        {b.totalWrong ? <IconChevronRight size={16} /> : <IconCheck size={16} />}
+                      </button>
+                    ))
+                  )}
+                </Panel>
+              </div>
+            ) : (
+              <div className="mb-4">
+                <Sect>班级高频错点 · 跨作业反复错的排前面</Sect>
+                <Panel bodyClass="p-3">
+                  {cls.points.length === 0 ? (
+                    <div style={{ fontSize: 12.5, color: 'var(--color-ink3)' }}>还没有数据。</div>
+                  ) : (
+                    <>
+                      {cls.points.slice(0, 12).map((p) => (
+                        <div
+                          key={p.pointId}
+                          className="flex items-center gap-2.5 py-2"
+                          style={{ borderTop: '1px solid var(--color-line)' }}
+                        >
+                          <span className="min-w-0 flex-1">
+                            <span className="truncate" style={{ fontSize: 13, fontWeight: 600, display: 'block' }}>
+                              {p.name}
+                            </span>
+                            <span style={{ fontSize: 11, color: 'var(--color-ink3)' }}>
+                              {p.chapter} · <span className="num">{p.studentsHit}</span>/
+                              <span className="num">{cls.totalStudents}</span> 人错过 · 分布在{' '}
+                              <span className="num">{p.spread}</span> 份作业里
+                            </span>
+                          </span>
+                          {p.spread >= 2 ? <Tag tone="bad">反复错</Tag> : null}
+                          <span
+                            className="num shrink-0"
+                            style={{ fontSize: 13, fontWeight: 700, width: 52, textAlign: 'right' }}
+                          >
+                            {p.classLost.toFixed(0)} 分
+                          </span>
+                        </div>
+                      ))}
+                    </>
+                  )}
+                </Panel>
+              </div>
+            )}
+
+            <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.7 }}>
+              丢分 = 错误率 × 该题分值。一道题挂了多个知识点时，丢分按个数均摊 ——
+              不然同一个知识点会被重复计算，排行就虚高了。
+            </p>
+          </>
+        )}
       </Page>
+
+      {/* 个人详情 */}
+      <Sheet open={Boolean(open)} onClose={() => setOpenNo(null)} title={open ? `${open.name} 的错题` : ''}>
+        {open ? (
+          open.totalWrong === 0 ? (
+            <div style={{ fontSize: 13, color: 'var(--color-ink3)', lineHeight: 1.9 }}>
+              这段时间没有错题。
+            </div>
+          ) : (
+            <>
+              <div className="mb-4 flex flex-wrap items-center gap-x-5 gap-y-2" style={{ fontSize: 13 }}>
+                <span className="flex items-center gap-1.5">
+                  <IconTarget size={15} />
+                  错 <b className="num">{open.totalWrong}</b> 处
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <IconChart size={15} />
+                  丢 <b className="num">{open.totalLost.toFixed(1)}</b> 分
+                </span>
+              </div>
+
+              <Sect>哪个知识点掉分最多</Sect>
+              <Panel className="mb-4" bodyClass="p-3">
+                {open.points.slice(0, 8).map((p) => (
+                  <Bar
+                    key={p.pointId}
+                    label={p.name}
+                    value={p.lost}
+                    max={open.points[0]?.lost ?? 1}
+                    suffix=" 分"
+                  />
+                ))}
+              </Panel>
+
+              <Sect>错过的题</Sect>
+              <Panel className="mb-3" bodyClass="p-3">
+                {open.items.map((it, i) => (
+                  <div
+                    key={`${it.assignmentId}-${it.seq}`}
+                    className="flex gap-2.5 py-2.5"
+                    style={{ borderTop: i ? '1px solid var(--color-line)' : undefined }}
+                  >
+                    {it.imgs?.length ? (
+                      <img
+                        src={it.imgs[0]}
+                        alt=""
+                        style={{
+                          width: 46,
+                          height: 46,
+                          objectFit: 'contain',
+                          border: '1px solid var(--color-line2)',
+                          borderRadius: 3,
+                          background: '***REMOVED***fff',
+                          flexShrink: 0,
+                        }}
+                      />
+                    ) : null}
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className="num" style={{ fontSize: 13, fontWeight: 700 }}>
+                          第 {it.seq} 题
+                        </span>
+                        {it.score !== undefined ? (
+                          <span className="num" style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
+                            {it.score} 分
+                          </span>
+                        ) : null}
+                        <span className="flex-1" />
+                        <span
+                          className="num"
+                          style={{
+                            fontSize: 11,
+                            color:
+                              it.classRate >= 0.5 ? 'var(--color-ink3)' : 'var(--color-warn)',
+                          }}
+                        >
+                          全班 {Math.round(it.classRate * 100)}% 错
+                        </span>
+                      </div>
+                      <div className="mt-0.5 flex flex-wrap gap-1">
+                        {it.points.map((p) => (
+                          <Tag key={p} tone="idle">
+                            {open.points.find((x) => x.pointId === p)?.name ?? p}
+                          </Tag>
+                        ))}
+                      </div>
+                      <div
+                        className="mt-1"
+                        style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.6 }}
+                      >
+                        {it.assignmentTitle} · {it.date}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </Panel>
+
+              <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.7 }}>
+                「全班 N% 错」用来分辨：这个知识点是他一个人没掌握，还是班里普遍没讲透 ——
+                <b>后者更该在课堂上重讲</b>。
+              </p>
+            </>
+          )
+        ) : null}
+      </Sheet>
     </>
   )
 }
