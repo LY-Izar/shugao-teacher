@@ -6,11 +6,13 @@ import {
   IconChart,
   IconCheck,
   IconChevronRight,
+  IconDownload,
   IconTarget,
   IconUsers,
 } from '../components/icons'
 import { Button, PageHead, Panel, Sect, Sheet, Tag } from '../components/ui'
-import { useStore } from '../data/store'
+import { useStore, useToast } from '../data/store'
+import { downloadPracticeDocx } from '../lib/examDoc'
 import { buildClassWrongBook, buildWrongBook } from '../lib/wrongbook'
 
 /** 横向条：一眼看出哪个知识点掉分最多 */
@@ -56,6 +58,7 @@ export default function WrongBook() {
   const classes = useStore((s) => s.classes)
   const currentClassId = useStore((s) => s.currentClassId)
   const assignments = useStore((s) => s.assignments)
+  const push = useToast((s) => s.push)
 
   const [tab, setTab] = useState<'person' | 'class'>('person')
   const [openNo, setOpenNo] = useState<string | null>(null)
@@ -353,6 +356,30 @@ export default function WrongBook() {
                 「全班 N% 错」用来分辨：这个知识点是他一个人没掌握，还是班里普遍没讲透 ——
                 <b>后者更该在课堂上重讲</b>。
               </p>
+
+              <Button
+                block
+                variant="primary"
+                className="mt-3"
+                icon={<IconDownload size={16} />}
+                onClick={async () => {
+                  try {
+                    const n = await downloadPracticeDocx(
+                      open.items,
+                      {
+                        title: `错题重练 · ${klass?.name ?? ''} ${open.name}`,
+                        subtitle: `按知识点整理 · 共 ${open.items.length} 处错题`,
+                      },
+                      `错题重练-${open.name}-${open.studentNo}.docx`,
+                    )
+                    push({ text: `已生成 ${n} 题的练习卷`, tone: 'ok' })
+                  } catch (e) {
+                    push({ text: e instanceof Error ? e.message : '生成失败', tone: 'bad' })
+                  }
+                }}
+              >
+                生成错题重练卷（{open.items.length} 题）
+              </Button>
             </>
           )
         ) : null}
