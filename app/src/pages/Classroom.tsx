@@ -23,12 +23,21 @@ import { isRemote } from '../lib/supabase'
 import {
   KIND_TEXT,
   canViewInline,
+  deleteFile,
+  fetchBlob,
   humanSize,
   kindOf,
   listFiles,
-  signedUrl,
   type SharedFile,
 } from '../lib/files'
+import {
+  allFiles,
+  clearFiles,
+  openLocal,
+  putFile,
+  saveToDisk,
+  type LocalFile,
+} from '../lib/localStore'
 import { chime, speak, stopSpeaking, unlockAudio } from '../lib/tts'
 import { friendlyDate } from '../lib/date'
 import type { CallRecord } from '../data/types'
@@ -111,23 +120,66 @@ export default function Classroom() {
     ensureClassroom(klass.id, '一体机')
   }, [klass?.id, ensureClassroom]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  /* 教师传来的文件 */
-  const [files, setFiles] = useState<SharedFile[]>([])
+  /* 教师传来的文件：拉到本机就立刻从云端删掉，云端只做中转 */
+  const [cloudFiles, setCloudFiles] = useState<SharedFile[]>([])
+  const [localFiles, setLocalFiles] = useState<LocalFile[]>([])
+  const [pulling, setPulling] = useState('')
+
+  const refreshLocal = useCallback(async () => {
+    try {
+      setLocalFiles(await allFiles())
+    } catch {
+      /* 本机库不可用时不影响上课 */
+    }
+  }, [])
+
   useEffect(() => {
     if (!isRemote) return
     let alive = true
-    void (async () => {
+
+    const pull = async () => {
+      let pending: SharedFile[] = []
       try {
-        const all = await listFiles()
-        if (alive) setFiles(all.filter((f) => !f.classId || f.classId === klass?.id))
+        pending = (await listFiles()).filter((f) => !f.classId || f.classId === klass?.id)
       } catch {
-        /* 教室端拿不到文件列表不影响上课 */
+        return
       }
-    })()
+      if (!alive) return
+      setCloudFiles(pending)
+
+      const have = new Set((await allFiles()).map((f) => f.id))
+      for (const f of pending) {
+        if (have.has(f.id) || !alive) continue
+        setPulling(f.name)
+        const blob = await fetchBlob(f.storagePath)
+        if (!alive) return
+        if (blob) {
+          await putFile({
+            id: f.id,
+            name: f.name,
+            mime: f.mime,
+            size: f.size,
+            blob,
+            savedAt: Date.now(),
+          })
+          // 已经落到本机硬盘上了，云端这份就没必要留着
+          await deleteFile(f).catch(() => {})
+        }
+        setPulling('')
+      }
+      if (alive) {
+        setCloudFiles((await listFiles().catch(() => [])) as SharedFile[])
+        await refreshLocal()
+      }
+    }
+
+    void pull()
+    const t = window.setInterval(() => void pull(), 60_000)
     return () => {
       alive = false
+      window.clearInterval(t)
     }
-  }, [klass?.id])
+  }, [klass?.id, refreshLocal])
 
   /* 心跳：教师端据此显示「在线 / 离线」 */
   useEffect(() => {
@@ -589,57 +641,114 @@ export default function Classroom() {
 
                   <Sect>老师传来的文件</Sect>
                   <Panel className="overflow-hidden">
-                    {files.length === 0 ? (
+                    {pulling ? (
                       <div
-                        className="px-3 py-4"
-                        style={{ fontSize: 12.5, color: 'var(--color-ink3)' }}
+                        className="px-3 py-2.5"
+                        style={{
+                          fontSize: 12.5,
+                          color: 'var(--color-accent)',
+                          borderBottom: '1px solid var(--color-line)',
+                        }}
                       >
-                        还没有文件。教师端在「我的 → 教室端文件」里上传。
+                        正在取回「{pulling}」…
+                      </div>
+                    ) : null}
+
+                    {localFiles.length === 0 && cloudFiles.length === 0 ? (
+                      <div className="px-3 py-4" style={{ fontSize: 12.5, color: 'var(--color-ink3)' }}>
+                        还没有文件。教师端在「我的 → 教室端文件」里上传，
+                        传过来会自动存到这台电脑上。
                       </div>
                     ) : (
-                      files.map((f, i) => {
-                        const k = kindOf(f.name, f.mime)
-                        return (
+                      <>
+                        {cloudFiles.map((f) => (
                           <div
                             key={f.id}
                             className="flex items-center gap-3 px-3 py-2.5"
-                            style={{
-                              borderBottom:
-                                i === files.length - 1 ? undefined : '1px solid var(--color-line)',
-                            }}
+                            style={{ borderBottom: '1px solid var(--color-line)' }}
                           >
                             <span className="min-w-0 flex-1">
-                              <span
-                                className="block truncate"
-                                style={{ fontSize: 13.5, fontWeight: 550 }}
-                              >
+                              <span className="block truncate" style={{ fontSize: 13.5, fontWeight: 550 }}>
                                 {f.name}
                               </span>
                               <span style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
-                                <Tag tone={canViewInline(k) ? 'accent' : 'idle'}>
-                                  {KIND_TEXT[k]}
-                                </Tag>{' '}
+                                <Tag tone="warn">待取回</Tag>{' '}
                                 <span className="num">{humanSize(f.size)}</span>
                               </span>
                             </span>
-                            <Button
-                              size="sm"
-                              variant={canViewInline(k) ? 'primary' : 'ghost'}
-                              icon={
-                                canViewInline(k) ? <IconEye size={15} /> : <IconDownload size={15} />
-                              }
-                              onClick={async () => {
-                                const url = await signedUrl(f.storagePath)
-                                if (url) window.open(url, '_blank', 'noopener')
+                          </div>
+                        ))}
+                        {localFiles.map((f, i) => {
+                          const k = kindOf(f.name, f.mime)
+                          const viewable = canViewInline(k)
+                          return (
+                            <div
+                              key={f.id}
+                              className="flex items-center gap-3 px-3 py-2.5"
+                              style={{
+                                borderBottom:
+                                  i === localFiles.length - 1
+                                    ? undefined
+                                    : '1px solid var(--color-line)',
                               }}
                             >
-                              {canViewInline(k) ? '打开' : '下载'}
-                            </Button>
-                          </div>
-                        )
-                      })
+                              <span className="min-w-0 flex-1">
+                                <span
+                                  className="block truncate"
+                                  style={{ fontSize: 13.5, fontWeight: 550 }}
+                                >
+                                  {f.name}
+                                </span>
+                                <span style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
+                                  <Tag tone={viewable ? 'accent' : 'idle'}>{KIND_TEXT[k]}</Tag>{' '}
+                                  <span className="num">{humanSize(f.size || f.blob.size)}</span>
+                                </span>
+                              </span>
+                              <Button
+                                size="sm"
+                                variant={viewable ? 'primary' : 'ghost'}
+                                icon={
+                                  viewable ? <IconEye size={15} /> : <IconDownload size={15} />
+                                }
+                                onClick={() => (viewable ? openLocal(f) : saveToDisk(f))}
+                              >
+                                {viewable ? '打开' : '下载'}
+                              </Button>
+                            </div>
+                          )
+                        })}
+                      </>
                     )}
                   </Panel>
+                  <p
+                    style={{
+                      fontSize: 11.5,
+                      color: 'var(--color-ink3)',
+                      marginTop: 8,
+                      lineHeight: 1.7,
+                    }}
+                  >
+                    文件已经存在<b>这台电脑上</b>，云端不留 —— 断网也能打开。
+                    {localFiles.length ? (
+                      <>
+                        {' '}
+                        本机共 <span className="num">{localFiles.length}</span> 个 ·{' '}
+                        <span className="num">
+                          {humanSize(localFiles.reduce((n, f) => n + (f.size || f.blob.size), 0))}
+                        </span>
+                        <button
+                          type="button"
+                          style={{ marginLeft: 8, color: 'var(--color-bad)', textDecoration: 'underline' }}
+                          onClick={async () => {
+                            await clearFiles()
+                            await refreshLocal()
+                          }}
+                        >
+                          全部清理
+                        </button>
+                      </>
+                    ) : null}
+                  </p>
 
                   <Sect>小窗操作</Sect>
                   <Panel bodyClass="p-4">

@@ -159,10 +159,12 @@ export default function Files() {
                 {busy ? `正在上传 ${busy}…` : '选择文件'}
               </span>
               <span style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.6 }}>
-                图片 / PDF / HTML 能在教室一体机上直接打开
-                <br />
-                PPT、Word 会以「下载」形式给到，用一体机的 Office 打开
-              </span>
+              图片 / PDF / HTML 能在教室一体机上直接打开
+              <br />
+              PPT、Word 会以「下载」形式给到，用一体机的 Office 打开
+              <br />
+              <b>教室里取走后就从云端删除</b>，不占免费存储
+            </span>
             </button>
 
             {classes.length ? (
@@ -184,7 +186,9 @@ export default function Files() {
             ) : null}
 
             <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 10, lineHeight: 1.7 }}>
-              单文件限 {MAX_MB} MB —— 免费版存储只有 1 GB，<b>用完记得删</b>。
+              单文件限 {MAX_MB} MB。传上去之后<b>教室端一旦取走，云端就会删掉</b> ——
+              文件最终存在教室那台电脑上，不占云端空间。
+              {classId ? '' : '教室端没开机时，文件会先在这儿等着。'}
             </p>
           </Panel>
         </div>

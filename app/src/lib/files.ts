@@ -134,3 +134,16 @@ export async function signedUrl(path: string, seconds = 7200): Promise<string | 
   if (error) return null
   return data?.signedUrl ?? null
 }
+
+/** 把云端文件取成本地 Blob —— 教室端「搬到自己电脑上」用 */
+export async function fetchBlob(path: string): Promise<Blob | null> {
+  const url = await signedUrl(path, 300)
+  if (!url) return null
+  try {
+    const r = await fetch(url)
+    if (!r.ok) return null
+    return await r.blob()
+  } catch {
+    return null
+  }
+}
