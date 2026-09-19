@@ -143,6 +143,8 @@ export default function AssignmentCollect() {
   const [lowConf, setLowConf] = useState<Set<string>>(new Set())
   const [ocrErr, setOcrErr] = useState<{ msg: string; detail?: string } | null>(null)
   const [ocrNotes, setOcrNotes] = useState('')
+  /** 识别产出过低时的已识别数量（非 null 表示这张照片不合格） */
+  const [lowYield, setLowYield] = useState<number | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
 
   /* 用档案里已有的收缴记录初始化（只记例外，默认全班已交） */
@@ -214,6 +216,21 @@ export default function AssignmentCollect() {
     const { all, lowConfidence } = splitByConfidence(out.numbers)
     const analysis = analyzeScan(all, allNos)
 
+    // 识别产出太低时**不预标未交** —— 否则 36 人认出 4 个，一按确认就记错 32 人。
+    // 宁可让教师重拍或手工标，也不能给一份看着像真的错名单。
+    const yieldRatio = allNos.length ? all.length / allNos.length : 1
+    if (yieldRatio < 0.5) {
+      setMark({})
+      setScan(analysis)
+      setDetectedCount(all.length)
+      setLowConf(lowConfidence)
+      setOcrNotes(out.notes)
+      setLowYield(all.length)
+      setStep(SCAN_STEPS.length)
+      setStage('done')
+      return
+    }
+
     const next: Record<string, Mark> = {}
     for (const n of analysis.unreadable) next[n] = 'missing'
     setMark(next)
@@ -221,6 +238,7 @@ export default function AssignmentCollect() {
     setDetectedCount(all.length)
     setLowConf(lowConfidence)
     setOcrNotes(out.notes)
+    setLowYield(null)
     setStep(SCAN_STEPS.length)
     setStage('done')
   }
@@ -595,6 +613,44 @@ export default function AssignmentCollect() {
                 </span>
               </div>
             )}
+
+            {lowYield !== null ? (
+              <div
+                className="mb-3 flex items-start gap-2.5 p-3"
+                style={{
+                  background: 'var(--color-badsoft)',
+                  border: '1px solid ***REMOVED***f0c9c9',
+                  borderRadius: 6,
+                }}
+              >
+                <span style={{ color: 'var(--color-bad)', marginTop: 1, flexShrink: 0 }}>
+                  <IconAlert size={18} />
+                </span>
+                <div style={{ fontSize: 12.5, color: '***REMOVED***8f2b2b', lineHeight: 1.7 }}>
+                  <b>这张照片没认全，先别用它登记。</b>
+                  <br />
+                  应交 <b className="num">{allNos.length}</b> 人，只认出{' '}
+                  <b className="num">{lowYield}</b> 个号 —— 剩下的人多半不是没交，而是没拍清楚。
+                  <br />
+                  <b>已经把预填的「未交」清空了</b>，免得你顺手就记错一大片。
+                  <br />
+                  建议：把整摞敦齐平方，<b>镜头与书脊齐平、正视、占满画面</b>，躲开反光和阴影，重拍一张；
+                  或者直接用下面的表格手工标未交。
+                </div>
+                <button
+                  type="button"
+                  className="shrink-0"
+                  style={{ fontSize: 12, color: '***REMOVED***8f2b2b', textDecoration: 'underline' }}
+                  onClick={() => {
+                    setStage('idle')
+                    setScan(null)
+                    setLowYield(null)
+                  }}
+                >
+                  重拍
+                </button>
+              </div>
+            ) : null}
 
             {lowConf.size > 0 || ocrNotes ? (
               <div
