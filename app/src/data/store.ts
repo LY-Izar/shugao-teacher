@@ -43,6 +43,19 @@ const uid = uuid
 
 export type ImportMode = 'merge' | 'replace' | 'append'
 
+/** 上次选中的班级（设备本地偏好：教室机想看 3 班、手机想看 1 班，各记各的更合理） */
+const CURRENT_CLASS_KEY = 'shugao.currentClass'
+
+function readCurrentClass(classes: Klass[]): string | null {
+  let saved = ''
+  try {
+    saved = localStorage.getItem(CURRENT_CLASS_KEY) ?? ''
+  } catch {
+    /* 忽略 */
+  }
+  return classes.find((c) => c.id === saved)?.id ?? classes[0]?.id ?? null
+}
+
 type State = {
   teacher: Teacher | null
   classes: Klass[]
@@ -211,7 +224,8 @@ export const useStore = create<State>()(
           schedule: snap.schedule,
           classrooms: snap.classrooms,
           calls: snap.calls,
-          currentClassId: snap.classes[0]?.id ?? null,
+          // 上次选的那个班还在就沿用它，否则退回第一个
+          currentClassId: readCurrentClass(snap.classes),
           isDemo: false,
           hydrated: true,
           lastSeenAt: Date.now(),
@@ -290,7 +304,15 @@ export const useStore = create<State>()(
         void remote.deleteClass(id)
       },
 
-      setCurrentClass: (id) => set({ currentClassId: id }),
+      setCurrentClass: (id) => {
+        set({ currentClassId: id })
+        // 后端模式不走 zustand 持久化，这里单独记一下，免得一刷新就回到第一个班
+        try {
+          localStorage.setItem(CURRENT_CLASS_KEY, id ?? '')
+        } catch {
+          /* 忽略 */
+        }
+      },
 
       addStudents: (classId, rows, mode) => {
         let added = 0

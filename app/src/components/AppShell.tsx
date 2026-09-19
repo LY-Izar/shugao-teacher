@@ -21,7 +21,7 @@ import {
   IconUsers,
   Logo,
 } from './icons'
-import { Tag } from './ui'
+import { Button, Sheet, Tag } from './ui'
 import { cx } from '../lib/cx'
 
 const NAV = [
@@ -216,6 +216,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const classes = useStore((s) => s.classes)
   const currentClassId = useStore((s) => s.currentClassId)
   const setCurrentClass = useStore((s) => s.setCurrentClass)
+  const push = useToast((s) => s.push)
+  /** 顶栏班级标签点开后的切换浮层 */
+  const [switching, setSwitching] = useState(false)
   const isDemo = useStore((s) => s.isDemo)
   const touchStreak = useStore((s) => s.touchStreak)
   const syncError = useStore((s) => s.syncError)
@@ -491,9 +494,25 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </span>
           <span className="flex-1" />
           {current ? (
-            <span className="tag tag-idle" style={{ height: 23 }}>
+            <button
+              type="button"
+              onClick={() => setSwitching(true)}
+              className="tag tag-idle flex items-center gap-1"
+              style={{ height: 23, cursor: 'pointer' }}
+              aria-label="切换班级"
+            >
               {current.name}
-            </span>
+              <span
+                style={{
+                  display: 'grid',
+                  placeItems: 'center',
+                  transform: 'rotate(90deg)',
+                  opacity: 0.55,
+                }}
+              >
+                <IconChevronRight size={11} />
+              </span>
+            </button>
           ) : null}
         </header>
 
@@ -692,6 +711,84 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           ))}
         </div>
       </nav>
+
+      {/* 切换班级 */}
+      <Sheet
+        open={switching}
+        onClose={() => setSwitching(false)}
+        title="切换班级"
+        footer={
+          <Button
+            block
+            onClick={() => {
+              setSwitching(false)
+              navigate('/classes')
+            }}
+          >
+            管理班级
+          </Button>
+        }
+      >
+        <div style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginBottom: 8, lineHeight: 1.65 }}>
+          切换后，「作业」「班级」等页面默认就按这个班来。
+        </div>
+        <div className="overflow-hidden" style={{ border: '1px solid var(--color-line)', borderRadius: 4 }}>
+          {classes.map((c, i) => {
+            const on = c.id === currentClassId
+            const active = c.students.filter((s) => s.status === 'active').length
+            return (
+              <button
+                key={c.id}
+                type="button"
+                onClick={() => {
+                  setCurrentClass(c.id)
+                  setSwitching(false)
+                  push({ text: `已切到 ${c.name}`, tone: 'ok' })
+                }}
+                className="flex w-full items-center gap-3 px-3 py-2.5 text-left"
+                style={{
+                  borderBottom: i === classes.length - 1 ? undefined : '1px solid var(--color-line)',
+                  background: on ? 'var(--color-accentsoft)' : 'transparent',
+                }}
+              >
+                <span
+                  className="grid shrink-0 place-items-center"
+                  style={{
+                    width: 32,
+                    height: 32,
+                    border: '1px solid var(--color-line2)',
+                    borderRadius: 4,
+                    background: 'var(--color-surface2)',
+                    color: on ? 'var(--color-accent)' : 'var(--color-ink2)',
+                  }}
+                >
+                  <IconUsers size={16} />
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span
+                    className="block truncate"
+                    style={{
+                      fontSize: 14,
+                      fontWeight: on ? 660 : 560,
+                      color: on ? 'var(--color-accentink)' : 'var(--color-ink)',
+                    }}
+                  >
+                    {c.name}
+                  </span>
+                  <span style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
+                    <span className="num">{active}</span> 名学生
+                  </span>
+                </span>
+                {on ? (
+                  <span style={{ color: 'var(--color-accent)', display: 'grid', placeItems: 'center' }}>
+                    <IconCheck size={16} />
+                  </span>
+                ) : null}
+              </button>
+            )
+          })}
+        </div>
+      </Sheet>
 
       {/* 情绪价值的两个时刻 */}
       <MorningWelcome
