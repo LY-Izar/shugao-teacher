@@ -1,17 +1,19 @@
+import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Page } from '../components/AppShell'
 import {
   Logo,
+  IconAlert,
   IconCalendar,
   IconChevronRight,
   IconDownload,
   IconLogout,
+  IconPencil,
   IconRefresh,
   IconUsers,
   IconWifi,
 } from '../components/icons'
-import { Button, KV, PageHead, Panel, Sect, Tag } from '../components/ui'
-import { IconAlert } from '../components/icons'
+import { Button, KV, PageHead, Panel, Sect, Sheet, Tag } from '../components/ui'
 import { activeStudents, useStore, useToast } from '../data/store'
 import { signOutEverywhere } from '../hooks/useAuthBootstrap'
 import { connectionMode } from '../lib/supabase'
@@ -29,6 +31,19 @@ export default function Settings() {
   const navigate = useNavigate()
   const push = useToast((s) => s.push)
   const mode = connectionMode()
+
+  /* 编辑教师身份 */
+  const updateTeacher = useStore((s) => s.updateTeacher)
+  const [editing, setEditing] = useState(false)
+  const [fName, setFName] = useState('')
+  const [fSchool, setFSchool] = useState('')
+  const [fSubject, setFSubject] = useState('')
+  const openEdit = () => {
+    setFName(teacher?.name ?? '')
+    setFSchool(teacher?.school ?? '')
+    setFSubject(teacher?.subject ?? '物理')
+    setEditing(true)
+  }
 
   const total = classes.reduce((n, c) => n + activeStudents(c).length, 0)
   const todayCount = itemsForDate(schedule).length
@@ -74,12 +89,14 @@ export default function Settings() {
               <div style={{ fontSize: 17, fontWeight: 660 }}>{teacher?.name ?? '未登录'}</div>
               <div className="mt-1 flex items-center gap-1.5">
                 <Tag tone="accent">{teacher?.subject ?? '物理'}</Tag>
-                <Tag tone="idle">{teacher?.school ?? '树高中学'}</Tag>
+                <Tag tone="idle">{teacher?.school || '未填学校'}</Tag>
               </div>
             </div>
+            <Button size="sm" variant="ghost" icon={<IconPencil size={14} />} onClick={openEdit}>
+              编辑
+            </Button>
           </div>
           <div className="px-4 pb-3">
-            <KV k="工号" v={<span className="num">T-0001</span>} />
             <KV k="任教班级" v={`${classes.length} 个 · ${total} 名学生`} />
             <KV
               k="当前班级"
@@ -377,6 +394,62 @@ export default function Settings() {
           退出登录
         </Button>
       </Page>
+
+      {/* 编辑教师身份 */}
+      <Sheet
+        open={editing}
+        onClose={() => setEditing(false)}
+        title="我的身份"
+        footer={
+          <Button
+            block
+            variant="primary"
+            disabled={!fName.trim()}
+            onClick={() => {
+              updateTeacher({
+                name: fName.trim(),
+                school: fSchool.trim(),
+                subject: fSubject.trim() || '物理',
+              })
+              setEditing(false)
+              push({ text: '已保存', tone: 'ok' })
+            }}
+          >
+            保存
+          </Button>
+        }
+      >
+        <label className="block">
+          <span className="label">姓名</span>
+          <input
+            className="input"
+            value={fName}
+            onChange={(e) => setFName(e.target.value)}
+            placeholder="例如 王老师"
+          />
+        </label>
+        <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 6, lineHeight: 1.65 }}>
+          这个名字会出现在问候语和账目里。刚注册时它默认取邮箱前缀，建议改成本名。
+        </p>
+        <label className="mt-4 block">
+          <span className="label">学校</span>
+          <input
+            className="input"
+            value={fSchool}
+            onChange={(e) => setFSchool(e.target.value)}
+            placeholder="例如 示例中学"
+          />
+        </label>
+        <label className="mt-4 block">
+          <span className="label">学科</span>
+          <input
+            className="input"
+            value={fSubject}
+            onChange={(e) => setFSubject(e.target.value)}
+            placeholder="例如 物理"
+          />
+        </label>
+      </Sheet>
     </>
   )
 }

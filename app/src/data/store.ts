@@ -71,6 +71,8 @@ type State = {
 
   signIn: (name: string) => void
   signOut: () => void
+  /** 改自己的姓名 / 学校 / 学科 */
+  updateTeacher: (patch: Partial<Pick<Teacher, 'name' | 'school' | 'subject'>>) => void
 
   addClass: (input: { name: string; grade: string; year: string }) => string
   updateClass: (id: string, patch: Partial<Pick<Klass, 'name' | 'grade' | 'year'>>) => void
@@ -242,6 +244,15 @@ export const useStore = create<State>()(
           schedule: [],
           hydrated: !isRemote,
         })
+      },
+
+      updateTeacher: (patch) => {
+        const t = get().teacher
+        if (!t) return
+        const next = { ...t, ...patch }
+        set({ teacher: next })
+        // 本地模式下 saveTeacher 是空操作
+        void remote.saveTeacher(next)
       },
 
       addClass: ({ name, grade, year }) => {
