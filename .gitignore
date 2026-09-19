@@ -30,9 +30,12 @@ release/
 .env
 .env.*
 !.env.example
+***REMOVED*** 唯一放行的一份：生产配置。里面是**公开**值（publishable key + 项目地址），
+***REMOVED*** 前端产物里必然包含它们，安全靠数据库 RLS 兜底。详见 app/.env.production 内的注释。
+!app/.env.production
 
 ***REMOVED*** ---- 参考素材（练习册照片的放大件，属派生物，不进仓库）----
 _crop/
 
-***REMOVED*** ---- ��ʱץȡ/��ȡ���� ----
+***REMOVED*** ---- 临时抓取 / 提取产物 ----
 _tmp/
