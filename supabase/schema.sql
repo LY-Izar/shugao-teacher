@@ -151,7 +151,32 @@ create table if not exists calls (
 create index if not exists calls_assignment_idx on calls (assignment_id, created_at desc);
 
 -- ============================================================
---  6. 行级安全（RLS）—— 每张表都要开，漏一张就等于全校数据裸奔
+--  6. 显式授权
+--
+--  创建项目时如果取消了「Automatically expose new tables」（推荐取消），
+--  新建的表不会自动授权给任何角色 —— 而 **RLS 策略只在角色有表权限时才生效**，
+--  光有 policy 没 GRANT，查询会直接报 permission denied。
+--  所以这里手动授权。
+--
+--  为什么不干脆勾上「自动暴露」：自动暴露是 fail-open ——
+--  以后加一张新表忘了配 RLS 就直接裸奔；
+--  显式授权 + 显式 RLS 是 fail-safe —— 忘了配只是用不了，会立刻发现。
+-- ============================================================
+
+grant usage on schema public to anon, authenticated;
+
+-- 登录教师：读写业务表（实际能看哪些行由下面的 RLS 决定）
+grant select, insert, update, delete on
+  teachers, classes, students, assignments, schedule_items, classrooms, calls
+to authenticated;
+
+-- 匿名用户：什么都不给。未登录不应读到任何业务数据。
+revoke all on
+  teachers, classes, students, assignments, schedule_items, classrooms, calls
+from anon;
+
+-- ============================================================
+--  7. 行级安全（RLS）—— 每张表都要开，漏一张就等于全校数据裸奔
 -- ============================================================
 alter table teachers       enable row level security;
 alter table classes        enable row level security;
@@ -211,7 +236,7 @@ create policy calls_own on calls
   with check (teacher_id = auth.uid());
 
 -- ============================================================
---  7. 实时推送
+--  8. 实时推送
 --    教师端发出呼叫 → 教室端立刻收到（替代现在的 BroadcastChannel）
 -- ============================================================
 do $$
@@ -230,7 +255,7 @@ end $$;
 alter table calls replica identity full;
 
 -- ============================================================
---  8. 自检：确认每张表都开了 RLS
+--  9. 自检：确认每张表都开了 RLS
 --     跑完应返回 0 行；返回任何一行都说明有表漏开
 -- ============================================================
 -- select tablename from pg_tables
