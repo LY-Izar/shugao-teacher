@@ -205,10 +205,6 @@ export default function Settings() {
                 清空全部数据
               </Button>
             </div>
-            <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 10, lineHeight: 1.7 }}>
-              当前数据保存在本机浏览器（localStorage）。接入 Supabase 后会自动迁移到云端，
-              并启用行级权限（RLS）—— 教师只能访问自己任教班级的学生数据。
-            </p>
           </Panel>
         </div>
 
@@ -263,10 +259,6 @@ export default function Settings() {
                 在新标签页打开教室端
               </Button>
             </div>
-            <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 10, lineHeight: 1.7 }}>
-              本机演示时：教师端与教室端开在两个标签页即可，呼叫会通过浏览器内通道实时送达。
-              跨设备使用需要接入 Supabase Realtime（换掉 <span className="num">lib/realtime.ts</span> 一个文件）。
-            </p>
           </Panel>
         </div>
 
