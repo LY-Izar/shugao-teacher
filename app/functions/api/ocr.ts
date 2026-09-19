@@ -182,7 +182,7 @@ export async function onRequestPost(context: {
           },
         ],
         response_format: { type: 'json_object' },
-        max_tokens: 2000,
+        max_tokens: 4000,
         temperature: 0,
       }),
     })
@@ -202,16 +202,40 @@ export async function onRequestPost(context: {
   }
 
   let content = ''
+  let finish = ''
+  let reasoningLen = 0
+  let usage = ''
   try {
     const parsed = JSON.parse(text) as {
-      choices?: Array<{ message?: { content?: string } }>
+      choices?: Array<{
+        message?: { content?: string; reasoning_content?: string }
+        finish_reason?: string
+      }>
       usage?: unknown
     }
-    content = parsed.choices?.[0]?.message?.content ?? ''
+    const ch = parsed.choices?.[0]
+    content = ch?.message?.content ?? ''
+    // 带思考的模型会把思维链放在 reasoning_content 里。
+    // 如果 max_tokens 被思考吃光，content 就会是空的 —— 这种情况要能看出来。
+    reasoningLen = (ch?.message?.reasoning_content ?? '').length
+    finish = ch?.finish_reason ?? ''
+    usage = JSON.stringify(parsed.usage ?? {})
   } catch {
     return json({ status: 'error', message: '识别服务返回了无法解析的内容' }, 502)
   }
-  if (!content) return json({ status: 'error', message: '识别服务没有返回内容' }, 502)
+  if (!content) {
+    return json(
+      {
+        status: 'error',
+        message:
+          finish === 'length'
+            ? '模型输出被截断了（思考占满了额度），请重试'
+            : '识别服务没有返回内容，重试一次通常就好',
+        detail: `finish=${finish} reasoningChars=${reasoningLen} usage=${usage}`,
+      },
+      502,
+    )
+  }
 
   // 模型偶尔会裹一层 ```json，稳妥起见剥掉
   const cleaned = content
