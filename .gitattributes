@@ -1,0 +1,28 @@
+***REMOVED*** 统一换行符：仓库里一律 LF。
+***REMOVED*** 这条很关键 —— .github/workflows/*.yml 里的 run: 脚本会在 Linux 上执行，
+***REMOVED*** 一旦被 CRLF 污染就会报 `$'\r': command not found`，而且报错信息很难看出原因。
+* text=auto eol=lf
+
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.sql  text eol=lf
+*.ts   text eol=lf
+*.tsx  text eol=lf
+*.js   text eol=lf
+*.mjs  text eol=lf
+*.json text eol=lf
+*.md   text eol=lf
+
+***REMOVED*** Windows 本地脚本保留 CRLF
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+***REMOVED*** 二进制文件不做任何转换
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.webp binary
+*.ico  binary
+*.woff binary
+*.woff2 binary
