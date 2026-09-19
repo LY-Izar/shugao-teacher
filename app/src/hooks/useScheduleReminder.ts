@@ -47,7 +47,8 @@ export function useScheduleReminder() {
       // （调休上班日照常提醒 —— 那天确实要上课）
       if (dayKind(ymdOf(beijingNow())) === 'holiday') return
 
-      const due = dueReminders(schedule)
+      // 只提醒教师自己的课；班级课表里别的科目不归他管
+      const due = dueReminders(schedule.filter((s) => s.scope !== 'class'))
       if (due.length === 0) return
 
       const seen = loadSeen()

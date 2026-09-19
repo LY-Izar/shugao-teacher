@@ -122,9 +122,14 @@ create table if not exists schedule_items (
   room        text,
   kind        text not null default 'class' check (kind in ('class', 'other')),
   notify      boolean not null default true,
+  -- 'mine' = 教师自己的排课表；'class' = 班级课表（全班所有科目，给教室端看）
+  scope       text not null default 'mine' check (scope in ('mine', 'class')),
   created_at  timestamptz not null default now()
 );
 create index if not exists schedule_teacher_idx on schedule_items (teacher_id, weekday);
+
+-- 已经建过表的库补这一列（本脚本可重复执行）
+alter table schedule_items add column if not exists scope text not null default 'mine';
 
 -- ============================================================
 --  5. 教室端与呼叫

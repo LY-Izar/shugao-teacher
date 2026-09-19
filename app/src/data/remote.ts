@@ -70,6 +70,7 @@ type ScheduleRow = {
   room: string | null
   kind: string
   notify: boolean
+  scope: string
 }
 type ClassroomRow = {
   id: string
@@ -160,6 +161,7 @@ export const scheduleToRow = (s: ScheduleItem, teacherId: string): ScheduleRow =
   room: s.room ?? null,
   kind: s.kind,
   notify: s.notify,
+  scope: s.scope ?? 'mine',
 })
 
 export const classroomToRow = (c: ClassroomClient, teacherId: string): ClassroomRow => ({
@@ -224,6 +226,7 @@ const rowToSchedule = (r: ScheduleRow): ScheduleItem => ({
   room: r.room ?? undefined,
   kind: (r.kind as ScheduleKind) ?? 'class',
   notify: r.notify,
+  scope: (r.scope as 'mine' | 'class') ?? 'mine',
 })
 
 export const rowToClassroom = (r: ClassroomRow): ClassroomClient => ({

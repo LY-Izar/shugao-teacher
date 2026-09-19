@@ -63,7 +63,11 @@ export function useMood() {
   const dateStr = ymdOf(now)
   const openDateStr = ymdOf(openedAt)
 
-  const day = useMemo(() => dayState(schedule, now), [schedule, now])
+  const day = useMemo(
+    // 只看教师自己的排课表；班级课表是给教室端展示的，不该混进「今天的日程」
+    () => dayState(schedule.filter((s) => s.scope !== 'class'), now),
+    [schedule, now],
+  )
   const pending = useMemo(() => assignments.filter((a) => a.status === 'collected'), [assignments])
 
   const mood: DayMood = dayMood(now, {

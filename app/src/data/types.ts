@@ -216,6 +216,12 @@ export type ScheduleItem = {
   kind: ScheduleKind
   /** 上课前 10 分钟提醒 */
   notify: boolean
+  /**
+   * 归属 —— 这两者是完全不同的东西，不能混：
+   *  · 'mine'  教师自己的排课表：我什么时候上哪个班（只有我教的科目）
+   *  · 'class' 班级课表：这个班整天所有科目（数学、语文…），贴在教室给学生看
+   */
+  scope?: 'mine' | 'class'
 }
 
 export const WEEKDAY_TEXT = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']

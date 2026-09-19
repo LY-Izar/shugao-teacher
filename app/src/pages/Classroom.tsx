@@ -193,7 +193,15 @@ export default function Classroom() {
   const schedRef = useRef<HTMLInputElement>(null)
   const [schedBusy, setSchedBusy] = useState(false)
   const [schedErr, setSchedErr] = useState('')
-  const day = useMemo(() => dayState(schedule, now), [schedule, now])
+  const day = useMemo(
+    () =>
+      dayState(
+        // 教室里要显示的是**这个班全部科目的课表**，不是物理老师自己的排课表
+        schedule.filter((s) => s.scope === 'class' && s.classId === klass?.id),
+        now,
+      ),
+    [schedule, klass?.id, now],
+  )
   const nowMin = now.getHours() * 60 + now.getMinutes()
 
   const scanSchedule = async (f: File) => {
@@ -225,6 +233,7 @@ export default function Classroom() {
           classId: it.classId,
           kind: it.kind,
           notify: it.notify,
+          scope: 'class' as const,
         })),
       )
       push({ text: `已从照片加入 ${parsed.items.length} 条课`, tone: 'ok' })
@@ -528,7 +537,7 @@ export default function Classroom() {
                 <div className="flex items-center gap-2" style={{ fontSize: 12.5 }}>
                   <IconClock size={15} />
                   <span style={{ color: 'var(--color-ink2)' }}>
-                    今天的课 · {WEEKDAY_TEXT[weekdayOf(now) - 1]}
+                    这个班的课 · {WEEKDAY_TEXT[weekdayOf(now) - 1]}
                   </span>
                   <span className="flex-1" />
                   <button

@@ -54,7 +54,8 @@ export default function Schedule() {
   const [perm, setPerm] = useState(() => notifyPermission())
 
   const today = weekdayOf()
-  const state = useMemo(() => dayState(schedule), [schedule])
+  // 这里只管教师自己的排课表；班级课表由教室端单独维护，不混进来
+  const state = useMemo(() => dayState(schedule.filter((s) => s.scope !== 'class')), [schedule])
 
   const startNew = (weekday = today) => {
     setEditing(null)
