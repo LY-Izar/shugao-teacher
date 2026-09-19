@@ -6,20 +6,22 @@ import { useClassroomPresence } from '../hooks/useClassroomPresence'
 import { useMood } from '../hooks/useMood'
 import { useScheduleReminder } from '../hooks/useScheduleReminder'
 import { analyzeRoster } from '../lib/roster'
-import { weekdayOf } from '../lib/schedule'
+import { awayText, toMinutes, weekdayOf } from '../lib/schedule'
 import { DoneCelebration, MorningWelcome } from './MoodModals'
 import {
   IconAlert,
+  IconCalendar,
   IconCheck,
+  IconChevronRight,
   IconClipboard,
   IconGauge,
   IconHash,
   IconInfo,
-  IconScan,
   IconUser,
   IconUsers,
   Logo,
 } from './icons'
+import { Tag } from './ui'
 import { cx } from '../lib/cx'
 
 const NAV = [
@@ -358,6 +360,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   useScheduleReminder()
   // 早上问候 / 当天完成的收尾
   const mood = useMood()
+  /** 当前时刻（北京时间，按分钟）—— 用于右栏判断哪节课已结束 */
+  const nowMin = mood.now.getHours() * 60 + mood.now.getMinutes()
 
   useEffect(() => {
     window.scrollTo(0, 0)
@@ -570,45 +574,77 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </div>
           </section>
 
+          {/* 当天日程 —— 右栏最该看的东西 */}
           <section className="panel p-3">
-            <div className="mb-2.5 flex items-center gap-2">
+            <div className="mb-2 flex items-center gap-2">
               <span style={{ fontSize: 11, letterSpacing: '.08em', color: 'var(--color-ink3)' }}>
-                索引规则
+                当天日程
               </span>
               <span className="flex-1" />
-              <IconScan size={14} />
+              <span className="num" style={{ fontSize: 11, color: 'var(--color-ink4)' }}>
+                {WEEKDAY_TEXT[weekdayOf(mood.now) - 1]}
+              </span>
             </div>
-            <div className="flex flex-col gap-2.5">
-              {[
-                ['学号是唯一主键', '批改、统计、呼叫全部按学号定位'],
-                ['序列自检', '重号与跳号会被标黄，交人工确认'],
-                ['原图并排校对', '识别结果永远可改，不静默采用'],
-              ].map(([t, d]) => (
-                <div key={t} className="flex gap-2.5">
-                  <span
+
+            {mood.day.items.length === 0 ? (
+              <div style={{ fontSize: 12.5, color: 'var(--color-ink3)', lineHeight: 1.7 }}>
+                今天没有排课。
+              </div>
+            ) : (
+              mood.day.items.map((it, i) => {
+                const done = toMinutes(it.end) <= nowMin
+                const live = mood.day.current?.id === it.id
+                const next = mood.day.next?.id === it.id
+                const last = i === mood.day.items.length - 1
+                return (
+                  <div
+                    key={it.id}
+                    className="flex items-center gap-2.5 py-1.5"
                     style={{
-                      width: 3,
-                      background: 'var(--color-line2)',
-                      borderRadius: 2,
-                      flexShrink: 0,
+                      borderBottom: last ? undefined : '1px solid var(--color-line)',
+                      opacity: done ? 0.42 : 1,
                     }}
-                  />
-                  <span>
-                    <span style={{ display: 'block', fontSize: 12.5, fontWeight: 600 }}>{t}</span>
+                  >
                     <span
+                      className="num shrink-0"
                       style={{
-                        display: 'block',
-                        fontSize: 11.5,
-                        color: 'var(--color-ink3)',
-                        lineHeight: 1.6,
+                        width: 38,
+                        fontSize: 12.5,
+                        fontWeight: 700,
+                        color: live || next ? 'var(--color-accent)' : 'var(--color-ink2)',
                       }}
                     >
-                      {d}
+                      {it.start}
                     </span>
-                  </span>
-                </div>
-              ))}
-            </div>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate" style={{ fontSize: 12.5, fontWeight: 550 }}>
+                        {it.title}
+                      </span>
+                      {it.room ? (
+                        <span style={{ fontSize: 11, color: 'var(--color-ink3)' }}>{it.room}</span>
+                      ) : null}
+                    </span>
+                    {live ? (
+                      <Tag tone="ok">进行中</Tag>
+                    ) : next && mood.day.minutesToNext !== null ? (
+                      <Tag tone="accent">{awayText(mood.day.minutesToNext)}</Tag>
+                    ) : null}
+                  </div>
+                )
+              })
+            )}
+
+            <button
+              type="button"
+              onClick={() => navigate('/schedule')}
+              className="mt-2.5 flex w-full items-center gap-1.5"
+              style={{ fontSize: 11.5, color: 'var(--color-accent)' }}
+            >
+              <IconCalendar size={13} />
+              <span>{mood.day.items.length ? '调整课表' : '去录入课表'}</span>
+              <span className="flex-1" />
+              <IconChevronRight size={13} />
+            </button>
           </section>
 
           <div

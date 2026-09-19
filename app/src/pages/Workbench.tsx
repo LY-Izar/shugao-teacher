@@ -21,7 +21,7 @@ import { WEEKDAY_TEXT } from '../data/types'
 import { useMood } from '../hooks/useMood'
 import { MoodBanner } from '../components/MoodModals'
 import { MOOD_TEXT, greetingWord } from '../lib/mood'
-import { weekdayOf } from '../lib/schedule'
+import { awayText, weekdayOf } from '../lib/schedule'
 import { collectStats } from '../lib/assignments'
 import { friendlyDate } from '../lib/date'
 import { analyzeRoster } from '../lib/roster'
@@ -320,7 +320,7 @@ export default function Workbench() {
                       </span>
                     </span>
                     {isNext && moodState.day.minutesToNext !== null ? (
-                      <Tag tone="accent">{moodState.day.minutesToNext} 分钟后</Tag>
+                      <Tag tone="accent">{awayText(moodState.day.minutesToNext)}</Tag>
                     ) : null}
                     <IconChevronRight size={16} />
                   </button>

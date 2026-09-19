@@ -87,3 +87,14 @@ export function durationText(start: string, end: string): string {
   const d = toMinutes(end) - toMinutes(start)
   return d > 0 ? `${d} 分钟` : '时间有误'
 }
+
+/**
+ * 「还有多久」的口语说法。
+ * 隔得远的时候说「190 分后」没人会在脑子里换算，所以超过 90 分钟改用小时。
+ */
+export function awayText(minutes: number): string {
+  if (minutes <= 0) return '马上'
+  if (minutes < 90) return `${minutes} 分后`
+  const h = Math.round(minutes / 60)
+  return h >= 24 ? `${Math.round(minutes / 1440)} 天后` : `${h} 小时后`
+}
