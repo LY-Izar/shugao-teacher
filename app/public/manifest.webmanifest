@@ -1,0 +1,20 @@
+{
+  "name": "树高教师平台",
+  "short_name": "树高教师",
+  "description": "面向高中物理教师的作业全链路工具",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "***REMOVED***E8EBF2",
+  "theme_color": "***REMOVED***E8EBF2",
+  "lang": "zh-CN",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
