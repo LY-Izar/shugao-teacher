@@ -23,7 +23,7 @@ import { closePip, openPip, pipSupported } from '../lib/pip'
 import { HEARTBEAT_MS, emit, subscribe } from '../lib/realtime'
 import { isRemote } from '../lib/supabase'
 import { awayText, dayState, maybeShift, toMinutes, weekdayOf } from '../lib/schedule'
-import { dayKind, ymdOf } from '../lib/holiday'
+import { dayKind, nextHoliday, ymdOf } from '../lib/holiday'
 import { parseScheduleText } from '../lib/scheduleParse'
 import { preparePhoto } from '../lib/photo'
 import { recognize } from '../lib/ocr'
@@ -289,6 +289,28 @@ export default function Classroom() {
     const t = window.setInterval(tick, 20_000)
     return () => window.clearInterval(t)
   }, [schedule, klass?.id])
+
+  /**
+   * 19:20 之后当天收尾：统计区换成一句收束。
+   * 0:00 起 now.getHours() 归零 → closing 变回 null → 自动恢复显示作业，
+   * 不需要额外的定时器去"刷新状态"。
+   */
+  const closing = useMemo(() => {
+    const h = now.getHours()
+    const m = now.getMinutes()
+    if (h < 19 || (h === 19 && m < 20)) return null
+    const today = ymdOf(now)
+    const nh = nextHoliday(today)
+    // 只在**最近 7 天内**有假期时才提假期，否则一律说周末
+    if (nh && nh.daysLeft <= 7) {
+      return `恭喜，今日的课业已全部完成，距离${nh.span.name}还有${nh.daysLeft}天`
+    }
+    const wd = now.getDay() // 0=周日
+    const days = wd === 0 ? 0 : 6 - (wd - 1) // 周一=6 … 周五=1
+    return days <= 0
+      ? '恭喜，今日的课业已全部完成，周末愉快'
+      : `恭喜，今日的课业已全部完成，距离周末还有${days}天`
+  }, [now])
 
   /* 心跳：教师端据此显示「在线 / 离线」 */
   useEffect(() => {
@@ -801,7 +823,7 @@ export default function Classroom() {
               ) : null}
 
               {/* 小窗同款面板：不支持置顶小窗时，这就是兜底 */}
-              {cur ? (
+              {cur && !closing ? (
                 <Panel className="overflow-hidden">
                   <div className="panel-head">
                     <h2>当前题目</h2>
@@ -832,7 +854,28 @@ export default function Classroom() {
 
             {/* 右列：逐题 */}
             <div className="flex flex-col gap-4">
-              {!assignment || !stats ? (
+              {closing ? (
+                <Panel bodyClass="p-6">
+                  <div className="flex flex-col items-center gap-3 text-center">
+                    <span
+                      className="grid place-items-center"
+                      style={{
+                        width: 46,
+                        height: 46,
+                        borderRadius: 99,
+                        background: 'var(--color-oksoft)',
+                        color: 'var(--color-ok)',
+                      }}
+                    >
+                      <IconCheck size={24} strokeWidth={2.4} />
+                    </span>
+                    <div style={{ fontSize: 17, fontWeight: 650, lineHeight: 1.6 }}>{closing}</div>
+                    <div style={{ fontSize: 12, color: 'var(--color-ink3)' }}>
+                      明天 0:00 自动恢复显示作业情况
+                    </div>
+                  </div>
+                </Panel>
+              ) : !assignment || !stats ? (
                 <Panel bodyClass="p-8 text-center">
                   <div style={{ fontSize: 15, fontWeight: 620 }}>本班还没有已批改的作业</div>
                   <div style={{ fontSize: 13, color: 'var(--color-ink3)', marginTop: 6 }}>
