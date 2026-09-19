@@ -28,6 +28,8 @@ export type OcrOutcome =
       notes: string
       /** 只有 scene: 'count' 才有 */
       count?: OcrCount
+      /** 只有 scene: 'schedule' 才有：转写出来的课表文本行 */
+      lines?: string[]
     }
   | { status: 'not_configured' | 'error'; message: string; detail?: string }
 
@@ -118,12 +120,18 @@ function sanitize(raw: unknown): OcrOutcome {
     unreadableCount: Math.max(0, Math.round(Number(d.unreadableCount) || 0)),
     notes: typeof d.notes === 'string' ? d.notes.slice(0, 300) : '',
     count,
+    lines: Array.isArray((d as { lines?: unknown }).lines)
+      ? ((d as { lines: unknown[] }).lines
+          .map((x) => String(x).trim())
+          .filter(Boolean)
+          .slice(0, 200) as string[])
+      : undefined,
   }
 }
 
 export async function recognize(
   image: string,
-  opts: { scene: 'collect' | 'roster' | 'count'; className?: string; nos?: string[] },
+  opts: { scene: 'collect' | 'roster' | 'count' | 'schedule'; className?: string; nos?: string[] },
 ): Promise<OcrOutcome> {
   const ctl = new AbortController()
   const timer = window.setTimeout(() => ctl.abort(), TIMEOUT_MS)

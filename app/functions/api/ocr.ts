@@ -19,8 +19,8 @@ type Body = {
   className?: string
   /** 本班在册学号，用来把识别范围收窄，大幅降低误读 */
   nos?: string[]
-  /** 'collect' 收作业查缺（侧面一列学号）；'roster' 花名册拍照；'count' 只数本数 */
-  scene?: 'collect' | 'roster' | 'count'
+  /** 'collect' 查缺；'roster' 花名册；'count' 数本数；'schedule' 课表转写 */
+  scene?: 'collect' | 'roster' | 'count' | 'schedule'
 }
 
 function json(data: unknown, status = 200): Response {
@@ -71,6 +71,26 @@ function buildPrompt(b: Body, nos: string[]): string {
 
 count 是你认为最可能的本数，min/max 是你有把握的下限与上限（完全确定时三个数相同）。
 confidence 用 high 或 low。notes 写一两句数不清的地方。只输出 JSON，不要解释。`
+  }
+
+  /* ---- 课表照片：只转写成文本行，结构交给前端的解析器 ---- */
+  if (scene === 'schedule') {
+    return `这是一张课程表（可能是表格，也可能是手写或打印的清单）。
+
+请把其中的**每一条课**转写成一行，格式固定为：
+  周X HH:MM-HH:MM 课程名 [地点]
+
+规则：
+- 星期用「周一…周日」
+- 时间统一成 24 小时制 HH:MM；若表里只有节次没有时间，按常见的中学节次表推算并照实写出
+- 课程名照抄，比如「高二(3)班 物理」「备课组活动」
+- 有地点就写在最后
+- **表格里空格的部分不要编**（那是没课）
+- 不是课表的文字（标题、备注、页眉）不要输出
+- 只输出 JSON，不要解释
+
+输出格式：
+{"lines":["周二 08:55-09:40 高二(3)班 物理 物理实验室","周三 14:30-15:15 备课组活动 办公室"],"notes":""}`
   }
 
   const rangeText = nos.length

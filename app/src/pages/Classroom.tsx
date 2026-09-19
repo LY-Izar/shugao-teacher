@@ -5,6 +5,7 @@ import { PipPanel } from '../components/PipPanel'
 import {
   IconAlert,
   IconCheck,
+  IconClock,
   IconDownload,
   IconEye,
   IconInfo,
@@ -20,6 +21,11 @@ import { BAND_META, gradeStats } from '../lib/grading'
 import { closePip, openPip, pipSupported } from '../lib/pip'
 import { HEARTBEAT_MS, emit, subscribe } from '../lib/realtime'
 import { isRemote } from '../lib/supabase'
+import { awayText, dayState, toMinutes, weekdayOf } from '../lib/schedule'
+import { parseScheduleText } from '../lib/scheduleParse'
+import { preparePhoto } from '../lib/photo'
+import { recognize } from '../lib/ocr'
+import { WEEKDAY_TEXT } from '../data/types'
 import {
   KIND_TEXT,
   canViewInline,
@@ -180,6 +186,54 @@ export default function Classroom() {
       window.clearInterval(t)
     }
   }, [klass?.id, refreshLocal])
+
+  /* 今天的课表 —— 教师端维护，这里只读；也支持现场拍一张课表自动识别 */
+  const schedule = useStore((s) => s.schedule)
+  const addScheduleMany = useStore((s) => s.addScheduleMany)
+  const schedRef = useRef<HTMLInputElement>(null)
+  const [schedBusy, setSchedBusy] = useState(false)
+  const [schedErr, setSchedErr] = useState('')
+  const day = useMemo(() => dayState(schedule, now), [schedule, now])
+  const nowMin = now.getHours() * 60 + now.getMinutes()
+
+  const scanSchedule = async (f: File) => {
+    setSchedErr('')
+    setSchedBusy(true)
+    try {
+      const img = await preparePhoto(f, { enhance: true, maxSide: 1800 })
+      const out = await recognize(img.dataUrl, { scene: 'schedule', className: klass?.name })
+      if (out.status !== 'ok') {
+        setSchedErr(out.message)
+        return
+      }
+      if (!out.lines?.length) {
+        setSchedErr('没从这张图里认出课表。拍正一点、光线均匀些再试，或在教师端「我的课表」里录入。')
+        return
+      }
+      const parsed = parseScheduleText(out.lines.join('\n'), classes)
+      if (!parsed.items.length) {
+        setSchedErr('识别到的内容没解析成课程。可以换一张更清楚的课表图。')
+        return
+      }
+      addScheduleMany(
+        parsed.items.map((it) => ({
+          weekday: it.weekday,
+          start: it.start,
+          end: it.end,
+          title: it.title,
+          room: it.room,
+          classId: it.classId,
+          kind: it.kind,
+          notify: it.notify,
+        })),
+      )
+      push({ text: `已从照片加入 ${parsed.items.length} 条课`, tone: 'ok' })
+    } catch (e) {
+      setSchedErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setSchedBusy(false)
+    }
+  }
 
   /* 心跳：教师端据此显示「在线 / 离线」 */
   useEffect(() => {
@@ -456,6 +510,95 @@ export default function Classroom() {
                   </div>
                 </Panel>
               ) : null}
+
+              {/* 今天的课 —— 时间在最前面，一眼看清现在上什么、下一节什么 */}
+              <Panel bodyClass="p-4">
+                <input
+                  ref={schedRef}
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  className="hidden"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0]
+                    if (f) void scanSchedule(f)
+                    e.target.value = ''
+                  }}
+                />
+                <div className="flex items-center gap-2" style={{ fontSize: 12.5 }}>
+                  <IconClock size={15} />
+                  <span style={{ color: 'var(--color-ink2)' }}>
+                    今天的课 · {WEEKDAY_TEXT[weekdayOf(now) - 1]}
+                  </span>
+                  <span className="flex-1" />
+                  <button
+                    type="button"
+                    disabled={schedBusy}
+                    onClick={() => schedRef.current?.click()}
+                    style={{ fontSize: 11.5, color: 'var(--color-accent)' }}
+                  >
+                    {schedBusy ? '识别中…' : '拍课表'}
+                  </button>
+                </div>
+
+                {day.items.length === 0 ? (
+                  <div
+                    className="mt-2"
+                    style={{ fontSize: 12, color: 'var(--color-ink3)', lineHeight: 1.7 }}
+                  >
+                    今天没有排课。拍一张课表照片可以自动识别录入。
+                  </div>
+                ) : (
+                  <div className="mt-2">
+                    {day.items.map((it) => {
+                      const live = day.current?.id === it.id
+                      const next = day.next?.id === it.id
+                      const done = toMinutes(it.end) <= nowMin
+                      return (
+                        <div
+                          key={it.id}
+                          className="flex items-center gap-3 py-1.5"
+                          style={{ opacity: done ? 0.42 : 1 }}
+                        >
+                          <span
+                            className="num shrink-0"
+                            style={{
+                              width: 46,
+                              fontSize: 13,
+                              fontWeight: 700,
+                              color: live || next ? 'var(--color-accent)' : 'var(--color-ink2)',
+                            }}
+                          >
+                            {it.start}
+                          </span>
+                          <span
+                            className="min-w-0 flex-1 truncate"
+                            style={{ fontSize: 13.5, fontWeight: live ? 700 : 550 }}
+                          >
+                            {it.title}
+                          </span>
+                          {it.room ? (
+                            <span style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
+                              {it.room}
+                            </span>
+                          ) : null}
+                          {live ? (
+                            <Tag tone="ok">上课中</Tag>
+                          ) : next && day.minutesToNext !== null ? (
+                            <Tag tone="accent">下一节 {awayText(day.minutesToNext)}</Tag>
+                          ) : null}
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+
+                {schedErr ? (
+                  <div style={{ fontSize: 11.5, color: 'var(--color-bad)', marginTop: 8, lineHeight: 1.6 }}>
+                    {schedErr}
+                  </div>
+                ) : null}
+              </Panel>
 
               <Panel bodyClass="p-4">
                 <div className="flex items-center gap-2" style={{ fontSize: 12.5 }}>
