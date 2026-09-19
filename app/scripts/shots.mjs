@@ -48,6 +48,29 @@ await page.addInitScript((s) => {
   window.localStorage.setItem('shugao.teacher.v1', JSON.stringify(s))
 }, TEACHER_STATE)
 
+/**
+ * 把时钟钉死在白天。
+ *
+ * 教室端有一批**按钟点切换的行为**（19:20 后作业区换成收尾语、0:00 恢复、
+ * 课前 5 分钟下课铃、周三下午静音）。不钉时钟的话，同一份代码
+ * **白天跑得过、晚上跑不过** —— 这种"看时间脸色"的回归最坑人。
+ * 钉在 2026-09-19（周六，也是演示数据的日期）能覆盖到所有分支之外的默认路径。
+ */
+await ctx.addInitScript((fixed) => {
+  const Real = Date
+  const t = new Real(fixed).getTime()
+  // @ts-ignore
+  window.Date = class extends Real {
+    constructor(...a) {
+      if (a.length === 0) super(t)
+      else super(...a)
+    }
+    static now() {
+      return t
+    }
+  }
+}, '2026-09-19T10:00:00+08:00')
+
 // ---------- S1 ----------
 await page.goto(`${BASE}/login`, { waitUntil: 'networkidle' })
 await shot('01-login')
