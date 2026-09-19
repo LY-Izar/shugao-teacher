@@ -12,6 +12,7 @@ export type { QuestionKind, QuestionMeta } from '../data/types'
 import type { QuestionKind, QuestionMeta } from '../data/types'
 
 import { KIND_ORDER, KIND_TEXT } from '../data/types'
+import { tagQuestion } from './knowledge'
 
 export { KIND_ORDER, KIND_TEXT }
 
@@ -28,6 +29,8 @@ export type ParsedQuestion = {
   stars: number
   /** 题干摘要，给教师核对用 */
   stem: string
+  /** 知识点 id —— 用完整题干打标，摘要太短会漏 */
+  points: string[]
 }
 
 export type ParsedExam = {
@@ -194,6 +197,8 @@ export function parseExam(text: string, fallbackTitle = ''): ParsedExam {
       optionCount,
       stars: (block.match(/★/g) ?? []).length,
       stem: makeStem(c.rest),
+      // 用整段（含选项）打标 —— 只给题干的话「下列说法正确的是」这类会漏掉关键线索
+      points: tagQuestion(block),
     })
   })
 
@@ -230,6 +235,7 @@ export function toQuestionMeta(questions: ParsedQuestion[]): Record<string, Ques
       optionCount: q.optionCount || undefined,
       stars: q.stars || undefined,
       stem: q.stem || undefined,
+      points: q.points.length ? q.points : undefined,
     }
   }
   return out

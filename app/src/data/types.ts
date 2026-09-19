@@ -98,6 +98,8 @@ export type QuestionMeta = {
   stars?: number
   /** 题干摘要，用于核对 */
   stem?: string
+  /** 知识点 id（见 lib/knowledge.ts），导入时按关键词自动打标 */
+  points?: string[]
 }
 
 export type Assignment = {
