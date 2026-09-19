@@ -1,0 +1,205 @@
+import type { Assignment, Klass, Student } from '../data/types'
+import { isQuestionWrong } from './grading'
+import { POINT_CHAPTER, POINT_NAME } from './knowledge'
+
+/* ============================================================
+   错题集：把一个学生历次作业的错题，按知识点聚起来
+
+   关键设计：一道题可能挂多个知识点，**丢分按挂的个数均摊** ——
+   不然同一道题会在几个知识点上各记一次满分，排行就虚高了。
+   ============================================================ */
+
+export type WrongItem = {
+  assignmentId: string
+  assignmentTitle: string
+  date: string
+  seq: number
+  subCount: number
+  score?: number
+  stem?: string
+  imgs?: string[]
+  points: string[]
+  /** 这道题全班多少人错（0–1）—— 用来分辨「只有他不会」还是「大家都不行」 */
+  classRate: number
+  /** 这道题他丢的分（已按知识点个数均摊后的原值，展示用） */
+  lost: number
+}
+
+export type PointLoss = {
+  pointId: string
+  name: string
+  chapter: string
+  /** 错了多少次 */
+  times: number
+  /** 累计丢了约多少分（同一题多知识点时均摊） */
+  lost: number
+  items: WrongItem[]
+}
+
+export type WrongBook = {
+  studentNo: string
+  name: string
+  /** 错题总次数 */
+  totalWrong: number
+  /** 累计丢分 */
+  totalLost: number
+  /** 按丢分从多到少 */
+  points: PointLoss[]
+  /** 按时间从新到旧 */
+  items: WrongItem[]
+}
+
+const ranked = (a: Assignment) => a.status === 'graded' || a.status === 'reviewed'
+
+/** 一个班、一份作业里，每道题的全班错误率 */
+function classRates(students: Student[], a: Assignment): number[] {
+  const active = students.filter((s) => s.status === 'active')
+  const n = active.length || 1
+  return Array.from({ length: a.questionCount }, (_, i) => {
+    const seq = i + 1
+    const sub = a.subQuestions[String(seq)] ?? 0
+    return active.filter((s) => isQuestionWrong(a.wrong[s.studentNo], seq, sub)).length / n
+  })
+}
+
+export function buildWrongBook(
+  student: Student,
+  klass: Klass | undefined,
+  assignments: Assignment[],
+): WrongBook {
+  const all = klass?.students ?? []
+  const mine = assignments
+    .filter((a) => a.classId === klass?.id && ranked(a))
+    .sort((x, y) => (x.assignDate < y.assignDate ? 1 : -1))
+
+  const items: WrongItem[] = []
+  let totalWrong = 0
+  let totalLost = 0
+
+  for (const a of mine) {
+    const rates = classRates(all, a)
+    const wrongKeys = a.wrong[student.studentNo] ?? []
+    if (!wrongKeys.length) continue
+
+    for (let i = 0; i < a.questionCount; i++) {
+      const seq = i + 1
+      const sub = a.subQuestions[String(seq)] ?? 0
+      if (!isQuestionWrong(wrongKeys, seq, sub)) continue
+
+      const meta = a.questionMeta?.[String(seq)]
+      const score = meta?.score
+      const pts = meta?.points ?? []
+      // 有小题时按错的小题比例折算
+      let ratio = 1
+      if (sub > 0) {
+        let bad = 0
+        for (let k = 1; k <= sub; k++) if (wrongKeys.includes(`${seq}.${k}`)) bad++
+        ratio = sub ? bad / sub : 1
+      }
+      const lost = score === undefined ? 0 : score * ratio
+
+      totalWrong++
+      totalLost += lost
+
+      items.push({
+        assignmentId: a.id,
+        assignmentTitle: a.title,
+        date: a.assignDate,
+        seq,
+        subCount: sub,
+        score,
+        stem: meta?.stem,
+        imgs: meta?.imgs,
+        points: pts,
+        classRate: rates[i] ?? 0,
+        lost,
+      })
+    }
+  }
+
+  /* 按知识点聚合 */
+  const map = new Map<string, PointLoss>()
+  for (const it of items) {
+    const pts = it.points.length ? it.points : ['__none__']
+    const share = it.lost / pts.length
+    for (const p of pts) {
+      const e =
+        map.get(p) ??
+        ({
+          pointId: p,
+          name: POINT_NAME[p] ?? '未归类',
+          chapter: POINT_CHAPTER[p] ?? '其他',
+          times: 0,
+          lost: 0,
+          items: [],
+        } satisfies PointLoss)
+      e.times++
+      e.lost += share
+      e.items.push(it)
+      map.set(p, e)
+    }
+  }
+
+  return {
+    studentNo: student.studentNo,
+    name: student.name,
+    totalWrong,
+    totalLost,
+    points: [...map.values()].sort((x, y) => y.lost - x.lost || y.times - x.times),
+    items,
+  }
+}
+
+/* ---------------- 班级视图的原料（下一步用） ---------------- */
+
+export type ClassPointLoss = PointLoss & {
+  /** 这个知识点上，班里有多少人错过 */
+  studentsHit: number
+  /** 全班在这上面的总丢分 */
+  classLost: number
+  /** 分布在几份作业里 —— 跨作业反复错 = 真高频错点 */
+  spread: number
+}
+
+export function buildClassWrongBook(
+  klass: Klass | undefined,
+  assignments: Assignment[],
+): { points: ClassPointLoss[]; totalStudents: number } {
+  const students = (klass?.students ?? []).filter((s) => s.status === 'active')
+  const books = students.map((s) => ({ s, b: buildWrongBook(s, klass, assignments) }))
+
+  const map = new Map<string, ClassPointLoss & { who: Set<string>; asg: Set<string> }>()
+  for (const { s, b } of books) {
+    for (const p of b.points) {
+      const e =
+        map.get(p.pointId) ??
+        ({
+          ...p,
+          items: [],
+          times: 0,
+          lost: 0,
+          studentsHit: 0,
+          classLost: 0,
+          spread: 0,
+          who: new Set<string>(),
+          asg: new Set<string>(),
+        } as ClassPointLoss & { who: Set<string>; asg: Set<string> })
+      e.times += p.times
+      e.lost += p.lost
+      e.classLost += p.lost
+      e.who.add(s.studentNo)
+      for (const it of p.items) e.asg.add(it.assignmentId)
+      map.set(p.pointId, e)
+    }
+  }
+
+  const points = [...map.values()]
+    .map((e) => ({
+      ...e,
+      studentsHit: e.who.size,
+      spread: e.asg.size,
+    }))
+    .sort((x, y) => y.classLost - x.classLost)
+
+  return { points, totalStudents: students.length }
+}

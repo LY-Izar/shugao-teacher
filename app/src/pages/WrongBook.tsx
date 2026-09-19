@@ -1,7 +1,7 @@
 import { useNavigate } from 'react-router-dom'
 import { Page } from '../components/AppShell'
 import { IconAlert, IconChart, IconClipboard, IconTarget, IconUsers } from '../components/icons'
-import { Button, PageHead, Panel, Sect, Tag } from '../components/ui'
+import { Button, PageHead, Panel, Sect } from '../components/ui'
 import { useStore } from '../data/store'
 
 /**
@@ -145,16 +145,8 @@ export default function WrongBook() {
         </div>
 
         <div className="flex gap-2">
-          <Button block onClick={() => navigate('/assignments')}>
-            去看作业
-          </Button>
-          <Button
-            block
-            variant="primary"
-            onClick={() => navigate('/settings')}
-            icon={<Tag tone="idle">催一下</Tag>}
-          >
-            告诉开发者我多想要
+          <Button block variant="primary" onClick={() => navigate('/assignments')}>
+            去看作业档案
           </Button>
         </div>
       </Page>
