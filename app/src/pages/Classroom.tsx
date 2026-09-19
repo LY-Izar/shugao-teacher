@@ -778,20 +778,45 @@ export default function Classroom() {
         </div>
       </div>
 
-      {/* 置顶小窗内容 */}
-      {pipWin && cur
+      {/* 置顶小窗内容
+          注意：没数据时也必须渲染 —— 否则小窗会是一个纯白窗口，教师以为坏了 */}
+      {pipWin
         ? createPortal(
-            <PipPanel
-              key={seq}
-              seq={seq}
-              total={stats?.questions.length ?? 0}
-              rate={cur.rate}
-              band={cur.band}
-              wrongNos={cur.wrongNos}
-              nameOf={nameOf}
-              onPrev={() => setSeq((v) => Math.max(1, v - 1))}
-              onNext={() => setSeq((v) => Math.min(stats?.questions.length ?? 1, v + 1))}
-            />,
+            cur ? (
+              <PipPanel
+                key={seq}
+                seq={seq}
+                total={stats?.questions.length ?? 0}
+                rate={cur.rate}
+                band={cur.band}
+                wrongNos={cur.wrongNos}
+                nameOf={nameOf}
+                onPrev={() => setSeq((v) => Math.max(1, v - 1))}
+                onNext={() => setSeq((v) => Math.min(stats?.questions.length ?? 1, v + 1))}
+              />
+            ) : (
+              <div
+                style={{
+                  height: '100%',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  padding: '12px 16px',
+                  textAlign: 'center',
+                  font: '13px/1.7 system-ui, -apple-system, "Microsoft YaHei", sans-serif',
+                  color: 'var(--color-ink2, ***REMOVED***333)',
+                  background: 'var(--color-surface, ***REMOVED***fff)',
+                }}
+              >
+                <div style={{ fontWeight: 600, marginBottom: 6 }}>还没有可讲评的作业</div>
+                <div style={{ fontSize: 12, color: 'var(--color-ink3, ***REMOVED***777)' }}>
+                  {klass?.name ?? ''} 还没有批改完的作业。
+                  <br />
+                  教师端批改一次后，这里就会出现题号与正确率。
+                </div>
+              </div>
+            ),
             pipWin.document.body,
           )
         : null}
