@@ -4,6 +4,7 @@ import type {
   AssignmentTemplate,
   ClassroomClient,
   Klass,
+  QuestionMeta,
   ScheduleItem,
   ScheduleKind,
   Student,
@@ -249,6 +250,19 @@ function makeDemoGrading(students: Student[], questionCount: number): Assignment
 
 /* ---------------- S2：演示作业档案 ---------------- */
 
+/**
+ * 演示档案的题目结构（等同于从 Word 稿识别出来的东西）。
+ * 本地模式是明确标注的演示数据，这里补上题型/分值，好让「题型掌握情况」有东西可看。
+ */
+const DEMO_META_21: Record<string, QuestionMeta> = {
+  '1': { kind: 'single', score: 4, optionCount: 4, stem: '关于电流与电压的关系，下列说法正确的是' },
+  '2': { kind: 'single', score: 4, optionCount: 4, stem: '某导体两端电压为 3 V 时通过的电流是 0.2 A' },
+  '3': { kind: 'experiment', score: 12, subCount: 2, stem: '用伏安法描绘小灯泡的 I-U 特性曲线' },
+  '4': { kind: 'multiple', score: 6, optionCount: 4, stem: '关于电阻定律，下列说法正确的是' },
+  '5': { kind: 'calc', score: 12, stem: '如图所示的电路中，电源电动势与内阻已知，求各支路电流' },
+  '6': { kind: 'calc', score: 12, stem: '滑动变阻器接入电路，求其消耗的最大功率' },
+}
+
 export function makeDemoAssignments(classes: Klass[]): Assignment[] {
   const [a, b] = classes
   if (!a) return []
@@ -271,6 +285,7 @@ export function makeDemoAssignments(classes: Klass[]): Assignment[] {
       missingNos: pickMissing(a.students.length, [7, 19, 33]),
       lateNos: pickMissing(a.students.length, [12]),
       subQuestions: { '3': 2 },
+      questionMeta: DEMO_META_21,
       wrong: makeDemoGrading(a.students, 6),
       confirmedNos: a.students.filter((s) => s.status === 'active').map((s) => s.studentNo),
       gradeSeconds: 254,

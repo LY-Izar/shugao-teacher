@@ -12,7 +12,7 @@ import {
 } from '../components/icons'
 import { Button, PageHead, Panel, Sect, StatStrip, Tag } from '../components/ui'
 import { useStore } from '../data/store'
-import type { Student } from '../data/types'
+import { KIND_TEXT, type Student } from '../data/types'
 import { collectStats } from '../lib/assignments'
 import { BAND_META, BAND_ORDER, gradeStats } from '../lib/grading'
 import { wrongStudents } from '../lib/calls'
@@ -64,7 +64,14 @@ export default function AssignmentStats() {
     <>
       <PageHead
         title="作业情况"
-        sub={`${klass?.name ?? '—'} · ${friendlyDate(assignment.assignDate)} · ${assignment.questionCount} 题`}
+        sub={[
+          klass?.name ?? '—',
+          friendlyDate(assignment.assignDate),
+          `${assignment.questionCount} 题`,
+          stats.hasScores ? `满分 ${stats.fullScore}` : '',
+        ]
+          .filter(Boolean)
+          .join(' · ')}
         onBack={() => navigate('/assignments')}
         right={
           <Button
@@ -117,6 +124,98 @@ export default function AssignmentStats() {
               还有 <b className="num">{stats.total - stats.confirmedCount}</b> 人没打开过题号列表，
               下面的错误率可能偏低。
             </div>
+          </div>
+        ) : null}
+
+        {/* 题型掌握情况 —— 值不值得花课堂时间，先看这个 */}
+        {stats.byKind.length > 0 ? (
+          <div className="mb-4">
+            <Sect>题型掌握情况</Sect>
+            <Panel className="overflow-hidden">
+              {stats.byKind.map((k, i) => (
+                <div
+                  key={k.kind}
+                  className="px-3 py-2.5"
+                  style={{
+                    borderBottom:
+                      i === stats.byKind.length - 1 ? undefined : '1px solid var(--color-line)',
+                  }}
+                >
+                  <div className="flex items-center gap-2.5">
+                    <Tag tone={k.rate >= 0.8 ? 'ok' : k.rate >= 0.5 ? 'warn' : 'bad'}>
+                      {KIND_TEXT[k.kind]}
+                    </Tag>
+                    <span style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
+                      <span className="num">{k.count}</span> 题
+                      {k.fullScore > 0 ? (
+                        <>
+                          {' · '}
+                          <span className="num">{k.fullScore}</span> 分
+                        </>
+                      ) : null}
+                    </span>
+                    <span className="flex-1" />
+                    <span
+                      className="num"
+                      style={{
+                        fontSize: 15,
+                        fontWeight: 700,
+                        color:
+                          k.rate >= 0.8
+                            ? 'var(--color-ok)'
+                            : k.rate >= 0.5
+                              ? 'var(--color-warn)'
+                              : 'var(--color-bad)',
+                      }}
+                    >
+                      {Math.round((1 - k.rate) * 100)}%
+                    </span>
+                    <span style={{ fontSize: 11, color: 'var(--color-ink4)' }}>正确</span>
+                  </div>
+                  {/* 丢分条：越长的题型越该讲 */}
+                  {k.fullScore > 0 ? (
+                    <div className="mt-2 flex items-center gap-2">
+                      <span
+                        style={{
+                          flex: 1,
+                          height: 5,
+                          background: 'var(--color-surface3)',
+                          borderRadius: 3,
+                          overflow: 'hidden',
+                        }}
+                      >
+                        <i
+                          style={{
+                            display: 'block',
+                            height: '100%',
+                            width: `${Math.min(100, k.rate * 100)}%`,
+                            background:
+                              k.rate >= 0.5
+                                ? 'var(--color-bad)'
+                                : k.rate >= 0.2
+                                  ? 'var(--color-warn)'
+                                  : 'var(--color-ok)',
+                            borderRadius: 3,
+                          }}
+                        />
+                      </span>
+                      <span
+                        className="num shrink-0"
+                        style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}
+                      >
+                        丢 {k.lost.toFixed(1)} 分/人
+                      </span>
+                    </div>
+                  ) : null}
+                </div>
+              ))}
+            </Panel>
+            <p
+              style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 8, lineHeight: 1.7 }}
+            >
+              「丢几分/人」= 错误率 × 该题型总分。{stats.hasScores ? `全班平均 ${Math.round(stats.avgScore ?? 0)} / ${stats.fullScore} 分。` : ''}
+              选择题掉得多，多半是概念没打通；计算题掉得多，多半是过程与运算。
+            </p>
           </div>
         ) : null}
 
@@ -176,10 +275,12 @@ export default function AssignmentStats() {
                       {q.seq}
                     </span>
 
+                    {q.kind ? <Tag tone="idle">{KIND_TEXT[q.kind]}</Tag> : null}
+
                     <span className="min-w-0 flex-1">
-                      <span className="flex items-baseline gap-2">
+                      <span className="flex items-center gap-2">
                         <span
-                          className="num"
+                          className="num shrink-0"
                           style={{
                             fontSize: 15,
                             fontWeight: 700,
@@ -189,11 +290,25 @@ export default function AssignmentStats() {
                         >
                           {Math.round(q.rate * 100)}%
                         </span>
-                        <span style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
+                        <span
+                          className="min-w-0 flex-1 truncate"
+                          style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}
+                        >
                           <b className="num">{q.wrongCount}</b> 人错
-                          {q.subCount > 0 ? ` · ${q.subCount} 个小题` : ''}
+                          {q.subCount > 0 ? ` · ${q.subCount} 小题` : ''}
+                          {q.fullScore !== undefined ? (
+                            <>
+                              {' · '}
+                              <span className="num">{q.fullScore}</span> 分
+                            </>
+                          ) : null}
+                          {q.lost ? (
+                            <>
+                              {' · 丢 '}
+                              <span className="num">{q.lost.toFixed(1)}</span>
+                            </>
+                          ) : null}
                         </span>
-                        <span className="flex-1" />
                         {q.wrongCount > 0 ? <Tag tone={meta.tone}>{meta.label}</Tag> : null}
                       </span>
                       <span className="mt-1.5 block">

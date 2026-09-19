@@ -1,4 +1,4 @@
-import type { Assignment, Student } from '../data/types'
+import type { Assignment, QuestionKind, Student } from '../data/types'
 import { parseQKey, qKey } from '../data/types'
 
 /* ============================================================
@@ -144,6 +144,23 @@ export type QuestionStat = {
   rate: number
   band: Band
   score: number
+  /* ---- 来自 Word 稿识别的题目信息（可能没有） ---- */
+  kind?: QuestionKind
+  /** 该题满分 */
+  fullScore?: number
+  /** 平均每人在这题上丢的分 = 错误率 × 满分。用来衡量「这题值不值得花课堂时间」 */
+  lost?: number
+}
+
+/** 按题型聚合的掌握情况 */
+export type KindStat = {
+  kind: QuestionKind
+  count: number
+  fullScore: number
+  /** 平均错误率 */
+  rate: number
+  lost: number
+  wrongCount: number
 }
 
 export type GradeStats = {
@@ -157,18 +174,31 @@ export type GradeStats = {
   ranked: QuestionStat[]
   /** 有错的学生数 */
   studentsWithWrong: number
+  /** 是否每道题都知道分值 */
+  hasScores: boolean
+  /** 卷面总分（只统计知道分值的那部分） */
+  fullScore: number
+  /** 全班平均得分；分值不齐时为 undefined —— 宁可不给，也不给一个错的数 */
+  avgScore?: number
+  /** 题型分布；没有题型信息时为空数组 */
+  byKind: KindStat[]
 }
 
 export function gradeStats(students: Student[], a: Assignment): GradeStats {
   const active = students.filter((s) => s.status === 'active')
   const total = active.length || 1
+  const meta = a.questionMeta ?? {}
 
   const questions: QuestionStat[] = Array.from({ length: a.questionCount }, (_, i) => {
     const seq = i + 1
     const subCount = a.subQuestions[String(seq)] ?? 0
-    const wrongNos = active.filter((s) => isQuestionWrong(a.wrong[s.studentNo], seq, subCount)).map((s) => s.studentNo)
+    const wrongNos = active
+      .filter((s) => isQuestionWrong(a.wrong[s.studentNo], seq, subCount))
+      .map((s) => s.studentNo)
     const rate = wrongNos.length / total
     const band = bandOf(rate)
+    const m = meta[String(seq)]
+    const fullScore = m?.score
     return {
       seq,
       subCount,
@@ -177,6 +207,9 @@ export function gradeStats(students: Student[], a: Assignment): GradeStats {
       rate,
       band,
       score: BAND_META[band].score,
+      kind: m?.kind,
+      fullScore,
+      lost: fullScore === undefined ? undefined : rate * fullScore,
     }
   })
 
@@ -184,9 +217,46 @@ export function gradeStats(students: Student[], a: Assignment): GradeStats {
   const wrongTotal = active.reduce((n, s) => n + (a.wrong[s.studentNo]?.length ?? 0), 0)
   const studentsWithWrong = active.filter((s) => (a.wrong[s.studentNo]?.length ?? 0) > 0).length
 
+  /* ---- 分值：只在「每道题都知道分值」时才算平均分 ---- */
+  const scored = questions.filter((q) => q.fullScore !== undefined)
+  const hasScores = questions.length > 0 && scored.length === questions.length
+  const fullScore = scored.reduce((n, q) => n + (q.fullScore ?? 0), 0)
+  const avgScore = hasScores
+    ? scored.reduce((n, q) => n + (q.fullScore ?? 0) * (1 - q.rate), 0)
+    : undefined
+
+  /* ---- 按题型聚合 ---- */
+  const kindMap = new Map<QuestionKind, KindStat>()
+  for (const q of questions) {
+    if (!q.kind) continue
+    const e = kindMap.get(q.kind) ?? {
+      kind: q.kind,
+      count: 0,
+      fullScore: 0,
+      rate: 0,
+      lost: 0,
+      wrongCount: 0,
+    }
+    e.count++
+    e.fullScore += q.fullScore ?? 0
+    e.wrongCount += q.wrongCount
+    e.rate += q.rate
+    e.lost += q.lost ?? 0
+    kindMap.set(q.kind, e)
+  }
+  const byKind = [...kindMap.values()]
+    .map((e) => ({ ...e, rate: e.count ? e.rate / e.count : 0 }))
+    .sort((x, y) => y.fullScore - x.fullScore || y.count - x.count)
+
   const ranked = [...questions]
     .filter((q) => q.wrongCount > 0)
-    .sort((x, y) => y.score - x.score || y.rate - x.rate)
+    .sort(
+      (x, y) =>
+        y.score - x.score ||
+        // 同一档里，先看「平均每人丢了多少分」—— 12 分的题丢 3 分比 4 分的题丢 3 分更值钱
+        (y.lost ?? y.rate) - (x.lost ?? x.rate) ||
+        y.rate - x.rate,
+    )
 
   return {
     total: active.length,
@@ -196,6 +266,10 @@ export function gradeStats(students: Student[], a: Assignment): GradeStats {
     questions,
     ranked,
     studentsWithWrong,
+    hasScores,
+    fullScore,
+    avgScore,
+    byKind,
   }
 }
 
