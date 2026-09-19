@@ -26,10 +26,21 @@ export type OcrOutcome =
       students: OcrStudent[]
       unreadableCount: number
       notes: string
+      /** 只有 scene: 'count' 才有 */
+      count?: OcrCount
     }
   | { status: 'not_configured' | 'error'; message: string; detail?: string }
 
 const TIMEOUT_MS = 60_000
+
+/** 「数本数」的结果。min/max 是模型的把握区间，用于判断能不能下结论 */
+export type OcrCount = {
+  typical: number
+  min: number
+  max: number
+  confidence: 'high' | 'low'
+  note?: string
+}
 
 function asConfidence(v: unknown): 'high' | 'low' {
   return String(v).toLowerCase().startsWith('low') ? 'low' : 'high'
@@ -42,6 +53,31 @@ function sanitize(raw: unknown): OcrOutcome {
     students?: unknown
     unreadableCount?: unknown
     notes?: unknown
+    count?: unknown
+    min?: unknown
+    max?: unknown
+    confidence?: unknown
+  }
+
+  /* 数本数 */
+  let count: OcrCount | undefined
+  if (d.count !== undefined || d.min !== undefined || d.max !== undefined) {
+    const c = Math.round(Number(d.count))
+    let lo = Math.round(Number(d.min))
+    let hi = Math.round(Number(d.max))
+    if (Number.isFinite(c) && c >= 0) {
+      if (!Number.isFinite(lo)) lo = c
+      if (!Number.isFinite(hi)) hi = c
+      // 容错：模型偶尔把 min/max 写反
+      if (lo > hi) [lo, hi] = [hi, lo]
+      count = {
+        typical: c,
+        min: Math.max(0, Math.min(lo, c)),
+        max: Math.max(hi, c),
+        confidence: asConfidence(d.confidence),
+        note: typeof d.notes === 'string' ? d.notes.slice(0, 200) : undefined,
+      }
+    }
   }
 
   const numbers: OcrNumber[] = []
@@ -81,12 +117,13 @@ function sanitize(raw: unknown): OcrOutcome {
     students,
     unreadableCount: Math.max(0, Math.round(Number(d.unreadableCount) || 0)),
     notes: typeof d.notes === 'string' ? d.notes.slice(0, 300) : '',
+    count,
   }
 }
 
 export async function recognize(
   image: string,
-  opts: { scene: 'collect' | 'roster'; className?: string; nos?: string[] },
+  opts: { scene: 'collect' | 'roster' | 'count'; className?: string; nos?: string[] },
 ): Promise<OcrOutcome> {
   const ctl = new AbortController()
   const timer = window.setTimeout(() => ctl.abort(), TIMEOUT_MS)

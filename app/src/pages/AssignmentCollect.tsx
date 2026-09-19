@@ -18,7 +18,7 @@ import { Button, PageHead, Panel, Portal, Sect, StatStrip, Tag } from '../compon
 import { useStore, useToast } from '../data/store'
 import type { Assignment, Student } from '../data/types'
 import { analyzeScan, simulateCollectScan, type ScanAnalysis } from '../lib/assignments'
-import { recognize, splitByConfidence } from '../lib/ocr'
+import { recognize, splitByConfidence, type OcrCount } from '../lib/ocr'
 import { preparePhoto, type PreparedPhoto, type Rotate } from '../lib/photo'
 import { isRemote } from '../lib/supabase'
 import { friendlyDate } from '../lib/date'
@@ -145,6 +145,10 @@ export default function AssignmentCollect() {
   const [ocrNotes, setOcrNotes] = useState('')
   /** 识别产出过低时的已识别数量（非 null 表示这张照片不合格） */
   const [lowYield, setLowYield] = useState<number | null>(null)
+  /** 数出来的本数 */
+  const [bookCount, setBookCount] = useState<OcrCount | null>(null)
+  /** 本数够 → 直接判定交齐 */
+  const [allIn, setAllIn] = useState<OcrCount | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
 
   /* 用档案里已有的收缴记录初始化（只记例外，默认全班已交） */
@@ -199,6 +203,30 @@ export default function AssignmentCollect() {
     const timers: number[] = []
     SCAN_STEPS.forEach((_, i) => timers.push(window.setTimeout(() => setStep(i + 1), 600 * (i + 1))))
 
+    /* ---------- 第一步：数本数 ----------
+       数本数比认手写学号可靠得多。交齐了就一步到位，不用认号。 */
+    const counted = await recognize(prep.dataUrl, { scene: 'count', className: klass?.name })
+
+    if (counted.status === 'ok' && counted.count) {
+      setBookCount(counted.count)
+      // 把握的下限都够数 → 一定是交齐了
+      if (counted.count.min >= allNos.length) {
+        timers.forEach((t) => window.clearTimeout(t))
+        setMark({})
+        // 空的校验结果，省得下面到处判空
+        setScan({ dupNos: [], unreadable: [], unknown: [], likelyMisread: [], suspicious: false })
+        setDetectedCount(0)
+        setLowConf(new Set())
+        setLowYield(null)
+        setAllIn(counted.count)
+        setOcrNotes(counted.count.note ?? '')
+        setStep(SCAN_STEPS.length)
+        setStage('done')
+        return
+      }
+    }
+
+    /* ---------- 第二步：数不够，才去认学号 ---------- */
     const out = await recognize(prep.dataUrl, {
       scene: 'collect',
       className: klass?.name,
@@ -206,6 +234,7 @@ export default function AssignmentCollect() {
     })
 
     timers.forEach((t) => window.clearTimeout(t))
+    setAllIn(null)
 
     if (out.status !== 'ok') {
       setOcrErr({ msg: out.message, detail: 'detail' in out ? out.detail : undefined })
@@ -556,8 +585,82 @@ export default function AssignmentCollect() {
           </div>
         ) : null}
 
+        {/* 数本数够 → 直接判定交齐，不用认学号 */}
+        {stage === 'done' && allIn ? (
+          <div className="anim-in mb-4">
+            <Panel bodyClass="p-4">
+              <div className="flex items-start gap-3">
+                <span
+                  className="grid place-items-center shrink-0"
+                  style={{
+                    width: 40,
+                    height: 40,
+                    borderRadius: 99,
+                    background: 'var(--color-oksoft)',
+                    color: 'var(--color-ok)',
+                  }}
+                >
+                  <IconCheck size={22} strokeWidth={2.4} />
+                </span>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 16, fontWeight: 680, color: 'var(--color-ok)' }}>
+                    数到 <span className="num">{allIn.typical}</span> 本 · 交齐了
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 12.5,
+                      color: 'var(--color-ink2)',
+                      marginTop: 4,
+                      lineHeight: 1.7,
+                    }}
+                  >
+                    应交 <span className="num">{allNos.length}</span> 人，本数够得上，
+                    就不必逐个去认学号了 —— <b>认手写号比数本数容易出错得多</b>。
+                    {allIn.min !== allIn.max ? (
+                      <>
+                        <br />
+                        数数的把握区间是 <span className="num">{allIn.min}–{allIn.max}</span> 本，
+                        下限也够，所以可以放心。
+                      </>
+                    ) : null}
+                    {allIn.note ? (
+                      <>
+                        <br />
+                        备注：{allIn.note}
+                      </>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+              <div className="mt-3 flex gap-2">
+                <Button
+                  block
+                  onClick={() => {
+                    setStage('idle')
+                    setAllIn(null)
+                    setBookCount(null)
+                  }}
+                >
+                  重拍
+                </Button>
+                <Button
+                  block
+                  variant="primary"
+                  icon={<IconCheck size={16} />}
+                  onClick={() => {
+                    setMark({})
+                    push({ text: '已登记：全员交齐', tone: 'ok' })
+                  }}
+                >
+                  确认全员已交
+                </Button>
+              </div>
+            </Panel>
+          </div>
+        ) : null}
+
         {/* 识别结果与自检 */}
-        {stage === 'done' && scan ? (
+        {stage === 'done' && scan && !allIn ? (
           <div className="anim-in mb-4">
             <Sect>识别结果与自检</Sect>
             {scan.suspicious ? (
@@ -688,6 +791,17 @@ export default function AssignmentCollect() {
                 className="flex flex-wrap items-center gap-x-5 gap-y-2"
                 style={{ fontSize: 12.5, color: 'var(--color-ink2)' }}
               >
+                {bookCount ? (
+                  <span className="flex items-center gap-1.5">
+                    <IconStack size={14} />
+                    数到 <b className="num">{bookCount.typical}</b> 本
+                    {bookCount.typical < allNos.length ? (
+                      <span style={{ color: 'var(--color-bad)' }}>
+                        （少 {allNos.length - bookCount.typical} 本）
+                      </span>
+                    ) : null}
+                  </span>
+                ) : null}
                 <span className="flex items-center gap-1.5">
                   <IconScan size={14} />
                   识别到 <b className="num">{detectedCount}</b> 个学号

@@ -19,8 +19,8 @@ type Body = {
   className?: string
   /** 本班在册学号，用来把识别范围收窄，大幅降低误读 */
   nos?: string[]
-  /** 'collect' 收作业查缺（侧面一列学号）；'roster' 花名册拍照 */
-  scene?: 'collect' | 'roster'
+  /** 'collect' 收作业查缺（侧面一列学号）；'roster' 花名册拍照；'count' 只数本数 */
+  scene?: 'collect' | 'roster' | 'count'
 }
 
 function json(data: unknown, status = 200): Response {
@@ -53,7 +53,26 @@ function normalizeNos(nos: string[] | undefined): string[] {
 }
 
 function buildPrompt(b: Body, nos: string[]): string {
-  const scene = b.scene === 'roster' ? 'roster' : 'collect'
+  const scene = b.scene ?? 'collect'
+
+  /* ---- 先数本数：比认手写学号可靠得多 ---- */
+  if (scene === 'count') {
+    return `这是一摞学生交上来的作业本，从侧面拍的书脊/切口。
+
+**只数有几本，不要认任何字，不要管上面写的是什么。**
+
+数数要点：
+- 最上面一本和最下面一本都要算
+- 每一层的书脊就是一本，不要把同一本的封面和书页数成两本
+- 边缘被压住、看不清的地方不要硬猜 —— 用 min / max 给一个区间
+
+请输出：
+{"count": 36, "min": 35, "max": 37, "confidence": "high", "notes": ""}
+
+count 是你认为最可能的本数，min/max 是你有把握的下限与上限（完全确定时三个数相同）。
+confidence 用 high 或 low。notes 写一两句数不清的地方。只输出 JSON，不要解释。`
+  }
+
   const rangeText = nos.length
     ? `本班在册学号共 ${nos.length} 个：${nos.join('、')}。`
     : '不知道完整的学号列表，请只按图像本身判断。'
