@@ -462,13 +462,6 @@ export default function Classroom() {
                   <IconMegaphone size={15} />
                   <span style={{ color: 'var(--color-ink2)' }}>呼叫播报已就绪</span>
                 </div>
-                <div
-                  className="mt-2"
-                  style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.7 }}
-                >
-                  教师端发出呼叫后，这里会先响提示音，再用系统 TTS 播报。
-                  播报用的是学号，不是姓名。
-                </div>
                 <Button
                   size="sm"
                   block
