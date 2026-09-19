@@ -15,10 +15,11 @@ import { Button, PageHead, Panel, Sect } from '../components/ui'
 import { WordImport } from '../components/WordImport'
 import { useStore, useToast } from '../data/store'
 import { ensureISO, isoOffset } from '../lib/date'
-import { docxToText } from '../lib/docx'
+import { docxToParts } from '../lib/docx'
 import {
   KIND_TEXT,
   parseExam,
+  resolveImages,
   toQuestionMeta,
   toSubQuestions,
   type ParsedExam,
@@ -59,13 +60,14 @@ export default function AssignmentNew() {
     setQuestions(null)
     setAdopted(false)
     try {
-      const text = await docxToText(f)
-      const r = parseExam(text, f.name.replace(/\.docx$/i, ''))
+      const parts = await docxToParts(f)
+      const r = parseExam(parts.text, f.name.replace(/\.docx$/i, ''))
       if (r.questions.length === 0) {
         setParseErr(r.warnings[0] ?? '没有从这份稿子里识别出题目。')
       } else {
         setParsed(r)
-        setQuestions(r.questions)
+        // Word 稿里与题号对齐的配图，挂到对应题目上（生成「错题重练」要用）
+        setQuestions(resolveImages(r.questions, parts.images))
       }
     } catch (e) {
       setParseErr(e instanceof Error ? e.message : String(e))

@@ -31,6 +31,8 @@ export type ParsedQuestion = {
   stem: string
   /** 知识点 id —— 用完整题干打标，摘要太短会漏 */
   points: string[]
+  /** 这道题的配图（Word 稿里的 rId，位置已对齐到题号） */
+  imgs: string[]
 }
 
 export type ParsedExam = {
@@ -199,6 +201,8 @@ export function parseExam(text: string, fallbackTitle = ''): ParsedExam {
       stem: makeStem(c.rest),
       // 用整段（含选项）打标 —— 只给题干的话「下列说法正确的是」这类会漏掉关键线索
       points: tagQuestion(block),
+      // U+E000 是 docx 抽取时留的图片占位符，它落在哪一段就属于哪一题
+      imgs: [...block.matchAll(/\uE000(rId\d+)\uE000/g)].map((m) => m[1]),
     })
   })
 
@@ -225,6 +229,7 @@ export function toSubQuestions(questions: ParsedQuestion[]): Record<string, numb
 }
 
 /** 题号 → 题目元信息 */
+/** 题号 → 题目元信息 */
 export function toQuestionMeta(questions: ParsedQuestion[]): Record<string, QuestionMeta> {
   const out: Record<string, QuestionMeta> = {}
   for (const q of questions) {
@@ -236,7 +241,19 @@ export function toQuestionMeta(questions: ParsedQuestion[]): Record<string, Ques
       stars: q.stars || undefined,
       stem: q.stem || undefined,
       points: q.points.length ? q.points : undefined,
+      imgs: q.imgs.length ? q.imgs : undefined,
     }
   }
   return out
+}
+
+/** 把 ParsedQuestion 里的 rId 占位换成真正的 data URL（导入时调用一次） */
+export function resolveImages(
+  questions: ParsedQuestion[],
+  images: Map<string, string>,
+): ParsedQuestion[] {
+  return questions.map((q) => ({
+    ...q,
+    imgs: q.imgs.map((r) => images.get(r)).filter((u): u is string => Boolean(u)),
+  }))
 }

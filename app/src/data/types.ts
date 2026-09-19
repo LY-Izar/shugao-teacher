@@ -100,6 +100,8 @@ export type QuestionMeta = {
   stem?: string
   /** 知识点 id（见 lib/knowledge.ts），导入时按关键词自动打标 */
   points?: string[]
+  /** 题目配图（data URL）—— 生成「错题重练」文档要用 */
+  imgs?: string[]
 }
 
 export type Assignment = {
