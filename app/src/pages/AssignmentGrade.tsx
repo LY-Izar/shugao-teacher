@@ -354,11 +354,11 @@ function GradeSession({
    */
   useEffect(() => {
     try {
-      localStorage.setItem(DRAFT_KEY, JSON.stringify({ wrong, subs, confirmed, at: Date.now() }))
+      localStorage.setItem(draftKey(id), JSON.stringify({ wrong, subs, confirmed, at: Date.now() }))
     } catch {
       /* 存不下（隐私模式/配额满）也不能因此打断批改 */
     }
-  }, [wrong, subs, confirmed])
+  }, [id, wrong, subs, confirmed])
   const [open, setOpen] = useState<string | null>(null)
   const [mode, setMode] = useState<Mode>('byStudent')
   const [curQ, setCurQ] = useState(1)
@@ -453,6 +453,12 @@ function GradeSession({
   }
 
   const unconfirmed = students.length - confirmed.length
+
+  /* ***REMOVED***11 已批改的从原表挪走：原表只留没批的，越批越短，一眼看到还剩谁
+     （这里不用 useMemo —— 它在早退分支之后，用了会违反 hooks 规则；数组很小，直接算） */
+  const doneSet = new Set(confirmed)
+  const todo = students.filter((s) => !doneSet.has(s.studentNo))
+  const doneList = students.filter((s) => doneSet.has(s.studentNo))
 
   return (
     <>
@@ -632,10 +638,11 @@ function GradeSession({
           <div className="mb-3">
             <Sect>
               {mode === 'byStudent' ? '点学号展开题号' : '点学生记为做错'}
+              {todo.length ? ` · 还剩 ${todo.length} 人` : ' · 都批完了'}
             </Sect>
             <Panel className="overflow-hidden">
               <div className="grid grid-cols-3 gap-2 p-2.5 sm:grid-cols-4">
-                {students.map((s) => {
+                {todo.map((s) => {
                   const wc = wrongCountOf(s.studentNo)
                   const isOpen = open === s.studentNo
                   const done = confirmed.includes(s.studentNo)
@@ -803,6 +810,53 @@ function GradeSession({
               </div>
             </Panel>
           </div>
+
+          {/* ***REMOVED***11 已批改的挪到下面单独一张表，上面只留没批的 */}
+          {doneList.length ? (
+            <div className="mb-3">
+              <Sect>已批改 {doneList.length} 人 · 点一下撤回重批</Sect>
+              <Panel className="overflow-hidden">
+                <div className="grid grid-cols-3 gap-2 p-2.5 sm:grid-cols-4">
+                  {doneList.map((s) => {
+                    const wc = wrongCountOf(s.studentNo)
+                    return (
+                      <button
+                        key={s.id}
+                        type="button"
+                        onClick={() => setConfirmed((c) => c.filter((x) => x !== s.studentNo))}
+                        className="flex items-center gap-1.5 px-2 py-2 text-left"
+                        style={{
+                          border: '1px solid var(--color-line2)',
+                          borderRadius: 4,
+                          background: wc ? 'var(--color-badsoft)' : 'var(--color-oksoft)',
+                        }}
+                      >
+                        <span
+                          className="num shrink-0"
+                          style={{ fontSize: 13, fontWeight: 700, minWidth: 20 }}
+                        >
+                          {s.studentNo}
+                        </span>
+                        <span className="min-w-0 flex-1 truncate" style={{ fontSize: 12.5 }}>
+                          {s.name}
+                        </span>
+                        <span
+                          className="num shrink-0"
+                          style={{
+                            fontSize: 11,
+                            fontWeight: 600,
+                            color: wc ? 'var(--color-bad)' : 'var(--color-ok)',
+                          }}
+                        >
+                          {wc ? `错${wc}` : '全对'}
+                        </span>
+                      </button>
+                    )
+                  })}
+                </div>
+              </Panel>
+            </div>
+          ) : null}
 
           {/* 错题汇总（按题模式下的实时反馈） */}
           {mode === 'byQuestion' && stats && stats.questions[curQ - 1] ? (
