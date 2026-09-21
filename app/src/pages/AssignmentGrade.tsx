@@ -412,17 +412,27 @@ function GradeSession({
    */
   const markOpen = (no: string) => setOpen((cur) => (cur === no ? null : no))
 
+  /**
+   * 记错题 / 取消错题。
+   *
+   * 加错题 = 这个人确实批过了 → 确认；
+   * **但把最后一个错题也消掉时，要把他退回"还没批"** ——
+   * 否则「取消掉所有错题」就等于全对，又绕过了「确认全对」那个按钮。
+   */
   const toggleFor = (no: string, seq: number) => {
     setTaps((t) => t + 1)
-    setWrong((w) => ({ ...w, [no]: toggleQuestion(w[no], seq, subCountOf(seq)) }))
-    // 记了错题 = 这个人确实批过了
-    confirm(no)
+    const next = toggleQuestion(wrong[no], seq, subCountOf(seq))
+    setWrong((w) => ({ ...w, [no]: next }))
+    if (next.length === 0) setConfirmed((c) => c.filter((x) => x !== no))
+    else confirm(no)
   }
 
   const toggleSubFor = (no: string, seq: number, sub: number) => {
     setTaps((t) => t + 1)
-    setWrong((w) => ({ ...w, [no]: toggleSub(w[no], seq, sub) }))
-    confirm(no)
+    const next = toggleSub(wrong[no], seq, sub)
+    setWrong((w) => ({ ...w, [no]: next }))
+    if (next.length === 0) setConfirmed((c) => c.filter((x) => x !== no))
+    else confirm(no)
   }
 
   const applySubs = (seq: number, n: number) => {
