@@ -74,7 +74,8 @@ export default function Calls() {
             </Panel>
 
             <div className="flex flex-col gap-2.5 stagger">
-              {rows.map(({ call, students, context }) => (
+              {/* 只显示最近 3 条 —— 记录堆长了没用，真正要跟进的是最近这次 */}
+              {rows.slice(0, 3).map(({ call, students, context }) => (
                 <CallCard
                   key={call.id}
                   call={call}
@@ -91,6 +92,12 @@ export default function Calls() {
                 />
               ))}
             </div>
+
+            {rows.length > 3 ? (
+              <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 8, paddingLeft: 2 }}>
+                只显示最近 3 条（共 <span className="num">{rows.length}</span> 条记录）
+              </p>
+            ) : null}
 
             <div
               className="mt-4 px-1"

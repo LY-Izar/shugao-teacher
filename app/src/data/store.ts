@@ -502,22 +502,30 @@ export const useStore = create<State>()(
       setGrade: (id, data) => {
         set((s) => ({
           isDemo: false,
-          assignments: s.assignments.map((a) =>
-            a.id === id
-              ? {
-                  ...a,
-                  wrong: data.wrong ?? a.wrong,
-                  confirmedNos: data.confirmedNos ?? a.confirmedNos,
-                  subQuestions: data.subQuestions ?? a.subQuestions,
-                  status: data.status ?? a.status,
-                  gradeSeconds: data.gradeSeconds ?? a.gradeSeconds,
-                  gradedAt:
-                    data.status === 'graded' || data.status === 'reviewed'
-                      ? Date.now()
-                      : a.gradedAt,
-                }
-              : a,
-          ),
+          assignments: s.assignments.map((a) => {
+            if (a.id !== id) return a
+            /**
+             * 批改过的人一律视为「已交」。
+             * 有同学当天才交作业，教师会先批改再回头登记 ——
+             * 批完还挂着"未交"的话，查人界面会显示成红的，自相矛盾。
+             */
+            const done = new Set(a.confirmedNos ?? [])
+            for (const no of data.confirmedNos ?? []) done.add(no)
+            return {
+              ...a,
+              wrong: data.wrong ?? a.wrong,
+              confirmedNos: data.confirmedNos ?? a.confirmedNos,
+              subQuestions: data.subQuestions ?? a.subQuestions,
+              status: data.status ?? a.status,
+              gradeSeconds: data.gradeSeconds ?? a.gradeSeconds,
+              missingNos: a.missingNos.filter((n) => !done.has(n)),
+              lateNos: (a.lateNos ?? []).filter((n) => !done.has(n)),
+              // 已经有人在批 = 收缴这一步事实上过去了
+              collected: a.collected || Boolean(data.confirmedNos?.length),
+              gradedAt:
+                data.status === 'graded' || data.status === 'reviewed' ? Date.now() : a.gradedAt,
+            }
+          }),
         }))
         const a = get().assignments.find((x) => x.id === id)
         const tid = get().teacher?.id

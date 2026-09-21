@@ -340,6 +340,17 @@ export default function Assignments() {
                   >
                     {PRIMARY_LABEL[a.status]}
                   </Button>
+                  {/* 收缴不再挡着批改：有同学当天才交，不能因为没登记完就不让批 */}
+                  {a.status === 'open' ? (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      icon={<IconZap size={14} />}
+                      onClick={() => navigate(`/assignments/${a.id}/grade`)}
+                    >
+                      直接批改
+                    </Button>
+                  ) : null}
                   {a.status !== 'open' ? (
                     <Button
                       size="sm"

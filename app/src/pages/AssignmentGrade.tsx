@@ -8,6 +8,7 @@ import {
   IconInfo,
   IconMinus,
   IconPlus,
+  IconRefresh,
   IconX,
   IconZap,
 } from '../components/icons'
@@ -281,6 +282,33 @@ export default function AssignmentGrade() {
  * 用 key={id} 保证换档案时整块重挂载 —— 本地工作副本直接由 useState
  * 惰性初始化，不需要在 effect 里 setState，也不需要渲染期读写 ref。
  */
+/**
+ * 批改草稿：按档案 id 分开存，避免两份作业的进度互相覆盖。
+ * 只存页面内的临时副本，不动档案本身 —— 正式提交仍然走「完成批改」。
+ */
+function draftKey(id: string) {
+  return `shugao.grade.draft.${id}`
+}
+
+type GradeDraft = {
+  wrong: Assignment['wrong']
+  subs: Record<string, number>
+  confirmed: string[]
+  at: number
+}
+
+function loadDraft(key: string): GradeDraft | null {
+  try {
+    const raw = localStorage.getItem(key)
+    if (!raw) return null
+    const d = JSON.parse(raw) as GradeDraft
+    if (!d || typeof d !== 'object' || !d.wrong) return null
+    return d
+  } catch {
+    return null
+  }
+}
+
 function GradeSession({
   id,
   initialWrong,
@@ -294,6 +322,7 @@ function GradeSession({
 }) {
   const navigate = useNavigate()
   const push = useToast((s) => s.push)
+  const DRAFT_KEY = draftKey(id)
 
   const assignment = useStore((s) => s.assignments.find((a) => a.id === id))
   const klass = useStore((s) => s.classes.find((c) => c.id === assignment?.classId))
@@ -307,10 +336,29 @@ function GradeSession({
     [klass],
   )
 
-  /* 本地工作副本：初值来自档案，换档案时靠 key 重挂载 */
-  const [wrong, setWrong] = useState<Assignment['wrong']>(initialWrong)
-  const [subs, setSubs] = useState<Record<string, number>>(initialSubs)
-  const [confirmed, setConfirmed] = useState<string[]>(initialConfirmed)
+  /* 本地工作副本：初值来自档案（**已有草稿则优先用草稿**），换档案时靠 key 重挂载 */
+  const [restored] = useState(() => Boolean(loadDraft(DRAFT_KEY)))
+  const [wrong, setWrong] = useState<Assignment['wrong']>(() => loadDraft(DRAFT_KEY)?.wrong ?? initialWrong)
+  const [subs, setSubs] = useState<Record<string, number>>(
+    () => loadDraft(DRAFT_KEY)?.subs ?? initialSubs,
+  )
+  const [confirmed, setConfirmed] = useState<string[]>(
+    () => loadDraft(DRAFT_KEY)?.confirmed ?? initialConfirmed,
+  )
+  const [showRestored, setShowRestored] = useState(restored)
+
+  /**
+   * 边改边落盘。
+   * 批改是"一个人点十几下"的连续动作，中途切出去（接电话、切应用）就全丢，
+   * 教师得从头再点一遍 —— 这是最伤人的一类 bug。
+   */
+  useEffect(() => {
+    try {
+      localStorage.setItem(DRAFT_KEY, JSON.stringify({ wrong, subs, confirmed, at: Date.now() }))
+    } catch {
+      /* 存不下（隐私模式/配额满）也不能因此打断批改 */
+    }
+  }, [wrong, subs, confirmed])
   const [open, setOpen] = useState<string | null>(null)
   const [mode, setMode] = useState<Mode>('byStudent')
   const [curQ, setCurQ] = useState(1)
@@ -395,6 +443,12 @@ function GradeSession({
       status: 'graded',
       gradeSeconds: seconds,
     })
+    // 正式提交了，草稿就没用了 —— 留着下次进来会跟档案对不上
+    try {
+      localStorage.removeItem(DRAFT_KEY)
+    } catch {
+      /* 忽略 */
+    }
     navigate(`/assignments/${assignment.id}/grade/done`)
   }
 
@@ -420,6 +474,39 @@ function GradeSession({
 
       <Page>
         <div>
+          {/* 恢复了上次没批完的进度 —— 得让教师知道，否则会以为数据串了 */}
+          {showRestored ? (
+            <div
+              className="anim-in mb-3 flex items-center gap-2 p-2.5"
+              style={{
+                background: 'var(--color-accentsoft)',
+                border: '1px solid var(--color-line2)',
+                borderRadius: 6,
+                fontSize: 12.5,
+                color: 'var(--color-accentink)',
+              }}
+            >
+              <IconRefresh size={15} />
+              <span className="flex-1">已恢复上次没批完的进度，接着批就行</span>
+              <button
+                type="button"
+                style={{ color: 'var(--color-ink3)', textDecoration: 'underline' }}
+                onClick={() => {
+                  try {
+                    localStorage.removeItem(DRAFT_KEY)
+                  } catch {
+                    /* 忽略 */
+                  }
+                  setWrong(initialWrong)
+                  setSubs(initialSubs)
+                  setConfirmed(initialConfirmed)
+                  setShowRestored(false)
+                }}
+              >
+                丢弃，重新开始
+              </button>
+            </div>
+          ) : null}
           {/* 概览 */}
           <Panel className="anim-in mb-3 overflow-hidden">
             <StatStrip
