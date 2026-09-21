@@ -455,10 +455,14 @@ function GradeSession({
   const unconfirmed = students.length - confirmed.length
 
   /* ***REMOVED***11 已批改的从原表挪走：原表只留没批的，越批越短，一眼看到还剩谁
-     （这里不用 useMemo —— 它在早退分支之后，用了会违反 hooks 规则；数组很小，直接算） */
+     （不用 useMemo —— 它在早退分支之后，用了会违反 hooks 规则；数组很小，直接算）
+
+     注意：`confirmed` 在"点开学生"时就记上了（相当于"已批阅"），
+     所以**正在展开的那个人必须留在原表**，否则一点开就跳走、面板跟着消失。
+     收起之后才落到下面的已批改表。 */
   const doneSet = new Set(confirmed)
-  const todo = students.filter((s) => !doneSet.has(s.studentNo))
-  const doneList = students.filter((s) => doneSet.has(s.studentNo))
+  const todo = students.filter((s) => !doneSet.has(s.studentNo) || open === s.studentNo)
+  const doneList = students.filter((s) => doneSet.has(s.studentNo) && open !== s.studentNo)
 
   return (
     <>
