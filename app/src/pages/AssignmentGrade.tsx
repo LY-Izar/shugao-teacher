@@ -401,19 +401,28 @@ function GradeSession({
 
   const subCountOf = (seq: number) => subs[String(seq)] ?? 0
 
-  const markOpen = (no: string) => {
-    setOpen((cur) => (cur === no ? null : no))
-    setConfirmed((c) => (c.includes(no) ? c : [...c, no]))
-  }
+  const confirm = (no: string) => setConfirmed((c) => (c.includes(no) ? c : [...c, no]))
+
+  /**
+   * 点开学生**只展开，不算批改过**。
+   *
+   * 以前点开就同时记成「已批阅」，而没人点过错题就等于「全对」——
+   * 于是点错人再切走，那个人就被默默记成全对了。
+   * 全对必须是教师**明确点一下**的动作，不能靠"点开过"推断。
+   */
+  const markOpen = (no: string) => setOpen((cur) => (cur === no ? null : no))
 
   const toggleFor = (no: string, seq: number) => {
     setTaps((t) => t + 1)
     setWrong((w) => ({ ...w, [no]: toggleQuestion(w[no], seq, subCountOf(seq)) }))
+    // 记了错题 = 这个人确实批过了
+    confirm(no)
   }
 
   const toggleSubFor = (no: string, seq: number, sub: number) => {
     setTaps((t) => t + 1)
     setWrong((w) => ({ ...w, [no]: toggleSub(w[no], seq, sub) }))
+    confirm(no)
   }
 
   const applySubs = (seq: number, n: number) => {
@@ -761,13 +770,15 @@ function GradeSession({
                             <span className="flex-1" />
                             <Button
                               size="sm"
-                              variant="ghost"
+                              variant="primary"
                               onClick={() => {
                                 setWrong((w) => ({ ...w, [s.studentNo]: [] }))
                                 setTaps((t) => t + 1)
+                                // 「全对」是要点出来的动作，不点就不算批过
+                                confirm(s.studentNo)
                               }}
                             >
-                              整份全对
+                              确认全对
                             </Button>
                             <button
                               type="button"

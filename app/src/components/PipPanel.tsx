@@ -87,6 +87,8 @@ export function PipPanel({
   nameOf,
   onPrev,
   onNext,
+  all,
+  onPick,
 }: {
   tone?: 'pip' | 'inline'
   seq: number
@@ -97,10 +99,22 @@ export function PipPanel({
   nameOf: (no: string) => string
   onPrev: () => void
   onNext: () => void
+  /** 全部题目的正确率（下标 0 = 第 1 题），用来画题号条 */
+  all: Array<{ rate: number; band: Band }>
+  onPick: (seq: number) => void
 }) {
   const [showList, setShowList] = useState(false)
+  const [expanded, setExpanded] = useState(false)
   const meta = BAND_META[band]
   const p = tone === 'pip' ? PIP : INLINE
+
+  /**
+   * 题号条：收起时**一次全部显示**；展开时只留前一个、当前、后一个。
+   * 不全藏起来 —— 讲评时经常要往前后翻，看得见邻居才敢点。
+   */
+  const nums = expanded
+    ? [seq - 1, seq, seq + 1].filter((n) => n >= 1 && n <= total)
+    : Array.from({ length: total }, (_, i) => i + 1)
 
   /* 小窗获得焦点时可用方向键切题、Esc 收起名单 */
   useEffect(() => {
@@ -129,7 +143,53 @@ export function PipPanel({
         boxSizing: 'border-box',
       }}
     >
-      <div className="flex items-baseline gap-2">
+      {/* 题号条：每个题号带自己的正确率，颜色即讲评优先级 */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+        {nums.map((n) => {
+          const q = all[n - 1]
+          const on = n === seq
+          const col = q ? BAND_META[q.band].color : p.dim
+          return (
+            <button
+              key={n}
+              type="button"
+              aria-label={`第 ${n} 题`}
+              onClick={() => {
+                // 点当前题 = 收起/展开；点别的题 = 切过去并展开
+                if (n === seq) {
+                  setExpanded((v) => !v)
+                  return
+                }
+                onPick(n)
+                setExpanded(true)
+              }}
+              style={{
+                display: 'flex',
+                alignItems: 'baseline',
+                gap: 3,
+                padding: '2px 6px',
+                borderRadius: 3,
+                border: `1px solid ${on ? col : 'transparent'}`,
+                background: on ? 'rgb(255 255 255 / .14)' : 'rgb(255 255 255 / .06)',
+                color: col,
+                cursor: 'pointer',
+                flexShrink: 0,
+              }}
+            >
+              <span className="num" style={{ fontSize: 12, fontWeight: 700 }}>
+                {n}
+              </span>
+              <span className="num" style={{ fontSize: 10, opacity: 0.85 }}>
+                {q ? Math.round(q.rate * 100) : 0}%
+              </span>
+            </button>
+          )
+        })}
+      </div>
+
+      {expanded ? (
+        <>
+          <div className="flex items-baseline gap-2">
         <span className="num" style={{ fontSize: 25, fontWeight: 700, letterSpacing: '-.02em' }}>
           第 {seq} 题
         </span>
@@ -178,6 +238,9 @@ export function PipPanel({
         </div>
       ) : null}
 
+        </>
+      ) : null}
+
       <div style={{ display: 'flex', gap: 5, marginTop: tone === 'pip' ? 'auto' : 2 }}>
         <PipBtn onClick={onPrev} p={p} ariaLabel="上一题">
           ◀
@@ -186,7 +249,10 @@ export function PipPanel({
           ▶
         </PipBtn>
         <PipBtn
-          onClick={() => setShowList((v) => !v)}
+          onClick={() => {
+            setExpanded(true)
+            setShowList((v) => !v)
+          }}
           on={showList}
           p={p}
           ariaLabel={showList ? '隐藏名单' : '展开错误名单'}

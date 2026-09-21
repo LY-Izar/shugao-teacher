@@ -953,6 +953,8 @@ export default function Classroom() {
                       band={cur.band}
                       wrongNos={cur.wrongNos}
                       nameOf={nameOf}
+                      all={stats?.questions ?? []}
+                      onPick={setSeq}
                       onPrev={() => setSeq((v) => Math.max(1, v - 1))}
                       onNext={() =>
                         setSeq((v) => Math.min(stats?.questions.length ?? 1, v + 1))
@@ -1300,6 +1302,8 @@ export default function Classroom() {
                 band={cur.band}
                 wrongNos={cur.wrongNos}
                 nameOf={nameOf}
+                all={stats?.questions ?? []}
+                onPick={setSeq}
                 onPrev={() => setSeq((v) => Math.max(1, v - 1))}
                 onNext={() => setSeq((v) => Math.min(stats?.questions.length ?? 1, v + 1))}
               />
