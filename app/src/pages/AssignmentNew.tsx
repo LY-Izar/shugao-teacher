@@ -40,6 +40,8 @@ export default function AssignmentNew() {
   const [title, setTitle] = useState('')
   const [questionCount, setQuestionCount] = useState('6')
   const [assignDate, setAssignDate] = useState(isoOffset(-1))
+  /** 统计模式：普通 = 逐题记录；极简 = 只记优/良/差 */
+  const [statsMode, setStatsMode] = useState<'normal' | 'simple'>('normal')
   const [templateId, setTemplateId] = useState<string | undefined>(undefined)
   const [alsoTemplate, setAlsoTemplate] = useState(false)
 
@@ -281,6 +283,61 @@ export default function AssignmentNew() {
                   </label>
                 </div>
 
+                {/* 统计模式 */}
+                <div className="mt-4">
+                  <span className="label">统计模式</span>
+                  <div className="flex gap-2">
+                    {(
+                      [
+                        ['normal', '普通模式', '逐题记录对错，能出错题统计与知识点分析'],
+                        ['simple', '极简模式', '只记每人 优 / 良 / 差，不涉及具体题目'],
+                      ] as const
+                    ).map(([k, label, desc]) => {
+                      const on = statsMode === k
+                      return (
+                        <button
+                          key={k}
+                          type="button"
+                          onClick={() => setStatsMode(k)}
+                          className="flex-1 p-2.5 text-left"
+                          style={{
+                            border: `1px solid ${on ? 'var(--color-accent)' : 'var(--color-line2)'}`,
+                            background: on ? 'var(--color-accentsoft)' : 'var(--color-surface)',
+                            borderRadius: 4,
+                          }}
+                        >
+                          <span
+                            style={{
+                              display: 'block',
+                              fontSize: 13.5,
+                              fontWeight: on ? 680 : 550,
+                              color: on ? 'var(--color-accentink)' : 'var(--color-ink)',
+                            }}
+                          >
+                            {label}
+                          </span>
+                          <span
+                            style={{
+                              display: 'block',
+                              fontSize: 11,
+                              color: 'var(--color-ink3)',
+                              lineHeight: 1.5,
+                              marginTop: 2,
+                            }}
+                          >
+                            {desc}
+                          </span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                  {statsMode === 'simple' ? (
+                    <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 6, lineHeight: 1.6 }}>
+                      极简模式不进错题集，也没有逐题错误率 —— 只有等级分布。
+                    </p>
+                  ) : null}
+                </div>
+
                 {/* 题号预览 */}
                 <div className="mt-4">
                   <span className="label">批改页将按这些题号展开</span>
@@ -397,6 +454,7 @@ export default function AssignmentNew() {
                     classId,
                     assignDate,
                     questionCount: n,
+                    statsMode,
                     templateId,
                     ...structure,
                   })
@@ -419,6 +477,7 @@ export default function AssignmentNew() {
                     classId,
                     assignDate,
                     questionCount: n,
+                    statsMode,
                     templateId,
                     ...structure,
                   })

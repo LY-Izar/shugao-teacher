@@ -276,6 +276,8 @@ type GradeDraft = {
   wrong: Assignment['wrong']
   subs: Record<string, number>
   confirmed: string[]
+  grades?: Record<string, string>
+  focus?: string[]
   at: number
 }
 
@@ -329,6 +331,17 @@ function GradeSession({
   )
   const [showRestored, setShowRestored] = useState(restored)
 
+  /** 极简模式：不记题，只记 优/良/差 */
+  const simple = assignment?.statsMode === 'simple'
+  const [grades, setGrades] = useState<Record<string, string>>(() => assignment?.grades ?? {})
+  /**
+   * 「需重点关注」——和改错名单是两回事：
+   * 改错名单是"错了要改的人"，这里是教师觉得这孩子不对劲、单独标的（哪怕他全对）。
+   */
+  const [focus, setFocus] = useState<string[]>(() => assignment?.focusNos ?? [])
+  const toggleFocus = (no: string) =>
+    setFocus((f) => (f.includes(no) ? f.filter((x) => x !== no) : [...f, no]))
+
   /**
    * 边改边落盘。
    * 批改是"一个人点十几下"的连续动作，中途切出去（接电话、切应用）就全丢，
@@ -336,11 +349,14 @@ function GradeSession({
    */
   useEffect(() => {
     try {
-      localStorage.setItem(draftKey(id), JSON.stringify({ wrong, subs, confirmed, at: Date.now() }))
+      localStorage.setItem(
+        draftKey(id),
+        JSON.stringify({ wrong, subs, confirmed, grades, focus, at: Date.now() }),
+      )
     } catch {
       /* 存不下（隐私模式/配额满）也不能因此打断批改 */
     }
-  }, [id, wrong, subs, confirmed])
+  }, [id, wrong, subs, confirmed, grades, focus])
   const [open, setOpen] = useState<string | null>(null)
   const [mode, setMode] = useState<Mode>('byStudent')
   const [curQ, setCurQ] = useState(1)
@@ -443,6 +459,8 @@ function GradeSession({
       subQuestions: subs,
       status: 'graded',
       gradeSeconds: seconds,
+      grades,
+      focusNos: focus,
     })
     // 正式提交了，草稿就没用了 —— 留着下次进来会跟档案对不上
     try {
@@ -540,8 +558,8 @@ function GradeSession({
             />
           </Panel>
 
-          {/* 模式 */}
-          <div className="mb-3 flex items-center gap-2">
+          {/* 模式：极简模式没有"题"，这两个切换没意义 */}
+          <div className="mb-3 flex items-center gap-2" style={{ display: simple ? 'none' : undefined }}>
             <div className="seg">
               <button
                 type="button"
@@ -756,22 +774,59 @@ function GradeSession({
                               {s.studentNo}
                             </span>
                             <span style={{ fontSize: 13.5, fontWeight: 600 }}>{s.name}</span>
-                            <Tag tone={wc > 0 ? 'bad' : 'ok'}>
-                              {wc > 0 ? `${wc} 处错` : '全对'}
-                            </Tag>
+                            {simple ? (
+                              <Tag tone={grades[s.studentNo] ? 'accent' : 'idle'}>
+                                {grades[s.studentNo] ?? '未评'}
+                              </Tag>
+                            ) : (
+                              <Tag tone={wc > 0 ? 'bad' : 'ok'}>
+                                {wc > 0 ? `${wc} 处错` : '全对'}
+                              </Tag>
+                            )}
+                            {focus.includes(s.studentNo) ? <Tag tone="warn">重点关注</Tag> : null}
                             <span className="flex-1" />
-                            <Button
-                              size="sm"
-                              variant="primary"
-                              onClick={() => {
-                                setWrong((w) => ({ ...w, [s.studentNo]: [] }))
-                                setTaps((t) => t + 1)
-                                // 「全对」是要点出来的动作，不点就不算批过
-                                confirm(s.studentNo)
+                            {!simple ? (
+                              <Button
+                                size="sm"
+                                variant="primary"
+                                onClick={() => {
+                                  setWrong((w) => ({ ...w, [s.studentNo]: [] }))
+                                  setTaps((t) => t + 1)
+                                  // 「全对」是要点出来的动作，不点就不算批过
+                                  confirm(s.studentNo)
+                                }}
+                              >
+                                确认全对
+                              </Button>
+                            ) : null}
+                            {/* 「找」：标记需重点关注。和改错名单是两回事 —— 全对也可能要盯 */}
+                            <button
+                              type="button"
+                              onClick={() => toggleFocus(s.studentNo)}
+                              aria-label={`${s.name} 标记需重点关注`}
+                              title={focus.includes(s.studentNo) ? '取消重点关注' : '标记为需重点关注'}
+                              style={{
+                                width: 30,
+                                height: 30,
+                                borderRadius: 99,
+                                flexShrink: 0,
+                                fontSize: 13,
+                                fontWeight: 700,
+                                border: `1.5px solid ${
+                                  focus.includes(s.studentNo)
+                                    ? 'var(--color-warn)'
+                                    : 'var(--color-line2)'
+                                }`,
+                                background: focus.includes(s.studentNo)
+                                  ? 'var(--color-warnsoft)'
+                                  : 'transparent',
+                                color: focus.includes(s.studentNo)
+                                  ? 'var(--color-warn)'
+                                  : 'var(--color-ink3)',
                               }}
                             >
-                              确认全对
-                            </Button>
+                              找
+                            </button>
                             <button
                               type="button"
                               onClick={() => setOpen(null)}
@@ -782,26 +837,64 @@ function GradeSession({
                             </button>
                           </div>
 
-                          <div
-                            className="grid gap-1.5"
-                            style={{ gridTemplateColumns: 'repeat(4, minmax(0, 1fr))' }}
-                          >
-                            {Array.from(
-                              { length: assignment.questionCount },
-                              (_, i) => i + 1,
-                            ).map((seq) => (
-                              <QButton
-                                key={seq}
-                                seq={seq}
-                                subCount={subCountOf(seq)}
-                                wrong={wrong[s.studentNo] ?? []}
-                                onToggle={() => toggleFor(s.studentNo, seq)}
-                                onSub={(sub) => toggleSubFor(s.studentNo, seq, sub)}
-                                onSetSubCount={(n) => applySubs(seq, n)}
-                                onSubSettings={() => setEditing(seq)}
-                              />
-                            ))}
-                          </div>
+                          {/* 极简模式只点等级；普通模式点题号记错 */}
+                          {simple ? (
+                            <div className="flex gap-2">
+                              {(['优', '良', '差'] as const).map((lv) => {
+                                const on = grades[s.studentNo] === lv
+                                const tone =
+                                  lv === '优'
+                                    ? 'var(--color-ok)'
+                                    : lv === '差'
+                                      ? 'var(--color-bad)'
+                                      : 'var(--color-warn)'
+                                return (
+                                  <button
+                                    key={lv}
+                                    type="button"
+                                    onClick={() => {
+                                      setGrades((g) => ({ ...g, [s.studentNo]: lv }))
+                                      setTaps((t) => t + 1)
+                                      confirm(s.studentNo)
+                                    }}
+                                    className="flex-1"
+                                    style={{
+                                      padding: '10px 0',
+                                      fontSize: 16,
+                                      fontWeight: 700,
+                                      borderRadius: 4,
+                                      border: `1px solid ${on ? tone : 'var(--color-line2)'}`,
+                                      background: on ? 'var(--color-surface2)' : 'var(--color-surface)',
+                                      color: on ? tone : 'var(--color-ink2)',
+                                    }}
+                                  >
+                                    {lv}
+                                  </button>
+                                )
+                              })}
+                            </div>
+                          ) : (
+                            <div
+                              className="grid gap-1.5"
+                              style={{ gridTemplateColumns: 'repeat(4, minmax(0, 1fr))' }}
+                            >
+                              {Array.from(
+                                { length: assignment.questionCount },
+                                (_, i) => i + 1,
+                              ).map((seq) => (
+                                <QButton
+                                  key={seq}
+                                  seq={seq}
+                                  subCount={subCountOf(seq)}
+                                  wrong={wrong[s.studentNo] ?? []}
+                                  onToggle={() => toggleFor(s.studentNo, seq)}
+                                  onSub={(sub) => toggleSubFor(s.studentNo, seq, sub)}
+                                  onSetSubCount={(n) => applySubs(seq, n)}
+                                  onSubSettings={() => setEditing(seq)}
+                                />
+                              ))}
+                            </div>
+                          )}
 
                           <div
                             className="mt-2"
@@ -817,6 +910,52 @@ function GradeSession({
               </div>
             </Panel>
           </div>
+
+          {/* 需重点关注名单 —— 和改错名单是两回事，全对的人也可能被标进来 */}
+          {focus.length ? (
+            <div className="mb-3">
+              <Sect>需重点关注 {focus.length} 人 · 点一下取消</Sect>
+              <Panel className="overflow-hidden">
+                <div className="grid grid-cols-3 gap-2 p-2.5 sm:grid-cols-4">
+                  {students
+                    .filter((s) => focus.includes(s.studentNo))
+                    .map((s) => (
+                      <button
+                        key={s.id}
+                        type="button"
+                        onClick={() => toggleFocus(s.studentNo)}
+                        className="flex items-center gap-1.5 px-2 py-2 text-left"
+                        style={{
+                          border: '1px solid var(--color-warn)',
+                          borderRadius: 4,
+                          background: 'var(--color-warnsoft)',
+                        }}
+                      >
+                        <span
+                          className="num shrink-0"
+                          style={{ fontSize: 13, fontWeight: 700, minWidth: 20 }}
+                        >
+                          {s.studentNo}
+                        </span>
+                        <span className="min-w-0 flex-1 truncate" style={{ fontSize: 12.5 }}>
+                          {s.name}
+                        </span>
+                        <span
+                          className="num shrink-0"
+                          style={{ fontSize: 11, color: 'var(--color-ink3)' }}
+                        >
+                          {simple
+                            ? (grades[s.studentNo] ?? '未评')
+                            : wrongCountOf(s.studentNo)
+                              ? `错${wrongCountOf(s.studentNo)}`
+                              : '全对'}
+                        </span>
+                      </button>
+                    ))}
+                </div>
+              </Panel>
+            </div>
+          ) : null}
 
           {/* ***REMOVED***11 已批改的挪到下面单独一张表，上面只留没批的 */}
           {doneList.length ? (

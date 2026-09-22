@@ -27,8 +27,15 @@ export default function AssignmentStats() {
   const [showRule, setShowRule] = useState(false)
 
   const students: Student[] = useMemo(
-    () => (klass?.students ?? []).filter((s) => s.status === 'active'),
+    () =>
+      (klass?.students ?? [])
+        .filter((s) => s.status === 'active')
+        .sort((a, b) => Number(a.studentNo) - Number(b.studentNo)),
     [klass],
+  )
+  const focusList = useMemo(
+    () => students.filter((s) => assignment?.focusNos?.includes(s.studentNo)),
+    [students, assignment],
   )
   const stats = useMemo(
     () => (assignment ? gradeStats(students, assignment) : null),
@@ -59,6 +66,112 @@ export default function AssignmentStats() {
   const incomplete = stats.completeness < 1
   const top = stats.ranked.slice(0, 3)
   const nameOf = (no: string) => students.find((s) => s.studentNo === no)?.name ?? ''
+
+  /* 极简模式：没有逐题数据，只显示等级分布 —— 不能沿用逐题那套界面 */
+  if (assignment.statsMode === 'simple') {
+    const LV = ['优', '良', '差'] as const
+    const TONE: Record<string, string> = {
+      优: 'var(--color-ok)',
+      良: 'var(--color-warn)',
+      差: 'var(--color-bad)',
+    }
+    const counts = LV.map((lv) => students.filter((s) => assignment.grades?.[s.studentNo] === lv))
+    const ungraded = students.filter((s) => !assignment.grades?.[s.studentNo])
+    const total = students.length || 1
+    return (
+      <>
+        <PageHead
+          title="作业情况"
+          sub={`${klass?.name ?? '—'} · ${friendlyDate(assignment.assignDate)} · 极简模式`}
+          onBack={() => navigate('/assignments')}
+        />
+        <Page>
+          <div className="mb-4">
+            <Sect>等级分布 · {students.length} 人</Sect>
+            <Panel bodyClass="p-4">
+              {LV.map((lv, i) => (
+                <div key={lv} className="flex items-center gap-3 py-2">
+                  <span style={{ width: 30, fontSize: 16, fontWeight: 700, color: TONE[lv] }}>
+                    {lv}
+                  </span>
+                  <span
+                    style={{
+                      flex: 1,
+                      height: 10,
+                      background: 'var(--color-surface3)',
+                      borderRadius: 3,
+                      overflow: 'hidden',
+                    }}
+                  >
+                    <i
+                      style={{
+                        display: 'block',
+                        height: '100%',
+                        width: `${Math.round((counts[i].length / total) * 100)}%`,
+                        background: TONE[lv],
+                        borderRadius: 3,
+                      }}
+                    />
+                  </span>
+                  <span
+                    className="num"
+                    style={{ fontSize: 14, fontWeight: 700, width: 46, textAlign: 'right' }}
+                  >
+                    {counts[i].length} 人
+                  </span>
+                </div>
+              ))}
+              {ungraded.length ? (
+                <div
+                  style={{
+                    fontSize: 12,
+                    color: 'var(--color-ink3)',
+                    marginTop: 8,
+                    paddingTop: 8,
+                    borderTop: '1px solid var(--color-line)',
+                  }}
+                >
+                  还有 <span className="num">{ungraded.length}</span> 人没评等级
+                </div>
+              ) : null}
+            </Panel>
+          </div>
+
+          {focusList.length ? (
+            <div className="mb-4">
+              <Sect>需重点关注 · {focusList.length} 人</Sect>
+              <Panel bodyClass="p-3">
+                <div className="flex flex-wrap gap-2">
+                  {focusList.map((s) => (
+                    <span
+                      key={s.id}
+                      className="flex items-center gap-1.5 px-2 py-1"
+                      style={{
+                        border: '1px solid var(--color-warn)',
+                        borderRadius: 4,
+                        background: 'var(--color-warnsoft)',
+                        fontSize: 12.5,
+                      }}
+                    >
+                      <b className="num">{s.studentNo}</b>
+                      {s.name}
+                      <span style={{ color: 'var(--color-ink3)' }}>
+                        {assignment.grades?.[s.studentNo] ?? '未评'}
+                      </span>
+                    </span>
+                  ))}
+                </div>
+              </Panel>
+            </div>
+          ) : null}
+
+          <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.7 }}>
+            极简模式只记等级，没有逐题数据，所以不做错题统计、也不进错题集。
+          </p>
+        </Page>
+      </>
+    )
+  }
 
   return (
     <>

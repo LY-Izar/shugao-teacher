@@ -111,6 +111,8 @@ type State = {
     questionCount: number
     templateId?: string
     subject?: string
+    /** 统计模式：普通（逐题）或极简（只记优/良/差） */
+    statsMode?: 'normal' | 'simple'
     /** 从 Word 稿识别出的结构，可直接带上 */
     subQuestions?: Record<string, number>
     questionMeta?: Record<string, QuestionMeta>
@@ -131,6 +133,10 @@ type State = {
       subQuestions?: Record<string, number>
       status?: Assignment['status']
       gradeSeconds?: number
+      /** 极简模式的等级 */
+      grades?: Record<string, string>
+      /** 需重点关注名单 */
+      focusNos?: string[]
     },
   ) => void
 
@@ -429,6 +435,7 @@ export const useStore = create<State>()(
         subject,
         subQuestions,
         questionMeta,
+        statsMode,
       }) => {
         const id = uid()
         const item: Assignment = {
@@ -448,6 +455,9 @@ export const useStore = create<State>()(
           wrong: {},
           confirmedNos: [],
           questionMeta: questionMeta ?? {},
+          statsMode: statsMode ?? 'normal',
+          grades: {},
+          focusNos: [],
         }
         set((s) => ({ isDemo: false, assignments: [item, ...s.assignments] }))
         const tid = get().teacher?.id
@@ -518,6 +528,8 @@ export const useStore = create<State>()(
               subQuestions: data.subQuestions ?? a.subQuestions,
               status: data.status ?? a.status,
               gradeSeconds: data.gradeSeconds ?? a.gradeSeconds,
+              grades: data.grades ?? a.grades,
+              focusNos: data.focusNos ?? a.focusNos,
               missingNos: a.missingNos.filter((n) => !done.has(n)),
               lateNos: (a.lateNos ?? []).filter((n) => !done.has(n)),
               // 已经有人在批 = 收缴这一步事实上过去了

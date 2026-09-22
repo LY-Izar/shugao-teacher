@@ -26,7 +26,11 @@ export default function Calls() {
           const assignment = assignments.find((a) => a.id === c.assignmentId)
           return {
             call: c,
-            students: (klass?.students ?? []).filter((s) => s.status === 'active'),
+            students: (klass?.students ?? [])
+              .filter((s) => s.status === 'active')
+              .sort(
+                (a, b) => Number(a.studentNo) - Number(b.studentNo) || a.name.localeCompare(b.name, 'zh'),
+              ),
             context: `${assignment?.title ?? '作业已删除'} · ${klass?.name ?? ''}`,
           }
         }),

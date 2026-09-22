@@ -49,7 +49,10 @@ export default function AssignmentCall() {
   const [preview, setPreview] = useState(false)
 
   const students: Student[] = useMemo(
-    () => (klass?.students ?? []).filter((s) => s.status === 'active'),
+    () =>
+      (klass?.students ?? [])
+        .filter((s) => s.status === 'active')
+        .sort((a, b) => Number(a.studentNo) - Number(b.studentNo) || a.name.localeCompare(b.name, 'zh')),
     [klass],
   )
 

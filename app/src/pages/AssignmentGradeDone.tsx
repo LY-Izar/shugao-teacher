@@ -21,7 +21,10 @@ export default function AssignmentGradeDone() {
   const streakDays = useStore((s) => s.streakDays)
 
   const students = useMemo(
-    () => (klass?.students ?? []).filter((s) => s.status === 'active'),
+    () =>
+      (klass?.students ?? [])
+        .filter((s) => s.status === 'active')
+        .sort((a, b) => Number(a.studentNo) - Number(b.studentNo) || a.name.localeCompare(b.name, 'zh')),
     [klass],
   )
   const stats = useMemo(

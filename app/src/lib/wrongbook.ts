@@ -49,7 +49,9 @@ export type WrongBook = {
   items: WrongItem[]
 }
 
-const ranked = (a: Assignment) => a.status === 'graded' || a.status === 'reviewed'
+/** 只有逐题记录过的作业才有错题可算 —— 极简模式不进错题集 */
+const ranked = (a: Assignment) =>
+  (a.status === 'graded' || a.status === 'reviewed') && a.statsMode !== 'simple'
 
 /** 一个班、一份作业里，每道题的全班错误率 */
 function classRates(students: Student[], a: Assignment): number[] {

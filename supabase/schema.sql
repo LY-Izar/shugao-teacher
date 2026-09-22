@@ -100,6 +100,12 @@ create table if not exists assignments (
   graded_at       timestamptz,
   -- 题号 -> 题型/分值/小问数/难度（从练习册 Word 稿识别而来，教师可改）
   question_meta   jsonb   not null default '{}'::jsonb,
+  -- 'normal' 逐题记录；'simple' 只记优/良/差，没有逐题数据
+  stats_mode      text    not null default 'normal',
+  -- 极简模式：学号 -> 优/良/差
+  grades          jsonb   not null default '{}'::jsonb,
+  -- 本次作业的「需重点关注」学号（与改错名单是两回事）
+  focus_nos       text[]  not null default '{}',
   created_at      timestamptz not null default now()
 );
 create index if not exists assignments_class_idx on assignments (class_id, assign_date desc);
