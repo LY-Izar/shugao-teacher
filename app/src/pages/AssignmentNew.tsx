@@ -249,6 +249,35 @@ export default function AssignmentNew() {
                       value={assignDate}
                       onChange={(e) => setAssignDate(ensureISO(e.target.value, assignDate))}
                     />
+                    {/* 一体机上点原生日期控件很费劲，给三个最常用的快捷选项 */}
+                    <div className="mt-1.5 flex gap-1.5">
+                      {[
+                        ['今天', 0],
+                        ['昨天', -1],
+                        ['前天', -2],
+                      ].map(([label, off]) => {
+                        const iso = isoOffset(off as number)
+                        const on = assignDate === iso
+                        return (
+                          <button
+                            key={label as string}
+                            type="button"
+                            onClick={() => setAssignDate(iso)}
+                            style={{
+                              padding: '3px 10px',
+                              borderRadius: 4,
+                              fontSize: 12,
+                              border: `1px solid ${on ? 'var(--color-accent)' : 'var(--color-line2)'}`,
+                              background: on ? 'var(--color-accentsoft)' : 'var(--color-surface)',
+                              color: on ? 'var(--color-accentink)' : 'var(--color-ink2)',
+                              fontWeight: on ? 650 : 500,
+                            }}
+                          >
+                            {label as string}
+                          </button>
+                        )
+                      })}
+                    </div>
                   </label>
                 </div>
 

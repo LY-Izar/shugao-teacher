@@ -19,7 +19,7 @@ import { Button, Empty, PageHead, Panel, Sheet, Tag } from '../components/ui'
 import { useStore, useToast } from '../data/store'
 import { STATUS_TEXT, type Assignment, type AssignmentStatus } from '../data/types'
 import { collectStats } from '../lib/assignments'
-import { friendlyDate, parseISODate, toISODate } from '../lib/date'
+import { friendlyDate, isoOffset, parseISODate, toISODate } from '../lib/date'
 
 const wrongTotal = (a: Assignment) =>
   Object.values(a.wrong ?? {}).reduce((n, keys) => n + keys.length, 0)
@@ -83,12 +83,15 @@ export default function Assignments() {
   const classes = useStore((s) => s.classes)
   const removeAssignment = useStore((s) => s.removeAssignment)
   const addAssignment = useStore((s) => s.addAssignment)
+  const updateAssignment = useStore((s) => s.updateAssignment)
   const navigate = useNavigate()
   const push = useToast((s) => s.push)
   const [filter, setFilter] = useState<Filter>('all')
   const [classFilter, setClassFilter] = useState<string>('all')
   const [timeFilter, setTimeFilter] = useState<TimeFilter>('all')
   const [confirmId, setConfirmId] = useState<string | null>(null)
+  /** 正在改布置日期的档案 id */
+  const [dateFor, setDateFor] = useState<string | null>(null)
 
   const rows = useMemo(
     () =>
@@ -360,6 +363,15 @@ export default function Assignments() {
                       收缴记录
                     </Button>
                   ) : null}
+                  {/* 布置日期建完之后也要能改 —— 之前建了就锁死了 */}
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    icon={<IconCalendar size={14} />}
+                    onClick={() => setDateFor(a.id)}
+                  >
+                    改日期
+                  </Button>
                   {a.status === 'graded' || a.status === 'reviewed' ? (
                     <Button
                       size="sm"
@@ -426,6 +438,68 @@ export default function Assignments() {
           将删除「{assignments.find((x) => x.id === confirmId)?.title}」及其收缴与批改记录。
           该操作不可恢复。
         </div>
+      </Sheet>
+
+      {/* 改布置日期：建完之后也能改 */}
+      <Sheet open={Boolean(dateFor)} onClose={() => setDateFor(null)} title="修改布置日期">
+        {dateFor ? (
+          <>
+            <div className="mb-3 flex flex-wrap gap-1.5">
+              {[
+                ['今天', 0],
+                ['昨天', -1],
+                ['前天', -2],
+              ].map(([label, off]) => {
+                const iso = isoOffset(off as number)
+                const on = assignments.find((x) => x.id === dateFor)?.assignDate === iso
+                return (
+                  <button
+                    key={label as string}
+                    type="button"
+                    onClick={() => updateAssignment(dateFor, { assignDate: iso })}
+                    style={{
+                      padding: '4px 11px',
+                      borderRadius: 4,
+                      fontSize: 12.5,
+                      border: `1px solid ${on ? 'var(--color-accent)' : 'var(--color-line2)'}`,
+                      background: on ? 'var(--color-accentsoft)' : 'var(--color-surface)',
+                      color: on ? 'var(--color-accentink)' : 'var(--color-ink2)',
+                      fontWeight: on ? 650 : 500,
+                    }}
+                  >
+                    {label as string}
+                  </button>
+                )
+              })}
+            </div>
+            <label className="block">
+              <span className="label">也可以直接选</span>
+              <input
+                className="input"
+                type="date"
+                value={assignments.find((x) => x.id === dateFor)?.assignDate ?? ''}
+                onChange={(e) => {
+                  const v = e.target.value
+                  if (/^\d{4}-\d{2}-\d{2}$/.test(v)) updateAssignment(dateFor, { assignDate: v })
+                }}
+              />
+            </label>
+            <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 10, lineHeight: 1.7 }}>
+              改的是"这次作业算哪天的"。收缴与批改记录不受影响。
+            </p>
+            <Button
+              block
+              variant="primary"
+              className="mt-3"
+              onClick={() => {
+                push({ text: '布置日期已更新', tone: 'ok' })
+                setDateFor(null)
+              }}
+            >
+              完成
+            </Button>
+          </>
+        ) : null}
       </Sheet>
     </>
   )

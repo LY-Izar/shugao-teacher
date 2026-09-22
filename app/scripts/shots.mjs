@@ -132,9 +132,12 @@ await shot('18-grade-inline-panel')
 await q(3).dblclick()
 await shot('19-grade-quick-sub')
 
-// 题号格里的 + 直接加第三个小题
-await page.getByRole('button', { name: '第 3 题增加小题' }).click()
-await shot('20-grade-sub-plus')
+// 题号格里**不再有「+」**（紧挨着小小题号，点错就把题拆了）——
+// 加/减小题一律走长按面板
+await q(3).click({ delay: 700 })
+await page.getByRole('button', { name: '增加', exact: true }).click()
+await page.getByRole('button', { name: '完成', exact: true }).click()
+await shot('20-grade-sub-three')
 
 // 标 (1) 错
 await page.getByRole('button', { name: '第 3 题第 1 小题' }).click()

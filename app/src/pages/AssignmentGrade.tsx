@@ -146,26 +146,8 @@ function QButton({
               </button>
             )
           })}
-          {/* 预留的加号：直接加一个小题，不再弹窗 */}
-          <button
-            type="button"
-            onClick={() => onSetSubCount(subCount + 1)}
-            disabled={subCount >= 6}
-            aria-label={`第 ${seq} 题增加小题`}
-            style={{
-              width: 26,
-              height: 26,
-              border: 0,
-              background: 'transparent',
-              color: 'var(--color-ink3)',
-              cursor: subCount >= 6 ? 'not-allowed' : 'pointer',
-              opacity: subCount >= 6 ? 0.3 : 1,
-              display: 'grid',
-              placeItems: 'center',
-            }}
-          >
-            <IconPlus size={11} strokeWidth={2.4} />
-          </button>
+          {/* 这里原来有个「+」能直接加小题，但它紧挨着小题号，
+              点错就把题拆了 —— 拆小题现在只走双击，加/减小题只走长按面板 */}
         </div>
       ) : null}
     </div>
