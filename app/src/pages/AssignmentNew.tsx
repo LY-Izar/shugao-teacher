@@ -232,17 +232,20 @@ export default function AssignmentNew() {
                 </label>
 
                 <div className="mt-4 grid grid-cols-2 gap-3">
-                  <label>
-                    <span className="label">题目数量</span>
-                    <input
-                      className="input num"
-                      type="number"
-                      min={1}
-                      max={60}
-                      value={questionCount}
-                      onChange={(e) => setQuestionCount(e.target.value)}
-                    />
-                  </label>
+                  {/* 极简模式不记题，题目数量没有意义 —— 直接不显示 */}
+                  {statsMode === 'normal' ? (
+                    <label>
+                      <span className="label">题目数量</span>
+                      <input
+                        className="input num"
+                        type="number"
+                        min={1}
+                        max={60}
+                        value={questionCount}
+                        onChange={(e) => setQuestionCount(e.target.value)}
+                      />
+                    </label>
+                  ) : null}
                   <label>
                     <span className="label">布置日期</span>
                     <input
@@ -339,6 +342,7 @@ export default function AssignmentNew() {
                 </div>
 
                 {/* 题号预览 */}
+                {statsMode === 'normal' ? (
                 <div className="mt-4">
                   <span className="label">批改页将按这些题号展开</span>
                   <div className="flex flex-wrap gap-1.5">
@@ -362,6 +366,7 @@ export default function AssignmentNew() {
                     ))}
                   </div>
                 </div>
+                ) : null}
               </Panel>
             </div>
 
