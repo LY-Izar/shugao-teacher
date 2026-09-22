@@ -137,6 +137,11 @@ type State = {
       grades?: Record<string, string>
       /** 需重点关注名单 */
       focusNos?: string[]
+      /** 改错名单 / 已改错名单 */
+      correctionNos?: string[]
+      correctedNos?: string[]
+      /** 显式覆盖未交名单（「确认完成批改」时把未批改的人登记为未交） */
+      missingNos?: string[]
     },
   ) => void
 
@@ -530,10 +535,12 @@ export const useStore = create<State>()(
               gradeSeconds: data.gradeSeconds ?? a.gradeSeconds,
               grades: data.grades ?? a.grades,
               focusNos: data.focusNos ?? a.focusNos,
-              missingNos: a.missingNos.filter((n) => !done.has(n)),
+              correctionNos: data.correctionNos ?? a.correctionNos,
+              correctedNos: data.correctedNos ?? a.correctedNos,
+              missingNos: (data.missingNos ?? a.missingNos).filter((n) => !done.has(n)),
               lateNos: (a.lateNos ?? []).filter((n) => !done.has(n)),
               // 已经有人在批 = 收缴这一步事实上过去了
-              collected: a.collected || Boolean(data.confirmedNos?.length),
+              collected: a.collected || Boolean(data.confirmedNos?.length) || Boolean(data.missingNos),
               gradedAt:
                 data.status === 'graded' || data.status === 'reviewed' ? Date.now() : a.gradedAt,
             }

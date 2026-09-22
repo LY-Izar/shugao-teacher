@@ -2,9 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Page } from '../components/AppShell'
 import {
-  IconAlert,
   IconCheck,
-  IconChevronRight,
   IconInfo,
   IconMinus,
   IconPlus,
@@ -342,6 +340,17 @@ function GradeSession({
   const toggleFocus = (no: string) =>
     setFocus((f) => (f.includes(no) ? f.filter((x) => x !== no) : [...f, no]))
 
+  /** 改错名单：**边勾边存** —— 教师随时可能被打断，不能等最后一起提交 */
+  const [correction, setCorrection] = useState<string[]>(() => assignment?.correctionNos ?? [])
+  const updateAssignment = useStore((s) => s.updateAssignment)
+  const toggleCorrection = (no: string) => {
+    const next = correction.includes(no)
+      ? correction.filter((x) => x !== no)
+      : [...correction, no]
+    setCorrection(next)
+    updateAssignment(id, { correctionNos: next })
+  }
+
   /**
    * 边改边落盘。
    * 批改是"一个人点十几下"的连续动作，中途切出去（接电话、切应用）就全丢，
@@ -362,6 +371,8 @@ function GradeSession({
   const [curQ, setCurQ] = useState(1)
   const [editing, setEditing] = useState<number | null>(null)
   const [askedDone, setAskedDone] = useState(false)
+  /** 弹层里的步骤：先选保存方式，再选改错名单 */
+  const [step, setStep] = useState<'choose' | 'select'>('choose')
   const [taps, setTaps] = useState(0)
   const [startedAt] = useState(() => Date.now())
   const panelRef = useRef<HTMLDivElement>(null)
@@ -451,8 +462,33 @@ function GradeSession({
 
   const wrongCountOf = (no: string) => wrong[no]?.length ?? 0
 
+  /**
+   * 临时保存：只把当前进度写回档案，**不**动未批改的人。
+   * 之后从作业列表点进来会接着这次的状态，不是空白。
+   */
+  const saveDraft = () => {
+    setGrade(assignment.id, {
+      wrong,
+      confirmedNos: confirmed,
+      subQuestions: subs,
+      grades,
+      focusNos: focus,
+      correctionNos: correction,
+    })
+    push({ text: '已临时保存，之后可以接着批', tone: 'ok' })
+    navigate('/assignments')
+  }
+
+  /**
+   * 确认完成批改。
+   * **未批改的人一律登记为「未交」** —— 教师批的就是交上来的那一摞，
+   * 不在里面的就是没交。
+   */
   const finish = () => {
     const seconds = Math.round((Date.now() - startedAt) / 1000)
+    const ungraded = students
+      .filter((s) => !confirmed.includes(s.studentNo))
+      .map((s) => s.studentNo)
     setGrade(assignment.id, {
       wrong,
       confirmedNos: confirmed,
@@ -461,6 +497,8 @@ function GradeSession({
       gradeSeconds: seconds,
       grades,
       focusNos: focus,
+      correctionNos: correction,
+      missingNos: [...new Set([...assignment.missingNos, ...ungraded])],
     })
     // 正式提交了，草稿就没用了 —— 留着下次进来会跟档案对不上
     try {
@@ -494,7 +532,7 @@ function GradeSession({
             size="sm"
             variant="primary"
             icon={<IconCheck size={15} />}
-            onClick={() => (unconfirmed > 0 ? setAskedDone(true) : finish())}
+            onClick={() => setAskedDone(true)}
           >
             完成批改
           </Button>
@@ -1067,31 +1105,150 @@ function GradeSession({
         />
       ) : null}
 
-      {/* 完整度提醒 */}
+      {/* 完成批改：两条路 —— 临时保存 / 确认完成（未批改的记为未交） */}
       <Sheet
         open={askedDone}
-        onClose={() => setAskedDone(false)}
-        title={`还有 ${unconfirmed} 人未确认`}
-        footer={
-          <div className="flex gap-2">
-            <Button block onClick={() => setAskedDone(false)}>
-              回去补完
-            </Button>
-            <Button block variant="primary" icon={<IconChevronRight size={16} />} onClick={finish}>
-              继续完成
-            </Button>
-          </div>
-        }
+        onClose={() => {
+          setAskedDone(false)
+          setStep('choose')
+        }}
+        title={step === 'choose' ? '完成批改' : '选择需要改错的学生'}
       >
-        <div className="flex items-start gap-2.5">
-          <span style={{ color: 'var(--color-warn)', marginTop: 1 }}>
-            <IconAlert size={17} />
-          </span>
-          <div style={{ fontSize: 13, lineHeight: 1.7, color: 'var(--color-ink2)' }}>
-            「未确认」表示你还没打开过他们的题号列表 —— 系统无法区分
-            <b>确实全对</b>和<b>根本没看</b>。可以继续，但统计会标注数据完整度。
-          </div>
-        </div>
+        {step === 'choose' ? (
+          <>
+            <button
+              type="button"
+              className="mb-2 w-full p-3 text-left"
+              style={{ border: '1px solid var(--color-line2)', borderRadius: 6, background: 'var(--color-surface)' }}
+              onClick={saveDraft}
+            >
+              <span style={{ display: 'block', fontSize: 14.5, fontWeight: 650 }}>临时保存</span>
+              <span style={{ display: 'block', fontSize: 12, color: 'var(--color-ink3)', lineHeight: 1.6, marginTop: 2 }}>
+                只存下当前进度，未批改的 <b>{unconfirmed}</b> 人<b>不算未交</b>。
+                之后从作业列表点进来会接着这次的状态继续批。
+              </span>
+            </button>
+            <button
+              type="button"
+              className="w-full p-3 text-left"
+              style={{ border: '1px solid var(--color-accent)', borderRadius: 6, background: 'var(--color-accentsoft)' }}
+              onClick={() => (simple ? finish() : setStep('select'))}
+            >
+              <span style={{ display: 'block', fontSize: 14.5, fontWeight: 650, color: 'var(--color-accentink)' }}>
+                确认完成批改
+              </span>
+              <span style={{ display: 'block', fontSize: 12, color: 'var(--color-ink3)', lineHeight: 1.6, marginTop: 2 }}>
+                未批改的 <b>{unconfirmed}</b> 人会被登记为<b>未交</b>。
+                你批的就是交上来的那一摞，不在里面的就是没交。
+                {simple ? '' : ' 下一步可以挑需要改错的人。'}
+              </span>
+            </button>
+          </>
+        ) : (
+          <>
+            <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.7, marginBottom: 8 }}>
+              勾选需要改错的人 —— <b>勾一下就存一下</b>，被叫走了也不丢。
+              这份名单会出现在「改错登记」里。
+            </p>
+
+            <div className="mb-2 flex flex-wrap gap-1.5">
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  const all = students.filter((s) => wrongCountOf(s.studentNo) > 0).map((s) => s.studentNo)
+                  setCorrection(all)
+                  updateAssignment(id, { correctionNos: all })
+                }}
+              >
+                全选有错的
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  const bad = students
+                    .filter((s) => wrongCountOf(s.studentNo) / Math.max(1, assignment.questionCount) >= 0.3)
+                    .map((s) => s.studentNo)
+                  setCorrection(bad)
+                  updateAssignment(id, { correctionNos: bad })
+                }}
+              >
+                错误率 ≥ 30%
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  setCorrection([])
+                  updateAssignment(id, { correctionNos: [] })
+                }}
+              >
+                清空
+              </Button>
+            </div>
+
+            <div style={{ maxHeight: '52vh', overflowY: 'auto' }}>
+              {students.map((s) => {
+                const wc = wrongCountOf(s.studentNo)
+                const rate = wc / Math.max(1, assignment.questionCount)
+                const col =
+                  wc === 0 ? 'var(--color-ok)' : rate >= 0.3 ? 'var(--color-bad)' : 'var(--color-warn)'
+                const on = correction.includes(s.studentNo)
+                return (
+                  <label
+                    key={s.id}
+                    className="flex items-center gap-2.5 px-1 py-2"
+                    style={{ borderBottom: '1px solid var(--color-line)', cursor: 'pointer' }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={on}
+                      onChange={() => toggleCorrection(s.studentNo)}
+                      style={{ width: 16, height: 16, accentColor: 'var(--color-accent)', flexShrink: 0 }}
+                    />
+                    <span className="num shrink-0" style={{ fontSize: 13.5, fontWeight: 700, minWidth: 24 }}>
+                      {s.studentNo}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate" style={{ fontSize: 13.5 }}>
+                      {s.name}
+                    </span>
+                    {focus.includes(s.studentNo) ? <Tag tone="warn">重点</Tag> : null}
+                    <span
+                      className="num shrink-0"
+                      style={{ fontSize: 13, fontWeight: 700, color: col, minWidth: 48, textAlign: 'right' }}
+                    >
+                      {wc === 0 ? '全对' : `错 ${wc}`}
+                    </span>
+                  </label>
+                )
+              })}
+            </div>
+
+            <div className="mt-3 flex gap-2">
+              <Button block onClick={() => setStep('choose')}>
+                返回
+              </Button>
+              <Button
+                block
+                variant="primary"
+                onClick={() => {
+                  // 改错名单默认就是"有错的那些人"，教师没勾就按有错的来
+                  if (!correction.length) {
+                    const all = students
+                      .filter((s) => wrongCountOf(s.studentNo) > 0)
+                      .map((s) => s.studentNo)
+                    setCorrection(all)
+                    updateAssignment(id, { correctionNos: all })
+                  }
+                  finish()
+                }}
+              >
+                确认完成批改
+              </Button>
+            </div>
+          </>
+        )}
       </Sheet>
     </>
   )

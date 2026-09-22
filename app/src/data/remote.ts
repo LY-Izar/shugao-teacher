@@ -57,6 +57,8 @@ type AssignmentRow = {
   stats_mode: string
   grades: Record<string, string>
   focus_nos: string[]
+  correction_nos: string[]
+  corrected_nos: string[]
   grade_seconds: number | null
   graded_at: string | null
   /** 由数据库默认值生成，只在读取时才有 */
@@ -152,6 +154,8 @@ export const assignmentToRow = (a: Assignment, teacherId: string): AssignmentRow
   stats_mode: a.statsMode ?? 'normal',
   grades: a.grades ?? {},
   focus_nos: a.focusNos ?? [],
+  correction_nos: a.correctionNos ?? [],
+  corrected_nos: a.correctedNos ?? [],
   grade_seconds: a.gradeSeconds ?? null,
   graded_at: ts(a.gradedAt),
 })
@@ -221,6 +225,8 @@ const rowToAssignment = (r: AssignmentRow): Assignment => ({
   statsMode: (r.stats_mode as 'simple' | 'normal') ?? 'normal',
   grades: r.grades ?? {},
   focusNos: r.focus_nos ?? [],
+  correctionNos: r.correction_nos ?? [],
+  correctedNos: r.corrected_nos ?? [],
   gradeSeconds: r.grade_seconds ?? undefined,
   gradedAt: ms(r.graded_at),
 })

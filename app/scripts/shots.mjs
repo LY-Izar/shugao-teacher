@@ -153,11 +153,24 @@ await page.getByRole('button', { name: /^7 号/ }).click()
 await q(2).click()
 await shot('23-grade-switch', { full: true })
 
-// 完成批改 → 完整度提醒 → 继续
+// 完成批改 → 两条路：临时保存 / 确认完成（未批改的记为未交）→ 再挑改错名单
 await page.getByRole('button', { name: '完成批改' }).click()
-await shot('24-grade-incomplete')
-await page.getByRole('button', { name: '继续完成' }).click()
-await shot('25-grade-done', { full: true, wait: 1200 })
+await shot('24-grade-finish-choose')
+
+// 先走「临时保存」：状态不变，进度留下
+await page.getByRole('button', { name: /^临时保存/ }).click()
+await page.waitForTimeout(700)
+await shot('25-grade-draft-saved', { full: true })
+
+// 再进来接着批 → 这次走「确认完成批改」+ 挑改错名单
+await page.goto(`${BASE}/assignments/a-demo-4/grade`, { waitUntil: 'networkidle' })
+await page.waitForTimeout(600)
+await page.getByRole('button', { name: '完成批改' }).click()
+await page.getByRole('button', { name: /确认完成批改/ }).click()
+await shot('26-grade-pick-correction')
+await page.getByRole('button', { name: '全选有错的' }).click()
+await page.getByRole('button', { name: '确认完成批改' }).click()
+await shot('27-grade-done', { full: true, wait: 1200 })
 
 // ---------- S4：统计与呼叫 ----------
 await page.goto(`${BASE}/assignments/a-demo-1/stats`, { waitUntil: 'networkidle' })
@@ -283,7 +296,8 @@ await shot('45-late-night', { full: true, wait: 600 })
 await page.clock.setFixedTime(new Date('2026-09-17T19:40:00'))
 await page.goto(`${BASE}/assignments/a-demo-4/grade`, { waitUntil: 'networkidle' })
 await page.getByRole('button', { name: '完成批改' }).click()
-await page.getByRole('button', { name: '继续完成' }).click()
+await page.getByRole('button', { name: /确认完成批改/ }).click()
+await page.getByRole('button', { name: '确认完成批改' }).click()
 await shot('46-day-done', { wait: 1100 })
 await page.getByRole('button', { name: '好的' }).click()
 await page.waitForTimeout(400)
@@ -308,7 +322,8 @@ await shot('50-holiday-festive', { full: true, wait: 900 })
 await page.clock.setFixedTime(new Date('2026-09-23T19:40:00'))
 await page.goto(`${BASE}/assignments/a-demo-4/grade`, { waitUntil: 'networkidle' })
 await page.getByRole('button', { name: '完成批改' }).click()
-await page.getByRole('button', { name: '继续完成' }).click()
+await page.getByRole('button', { name: /确认完成批改/ }).click()
+await page.getByRole('button', { name: '确认完成批改' }).click()
 await shot('51-countdown-done', { wait: 1100 })
 
 // ---------- 桌面 ----------

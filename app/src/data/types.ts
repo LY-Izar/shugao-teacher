@@ -162,6 +162,14 @@ export type Assignment = {
   focusNos?: string[]
   /** 极简模式的等级：学号 → 优 / 良 / 差 */
   grades?: Record<string, string>
+  /**
+   * 「改错名单」：这次作业做错了、要去改的人。
+   * 与 focusNos（需重点关注）是**两张表** —— 全对的学生也可能被重点关注，
+   * 而进改错名单的一定是有错的。
+   */
+  correctionNos?: string[]
+  /** 「已改错」：改错登记时逐个点过的学号 */
+  correctedNos?: string[]
 }
 
 /** 错题键：无小题为 "3"，有小题为 "3.1" */

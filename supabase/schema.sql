@@ -106,13 +106,22 @@ create table if not exists assignments (
   grades          jsonb   not null default '{}'::jsonb,
   -- 本次作业的「需重点关注」学号（与改错名单是两回事）
   focus_nos       text[]  not null default '{}',
+  -- 改错名单与已改错名单
+  correction_nos  text[]  not null default '{}',
+  corrected_nos   text[]  not null default '{}',
   created_at      timestamptz not null default now()
 );
 create index if not exists assignments_class_idx on assignments (class_id, assign_date desc);
 create index if not exists assignments_teacher_idx on assignments (teacher_id);
 
--- 已经建过表的库补这一列（本脚本可重复执行）
+-- 已经建过表的库补这些列（本脚本可重复执行）
+-- ⚠️ `create table if not exists` 对**已存在**的表不会加列 —— 老库必须靠下面这几条 ALTER。
 alter table assignments add column if not exists question_meta jsonb not null default '{}'::jsonb;
+alter table assignments add column if not exists stats_mode     text    not null default 'normal';
+alter table assignments add column if not exists grades         jsonb   not null default '{}'::jsonb;
+alter table assignments add column if not exists focus_nos      text[]  not null default '{}';
+alter table assignments add column if not exists correction_nos text[]  not null default '{}';
+alter table assignments add column if not exists corrected_nos  text[]  not null default '{}';
 
 -- ============================================================
 --  4. 教师课表（每周重复）
