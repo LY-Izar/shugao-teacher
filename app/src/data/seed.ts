@@ -288,6 +288,10 @@ export function makeDemoAssignments(classes: Klass[]): Assignment[] {
       questionMeta: DEMO_META_21,
       wrong: makeDemoGrading(a.students, 6),
       confirmedNos: a.students.filter((s) => s.status === 'active').map((s) => s.studentNo),
+      // 改错名单 / 已改错 / 需重点关注 —— 让改错登记页在演示数据里就有内容
+      correctionNos: a.students.filter((s) => s.status === 'active').slice(0, 12).map((s) => s.studentNo),
+      correctedNos: a.students.filter((s) => s.status === 'active').slice(0, 5).map((s) => s.studentNo),
+      focusNos: [a.students[2]?.studentNo, a.students[8]?.studentNo].filter(Boolean) as string[],
       gradeSeconds: 254,
       gradedAt: now - 2 * 86400000 + 7200_000,
     },

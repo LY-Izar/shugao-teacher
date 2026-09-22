@@ -18,6 +18,7 @@ import ImportPhoto from './pages/ImportPhoto'
 import Login from './pages/Login'
 import NotFound from './pages/NotFound'
 import WrongBook from './pages/WrongBook'
+import AssignmentCorrect from './pages/AssignmentCorrect'
 import Files from './pages/Files'
 import Schedule from './pages/Schedule'
 import Settings from './pages/Settings'
@@ -132,6 +133,14 @@ export default function App() {
           element={
             <Guard>
               <AssignmentGrade />
+            </Guard>
+          }
+        />
+        <Route
+          path="/assignments/:id/correct"
+          element={
+            <Guard>
+              <AssignmentCorrect />
             </Guard>
           }
         />

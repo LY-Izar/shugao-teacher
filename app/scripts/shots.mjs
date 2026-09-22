@@ -172,6 +172,22 @@ await page.getByRole('button', { name: '全选有错的' }).click()
 await page.getByRole('button', { name: '确认完成批改' }).click()
 await shot('27-grade-done', { full: true, wait: 1200 })
 
+// 改错登记：点一下记「已改」，重点关注置顶变色，旁边能呼叫
+// （用已批改且带改错名单的 a-demo-1，避免依赖前面步骤的内存状态）
+await page.goto(`${BASE}/assignments/a-demo-1/correct`, { waitUntil: 'networkidle' })
+await shot('28-correct', { full: true })
+const beforeCorrect = await page.locator('.row').count()
+await page.locator('.row').first().click()
+await page.waitForTimeout(400)
+await page.screenshot({ path: `${OUT}/29-correct-one-done.png`, fullPage: true })
+console.log('correct rows', beforeCorrect)
+await page.getByRole('button', { name: '更改名单' }).click()
+await shot('30-correct-edit-list')
+await page.getByRole('button', { name: /^完成/ }).click()
+await page.getByRole('button', { name: '呼叫' }).click()
+await shot('31-correct-call')
+await page.getByRole('button', { name: /取消/ }).click()
+
 // ---------- S4：统计与呼叫 ----------
 await page.goto(`${BASE}/assignments/a-demo-1/stats`, { waitUntil: 'networkidle' })
 await shot('26-stats', { full: true })

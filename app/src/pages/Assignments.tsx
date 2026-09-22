@@ -382,6 +382,20 @@ export default function Assignments() {
                       呼叫
                     </Button>
                   ) : null}
+                  {/* 确认完成批改之后才有改错登记 */}
+                  {a.status === 'graded' || a.status === 'reviewed' ? (
+                    <Button
+                      size="sm"
+                      variant={(a.correctionNos?.length ?? 0) > 0 ? 'primary' : 'ghost'}
+                      icon={<IconCheck size={14} />}
+                      onClick={() => navigate(`/assignments/${a.id}/correct`)}
+                    >
+                      改错登记
+                      {a.correctionNos?.length
+                        ? ` ${a.correctedNos?.length ?? 0}/${a.correctionNos.length}`
+                        : ''}
+                    </Button>
+                  ) : null}
                   <span className="flex-1" />
                   <button
                     type="button"
