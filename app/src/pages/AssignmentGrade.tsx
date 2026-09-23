@@ -244,15 +244,41 @@ function SubEditor({
 
 export default function AssignmentGrade() {
   const { id = '' } = useParams()
+  const navigate = useNavigate()
   const assignment = useStore((s) => s.assignments.find((a) => a.id === id))
+  const hydrated = useStore((s) => s.hydrated)
+
+  /**
+   * ⚠️ 档案没到位之前**绝对不能挂载 GradeSession**。
+   *
+   * GradeSession 把初值快照进 useState，而 useState 的初值**只取第一次渲染**。
+   * 之前是 `initialConfirmed={assignment?.confirmedNos ?? []}` ——
+   * 云端数据还在路上时传进去空数组，等数据到了它也不会再看一眼，
+   * 于是「修改批改」进去永远是全新界面。这就是"有的档案正常、有的不对"的原因：
+   * 差别只在进页面那一瞬间档案在不在内存里。
+   */
+  if (!hydrated || !assignment) {
+    return (
+      <>
+        <PageHead title="批改录入" onBack={() => navigate('/assignments')} />
+        <Page>
+          <Panel bodyClass="p-6 text-center">
+            <div style={{ fontSize: 14, color: 'var(--color-ink3)' }}>
+              {hydrated ? '该作业档案可能已被删除' : '正在读取作业档案…'}
+            </div>
+          </Panel>
+        </Page>
+      </>
+    )
+  }
 
   return (
     <GradeSession
       key={id}
       id={id}
-      initialWrong={assignment?.wrong ?? {}}
-      initialSubs={assignment?.subQuestions ?? {}}
-      initialConfirmed={assignment?.confirmedNos ?? []}
+      initialWrong={assignment.wrong ?? {}}
+      initialSubs={assignment.subQuestions ?? {}}
+      initialConfirmed={assignment.confirmedNos ?? []}
     />
   )
 }
@@ -397,6 +423,22 @@ function GradeSession({
       /* 存不下（隐私模式/配额满）也不能因此打断批改 */
     }
   }, [id, wrong, subs, confirmed, grades, focus])
+
+  /**
+   * 兜底：档案数据在本页挂载**之后**才更新（云端同步晚到）时补一次。
+   * 只在**完全没动过**时生效（一个人都没确认、一道错题都没记）——
+   * 教师已经点过的进度绝不能被覆盖。
+   */
+  useEffect(() => {
+    const saved = assignment?.confirmedNos ?? []
+    const untouched = confirmed.length === 0 && Object.keys(wrong).length === 0
+    if (untouched && saved.length > 0) {
+      setWrong(assignment?.wrong ?? {})
+      setSubs(assignment?.subQuestions ?? {})
+      setConfirmed(saved)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [confirmed.length, Object.keys(wrong).length, assignment?.confirmedNos?.length])
   const [open, setOpen] = useState<string | null>(null)
   const [mode, setMode] = useState<Mode>('byStudent')
   const [curQ, setCurQ] = useState(1)
