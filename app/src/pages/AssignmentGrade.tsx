@@ -291,6 +291,29 @@ function loadDraft(key: string): GradeDraft | null {
   }
 }
 
+/**
+ * 挑一份**值得用**的草稿。
+ *
+ * 空草稿比档案还空时直接丢掉 —— 它多半是"数据还没就绪时挂载写进去的空壳"，
+ * 用了它会把档案里真实的批改进度盖成 0。
+ */
+function pickDraft(key: string, savedConfirmed: string[]): GradeDraft | null {
+  const d = loadDraft(key)
+  if (!d) return null
+  const draftCount = (d.confirmed ?? []).length
+  const savedCount = savedConfirmed.length
+  // 草稿的进度还不如档案 → 这是坏草稿（或者档案更新过），以档案为准
+  if (draftCount < savedCount) {
+    try {
+      localStorage.removeItem(key)
+    } catch {
+      /* 忽略 */
+    }
+    return null
+  }
+  return d
+}
+
 function GradeSession({
   id,
   initialWrong,
@@ -318,16 +341,17 @@ function GradeSession({
     [klass],
   )
 
-  /* 本地工作副本：初值来自档案（**已有草稿则优先用草稿**），换档案时靠 key 重挂载 */
-  const [restored] = useState(() => Boolean(loadDraft(DRAFT_KEY)))
-  const [wrong, setWrong] = useState<Assignment['wrong']>(() => loadDraft(DRAFT_KEY)?.wrong ?? initialWrong)
-  const [subs, setSubs] = useState<Record<string, number>>(
-    () => loadDraft(DRAFT_KEY)?.subs ?? initialSubs,
-  )
-  const [confirmed, setConfirmed] = useState<string[]>(
-    () => loadDraft(DRAFT_KEY)?.confirmed ?? initialConfirmed,
-  )
-  const [showRestored, setShowRestored] = useState(restored)
+  /**
+   * 本地工作副本：初值来自档案，**草稿只在它确实更有进度时**才优先。
+   *
+   * 之前是 `草稿 ?? 档案`，而空数组也是"有值" —— 于是一份空壳草稿
+   * 会把档案里已批改的 43 个人盖成 0 个（就是"有的档案点进去是空白"的原因）。
+   */
+  const [draft] = useState(() => pickDraft(DRAFT_KEY, initialConfirmed))
+  const [wrong, setWrong] = useState<Assignment['wrong']>(() => draft?.wrong ?? initialWrong)
+  const [subs, setSubs] = useState<Record<string, number>>(() => draft?.subs ?? initialSubs)
+  const [confirmed, setConfirmed] = useState<string[]>(() => draft?.confirmed ?? initialConfirmed)
+  const [showRestored, setShowRestored] = useState(Boolean(draft))
 
   /** 极简模式：不记题，只记 优/良/差 */
   const simple = assignment?.statsMode === 'simple'
@@ -356,7 +380,14 @@ function GradeSession({
    * 批改是"一个人点十几下"的连续动作，中途切出去（接电话、切应用）就全丢，
    * 教师得从头再点一遍 —— 这是最伤人的一类 bug。
    */
+  const firstRun = useRef(true)
   useEffect(() => {
+    // 挂载那一次不写 —— 那一刻的初值可能还没就绪，
+    // 写下去就是一份空壳草稿，下次进来会把真实进度盖掉
+    if (firstRun.current) {
+      firstRun.current = false
+      return
+    }
     try {
       localStorage.setItem(
         draftKey(id),
