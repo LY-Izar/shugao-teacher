@@ -36,7 +36,8 @@ export default function AssignmentNew() {
   const push = useToast((s) => s.push)
 
   const firstClass = currentClassId ?? classes[0]?.id ?? ''
-  const [classId, setClassId] = useState(firstClass)
+  /** 可以一次勾多个班 —— 提交时为每个班各建一份独立档案 */
+  const [classIds, setClassIds] = useState<string[]>(firstClass ? [firstClass] : [])
   const [title, setTitle] = useState('')
   const [questionCount, setQuestionCount] = useState('6')
   const [assignDate, setAssignDate] = useState(isoOffset(-1))
@@ -52,7 +53,8 @@ export default function AssignmentNew() {
   const [parsing, setParsing] = useState(false)
   const [adopted, setAdopted] = useState(false)
 
-  const klass = classes.find((c) => c.id === classId)
+  /** 预览用第一个班就够了（题干、人数只跟题目有关） */
+  const klass = classes.find((c) => c.id === classIds[0])
   const n = Math.max(1, Math.min(60, Number(questionCount) || 0))
 
   const handleFile = async (f: File) => {
@@ -370,18 +372,22 @@ export default function AssignmentNew() {
               </Panel>
             </div>
 
-            {/* 班级 */}
+            {/* 班级 —— 可以**一次勾多个班**：同一份作业常常要布置给两个班 */}
             <div className="mb-4">
-              <Sect>第 4 步 · 布置班级</Sect>
+              <Sect>第 4 步 · 布置班级{classIds.length > 1 ? ` · 已选 ${classIds.length} 个` : ''}</Sect>
               <Panel bodyClass="p-3">
                 <div className="flex flex-wrap gap-2">
                   {classes.map((c) => {
-                    const on = classId === c.id
+                    const on = classIds.includes(c.id)
                     return (
                       <button
                         key={c.id}
                         type="button"
-                        onClick={() => setClassId(c.id)}
+                        onClick={() =>
+                          setClassIds((cur) =>
+                            cur.includes(c.id) ? cur.filter((x) => x !== c.id) : [...cur, c.id],
+                          )
+                        }
                         className="flex items-center gap-2 px-3 py-2"
                         style={{
                           border: `1px solid ${on ? 'var(--color-accent)' : 'var(--color-line2)'}`,
@@ -390,16 +396,40 @@ export default function AssignmentNew() {
                           color: on ? 'var(--color-accentink)' : 'var(--color-ink2)',
                         }}
                       >
-                        <IconUsers size={15} />
+                        <span
+                          className="grid shrink-0 place-items-center"
+                          style={{
+                            width: 15,
+                            height: 15,
+                            borderRadius: 3,
+                            border: `1px solid ${on ? 'var(--color-accent)' : 'var(--color-line2)'}`,
+                            background: on ? 'var(--color-accent)' : 'transparent',
+                            color: '***REMOVED***fff',
+                          }}
+                        >
+                          {on ? <IconCheck size={11} strokeWidth={3} /> : null}
+                        </span>
                         <span style={{ fontSize: 13, fontWeight: 550 }}>{c.name}</span>
                         <span className="num" style={{ fontSize: 11.5, opacity: 0.75 }}>
                           {c.students.filter((s) => s.status === 'active').length} 人
                         </span>
-                        {on ? <IconCheck size={14} /> : null}
                       </button>
                     )
                   })}
                 </div>
+                {classIds.length > 1 ? (
+                  <p
+                    style={{
+                      fontSize: 11.5,
+                      color: 'var(--color-ink3)',
+                      marginTop: 8,
+                      lineHeight: 1.7,
+                    }}
+                  >
+                    会为这 <b className="num">{classIds.length}</b> 个班<b>各建一份独立档案</b>
+                    （题目、分值、知识点共用），收缴与批改各算各的。
+                  </p>
+                ) : null}
               </Panel>
             </div>
 
@@ -453,20 +483,29 @@ export default function AssignmentNew() {
               <Button
                 block
                 onClick={() => {
-                  if (!classId || !title.trim()) return
-                  addAssignment({
-                    title,
-                    classId,
-                    assignDate,
-                    questionCount: n,
-                    statsMode,
-                    templateId,
-                    ...structure,
+                  if (!classIds.length || !title.trim()) return
+                  // 勾了几个班就建几份 —— 各算各的收缴与批改
+                  for (const cid of classIds) {
+                    addAssignment({
+                      title,
+                      classId: cid,
+                      assignDate,
+                      questionCount: n,
+                      statsMode,
+                      templateId,
+                      ...structure,
+                    })
+                  }
+                  push({
+                    text:
+                      classIds.length > 1
+                        ? `已为 ${classIds.length} 个班各建一份档案`
+                        : '档案已建立',
+                    tone: 'ok',
                   })
-                  push({ text: '档案已建立', tone: 'ok' })
                   navigate('/assignments')
                 }}
-                disabled={!title.trim()}
+                disabled={!title.trim() || !classIds.length}
               >
                 仅建立档案
               </Button>
@@ -474,18 +513,21 @@ export default function AssignmentNew() {
                 block
                 variant="primary"
                 icon={<IconChevronRight size={16} />}
-                disabled={!title.trim()}
+                disabled={!title.trim() || !classIds.length}
                 onClick={() => {
-                  if (!classId || !title.trim()) return
-                  const id = addAssignment({
-                    title,
-                    classId,
-                    assignDate,
-                    questionCount: n,
-                    statsMode,
-                    templateId,
-                    ...structure,
-                  })
+                  if (!classIds.length || !title.trim()) return
+                  let lastId = ''
+                  for (const cid of classIds) {
+                    lastId = addAssignment({
+                      title,
+                      classId: cid,
+                      assignDate,
+                      questionCount: n,
+                      statsMode,
+                      templateId,
+                      ...structure,
+                    })
+                  }
                   if (alsoTemplate) {
                     saveTemplate({
                       name: title,
@@ -494,7 +536,7 @@ export default function AssignmentNew() {
                     })
                     push({ text: '已存为模板', tone: 'ok' })
                   }
-                  navigate(`/assignments/${id}/collect`)
+                  navigate(`/assignments/${lastId}/collect`)
                 }}
               >
                 建立并去收缴
