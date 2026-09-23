@@ -1,5 +1,5 @@
 import { POINT_NAME } from './knowledge'
-import { buildDocx, dataUrlToBytes, downloadBlob, type DocBlock } from './docxWrite'
+import { buildDocx, dataUrlToBytes, downloadBlob, type DocBlock, type DocImage } from './docxWrite'
 import type { WrongItem } from './wrongbook'
 
 /* ============================================================
@@ -35,7 +35,7 @@ export async function buildPracticeDocx(
 ): Promise<{ blob: Blob; count: number; images: number }> {
   const list = distinct(items)
   const blocks: DocBlock[] = []
-  const images = new Map<string, Uint8Array>()
+  const images = new Map<string, DocImage>()
 
   blocks.push({ t: 'p', text: opts.title, bold: true, size: 15, align: 'center', space: 100 })
   if (opts.subtitle) {
@@ -79,10 +79,12 @@ export async function buildPracticeDocx(
     const stem = (it.stem ?? '').trim()
     if (stem) blocks.push({ t: 'p', text: stem, size: 10.5, space: 40 })
 
-    const d = it.imgs?.[0] ? dataUrlToBytes(it.imgs[0]) : null
-    if (d) {
-      const rid = `p${n}`
-      images.set(rid, d.bytes)
+    /* 一题可能不止一张图（比如「图甲」「图乙」）—— 全部嵌进去，别只取第一张 */
+    for (const [k, url] of (it.imgs ?? []).entries()) {
+      const d = dataUrlToBytes(url)
+      if (!d) continue
+      const rid = `p${n}_${k}`
+      images.set(rid, d)
       blocks.push({ t: 'img', rid, wEmu: A4_W, hEmu: Math.round(A4_W * 0.68) })
     }
 

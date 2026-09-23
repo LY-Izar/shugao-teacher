@@ -142,17 +142,30 @@ function image(b: Extract<DocBlock, { t: 'img' }>, id: number): string {
   )
 }
 
+/** 图片字节 + 扩展名。扩展名必须跟着真实格式走 —— 全是 .png 的话 JPEG 在 Word 里渲染不出来 */
+export type DocImage = { bytes: Uint8Array; ext: string }
+
+const MIME_BY_EXT: Record<string, string> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  bmp: 'image/bmp',
+  webp: 'image/webp',
+}
+
 /** data URL → 字节 + 扩展名 */
-export function dataUrlToBytes(url: string): { bytes: Uint8Array; ext: string } | null {
+export function dataUrlToBytes(url: string): DocImage | null {
   const m = url.match(/^data:image\/(\w+);base64,(.+)$/)
   if (!m) return null
   const bin = atob(m[2])
   const bytes = new Uint8Array(bin.length)
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
-  return { bytes, ext: m[1] === 'jpeg' ? 'jpg' : m[1] }
+  const ext = m[1].toLowerCase() === 'jpeg' ? 'jpg' : m[1].toLowerCase()
+  return { bytes, ext: MIME_BY_EXT[ext] ? ext : 'png' }
 }
 
-export async function buildDocx(blocks: DocBlock[], images: Map<string, Uint8Array>): Promise<Blob> {
+export async function buildDocx(blocks: DocBlock[], images: Map<string, DocImage>): Promise<Blob> {
   let imgId = 0
   const body = blocks
     .map((b) => {
@@ -177,18 +190,23 @@ export async function buildDocx(blocks: DocBlock[], images: Map<string, Uint8Arr
     ridOf.set(b.rid, rid)
   }
   let n = 0
-  for (const [key, bytes] of images) {
+  const exts = new Set<string>()
+  for (const [key, img] of images) {
     const rid = ridOf.get(key)
     if (!rid) continue
-    const name = `image${++n}.png`
-    media.push({ name: `word/media/${name}`, bytes })
+    const ext = MIME_BY_EXT[img.ext] ? img.ext : 'png'
+    exts.add(ext)
+    const name = `image${++n}.${ext}`
+    media.push({ name: `word/media/${name}`, bytes: img.bytes })
     relItems.push(
       `<Relationship Id="${rid}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/${name}"/>`,
     )
   }
 
   const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>`
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>${[...exts]
+    .map((e) => `<Default Extension="${e}" ContentType="${MIME_BY_EXT[e]}"/>`)
+    .join('')}<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>`
 
   const rootRels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`

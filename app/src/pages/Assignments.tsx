@@ -12,6 +12,7 @@ import {
   IconRefresh,
   IconScan,
   IconTrash,
+  IconUpload,
   IconUsers,
   IconZap,
 } from '../components/icons'
@@ -394,6 +395,17 @@ export default function Assignments() {
                       {a.correctionNos?.length
                         ? ` ${a.correctedNos?.length ?? 0}/${a.correctionNos.length}`
                         : ''}
+                    </Button>
+                  ) : null}
+                  {/* 题目信息是空的（手工建的档案）→ 给它补一次 Word 导入 */}
+                  {Object.keys(a.questionMeta ?? {}).length === 0 ? (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      icon={<IconUpload size={14} />}
+                      onClick={() => navigate(`/assignments/${a.id}/import`)}
+                    >
+                      补题目
                     </Button>
                   ) : null}
                   <span className="flex-1" />

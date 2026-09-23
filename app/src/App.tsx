@@ -19,6 +19,7 @@ import Login from './pages/Login'
 import NotFound from './pages/NotFound'
 import WrongBook from './pages/WrongBook'
 import AssignmentCorrect from './pages/AssignmentCorrect'
+import AssignmentImport from './pages/AssignmentImport'
 import Files from './pages/Files'
 import Schedule from './pages/Schedule'
 import Settings from './pages/Settings'
@@ -141,6 +142,14 @@ export default function App() {
           element={
             <Guard>
               <AssignmentCorrect />
+            </Guard>
+          }
+        />
+        <Route
+          path="/assignments/:id/import"
+          element={
+            <Guard>
+              <AssignmentImport />
             </Guard>
           }
         />
