@@ -3,20 +3,22 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { Page } from '../components/AppShell'
 import {
   IconAlert,
+  IconCalendar,
   IconCheck,
   IconChevronRight,
   IconInfo,
   IconMegaphone,
   IconTarget,
+  IconUpload,
   IconX,
 } from '../components/icons'
-import { Button, PageHead, Panel, Sect, StatStrip, Tag } from '../components/ui'
+import { Button, PageHead, Panel, Sect, Sheet, StatStrip, Tag } from '../components/ui'
 import { useStore } from '../data/store'
 import { KIND_TEXT, type Student } from '../data/types'
 import { collectStats } from '../lib/assignments'
 import { BAND_META, BAND_ORDER, gradeStats } from '../lib/grading'
 import { wrongStudents } from '../lib/calls'
-import { friendlyDate } from '../lib/date'
+import { friendlyDate, isoOffset } from '../lib/date'
 
 export default function AssignmentStats() {
   const { id = '' } = useParams()
@@ -25,6 +27,9 @@ export default function AssignmentStats() {
   const klass = useStore((s) => s.classes.find((c) => c.id === assignment?.classId))
   const [openSeq, setOpenSeq] = useState<number | null>(null)
   const [showRule, setShowRule] = useState(false)
+  /** 「改日期」浮层 —— 从档案卡片挪到这里，作业情况页才是档案的管理入口 */
+  const [dateOpen, setDateOpen] = useState(false)
+  const updateAssignment = useStore((s) => s.updateAssignment)
 
   const students: Student[] = useMemo(
     () =>
@@ -187,15 +192,27 @@ export default function AssignmentStats() {
           .join(' · ')}
         onBack={() => navigate('/assignments')}
         right={
-          <Button
-            size="sm"
-            variant="primary"
-            icon={<IconMegaphone size={15} />}
-            disabled={needCall.length === 0}
-            onClick={() => navigate(`/assignments/${assignment.id}/call`)}
-          >
-            呼叫
-          </Button>
+          <div className="flex items-center gap-2">
+            {/* 题目信息是空的（手工建的档案）→ 给它补一次 Word 导入 */}
+            {Object.keys(assignment.questionMeta ?? {}).length === 0 ? (
+              <Button
+                size="sm"
+                variant="primary"
+                icon={<IconUpload size={15} />}
+                onClick={() => navigate(`/assignments/${assignment.id}/import`)}
+              >
+                补题目
+              </Button>
+            ) : null}
+            <Button
+              size="sm"
+              variant="ghost"
+              icon={<IconCalendar size={15} />}
+              onClick={() => setDateOpen(true)}
+            >
+              改日期
+            </Button>
+          </div>
         }
       />
 
@@ -659,6 +676,56 @@ export default function AssignmentStats() {
           </Button>
         </div>
       </Page>
+
+      {/* 改布置日期 —— 从档案卡片挪到这儿 */}
+      <Sheet open={dateOpen} onClose={() => setDateOpen(false)} title="修改布置日期">
+        <div className="mb-3 flex flex-wrap gap-1.5">
+          {[
+            ['今天', 0],
+            ['昨天', -1],
+            ['前天', -2],
+          ].map(([label, off]) => {
+            const iso = isoOffset(off as number)
+            const on = assignment.assignDate === iso
+            return (
+              <button
+                key={label as string}
+                type="button"
+                onClick={() => updateAssignment(assignment.id, { assignDate: iso })}
+                style={{
+                  padding: '4px 11px',
+                  borderRadius: 4,
+                  fontSize: 12.5,
+                  border: `1px solid ${on ? 'var(--color-accent)' : 'var(--color-line2)'}`,
+                  background: on ? 'var(--color-accentsoft)' : 'var(--color-surface)',
+                  color: on ? 'var(--color-accentink)' : 'var(--color-ink2)',
+                  fontWeight: on ? 650 : 500,
+                }}
+              >
+                {label as string}
+              </button>
+            )
+          })}
+        </div>
+        <label className="block">
+          <span className="label">也可以直接选</span>
+          <input
+            className="input"
+            type="date"
+            value={assignment.assignDate}
+            onChange={(e) => {
+              const v = e.target.value
+              if (/^\d{4}-\d{2}-\d{2}$/.test(v)) updateAssignment(assignment.id, { assignDate: v })
+            }}
+          />
+        </label>
+        <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 10, lineHeight: 1.7 }}>
+          改的是"这次作业算哪天的"。收缴与批改记录不受影响。
+        </p>
+        <Button block variant="primary" className="mt-3" onClick={() => setDateOpen(false)}>
+          完成
+        </Button>
+      </Sheet>
     </>
   )
 }

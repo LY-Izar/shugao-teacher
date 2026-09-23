@@ -7,12 +7,10 @@ import {
   IconClipboard,
   IconGrid,
   IconHash,
-  IconMegaphone,
   IconPlus,
   IconRefresh,
   IconScan,
   IconTrash,
-  IconUpload,
   IconUsers,
   IconZap,
 } from '../components/icons'
@@ -64,19 +62,35 @@ function statusTone(s: AssignmentStatus): 'idle' | 'accent' | 'ok' | 'warn' {
   return 'ok'
 }
 
-/** 每份档案的主入口：待收缴去收缴，待批改去批改，已批改看统计 */
-function primaryPath(a: { id: string; status: AssignmentStatus }): string {
-  if (a.status === 'open') return `/assignments/${a.id}/collect`
-  if (a.status === 'collected') return `/assignments/${a.id}/grade`
-  return `/assignments/${a.id}/stats`
+/**
+ * 已经动过批改的档案。
+ *
+ * 判定只用云端就有的 `confirmedNos` —— **不能依赖本机草稿**：
+ * 换台设备、或者清过缓存，草稿就没了，档案会突然退回"待收缴"，
+ * 教师会以为批改白做了。
+ */
+function gradingStarted(a: { confirmedNos?: string[] }): boolean {
+  return (a.confirmedNos?.length ?? 0) > 0
 }
 
-const PRIMARY_LABEL: Record<AssignmentStatus, string> = {
-  open: '拍照查缺',
-  collected: '去批改',
-  graded: '看统计',
-  reviewed: '看统计',
-  archived: '查看',
+/**
+ * 每份档案的主入口。
+ *  - 已批改 → 点档案看统计
+ *  - **批改中（临时保存过）→ 点档案继续批**，而不是回到查人页
+ *  - 还没动 → 去收缴
+ */
+function primaryPath(a: { id: string; status: AssignmentStatus; confirmedNos?: string[] }): string {
+  if (a.status === 'graded' || a.status === 'reviewed') return `/assignments/${a.id}/stats`
+  if (gradingStarted(a)) return `/assignments/${a.id}/grade`
+  if (a.status === 'collected') return `/assignments/${a.id}/grade`
+  return `/assignments/${a.id}/collect`
+}
+
+function primaryLabel(a: { status: AssignmentStatus; confirmedNos?: string[] }): string {
+  if (a.status === 'graded' || a.status === 'reviewed') return '看统计'
+  if (gradingStarted(a)) return '继续批改'
+  if (a.status === 'collected') return '去批改'
+  return '拍照查缺'
 }
 
 export default function Assignments() {
@@ -256,7 +270,9 @@ export default function Assignments() {
           </Panel>
         ) : (
           <div className="flex flex-col gap-2.5 stagger">
-            {rows.map(({ a, klass, stats }) => (
+            {rows.map(({ a, klass, stats }) => {
+              const started = gradingStarted(a)
+              return (
               <Panel key={a.id} className="overflow-hidden">
                 <button
                   type="button"
@@ -342,10 +358,22 @@ export default function Assignments() {
                     icon={a.status === 'collected' ? <IconZap size={14} /> : <IconScan size={14} />}
                     onClick={() => navigate(primaryPath(a))}
                   >
-                    {PRIMARY_LABEL[a.status]}
+                    {primaryLabel(a)}
                   </Button>
-                  {/* 收缴不再挡着批改：有同学当天才交，不能因为没登记完就不让批 */}
-                  {a.status === 'open' ? (
+
+                  {/* 已经临时保存过的：主入口是继续批，下面只留一个看统计的口子 */}
+                  {started && a.status !== 'graded' && a.status !== 'reviewed' ? (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => navigate(`/assignments/${a.id}/stats`)}
+                    >
+                      查看当前统计情况
+                    </Button>
+                  ) : null}
+
+                  {/* 还没动过批改才给「直接批改」——已经批过的人不需要 */}
+                  {a.status === 'open' && !started ? (
                     <Button
                       size="sm"
                       variant="ghost"
@@ -355,6 +383,7 @@ export default function Assignments() {
                       直接批改
                     </Button>
                   ) : null}
+
                   {a.status !== 'open' ? (
                     <Button
                       size="sm"
@@ -364,26 +393,8 @@ export default function Assignments() {
                       收缴记录
                     </Button>
                   ) : null}
-                  {/* 布置日期建完之后也要能改 —— 之前建了就锁死了 */}
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    icon={<IconCalendar size={14} />}
-                    onClick={() => setDateFor(a.id)}
-                  >
-                    改日期
-                  </Button>
-                  {a.status === 'graded' || a.status === 'reviewed' ? (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      icon={<IconMegaphone size={14} />}
-                      onClick={() => navigate(`/assignments/${a.id}/call`)}
-                    >
-                      呼叫
-                    </Button>
-                  ) : null}
-                  {/* 确认完成批改之后才有改错登记 */}
+
+                  {/* 确认完成批改之后才有改错登记。呼叫也在那一页里，档案下不再重复放 */}
                   {a.status === 'graded' || a.status === 'reviewed' ? (
                     <Button
                       size="sm"
@@ -397,17 +408,7 @@ export default function Assignments() {
                         : ''}
                     </Button>
                   ) : null}
-                  {/* 题目信息是空的（手工建的档案）→ 给它补一次 Word 导入 */}
-                  {Object.keys(a.questionMeta ?? {}).length === 0 ? (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      icon={<IconUpload size={14} />}
-                      onClick={() => navigate(`/assignments/${a.id}/import`)}
-                    >
-                      补题目
-                    </Button>
-                  ) : null}
+                  {/* 「补题目」「改日期」都挪到作业情况页右上角了 —— 那里才是档案的管理入口 */}
                   <span className="flex-1" />
                   <button
                     type="button"
@@ -419,7 +420,8 @@ export default function Assignments() {
                   </button>
                 </div>
               </Panel>
-            ))}
+              )
+            })}
           </div>
         )}
 
