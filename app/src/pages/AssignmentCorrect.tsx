@@ -27,6 +27,7 @@ export default function AssignmentCorrect() {
   const klass = useStore((s) => s.classes.find((c) => c.id === assignment?.classId))
   const updateAssignment = useStore((s) => s.updateAssignment)
   const sendCall = useStore((s) => s.sendCall)
+  const refreshClassrooms = useStore((s) => s.refreshClassrooms)
 
   const [editList, setEditList] = useState(false)
   const [calling, setCalling] = useState(false)
@@ -83,8 +84,12 @@ export default function AssignmentCorrect() {
 
   const room = klass?.name ?? ''
 
-  const doCall = () => {
+  const doCall = async () => {
     if (!callSel.length) return
+    // 发之前重新确认教室端在线（页面上那份可能是旧快照）
+    const fresh = await refreshClassrooms()
+    const online = fresh.find((c) => c.classId === assignment.classId)?.online ?? false
+
     sendCall({
       assignmentId: id,
       classId: assignment.classId,
@@ -92,7 +97,11 @@ export default function AssignmentCorrect() {
       text: composeCallText(callSel, room, assignment.subject, ''),
       room,
     })
-    push({ text: `已呼叫 ${callSel.length} 人，教室端会播报`, tone: 'ok' })
+    push({
+      text: online ? `已呼叫 ${callSel.length} 人` : `已记录 ${callSel.length} 人，但教室端离线`,
+      tone: online ? 'ok' : 'warn',
+      desc: online ? '教室端会响铃并按学号播报' : '刚才重新检测过：教室端不在线，学生可能听不到',
+    })
     setCallSel([])
     setCalling(false)
   }

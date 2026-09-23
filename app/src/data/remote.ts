@@ -275,6 +275,19 @@ export type Snapshot = {
   userId: string
 }
 
+/**
+ * 只重读教室端设备状态。
+ * 发呼叫前要确认"对面真的在线" —— 页面上那份可能是几分钟前的快照，
+ * 光看它会以为教室端还在线，结果学生什么都没听到。
+ */
+export async function loadClassrooms(): Promise<ClassroomClient[] | null> {
+  const sb = getSupabase()
+  if (!sb) return null
+  const { data, error } = await sb.from('classrooms').select('*')
+  if (error) return null
+  return (data ?? []).map(rowToClassroom)
+}
+
 export async function loadSnapshot(): Promise<Snapshot | null> {
   const sb = getSupabase()
   if (!sb) return null

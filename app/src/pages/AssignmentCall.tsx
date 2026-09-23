@@ -40,8 +40,10 @@ export default function AssignmentCall() {
   const repeatCall = useStore((s) => s.repeatCall)
   const setCallState = useStore((s) => s.setCallState)
   const setClassroomOnline = useStore((s) => s.setClassroomOnline)
+  const refreshClassrooms = useStore((s) => s.refreshClassrooms)
 
   const [mode, setMode] = useState<'all' | 'byQuestion'>('all')
+  const [sending, setSending] = useState(false)
   const [seq, setSeq] = useState(1)
   const [selected, setSelected] = useState<string[]>([])
   const [room, setRoom] = useState(DEFAULT_ROOM)
@@ -105,8 +107,18 @@ export default function AssignmentCall() {
     })
   }
 
-  const doSend = () => {
-    if (selected.length === 0) return
+  const doSend = async () => {
+    if (selected.length === 0 || sending) return
+    setSending(true)
+    /*
+     * 发之前**重新读一次**教室端状态。
+     * 页面上那个「在线」可能是几分钟前的快照 —— 一体机早被关了、
+     * 或者切了信号源，光看它会以为叫得通，结果学生什么都没听到。
+     */
+    const fresh = await refreshClassrooms()
+    const rc = fresh.find((c) => c.classId === assignment.classId)
+    const online = rc?.online ?? false
+
     const rec = sendCall({
       assignmentId: assignment.id,
       classId: assignment.classId,
@@ -114,14 +126,14 @@ export default function AssignmentCall() {
       text,
       room,
     })
-    // 推给教室端（当前是本地通道；接 Supabase 后换成 Realtime 即可）
     emit({ type: 'call', call: rec })
     push({
-      text: room_client?.online ? '已发送到教室端' : '已记录，但教室端当前离线',
-      tone: room_client?.online ? 'ok' : 'warn',
-      desc: room_client?.online ? text : '学生可能听不到，请检查一体机',
+      text: online ? '已发送到教室端' : '已记录，但教室端当前离线',
+      tone: online ? 'ok' : 'warn',
+      desc: online ? text : '刚才重新检测过：教室端不在线，学生可能听不到',
     })
     setSelected([])
+    setSending(false)
   }
 
   return (

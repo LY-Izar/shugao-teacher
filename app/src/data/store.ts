@@ -156,6 +156,8 @@ type State = {
   repeatCall: (callId: string) => void
   setCallState: (callId: string, studentNo: string, state: CallState) => void
   setClassroomOnline: (id: string, online: boolean) => void
+  /** 只重读教室端设备状态（发呼叫前用），返回最新列表 */
+  refreshClassrooms: () => Promise<ClassroomClient[]>
   /** 教室端首次打开时给自己登记一台设备（后端模式下没有种子数据，必须自建） */
   ensureClassroom: (classId: string, name: string) => void
   /* ---- 课表 ---- */
@@ -601,6 +603,14 @@ export const useStore = create<State>()(
         const c = get().classrooms.find((x) => x.id === id)
         const tid = get().teacher?.id
         if (c && tid) void remote.saveClassroom(c, tid)
+      },
+
+      refreshClassrooms: async () => {
+        const list = await remote.loadClassrooms()
+        if (!list) return get().classrooms
+        // 只镜像，**不回写** —— 否则和教室端的心跳互相触发，形成写入回环
+        set({ classrooms: list })
+        return list
       },
 
       ensureClassroom: (classId, name) => {
