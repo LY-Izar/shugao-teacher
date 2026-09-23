@@ -1,7 +1,9 @@
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom'
+import { useEffect, useState } from 'react'
 import { AppShell, ToastHost } from './components/AppShell'
 import { useStore } from './data/store'
 import { useAuthBootstrap } from './hooks/useAuthBootstrap'
+import { authExpired, hasAuthStamp, markLogin } from './lib/session'
 import AssignmentCall from './pages/AssignmentCall'
 import AssignmentCollect from './pages/AssignmentCollect'
 import AssignmentGrade from './pages/AssignmentGrade'
@@ -28,10 +30,25 @@ import Workbench from './pages/Workbench'
 function Guard({ children }: { children: React.ReactNode }) {
   const teacher = useStore((s) => s.teacher)
   const hydrated = useStore((s) => s.hydrated)
+  const signOut = useStore((s) => s.signOut)
   const loc = useLocation()
+  const [expired] = useState(() => authExpired())
+
+  useEffect(() => {
+    if (!teacher) return
+    if (!expired) {
+      // 老设备升级上来时没有登录时间戳：从现在开始计时，不把人直接踢出去
+      if (!hasAuthStamp()) markLogin()
+      return
+    }
+    signOut()
+  }, [teacher, expired, signOut])
+
   // 连了后端时，先等会话与数据就绪，否则会误判成「未登录」被踢回登录页
   if (!hydrated) return <BootScreen />
-  if (!teacher) return <Navigate to="/login" replace state={{ from: loc.pathname }} />
+  if (!teacher || expired) {
+    return <Navigate to="/login" replace state={{ from: loc.pathname, expired }} />
+  }
   return <AppShell>{children}</AppShell>
 }
 

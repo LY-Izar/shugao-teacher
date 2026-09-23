@@ -4,13 +4,14 @@ import { Logo, IconChevronRight, IconWifi } from '../components/icons'
 import { Button } from '../components/ui'
 import { useStore, useToast } from '../data/store'
 import { getSupabase, isRemote } from '../lib/supabase'
+import { markLogin } from '../lib/session'
 import { APP_VERSION } from '../lib/version'
 
 export default function Login() {
   const signIn = useStore((s) => s.signIn)
   const hydrate = useStore((s) => s.hydrate)
   const navigate = useNavigate()
-  const loc = useLocation() as { state?: { from?: string } }
+  const loc = useLocation() as { state?: { from?: string; expired?: boolean } }
   const push = useToast((s) => s.push)
   const [account, setAccount] = useState('')
   const [pwd, setPwd] = useState('')
@@ -37,12 +38,14 @@ export default function Login() {
         return
       }
       await hydrate()
+      markLogin()
       navigate(loc.state?.from ?? '/', { replace: true })
       return
     }
 
     setTimeout(() => {
       signIn(account)
+      markLogin()
       navigate(loc.state?.from ?? '/', { replace: true })
     }, 380)
   }
@@ -102,6 +105,21 @@ export default function Login() {
           </div>
 
           <div className="flex flex-col gap-4 p-4">
+            {loc.state?.expired ? (
+              <div
+                className="p-2.5"
+                style={{
+                  background: 'var(--color-warnsoft)',
+                  border: '1px solid ***REMOVED***ecd9ae',
+                  borderRadius: 4,
+                  fontSize: 12.5,
+                  lineHeight: 1.7,
+                  color: '***REMOVED***8a5a12',
+                }}
+              >
+                距上次在这台设备上登录已超过 <b>7 天</b>，请重新输入一次密码。
+              </div>
+            ) : null}
             <label>
               <span className="label">{isRemote ? '邮箱' : '账号 / 工号'}</span>
               <input
