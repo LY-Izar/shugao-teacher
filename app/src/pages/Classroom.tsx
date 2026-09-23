@@ -22,6 +22,7 @@ import { BAND_META, gradeStats } from '../lib/grading'
 import { closePip, openPip, pipSupported } from '../lib/pip'
 import { HEARTBEAT_MS, emit, subscribe } from '../lib/realtime'
 import { isRemote } from '../lib/supabase'
+import * as remote from '../data/remote'
 import { awayText, dayState, maybeShift, toMinutes, weekdayOf } from '../lib/schedule'
 import { dayKind, nextHoliday, ymdOf } from '../lib/holiday'
 import { parseScheduleText, type ParsedScheduleItem } from '../lib/scheduleParse'
@@ -325,17 +326,53 @@ export default function Classroom() {
     return () => window.clearInterval(t)
   }, [client?.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  /* 接收呼叫 —— **只接本班的**，别的班的一声不响地丢掉（那是别的教室的事） */
+  /* 接收呼叫 —— **只接本班的**，别的班的一声不响地丢掉（那是别的教室的事）
+     ------------------------------------------------------------------
+     两条路一起走：
+       ① Realtime 推送 —— 快，但 websocket 会悄悄断（心跳是另一条 REST 连接，照常活着）
+       ② 每 8 秒轮询一次 —— 兜底。上面那条断了也不会漏掉呼叫。 */
+  const playedRef = useRef<Set<string>>(new Set())
+  const seededRef = useRef(false)
+  /** 同一个 call 重复播报时 sentAt 会追加，所以用「id + 最后一次时间」当键 */
+  const callKey = (c: CallRecord) => `${c.id}:${Math.max(0, ...(c.sentAt ?? []))}`
+
   useEffect(() => {
     if (!klass) return
-    return subscribe((m) => {
+    const play = (c: CallRecord) => {
+      const k = callKey(c)
+      if (playedRef.current.has(k)) return
+      playedRef.current.add(k)
+      setBroadcast(c)
+      chime()
+      window.setTimeout(() => speak(c.text), 680)
+      window.setTimeout(() => setBroadcast(null), 15000)
+    }
+
+    const off = subscribe((m) => {
       if (m.type !== 'call') return
       if (m.call.classId !== klass.id) return
-      setBroadcast(m.call)
-      chime()
-      window.setTimeout(() => speak(m.call.text), 680)
-      window.setTimeout(() => setBroadcast(null), 15000)
+      play(m.call)
     })
+
+    let alive = true
+    const tick = async () => {
+      const list = await remote.loadRecentCalls(klass.id, Date.now() - 15 * 60_000)
+      if (!alive) return
+      if (!seededRef.current) {
+        // 第一次只把"已经存在的"记下来，不播 —— 免得刚打开就把几分钟前的旧呼叫播一遍
+        for (const c of list) playedRef.current.add(callKey(c))
+        seededRef.current = true
+        return
+      }
+      for (const c of list) play(c)
+    }
+    void tick()
+    const t = window.setInterval(() => void tick(), 8000)
+    return () => {
+      alive = false
+      window.clearInterval(t)
+      off()
+    }
   }, [klass?.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => () => closePip(), [])

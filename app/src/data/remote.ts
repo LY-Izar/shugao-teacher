@@ -288,6 +288,28 @@ export async function loadClassrooms(): Promise<ClassroomClient[] | null> {
   return (data ?? []).map(rowToClassroom)
 }
 
+/**
+ * 读某个班最近的呼叫 —— 给教室端做**轮询兜底**。
+ *
+ * 为什么需要：教室端收呼叫走的是 Realtime 的 websocket，而"在线"是靠 REST 心跳。
+ * 这两条连接是独立的 —— **websocket 悄悄断掉时心跳照常**，
+ * 于是教师端看到"在线"、呼叫也发出去了，教室端却一声不响。
+ * 教室端要开一整天，这种事迟早会发生，所以不能只靠推送。
+ */
+export async function loadRecentCalls(classId: string, sinceMs: number): Promise<CallRecord[]> {
+  const sb = getSupabase()
+  if (!sb) return []
+  const { data, error } = await sb
+    .from('calls')
+    .select('*')
+    .eq('class_id', classId)
+    .gte('created_at', new Date(sinceMs).toISOString())
+    .order('created_at', { ascending: false })
+    .limit(10)
+  if (error) return []
+  return (data ?? []).map(rowToCall)
+}
+
 export async function loadSnapshot(): Promise<Snapshot | null> {
   const sb = getSupabase()
   if (!sb) return null
