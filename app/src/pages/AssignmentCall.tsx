@@ -192,17 +192,39 @@ export default function AssignmentCall() {
               切换状态
             </button>
           </div>
-          <div
-            className="mt-2 flex items-start gap-2"
-            style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.6 }}
-          >
-            <IconWifi size={13} />
-            <span>
-              {room_client?.online
-                ? '播报前会先响一声提示音，语音用系统 TTS 播放，被切信号源也能出声。'
-                : '教室端当前离线 —— 呼叫会被记录，但学生很可能听不到，请先检查一体机。'}
-            </span>
-          </div>
+          {room_client?.online ? (
+            <div
+              className="mt-2 flex items-start gap-2"
+              style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.6 }}
+            >
+              <IconWifi size={13} />
+              <span>
+                播报前会先响一声提示音，语音用系统 TTS 播放，被切信号源也能出声。
+              </span>
+            </div>
+          ) : (
+            /* 离线要写得显眼 —— 教师点了呼叫、教室没动静，是这里最容易踩的坑 */
+            <div
+              className="mt-2 flex items-start gap-2 p-2.5"
+              style={{
+                background: 'var(--color-warnsoft)',
+                border: '1px solid ***REMOVED***ecd9ae',
+                borderRadius: 4,
+                fontSize: 12.5,
+                lineHeight: 1.7,
+                color: '***REMOVED***8a5a12',
+              }}
+            >
+              <IconAlert size={15} />
+              <span>
+                <b>{klass?.name ?? '这个班'}</b> 的教室端
+                {room_client ? '当前离线' : '还没有绑定设备'} —— 呼叫发出去
+                <b>学生也听不到</b>。
+                <br />
+                请先打开教室里那台一体机上的教室端（双击桌面上的启动图标）。
+              </span>
+            </div>
+          )}
         </Panel>
 
         {/* 概览 */}

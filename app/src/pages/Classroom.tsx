@@ -101,8 +101,6 @@ export default function Classroom() {
   const [seq, setSeq] = useState(1)
   const [pipWin, setPipWin] = useState<Window | null>(null)
   const [broadcast, setBroadcast] = useState<CallRecord | null>(null)
-  /** 收到了别的班的呼叫 —— 不播报，但要让教师看见，否则没法排查 */
-  const [foreignCall, setForeignCall] = useState<string | null>(null)
   const [now, setNow] = useState(() => new Date())
   const [armed, setArmed] = useState(false)
   const push = useToast((s) => s.push)
@@ -327,21 +325,12 @@ export default function Classroom() {
     return () => window.clearInterval(t)
   }, [client?.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  /* 接收呼叫 */
+  /* 接收呼叫 —— **只接本班的**，别的班的一声不响地丢掉（那是别的教室的事） */
   useEffect(() => {
     if (!klass) return
     return subscribe((m) => {
       if (m.type !== 'call') return
-      /*
-       * 收到**别的班**的呼叫：不能在这儿播报（那是别的教室的事），
-       * 但也不能一声不响地丢掉 —— 教师那边显示"已发送"，这边毫无反应，
-       * 根本没法排查。所以留一条可见的提示。
-       */
-      if (m.call.classId !== klass.id) {
-        setForeignCall(m.call.classId)
-        window.setTimeout(() => setForeignCall(null), 15000)
-        return
-      }
+      if (m.call.classId !== klass.id) return
       setBroadcast(m.call)
       chime()
       window.setTimeout(() => speak(m.call.text), 680)
@@ -1344,24 +1333,6 @@ export default function Classroom() {
             pipWin.document.body,
           )
         : null}
-
-      {/* 收到别的班的呼叫 */}
-      {foreignCall ? (
-        <div
-          className="anim-in fixed bottom-4 left-1/2 z-[80] -translate-x-1/2 px-4 py-2.5"
-          style={{
-            background: 'var(--color-warnsoft)',
-            border: '1px solid ***REMOVED***ecd9ae',
-            borderRadius: 6,
-            fontSize: 13,
-            color: '***REMOVED***8a5a12',
-            maxWidth: '80vw',
-          }}
-        >
-          收到「{classes.find((c) => c.id === foreignCall)?.name ?? '其他班'}」的呼叫，
-          但本机当前显示的是「{klass?.name ?? ''}」—— 请在顶栏切换班级后重播
-        </div>
-      ) : null}
 
       {/* 播报浮层 */}
       {broadcast ? (
