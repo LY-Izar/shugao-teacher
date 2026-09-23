@@ -14,7 +14,7 @@ import {
   IconUpload,
   IconX,
 } from '../components/icons'
-import { Button, PageHead, Panel, Portal, Sect, StatStrip, Tag } from '../components/ui'
+import { Button, PageHead, Panel, Portal, Sect, Sheet, StatStrip, Tag } from '../components/ui'
 import { useStore, useToast } from '../data/store'
 import type { Assignment, Student } from '../data/types'
 import { analyzeScan, simulateCollectScan, type ScanAnalysis } from '../lib/assignments'
@@ -105,6 +105,7 @@ export default function AssignmentCollect() {
   const assignment = useStore((s) => s.assignments.find((a) => a.id === id))
   const klass = useStore((s) => s.classes.find((c) => c.id === assignment?.classId))
   const setCollection = useStore((s) => s.setCollection)
+  const updateAssignment = useStore((s) => s.updateAssignment)
 
   const students: Student[] = useMemo(
     () =>
@@ -128,6 +129,8 @@ export default function AssignmentCollect() {
   ) => setMarkBox((b) => ({ ...b, mark: typeof v === 'function' ? v(b.mark) : v }))
 
   const [mode, setMode] = useState<'missing' | 'late'>('missing')
+  /** 待确认降级为未交的学生学号（他已批改过，要先确认删掉批改记录） */
+  const [demoteNo, setDemote] = useState<string | null>(null)
   const [stage, setStage] = useState<Stage>('idle')
   const [step, setStep] = useState(0)
   const [scan, setScan] = useState<ScanAnalysis | null>(null)
@@ -272,13 +275,45 @@ export default function AssignmentCollect() {
     setStage('done')
   }
 
-  const toggle = (no: string) => {
-    setMark((m) => {
-      const next = { ...m }
-      if (next[no] === mode) delete next[no]
-      else next[no] = mode
-      return next
+  /**
+   * 三态循环：白（还没碰）→ 红（未交）→ 绿（已交）→ 红 → …
+   *
+   * 白和绿都算「已交」，区别只是"我核对过这一个"——
+   * 所以教师只需要点没交的那几个，不用全班点一遍。
+   *
+   * 唯一要小心的是**绿变红**：如果这个人已经批改过（有错题记录），
+   * 把他改成未交就自相矛盾了，必须先确认、并把批改记录一并删掉。
+   */
+  const cycle = (no: string) => {
+    const cur = mark[no]
+    if (cur === undefined) {
+      setMark((m) => ({ ...m, [no]: 'missing' }))
+      return
+    }
+    if (cur === 'missing') {
+      setMark((m) => ({ ...m, [no]: 'submitted' }))
+      return
+    }
+    const wc = assignment?.wrong?.[no]?.length ?? 0
+    const graded = (assignment?.confirmedNos ?? []).includes(no)
+    if (wc > 0 || graded) {
+      setDemote(no)
+      return
+    }
+    setMark((m) => ({ ...m, [no]: 'missing' }))
+  }
+
+  /** 确认把已批改的人改成未交：批改记录一起删，不能留一份"没交却有错题"的数据 */
+  const doDemote = (no: string) => {
+    if (!assignment) return
+    const nextWrong = { ...assignment.wrong }
+    delete nextWrong[no]
+    updateAssignment(assignment.id, {
+      wrong: nextWrong,
+      confirmedNos: assignment.confirmedNos.filter((x) => x !== no),
     })
+    setMark((m) => ({ ...m, [no]: 'missing' }))
+    setDemote(null)
   }
 
   return (
@@ -838,7 +873,9 @@ export default function AssignmentCollect() {
                 background: 'var(--color-surface2)',
               }}
             >
-              <span style={{ fontSize: 12, color: 'var(--color-ink3)' }}>点学生标记为</span>
+              <span style={{ fontSize: 12, color: 'var(--color-ink3)' }}>
+                {mode === 'missing' ? '点一下：未交 → 已交 → 未交' : '点学生标记为'}
+              </span>
               <div className="seg">
                 <button type="button" data-on={mode === 'missing'} onClick={() => setMode('missing')}>
                   未交
@@ -886,7 +923,7 @@ export default function AssignmentCollect() {
                   <button
                     key={s.id}
                     type="button"
-                    onClick={() => toggle(s.studentNo)}
+                    onClick={() => cycle(s.studentNo)}
                     className="flex flex-col items-start gap-0.5 px-2 py-1.5 text-left"
                     style={{
                       background: bg,
@@ -971,6 +1008,36 @@ export default function AssignmentCollect() {
           </span>
         </div>
       </Page>
+
+      {/* 绿 → 红：这个人已经批改过，改成未交就得连批改记录一起删 */}
+      <Sheet
+        open={Boolean(demoteNo)}
+        onClose={() => setDemote(null)}
+        title="他要改成未交？"
+        footer={
+          <div className="flex gap-2">
+            <Button block onClick={() => setDemote(null)}>
+              算了
+            </Button>
+            <Button block variant="primary" onClick={() => demoteNo && doDemote(demoteNo)}>
+              确认改成未交
+            </Button>
+          </div>
+        }
+      >
+        <div className="flex items-start gap-2.5">
+          <span style={{ color: 'var(--color-bad)', marginTop: 1 }}>
+            <IconAlert size={17} />
+          </span>
+          <div style={{ fontSize: 13, lineHeight: 1.8, color: 'var(--color-ink2)' }}>
+            <b className="num">{demoteNo}</b> 号
+            {students.find((s) => s.studentNo === demoteNo)?.name ?? ''} 已经有批改记录（错了{' '}
+            <b className="num">{assignment?.wrong?.[demoteNo ?? '']?.length ?? 0}</b> 处）。
+            <br />
+            改成未交的话，<b>这份批改记录会一起删掉</b>，且不能撤销。
+          </div>
+        </div>
+      </Sheet>
 
       {/* 原图放大 */}
       {zoom ? (

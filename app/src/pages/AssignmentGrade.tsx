@@ -413,13 +413,26 @@ function GradeSession({
   const confirm = (no: string) => setConfirmed((c) => (c.includes(no) ? c : [...c, no]))
 
   /**
+   * 登记为「未交」的学生**不能批改** —— 人没交本子，哪来的错题。
+   * 要批先回收缴页把他改回已交。
+   */
+  const isMissing = (no: string) => (assignment?.missingNos ?? []).includes(no)
+  const blocked = () => push({ text: '这位同学登记为未交，先去收缴页改回已交才能批', tone: 'warn' })
+
+  /**
    * 点开学生**只展开，不算批改过**。
    *
    * 以前点开就同时记成「已批阅」，而没人点过错题就等于「全对」——
    * 于是点错人再切走，那个人就被默默记成全对了。
    * 全对必须是教师**明确点一下**的动作，不能靠"点开过"推断。
    */
-  const markOpen = (no: string) => setOpen((cur) => (cur === no ? null : no))
+  const markOpen = (no: string) => {
+    if (isMissing(no)) {
+      blocked()
+      return
+    }
+    setOpen((cur) => (cur === no ? null : no))
+  }
 
   /**
    * 记错题 / 取消错题。
@@ -429,6 +442,10 @@ function GradeSession({
    * 否则「取消掉所有错题」就等于全对，又绕过了「确认全对」那个按钮。
    */
   const toggleFor = (no: string, seq: number) => {
+    if (isMissing(no)) {
+      blocked()
+      return
+    }
     setTaps((t) => t + 1)
     const next = toggleQuestion(wrong[no], seq, subCountOf(seq))
     setWrong((w) => ({ ...w, [no]: next }))
