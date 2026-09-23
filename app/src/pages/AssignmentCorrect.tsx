@@ -86,24 +86,33 @@ export default function AssignmentCorrect() {
 
   const doCall = async () => {
     if (!callSel.length) return
-    // 发之前重新确认教室端在线（页面上那份可能是旧快照）
-    const fresh = await refreshClassrooms()
-    const online = fresh.find((c) => c.classId === assignment.classId)?.online ?? false
+    try {
+      // 发之前重新确认教室端在线（只是提示，不挡发送）
+      let online = false
+      try {
+        const fresh = await refreshClassrooms()
+        online = fresh.find((c) => c.classId === assignment.classId)?.online ?? false
+      } catch {
+        /* 读不到状态不影响发送 */
+      }
 
-    sendCall({
-      assignmentId: id,
-      classId: assignment.classId,
-      studentNos: callSel,
-      text: composeCallText(callSel, room, assignment.subject, ''),
-      room,
-    })
-    push({
-      text: online ? `已呼叫 ${callSel.length} 人` : `已记录 ${callSel.length} 人，但教室端离线`,
-      tone: online ? 'ok' : 'warn',
-      desc: online ? '教室端会响铃并按学号播报' : '刚才重新检测过：教室端不在线，学生可能听不到',
-    })
-    setCallSel([])
-    setCalling(false)
+      sendCall({
+        assignmentId: id,
+        classId: assignment.classId,
+        studentNos: callSel,
+        text: composeCallText(callSel, room, assignment.subject, ''),
+        room,
+      })
+      push({
+        text: online ? `已呼叫 ${callSel.length} 人` : `已发送 ${callSel.length} 人，但教室端离线`,
+        tone: online ? 'ok' : 'warn',
+        desc: online ? '教室端会响铃并按学号播报' : '刚才重新检测过：教室端不在线，学生可能听不到',
+      })
+      setCallSel([])
+      setCalling(false)
+    } catch (e) {
+      push({ text: e instanceof Error ? e.message : '呼叫失败', tone: 'bad' })
+    }
   }
 
   const Row = ({ s, on, onClick }: { s: Student; on: boolean; onClick: () => void }) => {
