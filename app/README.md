@@ -21,8 +21,110 @@ npm run dev          ***REMOVED*** http://localhost:5178
 
 ```bash
 npm run build        ***REMOVED*** 类型检查 + 生产构建
-npm run shots        ***REMOVED*** 无头浏览器截图，输出到 .shots/（需本机 Edge）
+npm run shots        ***REMOVED*** 无头浏览器截图，输出到 .shots/<runId>/（浏览器路径见下）
+npm run clock-checks ***REMOVED*** 假时钟验教室端「看时间脸色」的行为
+npm run rls-checks   ***REMOVED*** PGlite 跑真 schema.sql，逐人逐动作验 RLS
+npm run exam-checks  ***REMOVED*** 考试链路的落库形状（假 PostgREST + 真 remote.ts）
+npm run backup-checks***REMOVED*** 备份 v2/v1 兼容 + 学科列在所有写入路径上的纪律
 npm run fetch:holidays   ***REMOVED*** 从中国政府网重新抓取放假安排
+```
+
+---
+
+***REMOVED******REMOVED*** 🔴 跑验证脚本前必须知道（**每一条都是实测踩过的**）
+
+***REMOVED******REMOVED******REMOVED*** 0. 五个脚本共用一把锁 —— 同一时刻只能跑一个
+
+锁是**仓库里的一个模块**：`scripts/lib/lock.mjs`（`%TEMP%\shugao-verify.lock`）。
+五个脚本的**全部工作**都包在 `withLock()` 里，等不到锁会**打印持有者并退出（退出码 3）**，
+不会偷偷并发跑；陈旧锁（持有者进程已死 / 超过 20 分钟）可以抢，但会打印警告。
+
+| 想干什么 | 怎么做 |
+| --- | --- |
+| 正常跑 | `npm run xxx`，什么都不用管 |
+| 手工配对（少见） | `await acquireLock({script:'x'})` … `releaseLockHandle()` |
+| 换锁目录 / 调等待上限 | `SHUGAO_LOCK` / `SHUGAO_LOCK_WAIT_MS` / `SHUGAO_LOCK_STALE_MS` |
+| 验锁本身 | `node scripts/lib/lock.selfcheck.mjs`（十几秒，17 条断言，不碰真正的锁） |
+
+> 为什么必须这样：**这条约定原来只存在于口头**，于是每个 agent 自己发明一套，审计实测到
+> `.shots/` 里同时躺着 4 个批次（旧图冒充这一轮）、以及两个 `shots` 并发写同一目录、
+> 两条序列交错。现在约定在代码里，**别再各写一份**。
+
+***REMOVED******REMOVED******REMOVED*** 1. **跑验证脚本期间不要改源码**
+
+vite 是**轮询监听 + HMR**（`usePolling`，400ms）。跑到一半你保存一个文件，
+页面会热替换/整页刷新 —— 脚本正在数的元素、正在量的时长会随机变化，
+表现成"**时好时坏的 flaky**"，而不是一句明确的失败。
+（`clock-checks.mjs` 里已经记过一次"偶尔会慢一拍"。）
+
+改完源码 → 等 HMR 安静下来 → **再**跑脚本。
+
+***REMOVED******REMOVED******REMOVED*** 2. dev server 必须先起在 **5178**
+
+```bash
+cd app && npm run dev     ***REMOVED*** 必须是 http://localhost:5178
+```
+
+`vite.config.ts` 里已经开了 **`strictPort: true`**：5178 被占（另一个 checkout、
+上一次没关干净的进程）会**当场报错退出**，而不是静默换到 5179。
+没开它的时候脚本打的还是写死的 5178 —— 可能在测**别人更早起的那个 server**，
+断言全绿、图也对，测的却不是这一份源码。**这是最难查的一类假通过，别把它关掉。**
+
+`shots.mjs` / `clock-checks.mjs` 的目标地址可以用 `SHUGAO_BASE` 或 `--base=` 覆盖（默认 5178）。
+
+***REMOVED******REMOVED******REMOVED*** 3. 本机时区必须是 **+08:00**
+
+`clock-checks.mjs` 开头会检查 `Intl.DateTimeFormat().resolvedOptions().timeZone`，
+不是 `China Standard Time` / `Asia/Shanghai` / `+08:00` 就**直接退出**。
+
+⚠️ 这是**挡住**，不是**修好**：`Classroom.tsx` 里「按钟点」的那几处仍然读设备本地
+`new Date()`，没走 §一 约定的 `beijingNow()` —— **已知欠账**，本机时区对时两者等价，
+一旦换台时区不对的机器，那块屏就会按当地时间切换。
+
+***REMOVED******REMOVED******REMOVED*** 4. 两个浏览器脚本（shots / clock-checks）**永远只跑本地演示模式**
+
+dev 下没有 Supabase 环境变量 → store 走本地演示数据。所以它们**覆盖不到云端路径、
+权限、RLS，覆盖率为 0** —— 那是 `rls-checks.mjs`（真 Postgres + 真策略）的活，
+**别去 shots 里补**。`exam-checks` / `backup-checks` 走的是"假 PostgREST + 真 `remote.ts`"，
+测的是**载荷形状**，也不是真权限。
+
+***REMOVED******REMOVED******REMOVED*** 5. 五个脚本各守什么 + 怎么跑
+
+| 脚本 | 断言 | 守什么 | 前置 |
+| --- | --- | --- | --- |
+| `npm run shots` | **337** | 截图冒烟：教师端全链路，**每张图前断言"我在对的页面"**，结束比对文件名清单（77 张） | dev server 5178 + 浏览器 |
+| `npm run clock-checks` | **101** | 假时钟：教室端所有"看时间脸色"的行为（下课铃 / 周三静音 / 考试模式 / 收尾语 / 调休） | dev server 5178 + 浏览器 + 时区 +08:00 |
+| `npm run rls-checks` | **147** | 真 Postgres（PGlite）跑 `schema.sql`，逐人逐动作验 RLS 与写策略矩阵 | 无 |
+| `npm run exam-checks` | **133** | 考试链路落库形状（假 PostgREST 5199 + 真 `remote.ts`） | 无 |
+| `npm run backup-checks` | **54** | 备份 v2/v1 兼容 + 学科列在**每一条**写入路径上的纪律 | 无 |
+
+> 截图张数**以 `shots.mjs` 打印的清单为准**（文档里曾经写死过 53 / 53+ / 63 三个互相矛盾的数字）。
+> 三件套另算：`npx tsc -p tsconfig.app.json` · `npm run build` · `npm run lint`（**必须 0 warning 0 error**）。
+
+***REMOVED******REMOVED******REMOVED*** 6. 登录态 **7 天有效期**（断言里涉及"设备角色 / 登录态"时注意）
+
+`src/lib/session.ts` 的 `AUTH_DAYS = 7`，`authExpired()` 比的是
+`Date.now() - 上次输密码的时间`。所以**假时钟拨表不能跨过这个窗口**：
+`shots.mjs` 的钟面在 09-17 → 09-25 之间来回走，再往后拨，Guard 会把每一页都踢回登录页
+（而那正是"静默 Navigate"的现场，只收 `pageerror` 的脚本看不出问题）。
+
+> 顺带记一条**不是**硬规矩的事：跑完教室端用例**不需要**手动复位 `shugao.deviceRole` ——
+> 教师账号打开 `/classroom` 是**预览**，产品不会把设备标成 classroom
+> （`Classroom.tsx`: 只有 `accountKind === 'classroom'` 才标）。
+
+***REMOVED******REMOVED******REMOVED*** 7. 浏览器路径是可配置的（`scripts/lib/edge-path.mjs`）
+
+两个浏览器脚本**共用一处解析**，回退顺序：
+
+1. `SHUGAO_EDGE`（显式指定可执行文件 —— 换机器/CI 的正解）
+2. `SHUGAO_EDGE_CHANNEL`（如 `msedge` / `chrome`，交给 playwright 找）
+3. 常见安装路径：`%ProgramFiles(x86)%` / `%ProgramFiles%` / `%LOCALAPPDATA%` 下的
+   Edge、Chrome；再退到 `PATH` 里的 `msedge` / `chrome`
+4. 都没有 → `chromium.launch({ channel: 'msedge' })` 让 playwright 自己找；
+   **仍然起不来就报一句人话**（告诉你怎么设 `SHUGAO_EDGE`），不是丢一段英文栈
+
+```powershell
+$env:SHUGAO_EDGE = 'D:\Edge\Application\msedge.exe'   ***REMOVED*** 装在不常见的位置时
 ```
 
 ---
@@ -272,5 +374,9 @@ npm run fetch:holidays 2027 <url> ***REMOVED*** 国务院发布次年安排后�
 - `vite.config.ts` 里开了 **`server.watch.usePolling`**。Windows 下编辑器的原子写入
   （先建临时目录再改名替换）会让原生文件监听抛 `EBUSY` 并**静默失效**，
   表现为服务器一直发旧代码、改了不生效、路由对不上。轮询能彻底规避这一类问题。
-- `npm run shots` 需要本机 Edge（路径写在 `scripts/shots.mjs` 顶部的 `EDGE`）。
-  它会跑完整的端到端流程并截图，**同时收集控制台与页面错误**，任何一步失败都会非零退出。
+- `vite.config.ts` 里还开了 **`server.strictPort`** —— 端口被占就直接报错，
+  绝不静默换端口（**理由见上面「跑验证脚本前必须知道」第 2 条**）。
+- `npm run shots` / `clock-checks` 需要一个浏览器，路径由 `scripts/lib/edge-path.mjs`
+  统一解析（`SHUGAO_EDGE` → 常见安装路径 → playwright channel，见上）。
+  shots 会跑完整端到端流程并截图到 `.shots/<runId>/`，**同时收集控制台与页面错误**，
+  任何一步失败都会非零退出；张数以脚本自己打印的清单为准。
