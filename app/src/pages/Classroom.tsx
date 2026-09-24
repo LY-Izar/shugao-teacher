@@ -36,7 +36,7 @@ import {
 /** 备份文件名：固定名字，每次覆盖 —— 免得一天攒几十个文件 */
 const BACKUP_NAME = '树高备份.json'
 import { awayText, dayState, maybeShift, toMinutes, weekdayOf } from '../lib/schedule'
-import { dayKind, isRestDay, nextHoliday, ymdOf } from '../lib/holiday'
+import { dayKind, holidayOn, isRestDay, nextHoliday, ymdOf } from '../lib/holiday'
 import { parseScheduleText, type ParsedScheduleItem } from '../lib/scheduleParse'
 import { preparePhoto } from '../lib/photo'
 import { recognize } from '../lib/ocr'
@@ -376,6 +376,21 @@ export default function Classroom() {
 
   // 传入 useWeekday：调休日教师手选的那天，不能被设备真实星期再筛一次
   const day = useMemo(() => dayState(dayItems.items, now, useWeekday), [dayItems.items, now, useWeekday])
+
+  /**
+   * 今天是不是**放假**（法定假期 / 周末）。
+   *
+   * 🔴 为什么必须单独判一次：放假那天 `useWeekday` 仍然是真实的星期四，
+   * 所以 `dayItems` 照样会筛出周四的课 —— 屏幕会在中秋节显示"第 4 节 物理"。
+   * 用户的原话：「节假日也要加进去，我可不想在节假日上课」。
+   *
+   * 注意和**调休上班日**的区别：那天 `dayKind === 'makeup'`，不是放假日，
+   * 课要照上（还可能按教师手选的星期上）—— 只有 `isRestDay` 才拦。
+   * 下课铃那边早就有这道判断了（见下面 tick 里的 isRestDay），这里是补上显示。
+   */
+  const todayIso = ymdOf(now)
+  const restDay = isRestDay(todayIso)
+  const restName = restDay ? (holidayOn(todayIso)?.name ?? '') : ''
   const nowMin = now.getHours() * 60 + now.getMinutes()
 
   const scanSchedule = async (f: File) => {
@@ -1173,11 +1188,29 @@ export default function Classroom() {
                 ) : null}
 
                 {/*
-                 * 正在上课：整张课表换成一张卡。
-                 * 站在教室前面的人此刻只想知道"这节是什么课、谁上" ——
-                 * 给一列时间表反而要他自己去找哪一行是现在。
+                 * 放假：不显示课表。
+                 * 放假那天 useWeekday 仍然是真实的星期四，不拦就会显示周四的课。
+                 * 调休上班日（makeup）**不算**放假，课照上（还可能按教师手选的星期上）。
                  */}
-                {day.current ? (
+                {restDay ? (
+                  <div
+                    className="mt-2"
+                    style={{
+                      border: '1px solid var(--color-line2)',
+                      background: 'var(--color-surface)',
+                      borderRadius: 6,
+                      padding: '18px 16px',
+                      textAlign: 'center',
+                    }}
+                  >
+                    <div style={{ fontSize: 22, fontWeight: 700 }}>
+                      {restName ? `今天放假 · ${restName}` : '今天放假'}
+                    </div>
+                    <div style={{ fontSize: 13, color: 'var(--color-ink3)', marginTop: 6 }}>
+                      没有课，好好休息 —— 明天按课表上课
+                    </div>
+                  </div>
+                ) : day.current ? (
                   <div
                     className="mt-2"
                     style={{
@@ -1212,14 +1245,22 @@ export default function Classroom() {
                         fontSize: 30,
                         fontWeight: 750,
                         letterSpacing: '-.01em',
-                        marginTop: 8,
+                        marginTop: 10,
                         lineHeight: 1.15,
+                        textAlign: 'center',
                       }}
                     >
                       {splitTitle(day.current.title).subject}
                     </div>
                     {splitTitle(day.current.title).teacher ? (
-                      <div style={{ fontSize: 16, color: 'var(--color-ink2)', marginTop: 4 }}>
+                      <div
+                        style={{
+                          fontSize: 16,
+                          color: 'var(--color-ink2)',
+                          marginTop: 6,
+                          textAlign: 'center',
+                        }}
+                      >
                         {splitTitle(day.current.title).teacher}
                       </div>
                     ) : null}
