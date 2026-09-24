@@ -1860,7 +1860,8 @@ as $$ select can_grade_subject(p_class_id, null, p_subject) $$;
 --     两样都对不上，新班立刻从列表里不见了，而且不报错。
 --  §13.4 早就写过同一条纪律（"自己建的永远看得见"），只是当时只落在 assignments 上。
 --  下面把这条纪律补齐到另外五张表，**保证"读"与删旧策略之前逐行相等**
---  （实测对照见 16.6 ① 与报告）。
+--  （实测对照见 16.6 ① 与 `app/scripts/rls-checks.mjs` 的第十节「删旧策略前后对照」——
+--    常驻回归，`npm run rls-checks`，8 个身份 × 11 张表逐行比对 A/B 两个库）。
 --
 --  班级：看得见（visible_class_ids）· **自己建的**（旧 classes_own 的 select 分支）
 drop policy if exists classes_visible on classes;
@@ -2095,7 +2096,9 @@ order by 4 desc, 1, 3;
 
 --  ④ 🔴 教室端的安全边界：它**不该有**任何一张业务表的写权限。
 --     把教室端账号的 uuid 填进去，下面每一条都应该是 0 行 / 抛"策略拒绝"。
---     最省事的做法是照 16.6 ③ 的清单人工看一眼，或者用 PGlite 那套脚本逐条打（见报告）。
+--     最省事的做法是照 16.6 ③ 的清单人工看一眼，或者跑 `npm run rls-checks`
+--     （`app/scripts/rls-checks.mjs` 第七节：给教室端逐个动作打 11 条写操作，全拒才算过；
+--       顺带用 `pg_policies` 静态审一遍「assignments 上没有任何一条策略提到 classroom_accounts」）。
 -- with room as (select '77777777-7777-7777-7777-777777777777'::uuid as uid)
 -- select
 --   (select count(*) from classroom_accounts where id = (select uid from room)) as 教室端账号行数,

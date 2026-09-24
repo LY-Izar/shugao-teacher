@@ -12,6 +12,7 @@
     "clock-checks": "node scripts/clock-checks.mjs",
     "exam-checks": "node scripts/exam-checks.mjs",
     "backup-checks": "node scripts/backup-checks.mjs",
+    "rls-checks": "node scripts/rls-checks.mjs",
     "fetch:holidays": "node scripts/fetch-holidays.mjs"
   },
   "dependencies": {
@@ -24,6 +25,7 @@
     "zustand": "^5.0.15"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8",
     "@types/node": "^24.13.3",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",
