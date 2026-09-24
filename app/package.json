@@ -9,6 +9,7 @@
     "lint": "oxlint",
     "preview": "vite preview",
     "shots": "node scripts/shots.mjs",
+    "clock-checks": "node scripts/clock-checks.mjs",
     "fetch:holidays": "node scripts/fetch-holidays.mjs"
   },
   "dependencies": {

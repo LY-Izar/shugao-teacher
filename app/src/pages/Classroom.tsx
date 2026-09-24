@@ -96,16 +96,31 @@ const BUBBLE_MIN_MS = 3_500
 const BUBBLE_MS_PER_CHAR = 180
 
 /**
- * 课表条目的标题约定是「**科目 [任课老师]**」—— 科目在前，老师在后、用空格分开。
+ * 标题开头的**班名**（`高二(4)班` / `高二（4）班` / `高二4班` / `高三1班`）。
+ *
+ * 为什么标题里会带班名：教室端只显示 `scope='class'` **且 classId 等于本班**的行，
+ * 而「粘贴课表」链路里 classId 是 `scheduleParse.ts` 的 `matchClass()` 从**标题文本**
+ * 里认出班名才给的 —— 所以真实课表的标题写的往往是「高二(4)班 语文 张老师」。
+ * 那个班名是给 matchClass 看的，**不该出现在「正在上课」卡上**（更不该当成科目）。
+ */
+const LEADING_CLASS_RE = /^[高初][一二三]\s*[（(]?\s*[0-9０-９一二三四五六七八九十]{1,3}\s*[)）]?\s*班/
+
+/**
+ * 课表条目的标题约定是「[班名] **科目 [任课老师]**」—— 科目在前，老师在后、用空格分开。
  * 「正在上课」那张卡要把这两样分两行显示（科目大、老师小），所以这里拆开。
+ *
+ * 拆之前**先剥掉开头的班名**：不剥的话 `indexOf(' ')` 会把「高二(4)班」当成科目，
+ * 在卡上以 30px 大字显示；而教室端要能收到这条呼叫，标题里又**必须**有班名
+ * （见上面 LEADING_CLASS_RE 的注释）—— 两件事只能在这里解开。
  *
  * 没有空格就整串当科目（「班会」「自习」「体锻」「选修课」这些本来就没有老师）；
  * `room` 是**另一个字段**，不在这里，别把地点也塞进标题。
  */
 function splitTitle(title: string): { subject: string; teacher: string } {
-  const i = title.indexOf(' ')
-  if (i < 0) return { subject: title, teacher: '' }
-  return { subject: title.slice(0, i), teacher: title.slice(i + 1).trim() }
+  const t = title.replace(LEADING_CLASS_RE, '').trim() || title.trim()
+  const i = t.search(/\s/)
+  if (i < 0) return { subject: t, teacher: '' }
+  return { subject: t.slice(0, i), teacher: t.slice(i + 1).trim() }
 }
 /** 播放记录只留最近这一段（轮询窗口是 15 分钟，比它长就够），不然开一整天会一直涨 */
 const SEEN_TTL_MS = 20 * 60_000

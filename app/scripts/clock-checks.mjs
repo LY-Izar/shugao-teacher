@@ -18,6 +18,9 @@
  *   ⑤ 19:19 / 19:21 / 23:59 / 00:01           → 与 §7.1 记的一致（19:21 起收尾语、0:00 起恢复）
  *   ⑥ TTS 不可用时派一条呼叫                   → 浮层至少停留 max(3.5 秒, 字数 × 180ms)
  *   ⑦ 「按日期选作业」点击展开（Sheet 列出所有日期）
+ *   ⑧ 「正在上课」卡在各种标题形状下显示什么   → splitTitle 要剥掉开头的班名（粘贴链路给的就是带班名的标题）
+ *   ⑨ 课前 5 分钟的下课铃（AudioContext 桩数振荡器）→ **只响一声 1174.7Hz 的轻声铃**，不响「叮咚」
+ *   ⑩ 周三静音时段 / 考试模式静音              → 呼叫**不响不念不霸屏**，但**队列留着**，静音一结束从队首接着播
  *
  * 时钟怎么钉的：`ctx.clock.install()` + `ctx.clock.setFixedTime(本地墙上时间)`。
  * 本机时区是 +08:00（和 beijingNow() 一个口径），所以本地时间 == 北京时间；
@@ -58,6 +61,9 @@ const CLS_KEY = 'shugao.teacher.v1'
  * 也就是教室端「正在上课」卡能正确工作的写法；`classId` 直接给本班。
  * 这和种子里的教师课表（`高二(3)班 物理`，`classId` 由字段给）是同一个形状，
  * 只是把 scope 换成 class。
+ *
+ * 注意这份**不带班名**：粘贴链路产出的是带班名的那种（见下面 CLASS_SCHEDULE）。
+ * 两种形状现在都测（场景 1/2 用这份，场景 8 用形状矩阵逐个量）。
  */
 const CLS_ROWS = [
   { weekday: 4, start: '08:55', end: '09:35', title: '语文 张老师' },
@@ -81,11 +87,11 @@ const CLS_ROWS = [
  * （见 lib/scheduleParse.ts）—— 标题不写班名，导进去的行 classId 是空的，
  * 教室端一条都不会显示。真实课表本来也写着班名，所以照实写。
  *
- * ⚠️ 这暴露了一个真实的产品裂缝（见文末「已知裂缝」）：
- * 同一个字段既要"能被 matchClass 认出班号"、又要"科目在前老师在后"，
- * 只有写成「高二(3)班 语文 张老师」才能同时满足 —— 而那样 `splitTitle` 会把
- * 班名当成科目，卡上显示成大字的「高二(3)班」。所以这个脚本用它验证**导入链路**，
- * 再用 CLS_ROWS 覆盖一遍教室端真正要读的数据（和种子数据同形状）。
+ * ⚠️ 这段输入**就是**那条"标题里必须有班名"的裂缝的现场：
+ * 导进来的标题是「高二(3)班 语文 张老师」——`splitTitle` 修好之前，
+ * 卡上会把「高二(3)班」当成科目显示成 30px 大字（修复见 §七）。
+ * 所以下面**先用这份数据验一次「正在上课」卡**（端到端：粘贴 → matchClass → 卡片），
+ * 再用 CLS_ROWS 把数据换成"不带班名"的写法，验后面几个场景不受影响。
  */
 const CLASS_SCHEDULE = `
 周四 08:55-09:35 ${DEMO_CLASS} 语文 张老师
@@ -93,6 +99,24 @@ const CLASS_SCHEDULE = `
 周五 10:50-11:30 ${DEMO_CLASS} 化学 李老师
 周日 08:50-09:30 ${DEMO_CLASS} 历史 周老师
 `.trim()
+
+/**
+ * 「正在上课」卡的标题形状矩阵（场景 8）。
+ *
+ * 教室端能收到课，靠的是标题里有班名（matchClass 认出来）；
+ * 而卡上要显示的是「科目 / 老师」两行 —— 这两种要求都由 `splitTitle` 调和：
+ * 它先把**开头的班名**剥掉，再按第一个空格拆。这里逐个形状量一遍。
+ */
+const TITLE_SHAPES = [
+  { raw: '语文 张老师', subject: '语文', teacher: '张老师', why: '不带班名（教室端只显示这一种形状也能工作）' },
+  { raw: `${DEMO_CLASS} 语文 张老师`, subject: '语文', teacher: '张老师', why: '半角括号班名（粘贴链路真实产出）' },
+  { raw: '高二（4）班 语文 张老师', subject: '语文', teacher: '张老师', why: '全角括号班名' },
+  { raw: '高三(12)班 语文 张老师', subject: '语文', teacher: '张老师', why: '高三位数班号' },
+  { raw: '高二(4)班 语文', subject: '语文', teacher: '', why: '有班名、没有老师 —— 不能把「语文」当成老师' },
+  { raw: '班会', subject: '班会', teacher: '', why: '没有老师的课' },
+  { raw: '自习', subject: '自习', teacher: '', why: '没有老师的课' },
+  { raw: '选修课', subject: '选修课', teacher: '', why: '没有老师的课' },
+]
 
 /** 期望在屏幕上看到的（标题按 `splitTitle` 拆成两行） */
 const CARD_SCHEDULE = {
@@ -136,6 +160,8 @@ const FAKE_GRADED = {
  */
 const SRC_CLASSROOM = new URL('../src/pages/Classroom.tsx', import.meta.url)
 const SRC_HOLIDAYS = new URL('../src/data/holidays.ts', import.meta.url)
+/** 静音时段表也从源码里读（见 tts.ts 的 QUIET_SLOTS）—— 不在脚本里再抄一份 */
+const SRC_TTS = new URL('../src/lib/tts.ts', import.meta.url)
 
 const runtime = { BUBBLE_MIN_MS: null, BUBBLE_MS_PER_CHAR: null }
 
@@ -181,6 +207,32 @@ async function readSource(url) {
   const { readFileSync } = await import('node:fs')
   return readFileSync(url, 'utf8')
 }
+
+/* ---------------- 日期/时刻小算术（静音时段、下课铃都要拿它算具体某天） ---------------- */
+
+const pad2 = (n) => String(n).padStart(2, '0')
+
+/**
+ * 基准日**所在那一周**（周一为一周之始）里的某个星期几。
+ * weekday: 0=周日 … 6=周六，与 Date.getDay() 一致。
+ * ⚠️ 别写成"往后找最近的那个星期X" —— 那会跨到下一周去（踩过一次：
+ *    基准日周四、目标周三，结果算成了 6 天后的下周三）。
+ */
+function isoOfWeekdayInWeek(baseIso, weekday) {
+  const d = new Date(`${baseIso}T12:00:00`)
+  const fromMonday = (d.getDay() + 6) % 7 // 周一=0 … 周日=6
+  d.setDate(d.getDate() - fromMonday + ((weekday + 6) % 7))
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
+}
+
+/** `HH:MM` 加减分钟，跨零点回绕 */
+function shiftHHMM(hhmm, deltaMin) {
+  const [h, m] = hhmm.split(':').map(Number)
+  const t = (((h * 60 + m + deltaMin) % 1440) + 1440) % 1440
+  return `${pad2(Math.floor(t / 60))}:${pad2(t % 60)}`
+}
+
+const weekdayCharOf = (iso) => '日一二三四五六'[new Date(`${iso}T12:00:00`).getDay()]
 
 /** 页面上「这个班的课」那一坨（课表面板）的文本 */
 async function schedText(page) {
@@ -345,6 +397,191 @@ async function readCurrentCard(page) {
   )
 }
 
+/**
+ * 「正在上课」那张卡上的**两行**：科目（30px 居中）/ 任课老师（16px 居中）。
+ * 和 readCurrentCard 是同一套找法（按内联样式认，不按第几层子节点认），
+ * 只是这里只关心「拆成了什么」，用于验 splitTitle 的各种标题形状。
+ */
+async function readCardLines(page) {
+  return page.evaluate(() => {
+    const secs = [...document.querySelectorAll('section.panel')]
+    const panel = secs.find((s) => (s.textContent ?? '').includes('正在上课'))
+    if (!panel) return { found: false }
+    const pick = (px) =>
+      [...panel.querySelectorAll('div')].find(
+        (d) => d.style.fontSize === px && d.style.textAlign === 'center' && (d.textContent ?? '').trim(),
+      ) ?? null
+    const subj = pick('30px')
+    const teach = pick('16px')
+    return {
+      found: true,
+      subject: subj ? (subj.textContent ?? '').trim() : null,
+      teacher: teach ? (teach.textContent ?? '').trim() : null,
+      subjectPx: subj ? subj.style.fontSize : null,
+      teacherPx: teach ? teach.style.fontSize : null,
+      panelText: (panel.textContent ?? '').replace(/\s+/g, ' ').trim(),
+    }
+  })
+}
+
+/* ---------------- 声音：数振荡器（AudioContext 桩） ---------------- */
+
+/** 桩记下来的振荡器：{ f, type, gainPeak }（gainPeak = 该音的音量峰值） */
+async function readAudio(page) {
+  return page.evaluate(() => ({
+    installed: Boolean(window.__audio),
+    ctxCount: window.__audio?.ctxCount ?? -1,
+    osc: (window.__audio?.osc ?? []).map((o) => ({ ...o })),
+  }))
+}
+
+/** 等到至少有 n 个振荡器（下课铃的 tick 是 20 秒一次，窗开宽一点） */
+async function waitOsc(page, n, timeout = 25_000) {
+  const t0 = Date.now()
+  for (;;) {
+    const a = await readAudio(page)
+    if (a.osc.length >= n) return a
+    if (Date.now() - t0 > timeout) return a
+    await page.waitForTimeout(500)
+  }
+}
+
+async function readTts(page) {
+  return page.evaluate(() => ({
+    installed: Boolean(window.__tts?.installed),
+    calls: (window.__tts?.calls ?? []).map((c) => ({ ...c })),
+  }))
+}
+
+/**
+ * 等 speak() 被调用。
+ * ⚠️ 别一看到浮层就立刻读：`playHead()` 是**先响「叮咚」、隔
+ * SPEAK_AFTER_CHIME_MS（680ms）才开口**，读早了永远是 0 次（踩过一次）。
+ */
+async function waitTts(page, n, timeout = 6000) {
+  const t0 = Date.now()
+  for (;;) {
+    const t = await readTts(page)
+    if (t.calls.length >= n) return t
+    if (Date.now() - t0 > timeout) return t
+    await page.waitForTimeout(150)
+  }
+}
+
+/** 把两个计数器清零（量"这一段里到底有没有出声"之前必须先清） */
+async function resetSoundCounters(page) {
+  await page.evaluate(() => {
+    if (window.__audio) {
+      window.__audio.osc.length = 0
+      window.__audio.gains.length = 0
+    }
+    if (window.__tts) {
+      window.__tts.calls.length = 0
+      window.__tts.cancelled = 0
+    }
+  })
+}
+
+const audioText = (a) =>
+  a.osc.length
+    ? a.osc.map((o) => `${o.f}Hz@${o.gainPeak}`).join('、')
+    : '一个振荡器都没有'
+
+/* ---------------- 播报浮层：盯住它有没有出现过 ---------------- */
+
+/**
+ * 用 MutationObserver 盯「播报浮层」（`div.fixed.inset-0.z-[70]`）。
+ * 静音期间要证明的是「**一次都没出现过**」—— 轮询采样会把一闪而过的浮层漏掉，
+ * 所以这里在派发呼叫**之前**就装上观察器。
+ * ⚠️ 别在这里写 CSS 转义选择器（`z-\\[70\\]`）：page.evaluate 的函数体是字符串，
+ *    转义容易被吃掉（同上文 3 个坑里的那个）；用 className 判断最稳。
+ */
+async function overlayWatchStart(page) {
+  await page.evaluate(() => {
+    const isOverlay = (el) =>
+      el.tagName === 'DIV' && String(el.className).includes('fixed inset-0 z-[70]')
+    window.__ov = { seen: 0, first: null, texts: [] }
+    const scan = () => {
+      for (const el of document.querySelectorAll('div')) {
+        if (!isOverlay(el)) continue
+        const text = (el.textContent ?? '').replace(/\s+/g, ' ').trim()
+        if (window.__ov.seen === 0) window.__ov.first = { at: performance.now(), text }
+        window.__ov.seen++
+        if (window.__ov.texts.length < 4) window.__ov.texts.push(text)
+      }
+    }
+    scan()
+    window.__ov.obs = new MutationObserver(scan)
+    window.__ov.obs.observe(document.body, { childList: true, subtree: true })
+  })
+}
+
+async function overlayWatchRead(page) {
+  return page.evaluate(() => {
+    window.__ov?.obs?.disconnect()
+    return {
+      seen: window.__ov?.seen ?? -1,
+      first: window.__ov?.first ?? null,
+      texts: window.__ov?.texts ?? [],
+      now: [...document.querySelectorAll('div')].some((d) =>
+        String(d.className).includes('fixed inset-0 z-[70]'),
+      ),
+    }
+  })
+}
+
+/** 当前浮层上写着什么（没有浮层就是 null） */
+async function overlayText(page) {
+  return page.evaluate(() => {
+    const el = [...document.querySelectorAll('div')].find((d) =>
+      String(d.className).includes('fixed inset-0 z-[70]'),
+    )
+    return el ? (el.textContent ?? '').replace(/\s+/g, ' ').trim() : null
+  })
+}
+
+/** 等浮层出现（静音解除后队列接着播的那一刻） */
+async function waitOverlay(page, timeout = 20_000) {
+  const t0 = Date.now()
+  for (;;) {
+    const t = await overlayText(page)
+    if (t) return t
+    if (Date.now() - t0 > timeout) return null
+    await page.waitForTimeout(150)
+  }
+}
+
+/* ---------------- 派一条呼叫（走真实的 BroadcastChannel，和教师端同一条路） ---------------- */
+
+async function openCallChannel(page) {
+  return page.evaluateHandle(() => new BroadcastChannel('shugao.classroom.v1'))
+}
+
+async function postCall(page, handle, id, text) {
+  await page.evaluate(
+    ([bc, id, text, classId]) => {
+      bc.postMessage({
+        type: 'call',
+        call: {
+          id,
+          assignmentId: 'a-demo-1',
+          classId,
+          studentNos: ['1'],
+          text,
+          room: '教师办公室',
+          sentAt: [Date.now()],
+          states: {},
+        },
+      })
+    },
+    [handle, id, text, DEMO_CLASS_ID],
+  )
+}
+
+async function closeCallChannel(page, handle) {
+  await page.evaluate((bc) => bc.close(), handle)
+}
+
 /* ---------------- 主流程 ---------------- */
 
 const errors = []
@@ -383,6 +620,32 @@ try {
   console.log(`  假期数据：中秋节 ${HOLIDAY_ISO}–${holiday[2]}（周${'日一二三四五六'[dow(HOLIDAY_ISO)]}）`)
   console.log(`  调休上班日（workdays 第一条）：${MAKEUP_ISO}（周${'日一二三四五六'[dow(MAKEUP_ISO)]}）`)
   console.log(`  浮层最短展示：max(${c.BUBBLE_MIN_MS}ms, 字数 × ${c.BUBBLE_MS_PER_CHAR}ms)`)
+
+  /* ---- 下课铃的两个声音特征也从 tts.ts 里读（不在脚本里抄一份，改了源码它会响） ---- */
+  const srcTts = await readSource(SRC_TTS)
+  const num = (m) => (m ? Number(m[1]) : null)
+  const SOFT_F = num(srcTts.match(/softChime[\s\S]{0,600}?frequency\.value\s*=\s*([\d.]+)/))
+  const SOFT_VOL = num(srcTts.match(/softChime[\s\S]{0,600}?exponentialRampToValueAtTime\(([\d.]+)/))
+  const LOUD_FS = [...srcTts.matchAll(/\{\s*f:\s*([\d.]+)/g)].map((m) => Number(m[1]))
+  if (SOFT_F === null || SOFT_VOL === null || LOUD_FS.length < 2) {
+    throw new Error('没能从 tts.ts 里读到下课铃/提示音的频率与音量（softChime 那段改过？）')
+  }
+  console.log(`  下课铃：${SOFT_F}Hz / 音量 ${SOFT_VOL}；播报提示音：${LOUD_FS.join('、')}Hz`)
+
+  /* ---- 静音时段同样从源码读：挑第一条槽位，算出"那一周的哪一天、几点" ---- */
+  const slotRaw = srcTts.match(
+    /weekday:\s*(\d+)\s*,\s*from:\s*'([\d:]+)'\s*,\s*to:\s*'([\d:]+)'\s*,\s*why:\s*'([^']*)'/,
+  )
+  if (!slotRaw) throw new Error('没能从 tts.ts 里读到 QUIET_SLOTS 的时段')
+  const QUIET_SLOT = { weekday: Number(slotRaw[1]), from: slotRaw[2], to: slotRaw[3], why: slotRaw[4] }
+  // 用 2026-09-24 那一周（演示数据与其它场景都钉在这一周），避免跨周跑到假期上
+  const QUIET_ISO = isoOfWeekdayInWeek('2026-09-24', QUIET_SLOT.weekday)
+  const QUIET_AT = `${QUIET_ISO}T${shiftHHMM(QUIET_SLOT.from, 5)}:00` // 时段内（开始后 5 分钟）
+  const AFTER_AT = `${QUIET_ISO}T${shiftHHMM(QUIET_SLOT.to, 1)}:00` // 时段刚过 1 分钟
+  console.log(
+    `  静音时段（${QUIET_SLOT.why}）：周${QUIET_SLOT.weekday} ${QUIET_SLOT.from}–${QUIET_SLOT.to} → ` +
+      `取 ${QUIET_ISO}：静音中 ${QUIET_AT.slice(11, 16)} / 解除后 ${AFTER_AT.slice(11, 16)}`,
+  )
 
   browser = await chromium.launch({ executablePath: EDGE, headless: !HEADED })
   const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, locale: 'zh-CN' })
@@ -462,7 +725,38 @@ try {
     `不写班名的话 matchClass 给不出 classId，教室端一条都不显示`,
   )
 
-  // ③ 换成「科目 老师」标题的那份（见 CLS_ROWS 上方注释：粘贴链路给不出这种标题）
+  // ②.5 端到端验一次**粘贴链路的真实数据**：库里的标题是「高二(3)班 语文 张老师」，
+  //      direct 进教室端看卡上写什么（这一段就是"标题里必须有班名"的现场）
+  say('【准备】用刚粘贴进来的那份数据（标题带班名）看一眼「正在上课」卡')
+  await ctx.clock.setFixedTime(new Date('2026-09-24T09:15:00'))
+  await goto(page, '/classroom', { clock: '09:15', date: '2026-09-24', weekday: '四' })
+  const pastedCard = await readCardLines(page)
+  if (!pastedCard.found) {
+    check(false, '粘贴进来的数据能在教室端显示成「正在上课」卡', `没找到卡片；课表区：${short(await schedText(page))}`)
+  } else {
+    console.log(`  · 库里那份标题是「${DEMO_CLASS} 语文 张老师」（matchClass 就是从这个班名认出 classId 的）`)
+    console.log(`  · 卡上两行：科目「${pastedCard.subject ?? '(无)'}」/ 老师「${pastedCard.teacher ?? '(无)'}」`)
+    check(
+      pastedCard.subject === '语文' && pastedCard.subjectPx === '30px',
+      '卡上第一行是科目「语文」，不是班名',
+      `实测「${pastedCard.subject ?? '(无)'}」 font-size=${pastedCard.subjectPx ?? '(无)'}`,
+      '修 splitTitle 之前这里显示的是 30px 的「高二(3)班」',
+    )
+    check(
+      pastedCard.teacher === '张老师',
+      '卡上第二行是任课老师「张老师」',
+      `实测「${pastedCard.teacher ?? '(无)'}」 font-size=${pastedCard.teacherPx ?? '(无)'}`,
+    )
+    check(
+      !(pastedCard.panelText ?? '').includes(DEMO_CLASS),
+      '班名没有漏到卡片上',
+      (pastedCard.panelText ?? '').includes(DEMO_CLASS)
+        ? `卡上还有「${DEMO_CLASS}」：${short(pastedCard.panelText, 90)}`
+        : `卡上只有：${short(pastedCard.panelText, 90)}`,
+    )
+  }
+
+  // ③ 换成不带班名的那种标题（见 CLS_ROWS 上方注释）—— 后面几个场景都用它
   await page.evaluate(
     ([k, rows, extra]) => {
       const snap = JSON.parse(localStorage.getItem(k) ?? '{}')
@@ -644,6 +938,53 @@ try {
       after.now !== before && !after.sheetOpen,
       '点日期后 Sheet 收起、并真的切到了那天的作业',
       `作业选择器：「${before}」→「${after.now}」；Sheet 还在吗：${after.sheetOpen}`,
+    )
+  }
+
+  /* ================= ⑧ 「正在上课」卡在各种标题形状下显示什么 ================= */
+
+  say('【场景 8】「正在上课」卡的标题形状：先剥开头班名，再按第一个空格拆科目/老师')
+  await ctx.clock.setFixedTime(new Date('2026-09-24T09:15:00'))
+  await goto(page, '/classroom', { clock: '09:15', date: '2026-09-24', weekday: '四' })
+
+  /**
+   * 把周四第 1 节的标题换成一个形状，重新打开教室端，读卡上的两行。
+   * ⚠️ 走的是**真实渲染路径**（快照 → dayState → 卡片），不是单独调 splitTitle：
+   *    量到的就是"这种标题在屏幕上到底长什么样"。
+   */
+  async function cardForTitle(title) {
+    await page.evaluate(
+      ([k, t]) => {
+        const snap = JSON.parse(localStorage.getItem(k) ?? '{}')
+        snap.state.schedule = (snap.state.schedule ?? []).map((s) =>
+          s.scope === 'class' && s.weekday === 4 && s.start === '08:55' ? { ...s, title: t } : s,
+        )
+        localStorage.setItem(k, JSON.stringify(snap))
+      },
+      [CLS_KEY, title],
+    )
+    await goto(page, '/classroom', { clock: '09:15', date: '2026-09-24', weekday: '四' })
+    return readCardLines(page)
+  }
+
+  for (const shape of TITLE_SHAPES) {
+    const got = await cardForTitle(shape.raw)
+    const subject = got.found ? (got.subject ?? '') : '(没找到卡片)'
+    const teacher = got.found ? (got.teacher ?? '') : '(没找到卡片)'
+    console.log(`\n  ── 标题「${shape.raw}」—— ${shape.why}`)
+    check(
+      got.found && subject === shape.subject && got.subjectPx === '30px',
+      `科目＝「${shape.subject}」（30px 居中）`,
+      got.found ? `实测「${subject}」 font-size=${got.subjectPx ?? '(无)'}` : `没找到「正在上课」卡：${short(got.panelText)}`,
+    )
+    check(
+      got.found && teacher === shape.teacher,
+      shape.teacher ? `老师＝「${shape.teacher}」（16px 居中）` : '老师那行不渲染（没有老师）',
+      got.found
+        ? teacher
+          ? `实测「${teacher}」 font-size=${got.teacherPx ?? '(无)'}`
+          : '实测：没有 16px 的那一行'
+        : '没找到「正在上课」卡',
     )
   }
 
@@ -915,6 +1256,251 @@ try {
     )
   }
 
+  /* ================= ⑨ 课前 5 分钟的下课铃（softChime） ================= */
+
+  say('【场景 9】课前 5 分钟的下课铃：周四 08:50（第 1 节 08:55 开始）')
+  note(
+    `从 tts.ts 读到：下课铃 ${SOFT_F}Hz / 音量峰值 ${SOFT_VOL}；` +
+      `播报提示音「叮咚」${LOUD_FS.join('、')}Hz（音量 0.22）`,
+  )
+
+  /**
+   * AudioContext 桩：**数振荡器**。
+   *
+   * 为什么数得出来"响的是哪一种"：两种声音都是 WebAudio 现场合成的（不加载音频文件）——
+   *   · `chime()`（播报前「叮咚」）= **2 个**振荡器（988 / 1319Hz，音量 0.22）
+   *   · `softChime()`（下课铃）    = **1 个**振荡器（1174.7Hz，音量 0.07，所以要"轻"）
+   * 频率 + 个数 + 音量峰值三样一起看，就能把「下课铃」和「播报提示音」分开。
+   *
+   * 装成 **context 级**（`ctx.addInitScript`）：从这一刻起每个新文档开头都生效，
+   * 导航过去时桩已经在位（page 级的只影响那一个 page，这里统一用 ctx 级）。
+   */
+  await ctx.addInitScript(() => {
+    window.__audio = { ctxCount: 0, osc: [], gains: [] }
+    const A = window.__audio
+    class StubGain {
+      constructor() {
+        this.gain = {
+          setValueAtTime() {},
+          exponentialRampToValueAtTime(v) {
+            A.gains.push(v)
+          },
+        }
+      }
+      connect() {}
+    }
+    class StubOsc {
+      constructor() {
+        this.type = ''
+        this.frequency = { value: 0 }
+      }
+      connect() {}
+      start(t) {
+        this._start = t
+      }
+      stop() {
+        // tts.ts 是 createOscillator → createGain → 设音量 → start/stop，
+        // 所以 stop 这一刻最后一个 gain 上挂的就是这个音的音量包络。
+        const ramp = A.gains.slice(-2)
+        A.osc.push({
+          f: this.frequency.value,
+          type: this.type,
+          gainPeak: ramp.length ? Math.max(...ramp) : null,
+        })
+      }
+    }
+    class StubAudioContext {
+      constructor() {
+        A.ctxCount++
+        this.state = 'running'
+        this.currentTime = 0
+        this.destination = {}
+      }
+      createOscillator() {
+        return new StubOsc()
+      }
+      createGain() {
+        return new StubGain()
+      }
+      resume() {
+        return Promise.resolve()
+      }
+    }
+    Object.defineProperty(window, 'AudioContext', {
+      value: StubAudioContext,
+      configurable: true,
+      writable: true,
+    })
+  })
+
+  await ctx.clock.setFixedTime(new Date('2026-09-24T08:50:00'))
+  await goto(page, '/classroom', { clock: '08:50', date: '2026-09-24', weekday: '四' })
+  const stubOn9 = await readAudio(page)
+  check(stubOn9.installed, 'AudioContext 桩已装好（createOscillator 会被记下来）', `window.__audio 在，ctxCount=${stubOn9.ctxCount}`)
+
+  // 下课铃的 tick 是 20 秒一次，窗开宽一点：宁可多等，也不要时好时坏
+  const bell = await waitOsc(page, 1, 25_000)
+  const soft = bell.osc.filter((o) => Math.abs(o.f - SOFT_F) < 1)
+  const loud = bell.osc.filter((o) => LOUD_FS.some((f) => Math.abs(o.f - f) < 1))
+  console.log(`  · 观察到的振荡器：${audioText(bell)}（AudioContext 建了 ${bell.ctxCount} 个）`)
+  check(
+    soft.length >= 1,
+    `课前 5 分钟响了下课铃（${SOFT_F}Hz 的振荡器 ≥ 1 个）`,
+    `实测响了 ${soft.length} 声，全部振荡器：${audioText(bell)}`,
+    '每节课只响一次（rungRef 去重），但断言只要求 ≥ 1，避免 tick 抖动变 flaky',
+  )
+  check(
+    loud.length === 0 && soft.every((o) => o.gainPeak !== null && o.gainPeak <= 0.1),
+    '响的是「轻声」下课铃，不是播报前的「叮咚」',
+    `频率 ${bell.osc.map((o) => `${o.f}Hz`).join('、') || '(无)'}；音量峰值 ` +
+      `${bell.osc.map((o) => o.gainPeak).join('、') || '(无)'}`,
+    `期望只有 ${SOFT_F}Hz、音量 ≈ ${SOFT_VOL}（播报的「叮咚」是 ${LOUD_FS.join('/')}Hz、0.22）`,
+  )
+
+  say('  ── 负例①：周四 08:45（课前 10 分钟）不该响 —— 时间窗是"正好 5 分钟"')
+  await ctx.clock.setFixedTime(new Date('2026-09-24T08:45:00'))
+  await goto(page, '/classroom', { clock: '08:45', date: '2026-09-24', weekday: '四' })
+  await page.waitForTimeout(21_000) // 20 秒一次的 tick 至少跑过一轮，否则"没响"可能只是还没轮到
+  const early = await readAudio(page)
+  check(
+    early.osc.length === 0,
+    '课前 10 分钟不响（不是"每节课前一直响"）',
+    audioText(early),
+    '等了 21 秒（覆盖至少一轮 tick，避开 20 秒窗口）',
+  )
+
+  say(`  ── 负例②：${HOLIDAY_ISO}（中秋节）10:45 不该响 —— 放假那天根本没课`)
+  await ctx.clock.setFixedTime(new Date(`${HOLIDAY_ISO}T10:45:00`))
+  await goto(page, '/classroom', {
+    clock: '10:45',
+    date: HOLIDAY_ISO,
+    weekday: weekdayCharOf(HOLIDAY_ISO),
+  })
+  await page.waitForTimeout(21_000)
+  const restDay = await readAudio(page)
+  check(
+    restDay.osc.length === 0,
+    '放假当天不响下课铃（isRestDay 拦住了）',
+    audioText(restDay),
+    `那天课表里本该有周五 ${CARD_SCHEDULE.fri1.start} 的课 —— 所以这是真的拦住了，不是没课可响`,
+  )
+
+  /* ================= ⑩ 静音 = 暂停（周三 QUIET_SLOTS / 考试模式） ================= */
+
+  say(
+    `【场景 10】周三静音时段（${QUIET_SLOT.from}–${QUIET_SLOT.to}）：呼叫**不响不念不霸屏**，` +
+      `但**队列留着**，${QUIET_SLOT.to} 后从队首接着播`,
+  )
+  const QUIET_CALL_1 = '静音甲：请 1 号到办公室。'
+  const QUIET_CALL_2 = '静音乙：请 2 号到办公室。'
+  await ctx.clock.setFixedTime(new Date(QUIET_AT))
+  await goto(page, '/classroom', {
+    clock: QUIET_AT.slice(11, 16),
+    date: QUIET_ISO,
+    weekday: weekdayCharOf(QUIET_ISO),
+  })
+
+  // 派呼叫**之前**就装上观察器：要证明的是"一次都没出现过"，轮询采样会漏掉一闪而过的浮层
+  await overlayWatchStart(page)
+  await resetSoundCounters(page)
+  const bcQuiet = await openCallChannel(page)
+  await postCall(page, bcQuiet, 'clockcheck-quiet-1', QUIET_CALL_1)
+  await postCall(page, bcQuiet, 'clockcheck-quiet-2', QUIET_CALL_2)
+  await page.waitForTimeout(3000) // 不静音的话，浮层在派发后几十毫秒就出现了（场景 6 实测 42ms）
+  const during = await overlayWatchRead(page)
+  const duringAudio = await readAudio(page)
+  const duringTts = await readTts(page)
+  const duringBody = await bodyText(page)
+  console.log(
+    `  · 静音期间（派了 2 条呼叫、等了 3 秒）：浮层出现 ${during.seen} 次；` +
+      `振荡器 ${duringAudio.osc.length} 个；speak() ${duringTts.calls.length} 次`,
+  )
+  check(
+    during.seen === 0 && !duringBody.includes(QUIET_CALL_1),
+    '不霸屏：浮层一次都没出现',
+    `浮层出现 ${during.seen} 次；页面里${duringBody.includes(QUIET_CALL_1) ? '**有**呼叫文案' : '没有呼叫文案'}`,
+  )
+  check(duringAudio.osc.length === 0, '不响：一个振荡器都没建', audioText(duringAudio))
+  check(
+    duringTts.calls.length === 0,
+    '不念：speak() 一次都没被调用',
+    `speak() 调用 ${duringTts.calls.length} 次`,
+  )
+
+  // 静音结束：**不重新派发**，看队列里的两条会不会自己接着播
+  await ctx.clock.setFixedTime(new Date(AFTER_AT))
+  const resumed = await waitOverlay(page, 20_000)
+  const afterAudio = await readAudio(page)
+  const afterTts = await waitTts(page, 1) // 响铃 → 隔 680ms 才开口，这里等它
+  const afterClock = await clockOnScreen(page)
+  console.log(`  · 解除后屏上时钟：${afterClock.date} ${afterClock.clock}（钉的是 ${AFTER_AT.slice(11, 16)}）`)
+  console.log(`  · 解除后浮层：「${short(resumed ?? '(没等到)', 60)}」`)
+  check(
+    Boolean(resumed) && resumed.includes(QUIET_CALL_1),
+    '静音结束后**从队首接着播**（没有重新派发，说明队列真的留着了）',
+    resumed ? `浮层：「${short(resumed, 60)}」` : '20 秒内浮层没出现（队列被丢了？）',
+  )
+  check(
+    Boolean(resumed) && resumed.includes('后面还有') && resumed.includes('1'),
+    '两条都还在队列里（浮层上写着「后面还有 1 条呼叫在排队」）',
+    resumed ? `浮层：「${short(resumed, 80)}」` : '没等到浮层',
+  )
+  check(
+    afterAudio.osc.length >= 2 &&
+      LOUD_FS.every((f) => afterAudio.osc.some((o) => Math.abs(o.f - f) < 1)),
+    '解除静音后才真的出声（播报前的「叮咚」= 2 个振荡器）',
+    `${audioText(afterAudio)}；speak() ${afterTts.calls.length} 次`,
+  )
+  await closeCallChannel(page, bcQuiet)
+
+  say('【场景 11】考试模式静音：同一套断言（不响不念不霸屏 + 队列留着）')
+  const EXAM_CALL = '考试静音：请 9 号到办公室。'
+  await ctx.clock.setFixedTime(new Date('2026-09-24T14:00:00'))
+  await goto(page, '/classroom', { clock: '14:00', date: '2026-09-24', weekday: '四' })
+  await page.getByRole('button', { name: '考试静音' }).click()
+  await page.waitForTimeout(500)
+  const examOn = await bodyText(page)
+  check(
+    examOn.includes('考试进行中 · 已静音'),
+    '考试静音已打开（全屏黑底时钟）',
+    examOn.includes('考试进行中') ? '屏上写着「考试进行中 · 已静音」' : short(examOn, 120),
+  )
+
+  await overlayWatchStart(page)
+  // 计数器清零：点「考试静音」时 unlockAudio() 会 speak 一次空串、并 new 一个 AudioContext
+  await resetSoundCounters(page)
+  const bcExam = await openCallChannel(page)
+  await postCall(page, bcExam, 'clockcheck-exam-1', EXAM_CALL)
+  await page.waitForTimeout(3000)
+  const examDuring = await overlayWatchRead(page)
+  const examAudio = await readAudio(page)
+  const examTts = await readTts(page)
+  const examBody = await bodyText(page)
+  console.log(
+    `  · 考试静音期间：浮层出现 ${examDuring.seen} 次；振荡器 ${examAudio.osc.length} 个；` +
+      `speak() ${examTts.calls.length} 次`,
+  )
+  check(
+    examDuring.seen === 0 && !examBody.includes(EXAM_CALL),
+    '不霸屏：浮层一次都没出现',
+    `浮层出现 ${examDuring.seen} 次；页面里${examBody.includes(EXAM_CALL) ? '**有**呼叫文案' : '没有呼叫文案'}`,
+    '考试是全屏黑底时钟，呼叫不该盖在它上面',
+  )
+  check(examAudio.osc.length === 0, '不响：一个振荡器都没建', audioText(examAudio))
+  check(examTts.calls.length === 0, '不念：speak() 一次都没被调用', `speak() 调用 ${examTts.calls.length} 次`)
+
+  // 「结束考试」有两个（面板上那个 + 黑屏里那个），点**后一个**：黑屏盖在最上面，点得到
+  await page.getByRole('button', { name: '结束考试' }).last().click()
+  const examResumed = await waitOverlay(page, 20_000)
+  const examAfter = await waitTts(page, 1) // 同上：先响「叮咚」，680ms 后才开口
+  check(
+    Boolean(examResumed) && examResumed.includes(EXAM_CALL),
+    '结束考试后从队首接着播（考试期间队列没被丢掉）',
+    examResumed ? `浮层：「${short(examResumed, 60)}」` : '20 秒内浮层没出现（队列被丢了？）',
+  )
+  check(examAfter.calls.length >= 1, '解除后真的念了', `speak() 调用 ${examAfter.calls.length} 次`)
+  await closeCallChannel(page, bcExam)
+
   /* ================= 收尾：设备角色复位 ================= */
 
   say('【收尾】把本机设备角色改回 teacher（教室端会把它标成 classroom）')
@@ -949,23 +1535,23 @@ else console.log('  全部通过 ✅')
 
 /*
  * ============================================================
- * 跑这个脚本时发现的两处裂缝（**没改**，因为它们都在别人正在动的文件 /
- * 本轮范围之外 —— 留在这里免得下次又踩）
+ * 跑这个脚本时发现的问题（留档：哪些修了、哪些还在）
  * ============================================================
  *
- * ① 班级课表的标题里，「班名」和「科目 老师」这两件事只能二选一。
+ * ① ✅ **已修**（2026-09-25）：班级课表的标题里，「班名」和「科目 老师」曾经只能二选一。
  *    教室端只显示 `scope='class'` 且 `classId === 本班` 的行；
  *    而「粘贴课表」链路里 classId 是 `matchClass()` 从**标题文本**里认班名才给的
  *    （lib/scheduleParse.ts）。于是：
  *      · 标题不写班名（如「语文 张老师」）→ classId 是空的 → 教室端一条都不显示；
  *      · 标题写班名（如「高二(3)班 语文 张老师」）→ classId 对了，但
  *        `splitTitle()` 按第一个空格拆，卡上会把「高二(3)班」当成科目显示成 30px 大字。
- *    真实课表和 `seed.ts` 的教师课表都走第二条路（标题＝「班级 科目」，没有老师那一节），
- *    所以「正在上课」卡目前在这份数据上永远只有一行（老师那行是空的、不渲染）。
- *    本脚本的做法是：用带班名的数据验证**导入链路**，再用「科目 老师」的数据
- *    验证**教室端显示**（形状和种子数据一致，只是 scope 换成 class）。
+ *    修法是让 `splitTitle()` **先剥掉开头的班名**再拆（Classroom.tsx），
+ *    这样两种标题形状都能用。本脚本现在两头都验：
+ *      · 「准备」一节用**粘贴链路的真实数据**（标题带班名）看卡片（端到端）；
+ *      · 场景 8 逐个形状量一遍（带/不带班名、全角/半角括号、只有科目、班会自习选修课）。
+ *    ⚠️ 标题里的班名**不能删**：删了 `matchClass()` 就给不出 classId，教室端一条课都不显示。
  *
- * ② `Classroom.tsx` 里「按钟点」的那几处仍然读设备本地 `new Date()`
+ * ② ⚠️ **仍是现状**：`Classroom.tsx` 里「按钟点」的那几处仍然读设备本地 `new Date()`
  *    （时钟、closing、下课铃、dayItems…），没有走 §一 约定的 `beijingNow()`。
  *    本机时区是 +08:00 时两者等价，所以现在测得过；一旦设备时区不是 +08:00，
  *    这块屏就会按当地时间切换。本脚本开头有时区检查，会当场把这件事报出来。
