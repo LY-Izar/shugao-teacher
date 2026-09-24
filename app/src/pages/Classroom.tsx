@@ -1158,7 +1158,12 @@ export default function Classroom() {
                     className="mt-2"
                     style={{ fontSize: 12, color: 'var(--color-ink3)', lineHeight: 1.7 }}
                   >
-                    今天没有排课。拍一张课表照片可以自动识别录入。
+                    今天没有排课。点上面的「粘贴课表」把班级课表录进来 ——
+                    贴学校发的电子表最准，也不会漏掉没写时间的节次。
+                    <br />
+                    <span style={{ color: 'var(--color-ink4)' }}>
+                      注意：教师端「我的课表」是另一套数据，教室端看的是这个班的课表。
+                    </span>
                   </div>
                 ) : (
                   <div className="mt-2">
