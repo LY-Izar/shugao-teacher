@@ -4,6 +4,7 @@ import { AppShell, ToastHost } from './components/AppShell'
 import { useStore } from './data/store'
 import { useAuthBootstrap } from './hooks/useAuthBootstrap'
 import { authExpired, hasAuthStamp, isClassroomDevice, markLogin } from './lib/session'
+import { isRemote } from './lib/supabase'
 import AssignmentCall from './pages/AssignmentCall'
 import AssignmentCollect from './pages/AssignmentCollect'
 import AssignmentGrade from './pages/AssignmentGrade'
@@ -67,9 +68,64 @@ function Guard({ children }: { children: React.ReactNode }) {
   return <AppShell>{children}</AppShell>
 }
 
-/** 后端模式下的首次加载（通常一闪而过） */
-function BootScreen() {
+/**
+ * 教室端也要登录。
+ *
+ * 这里以前是**完全公开**的（原来的注释就写着"不要求登录"），后果有两个：
+ *  ① 从教师端点进去时，它直接用教师会话渲染教室端 —— 你根本没有机会输教室端账号，
+ *     所以那条路**没法测**；
+ *  ② 未登录的访客也能打开这块屏。
+ * 数据库那边已经按账号收口了（教室端账号只看得见自己那个班），前端也得跟着要求身份，
+ * 否则界面上永远是"用谁的会话就显示谁的数据"，账号体系等于白做。
+ *
+ * 和教师端的 Guard 不同：不检查设备标记（这台机器本来就该是教室端），
+ * 也不套 AppShell（教室端是独立的一整屏）。
+ */
+function ClassroomGate({ children }: { children: React.ReactNode }) {
+  const hydrated = useStore((s) => s.hydrated)
+  const teacher = useStore((s) => s.teacher)
+  const accountKind = useStore((s) => s.accountKind)
+  const loc = useLocation()
+  if (!hydrated) return <BootScreen />
+  if (!teacher) {
+    return <Navigate to="/login" replace state={{ from: loc.pathname, classroom: true }} />
+  }
   return (
+    <>
+      {/*
+       * 教师账号打开教室端 = **预览**：拿自己的班当样本看看这块屏长什么样。
+       * 它和一体机上那台（教室端账号，只看得见自己那个班）不是一回事，
+       * 不写清楚很容易被当成同一个东西 —— 上一次的困惑就是这么来的。
+       * 用 fixed 定位，不参与布局，也不影响截图。
+       */}
+      {isRemote && accountKind === 'teacher' ? (
+        <div
+          style={{
+            position: 'fixed',
+            left: 0,
+            right: 0,
+            top: 0,
+            zIndex: 60,
+            padding: '6px 12px',
+            textAlign: 'center',
+            fontSize: 12.5,
+            lineHeight: 1.5,
+            background: 'var(--color-warnsoft)',
+            borderBottom: '1px solid ***REMOVED***ecd9ae',
+            color: '***REMOVED***8a5a12',
+          }}
+        >
+          预览模式 —— 你用的是<b>教师账号</b>，显示的是你自己的班。
+          一体机上那台用的是教室端账号，只看得见它自己那个班。
+        </div>
+      ) : null}
+      {children}
+    </>
+  )
+}
+
+/** 后端模式下的首次加载（通常一闪而过） */
+function BootScreen() {  return (
     <div className="grid min-h-full place-items-center px-6">
       <div className="flex flex-col items-center gap-3">
         <span
@@ -95,8 +151,15 @@ export default function App() {
       <ToastHost />
       <Routes>
         <Route path="/login" element={<Login />} />
-        {/* 教室端：一体机上的公共展示，不要求登录，也不套教师端应用壳 */}
-        <Route path="/classroom" element={<Classroom />} />
+        {/* 教室端：独立的一整屏，不套教师端应用壳；但要登录（见 ClassroomGate） */}
+        <Route
+          path="/classroom"
+          element={
+            <ClassroomGate>
+              <Classroom />
+            </ClassroomGate>
+          }
+        />
         <Route
           path="/"
           element={

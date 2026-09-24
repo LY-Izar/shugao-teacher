@@ -540,10 +540,19 @@ export default function Classroom() {
    * 标记这台设备是「教室端」。
    * 之后在这台机器上访问教师端（把 /classroom 改成 /）会要求重新输教师密码 ——
    * 学生在教室里改网址就进不去教师控制台了。
+   *
+   * ⚠️ **只在教室端账号登录时才标。**
+   * 教师用自己的账号打开 /classroom 通常只是想看看那块屏长什么样（核对课表显示），
+   * 如果顺手把设备标成教室端，他回头就被自己的 Guard 挡在教师控制台外面了 ——
+   * 预览一个页面不该有这个代价。
+   *
+   * 注意这个标记本来就只是"改网址"这一层的拦阻，**不是安全边界**：
+   * 真正的隔离是教室端账号 + 数据库 RLS。
    */
+  const accountKind = useStore((s) => s.accountKind)
   useEffect(() => {
-    setDeviceRole('classroom')
-  }, [])
+    if (accountKind === 'classroom') setDeviceRole('classroom')
+  }, [accountKind])
 
   /**
    * 播报队首那条：响一声提示音 → 念出来 → **念完**才出队，接着播下一条。
