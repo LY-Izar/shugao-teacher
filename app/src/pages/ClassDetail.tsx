@@ -6,6 +6,7 @@ import {
   IconCamera,
   IconCheck,
   IconHash,
+  IconMegaphone,
   IconPaste,
   IconPencil,
   IconPlus,
@@ -28,6 +29,12 @@ export default function ClassDetail() {
   const currentClassId = useStore((s) => s.currentClassId)
   const setCurrentClass = useStore((s) => s.setCurrentClass)
   const updateStudent = useStore((s) => s.updateStudent)
+  const assignments = useStore((s) => s.assignments)
+  const sendCall = useStore((s) => s.sendCall)
+
+  /** 自由播报：教师自己输要念的话，不针对某次作业 */
+  const [callOpen, setCallOpen] = useState(false)
+  const [callText, setCallText] = useState('')
   const removeStudent = useStore((s) => s.removeStudent)
   const transferStudent = useStore((s) => s.transferStudent)
   const addStudents = useStore((s) => s.addStudents)
@@ -77,19 +84,33 @@ export default function ClassDetail() {
         sub={`${klass.grade} · ${klass.year}`}
         onBack={() => navigate('/classes')}
         right={
-          currentClassId === klass.id ? (
-            <Tag tone="accent">当前班级</Tag>
-          ) : (
+          <div className="flex items-center gap-2">
+            {/* 自由播报：不针对某次作业，教师自己输要念的话 */}
             <Button
               size="sm"
+              variant="ghost"
+              icon={<IconMegaphone size={15} />}
               onClick={() => {
-                setCurrentClass(klass.id)
-                push({ text: `已切换为 ${klass.name}`, tone: 'ok' })
+                setCallText('')
+                setCallOpen(true)
               }}
             >
-              设为当前
+              呼叫
             </Button>
-          )
+            {currentClassId === klass.id ? (
+              <Tag tone="accent">当前班级</Tag>
+            ) : (
+              <Button
+                size="sm"
+                onClick={() => {
+                  setCurrentClass(klass.id)
+                  push({ text: `已切换为 ${klass.name}`, tone: 'ok' })
+                }}
+              >
+                设为当前
+              </Button>
+            )}
+          </div>
         }
       />
 
@@ -418,6 +439,60 @@ export default function ClassDetail() {
               autoFocus
             />
           </label>
+        </div>
+      </Sheet>
+
+      {/* 自由播报：教师自己输内容，教室端直接念 */}
+      <Sheet open={callOpen} onClose={() => setCallOpen(false)} title={`呼叫 ${klass.name}`}>
+        <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.7, marginBottom: 8 }}>
+          输入想让教室端念出来的话。教室端会先响一声提示音，再用系统语音播报。
+        </p>
+        <textarea
+          className="input"
+          rows={4}
+          value={callText}
+          onChange={(e) => setCallText(e.target.value)}
+          placeholder={`例如：请 ${klass.name} 的课代表把作业收齐送到办公室。`}
+          style={{ width: '100%', fontFamily: 'inherit', lineHeight: 1.7, resize: 'vertical' }}
+        />
+        <div className="mt-3 flex gap-2">
+          <Button block onClick={() => setCallOpen(false)}>
+            取消
+          </Button>
+          <Button
+            block
+            variant="primary"
+            disabled={!callText.trim()}
+            onClick={() => {
+              /*
+               * 呼叫记录在数据库里必须挂在某份作业档案上（assignment_id 是 NOT NULL + 外键），
+               * 所以这里挂到该班最近的一份档案上 —— 至少呼叫记录里能看出是哪个班。
+               */
+              const carrier = [...assignments]
+                .filter((a) => a.classId === klass.id)
+                .sort((a, b) => (a.assignDate < b.assignDate ? 1 : -1))[0]
+              if (!carrier) {
+                push({
+                  text: '这个班还没有作业档案',
+                  tone: 'warn',
+                  desc: '自由播报需要先有一份档案来挂靠呼叫记录',
+                })
+                return
+              }
+              sendCall({
+                assignmentId: carrier.id,
+                classId: klass.id,
+                studentNos: [],
+                text: callText.trim(),
+                room: klass.name,
+              })
+              push({ text: '已发送到教室端', tone: 'ok', desc: callText.trim() })
+              setCallText('')
+              setCallOpen(false)
+            }}
+          >
+            发送播报
+          </Button>
         </div>
       </Sheet>
     </>
