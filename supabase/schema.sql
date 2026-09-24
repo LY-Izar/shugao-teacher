@@ -336,7 +336,279 @@ create policy classroom_files_delete on storage.objects
   using (bucket_id = 'classroom-files' and (storage.foldername(name))[1] = auth.uid()::text);
 
 -- ============================================================
---  10. 自检：确认每张表都开了 RLS
+--  10. 权限与账号体系 · 阶段 1（建表 / 回填 / RLS 函数）
+--      设计见 `权限与账号体系设计.md` §四 §五 §七 §九
+--
+--  ⚠️⚠️ 这一段的边界：**只做加法，一条旧策略都不动。**
+--      旧策略仍然是 `teacher_id = auth.uid()`，所以跑完这段之后
+--      现有功能的行为**完全不变** —— 新表、新函数只是躺在那里。
+--      「用新策略替换旧策略」是阶段 5，是全流程唯一危险的一步，
+--      必须先新旧并存、用真实账号核对可见数据量一致，才能删旧策略。
+--
+--  本段可重复执行（幂等）。
+-- ============================================================
+
+-- -------- 10.1 建表 --------
+
+-- 学校（为将来多校预留，现在只有一所）
+create table if not exists schools (
+  id         uuid primary key default gen_random_uuid(),
+  name       text not null,
+  created_at timestamptz not null default now()
+);
+
+-- 年级
+create table if not exists grades (
+  id         uuid primary key default gen_random_uuid(),
+  school_id  uuid not null references schools (id) on delete cascade,
+  name       text not null,              -- 高一 / 高二 / 高三
+  year       text not null default '',   -- 2026 级
+  created_at timestamptz not null default now()
+);
+-- 同一所学校里年级名不重复（设计稿没写，但回填要幂等就需要它）
+create unique index if not exists grades_school_name_key on grades (school_id, name);
+
+alter table classes add column if not exists school_id uuid references schools (id);
+alter table classes add column if not exists grade_id  uuid references grades (id);
+create index if not exists classes_grade_idx on classes (grade_id);
+
+-- 🔑 角色与管辖范围：一个人可以有多条（多角色是常态，不是异常）
+create table if not exists teacher_roles (
+  id         uuid primary key default gen_random_uuid(),
+  teacher_id uuid not null references teachers (id) on delete cascade,
+  role       text not null check (role in ('super','grade_head','head_teacher','admin','teacher')),
+  -- 管辖范围：grade_head → grades；head_teacher → classes；super/admin → school 或 null
+  scope_type text check (scope_type in ('school','grade','class')),
+  scope_id   uuid,
+  created_at timestamptz not null default now()
+);
+create index if not exists teacher_roles_teacher_idx on teacher_roles (teacher_id);
+-- 同一人 + 同一角色 + 同一范围只允许一条。
+-- scope_type/scope_id 可为 NULL，而唯一索引默认把 NULL 当互不相等 ——
+-- 所以拿占位值把它们折叠起来，否则回填重跑会插出一堆重复行。
+create unique index if not exists teacher_roles_unique on teacher_roles (
+  teacher_id,
+  role,
+  coalesce(scope_type, ''),
+  coalesce(scope_id, '00000000-0000-0000-0000-000000000000'::uuid)
+);
+
+-- 🔑 任课关系：谁教哪个班哪一科（这是「批改权限」的判据）
+create table if not exists class_subjects (
+  id         uuid primary key default gen_random_uuid(),
+  class_id   uuid not null references classes (id) on delete cascade,
+  subject    text not null,        -- 物理 / 语文 / …
+  teacher_id uuid not null references teachers (id) on delete cascade,
+  created_at timestamptz not null default now(),
+  unique (class_id, subject, teacher_id)
+);
+create index if not exists class_subjects_teacher_idx on class_subjects (teacher_id);
+
+-- 🔑 教室端账号：一个班一个，与登录账号一一对应（id = auth.uid()）
+-- 与设计稿的唯一差别：id 多了一条指向 auth.users 的外键。
+-- 教室端账号是「先用管理员密钥建 auth 用户、再写这一行」，外键成立；
+-- 删掉 auth 用户时这行跟着走，不会留下「指向已不存在的人、却依然授权」的残留。
+create table if not exists classroom_accounts (
+  id         uuid primary key references auth.users (id) on delete cascade,
+  class_id   uuid not null references classes (id) on delete cascade,
+  school_id  uuid references schools (id),
+  name       text not null,        -- 「高二(4)班教室」
+  created_by uuid references teachers (id),
+  disabled   boolean not null default false,
+  created_at timestamptz not null default now(),
+  unique (class_id)                -- 一个班只允许一个教室端账号
+);
+
+-- 新表同样要开 RLS：不开等于裸奔
+alter table schools            enable row level security;
+alter table grades             enable row level security;
+alter table teacher_roles      enable row level security;
+alter table class_subjects     enable row level security;
+alter table classroom_accounts enable row level security;
+
+-- 新表的读策略见 §10.4 —— 它要调用 visible_class_ids()，
+-- 而 PostgreSQL 在 create policy 的那一刻就会解析表达式，
+-- 所以函数必须先存在，策略不能写在这里。
+
+-- -------- 10.2 回填现有数据（只增不改）--------
+--  现有线上数据（设计 §七）：教师只有示例教师一人，班级 高二(1)班 / 高二(4)班。
+
+-- ① 学校：优先沿用 teachers.school 里已经填过的名字，没有才用默认
+insert into schools (name)
+select coalesce(
+  (select nullif(school, '') from teachers where school <> '' limit 1),
+  '示例中学'
+)
+where not exists (select 1 from schools);
+
+-- ② 三个年级
+insert into grades (school_id, name)
+select s.id, g.name
+from schools s
+cross join (values ('高一'), ('高二'), ('高三')) as g(name)
+on conflict do nothing;
+
+-- ③ 班级挂到学校
+update classes c
+set school_id = s.id
+from schools s
+where c.school_id is null;
+
+-- ④ 班级挂到年级：优先用 classes.grade；它是空的就从班名里抠「高X」
+update classes c
+set grade_id = g.id
+from grades g
+where c.grade_id is null
+  and g.school_id = c.school_id
+  and g.name = coalesce(nullif(c.grade, ''), substring(c.name from '^(高[一二三])'));
+
+-- ⑤ 超管：**只给现在真正拥有班级的教师**。
+--    设计 §七 步骤 2 说的是「现有教师」—— 现在库里只有示例教师一人，等价。
+--    ⚠️ 将来教师多了，这里必须改成按人指定，否则等于整体提权。
+insert into teacher_roles (teacher_id, role, scope_type, scope_id)
+select distinct c.teacher_id, 'super', 'school', s.id
+from classes c
+cross join (select id from schools order by created_at limit 1) s
+on conflict do nothing;
+
+-- ⑥ 班主任：classes.teacher_id 在旧模型里就是「这个班是谁的」，即班主任
+insert into teacher_roles (teacher_id, role, scope_type, scope_id)
+select c.teacher_id, 'head_teacher', 'class', c.id
+from classes c
+on conflict do nothing;
+
+-- ⑦ 任课关系：班级所有者教自己那一科（示例教师 = 物理 × 两个班）
+insert into class_subjects (class_id, subject, teacher_id)
+select c.id, coalesce(nullif(t.subject, ''), '物理'), c.teacher_id
+from classes c
+join teachers t on t.id = c.teacher_id
+on conflict do nothing;
+
+-- -------- 10.3 RLS 函数 --------
+--  核心手法（设计 §五）：把「能不能看到这个班」抽成一个函数，策略里只调它。
+--  两个函数都是 security definer —— 以定义者身份读 teacher_roles，
+--  避免「策略读表、表又触发策略」的套娃。
+
+-- 与设计稿的差别：多加了 `set search_path = public`。
+-- security definer 函数不锁 search_path 是可以被劫持的（搜索路径攻击），
+-- 本文件里已有的 handle_new_user() 也是这么写的，保持一致。
+-- 另外参数改名成 p_ 前缀，避免和列名同名带来的解析歧义（调用是按位置的，不受影响）。
+--
+-- 🔴 这里有一个**不能动的前提**：函数必须由表的属主（Supabase SQL 编辑器里就是 postgres）创建。
+--    因为类的策略会调用 visible_class_ids()，而这个函数自己又读 class_subjects /
+--    classroom_accounts / teacher_roles —— 一旦函数属主不是表属主，内层读取就会
+--    重新触发策略 → 策略再调函数 → 无限递归。
+--    表属主默认绕过 RLS，所以这条链是断的。**不要在 SQL 编辑器以外、用别的角色建这两个函数。**
+
+-- 当前登录者能看到的班级 id 集合
+create or replace function visible_class_ids()
+returns setof uuid
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  with me as (select auth.uid() as uid)
+  select c.id
+  from classes c
+  where
+    -- 最高管理员 / 行政：全校
+    exists (select 1 from teacher_roles r, me
+             where r.teacher_id = me.uid and r.role in ('super','admin'))
+    -- 年级主任：本年级
+    or exists (select 1 from teacher_roles r, me
+                where r.teacher_id = me.uid and r.role = 'grade_head'
+                  and r.scope_type = 'grade' and r.scope_id = c.grade_id)
+    -- 班主任：本班
+    or exists (select 1 from teacher_roles r, me
+                where r.teacher_id = me.uid and r.role = 'head_teacher'
+                  and r.scope_type = 'class' and r.scope_id = c.id)
+    -- 任课教师：任教班（走班也走这条）
+    or exists (select 1 from class_subjects cs, me
+                where cs.teacher_id = me.uid and cs.class_id = c.id)
+    -- 教室端：本班
+    or exists (select 1 from classroom_accounts ca, me
+                where ca.id = me.uid and ca.class_id = c.id and not ca.disabled);
+$$;
+
+-- 能不能批改「这个班的这一科」
+-- 注意：教室端**故意不在这里** —— 学生能碰到教室端那台机器，
+-- 给教室端任何 assignments 的写权限都是破防（设计 §五 的红线）。
+create or replace function can_grade(p_class_id uuid, p_subject text)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  with me as (select auth.uid() as uid)
+  select
+    exists (select 1 from teacher_roles r, me
+             where r.teacher_id = me.uid and r.role in ('super','admin'))
+    or exists (select 1 from teacher_roles r, me
+                where r.teacher_id = me.uid and r.role = 'grade_head'
+                  and r.scope_type = 'grade'
+                  and r.scope_id = (select grade_id from classes where id = p_class_id))
+    or exists (select 1 from teacher_roles r, me
+                where r.teacher_id = me.uid and r.role = 'head_teacher'
+                  and r.scope_type = 'class' and r.scope_id = p_class_id)
+    or exists (select 1 from class_subjects cs, me
+                where cs.teacher_id = me.uid and cs.class_id = p_class_id
+                  and cs.subject = p_subject);
+$$;
+
+grant execute on function visible_class_ids() to authenticated;
+grant execute on function can_grade(uuid, text) to authenticated;
+
+-- -------- 10.4 新表的读策略 --------
+--  只给「读」，且都不越权：
+--    schools / grades 的名字不算敏感
+--    teacher_roles 只能读自己那一行（避免靠它反查别人的管辖范围）
+--    class_subjects / classroom_accounts 按 visible_class_ids() 收口
+--  注意：visible_class_ids() / can_grade() 是 security definer，
+--  它们读 teacher_roles 时不走策略，所以这里不会「策略套策略」递归。
+drop policy if exists schools_read on schools;
+create policy schools_read on schools
+  for select to authenticated using (true);
+
+drop policy if exists grades_read on grades;
+create policy grades_read on grades
+  for select to authenticated using (true);
+
+drop policy if exists teacher_roles_read on teacher_roles;
+create policy teacher_roles_read on teacher_roles
+  for select to authenticated using (teacher_id = auth.uid());
+
+drop policy if exists class_subjects_read on class_subjects;
+create policy class_subjects_read on class_subjects
+  for select to authenticated using (class_id in (select visible_class_ids()));
+
+drop policy if exists classroom_accounts_read on classroom_accounts;
+create policy classroom_accounts_read on classroom_accounts
+  for select to authenticated using (class_id in (select visible_class_ids()));
+
+grant select on schools, grades, teacher_roles, class_subjects, classroom_accounts to authenticated;
+revoke all on schools, grades, teacher_roles, class_subjects, classroom_accounts from anon;
+
+-- ⚠️ 教室里那台机器的安全边界靠这一条守：
+--    绝不能给教室端账号任何 assignments 的 UPDATE 策略。
+--    教室端的两个有限写权限（心跳 / 本班课表 scope='class'）留到阶段 3 ——
+--    那时才有真账号可以验，现在加进去只是无法验证的攻击面。
+
+-- -------- 10.5 阶段 2 的验证查询（先别执行，等新旧并存时用）--------
+--  这一步是设计 §七 的「第 5 步是唯一危险步骤」的护栏：
+--  新函数看到的必须 ⊇ 旧策略看到的，且数量一致，才能删旧策略。
+--
+-- select (select count(*) from classes where id in (select visible_class_ids())) as 新函数的班级数,
+--        (select count(*) from classes where teacher_id = auth.uid())            as 旧策略的班级数;
+-- select (select count(*) from students where class_id in (select visible_class_ids())) as 新学生数,
+--        (select count(*) from students s join classes c on c.id = s.class_id
+--          where c.teacher_id = auth.uid())                                            as 旧学生数;
+-- -- 回填是否漏了班（应为 0 行）
+-- select id, name, grade from classes where grade_id is null;
+
+-- ============================================================
+--  11. 自检：确认每张表都开了 RLS
 --     跑完应返回 0 行；返回任何一行都说明有表漏开
 -- ============================================================
 -- select tablename from pg_tables
