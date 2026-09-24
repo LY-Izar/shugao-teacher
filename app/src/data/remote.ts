@@ -328,6 +328,41 @@ export async function loadRecentCalls(classId: string, sinceMs: number): Promise
     .map(rowToCall)
 }
 
+/**
+ * 这个登录账号是不是「教室端账号」？是的话连它管哪个班一起返回。
+ *
+ * 为什么不能靠别的办法判断身份：
+ * `handle_new_user` 触发器会给**每一个** auth 用户建一行 `teachers` ——
+ * 教室端账号也有。所以"有没有 teachers 行"区分不了教师和教室端。
+ * 唯一的判据是 `classroom_accounts` 里有没有 id = 自己 uid 的那一行。
+ *
+ * RLS 上教室端读得到自己那一行：`classroom_accounts_read` 按 visible_class_ids() 收口，
+ * 而 visible_class_ids() 里本来就有 classroom_accounts 这一支。
+ *
+ * 任何失败（表还没建、没登录、网络）都返回 null —— 那就当教师处理，
+ * 和现在的行为一致，不会因为权限体系还没上线就把人挡在门外。
+ */
+export async function loadClassroomAccount(): Promise<{
+  classId: string
+  disabled: boolean
+} | null> {
+  const sb = getSupabase()
+  if (!sb) return null
+  const {
+    data: { user },
+  } = await sb.auth.getUser()
+  if (!user) return null
+  const { data, error } = await sb
+    .from('classroom_accounts')
+    .select('class_id, disabled')
+    .eq('id', user.id)
+    .maybeSingle()
+  if (error || !data) return null
+  const row = data as { class_id?: string; disabled?: boolean }
+  if (!row.class_id) return null
+  return { classId: row.class_id, disabled: row.disabled === true }
+}
+
 export async function loadSnapshot(): Promise<Snapshot | null> {
   const sb = getSupabase()
   if (!sb) return null

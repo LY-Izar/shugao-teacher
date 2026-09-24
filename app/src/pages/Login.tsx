@@ -65,8 +65,14 @@ export default function Login() {
       }
       await hydrate()
       markLogin()
-      // 在这个页面输的密码 = 这是教师端设备
-      setDeviceRole('teacher')
+      /*
+       * 这台设备按**这个账号的身份**用。
+       * 教室端账号登录的就是一体机本身，别把它标成教师端 ——
+       * 否则 Guard 会先按"这台设备被当过教室端"把它踢回登录页，来回弹。
+       * 身份是 hydrate() 里查 classroom_accounts 得出的，不是靠猜。
+       */
+      const kind = useStore.getState().accountKind
+      setDeviceRole(kind === 'classroom' ? 'classroom' : 'teacher')
       navigate(loc.state?.from ?? '/', { replace: true })
       return
     }

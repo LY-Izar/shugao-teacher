@@ -30,6 +30,7 @@ import Workbench from './pages/Workbench'
 function Guard({ children }: { children: React.ReactNode }) {
   const teacher = useStore((s) => s.teacher)
   const hydrated = useStore((s) => s.hydrated)
+  const accountKind = useStore((s) => s.accountKind)
   const signOut = useStore((s) => s.signOut)
   const loc = useLocation()
   const [expired] = useState(() => authExpired())
@@ -47,9 +48,15 @@ function Guard({ children }: { children: React.ReactNode }) {
   // 连了后端时，先等会话与数据就绪，否则会误判成「未登录」被踢回登录页
   if (!hydrated) return <BootScreen />
   /*
+   * 教室端账号：它整个可见范围就只有自己那一个班，进教师控制台没有任何意义。
+   * 这是**账号身份**决定的，和设备标记无关 —— 换个浏览器、清掉 localStorage 也一样。
+   * /classroom 本身不在 Guard 里，所以这里不会绕成死循环。
+   */
+  if (accountKind === 'classroom') return <Navigate to="/classroom" replace />
+  /*
    * 这台设备是被当作**教室端**用的（在教室里打开过 /classroom）——
    * 学生把网址后缀一改就能进教师控制台，所以这里要求重新输一次教师密码。
-   * 拦的是"改网址"这个实际操作；真正的权限隔离要靠独立账号 + 数据库 RLS。
+   * 拦的是"改网址"这个实际操作；真正的权限隔离靠独立账号 + 数据库 RLS。
    */
   if (isClassroomDevice()) {
     return <Navigate to="/login" replace state={{ from: loc.pathname, classroom: true }} />

@@ -711,7 +711,78 @@ select
 --  on conflict do nothing;
 
 -- ============================================================
---  11. 自检：确认每张表都开了 RLS
+--  11. 阶段 2：新策略与旧策略**并存**（只加，不删）
+--
+--  ⚠️ 这一步是「加策略」，不是「换策略」。
+--     PostgreSQL 的 permissive 策略之间是 **OR** —— 新旧并存时可见范围是两者的**并集**。
+--     已验证（用户实跑）：对示例教师，visible_class_ids_for() 与旧策略 teacher_id = auth.uid()
+--     看到的**完全相等**（班级 2 / 学生 80 / 作业 8），所以这个并集就是原来那个集合 ——
+--     教师的可见范围一点没变。这正是设计 §七 要求的"先并存核对，再删旧的"。
+--
+--  🔴 只有一类身份的可见范围是**净新增**的：教室端账号。
+--     旧策略下它什么都看不到（teacher_id = auth.uid() 对它永远为假），
+--     这里给它的读权限就是它该有的全部 —— 一个班一台机器，只看得见自己班。
+--
+--  旧策略**一条都不删**。删除是阶段 5，要等前端按角色分流做完、教室端真机验过。
+-- ============================================================
+
+-- 班级 / 学生 / 作业 / 呼叫：看得见这个班 → 看得见班里的东西
+drop policy if exists classes_visible on classes;
+create policy classes_visible on classes for select to authenticated
+  using (id in (select visible_class_ids()));
+
+drop policy if exists students_visible on students;
+create policy students_visible on students for select to authenticated
+  using (class_id in (select visible_class_ids()));
+
+drop policy if exists assignments_visible on assignments;
+create policy assignments_visible on assignments for select to authenticated
+  using (class_id in (select visible_class_ids()));
+
+drop policy if exists calls_visible on calls;
+create policy calls_visible on calls for select to authenticated
+  using (class_id in (select visible_class_ids()));
+
+-- 课表：教室端要的只有「班级课表」这一类（scope='class'）。
+-- 教师自己的排课表（scope='mine'）仍由旧策略负责，这条不碰它。
+drop policy if exists schedule_class_visible on schedule_items;
+create policy schedule_class_visible on schedule_items for select to authenticated
+  using (scope = 'class' and class_id in (select visible_class_ids()));
+
+-- 教室端设备行（在线状态）
+drop policy if exists classrooms_visible on classrooms;
+create policy classrooms_visible on classrooms for select to authenticated
+  using (class_id in (select visible_class_ids()));
+
+-- -------- 11.1 教室端的两处有限写（设计 §五）--------
+--  ⚠️ 设计稿 §五 这里有个笔误，照它写会永远匹配不上：
+--     原文是 `id in (select id from classroom_accounts where id = auth.uid())` ——
+--     拿 classrooms.id（**设备行**的 id）去比 classroom_accounts.id（**教室端账号**的 auth uid），
+--     这是两个不同的 uuid，条件恒为假。正确写法是按 **class_id** 关联。
+--     另外补了 `not disabled` —— 停用的账号不该还能写。
+
+-- ① 心跳
+drop policy if exists classrooms_heartbeat on classrooms;
+create policy classrooms_heartbeat on classrooms for update to authenticated
+  using (class_id in (select class_id from classroom_accounts
+                       where id = auth.uid() and not disabled))
+  with check (class_id in (select class_id from classroom_accounts
+                            where id = auth.uid() and not disabled));
+
+-- ② 本班课表（粘贴 / 修改 scope='class' 的课）
+drop policy if exists schedule_classroom_write on schedule_items;
+create policy schedule_classroom_write on schedule_items for all to authenticated
+  using (scope = 'class' and class_id in (select class_id from classroom_accounts
+                                           where id = auth.uid() and not disabled))
+  with check (scope = 'class' and class_id in (select class_id from classroom_accounts
+                                                where id = auth.uid() and not disabled));
+
+-- 🔴 绝不能给教室端账号任何 assignments 的 INSERT / UPDATE / DELETE 策略 ——
+--    学生能碰到教室端那台机器，这是整个设计的安全边界。
+--    上面 assignments 只加了 for select，写权限仍然只属于教师。
+
+-- ============================================================
+--  12. 自检：确认每张表都开了 RLS
 --     跑完应返回 0 行；返回任何一行都说明有表漏开
 -- ============================================================
 -- select tablename from pg_tables

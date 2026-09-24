@@ -79,6 +79,15 @@ type State = {
   hydrated: boolean
   /** 最近一次同步失败的原因，非空时界面顶部会提示 */
   syncError: string | null
+  /**
+   * 这次登录的是**教师**还是**教室端账号**？
+   *
+   * 判据只有一个：`classroom_accounts` 里有没有 id = 自己 uid 的那一行。
+   * 不能靠"有没有 teachers 行"来判断 —— `handle_new_user` 触发器会给每一个
+   * auth 用户都建一行 teachers，教室端账号也有。
+   * 本地演示模式恒为 'teacher'。
+   */
+  accountKind: 'teacher' | 'classroom'
 
   hydrate: () => Promise<void>
   clearSyncError: () => void
@@ -284,6 +293,7 @@ export const useStore = create<State>()(
       userId: null,
       hydrated: !isRemote,
       syncError: null,
+      accountKind: 'teacher',
 
       /* ---------------- 后端 ---------------- */
 
@@ -297,6 +307,12 @@ export const useStore = create<State>()(
           set({ hydrated: true })
           return
         }
+        /*
+         * 顺便判定这是教师还是教室端账号 —— 路由守卫靠它分流。
+         * 教室端账号能看到的班级由数据库收口（visible_class_ids 里的
+         * classroom_accounts 那一支），前端这里只负责"该送去哪个界面"。
+         */
+        const room = await remote.loadClassroomAccount()
         set({
           userId: snap.userId,
           teacher: snap.teacher,
@@ -309,6 +325,7 @@ export const useStore = create<State>()(
           currentClassId: readCurrentClass(snap.classes),
           isDemo: false,
           hydrated: true,
+          accountKind: room ? 'classroom' : 'teacher',
           lastSeenAt: Date.now(),
         })
       },
@@ -338,6 +355,8 @@ export const useStore = create<State>()(
           calls: [],
           schedule: [],
           hydrated: !isRemote,
+          // 身份跟着会话走，别把上一个账号的类型留在内存里
+          accountKind: 'teacher',
         })
       },
 
