@@ -405,14 +405,19 @@ create table if not exists class_subjects (
 create index if not exists class_subjects_teacher_idx on class_subjects (teacher_id);
 
 -- 🔑 教室端账号：一个班一个，与登录账号一一对应（id = auth.uid()）
--- 与设计稿的唯一差别：id 多了一条指向 auth.users 的外键。
--- 教室端账号是「先用管理员密钥建 auth 用户、再写这一行」，外键成立；
--- 删掉 auth 用户时这行跟着走，不会留下「指向已不存在的人、却依然授权」的残留。
+-- 与设计稿的两处偏差：
+--  1. id 多了一条指向 auth.users 的外键。教室端账号是「先用管理员密钥建 auth 用户、
+--     再写这一行」，外键成立；删掉 auth 用户时这行跟着走，不会留下
+--     「指向已不存在的人、却依然授权」的残留。
+--  2. 多存一列 email。教室端登录界面上要输「邮箱 + 密码」，而教师过几天回来
+--     （换机器、重装、贴错密码）需要能重新看到这个邮箱 ——
+--     不存的话就只能拿管理员密钥去 auth.users 里反查，既慢又要多一次管理员调用。
 create table if not exists classroom_accounts (
   id         uuid primary key references auth.users (id) on delete cascade,
   class_id   uuid not null references classes (id) on delete cascade,
   school_id  uuid references schools (id),
   name       text not null,        -- 「高二(4)班教室」
+  email      text not null default '',
   created_by uuid references teachers (id),
   disabled   boolean not null default false,
   created_at timestamptz not null default now(),
