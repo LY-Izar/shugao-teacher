@@ -7,6 +7,32 @@ import { getSupabase, isRemote } from '../lib/supabase'
 import { markLogin, setDeviceRole } from '../lib/session'
 import { APP_VERSION } from '../lib/version'
 
+/**
+ * 内部账号的邮箱后缀。
+ *
+ * 这个平台有三类登录身份，只有第一类是人：
+ *   教师 / 管理员：用真实邮箱（`admin2@example.com`、`admin@example.com`）
+ *   教室端账号：  一个班一个，登录名是 `g2-4` 这种短名 —— 不是人，也不该收信
+ *
+ * 所以登录框允许**只敲短名**，这里按输入内容补后缀：
+ *   带 @              → 原样放行（教师、管理员都敲完整邮箱）
+ *   纯数字 5–11 位    → 当 QQ 号，补 `@qq.com`（管理员平时只记号码）
+ *   其余              → 当内部短名，补 `@shugao.local`
+ *
+ * ⚠️ 这个后缀必须和 `functions/api/classroom-account.ts` 里的 EMAIL_DOMAIN 一致，
+ *    否则教室端账号在那边建出来、在这边登不进去。
+ */
+const ACCOUNT_DOMAIN = '@shugao.local'
+const QQ_DOMAIN = '@qq.com'
+const QQ_RE = /^\d{5,11}$/
+
+/** 看输入内容决定补哪个后缀；本来就有 @ 的原样放行。 */
+function toEmail(raw: string): string {
+  const s = raw.trim()
+  if (!s || s.includes('@')) return s
+  return QQ_RE.test(s) ? `${s}${QQ_DOMAIN}` : `${s}${ACCOUNT_DOMAIN}`
+}
+
 export default function Login() {
   const signIn = useStore((s) => s.signIn)
   const hydrate = useStore((s) => s.hydrate)
@@ -25,7 +51,7 @@ export default function Login() {
     if (isRemote) {
       const sb = getSupabase()
       const { error } = await sb!.auth.signInWithPassword({
-        email: account.trim(),
+        email: toEmail(account),
         password: pwd,
       })
       if (error) {
@@ -139,12 +165,12 @@ export default function Login() {
               </div>
             ) : null}
             <label>
-              <span className="label">{isRemote ? '邮箱' : '账号 / 工号'}</span>
+              <span className="label">{isRemote ? '邮箱 / 账号' : '账号 / 工号'}</span>
               <input
                 className="input"
                 value={account}
                 onChange={(e) => setAccount(e.target.value)}
-                placeholder={isRemote ? 'teacher@example.com' : '输入账号'}
+                placeholder={isRemote ? '邮箱，或直接敲 QQ 号 / 账号名' : '输入账号'}
                 autoComplete="username"
                 autoFocus
               />

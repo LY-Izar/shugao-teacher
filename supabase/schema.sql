@@ -436,7 +436,11 @@ alter table classroom_accounts enable row level security;
 -- 所以函数必须先存在，策略不能写在这里。
 
 -- -------- 10.2 回填现有数据（只增不改）--------
---  现有线上数据（设计 §七）：教师只有示例教师一人，班级 高二(1)班 / 高二(4)班。
+--  ⚠️ 回填**只做能确证的事**：学校、年级、班级归属、任课关系这些是数据事实；
+--      **角色一律显式指派**（见 §10.6），不做任何推断式提权。
+--  真实情况（用户 2026-09-24 确认）：教师有两位 —— 示例教师（高二(1)班 / 高二(4)班 的
+--  **物理老师，不是班主任**）和一个测试账号；班级三个（含一个「测试专用」）。
+--  设计 §七 里记的「示例教师一人 / 两个班 / 2 份作业」是 09-23 的快照，早已过时。
 
 -- ① 学校：优先沿用 teachers.school 里已经填过的名字，没有才用默认
 insert into schools (name)
@@ -467,20 +471,21 @@ where c.grade_id is null
   and g.school_id = c.school_id
   and g.name = coalesce(nullif(c.grade, ''), substring(c.name from '^(高[一二三])'));
 
--- ⑤ 超管：**只给现在真正拥有班级的教师**。
---    设计 §七 步骤 2 说的是「现有教师」—— 现在库里只有示例教师一人，等价。
---    ⚠️ 将来教师多了，这里必须改成按人指定，否则等于整体提权。
-insert into teacher_roles (teacher_id, role, scope_type, scope_id)
-select distinct c.teacher_id, 'super', 'school', s.id
-from classes c
-cross join (select id from schools order by created_at limit 1) s
-on conflict do nothing;
+-- ⑤ 超管：**不回填**。
+--    设计 §七 步骤 2 写的是「给现有教师插一条 role='super'」—— 那是 09-23 的假设，
+--    当时以为库里只有示例教师一位教师、而且他就是管理员。
+--    实际不是：示例教师只是任课教师，库里还有测试账号，真正的主管另有一个专用账号
+--    （用户 2026-09-24 决定：**只留 Admin 一个最高管理员**）。
+--    「按拥有班级的人自动提权」这条规则尤其危险：它会顺手把任何一个建过班的老师
+--    变成全校可见 —— 那不是权限设计，那是漏洞。所以超管必须**显式指派**，见 §10.6。
 
--- ⑥ 班主任：classes.teacher_id 在旧模型里就是「这个班是谁的」，即班主任
-insert into teacher_roles (teacher_id, role, scope_type, scope_id)
-select c.teacher_id, 'head_teacher', 'class', c.id
-from classes c
-on conflict do nothing;
+-- ⑥ 班主任：**不回填**。
+--    旧模型里 classes.teacher_id 的含义是「这条班级记录是谁建的」，
+--    **不等于班主任** —— 本项目里示例教师是这两个班的物理老师，不是班主任
+--    （用户 2026-09-24 明确）。设计 §七 步骤 3 里「班级所有者 = 班主任」是错的：
+--    照它回填会让任课教师拿到班主任的实权。
+--    ⚠️ 不要为了方便把它加回来 —— 这是权限，不是便利。
+--    班主任同样必须按人显式指派，见 §10.6。
 
 -- ⑦ 任课关系：班级所有者教自己那一科（示例教师 = 物理 × 两个班）
 insert into class_subjects (class_id, subject, teacher_id)
@@ -640,8 +645,9 @@ union all
 select '有班级却没人任课', count(*) from classes c
   where not exists (select 1 from class_subjects cs where cs.class_id = c.id);
 
--- ② 回填明细：对着设计 §七 的现有数据核对
---    期望 1 所学校 / 3 个年级 / 2 个班 / 1 条 super / 2 条班主任 / 2 行任课关系
+-- ② 回填明细
+--    期望：1 所学校 / 3 个年级 / 3 个班 / **0 条 super、0 条班主任**（角色显式指派，见 §10.6）
+--          / 3 行任课关系（示例教师 × 物理 × 高二(1)、高二(4)；测试账号 × 物理 × 测试专用）
 select '学校' as 表, count(*)::text as 行数 from schools
 union all select '年级', count(*)::text from grades
 union all select '班级', count(*)::text from classes
@@ -661,6 +667,48 @@ select
      where c.teacher_id = (select uid from me))                                                      as 旧_学生数,
   (select count(*) from assignments where class_id in (select visible_class_ids_for((select uid from me)))) as 新_作业数,
   (select count(*) from assignments where teacher_id = (select uid from me))                          as 旧_作业数;
+
+-- -------- 10.6 角色指派（模板，按真实的人换成实际语句）--------
+--  🔴 **角色一律显式指派，绝不做推断式回填。**
+--     曾经按「谁拥有班级谁就是班主任 / 谁建过班谁就是超管」回填过一次，
+--     结果是：任课教师拿到了班主任的实权，建过班的测试账号被提成全校可见。
+--     那不是权限设计，那是漏洞。
+--
+--  四种身份各自的判据（对应 §10.3 那两个函数）：
+--    超管 / 行政   teacher_roles: role='super' / 'admin', scope_type='school'
+--    年级主任      teacher_roles: role='grade_head',   scope_type='grade', scope_id=<grades.id>
+--    班主任        teacher_roles: role='head_teacher', scope_type='class', scope_id=<classes.id>
+--    任课教师      **不写 teacher_roles**，写 class_subjects（见 10.2 ⑦）——
+--                  它只决定"能不能批改这一科"，**不代表班主任身份**
+--
+--  指派模板（把姓名和班名换成真实的）：
+--
+--  -- 设为最高管理员
+--  insert into teacher_roles (teacher_id, role, scope_type, scope_id)
+--  select t.id, 'super', 'school', (select id from schools order by created_at limit 1)
+--  from teachers t where t.name = '某某'
+--  on conflict do nothing;
+--
+--  -- 设为某班班主任
+--  insert into teacher_roles (teacher_id, role, scope_type, scope_id)
+--  select t.id, 'head_teacher', 'class', c.id
+--  from teachers t, classes c
+--  where t.name = '某某' and c.name = '高二(4)班'
+--  on conflict do nothing;
+--
+--  -- 设为某年级主任
+--  insert into teacher_roles (teacher_id, role, scope_type, scope_id)
+--  select t.id, 'grade_head', 'grade', g.id
+--  from teachers t, grades g
+--  where t.name = '某某' and g.name = '高二'
+--  on conflict do nothing;
+--
+--  -- 加一门任课关系（任课教师真正的身份在这里）
+--  insert into class_subjects (class_id, subject, teacher_id)
+--  select c.id, '物理', t.id
+--  from teachers t, classes c
+--  where t.name = '某某' and c.name = '高二(4)班'
+--  on conflict do nothing;
 
 -- ============================================================
 --  11. 自检：确认每张表都开了 RLS
