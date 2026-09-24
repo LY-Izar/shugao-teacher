@@ -198,6 +198,9 @@ export default function Classroom() {
   const [schedErr, setSchedErr] = useState('')
   /** 照片识别结果，等教师核对/改完时间再入库 */
   const [schedReview, setSchedReview] = useState<ParsedScheduleItem[] | null>(null)
+  /** 粘贴课表 —— 学校发的电子表直接贴进来，比拍照准得多（也不会漏掉没写时间的节次） */
+  const [pasteOpen, setPasteOpen] = useState(false)
+  const [pasteText, setPasteText] = useState('')
 
   /** 改一行（时间最容易认错，所以每一格都能直接编辑） */
   const patchRow = (i: number, patch: Partial<ParsedScheduleItem>) =>
@@ -565,6 +568,43 @@ export default function Classroom() {
         ) : null}
       </Sheet>
 
+      {/* 粘贴课表：学校发的电子表直接贴，比拍照准，也不会漏掉"没写时间"的节次 */}
+      <Sheet open={pasteOpen} onClose={() => setPasteOpen(false)} title="粘贴课表">
+        <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.7, marginBottom: 8 }}>
+          把课表复制粘贴进来即可。识别出来会先让你<b>核对时间</b>，不会直接入库。
+        </p>
+        <textarea
+          className="input"
+          rows={11}
+          value={pasteText}
+          onChange={(e) => setPasteText(e.target.value)}
+          placeholder={'一行一条，例如：\n周一 08:00-08:40 英语\n周一 08:50-09:30 语文\n周三 10:50-11:30 化学'}
+          style={{ width: '100%', fontFamily: 'inherit', lineHeight: 1.7, resize: 'vertical' }}
+        />
+        <div className="mt-3 flex gap-2">
+          <Button block onClick={() => setPasteOpen(false)}>
+            取消
+          </Button>
+          <Button
+            block
+            variant="primary"
+            disabled={!pasteText.trim()}
+            onClick={() => {
+              const parsed = parseScheduleText(pasteText, classes)
+              setPasteOpen(false)
+              if (!parsed.items.length) {
+                setSchedErr('没解析出课程。按「周一 08:00-08:40 英语」一行一条写最稳。')
+                return
+              }
+              setSchedErr('')
+              setSchedReview(parsed.items)
+            }}
+          >
+            解析并核对
+          </Button>
+        </div>
+      </Sheet>
+
       <div ref={rootRef}>
         {/* 顶栏 */}
         <div
@@ -756,6 +796,16 @@ export default function Classroom() {
                     这个班的课 · {WEEKDAY_TEXT[weekdayOf(now) - 1]}
                   </span>
                   <span className="flex-1" />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPasteText('')
+                      setPasteOpen(true)
+                    }}
+                    style={{ fontSize: 11.5, color: 'var(--color-accent)' }}
+                  >
+                    粘贴课表
+                  </button>
                   <button
                     type="button"
                     disabled={schedBusy}
