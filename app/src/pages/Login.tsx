@@ -37,7 +37,7 @@ export default function Login() {
   const signIn = useStore((s) => s.signIn)
   const hydrate = useStore((s) => s.hydrate)
   const navigate = useNavigate()
-  const loc = useLocation() as { state?: { from?: string; expired?: boolean; classroom?: boolean } }
+  const loc = useLocation() as { state?: { from?: string; expired?: boolean } }
   const push = useToast((s) => s.push)
   const [account, setAccount] = useState('')
   const [pwd, setPwd] = useState('')
@@ -140,21 +140,6 @@ export default function Login() {
           </div>
 
           <div className="flex flex-col gap-4 p-4">
-            {loc.state?.classroom ? (
-              <div
-                className="p-2.5"
-                style={{
-                  background: 'var(--color-accentsoft)',
-                  border: '1px solid var(--color-line2)',
-                  borderRadius: 4,
-                  fontSize: 12.5,
-                  lineHeight: 1.7,
-                  color: 'var(--color-accentink)',
-                }}
-              >
-                这台设备正在当<b>教室端</b>用。要进教师端，请重新输一次教师密码。
-              </div>
-            ) : null}
             {loc.state?.expired ? (
               <div
                 className="p-2.5"

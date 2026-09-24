@@ -60,7 +60,7 @@ function Guard({ children }: { children: React.ReactNode }) {
    * 拦的是"改网址"这个实际操作；真正的权限隔离靠独立账号 + 数据库 RLS。
    */
   if (isClassroomDevice()) {
-    return <Navigate to="/login" replace state={{ from: loc.pathname, classroom: true }} />
+    return <Navigate to="/login" replace state={{ from: loc.pathname }} />
   }
   if (!teacher || expired) {
     return <Navigate to="/login" replace state={{ from: loc.pathname, expired }} />
@@ -88,7 +88,7 @@ function ClassroomGate({ children }: { children: React.ReactNode }) {
   const loc = useLocation()
   if (!hydrated) return <BootScreen />
   if (!teacher) {
-    return <Navigate to="/login" replace state={{ from: loc.pathname, classroom: true }} />
+    return <Navigate to="/login" replace state={{ from: loc.pathname }} />
   }
   return (
     <>
