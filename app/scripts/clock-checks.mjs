@@ -233,6 +233,8 @@ function shiftHHMM(hhmm, deltaMin) {
 }
 
 const weekdayCharOf = (iso) => '日一二三四五六'[new Date(`${iso}T12:00:00`).getDay()]
+/** 与产品同一个口径的星期文案（Classroom.tsx 用的是 WEEKDAY_TEXT，带「周」字） */
+const weekdayTextOf = (iso) => `周${weekdayCharOf(iso)}`
 
 /** 页面上「这个班的课」那一坨（课表面板）的文本 */
 async function schedText(page) {
@@ -310,20 +312,76 @@ async function goto(page, path, expect) {
 }
 
 /**
+ * 卡上那一行「正在上课」，以及**时间区间的文本**。
+ *
+ * ⚠️ 这里刻意**不用 `/正在上课/` 找元素再拿它自证**：卡片本身就是靠这个正则找到的，
+ *    再用同一个正则断言"第一行是正在上课"是**恒真**的（这条假断言 2026-09-27 已删）。
+ *    所以下面量的是**别的东西**：这一行的整段文案、起止时间是不是数据里的那两个时刻。
+ */
+async function readCardLineText(page, range = CARD_SCHEDULE.thu1) {
+  return page.evaluate(
+    (rangeWant) => {
+      const secs = [...document.querySelectorAll('section.panel')]
+      const panel = secs.find((s) => (s.textContent ?? '').includes('正在上课'))
+      if (!panel) return { found: false }
+      const desc = [...panel.querySelectorAll('div')]
+      const first = desc.find(
+        (d) =>
+          (d.textContent ?? '').includes('正在上课') &&
+          ![...d.children].some((c) => (c.textContent ?? '').includes('正在上课')),
+      )
+      const walker = document.createTreeWalker(panel, NodeFilter.SHOW_TEXT)
+      const texts = []
+      for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+        const t = (n.textContent ?? '').trim()
+        if (t) texts.push(t)
+      }
+      return {
+        found: true,
+        text: (first?.textContent ?? '').replace(/\s+/g, ' ').trim(),
+        hasStart: texts.includes(rangeWant.start),
+        hasEnd: texts.includes(rangeWant.end),
+        texts: texts.slice(0, 14),
+      }
+    },
+    { start: range.start, end: range.end },
+  )
+}
+
+/**
+ * 「按日期选作业」那个选择器的**产品口径**：只有 `graded.length > 1` 才渲染。
+ * 返回页面上那个带 ▾ 的按钮文案（没有就是 null），以及"当前小窗显示：第 N 题"那行。
+ */
+async function readDatePicker(page) {
+  return page.evaluate(() => {
+    const outside = [...document.querySelectorAll('button')].filter((b) => !b.closest('.sheet'))
+    const withArrow = outside.filter((b) => (b.textContent ?? '').includes('▾'))
+    const pip = [...document.querySelectorAll('span')].find((s) =>
+      /^当前小窗显示：第 \d+ 题/.test((s.textContent ?? '').trim()),
+    )
+    return {
+      n: withArrow.length,
+      text: withArrow[0] ? (withArrow[0].textContent ?? '').replace(/\s+/g, ' ').trim() : '',
+      pip: pip ? (pip.textContent ?? '').replace(/\s+/g, ' ').trim() : null,
+    }
+  })
+}
+
+/**
  * 「正在上课」那张卡：科目 / 老师两行的文案、字号、对齐，还有时间区间。
  *
  * 找法**不靠层级**：那一块是 Panel 里唯一带内联 `font-size: 30px` / `16px`
  * 且 `text-align: center` 的 div（卡片形状是这部分设计的一部分，
  * 按样式认比按第几层子节点认稳），再拿「正在上课」那一行做交叉验证。
  */
-async function readCurrentCard(page) {
+async function readCurrentCard(page, range = CARD_SCHEDULE.thu1) {
   /** 期望的时间区间，从外面传进去 —— page.evaluate 的函数体会被序列化成字符串，
    *  写在里面的 \uXXXX 转义会被吃掉（这个坑踩过一次），所以别在里面拼转义。 */
   const rangeWant = {
-    start: CARD_SCHEDULE.thu1.start,
-    end: CARD_SCHEDULE.thu1.end,
+    start: range.start,
+    end: range.end,
     dash: '–',
-    text: `${CARD_SCHEDULE.thu1.start}–${CARD_SCHEDULE.thu1.end}`,
+    text: `${range.start}–${range.end}`,
   }
   return page.evaluate(
     (rangeWant) => {
@@ -783,11 +841,13 @@ try {
     console.log('  · 教室端要读的那份课表（标题＝「科目 老师」）：')
     for (const r of after.cls) console.log(`      - 周${r[0]} ${r[1]}-${r[2]} 「${r[3]}」 classId=${r[4]}`)
     console.log(`  · c-demo-1 的已批改档案：${after.graded.map((g) => `${g[0]}(${g[1]})`).join('、')}`)
-    check(
-      after.cls.length === 4 && after.graded.length >= 2,
-      '准备就绪：4 条班级课表 + ≥2 份已批改档案（日期选择器才会渲染）',
-      `class=${after.cls.length} 条，graded=${after.graded.length} 份`,
-    )
+    /*
+     * ⚠️ 这里**故意不断言** `cls.length === 4 && graded.length >= 2` ——
+     *    那是"脚本刚写进去的东西等于脚本刚写进去的东西"，**自证**、恒真（2026-09-27 删）。
+     *    有价值的核对放到产品真渲染出来之后：见下面场景 1 里的 `readDatePicker` 断言
+     *    （"日期选择器真的渲染出来了"只有 graded 真的 ≥2 才会发生）与卡上两行。
+     */
+    note('上面这些是脚本**写入**的内容（自证不算断言）；真正核对产品渲染见场景 1')
   }
 
   /* ================= ① 某节课正在进行的中间时刻 ================= */
@@ -797,6 +857,39 @@ try {
   await goto(page, '/classroom', { clock: '09:15', date: '2026-09-24', weekday: '四' })
   const card = await readCurrentCard(page)
   const body1 = await bodyText(page)
+  /*
+   * 「准备」那一节写进去的东西，到这里**真的渲染出来了吗**？
+   * 这是把那条自证断言换成产品断言的地方：
+   *   · 「按日期选作业」那个选择器**只有 graded.length > 1 才渲染**（Classroom.tsx），
+   *     它出现了 = 产品确实读到了 ≥2 份已批改档案；
+   *   · 它显示的日期必须是 FAKE_GRADED 那条的日期（产品按 assignDate 筛出来的）。
+   */
+  /*
+   * 选中的那份日期 —— 从**快照里产品要读的那份数据**算出来（不是脚本当场拍一个常量）：
+   * 教室端默认选中的是 `graded` 里的第一份（`assignment` 由 classId + status 推出）。
+   */
+  const wantPicked = await page.evaluate(
+    ([k, classId]) => {
+      const st = JSON.parse(localStorage.getItem(k) ?? '{}').state ?? {}
+      const graded = (st.assignments ?? []).filter((a) => a.classId === classId && a.status === 'graded')
+      return graded[0] ? graded[0].assignDate : null
+    },
+    [CLS_KEY, DEMO_CLASS_ID],
+  )
+  const picker1 = await readDatePicker(page)
+  check(
+    picker1.n === 1 &&
+      Boolean(wantPicked) &&
+      picker1.text.includes(wantPicked.slice(5).replace('-', '/')),
+    '「按日期选作业」选择器真的渲染了，且显示的是产品选中的那份已批改档案的日期（读到了 ≥2 份）',
+    `带 ▾ 的按钮 ${picker1.n} 个，文案「${picker1.text}」`,
+    `只有 graded.length > 1 才渲染；期望含 ${wantPicked ? wantPicked.slice(5).replace('-', '/') : '(快照里没有 graded 档案)'}`,
+  )
+  check(
+    /^当前小窗显示：第 \d+ 题/.test(picker1.pip ?? ''),
+    '当前小窗那一行也在（作业与小窗都挂上了）',
+    String(picker1.pip),
+  )
   if (!card.found) {
     check(false, '出现「正在上课」卡片', `没找到，课表区文案：${short(await schedText(page))}`)
     // 失败时把课表数据摊出来，省得下次还要另写探针
@@ -819,7 +912,23 @@ try {
     console.log(`  · 现场数据：${JSON.stringify(dbg)}`)
   } else {
     console.log(`  · 卡片文本：${short(card.panelText, 120)}`)
-    check(/正在上课/.test(card.panelText), '第一行是「正在上课」+ 起止时间', short(card.panelText, 90))
+    /*
+     * ⚠️ 原来这里是 `check(/正在上课/.test(card.panelText), …)` —— **恒真**：
+     *    `card` 就是靠 `/正在上课/` 找出来的（readCurrentCard 里那句），
+     *    拿同一个正则再断言一次等于什么都没验。2026-09-27 换成量**别的东西**：
+     *    那一行的整段文案、起止时间是不是数据里那两个时刻、字号与对齐。
+     */
+    const line1 = await readCardLineText(page, CARD_SCHEDULE.thu1)
+    check(
+      line1.found &&
+        line1.text.includes('正在上课') &&
+        line1.hasStart &&
+        line1.hasEnd,
+      '第一行是「正在上课」+ 起止时间（08:55 与 09:35 都在这一行里）',
+      line1.found
+        ? `这一行「${line1.text}」；起 ${line1.hasStart ? '在' : '不在'} / 止 ${line1.hasEnd ? '在' : '不在'}；面板文本节点=${JSON.stringify(line1.texts)}`
+        : '没找到那一行',
+    )
     check(
       card.range === `${CARD_SCHEDULE.thu1.start}–${CARD_SCHEDULE.thu1.end}`,
       '第一行的时间区间正确（08:55–09:35）',
@@ -882,14 +991,7 @@ try {
   /* ================= ⑦ 「按日期选作业」点击展开 ================= */
 
   say('【场景 7】「按日期选作业」—— 只显示当前日期 + ▾，点一下弹出 Sheet 列出所有日期')
-  const pickInfo = await page.evaluate(() => {
-    const outside = [...document.querySelectorAll('button')].filter((b) => !b.closest('.sheet'))
-    const withArrow = outside.filter((b) => (b.textContent ?? '').includes('▾'))
-    return {
-      n: withArrow.length,
-      text: withArrow[0] ? (withArrow[0].textContent ?? '').replace(/\s+/g, ' ').trim() : '',
-    }
-  })
+  const pickInfo = await readDatePicker(page)
   const sheetBefore = await page.locator('.sheet').count()
   check(
     pickInfo.n === 1 && /▾$/.test(pickInfo.text) && /^\d{2}\/\d{2}/.test(pickInfo.text),
@@ -897,6 +999,24 @@ try {
     `页面上（Sheet 外）带 ▾ 的按钮 ${pickInfo.n} 个，文案「${pickInfo.text}」`,
   )
   check(sheetBefore === 0, '未点击时 Sheet 是收起的', `页面上 .sheet 数量 = ${sheetBefore}`)
+
+  /**
+   * Sheet 里**应该**列出哪些日期：产品是按 `graded` 的 `assignDate` 去重排的
+   * （Classroom.tsx：`[...new Set(graded.map(a => a.assignDate))].sort(desc).slice(0,30)`，
+   *  每行渲染成 `MM/DD` + 星期）。
+   * 这里从**本班的已批改档案**（快照里读，与产品同一个数据源）算出这份集合，
+   * 再和屏上列出来的逐一对齐 —— 原来那条 `>= 1` 兜得太低：
+   * 设计上要列**所有**可选日期，只列 1 个也是"坏了一半"却照样绿。
+   */
+  const wantDates = await page.evaluate(
+    ([k, classId]) => {
+      const st = JSON.parse(localStorage.getItem(k) ?? '{}').state ?? {}
+      const graded = (st.assignments ?? []).filter((a) => a.classId === classId && a.status === 'graded')
+      return [...new Set(graded.map((a) => a.assignDate))].sort((x, y) => (x < y ? 1 : -1)).slice(0, 30)
+    },
+    [CLS_KEY, DEMO_CLASS_ID],
+  )
+  const wantRowText = wantDates.map((d) => `${d.slice(5).replace('-', '/')}${weekdayTextOf(d)}`.replace(/\s+/g, ''))
 
   await page.locator('button', { hasText: '▾' }).first().click()
   await page.waitForTimeout(400)
@@ -913,7 +1033,19 @@ try {
     }
   })
   check(sheet.open && sheet.title === '选择日期', '点击后弹出 Sheet（标题「选择日期」）', `open=${sheet.open} title="${sheet.title}"`)
-  check(sheet.rows.length >= 1, 'Sheet 里列出了可选日期', `${sheet.rows.length} 个日期行：${sheet.rows.join(' | ')}`)
+  {
+    const got = sheet.rows.map((r) => r.replace(/\s+/g, ''))
+    const missing = wantRowText.filter((w) => !got.includes(w))
+    const extra = got.filter((g) => !wantRowText.includes(g))
+    check(
+      wantRowText.length > 0 && missing.length === 0 && extra.length === 0,
+      `Sheet 列出了**全部**可选日期（本班 ${wantDates.length} 个已批改日期：${wantDates.join('、')}）`,
+      `${got.length} 个日期行：${sheet.rows.join(' | ')}`,
+      missing.length || extra.length
+        ? `少 ${JSON.stringify(missing)} / 多 ${JSON.stringify(extra)}`
+        : '与快照里 graded 的 assignDate 集合完全一致',
+    )
+  }
 
   // 点一个「不是当前」的日期 → 上面的作业选择器要真的跟着切，Sheet 收起
   if (sheet.rows.length >= 2) {
@@ -1113,8 +1245,17 @@ try {
   await page.goto(`${BASE}/classroom`, { waitUntil: 'networkidle' })
   await waitSched(page)
   await page.waitForTimeout(300)
+  /*
+   * ⚠️ 这里原来只验 `window.__tts.installed` —— 那是**桩自己的标志位**，
+   *    产品坏掉（不问 TTS 就自己出队）它照样是 true，恒真（2026-09-27 改）。
+   *    "装好没装好"真正的判据是**桩有没有被调用过**，而那要等下面派完呼叫才量得到：
+   *    见场景 6 里 `m1.tts.calls.length >= 1` 那条（speak() 被调用 = 产品真的在走 TTS）。
+   *    这里保留一句提示，把"装好了"和"用上了"分开说。
+   */
   const stubOn = await page.evaluate(() => Boolean(window.__tts?.installed))
-  check(stubOn, 'TTS 桩已装好（speechSynthesis.speak 会立刻触发 onerror）', stubOn ? 'window.__tts.installed = true' : '没装上')
+  note(
+    `TTS 桩已装载：${stubOn ? 'window.__tts 在' : '**没装上**'}（真正的判据是下面 speak() 被调用过几次）`,
+  )
 
   const CALL_TEXT = '请 12 号、37 号，到物理老师办公室。'
   const CHARS = await page.evaluate((t) => t.replace(/\s+/g, '').length, CALL_TEXT)
@@ -1230,6 +1371,16 @@ try {
       `TTS 侧：speak() 被调用 ${calls} 次，桩每次都立刻回调 onerror —— ` +
         `语音这条路 ${m1.speakAt}ms 就走完了；浮层是派发后 ${m1.showDelay}ms 出现的`,
     )
+    /*
+     * TTS 桩"真的被用上了"的判据（原来只验 window.__tts.installed，那是恒真的）。
+     * 顺带证明派发出去的文案确实交给了语音这条路 —— 桩没被调用 = 产品没走 TTS。
+     */
+    check(
+      calls >= 1 && m1.tts.calls.some((c) => c.text.includes(CALL_TEXT.slice(0, 6))),
+      'TTS 桩真的被调用了（speak() 收到的是这条呼叫的文案）',
+      `speak() 调用 ${calls} 次：${m1.tts.calls.map((c) => short(c.text, 24)).join(' / ') || '(一次都没有)'}`,
+      stubOn ? '桩已装载' : '⚠️ 桩连装载都没成功',
+    )
     check(
       m1.hold !== null && m1.hold >= EXPECT_HOLD - 150,
       `浮层停留 ≥ max(${runtime.BUBBLE_MIN_MS}ms, 字数×${runtime.BUBBLE_MS_PER_CHAR}ms) = ${EXPECT_HOLD}ms`,
@@ -1336,7 +1487,16 @@ try {
   await ctx.clock.setFixedTime(new Date('2026-09-24T08:50:00'))
   await goto(page, '/classroom', { clock: '08:50', date: '2026-09-24', weekday: '四' })
   const stubOn9 = await readAudio(page)
-  check(stubOn9.installed, 'AudioContext 桩已装好（createOscillator 会被记下来）', `window.__audio 在，ctxCount=${stubOn9.ctxCount}`)
+  /*
+   * ⚠️ 原来这里是 `check(stubOn9.installed, '桩已装好')` —— 验的是**桩自己的标志位**，
+   *    产品根本不用 WebAudio 时它照样是 true，恒真（2026-09-27 改）。
+   *    "AudioContext 真的被用上了"的判据是**振荡器被记下来了**，也就是下面那两条：
+   *    soft ≥ 1（下课铃响了）、loud = 0（响的不是播报提示音）。
+   */
+  note(
+    `AudioContext 桩已装载：${stubOn9.installed ? 'window.__audio 在' : '**没装上**'}，` +
+      `ctxCount=${stubOn9.ctxCount}（真正的判据是下面数出来的振荡器）`,
+  )
 
   // 下课铃的 tick 是 20 秒一次，窗开宽一点：宁可多等，也不要时好时坏
   const bell = await waitOsc(page, 1, 25_000)
@@ -1503,11 +1663,49 @@ try {
 
   /* ================= 收尾：设备角色复位 ================= */
 
-  say('【收尾】把本机设备角色改回 teacher（教室端会把它标成 classroom）')
+  /*
+   * ⚠️ 这里原来是 `check(roleAfter === 'teacher', '设备角色已复位')` —— 读回的正是脚本
+   *    自己上一句 `setItem` 写进去的值，**验的是脚本不是产品**，恒真（2026-09-27 改）。
+   *    有价值的其实是 `roleBefore`（教室端有没有把设备标掉，只当提示打印了）。
+   *
+   *    现在改成断言**产品行为**：复位之后重新加载设置页，
+   *      · 没有被 Guard 拦去登录页（URL 还是 /settings）；
+   *      · 设置页的「本机角色 · 这台设备」显示的是**教师端**（Settings.tsx 按 deviceRole() 渲染）。
+   *    这两条合起来就是"复位真的生效了"——产品坏了（Guard 改错 / 角色没读回来）会红。
+   */
+  say('【收尾】把本机设备角色改回 teacher，再用**产品行为**验一次（教室端会把它标成 classroom）')
   const roleBefore = await page.evaluate(() => localStorage.getItem('shugao.deviceRole'))
+  note(`复位前 shugao.deviceRole = ${roleBefore}（教室端自身会把它写成 classroom）`)
   await page.evaluate(() => localStorage.setItem('shugao.deviceRole', 'teacher'))
-  const roleAfter = await page.evaluate(() => localStorage.getItem('shugao.deviceRole'))
-  check(roleAfter === 'teacher', '设备角色已复位为 teacher', `${roleBefore} → ${roleAfter}`, '教室端自身会把它写成 classroom')
+  await page.goto(`${BASE}/settings`, { waitUntil: 'networkidle' })
+  await page.waitForTimeout(600)
+  const afterReset = await page.evaluate(() => {
+    /*
+     * 「本机角色 → 这台设备」那一行是 ui.tsx 的 KV：一个 flex div，左边标签右边 Tag。
+     * 按**文本**找（标签「这台设备」），不按第几层子节点找 —— 那正是本文件一贯的找法。
+     */
+    const row = [...document.querySelectorAll('div')].find((d) => {
+      const t = (d.textContent ?? '').replace(/\s+/g, '')
+      return t.startsWith('这台设备') && t.length < 30
+    })
+    return {
+      url: location.pathname,
+      roleText: row ? (row.textContent ?? '').replace(/\s+/g, ' ').trim() : null,
+      h1: [...document.querySelectorAll('h1')].map((h) => h.textContent.trim()),
+    }
+  })
+  check(
+    afterReset.url === '/settings',
+    '复位后能直接进设置页（没有被 Guard 拦去登录页）',
+    `屏上 url = ${afterReset.url}`,
+    '被拦的话这里会是 /login',
+  )
+  check(
+    (afterReset.roleText ?? '').includes('教师端') && !(afterReset.roleText ?? '').includes('教室端'),
+    '设置页「本机角色 · 这台设备」显示的是**教师端**',
+    afterReset.roleText ? `这一行：「${afterReset.roleText}」` : `没找到那一行（h1=${JSON.stringify(afterReset.h1)}）`,
+    'Settings.tsx 按 deviceRole() 渲染，产品没读回来的话这里还是「教室端」',
+  )
 } catch (e) {
   failures.push(`脚本异常：${e instanceof Error ? e.message : String(e)}`)
   console.log(`\n💥 脚本异常：${e instanceof Error ? (e.stack ?? e.message) : String(e)}`)
