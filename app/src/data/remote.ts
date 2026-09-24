@@ -507,9 +507,8 @@ export const studentToRow = (s: Student, classId: string): StudentRow => ({
  * 本地 → 行。
  *
  * ⚠️ **故意不带 `subject_code`**：带不带取决于那一列在不在（见 ensureSubjectCols），
- *    而这是一个纯函数。真正的写入点在 `saveAssignment`，那里按探测结果补上。
- *    另一个好处是"备份回推云端"（backup.ts 也调这个函数）沿用同一套安全性：
- *    备份 v1 里没有 `subjectCode`，也就不会往可能不存在的列上写。
+ *    而这是一个纯函数 —— 那个判断留给 `assignmentWriteRow`（`saveAssignment` 与
+ *    "备份回推云端"共用它）：**列不存在不带、认不出学科也不带**，两条纪律写在那里。
  *    （upsert 只更新载荷里出现过的列，所以老行的 subject_code 不会被抹掉。）
  */
 export const assignmentToRow = (a: Assignment, teacherId: string): AssignmentRow => ({
@@ -912,18 +911,46 @@ export const saveStudents = (classId: string, list: Student[]) =>
 export const deleteStudent = (id: string) => remove('students', id)
 
 /**
+ * 作业档案的**落库载荷** —— `subject_code` 带不带，只有这一处说了算。
+ *
+ * 🔴 两条纪律（两条都破过，见 功能设计与不变量.md §十）：
+ *
+ *  ① **列不存在就不带这一列**（`ensureSubjectCols` 的探测结果）：带上一列不存在的列，
+ *     整条 upsert 会被 PostgREST 拒掉 —— 而本项目"保存失败 = 刷新即丢"。
+ *
+ *  ② **认不出学科（code 为空）也不带这一列**，而不是写 `null`：
+ *     upsert 只更新载荷里出现过的列，所以"不带"＝**保住库里已有的值**。
+ *     写 `null` 会把一行本该有学科的历史数据抹成"未标学科"——
+ *     字典内的显示名靠 `schema.sql` 的 `teaches_subject_for` 还能兜住（所以不报错），
+ *     字典外的显示名从此失去判据，而且**不可逆**。
+ *
+ * ⚠️ 与 `saveTeacher` 上那一列**故意不同**：老师可以在设置页显式不设主学科，
+ *    所以 `saveTeacher` 写 `null` 是"清空"这个动作本身。
+ *    作业档案**没有**"未设学科"这个状态（`subject` 永远来自字典），
+ *    空 code 只能理解为"不知道"，那就什么都别写。
+ */
+export async function assignmentWriteRow(
+  a: Assignment,
+  teacherId: string,
+): Promise<Record<string, unknown>> {
+  const cols = await ensureSubjectCols()
+  const row: Record<string, unknown> = { ...assignmentToRow(a, teacherId) }
+  if (cols.assignments) {
+    const code = asSubjectCode(a.subjectCode)
+    if (code) row.subject_code = code
+  }
+  return row
+}
+
+/**
  * 写作业档案。
  *
  * 🔴 `subject_code` 的**唯一写入点**就是这里（`store.addAssignment` /
- * `store.updateAssignment` 是上游唯一入口，页面里不许写这两个字段）。
- * 列不存在时把这一列摘掉，而不是让整条 upsert 被拒 —— 这是"SQL 还没跑时前端不崩"的关键。
+ * `store.updateAssignment` 上游是唯一的业务入口，页面里不许写这两个字段；
+ * "恢复备份回推云端"走 `assignmentWriteRow`，与这里共用同一条判据）。
  */
-export const saveAssignment = async (a: Assignment, teacherId: string) => {
-  const cols = await ensureSubjectCols()
-  const row: Record<string, unknown> = { ...assignmentToRow(a, teacherId) }
-  if (cols.assignments) row.subject_code = asSubjectCode(a.subjectCode) ?? null
-  return upsert('assignments', row)
-}
+export const saveAssignment = async (a: Assignment, teacherId: string) =>
+  upsert('assignments', await assignmentWriteRow(a, teacherId))
 export const deleteAssignment = (id: string) => remove('assignments', id)
 
 export const saveSchedule = (s: ScheduleItem, teacherId: string) =>

@@ -10,6 +10,8 @@
     "preview": "vite preview",
     "shots": "node scripts/shots.mjs",
     "clock-checks": "node scripts/clock-checks.mjs",
+    "exam-checks": "node scripts/exam-checks.mjs",
+    "backup-checks": "node scripts/backup-checks.mjs",
     "fetch:holidays": "node scripts/fetch-holidays.mjs"
   },
   "dependencies": {

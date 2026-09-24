@@ -131,6 +131,35 @@ export function subjectCodeOf(rec?: { subjectCode?: string; subject?: string } |
 }
 
 /**
+ * **作业档案**：把 `{ subjectCode, subject }` 成对对齐 —— `subject` 永远是 code 在字典里的显示名。
+ *
+ * 什么时候用它：任何**外部数据落地**的入口（恢复备份）或写入路径要守 I13 的时候。
+ * 认不出学科时**原样返回**（`asSubjectCode` 只精确匹配，绝不猜，见 I14）。
+ *
+ * ⚠️ 它**只负责对齐**，不负责补结构（那是 `lib/backup.ts` 的 `normalizeAssignment` 的事）。
+ *    实现只此一份：这一轮"恢复备份丢 `subjectCode`"的 bug 就是某条写入路径漏了归一化，
+ *    所以别再就地手写一份 `asSubjectCode(x) ?? subjectCodeOfName(y)` —— 抄第二份就是第二个判定入口。
+ */
+export function alignAssignmentSubject<T extends { subjectCode?: string; subject?: string }>(a: T): T {
+  const code = asSubjectCode(a.subjectCode) ?? subjectCodeOfName(a.subject)
+  return code ? { ...a, subjectCode: code, subject: subjectName(code) } : a
+}
+
+/**
+ * **老师**：只补齐 `primarySubjectCode`，显示名一个字都不动。
+ *
+ * 与上面那个**故意不同**：`Assignment.subject` 是 code 的显示缓存（必须跟着 code 走），
+ * 而 `Teacher.subject` 是**自由显示标签**（老师可以写「物理竞赛」，见 §12.2）——
+ * 拿 `subjectName(code)` 去覆盖它 = 把老师自己写的名字抹掉。
+ */
+export function alignTeacherPrimarySubject<T extends { primarySubjectCode?: string; subject?: string }>(
+  t: T,
+): T {
+  const code = asSubjectCode(t.primarySubjectCode) ?? subjectCodeOfName(t.subject)
+  return code && code !== t.primarySubjectCode ? { ...t, primarySubjectCode: code } : t
+}
+
+/**
  * 老师的主学科。
  *
  * 取值顺序（**永远有值**，所以新建作业不需要老师做任何额外操作）：

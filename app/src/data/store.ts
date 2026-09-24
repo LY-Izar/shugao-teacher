@@ -4,6 +4,8 @@ import { isRemote } from '../lib/supabase'
 import { HEARTBEAT_MS, emit, subscribe } from '../lib/realtime'
 import { normalizePaperName } from '../lib/examPaper'
 import {
+  alignAssignmentSubject,
+  alignTeacherPrimarySubject,
   asSubjectCode,
   subjectCodeOfName,
   subjectName,
@@ -1214,12 +1216,26 @@ export const useStore = create<State>()(
         void remote.deleteSchedule(id)
       },
 
+      /*
+       * 从备份恢复：**逐条过写入路径的归一化，不裸 set**。
+       *
+       * 为什么不能直接把 `b.assignments` 塞进 state：`restoreBackup` 也是一条**写入路径**，
+       * 而"学科不变量要在所有写入路径上守"（§12.3 I13）。
+       * 这里曾经漏过一次（`lib/backup.ts` 的 `normalizeAssignment` 不带 `subjectCode`），
+       * 后果不报错但不可逆：恢复完再批改一次 → `saveAssignment` 把云端 `subject_code`
+       * 写成 NULL；本地模式下老师的主学科也一起没了（化学竞赛老师新建作业默认成"物理"）。
+       *
+       * `validateBackup` 已经归一过一遍，这里再对齐一次是**第二道闸**：
+       * 恢复是不可逆动作，且它现在/将来可能被别处调用（页面、脚本、测试），
+       * 不能假设调用方都先跑过 `validateBackup`。
+       */
       restoreBackup: (b) => {
+        const teacher = b.teacher ? alignTeacherPrimarySubject(b.teacher) : get().teacher
         set({
-          teacher: b.teacher ?? get().teacher,
+          teacher,
           classes: b.classes,
           currentClassId: b.classes[0]?.id ?? null,
-          assignments: b.assignments,
+          assignments: b.assignments.map(alignAssignmentSubject),
           schedule: b.schedule,
           calls: b.calls,
           classrooms: b.classrooms,

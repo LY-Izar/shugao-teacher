@@ -1,12 +1,20 @@
 import { getSupabase } from './supabase'
 import { useToast } from '../data/store'
 import { toISODate } from './date'
-import { DEFAULT_SUBJECT_CODE, subjectName } from './subjects'
 import {
-  assignmentToRow,
+  DEFAULT_SUBJECT_CODE,
+  alignAssignmentSubject,
+  alignTeacherPrimarySubject,
+  asSubjectCode,
+  subjectCodeOfName,
+  subjectName,
+} from './subjects'
+import {
+  assignmentWriteRow,
   callToRow,
   classToRow,
   classroomToRow,
+  ensureSubjectCols,
   scheduleToRow,
   studentToRow,
 } from '../data/remote'
@@ -37,8 +45,19 @@ import type {
    两边都坏才会真丢数据 —— 这正是备份该有的样子。
    ============================================================ */
 
+/**
+ * 备份格式版本。**写出去的一律是当前版本，读进来的一律兼容到 v1。**
+ *
+ * · **v1**：没有 `subjectCode` / `primarySubjectCode` 两个字段（学科只有中文显示名）。
+ * · **v2**（2026-09-25）：带上它们，恢复时才能把"判据"一起搬回去。
+ *
+ * 🔴 **v1 老备份必须永远能导入**，不许因为"v1 已经淘汰"就删掉兼容分支：
+ *    导入方按**显示名反查字典**把 code 补回来（`subjectCodeOfName`），
+ *    反查不出来（老师写的是「物理竞赛」这种字典外显示名）就留 `undefined`，
+ *    **绝不写 `null`、也绝不猜**（I14）。理由见 功能设计与不变量.md §12.7。
+ */
 export type Backup = {
-  v: 1
+  v: 2
   at: number
   teacher?: Teacher | null
   classes: Klass[]
@@ -57,7 +76,7 @@ export function makeBackup(s: {
   classrooms: ClassroomClient[]
 }): Backup {
   return {
-    v: 1,
+    v: 2,
     at: Date.now(),
     teacher: s.teacher,
     classes: s.classes,
@@ -165,12 +184,29 @@ function normalizeAssignment(raw: unknown): Assignment {
   const status = STATUSES.includes(a.status as AssignmentStatus)
     ? (a.status as AssignmentStatus)
     : 'open'
-  return {
+  /*
+   * 🔴 **学科：判据（code）和显示名一起补齐**（I13）。
+   *
+   * 这里曾经漏掉 `subjectCode`（导出带、导入丢）—— 后果是不报错的：
+   * 恢复完再批改一次，`saveAssignment` 把云端 `subject_code` 写成 NULL；
+   * 本地模式下老师的主学科也跟着没了，化学竞赛老师新建作业默认成"物理"。
+   *
+   * 取值顺序：先认 code（v2 备份里有），再按显示名反查字典（v1 老备份只能这样兜）。
+   * **两个都认不出来就留 `undefined`**（不是 `null`）：字典外的显示名（「物理竞赛」）
+   * 本来就没有判据，编一个出来会写进不可逆的历史数据（I14）。
+   */
+  const subjectCode = asSubjectCode(a.subjectCode) ?? subjectCodeOfName(a.subject)
+  const item: Assignment = {
     id: asText(a.id) || uuid(),
     title: asText(a.title, '未命名作业'),
     classId: asText(a.classId),
     // 兜底值来自学科字典（这个文件以前手写了第二份「物理」）
-    subject: asText(a.subject, subjectName(DEFAULT_SUBJECT_CODE)),
+    subject: asText(
+      a.subject,
+      subjectCode ? subjectName(subjectCode) : subjectName(DEFAULT_SUBJECT_CODE),
+    ),
+    // 认出来了才带上；认不出**不加这个键**（JSON 里连 `null` 都不出现）
+    ...(subjectCode ? { subjectCode } : {}),
     assignDate: ISO_DATE.test(asText(a.assignDate)) ? asText(a.assignDate) : toISODate(new Date()),
     // 数据库有 check (question_count between 1 and 60)：越界会让**整条 upsert 被拒**（刷新即丢）
     questionCount: Math.min(60, Math.max(1, Math.round(asNumber(a.questionCount, 1)))),
@@ -197,6 +233,8 @@ function normalizeAssignment(raw: unknown): Assignment {
     correctionNos: asTextList(a.correctionNos),
     correctedNos: asTextList(a.correctedNos),
   }
+  // 认出了 code 就把显示名对齐成它（`subject` 是 code 的显示缓存）；认不出原样保留
+  return alignAssignmentSubject(item)
 }
 
 function normalizeSchedule(raw: unknown): ScheduleItem {
@@ -254,19 +292,35 @@ function normalizeCall(raw: unknown): CallRecord {
 function normalizeTeacher(raw: unknown): Teacher | null {
   if (!raw || typeof raw !== 'object') return null
   const t = raw as Partial<Teacher>
-  return {
+  const code = asSubjectCode(t.primarySubjectCode)
+  const item: Teacher = {
     id: asText(t.id, 't-1'),
     name: asText(t.name, '老师'),
     subject: asText(t.subject, subjectName(DEFAULT_SUBJECT_CODE)),
     school: asText(t.school),
   }
+  // 与作业同一条纪律：认得出才写，认不出留 undefined（v1 老备份只能按显示名反查）
+  if (code) item.primarySubjectCode = code
+  /*
+   * ⚠️ 只补 `primarySubjectCode`，**不动 `subject`**：那是老师自己写的显示标签，
+   *    可能是「物理竞赛」这种字典外写法（见 §12.2），拿字典名覆盖它等于抹掉老师写的东西。
+   */
+  return alignTeacherPrimarySubject(item)
 }
 
-/** 一份备份值不值得信 —— 恢复是不可逆的，宁可不恢复也不能恢复半份 */
+/**
+ * 一份备份值不值得信 —— 恢复是不可逆的，宁可不恢复也不能恢复半份。
+ *
+ * 🔴 **版本判据：`v1` 与 `v2` 都收**，收完一律按当前版本（v2）返回。
+ *    v1 没有 `subjectCode` / `primarySubjectCode`，由两个 normalize 按显示名反查字典兜住；
+ *    反查不出来的（字典外显示名）留 `undefined` —— 那正是"没有判据"的诚实表达。
+ *    版本比当前高（v3+）或没有 `v` 的**不认**：宁可报错，也不要猜一份看不懂的结构。
+ */
 export function validateBackup(raw: unknown): { ok: true; data: Backup } | { ok: false; why: string } {
   if (!raw || typeof raw !== 'object') return { ok: false, why: '不是有效的备份文件' }
-  const b = raw as Partial<Backup>
-  if (b.v !== 1) return { ok: false, why: `备份版本不认识（v${String(b.v)}）` }
+  // `v` 单独按 number 读：Backup['v'] 是字面量 2，直接比较 1 会被 TS 判成"不可能相等"
+  const b = raw as Omit<Partial<Backup>, 'v'> & { v?: number }
+  if (b.v !== 1 && b.v !== 2) return { ok: false, why: `备份版本不认识（v${String(b.v)}）` }
   if (!Array.isArray(b.classes)) return { ok: false, why: '缺少班级数据' }
   if (!Array.isArray(b.assignments)) return { ok: false, why: '缺少作业数据' }
   const classes = b.classes.map(normalizeKlass)
@@ -284,7 +338,8 @@ export function validateBackup(raw: unknown): { ok: true; data: Backup } | { ok:
   return {
     ok: true,
     data: {
-      v: 1,
+      // 收进来的是 v1 还是 v2 都好，**从这里往后一律是 v2**（归一化后的结构）
+      v: 2,
       at: asNumber(b.at, 0),
       teacher: normalizeTeacher(b.teacher),
       classes,
@@ -504,11 +559,14 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  *
  * 现在按外键依赖的顺序把每一类都推上去：
  *   teachers → classes → students → assignments → schedule_items → classrooms → calls
- * 并且三点必须做到，否则"已恢复"就是句谎话：
+ * 并且四点必须做到，否则"已恢复"就是句谎话：
  *  ① **每一批都看 error**（以前只 await，Supabase 不抛异常，错就咽掉了）；
  *  ② 用 `.select('id')` 数回真正落库的行数 —— 被 RLS 挡下的更新是 **0 行且不报错**；
  *  ③ 备份里引用了不存在的班级 / 档案的行（本地删班留下的孤儿）**跳过并写进结果**，
- *     不让一条脏数据把整批 upsert 拖垮，也不假装推成功了。
+ *     不让一条脏数据把整批 upsert 拖垮，也不假装推成功了；
+ *  ④ **学科那两列（`subject_code` / `primary_subject_code`）认得出才带、认不出就不带**
+ *     （列不存在也不带）—— 绝不写 `null`：这里写一次 null 就把云端历史数据的判据抹掉了，
+ *     而且不可逆（见 §12.7）。
  */
 export async function pushBackupToCloud(b: Backup, teacherId: string): Promise<string> {
   const sb = getSupabase()
@@ -549,16 +607,31 @@ export async function pushBackupToCloud(b: Backup, teacherId: string): Promise<s
   const errors: string[] = []
   const counts = { classes: 0, students: 0, assignments: 0, schedule: 0, classrooms: 0, calls: 0 }
 
+  /*
+   * 学科那两列在不在（与 `remote.saveAssignment` 同一套探测纪律）：
+   * 列不存在时**一个字都不许往载荷里放** —— 带上不存在的列，整批 upsert 会被拒，
+   * 而"恢复"这个动作被拒的后果比平时严重得多（教师以为恢复好了）。
+   */
+  const cols = await ensureSubjectCols()
+
   // teachers 那一行绑定 auth 用户；它缺失的话下面全都会卡在外键上
   if (b.teacher) {
-    const t = await push('teachers', [
-      {
-        id: teacherId,
-        name: b.teacher.name,
-        subject: b.teacher.subject,
-        school: b.teacher.school,
-      },
-    ])
+    const row: Record<string, unknown> = {
+      id: teacherId,
+      name: b.teacher.name,
+      subject: b.teacher.subject,
+      school: b.teacher.school,
+    }
+    /*
+     * 主学科：v2 备份里带着，v1 老备份靠显示名反查（`normalizeTeacher` 已经补过）。
+     *
+     * 🔴 **认不出就整列不出现**，而不是写 `null` —— 与 `saveTeacher` 故意不同：
+     *    那边写 null 是"老师显式清空主学科"这一个动作本身；恢复备份时我们**不知道**，
+     *    写 null 会把账号上已有的主学科抹掉（换设备/换账号恢复时尤其明显）。
+     */
+    const code = asSubjectCode(b.teacher.primarySubjectCode)
+    if (cols.teachers && code) row.primary_subject_code = code
+    const t = await push('teachers', [row])
     if (t.why) errors.push(`教师资料：${t.why}`)
   }
 
@@ -588,7 +661,12 @@ export async function pushBackupToCloud(b: Backup, teacherId: string): Promise<s
       label: '作业档案',
       key: 'assignments',
       table: 'assignments',
-      rows: keepAssignments.map((a) => assignmentToRow(a, teacherId)),
+      /*
+       * 走 `assignmentWriteRow`（与 `saveAssignment` 同一个落库载荷）：
+       * 于是"回推云端"也守 `subject_code` 的两条纪律 —— 列不存在不带、认不出学科不带。
+       * v1 老备份没有 code（按显示名也反查不出来时）就等于**不动**云端已有的值。
+       */
+      rows: await Promise.all(keepAssignments.map((a) => assignmentWriteRow(a, teacherId))),
       fatal: true,
     },
     {
