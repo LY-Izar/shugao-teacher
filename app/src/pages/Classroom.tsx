@@ -79,6 +79,21 @@ const CLASS_KEY = 'shugao.classroom.classId'
 
 /** 队列上限。一节课正常也就三五条，这只是防止队列无限涨的阀门；满了就先不收（见 play） */
 const MAX_QUEUE = 12
+/**
+ * 呼叫浮层的**最短展示时长**。
+ *
+ * 为什么必须有它：出队时机原本完全交给 TTS 的 onend（"念完才算播完"，见下面
+ * 播报 effect 的注释）。这在语音正常时是对的，但一旦这台机器的语音合成不可用，
+ * `tts.ts` 里的 `u.onerror = () => done()` 会**立刻**触发 —— 队列马上跳下一条，
+ * 浮层闪一下就没了，教师根本来不及看。实机上就撞到过：23 点报修
+ * 「呼叫信息过了一秒就被顶掉了，并且信息还没显示完」。
+ *
+ * 所以展示时长要取「念完」和「够读完」两者中**更长**的那个：
+ * 语音快慢只影响朗读，不该决定人有没有时间看。
+ */
+const BUBBLE_MIN_MS = 3_500
+/** 每个字至少留多少毫秒给人看（默读中文约 5～8 字/秒，取 180ms/字＝5.5 字/秒，宁可慢一点） */
+const BUBBLE_MS_PER_CHAR = 180
 /** 播放记录只留最近这一段（轮询窗口是 15 分钟，比它长就够），不然开一整天会一直涨 */
 const SEEN_TTL_MS = 20 * 60_000
 /** 「叮咚」响完到开口的间隔 */
@@ -577,26 +592,46 @@ export default function Classroom() {
     let done = false
     let speakTimer = 0
     let fallbackTimer = 0
-    /** 出队。onEnd 和兜底定时器会抢，只认先到的那个 */
+    let holdTimer = 0
+    /** 这条从什么时候开始展示 —— 「再播一遍」会重置它 */
+    let shownAt = Date.now()
+    /** 出队。语音结束 / 兜底超时 / 最短展示到期，三个来源会抢，只认先到的那个 */
     const advance = () => {
       if (done) return
       done = true
       mutateQueue((q) => (q[0] && callKey(q[0]) === key ? q.slice(1) : q))
     }
-    /** 响铃 → 开口；「再播一遍」也走这里，所以兜底计时会重新起算 */
+    /**
+     * 这条至少要展示多久 —— 按字数算，与语音是否可用无关。
+     * 见文件上方 BUBBLE_MIN_MS 的注释：语音一坏就闪过去，是实机上踩过的坑。
+     */
+    const holdMs = () =>
+      Math.max(BUBBLE_MIN_MS, broadcast.text.replace(/\s+/g, '').length * BUBBLE_MS_PER_CHAR)
+    /**
+     * 语音这条路走完了（念完、合成失败、被系统打断都算）。
+     * **不立刻出队** —— 先补齐"够读完"的那段时间，不够就不补。
+     */
+    const finishSpeech = () => {
+      const left = shownAt + holdMs() - Date.now()
+      if (left > 0) holdTimer = window.setTimeout(advance, left)
+      else advance()
+    }
+    /** 响铃 → 开口；「再播一遍」也走这里，所以最短展示与兜底计时都重新起算 */
     const playHead = () => {
       chime()
+      shownAt = Date.now()
       window.clearTimeout(speakTimer)
       window.clearTimeout(fallbackTimer)
+      window.clearTimeout(holdTimer)
       speakTimer = window.setTimeout(() => {
         // 这 0.68 秒里静音开始了（静音时段刚好跨过这一秒）：
         // 什么都别做，队列留着 —— silenced 一变 effect 会重跑，静音结束再念
         if (isSilenced()) return
-        speak(broadcast.text, { onEnd: advance })
+        speak(broadcast.text, { onEnd: finishSpeech })
       }, SPEAK_AFTER_CHIME_MS)
       fallbackTimer = window.setTimeout(
         () => {
-          if (!isSilenced()) advance()
+          if (!isSilenced()) finishSpeech()
         },
         SPEAK_AFTER_CHIME_MS + speechBudgetMs(broadcast.text),
       )
@@ -606,6 +641,7 @@ export default function Classroom() {
     return () => {
       window.clearTimeout(speakTimer)
       window.clearTimeout(fallbackTimer)
+      window.clearTimeout(holdTimer)
       playHeadRef.current = () => {}
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
