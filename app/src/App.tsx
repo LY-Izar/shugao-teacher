@@ -16,6 +16,10 @@ import Calls from './pages/Calls'
 import ClassDetail from './pages/ClassDetail'
 import Classroom from './pages/Classroom'
 import Classes from './pages/Classes'
+import ExamGrade from './pages/ExamGrade'
+import ExamNew from './pages/ExamNew'
+import Exams from './pages/Exams'
+import ExamStats from './pages/ExamStats'
 import ImportPaste from './pages/ImportPaste'
 import ImportPhoto from './pages/ImportPhoto'
 import Login from './pages/Login'
@@ -282,6 +286,43 @@ export default function App() {
             </Guard>
           }
         />
+        {/*
+          考试（功能设计与不变量.md §十四）。**独立的一条 /exams 路由族**，不挂在 /assignments 下面：
+          考试与作业是两套数据模型（作业默认全对、考试默认全零），路径混在一起最容易被人"顺手统一"。
+          入口在作业列表页的右上角，以及考试列表自己的返回按钮。
+        */}
+        <Route
+          path="/exams"
+          element={
+            <Guard>
+              <Exams />
+            </Guard>
+          }
+        />
+        <Route
+          path="/exams/new"
+          element={
+            <Guard>
+              <ExamNew />
+            </Guard>
+          }
+        />
+        <Route
+          path="/exams/:id/grade"
+          element={
+            <Guard>
+              <ExamGrade />
+            </Guard>
+          }
+        />
+        <Route
+          path="/exams/:id/stats"
+          element={
+            <Guard>
+              <ExamStats />
+            </Guard>
+          }
+        />
         <Route
           path="/schedule"
           element={
@@ -329,7 +370,7 @@ export default function App() {
         />
         {/*
           教师账号（建号 / 主学科 / 任课关系 / 身份）。
-          入口在「我的 → 教师账号」，**只有最高管理员和行政老师看得见那个入口**；
+          入口在「我的 → 教师账号」，**只有最高管理员和教导处看得见那个入口**；
           页面自己也会在服务端被拒（判据是数据库的 can_manage_teachers()）。
           路由本身不额外加守卫：藏入口是"少点几下"，不是安全边界。
         */}

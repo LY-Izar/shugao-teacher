@@ -9,17 +9,19 @@ import { analyzeRoster } from '../lib/roster'
 import { awayText, toMinutes, weekdayOf } from '../lib/schedule'
 import { teacherSubjectLabel } from '../lib/subjects'
 import { connectionMode } from '../lib/supabase'
-import { APP_VERSION } from '../lib/version'
+import { APP_VERSION_LABEL } from '../lib/version'
 import { DoneCelebration, MorningWelcome } from './MoodModals'
 import {
   IconAlert,
   IconCalendar,
+  IconChart,
   IconCheck,
   IconChevronRight,
   IconClipboard,
   IconGauge,
   IconHash,
   IconInfo,
+  IconSend,
   IconTarget,
   IconUser,
   IconUsers,
@@ -28,13 +30,43 @@ import {
 import { Button, Sheet, Tag } from './ui'
 import { cx } from '../lib/cx'
 
+/**
+ * 全部入口。**桌面左栏按这个顺序全摆**（一行文字 + 图标）；
+ * 移动端只把其中三个放进悬浮胶囊，其余收进「更多入口」——
+ * 哪三个见下面的 `PIN_KEYS`（形态与理由见 `功能设计与不变量.md` §十五）。
+ */
 const NAV = [
   { to: '/', label: '工作台', icon: IconGauge, end: true },
   { to: '/classes', label: '班级', icon: IconUsers, end: false },
   { to: '/assignments', label: '作业', icon: IconClipboard, end: false },
+  /*
+   * 考试（`功能设计与不变量.md` §十四）。两条纪律：
+   *  · `end: false` —— `/exams/new`、`/exams/:id/grade`、`/exams/:id/stats`
+   *    都要让「考试」保持选中（同 §11.1 里错题集那条）。
+   *  · 它**不在** `PIN_KEYS` 里 → 移动端默认收进「更多入口」。
+   *    这是刻意的：胶囊里那三个是每天来回切的；考试是"考完那一两天进去"的。
+   */
+  { to: '/exams', label: '考试', icon: IconChart, end: false },
   { to: '/wrong', label: '错题集', icon: IconTarget, end: false },
   { to: '/settings', label: '我的', icon: IconUser, end: false },
 ]
+
+/**
+ * 移动端胶囊里的三个（顺序即胶囊里的排列顺序）：工作台 / 作业 / 我的。
+ *
+ * 判据是**频次**：这三条是每天要来回切的；班级与错题集是"进去待一会儿"的，
+ * 收进更多入口。以后往 NAV 里加新入口，默认会落到「更多入口」里 —— 这是**故意**的兜底：
+ * 新入口宁可在展开层多一步，也别把胶囊挤成"一排又小又密的按钮"（那正是上一轮改掉的东西）。
+ */
+const PIN_KEYS = ['/', '/assignments', '/settings']
+const PINNED = NAV.filter((n) => PIN_KEYS.includes(n.to))
+const COLLAPSED = NAV.filter((n) => !PIN_KEYS.includes(n.to))
+
+const MORE_HINT: Record<string, string> = {
+  '/classes': '花名册 · 拍照录入 · 名单体检',
+  '/exams': '导入成绩单 · 手动批阅 · 逐题统计',
+  '/wrong': '按班级看错题 · 生成重练题卷',
+}
 
 /* ---------------- Toast ---------------- */
 
@@ -136,16 +168,44 @@ function RailItem({ to, label, icon: Icon, end }: (typeof NAV)[number]) {
   )
 }
 
-function TabItem({ to, label, icon: Icon, end }: (typeof NAV)[number]) {
+/* ============================================================
+   移动端导航：悬浮的深色玻璃控件（两件，彼此分开）
+
+   形态（用户给的图 + `功能设计与不变量.md` §十五）：
+
+        ┌───────────────────┐        ╭─────╮
+        │  ♥    ▣✎    ⌕     │        │  ✈  │      ← 全圆按钮 = 展开其余入口
+        └───────────────────┘        ╰─────╯
+         12 圆角胶囊 · 三个图标          独立、不连着
+
+   三条不能破的：
+   ① 每个图标 **48×48**（≥44px，手指点的东西不许更小）；
+   ② 只放图标、**不放文字标签**，所以必须有 `aria-label`（无障碍名 = 原来的文字）；
+   ③ 悬浮在内容之上、**不贴底边**；容器 `pointer-events-none`，
+      只有胶囊与圆按钮本身可点 —— 中间那段空隙要能点穿到页面上去。
+   ============================================================ */
+
+/** 胶囊里的一个图标：可点区域 48×48，当前页高亮由父级的滑动胶囊负责。 */
+function PinTab({ to, label, icon: Icon, end }: (typeof NAV)[number]) {
   return (
-    <NavLink to={to} end={end} className="relative flex-1">
+    <NavLink
+      to={to}
+      end={end}
+      aria-label={label}
+      title={label}
+      /* 🔴 链接默认是**可拖拽**的：在胶囊上按住横向滑动时，浏览器会改为拖这个链接
+         （HTML5 拖放），指针事件直接停掉 —— 滑动跟手就永远不会发生（鼠标上必现）。
+         关掉它，滑动才拿得到 pointermove。见 §十五 */
+      draggable={false}
+      className="relative block shrink-0"
+      style={{ width: 48, height: 48 }}
+    >
       {({ isActive }) => (
         <span
           data-active={isActive}
-          className="relative flex flex-col items-center justify-center gap-1"
+          className="grid h-full w-full place-items-center"
           style={{
-            height: 56,
-            color: isActive ? 'var(--color-accent)' : 'var(--color-ink3)',
+            color: isActive ? '***REMOVED***fff' : 'rgb(255 255 255 / .62)',
             transition: 'color .22s cubic-bezier(.22,.8,.24,1)',
           }}
         >
@@ -153,20 +213,338 @@ function TabItem({ to, label, icon: Icon, end }: (typeof NAV)[number]) {
             className={isActive ? 'tab-icon-on' : undefined}
             style={{ display: 'grid', placeItems: 'center' }}
           >
-            <Icon size={21} strokeWidth={isActive ? 1.9 : 1.6} />
-          </span>
-          <span
-            style={{
-              fontSize: 11,
-              fontWeight: isActive ? 650 : 500,
-              transition: 'font-weight .2s',
-            }}
-          >
-            {label}
+            <Icon size={22} strokeWidth={isActive ? 1.9 : 1.6} />
           </span>
         </span>
       )}
     </NavLink>
+  )
+}
+
+function MobileNav() {
+  const { pathname } = useLocation()
+  const navigate = useNavigate()
+  /**
+   * 「更多入口」的展开态：记的是**打开它的那个路径**，而不是一个布尔。
+   * 这样"换了页面就自动收起"是**推导**出来的（路径一变 `more` 立刻为 false），
+   * 既不用在 effect 里 setState，浏览器前进/后退回来时也不会莫名弹着一张浮层。
+   */
+  const [moreAt, setMoreAt] = useState<string | null>(null)
+  const more = moreAt === pathname
+
+  /* 当前页在胶囊里 → 高亮滑到那一格；在「更多入口」里 → 圆按钮加一圈暖黄描边 */
+  const pinIdx = PINNED.findIndex((n) => (n.end ? pathname === n.to : pathname.startsWith(n.to)))
+  const moreActive = COLLAPSED.some((n) =>
+    n.end ? pathname === n.to : pathname.startsWith(n.to),
+  )
+
+  const pillRef = useRef<HTMLDivElement>(null)
+  const hiRef = useRef<HTMLSpanElement>(null)
+  const lastIdx = useRef(-1)
+  const [hi, setHi] = useState({ left: 4, width: 48, show: false })
+
+  /* 高亮块的落点靠**量**（不写死 48×序号）：字号/间距将来变了也不会错位 */
+  useEffect(() => {
+    const measure = () => {
+      const wrap = pillRef.current
+      if (!wrap) return
+      const el = wrap.querySelector<HTMLElement>('[data-active="true"]')
+      if (!el) {
+        setHi((v) => ({ ...v, show: false }))
+        return
+      }
+      const r = el.getBoundingClientRect()
+      const pr = wrap.getBoundingClientRect()
+      /* 绝对定位的 `left` 是相对**内边距盒**算的，所以要减掉左边框那 1px */
+      setHi({ left: r.left - pr.left - wrap.clientLeft, width: r.width, show: true })
+    }
+    measure()
+    const t = window.setTimeout(measure, 80)
+    window.addEventListener('resize', measure)
+    return () => {
+      window.clearTimeout(t)
+      window.removeEventListener('resize', measure)
+    }
+  }, [pathname])
+
+  /* 切页时给高亮块一段拉伸回弹（液态手感，与桌面左栏同一套缓动） */
+  useEffect(() => {
+    if (pinIdx < 0) return
+    const first = lastIdx.current === -1
+    if (lastIdx.current === pinIdx) return
+    lastIdx.current = pinIdx
+    if (first) return
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+    hiRef.current?.animate(
+      [
+        { transform: 'scaleX(1)' },
+        { transform: 'scaleX(1.16)' },
+        { transform: 'scaleX(0.97)' },
+        { transform: 'scaleX(1)' },
+      ],
+      { duration: 470, easing: 'cubic-bezier(.34,1.3,.5,1)' },
+    )
+  }, [pinIdx])
+
+  /* ---- 在胶囊上滑动：高亮跟手，松手落到手指最近的那一格 ---- */
+
+  const dragRef = useRef<{
+    startX: number
+    active: boolean
+    boxes: Array<{ left: number; width: number }>
+  } | null>(null)
+  const suppressClick = useRef(false)
+  const [dragX, setDragX] = useState<number | null>(null)
+
+  /** 胶囊内边距盒在视口里的左边缘（滑动的坐标系原点） */
+  const pillOrigin = (wrap: HTMLElement) => wrap.getBoundingClientRect().left + wrap.clientLeft
+
+  const onDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    suppressClick.current = false
+    const wrap = pillRef.current
+    if (!wrap) return
+    const origin = pillOrigin(wrap)
+    const boxes = Array.from(wrap.querySelectorAll<HTMLElement>('a')).map((a) => {
+      const r = a.getBoundingClientRect()
+      return { left: r.left - origin, width: r.width }
+    })
+    dragRef.current = { startX: e.clientX, active: false, boxes }
+    /*
+     * 🔴 **这里不能 setPointerCapture**：一旦在 pointerdown 就捕获，
+     * pointerup / mouseup / click 会被**重定向到胶囊本身**，里面的 <NavLink> 永远收不到 click
+     * —— 表现为"点图标没反应"（真机上点一下什么都不会发生）。已实测踩过，见 §十五。
+     * 指针捕获改成**滑动超过阈值时**才拿（那时本来也不该触发点击）。
+     */
+  }
+
+  const onMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const d = dragRef.current
+    const wrap = pillRef.current
+    if (!d || !wrap) return
+    if (!d.active) {
+      if (Math.abs(e.clientX - d.startX) < 8) return
+      d.active = true
+      try {
+        e.currentTarget.setPointerCapture(e.pointerId)
+      } catch {
+        /* 忽略 */
+      }
+    }
+    const half = hi.width / 2
+    const max = Math.max(4, wrap.clientWidth - 4 - hi.width)
+    setDragX(Math.min(Math.max(e.clientX - pillOrigin(wrap) - half, 4), max))
+  }
+
+  const onUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    const d = dragRef.current
+    dragRef.current = null
+    if (!d?.active) {
+      setDragX(null)
+      return
+    }
+    suppressClick.current = true
+    setDragX(null)
+    const wrap = pillRef.current
+    if (!wrap) return
+    const x = e.clientX - pillOrigin(wrap)
+    let idx = 0
+    let best = Infinity
+    d.boxes.forEach((b, i) => {
+      const dist = Math.abs(x - (b.left + b.width / 2))
+      if (dist < best) {
+        best = dist
+        idx = i
+      }
+    })
+    const target = PINNED[idx]
+    if (target && target.to !== pathname) navigate(target.to)
+  }
+
+  return (
+    <>
+      <nav
+        aria-label="主导航"
+        className="pointer-events-none fixed inset-x-0 z-40 lg:hidden"
+        style={{ bottom: 'calc(env(safe-area-inset-bottom, 0px) + 18px)' }}
+      >
+        {/*
+         * 这一行**只包住两个控件**（fit-content + 居中），不铺满整屏：
+         * ① 它中间那段空隙要让点击穿过去（父级是 pointer-events-none）；
+         * ② `scripts/shots.mjs` 的拖拽回归按 `nav > div` 取拖拽区，宽度等于控件本身才对得上。
+         */}
+        <div
+          className="mx-auto flex items-center gap-3"
+          style={{ width: 'fit-content', maxWidth: 640, padding: '0 16px' }}
+        >
+          {/* ① 胶囊：工作台 / 作业 / 我的 —— 半透明深色玻璃、细描边、12 圆角 */}
+          <div
+            ref={pillRef}
+            className="glass-dark pointer-events-auto relative flex items-center"
+            style={{
+              /* 58 = 1 边框 + 4 内边距 + 48 图标格 + 4 + 1（box-sizing 是 border-box） */
+              height: 58,
+              padding: 4,
+              borderRadius: 12,
+              border: '1px solid rgb(255 255 255 / .18)',
+              touchAction: 'pan-y',
+            }}
+            onPointerDown={onDown}
+            onPointerMove={onMove}
+            onPointerUp={onUp}
+            onPointerCancel={onUp}
+            onClickCapture={(e) => {
+              if (suppressClick.current) {
+                e.preventDefault()
+                e.stopPropagation()
+              }
+            }}
+          >
+            {/* 当前页那一格：跟着手指走的一块玻璃 */}
+            <span
+              ref={hiRef}
+              aria-hidden="true"
+              style={{
+                position: 'absolute',
+                top: 4,
+                bottom: 4,
+                left: dragX ?? hi.left,
+                width: hi.width,
+                borderRadius: 12,
+                background:
+                  'linear-gradient(180deg, rgb(255 255 255 / .24), rgb(255 255 255 / .12))',
+                border: '1px solid rgb(255 255 255 / .22)',
+                boxShadow: 'inset 0 1px 0 rgb(255 255 255 / .3)',
+                opacity: hi.show ? 1 : 0,
+                pointerEvents: 'none',
+                willChange: 'left, width, transform',
+                transition:
+                  dragX !== null
+                    ? 'none'
+                    : 'left .44s cubic-bezier(.34,1.32,.5,1), width .44s cubic-bezier(.34,1.32,.5,1), opacity .2s',
+              }}
+            />
+            {PINNED.map((n) => (
+              <PinTab key={n.to} {...n} />
+            ))}
+          </div>
+
+          {/* ② 圆按钮：展开其余入口。和胶囊**分开**，不连着 */}
+          <button
+            type="button"
+            onClick={() => setMoreAt(more ? null : pathname)}
+            aria-label="展开更多入口"
+            aria-expanded={more}
+            aria-haspopup="dialog"
+            title="更多入口"
+            className="glass-dark pointer-events-auto grid shrink-0 place-items-center"
+            style={{
+              /* 与胶囊等高（58），全圆 */
+              width: 58,
+              height: 58,
+              borderRadius: 999,
+              border: '1px solid rgb(255 255 255 / .18)',
+              color: '***REMOVED***f5c469',
+              /* 当前页在展开层里时描一圈同色暖黄，免得"高亮不见了" */
+              outline:
+                more || moreActive ? '2px solid rgb(245 196 105 / .5)' : '2px solid transparent',
+              outlineOffset: 3,
+              transition: 'outline-color .2s',
+            }}
+          >
+            <IconSend size={24} fill="currentColor" />
+          </button>
+        </div>
+      </nav>
+
+      {/* 展开：其余入口（班级 / 错题集 …）。一行 52px，够手指点 */}
+      <Sheet
+        open={more}
+        onClose={() => setMoreAt(null)}
+        title="更多入口"
+        footer={
+          <Button block onClick={() => setMoreAt(null)}>
+            收起
+          </Button>
+        }
+      >
+        <div
+          className="overflow-hidden"
+          style={{ border: '1px solid var(--color-line)', borderRadius: 4 }}
+        >
+          {COLLAPSED.map((n, i) => {
+            const on = n.end ? pathname === n.to : pathname.startsWith(n.to)
+            const Icon = n.icon
+            return (
+              <button
+                key={n.to}
+                type="button"
+                onClick={() => {
+                  setMoreAt(null)
+                  navigate(n.to)
+                }}
+                className="flex w-full items-center gap-3 px-3 text-left"
+                style={{
+                  minHeight: 52,
+                  borderBottom:
+                    i === COLLAPSED.length - 1 ? undefined : '1px solid var(--color-line)',
+                  background: on ? 'var(--color-accentsoft)' : 'var(--color-surface)',
+                }}
+              >
+                <span
+                  className="grid shrink-0 place-items-center"
+                  style={{
+                    width: 34,
+                    height: 34,
+                    border: '1px solid var(--color-line2)',
+                    borderRadius: 4,
+                    background: 'var(--color-surface2)',
+                    color: on ? 'var(--color-accent)' : 'var(--color-ink2)',
+                  }}
+                >
+                  <Icon size={18} />
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span
+                    className="block truncate"
+                    style={{
+                      fontSize: 14.5,
+                      fontWeight: on ? 660 : 560,
+                      color: on ? 'var(--color-accentink)' : 'var(--color-ink)',
+                    }}
+                  >
+                    {n.label}
+                  </span>
+                  {MORE_HINT[n.to] ? (
+                    <span style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
+                      {MORE_HINT[n.to]}
+                    </span>
+                  ) : null}
+                </span>
+                <span
+                  style={{
+                    color: on ? 'var(--color-accent)' : 'var(--color-ink4)',
+                    display: 'grid',
+                    placeItems: 'center',
+                  }}
+                >
+                  {on ? <IconCheck size={16} /> : <IconChevronRight size={16} />}
+                </span>
+              </button>
+            )
+          })}
+        </div>
+        <p
+          style={{
+            fontSize: 11.5,
+            color: 'var(--color-ink3)',
+            marginTop: 10,
+            lineHeight: 1.7,
+          }}
+        >
+          工作台 / 作业 / 我的 在底部那颗胶囊里；这一层装的是其余入口。
+        </p>
+      </Sheet>
+    </>
   )
 }
 
@@ -237,40 +615,19 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const navigate = useNavigate()
   const current = classes.find((c) => c.id === currentClassId)
 
-  /* 底部导航 + 左侧导航：测量激活项位置，让液态玻璃胶囊滑过去 */
-  const tabsRef = useRef<HTMLDivElement>(null)
-  const pillRef = useRef<HTMLSpanElement>(null)
+  /*
+   * 桌面左栏的液态玻璃胶囊：量出激活项的位置，让胶囊滑过去。
+   * 移动端那颗悬浮胶囊由 `MobileNav` 自己管（两份状态各自独立 —— 两个端从不同时出现）。
+   */
   const railNavRef = useRef<HTMLElement>(null)
   const railPillRef = useRef<HTMLSpanElement>(null)
   const lastIdx = useRef(-1)
-  const [ind, setInd] = useState({ left: 0, width: 0, show: false })
   const [railInd, setRailInd] = useState({ top: 0, height: 40, show: false })
-
-  /* 拖动底栏时胶囊跟手 */
-  const dragRef = useRef<{ startX: number; active: boolean } | null>(null)
-  const suppressClick = useRef(false)
-  const [dragX, setDragX] = useState<number | null>(null)
 
   const activeIdx = NAV.findIndex((n) => (n.end ? pathname === n.to : pathname.startsWith(n.to)))
 
   useEffect(() => {
     const measure = () => {
-      const tw = tabsRef.current
-      if (tw) {
-        const el = tw.querySelector<HTMLElement>('[data-active="true"]')
-        if (el) {
-          const r = el.getBoundingClientRect()
-          const pr = tw.getBoundingClientRect()
-          const pad = 7
-          setInd({
-            left: r.left - pr.left + pad,
-            width: Math.max(0, r.width - pad * 2),
-            show: true,
-          })
-        } else {
-          setInd((v) => ({ ...v, show: false }))
-        }
-      }
       const rw = railNavRef.current
       if (rw) {
         const el = rw.querySelector<HTMLElement>('[data-active="true"]')
@@ -292,7 +649,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     }
   }, [pathname])
 
-  /* 切页时给两颗胶囊一段拉伸回弹，做出「液态」的手感 */
+  /* 切页时给左栏胶囊一段拉伸回弹，做出「液态」的手感 */
   useEffect(() => {
     if (activeIdx < 0) return
     const first = lastIdx.current === -1
@@ -300,16 +657,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     lastIdx.current = activeIdx
     if (first) return
     if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
-    const easing = 'cubic-bezier(.34,1.3,.5,1)'
-    pillRef.current?.animate(
-      [
-        { transform: 'scaleX(1)' },
-        { transform: 'scaleX(1.16)' },
-        { transform: 'scaleX(0.97)' },
-        { transform: 'scaleX(1)' },
-      ],
-      { duration: 470, easing },
-    )
     railPillRef.current?.animate(
       [
         { transform: 'scaleY(1)' },
@@ -317,51 +664,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         { transform: 'scaleY(0.96)' },
         { transform: 'scaleY(1)' },
       ],
-      { duration: 470, easing },
+      { duration: 470, easing: 'cubic-bezier(.34,1.3,.5,1)' },
     )
   }, [activeIdx])
-
-  /* ---- 底栏拖拽：胶囊实时跟手，松手落到手指所在的 tab ---- */
-
-  const onNavDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    suppressClick.current = false
-    dragRef.current = { startX: e.clientX, active: false }
-    try {
-      e.currentTarget.setPointerCapture(e.pointerId)
-    } catch {
-      /* 忽略 */
-    }
-  }
-
-  const onNavMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    const d = dragRef.current
-    const wrap = tabsRef.current
-    if (!d || !wrap) return
-    if (!d.active && Math.abs(e.clientX - d.startX) < 8) return
-    d.active = true
-    const pr = wrap.getBoundingClientRect()
-    const half = ind.width / 2
-    const x = Math.min(Math.max(e.clientX - pr.left - half, 0), Math.max(0, pr.width - ind.width))
-    setDragX(x)
-  }
-
-  const onNavUp = (e: React.PointerEvent<HTMLDivElement>) => {
-    const d = dragRef.current
-    dragRef.current = null
-    if (!d?.active) {
-      setDragX(null)
-      return
-    }
-    suppressClick.current = true
-    setDragX(null)
-    const wrap = tabsRef.current
-    if (!wrap) return
-    const pr = wrap.getBoundingClientRect()
-    const ratio = (e.clientX - pr.left) / pr.width
-    const idx = Math.min(NAV.length - 1, Math.max(0, Math.floor(ratio * NAV.length)))
-    const target = NAV[idx]
-    if (target && target.to !== pathname) navigate(target.to)
-  }
 
   useEffect(() => {
     touchStreak()
@@ -688,46 +993,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             style={{ fontSize: 11, color: 'var(--color-ink4)' }}
           >
             <IconInfo size={13} />
-            <span>v{APP_VERSION}</span>
+            <span>{APP_VERSION_LABEL}</span>
           </div>
         </div>
       </aside>
 
-      {/* 移动端底部导航 —— 磨砂玻璃 + 液态玻璃胶囊 */}
-      <nav
-        className="nav-frost fixed inset-x-0 bottom-0 z-40 lg:hidden"
-        style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
-      >
-        <div
-          ref={tabsRef}
-          className="relative mx-auto flex"
-          style={{ maxWidth: 640, touchAction: 'pan-y' }}
-          onPointerDown={onNavDown}
-          onPointerMove={onNavMove}
-          onPointerUp={onNavUp}
-          onPointerCancel={onNavUp}
-          onClickCapture={(e) => {
-            if (suppressClick.current) {
-              e.preventDefault()
-              e.stopPropagation()
-            }
-          }}
-        >
-          <span
-            ref={pillRef}
-            className="tab-pill"
-            style={{
-              left: dragX ?? ind.left,
-              width: ind.width,
-              opacity: ind.show ? 1 : 0,
-              transition: dragX !== null ? 'none' : undefined,
-            }}
-          />
-          {NAV.map((n) => (
-            <TabItem key={n.to} {...n} />
-          ))}
-        </div>
-      </nav>
+      {/* 移动端导航 —— 悬浮的深色玻璃胶囊 + 展开按钮（形态见 MobileNav 上方的说明） */}
+      <MobileNav />
 
       {/* 切换班级 */}
       <Sheet

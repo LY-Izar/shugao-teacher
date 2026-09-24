@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { createJSONStorage, persist, type StateStorage } from 'zustand/middleware'
 import { isRemote } from '../lib/supabase'
 import { HEARTBEAT_MS, emit, subscribe } from '../lib/realtime'
+import { normalizePaperName } from '../lib/examPaper'
 import {
   asSubjectCode,
   subjectCodeOfName,
@@ -10,7 +11,8 @@ import {
   DEFAULT_SUBJECT_CODE,
 } from '../lib/subjects'
 import * as remote from './remote'
-import { makeClassrooms, makeDemoAssignments, makeDemoClasses, makeDemoSchedule, makeTemplates } from './seed'
+import { makeClassrooms, makeDemoAssignments, makeDemoClasses, makeDemoExams, makeDemoSchedule, makeTemplates } from './seed'
+import type { Exam, ExamScore } from './examTypes'
 import type {
   Assignment,
   AssignmentTemplate,
@@ -50,6 +52,39 @@ function uuid(): string {
 
 const uid = uuid
 
+/**
+ * **确定性** UUID（v5 式：SHA-1(namespace + name)）。
+ *
+ * 考试为什么会用到它：一份**试卷**（同 paper_key + 学科 + 班级）在两台设备上
+ * 各自新建时必须落到同一行 —— 否则"同一个班同一次考试"会变成两份档案，
+ * 年级排名就会把同一个人算两遍。有了它，upsert 的 onConflict('id') 天然幂等。
+ *
+ * ⚠️ 它**不是**随机 id：同一个 (classId, paperKey) 永远得到同一个 uuid。
+ *    改试卷名 = 换一份档案（符合语义：名字不同就是不同的考试，见 §14 同场判定）。
+ *    `crypto.subtle` 只在安全上下文有（与 `uuid()` 的注释同一件事），
+ *    没有时退回随机 id —— 功能不受影响，只是没了跨设备的幂等。
+ */
+async function stableUuid(namespace: string, name: string): Promise<string> {
+  const c = globalThis.crypto
+  if (!c?.subtle) return uid()
+  try {
+    const data = new TextEncoder().encode(`${namespace}\u0000${name}`)
+    const buf = await c.subtle.digest('SHA-1', data)
+    const b = new Uint8Array(buf).subarray(0, 16)
+    b[6] = (b[6] & 0x0f) | 0x50
+    b[8] = (b[8] & 0x3f) | 0x80
+    const h = Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('')
+    return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`
+  } catch {
+    return uid()
+  }
+}
+
+/** 一个学生的一次考试那一行的 id —— 只由 (考试, 学号) 决定，重跑导入不会插重 */
+export function examScoreId(examId: string, studentNo: string): Promise<string> {
+  return stableUuid(`exam-score:${examId}`, String(studentNo))
+}
+
 export type ImportMode = 'merge' | 'replace' | 'append'
 
 /** 上次选中的班级（设备本地偏好：教室机想看 3 班、手机想看 1 班，各记各的更合理） */
@@ -76,6 +111,18 @@ type State = {
   calls: CallRecord[]
   /* ---- 课表 ---- */
   schedule: ScheduleItem[]
+  /* ---- 考试（见 功能设计与不变量.md §十四）---- */
+  exams: Exam[]
+  examScores: ExamScore[]
+  /**
+   * `exams` / `exam_scores` 两张表在不在线上库里。
+   *
+   * `'missing'` = 还没跑 `schema.sql` 第 15 段。这时：
+   *   · 读：列表显示"还没有考试档案"（**不白屏**）
+   *   · 写：**拒绝并说明**（不乐观更新 —— 那会变成"刷新即丢"）
+   * 探测一次、本页缓存（见 `remote.ensureExamTables`）。
+   */
+  examTables: 'unknown' | 'present' | 'missing'
   /** 是否仍是初始演示数据（未做任何真实改动） */
   isDemo: boolean
   lastSeenAt: number
@@ -210,6 +257,78 @@ type State = {
   updateSchedule: (id: string, patch: Partial<ScheduleItem>) => void
   removeSchedule: (id: string) => void
 
+  /* ---- 考试 ---- */
+  /**
+   * 读一次考试数据（表不在时静默为空 + 把 `examTables` 标成 'missing'）。
+   * **不进 `hydrate()`**：那是"任一失败就整份快照作废"的那一组，
+   * 线上库没跑第 15 段时混进去会让整个应用一起看不到数据。
+   */
+  hydrateExams: () => Promise<void>
+  /**
+   * 建一份考试档案。
+   *
+   * 学科与 `subject` 显示名的成对写入在这里（页面里不许单独写）——
+   * 与 `addAssignment` 同一条不变量（§12.3 I13）。
+   * 返回 `{ id, saved }`：`saved=false` 时是"表还没建"，界面要如实说，不能假装建好了。
+   */
+  addExam: (input: {
+    title: string
+    subjectCode?: string
+    scope: Exam['scope']
+    source: Exam['source']
+    mode: Exam['mode']
+    examDate: string
+    questionCount: number
+    questions: Exam['questions']
+    classIds: string[]
+    grade?: string
+    absentNos?: string[]
+    /** 从文件带进来的学生行（导入路径用） */
+    rows?: ExamScore[]
+  }) => Promise<{ id: string; saved: boolean; reason?: string }>
+  updateExam: (id: string, patch: Partial<Exam>) => void
+  /** 删档案（连带这个档案的成绩行） */
+  removeExam: (id: string) => void
+  /**
+   * 写一个人的成绩行（**唯一的成绩写入口**）。
+   *
+   * 不变量 E1：`graded` 只由「确认批阅」「文件导入」这两条路置 true，
+   * 点开学生/展开题号**不算**批阅（与作业 I1 同一条纪律）。
+   */
+  setExamScore: (
+    examId: string,
+    row: {
+      studentNo: string
+      classId: string
+      name?: string
+      scores?: Record<string, number>
+      answers?: Record<string, string>
+      graded?: boolean
+      absent?: boolean
+      total?: number
+      objective?: number
+      subjective?: number
+      classRank?: number
+      gradeRank?: number
+    },
+  ) => void
+  /** 批量写（导入、确认完成时一次落库） */
+  setExamScores: (examId: string, rows: ExamScore[]) => void
+  /** 重新探一次考试表在不在（老师跑完 SQL 后不用刷新页面） */
+  refreshExamTables: () => Promise<void>
+
+  /**
+   * 把整份 state 换成一份演示快照（**危险操作**）。
+   *
+   * ⚠️ 调用方只剩一个：`Workbench.tsx` 的「演示数据提示」横幅 ——
+   *    那条横幅**只在 `isDemo === true` 时渲染**（看到的本来就是演示数据），所以够不到真实数据。
+   *    远程模式这一支其实只是重新 `hydrate()`，不删云端任何东西。
+   *
+   * 🔴 `Settings.tsx`（我的）里原来那个**不看 `isDemo`、也没有二次确认**的
+   *    「重置为演示数据」按钮已于 2026-09 按用户要求删除：本地模式下它会把老师
+   *    真实录入的班级 / 名单 / 作业整份换掉，且不可撤销。
+   *    **别再把它摆回设置页或其它无条件显示的地方**（见 功能设计与不变量.md）。
+   */
   resetDemo: () => void
   /** 从备份文件恢复（覆盖当前数据，调用前必须让用户确认） */
   restoreBackup: (b: {
@@ -282,6 +401,8 @@ function pickTransferNo(
 
 function freshDemo() {
   const classes = makeDemoClasses()
+  // 演示考试也来自 seed（结构与真实物理卷一致，见 seed.ts 的说明）
+  const examDemo = makeDemoExams(classes)
   return {
     classes,
     currentClassId: classes[0]?.id ?? null,
@@ -290,6 +411,8 @@ function freshDemo() {
     classrooms: makeClassrooms(classes),
     calls: [] as CallRecord[],
     schedule: makeDemoSchedule(classes),
+    exams: examDemo.exams,
+    examScores: examDemo.scores,
     isDemo: true,
   }
 }
@@ -305,6 +428,8 @@ function initialState() {
     classrooms: [] as ClassroomClient[],
     calls: [] as CallRecord[],
     schedule: [] as ScheduleItem[],
+    exams: [] as Exam[],
+    examScores: [] as ExamScore[],
     isDemo: false,
   }
 }
@@ -328,6 +453,9 @@ export const useStore = create<State>()(
       syncError: null,
       accountKind: 'teacher',
       myRoles: [],
+      exams: [],
+      examScores: [],
+      examTables: 'unknown',
 
       /* ---------------- 后端 ---------------- */
 
@@ -347,6 +475,14 @@ export const useStore = create<State>()(
          * classroom_accounts 那一支），前端这里只负责"该送去哪个界面"。
          */
         const room = await remote.loadClassroomAccount()
+        /*
+         * 考试数据**单独读**（见 remote.loadExams 的注释：那两张表不进
+         * `loadSnapshot` 的"任一失败就整份快照作废"那一组 —— 线上库还没跑
+         * schema.sql 第 15 段时，混进去会让整个应用一起看不到数据）。
+         * 失败/表不存在时它返回空包，这里照常 set，页面上是"还没有考试档案"。
+         */
+        const examBundle = await remote.loadExams()
+        const examState = await remote.ensureExamTables()
         set({
           userId: snap.userId,
           teacher: snap.teacher,
@@ -355,6 +491,9 @@ export const useStore = create<State>()(
           schedule: snap.schedule,
           classrooms: snap.classrooms,
           calls: snap.calls,
+          exams: examBundle.exams,
+          examScores: examBundle.scores,
+          examTables: examState,
           // 上次选的那个班还在就沿用它，否则退回第一个
           currentClassId: readCurrentClass(snap.classes),
           isDemo: false,
@@ -397,6 +536,10 @@ export const useStore = create<State>()(
           classrooms: [],
           calls: [],
           schedule: [],
+          // 考试数据跟着会话走：换账号后不能还留着上一个人的成绩
+          exams: [],
+          examScores: [],
+          examTables: 'unknown',
           hydrated: !isRemote,
           // 身份跟着会话走，别把上一个账号的类型留在内存里
           accountKind: 'teacher',
@@ -875,6 +1018,167 @@ export const useStore = create<State>()(
         if (tid) void remote.saveClassroom(item, tid)
       },
 
+      /* ---- 考试（见 功能设计与不变量.md §十四） ---- */
+
+      hydrateExams: async () => {
+        const state = await remote.ensureExamTables()
+        if (state === 'missing') {
+          set({ examTables: 'missing', exams: [], examScores: [] })
+          return
+        }
+        const bundle = await remote.loadExams()
+        set({ examTables: state, exams: bundle.exams, examScores: bundle.scores })
+      },
+
+      refreshExamTables: async () => {
+        // 探测结果是按页面缓存的（`remote.ensureExamTables`），
+        // 老师跑完 SQL 后要点一下这个 → 先把缓存清掉再重探。
+        // 这里通过"重新加载"顺带重探：`loadExams` 内部会再问一次。
+        set({ examTables: 'unknown' })
+        await get().hydrateExams()
+      },
+
+      addExam: async (input) => {
+        const code = asSubjectCode(input.subjectCode) ?? teacherPrimarySubjectCode(get().teacher)
+        const title = input.title.trim() || '未命名考试'
+        const paperKey = normalizePaperName(title)
+        /*
+         * 班级考试：档案 id 由 (班级, 试卷键) 决定 → 同一场考试在两台设备上建也落到同一行。
+         * 年级考试：老师可能一次勾好几个班，用**排序后的班级列表**一起进键 ——
+         * 于是"同一位老师对同一场考试"只有一份档案，改一次两个班都更新。
+         *
+         * ⚠️ 另一位老师给自己班建的那一份是**另一行**（班级不同 → id 不同），
+         *    这是刻意的：两边的数据各归各，靠 `paperKey` 在读取时合成年级排名
+         *    （见 schema.sql §15.5）。这样谁也不会覆盖谁的分数。
+         */
+        const ids = [...new Set(input.classIds)].sort()
+        const id = await stableUuid('exam', `${ids.join(',')}|${code}|${paperKey}`)
+        const grade =
+          input.grade ??
+          get().classes.find((c) => c.id === ids[0])?.grade ??
+          ''
+        const exam: Exam = {
+          id,
+          title,
+          paperKey,
+          subjectCode: code,
+          subject: subjectName(code),
+          scope: input.scope,
+          grade,
+          source: input.source,
+          mode: input.mode,
+          examDate: input.examDate,
+          questionCount: Math.max(1, Math.min(60, Number(input.questionCount) || 1)),
+          questions: input.questions ?? {},
+          classIds: ids,
+          absentNos: input.absentNos ?? [],
+          status: 'grading',
+          createdBy: get().teacher?.id ?? '',
+          createdAt: Date.now(),
+        }
+        const incoming = input.rows ?? []
+        const prev = get().exams.some((x) => x.id === id)
+        set((s) => ({
+          isDemo: false,
+          exams: prev ? s.exams.map((x) => (x.id === id ? { ...exam, createdAt: x.createdAt } : x)) : [exam, ...s.exams],
+          examScores: incoming.length
+            ? [...s.examScores.filter((r) => r.examId !== id), ...incoming]
+            : s.examScores,
+        }))
+        const tid = get().teacher?.id
+        if (!tid) return { id, saved: true }
+        const res = await remote.saveExam(exam, incoming, tid)
+        if (!res.ok) set({ examTables: 'missing' })
+        return { id, saved: res.ok, reason: res.reason }
+      },
+
+      updateExam: (id, patch) => {
+        set((s) => ({
+          isDemo: false,
+          exams: s.exams.map((e) => {
+            if (e.id !== id) return e
+            const next = { ...e, ...patch }
+            /*
+             * 学科不变量在**所有**写入路径上守（不只 addExam，与 §12.3 I13 同一句纪律）：
+             * `subject` 永远是 `subjectCode` 的显示缓存。
+             *  · 传了合法 code → 显示名跟着 code 走
+             *  · 只改了显示名   → 按名字反查 code（兼容期老写法）
+             *  · 两个都认不出来 → 原样留着，**绝不猜**
+             */
+            const code =
+              asSubjectCode(next.subjectCode) ??
+              subjectCodeOfName(next.subject) ??
+              asSubjectCode(e.subjectCode)
+            if (code) {
+              next.subjectCode = code
+              next.subject = subjectName(code)
+            }
+            // 改了名字 → 试卷键跟着变（同场判定读 paperKey，不读 title）
+            if (patch.title !== undefined) next.paperKey = normalizePaperName(next.title)
+            return next
+          }),
+        }))
+        const e = get().exams.find((x) => x.id === id)
+        const tid = get().teacher?.id
+        if (e && tid) void remote.saveExam(e, [], tid)
+      },
+
+      removeExam: (id) => {
+        set((s) => ({
+          isDemo: false,
+          exams: s.exams.filter((e) => e.id !== id),
+          examScores: s.examScores.filter((r) => r.examId !== id),
+        }))
+        void remote.deleteExam(id)
+      },
+
+      setExamScore: (examId, row) => {
+        const exam = get().exams.find((e) => e.id === examId)
+        if (!exam) return
+        const id = uuid()
+        const prev = get().examScores.find(
+          (r) => r.examId === examId && r.studentNo === row.studentNo,
+        )
+        const next: ExamScore = {
+          id: prev?.id ?? id,
+          examId,
+          classId: row.classId,
+          studentNo: row.studentNo,
+          name: row.name ?? prev?.name ?? '',
+          scores: row.scores ?? prev?.scores ?? {},
+          answers: row.answers ?? prev?.answers ?? {},
+          graded: row.graded ?? prev?.graded ?? false,
+          absent: row.absent ?? prev?.absent ?? false,
+          total: row.total ?? prev?.total,
+          objective: row.objective ?? prev?.objective,
+          subjective: row.subjective ?? prev?.subjective,
+          classRank: row.classRank ?? prev?.classRank,
+          gradeRank: row.gradeRank ?? prev?.gradeRank,
+          createdAt: prev?.createdAt ?? Date.now(),
+        }
+        set((s) => ({
+          isDemo: false,
+          examScores: prev
+            ? s.examScores.map((r) => (r.id === next.id ? next : r))
+            : [...s.examScores, next],
+        }))
+        const tid = get().teacher?.id
+        if (tid) void remote.saveExam(exam, [next], tid)
+      },
+
+      setExamScores: (examId, rows) => {
+        if (!rows.length) return
+        const exam = get().exams.find((e) => e.id === examId)
+        if (!exam) return
+        const byId = new Map(rows.map((r) => [r.id, r]))
+        set((s) => ({
+          isDemo: false,
+          examScores: [...s.examScores.filter((r) => !byId.has(r.id)), ...rows],
+        }))
+        const tid = get().teacher?.id
+        if (tid) void remote.saveExam(exam, rows, tid)
+      },
+
       /* ---- 课表 ---- */
 
       addSchedule: (item) => {
@@ -923,6 +1227,11 @@ export const useStore = create<State>()(
         })
       },
 
+      /**
+       * 危险：本地模式下 `set({...freshDemo()})` = 丢掉当前全部数据。
+       * 唯一的 UI 入口是 Workbench 的演示横幅（仅 `isDemo` 时可见）；
+       * 设置页那个无条件显示的入口已删（见接口处的说明）。
+       */
       resetDemo: () => {
         if (isRemote) {
           void get().hydrate()
@@ -944,6 +1253,9 @@ export const useStore = create<State>()(
           classrooms: [],
           calls: [],
           schedule: [],
+          exams: [],
+          examScores: [],
+          examTables: 'unknown',
           isDemo: false,
           streakDays: 1,
           hydrated: !isRemote,
@@ -975,6 +1287,8 @@ export const useStore = create<State>()(
           classrooms: s.classrooms,
           calls: s.calls,
           schedule: s.schedule,
+          exams: s.exams,
+          examScores: s.examScores,
           isDemo: s.isDemo,
           lastSeenAt: s.lastSeenAt,
           streakDays: s.streakDays,

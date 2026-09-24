@@ -121,15 +121,12 @@ export function holidayWish(
   return { title: `祝${teacherName}老师${name}快乐！`, sub }
 }
 
-/* ---------------- 数据来源说明 ---------------- */
-
-export function holidayDataInfo(): {
-  years: number[]
-  latest?: YearPlan
-  coversThisYear: boolean
-} {
-  const years = HOLIDAY_PLANS.map((p) => p.year)
-  const latest = HOLIDAY_PLANS[HOLIDAY_PLANS.length - 1]
-  const thisYear = yearOf(ymdOf(beijingNow()))
-  return { years, latest, coversThisYear: years.includes(thisYear) }
-}
+/*
+ * 这里原来有 `holidayDataInfo()`（返回覆盖年份 / 最近一份通知的文号 / coversThisYear），
+ * 只为「我的 → 节假日与调休」那块展示面板服务；面板 2026-09 整块删掉后它没有调用方，
+ * 随之删除。
+ *
+ * ⚠️ 删的只是"数据来源说明"：上面的判定函数（`isRestDay` / `dayKind` / `holidayOn` /
+ *    `nextHoliday` / `countdownText` / `holidayWish`）与 `data/holidays.ts` 的数据
+ *    **一处都没动** —— 教室端「今天放假」「下课铃」、周一顺延、节假日氛围都还在用。
+ */

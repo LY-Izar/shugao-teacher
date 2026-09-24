@@ -15,9 +15,9 @@ import {
   IconUsers,
   IconZap,
 } from '../components/icons'
-import { Button, Empty, PageHead, Panel, Sheet, Tag } from '../components/ui'
+import { Button, Empty, PageHead, Panel, Sect, Sheet, Tag } from '../components/ui'
 import { useStore, useToast } from '../data/store'
-import { STATUS_TEXT, type Assignment, type AssignmentStatus } from '../data/types'
+import { STATUS_TEXT, type Assignment, type AssignmentStatus, type Klass } from '../data/types'
 import { collectStats } from '../lib/assignments'
 import { friendlyDate, isoOffset, parseISODate, toISODate } from '../lib/date'
 import { SUBJECTS, subjectCodeOf, subjectName } from '../lib/subjects'
@@ -30,6 +30,36 @@ const subjectLabelOf = (a: Assignment) => subjectName(subjectCodeOf(a), a.subjec
 
 type Filter = 'all' | 'open' | 'collected'
 type TimeFilter = 'all' | 'today' | 'week' | 'month'
+
+/**
+ * 列表怎么排：
+ *  · `time`    按时间（**默认**，与以前完全一样）
+ *  · `subject` **按学科分类**：一科一段，段头写清这一科有几份、几份待收缴、几份待批改
+ *
+ * 为什么要有后一种（用户 2026-09-27：「现在有多学科了，查看作业档案再加个按学科分类」）：
+ * 一份档案只属于**一科**，而列表原来是一条时间流水 ——
+ * 教两个学科的老师、以及看全科的班主任，都得自己在心里把科目分开。
+ *
+ * 实现纪律：
+ *  · 分组判据走 `subjectCodeOf()`（兼容期老档案按显示名反查字典），**不新增任何字段**；
+ *  · 「全部学科」时认不出的学科**照常列出来**（单开一段「未标学科」那类名字），
+ *    绝不静默藏数据 —— 与筛选下拉框"只列出现过的学科"是同一条纪律；
+ *  · 分组**只改渲染顺序**，不改任何筛选/统计语义（份数、待办都是从同一份 rows 上数的）。
+ */
+type ViewMode = 'time' | 'subject'
+
+const VIEW_MODES: Array<{ k: ViewMode; label: string }> = [
+  { k: 'time', label: '按时间' },
+  { k: 'subject', label: '按学科' },
+]
+
+/** 列表里的一行（`rows` 的元素） */
+type Row = { a: Assignment; klass?: Klass; stats: ReturnType<typeof collectStats> }
+
+/** 按学科分类时，渲染序列 = 段头 + 这一科的若干行 */
+type ListItem =
+  | { kind: 'head'; key: string; name: string; count: number; open: number; collected: number }
+  | { kind: 'row'; key: string; r: Row }
 
 const FILTERS: Array<{ k: Filter; label: string }> = [
   { k: 'all', label: '全部' },
@@ -110,6 +140,7 @@ export default function Assignments() {
   const [classFilter, setClassFilter] = useState<string>('all')
   const [subjectFilter, setSubjectFilter] = useState<string>('all')
   const [timeFilter, setTimeFilter] = useState<TimeFilter>('all')
+  const [view, setView] = useState<ViewMode>('time')
   const [confirmId, setConfirmId] = useState<string | null>(null)
   /** 正在改布置日期的档案 id */
   const [dateFor, setDateFor] = useState<string | null>(null)
@@ -131,7 +162,7 @@ export default function Assignments() {
     return SUBJECTS.filter((s) => seen.has(s.code))
   }, [assignments])
 
-  const rows = useMemo(
+  const rows = useMemo<Row[]>(
     () =>
       assignments
         .map((a) => {
@@ -151,6 +182,50 @@ export default function Assignments() {
     [assignments, classes, filter, classFilter, subjectFilter, timeFilter],
   )
 
+  /** 有几种学科就有没有"分类"这回事：只有一科时不摆这个开关（摆了也是空转） */
+  const multiSubject = subjectOptions.length > 1
+
+  /**
+   * 渲染序列。`time` 模式 = 原来那条流水（一个字节都没变）；
+   * `subject` 模式 = 段头 + 该科的行，科与科之间按**字典顺序**排，
+   * 认不出学科的（老档案 / 字典外的写法）排在最后，按名字排。
+   */
+  const listItems = useMemo<ListItem[]>(() => {
+    if (view !== 'subject') return rows.map((r) => ({ kind: 'row', key: r.a.id, r }))
+    const dictOrder = new Map(SUBJECTS.map((s, i) => [s.code, i]))
+    const groups = new Map<
+      string,
+      { key: string; name: string; sort: number; rows: Row[] }
+    >()
+    for (const r of rows) {
+      const code = subjectCodeOf(r.a)
+      const key = code ?? `?${subjectLabelOf(r.a)}`
+      const g = groups.get(key) ?? {
+        key,
+        name: subjectLabelOf(r.a),
+        sort: code ? (dictOrder.get(code) ?? 900) : 999, // 字典外的排最后
+        rows: [],
+      }
+      g.rows.push(r)
+      groups.set(key, g)
+    }
+    const out: ListItem[] = []
+    for (const g of [...groups.values()].sort(
+      (x, y) => x.sort - y.sort || x.name.localeCompare(y.name, 'zh'),
+    )) {
+      out.push({
+        kind: 'head',
+        key: `h-${g.key}`,
+        name: g.name,
+        count: g.rows.length,
+        open: g.rows.filter((r) => r.a.status === 'open').length,
+        collected: g.rows.filter((r) => r.a.status === 'collected').length,
+      })
+      for (const r of g.rows) out.push({ kind: 'row', key: r.a.id, r })
+    }
+    return out
+  }, [rows, view])
+
   const filtered =
     filter !== 'all' || classFilter !== 'all' || subjectFilter !== 'all' || timeFilter !== 'all'
 
@@ -163,14 +238,25 @@ export default function Assignments() {
         title="作业"
         sub={`${assignments.length} 份档案 · ${pending} 份待收缴`}
         right={
-          <Button
-            size="sm"
-            variant="primary"
-            icon={<IconPlus size={15} />}
-            onClick={() => navigate('/assignments/new')}
-          >
-            新建
-          </Button>
+          <div className="flex items-center gap-1">
+            {/*
+              考试入口放这里（而不是塞进底部导航）：底部只有 5 个位置，
+              而"考试"和"作业"本来就是同一件事的两个分支，放在一起最好找。
+              ⚠️ 这只是**入口**，作业的数据与语义一个字节都没动 ——
+              考试是独立的一条 /exams 路由族与两张独立的表。
+            */}
+            <Button size="sm" variant="ghost" icon={<IconHash size={14} />} onClick={() => navigate('/exams')}>
+              考试
+            </Button>
+            <Button
+              size="sm"
+              variant="primary"
+              icon={<IconPlus size={15} />}
+              onClick={() => navigate('/assignments/new')}
+            >
+              新建
+            </Button>
+          </div>
         }
       />
 
@@ -221,6 +307,32 @@ export default function Assignments() {
                 </option>
               ))}
             </select>
+            {/*
+              「按学科」这个开关**只在数据里真的有两种以上学科时**才摆出来
+              （判据与上面那个学科下拉框同一条：`subjectOptions.length > 1`）——
+              只有一科时它点了也是原样，属于多余的控件。
+              ⚠️ 它必须待在这一行（flex-wrap 的那行）：塞进下面"状态"那一行会把
+                 状态分段控件挤窄、四个字折成两行（实测过）。
+            */}
+            {multiSubject ? (
+              <div
+                className="seg"
+                role="group"
+                aria-label="列表排列方式"
+                style={{ whiteSpace: 'nowrap' }}
+              >
+                {VIEW_MODES.map((v) => (
+                  <button
+                    key={v.k}
+                    type="button"
+                    data-on={view === v.k}
+                    onClick={() => setView(v.k)}
+                  >
+                    {v.label}
+                  </button>
+                ))}
+              </div>
+            ) : null}
             <span className="flex-1" />
             {filtered ? (
               <button
@@ -295,7 +407,7 @@ export default function Assignments() {
               desc={
                 assignments.length === 0
                   ? '建立档案后才能登记收缴、进入批改。题目数量来自练习册模板，不需要识别图片。'
-                  : '换一个班级或时间范围试试。'
+                  : '换一个班级、学科或时间范围试试。'
               }
               action={
                 assignments.length === 0 ? (
@@ -313,6 +425,9 @@ export default function Assignments() {
                     onClick={() => {
                       setFilter('all')
                       setClassFilter('all')
+                      // 🔴 学科那一个也要清：漏了它，"清空筛选"之后列表还是空的，
+                      // 教师会以为档案没了（这一条曾经真的漏过）
+                      setSubjectFilter('all')
                       setTimeFilter('all')
                     }}
                   >
@@ -324,10 +439,24 @@ export default function Assignments() {
           </Panel>
         ) : (
           <div className="flex flex-col gap-2.5 stagger">
-            {rows.map(({ a, klass, stats }) => {
+            {listItems.map((it) => {
+              /*
+               * 按学科分类时，段头先把这一科的家底交代清楚（几份 / 几份待收缴 / 几份待批改）——
+               * 没有它，"分类"就只是把列表切断；有了它，一眼就知道哪一科还欠着活。
+               */
+              if (it.kind === 'head') {
+                return (
+                  <Sect key={it.key}>
+                    {it.name} · {it.count} 份
+                    {it.open ? ` · 待收缴 ${it.open}` : ''}
+                    {it.collected ? ` · 待批改 ${it.collected}` : ''}
+                  </Sect>
+                )
+              }
+              const { a, klass, stats } = it.r
               const started = gradingStarted(a)
               return (
-              <Panel key={a.id} className="overflow-hidden">
+              <Panel key={it.key} className="overflow-hidden">
                 <button
                   type="button"
                   className="row"

@@ -1305,3 +1305,849 @@ order by r.role, t.name;
 -- ============================================================
 -- select tablename from pg_tables
 --  where schemaname = 'public' and rowsecurity = false;
+
+-- ============================================================
+--  15. 考试（2026-09-27 新增）
+--      设计见 `功能设计与不变量.md` §十四「考试」
+--
+--  🔴 两条与作业**故意相反**的约定（别把它们统一）：
+--     ① 作业：默认全对，只记例外（`assignments.wrong`）；
+--        考试：**默认全零**，没批改过的人每题 0 分。
+--     ② 作业：收缴与批改都"只记例外"；考试要存**每个人的逐题数据**，
+--        因为"0 分"与"还没批"必须分得开。
+--
+--  两张表：
+--    `exams`        = 一次考试（一张卷子 × 一个班 / 一个年级）
+--    `exam_scores`  = 一个学生的一次考试（逐题得分 + 选项 + 缺考）
+--
+--  ⚠️ **这一段是本仓库第一次给"成绩"单独立表**，所以写权限收得比作业紧：
+--     作业那套写判据是 `teacher_id = auth.uid()`（谁建的谁能改）。
+--     考试在这里更进一步：**写必须"在本班教这一科"**（`teaches_subject`），
+--     光"建过这个班"不够 —— 用户口径：
+--       「一个老师即使同时是年级主任/班主任，他能改的仍限于自己任教的班级+对应任教科目」
+--     所以年级主任 / 班主任对别人的班**只能读**（这一条与设计 §三 矩阵一致：
+--     成绩由学科老师上传和修改，年级主任和班主任都只能看）。
+--
+--  本段可重复执行（幂等）；前端在**这一段没跑过**时不许崩（见 §15.6）。
+-- ============================================================
+
+-- -------- 15.1 建表 --------
+
+create table if not exists exams (
+  id             uuid primary key default gen_random_uuid(),
+  -- 谁建的（回退用；真正的写判据是"在本班教这一科"，见 15.3）
+  teacher_id     uuid not null references teachers (id) on delete cascade,
+  title          text not null,
+  -- 归一化后的试卷键（前端 lib/examPaper.ts 的 normalizePaperName）。
+  -- **同场考试的判定读它**，不读 title —— 否则每次判定都要重算，
+  -- 而且历史档案的判定结果会随归一化规则改动而悄悄改变。
+  paper_key      text not null default '',
+  -- 学科：code 是判据、subject 是显示名（与 assignments 同一条纪律，§12.2）
+  subject        text not null default '',
+  subject_code   text references subjects (code),
+  -- 'class' 班级考试（只记本班）/ 'grade' 年级考试（同名同科的档案一起排名）
+  scope          text not null default 'class' check (scope in ('class', 'grade')),
+  -- 年级（高一/高二/高三）：年级考试按它 + paper_key 把各班的档案合起来
+  grade          text not null default '',
+  -- 数据来源：'file' 平台文件导入 / 'manual' 手动批阅（智学网留空，这一轮不做）
+  source         text not null default 'manual' check (source in ('file', 'manual')),
+  -- 'answers' 记录答题情况（选择题按 m/n 判分）/ 'scores' 只记录分值
+  mode           text not null default 'scores' check (mode in ('answers', 'scores')),
+  exam_date      date not null,
+  question_count int  not null default 1 check (question_count between 1 and 60),
+  -- 题号 -> { kind, fullScore, answer, points, stem }
+  questions      jsonb not null default '{}'::jsonb,
+  -- 计划参加考试的班级（年级考试 = 同一年级多个班；班级考试通常一个）。
+  -- 用数组而不是单列：一次年级考试里，一个老师可能同时教这个年级的两个班。
+  class_ids      uuid[] not null default '{}',
+  -- 缺考 / 未交学号（**只记例外**，与作业同一条纪律）
+  absent_nos     text[] not null default '{}',
+  status         text not null default 'grading' check (status in ('grading', 'graded')),
+  graded_at      timestamptz,
+  note           text not null default '',
+  created_at     timestamptz not null default now()
+);
+create index if not exists exams_paper_idx  on exams (paper_key, subject_code, grade);
+create index if not exists exams_class_idx  on exams using gin (class_ids);
+create index if not exists exams_teacher_idx on exams (teacher_id, exam_date desc);
+
+create table if not exists exam_scores (
+  id          uuid primary key default gen_random_uuid(),
+  exam_id     uuid not null references exams (id) on delete cascade,
+  class_id    uuid not null references classes (id) on delete cascade,
+  -- 学号即身份（与作业同一套：收缴/批改全以学号为键，§一）
+  student_no  text not null,
+  -- 姓名快照：学生转班/改名后，历史档案里仍要显示当时的名字
+  name        text not null default '',
+  -- 逐题得分：题号 -> 分数（answers 模式下只对非选择题用）
+  scores      jsonb not null default '{}'::jsonb,
+  -- 逐题选项：题号 -> 学生选的选项串（只有 answers 模式的选择题会写）
+  answers     jsonb not null default '{}'::jsonb,
+  -- 🔴 只有教师明确点过「确认批阅」才为 true（不变量 E1）
+  graded      boolean not null default false,
+  -- 缺考 / 未交：不参与均分（与"没批改"是两回事，后者按 0 分参与）
+  absent      boolean not null default false,
+  -- 文件带来的、或平台算出来的汇总。**文件里有就保留文件的值**（用户口径：不覆盖）
+  total       numeric(7,2),
+  objective   numeric(7,2),
+  subjective  numeric(7,2),
+  class_rank  int,
+  grade_rank  int,
+  created_at  timestamptz not null default now(),
+  unique (exam_id, student_no)
+);
+create index if not exists exam_scores_exam_idx  on exam_scores (exam_id);
+create index if not exists exam_scores_class_idx on exam_scores (class_id, student_no);
+
+alter table exams       enable row level security;
+alter table exam_scores enable row level security;
+
+-- -------- 15.2 写判据：**在这份档案的某个班里教这一科** --------
+--  为什么不能照抄作业的 `teacher_id = auth.uid()`：
+--    用户口径是「能改的限于自己任教的班级 + 对应任教科目」，
+--    而"建过这个班/建过这次考试"与"在这班教这一科"是两件事
+--    （本仓库已经因为这两件事共用一个字段出过事故，见 §12.2 的教训）。
+--
+--  为什么"任一班"就够：班级考试只有一个班；年级考试里老师只会给自己那几个班录分，
+--    别的班的分数由**那个班的任课老师**自己录 —— 一次考试是多人协作的，
+--    这恰恰是"年级排名"能成立的原因。
+--
+--  兼容期两条路（与 §13.3 的 teaches_subject_for 同一口径）：
+--    ① 新列：class_subjects.subject_code = 这份档案的学科代码
+--    ② 老列：任课关系那行还没回填 subject_code 时，按**显示名精确比对**
+--    **认不出来 = 不匹配**（不猜）。猜错会让一位老师改不了自己班的成绩，而且不报错。
+create or replace function public.can_edit_exam(
+  p_class_ids uuid[],
+  p_subject_code text,
+  p_subject text
+)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  with me as (select auth.uid() as uid),
+       subj as (
+         select coalesce(
+           nullif(btrim(coalesce(p_subject_code, '')), ''),
+           (select s.code from subjects s where btrim(s.name) = btrim(coalesce(p_subject, '')))
+         ) as code
+       )
+  select
+    -- 最高管理员兜底（与 can_grade 的 super/admin 一支同口径：两人一起，见 §13.1）
+    exists (select 1 from teacher_roles r, me
+             where r.teacher_id = me.uid and r.role in ('super', 'admin'))
+    -- 或者：在我教这一科的某个班里
+    or exists (
+      select 1
+      from class_subjects cs, subj, me
+      where cs.teacher_id = me.uid
+        and cs.class_id = any (coalesce(p_class_ids, '{}'::uuid[]))
+        and (
+          (subj.code is not null and cs.subject_code = subj.code)
+          or (cs.subject_code is null
+              and btrim(cs.subject) = btrim(coalesce(p_subject, '')))
+        )
+    );
+$$;
+
+grant execute on function can_edit_exam(uuid[], text, text) to authenticated;
+
+-- -------- 15.3 策略 --------
+--  读：**看得见这个班就能读这次考试**（哪怕不是自己教的科）。
+--     年级主任看整个年级的统计（用户口径）靠的就是这一条；
+--     班主任看本班各科成绩同理。读得宽、写得窄 —— 与设计 §三 矩阵一致
+--     （「看成绩」列比「上传/修改成绩」列宽）。
+--
+--  ⚠️ 为什么读策略不照抄 §13.4 的 `assignments_visible`（那条把学科也收窄了）：
+--     作业是"我这一科的作业"，收窄学科是对的；
+--     考试是**整个年级同一张卷子**，收窄了就算不出年级排名与班级排名 ——
+--     而"排年级排名和班级排名"正是用户对这一段的原话要求。
+drop policy if exists exams_visible on exams;
+create policy exams_visible on exams for select to authenticated
+  using (class_ids && (select array(select visible_class_ids())));
+
+drop policy if exists exams_write on exams;
+create policy exams_write on exams for all to authenticated
+  using (
+    teacher_id = auth.uid()
+    and can_edit_exam(class_ids, subject_code, subject)
+  )
+  with check (
+    teacher_id = auth.uid()
+    and can_edit_exam(class_ids, subject_code, subject)
+  );
+
+drop policy if exists exam_scores_visible on exam_scores;
+create policy exam_scores_visible on exam_scores for select to authenticated
+  using (class_id in (select visible_class_ids()));
+
+drop policy if exists exam_scores_write on exam_scores;
+create policy exam_scores_write on exam_scores for all to authenticated
+  using (
+    exists (
+      select 1 from exams e
+      where e.id = exam_scores.exam_id
+        and e.teacher_id = auth.uid()
+        and can_edit_exam(e.class_ids, e.subject_code, e.subject)
+    )
+  )
+  with check (
+    exists (
+      select 1 from exams e
+      where e.id = exam_scores.exam_id
+        and e.teacher_id = auth.uid()
+        and can_edit_exam(e.class_ids, e.subject_code, e.subject)
+    )
+  );
+
+--  ⚠️ exam_scores 的写策略里**再查一次 exams.teacher_id**，看起来冗余（exams_write 已经查过），
+--     但它防的是这一种情形：A 老师建的考试，B 老师（同班同科）想直接往 exam_scores 插分。
+--     今天的口径是"谁建的考试谁录分"（用户：科任老师改自己任教班级+科目），
+--     所以 B 老师应当**自己建一份**同 paper_key 的档案 —— 前端的"同场考试"判定会
+--     把两份档案合起来排名（见 §15.5 的核对 SQL）。这样两边的数据各归各，谁也不覆盖谁。
+--
+--  ⚠️ 教室端**故意一条策略都没有**：那块屏是给学生看的（设计 §五 红线）。
+--     它今天连 exams 的 select 都拿不到（visible_class_ids 里有它，但下面
+--     没有针对 classroom 的读策略吗？—— 有的，exams_visible 用的是 visible_class_ids()，
+--     教室端在里面）。**这是刻意的**：教室端需要展示"本次考试逐题正确率"，
+--     读得到、写不了。真正的红线是"绝不给它任何成绩的 UPDATE"。
+
+grant select, insert, update, delete on exams       to authenticated;
+grant select, insert, update, delete on exam_scores to authenticated;
+revoke all on exams, exam_scores from anon;
+
+-- -------- 15.4 自检（跑完这一段，把下面整段粘进 SQL 编辑器）--------
+--  ① 两张表都开了 RLS、策略数量对不对
+-- select tablename, rowsecurity from pg_tables
+--  where schemaname = 'public' and tablename in ('exams','exam_scores');
+-- select tablename, policyname, cmd from pg_policies
+--  where schemaname = 'public' and tablename in ('exams','exam_scores') order by 1,2;
+--  期望：exams 2 条（visible=SELECT / write=ALL）、exam_scores 2 条，共 4 条。
+
+--  ② 写判据函数在真实数据上的表现（把 uuid 换成要核对的老师 id）
+-- with me as (select '00000000-0000-0000-0000-000000000000'::uuid as uid)
+-- select t.name, cs.subject, cs.subject_code, c.name as 班级,
+--        can_edit_exam_for((select uid from me), array[c.id], cs.subject_code, cs.subject) as 他能改
+-- from class_subjects cs
+-- join classes c on c.id = cs.class_id
+-- join teachers t on t.id = cs.teacher_id
+-- order by 1, 4;
+--  期望：他自己任教的那几行是 true；别人任教的班（同一个年级）是 false。
+--   ⚠️ `can_edit_exam_for` 这个变体**故意不建**（与 visible_class_ids_for 的理由相反：它不需要
+--      在 SQL 编辑器里被指定人核对 —— 上面这条已经用 class_subjects 自连接把"谁能改哪一行"
+--      摆出来了）。要在编辑器里验判据，把函数体里的 `me` 换成一个常量 uuid 即可。
+
+-- -------- 15.5 年级排名怎么算（**没有额外的表，靠这一条查询**）--------
+--  用户口径：「年级考试 → 按学科把整个年级同一场考试的数据读出来，排年级排名和班级排名」。
+--  同一场考试的判据是 **paper_key + subject_code + grade + exam_date**，
+--  这四样都在 exams 上，所以年级排名不需要"先建一次年级考试再把各班挂上去"这种结构 ——
+--  每个班的任课老师各建各的档案，读的时候按上面四样合起来就是一次年级考试。
+--
+--  班级排名：班内按总分排名；年级排名：把那四样相同的所有班的分合起来排名。
+--  下面这条是"排出来的名次长什么样"的核对 SQL（把 paper_key 换成真实值）：
+-- with same_paper as (
+--   select e.id, e.title, e.paper_key, e.exam_date, e.class_ids
+--   from exams e
+--   where e.scope = 'grade' and e.paper_key = '物理练习8'
+-- )
+-- select s.class_id, s.student_no, s.name, s.total,
+--        rank() over (partition by s.class_id order by s.total desc nulls last) as 班级排名,
+--        rank() over (order by s.total desc nulls last)                      as 年级排名
+-- from exam_scores s
+-- join same_paper p on p.id = s.exam_id
+-- where not s.absent
+-- order by 年级排名;
+
+-- -------- 15.6 这一段跑之前，前端会怎样（"SQL 没跑也不崩"）--------
+--  与 §12.4 / §13.6 同一套纪律，落在 `app/src/data/remote.ts` 的 `ensureExamTables()`：
+--    · 探测：`select('id').limit(1)` 打两张表，判据只有「表不存在」这一种错误
+--      （`42P01` / `PGRST205` / `does not exist`）；
+--    · 读：表不在 → 返回空数组，考试列表显示"还没有考试档案"，**不白屏**；
+--    · 写：表不在 → **不写**，返回一条"请先跑 schema.sql 第 15 段"的提示
+--      （而不是乐观更新后刷新即丢 —— 复习 §一「保存失败 = 刷新即丢」）；
+--    · 探测只看「表不存在」：网络抖动/权限问题**一律当作有**，免得一次抖动把写永久停掉。
+--
+-- -------- 15.7 这一段**不做**什么（免得后来的人以为漏了）--------
+--  · 智学网数据源 —— 用户明确"先留空，这轮不做"
+--  · 走班教学班（`teaching_groups`）—— 用户明确"先做行政班多选，走班留接口、不要猜"；
+--    `exams.class_ids` 是数组，将来加 `teaching_group_ids` 是纯加法
+--  · 考试与作业的统计合并 —— 两者的默认值正好相反（全零 vs 全对），合并一定算错
+--  · 教室端的考试展示 —— 本轮只做教师端；数据层已经允许教室端读（见 15.3 的说明），
+--    界面留到下一轮
+
+-- ============================================================
+--  16. 收口 · 阶段 5：逐表写策略矩阵 + can_grade 落地 + 删旧策略
+--      设计见 `权限与账号体系设计.md` §三（角色矩阵）§五（RLS）§九（阶段 5）、
+--      `多学科体系方案.md` §3.3.3 与 §5「阶段 5」；
+--      `功能设计与不变量.md` §十六 记的是"为什么这样写"。
+--
+--  🔴🔴 这是全仓库**唯一不可逆**的一段：它删掉 §7 那批 `for all` 旧策略（见 16.4）。
+--      为什么必须先补全写策略、再删旧的：PostgreSQL 里
+--      「**没有对应动作的策略 = 该动作被拒**」。
+--      照原样只留 §11 §13 的 `for select` 就删旧策略，
+--      **新建作业 / 批改 / 加学生会被 RLS 直接拒掉**，而界面上看不出来
+--      （乐观更新先改本地，失败只进 `syncError`，"保存失败 = 刷新即丢"）。
+--      顺序：① 判据函数（16.2）② 逐表写策略矩阵（16.3）③ 删旧策略（16.4）
+--      ④ 跑 16.6 的核对 SQL，证明"没人丢数据、该拒的确实被拒"。
+--
+--  📌 用户 2026-09-27 拍板的口径（照它写，不要自己发挥）：
+--      建班 / 加删学生    super · admin(教导处) · grade_head(本年级) · head_teacher(本班)
+--      建作业档案         任课老师（自己任教的班 + 那一科）；super / admin 兜底
+--      删作业档案         任课老师（自己任教的班 + 那一科）· 管理身份按各自范围 · 自己建的
+--      改成绩 / 批改      **只有该班该科的任课老师**；班主任 / 年级主任**只读**
+--                        （super / admin 兜底：设计 §三 矩阵 + 第 15 段考试同一口径）
+--      教室端账号         只读（两处有限写不变：心跳 + 本班班级课表）
+--      指派身份           教导处(admin) + 最高管理员(super)  ← 与 §13.1 那张表**不同**，见 16.7
+--
+--  ⚠️ 实测发现（它决定了下面策略的写法，别把这些注释当废话删掉）：
+--     前端所有保存都走 **upsert**（`remote.ts` 的 `upsert()` → PostgREST 的
+--     `insert ... on conflict (id) do update`），而 PostgreSQL 在**冲突转更新**这条路上
+--     **也要过 INSERT 策略的 `with check`**。真 Postgres 17 实测（PGlite）：
+--     只满足 UPDATE 策略、INSERT 的 with check 不满足 → 整条 upsert 被拒
+--     （`new row violates row-level security policy`）。
+--     所以「谁能建」不能写得比「谁能改」更严，否则**改自己的东西会被顺带拦掉**。
+--     16.3 里 classes 的 `owns_class()` 就是为这件事留的口子。
+--
+--  本段可重复执行（幂等）：策略一律 `drop policy if exists` + `create policy`。
+-- ============================================================
+
+-- -------- 16.1 这一段的策略矩阵（人话版，与 16.3 的 SQL 一一对应）--------
+--
+--   表 / 动作      | 谁能做
+--   ---------------|--------------------------------------------------------------
+--   classes  读    | 看得见这个班（§11 classes_visible，一字不改）
+--            建    | 建档人是自己 + 有管理身份（super / admin / 年级主任 / 班主任）
+--            改    | 管得着这个班（本年级 / 本班 / 校级）或**就是这个班的建档人**
+--            删    | 同上（删班是级联删，跟"改"同一档）
+--   students 读    | 看得见这个班（§11 students_visible）
+--            增/改/删 | **管得着这个班**（任课老师不算 —— 用户口径：加删学生归管理身份）
+--   assignments 读 | §13.4（自己建的 ∪ 看得见这个班且（全科视角 或 本科视角））
+--            建    | 建档人是自己 + **在本班教这一科**（super / admin 兜底）
+--            改    | **在本班教这一科**（批改、收缴、改日期都走这条）
+--            删    | 自己建的 · 管得着这个班 · 在本班教这一科
+--   calls    读    | 看得见这个班（§11 calls_visible）
+--            写    | 管得着这个班 · 在本班任教（任一科）；**教室端不能发呼叫**
+--   schedule 读    | 自己的排课表（teacher_id = 自己）· 班级课表（scope='class' 且班可见）
+--            写    | 'mine' 行：建档人就是自己；'class' 行：**管得着这个班**（+ 教室端那条线）
+--   classrooms 读  | 看得见这个班（§11 classrooms_visible）
+--            写    | 建档人是自己 · 这个班看得见（教室端心跳走同一条）
+--   ---------------|--------------------------------------------------------------
+--   teachers / shared_files：**不在本矩阵里**，§7/§9 的"只能动自己那一行"原样保留
+--   teacher_roles / class_subjects / classroom_accounts / subjects / schools / grades：
+--     只读（§10.4 / §12.1），写一律走服务端 `functions/api/*`（service_role），
+--     数据库这一层**不 grant** insert/update/delete —— 免得同一个动作有两个入口
+--   exams / exam_scores：第 15 段自己的判据（`can_edit_exam`），本段不碰
+
+-- -------- 16.2 判据函数（策略里只调函数，别把 or 条件抄进策略）--------
+--  与 §10.3 / §13.3 同一套手法：security definer + `set search_path = public`，
+--  且**函数必须由表属主创建**（否则内层读取会再触发策略 → 无限递归）。
+--  `_for(uid, …)` 变体一律 revoke：接受任意 uid 就等于"以任意人身份问权限"，
+--  它只给属主在 SQL 编辑器里做核对用（见 16.6）。
+
+-- 校级管理 = 最高管理员 + 教导处。
+--  🔴 它与 `is_super_admin()` **不是同义词**：那个只有最高管理员。
+--     本段里"两种身份一起"的场合（建班 / 加删学生 / 改成绩兜底）才用它；
+--     需要区分的场合（将来交接超管）用 `is_super_admin()`。
+--  🔴 不要在别处再抄一遍 `role in ('super','admin')`：口径一改就是两处不一致（I17）。
+create or replace function public.is_school_admin_for(p_uid uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1 from teacher_roles r
+    where r.teacher_id = p_uid and r.role in ('super', 'admin')
+  );
+$$;
+
+revoke all on function is_school_admin_for(uuid) from public, anon, authenticated;
+
+create or replace function public.is_school_admin()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$ select is_school_admin_for(auth.uid()) $$;
+
+grant execute on function is_school_admin() to authenticated;
+
+-- 我有没有这一档身份（只回答"我自己"）。给"新建"用 ——
+--  新行还没有 id / grade_id，按"本年级 / 本班"收敛判不了（前端 classToRow 也不送 grade_id），
+--  所以"建班"这一动只能判到"有没有这档身份"；建出来的空班之后能不能看/改，
+--  仍然由 can_manage_class 管住。
+create or replace function public.has_role_for(p_uid uuid, p_role text)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1 from teacher_roles r
+    where r.teacher_id = p_uid and r.role = p_role
+  );
+$$;
+
+revoke all on function has_role_for(uuid, text) from public, anon, authenticated;
+
+create or replace function public.has_role(p_role text)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$ select has_role_for(auth.uid(), p_role) $$;
+
+grant execute on function has_role(text) to authenticated;
+
+-- 管得着这个班：校级（super / admin）· 年级主任（本年级）· 班主任（本班）。
+--  🔴 **故意不含任课老师** —— 任课老师看得见这个班（visible_class_ids 里有他），
+--     但"加删学生 / 删别人的档案 / 改班级课表"不是他的事（用户 2026-09-27 口径）。
+--     它 = `can_view_all_subjects_for` 去掉"教室端"那一支。
+create or replace function public.can_manage_class_for(p_uid uuid, p_class_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select
+    exists (select 1 from teacher_roles r
+             where r.teacher_id = p_uid and r.role in ('super', 'admin'))
+    or exists (select 1 from teacher_roles r
+                where r.teacher_id = p_uid and r.role = 'grade_head'
+                  and r.scope_type = 'grade'
+                  and r.scope_id = (select c.grade_id from classes c where c.id = p_class_id))
+    or exists (select 1 from teacher_roles r
+                where r.teacher_id = p_uid and r.role = 'head_teacher'
+                  and r.scope_type = 'class' and r.scope_id = p_class_id);
+$$;
+
+revoke all on function can_manage_class_for(uuid, uuid) from public, anon, authenticated;
+
+create or replace function public.can_manage_class(p_class_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$ select can_manage_class_for(auth.uid(), p_class_id) $$;
+
+grant execute on function can_manage_class(uuid) to authenticated;
+
+-- 我在这班任教吗（**任一科**）—— 发呼叫、看设备状态用；不判科目。
+create or replace function public.teaches_in_class_for(p_uid uuid, p_class_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1 from class_subjects cs
+    where cs.teacher_id = p_uid and cs.class_id = p_class_id
+  );
+$$;
+
+revoke all on function teaches_in_class_for(uuid, uuid) from public, anon, authenticated;
+
+create or replace function public.teaches_in_class(p_class_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$ select teaches_in_class_for(auth.uid(), p_class_id) $$;
+
+grant execute on function teaches_in_class(uuid) to authenticated;
+
+-- 这个班是不是"我建的"（既有行，给 upsert 用：见 16.1 上面那段实测说明）。
+--  它只回答"关于我自己的行"，不泄露别人的东西。
+create or replace function public.owns_class_for(p_uid uuid, p_class_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1 from classes c where c.id = p_class_id and c.teacher_id = p_uid
+  );
+$$;
+
+revoke all on function owns_class_for(uuid, uuid) from public, anon, authenticated;
+
+create or replace function public.owns_class(p_class_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$ select owns_class_for(auth.uid(), p_class_id) $$;
+
+grant execute on function owns_class(uuid) to authenticated;
+
+-- 能不能改「这个班的这一科」的成绩/作业 —— 本段的核心判据。
+--  口径 A（用户 2026-09-27 拍板）：**只有该班该科的任课老师**；
+--  班主任 / 年级主任**只读** —— 所以这里**没有** grade_head / head_teacher 两支
+--  （`多学科体系方案.md` §7 问题 4 问的就是这件事，答案就是 A）。
+--  super / admin 保留为兜底（设计 §三 矩阵"上传/修改成绩 ✅" + 第 15 段 can_edit_exam 同口径）：
+--  成绩录错了总得有人能改，而"必要时 super 兜底"是设计 §三 已经确认过的一句话。
+--  ⚠️ 想让超管也不能改：把下面第一支（is_school_admin）删掉即可，别的都不用动。
+create or replace function public.can_grade_subject_for(
+  p_uid uuid,
+  p_class_id uuid,
+  p_subject_code text,
+  p_subject text
+)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select
+    is_school_admin_for(p_uid)
+    or teaches_subject_for(p_uid, p_class_id, p_subject_code, p_subject);
+$$;
+
+revoke all on function can_grade_subject_for(uuid, uuid, text, text) from public, anon, authenticated;
+
+create or replace function public.can_grade_subject(
+  p_class_id uuid,
+  p_subject_code text,
+  p_subject text
+)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$ select can_grade_subject_for(auth.uid(), p_class_id, p_subject_code, p_subject) $$;
+
+grant execute on function can_grade_subject(uuid, text, text) to authenticated;
+
+-- §10.3 那个 `can_grade(p_class_id, p_subject)`：**签名一个字没改**，只改函数体。
+--  为什么必须改：老函数体里有 grade_head / head_teacher 两支 —— 那是设计稿 §五 的旧版本，
+--  与已确认的"班主任 / 年级主任只读"矛盾。留着它，将来谁把它挂到策略上就是权限事故
+--  （班主任能改全科成绩）。现在它转调 can_grade_subject（没有 code 就走显示名反查字典，
+--  与 teaches_subject_for 的兼容期口径一致）。
+create or replace function public.can_grade(p_class_id uuid, p_subject text)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$ select can_grade_subject(p_class_id, null, p_subject) $$;
+
+-- -------- 16.3 写策略矩阵（四个动作各自成条，好审计）--------
+--  §11 §13 已经给了每个表的**读**策略（`*_visible`），这里只补 insert / update / delete。
+--  ⚠️ 策略之间是 **OR**：一条 `for all` 就足以覆盖四个动作，
+--     所以下面凡是补了逐动作策略的表，16.4 必须把对应的旧 `for all` 那条删掉 ——
+--     不删的话"最宽的那条"说了算，收紧等于白做。
+
+-- ---- 16.3.0 先补一件容易被忽略的事：旧策略也在给"读"----
+--  🔴 `for all` 覆盖**四个**动作 —— 删掉 `classes_own` 这类旧策略时，
+--     同时删掉的还有它那条 `using (teacher_id = auth.uid())` 的 **select** 分支。
+--     只补写策略、不管读，就会出现"**建完就消失**"：
+--     班主任新建的班 `grade_id` 是空的（前端 classToRow 不送这一列），
+--     而 `visible_class_ids()` 判年级主任按 `grade_id`、判班主任按 `scope_id` ——
+--     两样都对不上，新班立刻从列表里不见了，而且不报错。
+--  §13.4 早就写过同一条纪律（"自己建的永远看得见"），只是当时只落在 assignments 上。
+--  下面把这条纪律补齐到另外五张表，**保证"读"与删旧策略之前逐行相等**
+--  （实测对照见 16.6 ① 与报告）。
+--
+--  班级：看得见（visible_class_ids）· **自己建的**（旧 classes_own 的 select 分支）
+drop policy if exists classes_visible on classes;
+create policy classes_visible on classes for select to authenticated
+  using (id in (select visible_class_ids()) or teacher_id = auth.uid());
+
+--  学生：所属班看得见 · **自己建的班**里的学生（旧 students_own 是按班级建档人判的）
+drop policy if exists students_visible on students;
+create policy students_visible on students for select to authenticated
+  using (class_id in (select visible_class_ids()) or owns_class(class_id));
+
+--  呼叫：本班看得见 · **自己发过的**（旧 calls_own 的 select 分支）
+drop policy if exists calls_visible on calls;
+create policy calls_visible on calls for select to authenticated
+  using (class_id in (select visible_class_ids()) or teacher_id = auth.uid());
+
+--  教室端设备行：本班的看得见 · **自己建的那一行**（旧 classrooms_own 的 select 分支）
+--  ⚠️ 少了后半句，教师端给"自己录过的教室端"打的在线状态自己就看不见了。
+drop policy if exists classrooms_visible on classrooms;
+create policy classrooms_visible on classrooms for select to authenticated
+  using (class_id in (select visible_class_ids()) or teacher_id = auth.uid());
+
+--  `assignments_visible`（§13.4）**不用补** —— 它当年就是照这条纪律写的
+--  （`teacher_id = auth.uid() or (看得见这个班 and (全科 或 本科))`）。
+--  `schedule_own` 的 select 分支由下面 16.3 的 `schedule_mine_read` 接住。
+
+-- ---- classes：建 / 改 / 删 ----
+--  读：classes_visible（§11）。`classes_own` 是旧策略，16.4 删。
+--
+--  「建」为什么要 `owns_class(id)` 这一支：前端保存班级走 upsert，
+--  而 upsert 在"冲突转更新"时**也要过 INSERT 的 with check**（见段首实测）。
+--  没有这一支，建档人改名自己的班会被 INSERT 策略拦掉（UPDATE 策略本来是放行的）。
+--  安全性由 UPDATE 策略把关：`owns_class(id)` 只对"我自己建的行"为真。
+drop policy if exists classes_insert on classes;
+create policy classes_insert on classes for insert to authenticated
+  with check (
+    teacher_id = auth.uid()
+    and (
+      is_school_admin()          -- 最高管理员 / 教导处
+      or has_role('grade_head')  -- 年级主任（新班还没 grade_id，见 16.2 的说明）
+      or has_role('head_teacher')-- 班主任
+      or owns_class(id)          -- 既有行再存一次 = 更新，交给下面的 update 策略判
+    )
+  );
+
+drop policy if exists classes_update on classes;
+create policy classes_update on classes for update to authenticated
+  using (can_manage_class(id) or owns_class(id))
+  with check (can_manage_class(id) or owns_class(id));
+
+drop policy if exists classes_delete on classes;
+create policy classes_delete on classes for delete to authenticated
+  using (can_manage_class(id) or owns_class(id));
+
+-- ---- students：增 / 改 / 删（全是"管得着这个班"）----
+--  读：students_visible（§11）。`students_own` 是旧策略（按班级建档人），16.4 删。
+--  🔴 用户口径：加删学生 = super / admin / 年级主任 / 班主任；
+--     **任课老师不算**（他看得见名单，但不动名单）。
+drop policy if exists students_insert on students;
+create policy students_insert on students for insert to authenticated
+  with check (can_manage_class(class_id));
+
+drop policy if exists students_update on students;
+create policy students_update on students for update to authenticated
+  using (can_manage_class(class_id))
+  with check (can_manage_class(class_id));
+
+drop policy if exists students_delete on students;
+create policy students_delete on students for delete to authenticated
+  using (can_manage_class(class_id));
+
+-- ---- assignments：建 / 改(批改) / 删 ----
+--  读：assignments_visible（§13.4 —— 那一条已经是"自己建的 ∪ 看得见且（全科 或 本科）"）。
+--  `assignments_own` 是旧策略（for all, teacher_id = auth.uid()），16.4 删。
+--
+--  建：**自己建的**（建的人是当前登录者）+ **在本班教这一科**。
+--      前端 `assignmentToRow` 恒把 teacher_id 写成当前老师，所以第一支永远成立；
+--      真正起作用的是第二支 —— 用户口径："科任老师可以建自己任教班的"。
+--  ⚠️ 于是班主任**建不了**别科的作业（即便他看得见那个班）：这是口径 A 的直接推论。
+drop policy if exists assignments_insert on assignments;
+create policy assignments_insert on assignments for insert to authenticated
+  with check (
+    teacher_id = auth.uid()
+    and can_grade_subject(class_id, subject_code, subject)
+  );
+
+--  改：批改 / 收缴 / 临时保存 / 改日期都走这一条。
+--      **班主任与年级主任改不了**（can_grade_subject 里没有他们）—— 用户明确要的"只读"。
+--  ⚠️ `with check` 与 `using` 同款：否则能把行改成"另一个班 / 另一科"（自己管不着的地方）。
+drop policy if exists assignments_update on assignments;
+create policy assignments_update on assignments for update to authenticated
+  using (can_grade_subject(class_id, subject_code, subject))
+  with check (can_grade_subject(class_id, subject_code, subject));
+
+--  删：自己建的 · 管得着这个班 · 在本班教这一科。
+--      「自己建的」这一支是**故意留的**：任课关系被撤掉之后，
+--      他建过的档案还得删得掉（否则那些档案谁也删不了），
+--      与 §13.3 的"自己建的永远看得见"是同一条纪律。
+drop policy if exists assignments_delete on assignments;
+create policy assignments_delete on assignments for delete to authenticated
+  using (
+    teacher_id = auth.uid()
+    or can_manage_class(class_id)
+    or teaches_subject(class_id, subject_code, subject)
+  );
+
+-- ---- calls：写（发呼叫 / 再播一遍 / 标记状态）----
+--  读：calls_visible（§11）。`calls_own` 是旧策略（for all, teacher_id = auth.uid()），16.4 删。
+--  🔴 教室里那块屏**不在**能写的人里：学生碰得到那台机器，
+--     "谁能发呼叫"只能是老师（设计 §五 红线）。教室端一边靠 calls_visible 读。
+drop policy if exists calls_insert on calls;
+create policy calls_insert on calls for insert to authenticated
+  with check (
+    teacher_id = auth.uid()
+    and (can_manage_class(class_id) or teaches_in_class(class_id))
+  );
+
+drop policy if exists calls_update on calls;
+create policy calls_update on calls for update to authenticated
+  using (can_manage_class(class_id) or teaches_in_class(class_id))
+  with check (can_manage_class(class_id) or teaches_in_class(class_id));
+
+drop policy if exists calls_delete on calls;
+create policy calls_delete on calls for delete to authenticated
+  using (can_manage_class(class_id) or teaches_in_class(class_id));
+
+-- ---- schedule_items：我自己的排课表 + 班级课表 ----
+--  读：`schedule_class_visible`（§11，scope='class' 且班可见）**保留**；
+--      这里补一条"我自己的排课表"。`schedule_own` 是旧策略，16.4 删。
+--  写：'mine' 行 = 建档人就是自己（谁都能录自己的课表，这是个人数据）；
+--      'class' 行 = **管得着这个班**（班级课表贴在教室里，是给全班看的）。
+--  ⚠️ 教室端写班级课表走 §11.1 的 `schedule_classroom_write`（**保留，一条不许动**）：
+--     它按 class_id 关联 classroom_accounts，少了它教室端粘贴课表会静默失败。
+drop policy if exists schedule_mine_read on schedule_items;
+create policy schedule_mine_read on schedule_items for select to authenticated
+  using (teacher_id = auth.uid());
+
+drop policy if exists schedule_mine_write on schedule_items;
+create policy schedule_mine_write on schedule_items for all to authenticated
+  using (teacher_id = auth.uid() and coalesce(scope, 'mine') <> 'class')
+  with check (teacher_id = auth.uid() and coalesce(scope, 'mine') <> 'class');
+
+drop policy if exists schedule_class_write on schedule_items;
+create policy schedule_class_write on schedule_items for all to authenticated
+  using (scope = 'class' and can_manage_class(class_id))
+  with check (scope = 'class' and can_manage_class(class_id));
+
+-- ---- classrooms：设备行（在线状态 / 心跳）----
+--  读：classrooms_visible（§11）。`classrooms_own` 是旧策略，16.4 删。
+--  ⚠️ `classrooms_heartbeat`（§11.1，教室端按 class_id 更新自己那一行）**保留**：
+--     掉了教室大屏的在线状态就再也不更新（而且不报错）。
+drop policy if exists classrooms_insert on classrooms;
+create policy classrooms_insert on classrooms for insert to authenticated
+  with check (teacher_id = auth.uid() and class_id in (select visible_class_ids()));
+
+drop policy if exists classrooms_update on classrooms;
+create policy classrooms_update on classrooms for update to authenticated
+  using (teacher_id = auth.uid() or class_id in (select visible_class_ids()))
+  with check (teacher_id = auth.uid() or class_id in (select visible_class_ids()));
+
+drop policy if exists classrooms_delete on classrooms;
+create policy classrooms_delete on classrooms for delete to authenticated
+  using (teacher_id = auth.uid() or class_id in (select visible_class_ids()));
+
+-- -------- 16.4 删旧策略（🔴 本仓库唯一不可逆的一步）--------
+--  删的全是 §7 那批 `for all`：它们用 `teacher_id = auth.uid()` 覆盖了四个动作，
+--  而新矩阵已经逐动作补全（16.3）。删掉之后：
+--    · 读：完全由 §11 / §13.4 的 `*_visible` 负责（一条都没动）
+--    · 写：完全由 16.3 的逐动作策略负责
+--  **保留不动的旧策略**（刻意留下，别"顺手"删）：
+--    teachers_self · shared_files_own（都只动自己那一行，不在本矩阵里）
+--    classes_visible / students_visible / assignments_visible / calls_visible /
+--    schedule_class_visible / classrooms_visible（读，§11 §13）
+--    classrooms_heartbeat / schedule_classroom_write（教室端的两处有限写，§11.1）
+--    teachers_roles_read / class_subjects_read / classroom_accounts_read / subjects_read /
+--    schools_read / grades_read（读，§10.4 §12.1）+ 第 15 段考试的两条
+--
+--  回退：见 16.7 —— 一行就能把最要紧的那条写回来。
+drop policy if exists classes_own        on classes;
+drop policy if exists students_own       on students;
+drop policy if exists assignments_own    on assignments;
+drop policy if exists calls_own          on calls;
+drop policy if exists schedule_own       on schedule_items;
+drop policy if exists classrooms_own     on classrooms;
+
+-- -------- 16.5 这一段跑完之后，前端会怎样（"SQL 没跑也不崩"）--------
+--  与 §12.4 / §13.6 / §15.6 同一套纪律：
+--    · **没跑这一段**：旧策略还在，前端行为与改动前**完全一致**（本段只加函数/策略，
+--      前端不依赖任何新对象 —— 没有新列、没有新表，所以不需要 `ensureXxx()` 探测）；
+--    · **跑了这一段**：读的范围与跑之前逐人相等（§13.4 已经把读收窄过了，本段只动写），
+--      写变严的地方按 16.1 的矩阵**应当**被拒；
+--    · 被 RLS 拒的写入在前端表现为 `syncError`（乐观更新已经改了本地）——
+--      所以上线这一段之前，请先跑 16.6 的核对 SQL。
+
+-- -------- 16.6 核对：删旧策略前后，逐人逐动作（把下面整段粘进 SQL 编辑器）--------
+--  ① 逐人可见量对照（**这是"删之前 / 删之后"要相等的那组数**）
+--     🔴 怎么用：**跑本段之前先跑一次并记下来**，跑完再跑一次，两边逐行对比。
+--     期望：**逐行相同** —— 本段只重写了读策略里"自己建的"那几支（16.3.0），
+--     效果与旧 `for all` 策略的 select 分支**相等**；删旧策略不该让任何人少看见一行。
+--     把 uuid 换成要核对的老师 id（`select id, name, subject from teachers;` 拿）。
+with me as (select '00000000-0000-0000-0000-000000000000'::uuid as uid)
+select
+  (select count(*) from classes    where id       in (select visible_class_ids_for((select uid from me)))) as 看得见_班级,
+  (select count(*) from students   where class_id in (select visible_class_ids_for((select uid from me)))) as 看得见_学生,
+  (select count(*) from assignments where class_id in (select visible_class_ids_for((select uid from me)))) as 看得见_作业,
+  (select count(*) from assignments where teacher_id = (select uid from me))                                 as 看得见_自己建的,
+  (select count(*) from calls      where class_id in (select visible_class_ids_for((select uid from me)))) as 看得见_呼叫,
+  (select count(*) from classrooms where class_id in (select visible_class_ids_for((select uid from me)))) as 看得见_教室端;
+
+--  ② 逐人逐动作：把"谁能对这个班做什么"摆出来（用 _for 变体，不必登录）
+--     期望：管理身份那几行 能管=true；任课老师 能管=false 但 能改这一科=true；
+--           班主任 / 年级主任 能改这一科=**false**（用户口径："只读"）。
+select
+  t.name                                        as 老师,
+  coalesce(t.primary_subject_code, t.subject)    as 主学科,
+  c.name                                        as 班级,
+  can_manage_class_for(t.id, c.id)              as 能管这个班,
+  teaches_in_class_for(t.id, c.id)              as 在本班任教,
+  (select string_agg(coalesce(cs.subject_code, cs.subject), '、')
+     from class_subjects cs where cs.class_id = c.id and cs.teacher_id = t.id) as 任教科目,
+  can_grade_subject_for(t.id, c.id, 'physics', '物理')  as 能改本班物理
+from teachers t
+cross join classes c
+where can_manage_class_for(t.id, c.id) or teaches_in_class_for(t.id, c.id)
+order by 4 desc, 1, 3;
+
+--  ③ 矩阵审计：每张表**有哪些策略、各管哪个动作**（删完旧策略后照一眼）
+--     期望：classes / students / assignments / calls / schedule_items / classrooms
+--           每一行都能在 16.1 的表里找到出处；**教室里那块屏不出现在任何写策略里**。
+-- select tablename, policyname, cmd, roles
+--   from pg_policies where schemaname = 'public' order by tablename, cmd, policyname;
+
+--  ④ 🔴 教室端的安全边界：它**不该有**任何一张业务表的写权限。
+--     把教室端账号的 uuid 填进去，下面每一条都应该是 0 行 / 抛"策略拒绝"。
+--     最省事的做法是照 16.6 ③ 的清单人工看一眼，或者用 PGlite 那套脚本逐条打（见报告）。
+-- with room as (select '77777777-7777-7777-7777-777777777777'::uuid as uid)
+-- select
+--   (select count(*) from classroom_accounts where id = (select uid from room)) as 教室端账号行数,
+--   (select count(*) from class_subjects where teacher_id = (select uid from room)) as 任课关系行数,
+--   (select count(*) from teacher_roles  where teacher_id = (select uid from room)) as 身份行数;
+--   —— 两个 0 意味着他在 can_manage_class / can_grade_subject / teaches_in_class
+--      三个判据上**永远为假** → 16.3 的写策略一条都匹配不上 → 只读。
+
+-- -------- 16.7 回退 SQL（删旧策略是本仓库唯一不可逆的动作，这里必须给出退路）--------
+--  ① 只退最要紧的一条（**一行**）：把"谁建的谁能改"写回来。
+--     它恢复的是作业那套旧写判据 —— 出问题（老师改不了自己的档案）时先跑这一行。
+--  create policy assignments_own on assignments for all to authenticated
+--    using (teacher_id = auth.uid()) with check (teacher_id = auth.uid());
+--
+--  ② 完整回退：把 §7 那六条原样重建（内容与 §7 一字不差，只是把 `create` 换成幂等写法）
+--  drop policy if exists classes_own on classes;
+--  create policy classes_own on classes for all to authenticated
+--    using (teacher_id = auth.uid()) with check (teacher_id = auth.uid());
+--  drop policy if exists students_own on students;
+--  create policy students_own on students for all to authenticated
+--    using (exists (select 1 from classes c where c.id = students.class_id and c.teacher_id = auth.uid()))
+--    with check (exists (select 1 from classes c where c.id = students.class_id and c.teacher_id = auth.uid()));
+--  drop policy if exists assignments_own on assignments;
+--  create policy assignments_own on assignments for all to authenticated
+--    using (teacher_id = auth.uid()) with check (teacher_id = auth.uid());
+--  drop policy if exists calls_own on calls;
+--  create policy calls_own on calls for all to authenticated
+--    using (teacher_id = auth.uid()) with check (teacher_id = auth.uid());
+--  drop policy if exists schedule_own on schedule_items;
+--  create policy schedule_own on schedule_items for all to authenticated
+--    using (teacher_id = auth.uid()) with check (teacher_id = auth.uid());
+--  drop policy if exists classrooms_own on classrooms;
+--  create policy classrooms_own on classrooms for all to authenticated
+--    using (teacher_id = auth.uid()) with check (teacher_id = auth.uid());
+--  —— 回退**只会放宽**（并集变大），不会让谁看不见东西；
+--     而 16.3 的新策略**不用删**：新旧并存时"能做的"是并集，正好等于改动前。
+--     要回到严格收口，把上面这些 drop + create 再删一次即可（本段幂等）。
+
+-- -------- 16.8 这一段**不做**什么（免得后来的人以为漏了）--------
+--  · 走班教学班（`teaching_groups` / `stream_key`）→ 阶段 4，用户明确"教学班是固定的，
+--    只在生物/地理/政治三科存在，具体班型待确认"，本轮**一个字都不动**。
+--    ⚠️ 将来做走班时，本段这两处要一起改，否则会挡住它：
+--      ① `can_manage_class(c.id)` 的年级主任一支按 `classes.grade_id` 判；
+--         走班作业若挂教学班而不是行政班，需要新的判据（教学班的老师）；
+--      ② `assignments_insert/update` 只认 `class_id + subject`。
+--         走班作业的"一份档案属于多个班"要另加判据（见 `多学科体系方案.md` §3.4.3）。
+--  · `class_subjects` 的 unique 换列（(class_id, subject, teacher_id) → 加 subject_code）
+--    → 阶段 3 的遗留项，本次不碰（换 unique 是破坏性迁移，与"收口"分开做）
+--  · `teacher_roles` / `class_subjects` / `classroom_accounts` 的**客户端写策略**
+--    → 指派身份 / 任课关系只走服务端（`/api/teacher-account`），
+--      数据库层刻意不 grant（§13.7 已经写过理由：同一个动作不要两个入口）
+--  · 教室端账号创建权限里 `admin` 的定位（`functions/api/classroom-account.ts` 的 mayManage）
+--    → 教室端那条线，本轮刻意不动（§13.1 的留档仍然有效）
+--  · 删 `assignments.subject` / `teachers.subject` / `class_subjects.subject` 旧列
+--    → 要等体检连续为 0，而且前端还在按显示名反查字典（§12.4）

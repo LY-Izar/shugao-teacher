@@ -4,6 +4,11 @@
    和 docx.ts 同一套路：xlsx 也是 zip + XML，用浏览器原生
    DecompressionStream 解压，不引任何第三方库。
    好处同样是**文件不上传** —— 学校发的课表不用过任何服务器。
+
+   两个入口：
+     · `xlsxToRows(file)`   —— **第一个工作表**（课表导入用的老入口，行为不许变）
+     · `xlsxSheets(file)`   —— **全部工作表 + 表名**（新教育/智学网导出的成绩文件
+                                是多 sheet 的：sheet1 逐题明细、sheet2 选项分布）
    ============================================================ */
 
 type Entry = { method: number; compSize: number; localOff: number }
@@ -44,8 +49,21 @@ function colOf(ref: string): number {
   return n
 }
 
-/** 读第一个工作表，返回二维字符串数组（保持行列位置，空格为 ''） */
-export async function xlsxToRows(file: File | Blob): Promise<string[][]> {
+export type SheetData = {
+  /** 工作表名（`<sheet name="…">`），认不出来时是 `工作表 N` */
+  name: string
+  rows: string[][]
+}
+
+/**
+ * 解出一份 .xlsx 的**全部工作表**（含表名），保持行列位置。
+ *
+ * 表名的来源是 `xl/workbook.xml` 的 `<sheet name=…>` 顺序，
+ * 它和 `xl/worksheets/sheetN.xml` 的**编号顺序**一致（Excel/WPS 都是这么写的）。
+ * 万一对不上（有些导出工具会乱序），退回 `工作表 N` —— **不猜**，
+ * 界面上让老师自己确认是哪个 sheet。
+ */
+export async function xlsxSheets(file: File | Blob): Promise<SheetData[]> {
   const buf = await file.arrayBuffer()
   if (buf.byteLength < 22) throw new Error('文件太小，不像是 .xlsx')
 
@@ -101,17 +119,37 @@ export async function xlsxToRows(file: File | Blob): Promise<string[][]> {
     }
   }
 
-  /* 第一个工作表：优先 sheet1.xml，否则取排序最靠前的 */
-  let sheetName = 'xl/worksheets/sheet1.xml'
-  if (!entries.has(sheetName)) {
-    const found = [...entries.keys()]
-      .filter((k) => /^xl\/worksheets\/sheet\d+\.xml$/.test(k))
-      .sort()
-    sheetName = found[0] ?? ''
+  /* 表名（workbook.xml 里的顺序 —— 内联字符串与 sharedStrings 两种都可能出现） */
+  const names: string[] = []
+  const wbXml = await read('xl/workbook.xml')
+  if (wbXml) {
+    for (const m of wbXml.matchAll(/<sheet\b[^>]*>/g)) {
+      const n = m[0].match(/name="([^"]*)"/)?.[1]
+      if (n !== undefined) names.push(unescapeXml(n))
+    }
   }
-  const sheet = sheetName ? await read(sheetName) : null
-  if (!sheet) throw new Error('这个文件里没有工作表')
 
+  /* 所有工作表，按 sheetN.xml 的编号排序（保证与表名顺序对应） */
+  const found = [...entries.keys()]
+    .filter((k) => /^xl\/worksheets\/sheet\d+\.xml$/.test(k))
+    .sort((a, b) => {
+      const na = Number(a.match(/sheet(\d+)\.xml$/)?.[1] ?? 0)
+      const nb = Number(b.match(/sheet(\d+)\.xml$/)?.[1] ?? 0)
+      return na - nb
+    })
+  if (!found.length) throw new Error('这个文件里没有工作表')
+
+  const out: SheetData[] = []
+  for (const [i, sheetPath] of found.entries()) {
+    const sheet = await read(sheetPath)
+    if (!sheet) continue
+    out.push({ name: names[i] ?? `工作表 ${i + 1}`, rows: parseSheetXml(sheet, shared) })
+  }
+  return out
+}
+
+/** 一个 worksheet 的 XML → 二维字符串数组 */
+function parseSheetXml(sheet: string, shared: string[]): string[][] {
   const rows: string[][] = []
   for (const rm of sheet.matchAll(/<row[^>]*>([\s\S]*?)<\/row>/g)) {
     const cells: string[] = []
@@ -134,6 +172,15 @@ export async function xlsxToRows(file: File | Blob): Promise<string[][]> {
     rows.push(cells)
   }
   return rows
+}
+
+/**
+ * 读**第一个工作表**，返回二维字符串数组（保持行列位置，空格为 ''）。
+ * 老入口，课表导入在用 —— 行为与加 `xlsxSheets` 之前完全一致。
+ */
+export async function xlsxToRows(file: File | Blob): Promise<string[][]> {
+  const sheets = await xlsxSheets(file)
+  return sheets[0]?.rows ?? []
 }
 
 /** 读 CSV / 制表符分隔的纯文本 */

@@ -1,5 +1,6 @@
 import { getSupabase } from '../lib/supabase'
 import { asSubjectCode, subjectCodeOfName } from '../lib/subjects'
+import type { Exam, ExamScore } from './examTypes'
 import type {
   Assignment,
   AssignmentStatus,
@@ -106,6 +107,64 @@ type CallRow = {
   created_at?: string | null
 }
 
+/* ---- 考试（schema.sql 第 15 段，见 功能设计与不变量.md §十四） ---- */
+
+type ExamQuestionRow = {
+  no?: number
+  kind?: string
+  fullScore?: number
+  answer?: string
+  points?: string[]
+  stem?: string
+}
+
+type ExamRow = {
+  id: string
+  teacher_id: string
+  title: string
+  paper_key: string
+  subject: string
+  subject_code?: string | null
+  scope: string
+  grade: string
+  source: string
+  mode: string
+  exam_date: string
+  question_count: number
+  questions: Record<string, ExamQuestionRow>
+  class_ids: string[]
+  absent_nos: string[]
+  status: string
+  graded_at?: string | null
+  note: string
+  created_at?: string | null
+}
+
+type ExamScoreRow = {
+  id: string
+  exam_id: string
+  class_id: string
+  student_no: string
+  name: string
+  scores: Record<string, number>
+  answers: Record<string, string>
+  graded: boolean
+  absent: boolean
+  total: number | string | null
+  objective: number | string | null
+  subjective: number | string | null
+  class_rank: number | null
+  grade_rank: number | null
+  created_at?: string | null
+}
+
+/** Postgres 的 numeric 经 PostgREST 回来是**字符串**（避免精度丢失），要显式转 */
+const nnum = (v: number | string | null | undefined): number | undefined => {
+  if (v === null || v === undefined) return undefined
+  const n = Number(v)
+  return Number.isFinite(n) ? n : undefined
+}
+
 /* ---------------- 兼容期：新列在不在？（多学科阶段 1） ----------------
 
    多学科那一段 schema 只做加法：给 assignments / teachers / class_subjects
@@ -155,6 +214,256 @@ async function probeSubjectCols(): Promise<SubjectCols> {
 export function ensureSubjectCols(): Promise<SubjectCols> {
   if (!colsProbe) colsProbe = probeSubjectCols()
   return colsProbe
+}
+
+/* ---------------- 兼容期：考试那两张表在不在？（schema.sql 第 15 段） ----------------
+
+   与上面的 `ensureSubjectCols()` 同一套纪律，但判据不同 —— 这次探的是**表**，不是列：
+     · 这一整段是**新增功能**，线上库没跑第 15 段时 `exams` / `exam_scores` 根本不存在；
+     · 读：`select('*')` 会报 42P01 / PGRST205；**表不在就当"还没有考试档案"**，
+          绝不能让"考试"这一个功能把整个应用拖垮（快照那条路一个字都不动）；
+     · 写：表不在就**不写**，并把原因交回给调用方去显示人话 ——
+          "乐观更新 + 刷新即丢"在这里是最坏的结局（老师录了一节课的分，刷新全没了）。
+
+   判据只有「表不存在」这一种：网络抖动、权限问题一律当作**在**
+   （否则一次抖动就把写入永久停掉，比偶发失败严重得多）。
+
+   ⚠️ 结果只有两种：'present' / 'missing'。
+      "探测本身失败"（断网）**不缓存**，下次还会重探 —— 缓存住会把临时故障固化成永久状态。 */
+
+export type ExamTablesState = 'present' | 'missing'
+
+let examTablesProbe: Promise<ExamTablesState> | null = null
+
+/** 表不存在的三种表述：PG 原生错误码 / PostgREST 的 schema cache 错误码 / 兜底文案 */
+function isMissingTable(error: { message?: string; code?: string } | null | undefined): boolean {
+  if (!error) return false
+  const code = String(error.code ?? '')
+  const msg = String(error.message ?? '')
+  return (
+    code === '42P01' || // undefined_table
+    code === 'PGRST205' || // PostgREST: table not found in schema cache
+    /does not exist/i.test(msg) ||
+    /schema cache/i.test(msg)
+  )
+}
+
+async function probeExamTables(): Promise<ExamTablesState> {
+  const sb = getSupabase()
+  if (!sb) return 'missing'
+  const has = async (table: string): Promise<boolean | null> => {
+    try {
+      const { error } = await sb.from(table).select('id').limit(1)
+      if (!error) return true
+      if (isMissingTable(error)) return false
+      return null // 认不出来 → "不知道"
+    } catch {
+      return null
+    }
+  }
+  const [exams, scores] = await Promise.all([has('exams'), has('exam_scores')])
+  if (exams === false || scores === false) return 'missing'
+  if (exams === null || scores === null) {
+    // 探测本身没结论：**不缓存**，让下一次重探（可能只是断网）
+    examTablesProbe = null
+    return 'missing'
+  }
+  return 'present'
+}
+
+/** 探测一次（同一页面内只探一次），给考试功能的读写路径用 */
+export function ensureExamTables(): Promise<ExamTablesState> {
+  if (!examTablesProbe) examTablesProbe = probeExamTables()
+  return examTablesProbe
+}
+
+/** 第 15 段还没跑时，界面上要显示的那句话（**下一步动作写在错误信息里**） */
+export const EXAM_MIGRATION_HINT =
+  '线上数据库还没有考试相关的表：请到 Supabase → SQL Editor 跑 supabase/schema.sql 第 15 段'
+
+/* ---------------- 考试：本地 → 行 ---------------- */
+
+export const examToRow = (e: Exam, teacherId: string): ExamRow => ({
+  id: e.id,
+  teacher_id: teacherId,
+  title: e.title,
+  paper_key: e.paperKey,
+  subject: e.subject,
+  subject_code: asSubjectCode(e.subjectCode) ?? null,
+  scope: e.scope,
+  grade: e.grade,
+  source: e.source,
+  mode: e.mode,
+  exam_date: e.examDate,
+  question_count: e.questionCount,
+  questions: (e.questions ?? {}) as unknown as Record<string, ExamQuestionRow>,
+  class_ids: e.classIds ?? [],
+  absent_nos: e.absentNos ?? [],
+  status: e.status,
+  graded_at: ts(e.gradedAt),
+  note: e.note ?? '',
+})
+
+export const examScoreToRow = (s: ExamScore): ExamScoreRow => ({
+  id: s.id,
+  exam_id: s.examId,
+  class_id: s.classId,
+  student_no: s.studentNo,
+  name: s.name,
+  scores: s.scores ?? {},
+  answers: s.answers ?? {},
+  graded: s.graded,
+  absent: s.absent,
+  total: s.total ?? null,
+  objective: s.objective ?? null,
+  subjective: s.subjective ?? null,
+  class_rank: s.classRank ?? null,
+  grade_rank: s.gradeRank ?? null,
+})
+
+/* ---------------- 考试：行 → 本地 ---------------- */
+
+const rowToExam = (r: ExamRow): Exam => ({
+  id: r.id,
+  title: r.title,
+  paperKey: r.paper_key ?? '',
+  subject: r.subject ?? '',
+  subjectCode: asSubjectCode(r.subject_code) ?? subjectCodeOfName(r.subject) ?? '',
+  scope: (r.scope as Exam['scope']) ?? 'class',
+  grade: r.grade ?? '',
+  source: (r.source as Exam['source']) ?? 'manual',
+  mode: (r.mode as Exam['mode']) ?? 'scores',
+  examDate: r.exam_date,
+  questionCount: r.question_count,
+  questions: (r.questions ?? {}) as Exam['questions'],
+  classIds: r.class_ids ?? [],
+  absentNos: r.absent_nos ?? [],
+  status: (r.status as Exam['status']) ?? 'grading',
+  createdBy: r.teacher_id,
+  createdAt: ms(r.created_at) ?? Date.now(),
+  gradedAt: ms(r.graded_at),
+  note: r.note ?? '',
+})
+
+const rowToExamScore = (r: ExamScoreRow): ExamScore => ({
+  id: r.id,
+  examId: r.exam_id,
+  classId: r.class_id,
+  studentNo: r.student_no,
+  name: r.name ?? '',
+  scores: r.scores ?? {},
+  answers: r.answers ?? {},
+  graded: r.graded === true,
+  absent: r.absent === true,
+  total: nnum(r.total),
+  objective: nnum(r.objective),
+  subjective: nnum(r.subjective),
+  classRank: r.class_rank ?? undefined,
+  gradeRank: r.grade_rank ?? undefined,
+  createdAt: ms(r.created_at) ?? Date.now(),
+})
+
+/* ---------------- 考试：读写 ----------------
+ *
+ * ⚠️ **这两张表不进 `loadSnapshot()`**（那组是"任一失败就整份快照作废"）：
+ *    线上库还没跑第 15 段时，混进去会让**整个应用一起看不到数据**——
+ *    比"考试功能暂时不可用"严重得多（同 §13.6 里 `loadMyRoles` 的理由）。
+ *    所以考试有自己的加载入口，页面按需调。 */
+
+export type ExamBundle = { exams: Exam[]; scores: ExamScore[] }
+
+/**
+ * 读全部可见的考试与成绩。
+ *
+ * 线上库没跑第 15 段时返回 `{ exams: [], scores: [] }`（**不抛错、不白屏**），
+ * 由调用方用 `ensureExamTables()` 去区分"表不存在"和"真的还没有档案"。
+ */
+export async function loadExams(): Promise<ExamBundle> {
+  const sb = getSupabase()
+  if (!sb) return { exams: [], scores: [] }
+  const state = await ensureExamTables()
+  if (state === 'missing') return { exams: [], scores: [] }
+  try {
+    const [e, s] = await Promise.all([
+      sb.from('exams').select('*').order('exam_date', { ascending: false }),
+      sb.from('exam_scores').select('*'),
+    ])
+    if (e.error || s.error) {
+      // 表在、但读失败（权限/网络）：如实报出来，列表退回空
+      if (!isMissingTable(e.error) && !isMissingTable(s.error)) {
+        fail('读取考试', e.error ?? s.error)
+      }
+      return { exams: [], scores: [] }
+    }
+    return {
+      exams: ((e.data ?? []) as ExamRow[]).map(rowToExam),
+      scores: ((s.data ?? []) as ExamScoreRow[]).map(rowToExamScore),
+    }
+  } catch (err) {
+    fail('读取考试', err)
+    return { exams: [], scores: [] }
+  }
+}
+
+export type SaveExamResult = { ok: boolean; reason?: string }
+
+/**
+ * 写一份考试档案（含它的全部学生行）。
+ *
+ * 顺序：**先 exams 再 exam_scores**（外键方向）。
+ * 两者都成功才算成功 —— 只写了档案没写分数，教师看到的是"改完了但分没了"。
+ */
+export async function saveExam(
+  e: Exam,
+  rows: ExamScore[],
+  teacherId: string,
+): Promise<SaveExamResult> {
+  const sb = getSupabase()
+  if (!sb) return { ok: true } // 本地模式：store 自己持久化
+  const state = await ensureExamTables()
+  if (state === 'missing') {
+    // 不写、也不吞：把下一步动作交给调用方显示（**不能乐观更新后刷新即丢**）
+    fail('保存考试', { message: EXAM_MIGRATION_HINT })
+    return { ok: false, reason: EXAM_MIGRATION_HINT }
+  }
+  try {
+    const { error } = await sb.from('exams').upsert(examToRow(e, teacherId) as never, { onConflict: 'id' })
+    if (error) {
+      fail('保存考试', error)
+      return { ok: false, reason: String(error.message ?? '未知错误') }
+    }
+    if (rows.length) {
+      const { error: e2 } = await sb
+        .from('exam_scores')
+        .upsert(rows.map(examScoreToRow) as never, { onConflict: 'id' })
+      if (e2) {
+        fail('保存考试成绩', e2)
+        return { ok: false, reason: String(e2.message ?? '未知错误') }
+      }
+    }
+    return { ok: true }
+  } catch (err) {
+    fail('保存考试', err)
+    return { ok: false, reason: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+export async function deleteExam(id: string): Promise<void> {
+  const sb = getSupabase()
+  if (!sb) return
+  remove('exams', id)
+}
+
+/** 只删某些学生的成绩行（改名/转班后用不上了）—— 目前只有"删整份档案"用到 */
+export async function deleteExamScores(ids: string[]): Promise<void> {
+  const sb = getSupabase()
+  if (!sb || !ids.length) return
+  try {
+    const { error } = await sb.from('exam_scores').delete().in('id', ids)
+    if (error) fail('删除考试成绩', error)
+  } catch (err) {
+    fail('删除考试成绩', err)
+  }
 }
 
 /* ---------------- 错误上报 ---------------- */

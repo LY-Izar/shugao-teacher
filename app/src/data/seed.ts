@@ -1,5 +1,7 @@
 import { isoOffset } from '../lib/date'
 import { DEFAULT_SUBJECT_CODE, subjectName } from '../lib/subjects'
+import { normalizePaperName, round2, totalOf } from '../lib/examPaper'
+import type { Exam, ExamQuestion, ExamScore } from './examTypes'
 import type {
   Assignment,
   AssignmentTemplate,
@@ -393,4 +395,177 @@ export function makeDemoAssignments(classes: Klass[]): Assignment[] {
     })
   }
   return out
+}
+
+/* ============================================================
+   考试（演示）—— 结构与分值**照一份真实的物理练习卷**
+   ------------------------------------------------------------
+   为什么用真结构而不是随便编 10 道题：这份演示数据的用途是让老师
+   一眼看懂"考试统计长什么样"。测试数据本身是编的（虚拟姓名池），
+   但**卷面结构用的是真实卷面**：
+     单选 7×4 + 多选 3×6（选对不全按 m/n 给分）+ 非选择 6/10/10/12/16 = 100 分
+   与 `data/examPresets.ts` 里物理那一档一致 —— 两边对不上就说明有一处写错了。
+
+   🔴 演示数据只在**本地模式**（`isDemo`）出现，云端模式一律从空开始
+      （见 `store.ts` 的 `initialState()`）。
+   ============================================================ */
+
+/** 演示卷的题目结构（题号 → 题型/满分/答案/知识点） */
+const DEMO_EXAM_QUESTIONS: Record<string, ExamQuestion> = {
+  '1': { no: 1, kind: 'single', fullScore: 4, answer: 'D', points: ['coulomb'], stem: '关于电场强度与电势，下列说法正确的是' },
+  '2': { no: 2, kind: 'single', fullScore: 4, answer: 'A', points: ['coulomb'] },
+  '3': { no: 3, kind: 'single', fullScore: 4, answer: 'B', points: ['ohm'] },
+  '4': { no: 4, kind: 'single', fullScore: 4, answer: 'B', points: ['ohm'] },
+  '5': { no: 5, kind: 'single', fullScore: 4, answer: 'C', points: ['closed-circuit'] },
+  '6': { no: 6, kind: 'single', fullScore: 4, answer: 'D', points: ['closed-circuit'] },
+  '7': { no: 7, kind: 'single', fullScore: 4, answer: 'A', points: ['power'] },
+  '8': { no: 8, kind: 'multiple', fullScore: 6, answer: 'AC', points: ['power'] },
+  '9': { no: 9, kind: 'multiple', fullScore: 6, answer: 'CD', points: ['meter-experiment'] },
+  '10': { no: 10, kind: 'multiple', fullScore: 6, answer: 'BD', points: ['meter-experiment'] },
+  '11': { no: 11, kind: 'experiment', fullScore: 6, points: ['meter-experiment'], stem: '力学实验：验证机械能守恒' },
+  '12': { no: 12, kind: 'experiment', fullScore: 10, points: ['meter-experiment'], stem: '电学实验：测电源电动势与内阻' },
+  '13': { no: 13, kind: 'calc', fullScore: 10, points: ['closed-circuit'], stem: '计算题：闭合电路欧姆定律（2 问）', subCount: 2 },
+  '14': { no: 14, kind: 'calc', fullScore: 12, points: ['power'], stem: '计算题：电功率与效率（2 问）', subCount: 2 },
+  '15': { no: 15, kind: 'calc', fullScore: 16, points: ['coulomb'], stem: '计算题：带电粒子在电场中的运动（3 问）', subCount: 3 },
+}
+
+/**
+ * 造一份批阅完成的演示考试（含"没批改按 0 分"与一名缺考的样本）。
+ * 与作业那套一样：**按目标得分率精确取人**，让分数分布有形状，
+ * 而不是纯随机（纯随机的分布看不出统计页在干什么）。
+ */
+export function makeDemoExams(classes: Klass[]): { exams: Exam[]; scores: ExamScore[] } {
+  const a = classes[0]
+  const b = classes[1]
+  if (!a) return { exams: [], scores: [] }
+
+  const qs = Object.values(DEMO_EXAM_QUESTIONS)
+  const build = (
+    examId: string,
+    klass: Klass,
+    seed: number,
+    /** 缺考的学号（不参与均分） */
+    absent: string[],
+    /** 刻意留几个没批改的（按 0 分计）—— 让统计页的"没批改"名单有内容 */
+    ungraded: string[],
+  ) => {
+    const rng = makeRng(seed)
+    const students = klass.students.filter((s) => s.status === 'active')
+    // 每个学生一个固定"水平"，再加题目层面的抖动
+    const ability = new Map(students.map((s) => [s.studentNo, 0.35 + rng() * 0.62]))
+    const rows: ExamScore[] = []
+    for (const s of students) {
+      const lv = ability.get(s.studentNo) ?? 0.6
+      const scores: Record<string, number> = {}
+      const answers: Record<string, string> = {}
+      for (const q of qs) {
+        const roll = Math.min(1, Math.max(0, lv + (rng() - 0.5) * 0.45))
+        if (q.kind === 'single') {
+          // 单选：对就满分、错就 0
+          if (rng() < roll) answers[String(q.no)] = q.answer ?? 'A'
+          else {
+            const wrong = 'ABCD'.replace(q.answer ?? 'A', '')
+            answers[String(q.no)] = wrong[Math.floor(rng() * wrong.length)]
+          }
+        } else if (q.kind === 'multiple') {
+          const key = (q.answer ?? 'AC').split('')
+          // 三成概率只选对一部分（演示 m/n 判分在数据上真的会出现）
+          const keep = rng() < roll * 0.75 ? key.length : Math.max(1, key.length - 1)
+          answers[String(q.no)] = key.slice(0, keep).join('')
+        } else {
+          scores[String(q.no)] = Math.round(q.fullScore * Math.min(1, roll + rng() * 0.2))
+        }
+      }
+      const merged = { scores, answers }
+      if (absent.includes(s.studentNo)) {
+        rows.push({
+          id: `ex-${examId}-${s.studentNo}`,
+          examId,
+          classId: klass.id,
+          studentNo: s.studentNo,
+          name: s.name,
+          scores: {},
+          answers: {},
+          graded: false,
+          absent: true,
+          createdAt: Date.now(),
+        })
+        continue
+      }
+      if (ungraded.includes(s.studentNo)) {
+        rows.push({
+          id: `ex-${examId}-${s.studentNo}`,
+          examId,
+          classId: klass.id,
+          studentNo: s.studentNo,
+          name: s.name,
+          scores: {},
+          answers: {},
+          graded: false,
+          absent: false,
+          createdAt: Date.now(),
+        })
+        continue
+      }
+      rows.push({
+        id: `ex-${examId}-${s.studentNo}`,
+        examId,
+        classId: klass.id,
+        studentNo: s.studentNo,
+        name: s.name,
+        scores,
+        answers,
+        graded: true,
+        absent: false,
+        total: round2(totalOf({ questionCount: qs.length, questions: DEMO_EXAM_QUESTIONS, mode: 'answers' }, merged)),
+        createdAt: Date.now(),
+      })
+    }
+    return rows
+  }
+
+  const examA: Exam = {
+    id: 'ex-demo-1',
+    title: '物理练习8',
+    paperKey: normalizePaperName('物理练习8'),
+    subject: subjectName(DEFAULT_SUBJECT_CODE),
+    subjectCode: DEFAULT_SUBJECT_CODE,
+    scope: b ? 'grade' : 'class',
+    grade: a.grade,
+    source: 'manual',
+    mode: 'answers',
+    examDate: isoOffset(-3),
+    questionCount: qs.length,
+    questions: DEMO_EXAM_QUESTIONS,
+    classIds: [a.id],
+    absentNos: ['7'],
+    status: 'graded',
+    createdBy: 't-1',
+    createdAt: Date.now() - 3 * 86400000,
+    gradedAt: Date.now() - 3 * 86400000 + 5400_000,
+  }
+
+  const scores = build(examA.id, a, 20260920, ['7'], ['19', '33'])
+
+  const exams: Exam[] = [examA]
+
+  /*
+   * 同年级的另一个班建一份**同场考试**的档案：
+   * 这样"年级排名 / 班级 vs 年级"在演示数据里就有真东西可看
+   * （两班档案靠 paperKey + 学科 + 年级 + 日期 合起来 —— 见 schema.sql §15.5）。
+   */
+  if (b) {
+    const examB: Exam = {
+      ...examA,
+      id: 'ex-demo-2',
+      classIds: [b.id],
+      absentNos: ['12'],
+      createdBy: 't-2',
+      createdAt: Date.now() - 3 * 86400000,
+    }
+    exams.push(examB)
+    scores.push(...build(examB.id, b, 20260921, ['12'], ['5', '28']))
+  }
+
+  return { exams, scores }
 }

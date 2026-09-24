@@ -5,6 +5,11 @@
  */
 import { mkdirSync } from 'node:fs'
 import { chromium } from 'playwright-core'
+import { registerTsResolve } from './lib/ts-resolve.mjs'
+
+// 先装 TS 解析钩子，再 import 仓库里的种子数据（见 scripts/lib/ts-resolve.mjs）
+registerTsResolve()
+const { makeDemoClasses, makeDemoExams } = await import('../src/data/seed.ts')
 
 const BASE = 'http://localhost:5178'
 const OUT = '.shots'
@@ -12,13 +17,25 @@ mkdirSync(OUT, { recursive: true })
 
 const EDGE = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe'
 
-// 每次导航前注入登录态；classes / assignments 由 store 的初始演示数据补齐，
-// 因此每张截图都在同一份确定性数据上生成。
+/*
+ * 每次导航前注入登录态。**类与考试的演示数据必须一起注入**：
+ * zustand persist 的 merge 是"存储快照浅合并到初始状态"，而快照里带着
+ * 上一轮跑出来的 `exams: []` / `examScores: []`（它们是数组、不是缺键），
+ * 于是 seed 里的演示考试会被这个空数组**覆盖掉** —— 表现就是"考试列表是空的"。
+ * 这条坑与 §九「shots.mjs 的 addInitScript 会覆盖 shugao.teacher.v1」是同一个。
+ * 这里直接调 seed 的构造函数，保证注入的就是页面本来该看到的那份数据。
+ */
+const DEMO_CLASSES = makeDemoClasses()
+const DEMO_EXAMS = makeDemoExams(DEMO_CLASSES)
+
 const TEACHER_STATE = {
   state: {
     teacher: { id: 't-1', name: '王老师', subject: '物理', school: '树高中学' },
     streakDays: 4,
     lastSeenAt: Date.now(),
+    classes: DEMO_CLASSES,
+    exams: DEMO_EXAMS.exams,
+    examScores: DEMO_EXAMS.scores,
   },
   version: 1,
 }
@@ -281,7 +298,14 @@ await shot('41-schedule', { full: true })
 // ---------- 底栏拖拽：胶囊实时跟手 ----------
 await page.goto(`${BASE}/`, { waitUntil: 'networkidle' })
 await page.waitForTimeout(600)
-const strip = page.locator('nav.nav-frost > div')
+/*
+ * ⚠️ 选择器要按**语义**选，不要按样式类名选。
+ * 原来写的是 `nav.nav-frost > div`，而 `nav-frost` 是底栏胶囊的一个**样式类**，
+ * 被一次导航栏改版（AppShell）换掉之后，这一段就静默地找不到了 ——
+ * 报错信息是 `locator.boundingBox: Timeout`，看名字完全想不到是"类名没了"。
+ * 现在用 `aria-label="主导航"`（那是可访问性语义，改样式不会动它）。
+ */
+const strip = page.locator('nav[aria-label="主导航"] > div')
 const sb = await strip.boundingBox()
 if (sb) {
   await page.mouse.move(sb.x + sb.width * 0.13, sb.y + sb.height / 2)
@@ -386,6 +410,88 @@ await shot('56-wrong-back-to-classes', { full: true })
 await page.getByRole('button', { name: /高二\(7\)班/ }).first().click()
 await page.waitForTimeout(600)
 await shot('57-wrong-class-empty', { full: true })
+
+// ---------- S7：考试（建档 → 批阅 → 统计） ----------
+/*
+ * 考试是独立的一条 /exams 路由族。这一节要**走完整条链**，只截列表是不够的：
+ * 建档页的题型清单、批阅页的"展开单人/竖列题号/确认批阅"、统计页的
+ * 知识点得分率与难度区分度 —— 这三处任意一处坏了，只截列表都看不出来。
+ */
+await page.evaluate(() => localStorage.setItem('shugao.deviceRole', 'teacher'))
+await page.goto(`${BASE}/assignments`, { waitUntil: 'networkidle' })
+await shot('60-assignments-with-exam-entry', { full: true })
+
+await page.getByRole('button', { name: '考试' }).click()
+await page.waitForTimeout(500)
+await shot('61-exams-list', { full: true })
+
+// 已完成的档案点进去就是统计页（数据统计 = 用户要的那一屏）
+await page.getByRole('button', { name: /物理练习8/ }).first().click()
+await page.waitForTimeout(700)
+await shot('62-exam-stats', { full: true })
+
+// 逐题下钻：选项分布 + 难度/区分度
+// （Sheet 里有两个「关闭」：右上角 X 是无障碍名 `关闭`，页脚那个是正文按钮 —— 取第一个）
+await page.getByRole('button', { name: /^8/ }).first().click()
+await page.waitForTimeout(500)
+await shot('63-exam-question-drill')
+await page.getByLabel('关闭').first().click()
+await page.waitForTimeout(300)
+
+// 个人诊断：薄弱知识点 + 薄弱题号 + 个人趋势
+// （学生行的无障碍名是「学号 号 姓名」，与作业页那一套保持一致）
+await page.getByRole('button', { name: /^\d+ 号 / }).first().click()
+await page.waitForTimeout(600)
+await shot('64-exam-student-diagnosis')
+await page.getByLabel('关闭').first().click()
+await page.waitForTimeout(300)
+
+// 建档页：考试类型 / 数据来源 / 题型清单 / 记录模式
+await page.goto(`${BASE}/exams/new`, { waitUntil: 'networkidle' })
+await page.waitForTimeout(400)
+await shot('65-exam-new', { full: true })
+
+// 四川新高考题型待选清单（**要交给老师确认的那份**）
+await page.getByRole('button', { name: '套用题型清单' }).click()
+await page.waitForTimeout(600)
+await shot('66-exam-preset-sheet', { full: true })
+await page.getByLabel('关闭').first().click()
+await page.waitForTimeout(300)
+
+// 批阅页：点一个学生 → 其他学生隐藏，题号沿竖列展开
+await page.goto(`${BASE}/exams/ex-demo-1/grade`, { waitUntil: 'networkidle' })
+await page.waitForTimeout(500)
+await shot('67-exam-grade-list', { full: true })
+
+await page.getByRole('button', { name: /^\d+ 号 / }).first().click()
+await page.waitForTimeout(400)
+await shot('68-exam-grade-one-student', { full: true })
+
+// 多选题选一部分 → 按 m/n 给分（这一条是判分规则唯一能"看得见"的地方）
+const mc = page.getByRole('button', { name: /第 8 题选 [A-D]/ }).first()
+if (await mc.count()) {
+  await mc.click()
+  await page.waitForTimeout(250)
+  await shot('69-exam-grade-multi-partial', { full: true })
+}
+
+// 确认批阅 → **回到整张表**（不是下一个学生顶上来）
+await page.getByRole('button', { name: '确认批阅' }).click()
+await page.waitForTimeout(600)
+await shot('70-exam-grade-after-confirm', { full: true })
+
+// 批阅完成：两条路（临时保存 / 确认完成）+ 确认完成的二次确认
+await page.getByRole('button', { name: '批阅完成' }).click()
+await page.waitForTimeout(400)
+await shot('71-exam-finish-choose')
+await page.getByRole('button', { name: '确认完成' }).click()
+await page.waitForTimeout(400)
+await shot('72-exam-finish-confirm-zero', { full: true })
+await page.getByRole('button', { name: '再改改' }).click()
+await page.waitForTimeout(200)
+await page.getByRole('button', { name: '临时保存' }).click()
+await page.waitForTimeout(700)
+await shot('73-exam-draft-saved', { full: true })
 
 // ---------- 桌面 ----------
 const wide = await ctx.newPage()

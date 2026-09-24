@@ -10,7 +10,6 @@ import {
   IconDownload,
   IconLogout,
   IconPencil,
-  IconRefresh,
   IconSwap,
   IconUpload,
   IconUsers,
@@ -36,7 +35,9 @@ import {
   validateBackup,
 } from '../lib/backup'
 import { REMIND_BEFORE, itemsForDate } from '../lib/schedule'
-import { beijingNow, holidayDataInfo, ymdOf } from '../lib/holiday'
+// 只用到时间工具：节假日「数据来源」面板已删（见 功能设计与不变量.md §十七 17.2），
+// 判定函数（isRestDay / dayKind / holidayOn / nextHoliday）仍在别处使用，没有动。
+import { beijingNow, ymdOf } from '../lib/holiday'
 import { canManageTeachers, roleChips } from '../lib/roles'
 import {
   SUBJECTS,
@@ -54,7 +55,6 @@ export default function Settings() {
   const schedule = useStore((s) => s.schedule)
   const currentClassId = useStore((s) => s.currentClassId)
   const setCurrentClass = useStore((s) => s.setCurrentClass)
-  const resetDemo = useStore((s) => s.resetDemo)
   const clearAll = useStore((s) => s.clearAll)
   const restoreBackup = useStore((s) => s.restoreBackup)
   const bkRef = useRef<HTMLInputElement>(null)
@@ -159,7 +159,6 @@ export default function Settings() {
   const canManage = isRemote && canManageTeachers(myRoles)
   // 只看教师自己的排课表 —— 班级课表（scope='class'）是教室端给学生看的，混进来数字会对不上
   const todayCount = itemsForDate(schedule.filter((s) => s.scope !== 'class')).length
-  const holidayInfo = holidayDataInfo()
 
   const exportJson = () => {
     const payload = {
@@ -387,6 +386,14 @@ export default function Settings() {
           </Panel>
         </div>
 
+        {/*
+          这里原来还有一个「重置为演示数据」按钮（直接调 store.resetDemo，且没有二次确认）。
+          2026-09 按用户要求删除：那个功能用不到，而且**很危险** ——
+          本地模式下 `resetDemo` 会用一份演示快照整份替换当前 state，
+          老师真实录入的班级 / 名单 / 作业全没了，还没法撤销。
+          别以为是漏做了又加回来（见 功能设计与不变量.md §十七 17.1）。
+        */}
+
         {/* 数据 */}
         <div className="mb-4">
           <Sect>数据</Sect>
@@ -394,16 +401,6 @@ export default function Settings() {
             <div className="flex flex-col gap-2">
               <Button block icon={<IconDownload size={16} />} onClick={exportJson}>
                 导出全部数据（JSON）
-              </Button>
-              <Button
-                block
-                icon={<IconRefresh size={16} />}
-                onClick={() => {
-                  resetDemo()
-                  push({ text: '已重置为演示数据', tone: 'ok' })
-                }}
-              >
-                重置为演示数据
               </Button>
               <Button
                 block
@@ -555,65 +552,15 @@ export default function Settings() {
           </div>
         </div>
 
-        {/* 节假日数据来源 */}
-        <div className="mb-4">
-          <Sect>节假日与调休</Sect>
-          <Panel bodyClass="px-4 py-2">
-            <KV
-              k="数据存储"
-              v={
-                mode === 'remote' ? (
-                  <Tag tone="ok">云端 · 跨设备同步</Tag>
-                ) : (
-                  <Tag tone="warn">本机浏览器 · 未连云端</Tag>
-                )
-              }
-            />
-            <KV
-              k="数据来源"
-              v={
-                holidayInfo.latest ? (
-                  <span className="num">{holidayInfo.latest.docNo}</span>
-                ) : (
-                  '未加载'
-                )
-              }
-            />
-            <KV k="覆盖年份" v={`${holidayInfo.years.join('、')} 年`} />
-            <KV
-              k="校准时间"
-              v={<span className="num">{ymdOf(beijingNow())}（北京时间）</span>}
-            />
-          </Panel>
-          {!holidayInfo.coversThisYear ? (
-            <div
-              className="mt-2 flex items-start gap-2.5 p-3"
-              style={{
-                background: 'var(--color-warnsoft)',
-                border: '1px solid ***REMOVED***ecd9ae',
-                borderRadius: 6,
-              }}
-            >
-              <span style={{ color: 'var(--color-warn)', marginTop: 1 }}>
-                <IconAlert size={16} />
-              </span>
-              <div style={{ fontSize: 12.5, color: '***REMOVED***8a5a12', lineHeight: 1.65 }}>
-                还没有今年的放假安排 —— 假期与调休判断会按普通周历走。
-                国务院通常每年 11 月发布次年安排，发布后运行
-                <span className="num"> npm run fetch:holidays </span>
-                即可更新。
-              </div>
-            </div>
-          ) : (
-            <p
-              style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 8, lineHeight: 1.7 }}
-            >
-              放假与调休安排取自中国政府网发布的国务院办公厅通知，由
-              <span className="num"> scripts/fetch-holidays.mjs </span>
-              解析生成；判断一律按北京时间。
-            </p>
-          )}
-        </div>
+        {/*
+          这里原来有一块「节假日与调休」面板（数据存储 / 数据来源 / 覆盖年份 / 校准时间
+          + 一段数据来源说明）。2026-09 按用户要求整块删除（"用不着说明"，
+          见 功能设计与不变量.md §十七 17.2）。
+          ⚠️ 只是删显示：节假日与调休的**判断**一处都没动 ——
+             `isRestDay` / `dayKind` / `holidayOn` / `nextHoliday` 以及
+             `data/holidays.ts` 的数据仍被教室端（今天放假 / 下课铃）和周一顺延使用。
+             别因为这里空了就把 lib/holiday.ts 当成死代码删掉。
+        */}
 
         {/* 关于 */}
         <div className="mb-4">
