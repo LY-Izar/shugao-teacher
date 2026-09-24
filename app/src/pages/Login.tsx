@@ -6,7 +6,7 @@ import { useStore, useToast } from '../data/store'
 import { toEmail } from '../lib/accounts'
 import { getSupabase, isRemote } from '../lib/supabase'
 import { markLogin, setDeviceRole } from '../lib/session'
-import { APP_VERSION } from '../lib/version'
+import { APP_VERSION_LABEL } from '../lib/version'
 
 /*
  * 登录名 → 邮箱：`toEmail()` 在 `lib/accounts.ts`。
@@ -120,7 +120,15 @@ export default function Login() {
           <div className="panel-head sweep" style={{ position: 'relative' }}>
             <h2>账号登录</h2>
             <span className="flex-1" />
-            <span className="tag tag-idle">S1 演示</span>
+            {/*
+             * 这里原先是「S1 演示」—— 那是"分阶段交付 S1–S5"时期留下的标签，
+             * 平台早就过了那个阶段，留着只会让人误以为这是演示版（正式环境上尤其误导）。
+             * 换成**当前版本号 + 构建哈希**：排查"线上跑的是哪一版"时，
+             * 登录页是所有人第一眼看到的那一屏（以前只能去比对线上 JS 的文件哈希）。
+             */}
+            <span className="tag tag-idle num" title="前端版本 · 后一段是构建产物的哈希">
+              {APP_VERSION_LABEL}
+            </span>
           </div>
 
           <div className="flex flex-col gap-4 p-4">
@@ -201,7 +209,7 @@ export default function Login() {
           </div>
         </form>
 
-        {/* 状态条 */}
+        {/* 状态条（版本号不在这里重复一遍：它已经在上面「账号登录」右侧那一枚标签上） */}
         <div
           className="mt-5 flex items-center gap-2 px-1"
           style={{ fontSize: 11.5, color: 'var(--color-ink4)' }}
@@ -210,8 +218,6 @@ export default function Login() {
           <span>
             {isRemote ? '已连接云端 · 手机与教室端共享数据' : '本地存储模式 · 尚未连接 Supabase'}
           </span>
-          <span className="flex-1" />
-          <span className="num">v{APP_VERSION}</span>
         </div>
       </div>
     </div>

@@ -43,13 +43,14 @@ export type Teacher = {
 /* ---------------- 身份（角色） ---------------- */
 
 /**
- * 身份代码。**判据在数据库**（`teacher_roles.role` 的 check 约束 + `schema.sql` §13.2 的
- * `is_super_admin()` / `can_manage_teachers()`），这里只是它的前端镜像 ——
+ * 身份代码。**判据在数据库**（`teacher_roles.role` 的 check 约束 + `schema.sql` §13.2 / §16.2 的
+ * `is_super_admin()` / `can_manage_teachers()` / `is_school_admin()`），这里只是它的前端镜像 ——
  * 前端拿它决定「显示哪些入口 / 标签」，**不用来决定"能不能写"**（见 §11.3 的纪律）。
  *
  * 两个容易混的身份，别再当成一个：
  *  · `super` 最高管理员（平台维护者）
- *  · `admin` 行政老师（教导处/办公室；能建号、能看全校，但**不能指派身份**）
+ *  · `admin` 教导处 / 校级行政（用户 2026-09-27 口径：显示成「教导处」；
+ *    能建号、能看全校、**也能指派身份**。代码 `admin` 不改名 —— 那是破坏性迁移）
  */
 export type RoleCode = 'super' | 'grade_head' | 'head_teacher' | 'admin' | 'teacher'
 

@@ -14,7 +14,7 @@ import {
   type Directory,
   type DirTeacher,
 } from '../lib/accounts'
-import { isSuperAdmin, roleName } from '../lib/roles'
+import { canAssignRoles, roleName } from '../lib/roles'
 import { SUBJECTS, asSubjectCode, subjectName } from '../lib/subjects'
 
 /**
@@ -26,7 +26,8 @@ import { SUBJECTS, asSubjectCode, subjectName } from '../lib/subjects'
  *   ② **任课关系**（谁教哪个班哪一科）—— 它决定这位老师登录后
  *      看得见哪些班、以及**哪一科的作业**（见 `schema.sql` §13.4 的读策略）。
  *   ③ **身份** —— 班主任 / 年级主任看一个班（年级）的**所有学科**；
- *      行政老师和最高管理员能管账号，但**只有最高管理员能指派身份**。
+ *      最高管理员和教导处都能管账号、**都能指派身份**
+ *      （用户 2026-09-27：「班主任，年级主任的身份也要由行政管理（教导处）给」）。
  *
  * 🔴 这一页的按钮显隐只是"少点几下"，**不是判据**：
  *    真正的闸门在服务端（`functions/api/teacher-account.ts` 拿你的 JWT 去问
@@ -39,7 +40,7 @@ export default function TeacherAccounts() {
   const myRoles = useStore((s) => s.myRoles)
   const userId = useStore((s) => s.userId)
   const refreshMyRoles = useStore((s) => s.refreshMyRoles)
-  const superAdmin = isSuperAdmin(myRoles)
+  const canAssign = canAssignRoles(myRoles)
 
   const [dir, setDir] = useState<Directory | null>(null)
   const [err, setErr] = useState<string | null>(null)
@@ -135,7 +136,7 @@ export default function TeacherAccounts() {
                   </Button>
                 </div>
                 <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 8, lineHeight: 1.7 }}>
-                  只有<b>最高管理员</b>和<b>行政老师</b>能建号。指派身份（班主任 / 年级主任）只有最高管理员能做。
+                  只有<b>最高管理员</b>和<b>教导处</b>能建号、指派身份（班主任 / 年级主任）。
                 </p>
               </Panel>
             </div>
@@ -272,7 +273,7 @@ export default function TeacherAccounts() {
         key={target?.id ?? 'none'}
         teacher={target}
         dir={dir}
-        superAdmin={superAdmin}
+        canAssign={canAssign}
         isMe={target?.id === userId}
         onClose={() => setTarget(null)}
         onChanged={afterChange}
@@ -471,14 +472,14 @@ function CreateSheet({
 function TeacherSheet({
   teacher,
   dir,
-  superAdmin,
+  canAssign,
   isMe,
   onClose,
   onChanged,
 }: {
   teacher: DirTeacher | null
   dir: Directory | null
-  superAdmin: boolean
+  canAssign: boolean
   isMe: boolean
   onClose: () => void
   onChanged: (teacherId: string) => Promise<void>
@@ -625,7 +626,7 @@ function TeacherSheet({
       {/* ---- 身份 ---- */}
       <div className="mt-5">
         <span className="label">身份</span>
-        {superAdmin ? (
+        {canAssign ? (
           <>
             <div className="flex flex-col gap-2">
               <select className="input" value={roleKind} onChange={(e) => {
@@ -635,7 +636,7 @@ function TeacherSheet({
                 <option value="">加一个身份…</option>
                 <option value="grade_head">{roleName('grade_head')}（看本年级所有学科）</option>
                 <option value="head_teacher">{roleName('head_teacher')}（看本班所有学科）</option>
-                <option value="admin">{roleName('admin')}（能建号，看全校）</option>
+                <option value="admin">{roleName('admin')}（能建号、能指派身份，看全校）</option>
                 <option value="super">{roleName('super')}（全部权限）</option>
               </select>
               {roleNeedsScope ? (
@@ -714,8 +715,8 @@ function TeacherSheet({
           </>
         ) : (
           <p style={{ fontSize: 12.5, color: 'var(--color-ink3)', lineHeight: 1.7 }}>
-            指派身份（班主任 / 年级主任 / 行政老师 / 最高管理员）<b>只有最高管理员能做</b>。
-            你是行政老师：建号、任课关系、重置密码都可以。
+            指派身份（班主任 / 年级主任 / 教导处 / 最高管理员）<b>教导处与最高管理员都能做</b>。
+            你现在没有这两档身份里的任何一个 —— 这一页只能看。
           </p>
         )}
       </div>
