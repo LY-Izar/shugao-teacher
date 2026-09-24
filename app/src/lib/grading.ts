@@ -42,25 +42,109 @@ export function toggleSub(wrong: string[] | undefined, seq: number, sub: number)
   return cur.includes(k) ? cur.filter((x) => x !== k) : [...cur, k]
 }
 
+/** 改变某题小题数的结果 —— 顺带说清动了谁的哪条记录，界面才好如实告知 */
+export type SubImpact = {
+  /** 归一化后的错题记录 */
+  next: Assignment['wrong']
+  /** 已有记录被搬成小题记录的学号 */
+  migrated: string[]
+  /** 归一化后不再有任何记录的学号（他们的错题真的没了） */
+  dropped: string[]
+}
+
 /**
- * 改变某题的小题数时的归一化：
- * 拆出小题后「整题错」标记不再有意义，超出范围的旧小题标记也要清掉。
+ * 改变某题的小题数时的归一化。
+ *
+ * ⚠️ **「整题错」不能丢**：拆小题之后 `isQuestionWrong` 只看小题键，
+ * 一条 "3" 会变成谁也看不见的孤儿，而下一次 `finish()` 照样把它写回档案。
+ * 原来的写法直接把它删掉 —— 于是"第 3 题已有 10 人记错，双击拆小题就清零"。
+ * 现在整题错的记录**同时落到每个小题上**（教师可以逐个取消），
+ * 缩小/取消小题时才真正删除，并且由调用方先向教师确认。
  */
-export function normalizeForSubCount(
-  wrong: Assignment['wrong'],
-  seq: number,
-  count: number,
-): Assignment['wrong'] {
+export function normalizeForSubCount({
+  wrong,
+  before = 0,
+  seq,
+  count,
+}: {
+  wrong: Assignment['wrong']
+  /** 这一题原来的小题数 —— 用来分辨"从整题拆出小题"和"已经是小题了" */
+  before?: number
+  seq: number
+  count: number
+}): SubImpact {
   const next: Assignment['wrong'] = {}
+  const migrated: string[] = []
+  const dropped: string[] = []
+  /** 0 → n 才算"拆出小题"；反过来（n > 0 → 0）是"恢复成整题" */
+  const splitting = before <= 0 && count > 0
   for (const [no, keys] of Object.entries(wrong)) {
-    next[no] = keys.filter((k) => {
+    const mine: string[] = []
+    const kept: string[] = []
+    for (const k of keys) {
       const p = parseQKey(k)
-      if (p.seq !== seq) return true
-      if (p.sub === undefined) return false
-      return p.sub <= count
-    })
+      if (p.seq !== seq) kept.push(k)
+      else mine.push(k)
+    }
+    const whole = mine.some((k) => parseQKey(k).sub === undefined)
+    const subs = mine
+      .map((k) => parseQKey(k).sub)
+      .filter((s): s is number => s !== undefined)
+    if (count <= 0) {
+      // 恢复成一个整题：整题错的记录照样成立，小题记录没有位置可放
+      if (whole) kept.push(qKey(seq))
+    } else if (whole && splitting) {
+      // 从整题拆出小题：整题错同时落到每个小题上，一条都不丢
+      for (let s = 1; s <= count; s++) kept.push(qKey(seq, s))
+    } else {
+      /*
+       * 已经是小题结构（或有小题记录）时的缩小/调整。
+       * 注意：**整题键不能留** —— `isQuestionWrong` 在小题结构下只看小题键，
+       * 留一条 "3" 就是一条谁也看不见、却算进统计的幽灵记录。
+       */
+      for (const s of subs) if (s <= count) kept.push(qKey(seq, s))
+    }
+    const uniq = [...new Set(kept)]
+    if (uniq.length) next[no] = uniq
+    else dropped.push(no)
+    // 有记录的这题、改完之后仍然看得见，且键确实变了 → 算「搬过去」；否则是「删掉」
+    const nowMine = uniq.filter((k) => parseQKey(k).seq === seq)
+    const changed = mine.length !== nowMine.length || mine.some((k) => !nowMine.includes(k))
+    const stillVisible = nowMine.some((k) => (count === 0 ? parseQKey(k).sub === undefined : true))
+    if ((whole || subs.length > 0) && changed && stillVisible) migrated.push(no)
   }
-  return next
+  return { next, migrated, dropped }
+}
+
+/**
+ * 把一个人登记为「未交」时要删掉的批改记录（不变量 I5：没交不能有错题）。
+ *
+ * 逐个字段对着 §二 的字段语义表判断：
+ *  · `wrong` / `confirmedNos` / `correctionNos` / `correctedNos` / `grades`
+ *    都是**批改的产物** —— 人没交就没得批，留着就是"未交 ∩ 已批改"的矛盾数据；
+ *  · `focusNos` **不动**：它是教师对学生本人的标注（全对也可能被标），
+ *    不是批改结论 —— 他这次没交，照样值得盯。
+ */
+export function clearStudentRecords(
+  a: Pick<
+    Assignment,
+    'wrong' | 'confirmedNos' | 'correctionNos' | 'correctedNos' | 'grades'
+  >,
+  nos: string[],
+): Partial<Assignment> {
+  if (nos.length === 0) return {}
+  const gone = new Set(nos)
+  const wrong: Assignment['wrong'] = {}
+  for (const [k, v] of Object.entries(a.wrong ?? {})) if (!gone.has(k)) wrong[k] = v
+  const grades: Record<string, string> = {}
+  for (const [k, v] of Object.entries(a.grades ?? {})) if (!gone.has(k)) grades[k] = v
+  return {
+    wrong,
+    grades,
+    confirmedNos: (a.confirmedNos ?? []).filter((n) => !gone.has(n)),
+    correctionNos: (a.correctionNos ?? []).filter((n) => !gone.has(n)),
+    correctedNos: (a.correctedNos ?? []).filter((n) => !gone.has(n)),
+  }
 }
 
 /** 反向题：某题的错题数 */

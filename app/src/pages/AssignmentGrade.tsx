@@ -2,6 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Page } from '../components/AppShell'
 import {
+  IconAlert,
   IconCheck,
   IconInfo,
   IconMinus,
@@ -13,18 +14,28 @@ import {
 import { Button, PageHead, Panel, Sect, Sheet, StatStrip, Tag } from '../components/ui'
 import { useStore, useToast } from '../data/store'
 import type { Assignment, Student } from '../data/types'
+import { parseQKey } from '../data/types'
 import {
   BAND_META,
   gradeStats,
   isQuestionWrong,
   isSubWrong,
   normalizeForSubCount,
+  type SubImpact,
   toggleQuestion,
   toggleSub,
 } from '../lib/grading'
 import { friendlyDate } from '../lib/date'
 
 type Mode = 'byStudent' | 'byQuestion'
+
+/**
+ * 双击拆小题时，第一下单击需要撤销的信息。
+ *
+ * `previous` 是**点第一下之前**这个学生的错题记录（没有就是空数组）——
+ * 不存快照、改用 toggle 反推的话，他原本就记过这一题时会把那一条也撤掉。
+ */
+type SubUndo = { no: string; previous: string[] }
 
 /* ============================================================
    题号按钮
@@ -45,27 +56,43 @@ function QButton({
   wrong: string[]
   onToggle: () => void
   onSub: (sub: number) => void
-  onSetSubCount: (n: number) => void
+  /** `previous` = 双击第一下之前这个学生的错题记录快照（撤销用） */
+  onSetSubCount: (n: number, previous?: string[]) => void
   onSubSettings: () => void
 }) {
   const lastTap = useRef(0)
   const pressTimer = useRef<number | null>(null)
   const longFired = useRef(false)
   const whole = isQuestionWrong(wrong, seq, subCount)
+  /*
+   * 双击的**第二下**点到的是上一次渲染留下的那个实例，props 还停在第一下之前。
+   * 所以"第一下点了什么、之前是什么样、现在能不能拆"都要自己记下来，第二下才撤得干净。
+   * 不能用 `whole`/`wrong`/`subCount` 反推：那还是旧值（这就是原来撤回失效的原因）。
+   *
+   * 用 effect 同步而不是渲染期赋值 —— 渲染期写 ref 会被 lint 挡下来（react(refs)）。
+   * 事件在渲染与 effect 之后才发生，读到的就是最新值。
+   */
+  const latest = useRef({ subCount, wrong, onToggle })
+  useEffect(() => {
+    latest.current = { subCount, wrong, onToggle }
+  })
+  const preTap = useRef<string[] | null>(null)
 
   const handleTap = () => {
     const now = Date.now()
     if (now - lastTap.current < 300) {
       lastTap.current = 0
       // 双击：只在还没有小题时直接拆出两个，不再弹窗打断
-      if (subCount === 0) {
-        if (whole) onToggle() // 回退刚才那次单击
-        onSetSubCount(2)
+      if (latest.current.subCount === 0) {
+        const previous = preTap.current
+        preTap.current = null
+        onSetSubCount(2, previous ?? undefined)
       }
       return
     }
     lastTap.current = now
-    onToggle()
+    preTap.current = latest.current.wrong
+    latest.current.onToggle()
   }
 
   return (
@@ -228,11 +255,12 @@ function SubEditor({
         ))}
       </div>
       <p style={{ fontSize: 12, color: 'var(--color-ink3)', marginTop: 12, lineHeight: 1.65 }}>
-        平时<strong>双击题号</strong>就能直接拆出 (1)(2)，题号格里的 <strong>+</strong> 可以继续加 ——
-        都不需要经过这里。这个面板只在<strong>长按</strong>时打开，用来减少小题数或取消小题。
+        平时<strong>双击题号</strong>就能直接拆出 (1)(2)。这个面板在<strong>长按</strong>题号时打开，
+        用来改成别的小题数、或取消小题。
       </p>
-      <p style={{ fontSize: 12, color: 'var(--color-bad)', marginTop: 8, lineHeight: 1.65 }}>
-        取消小题会把这一题恢复成一个整题，已记录的小题对错会被清除。
+      <p style={{ fontSize: 12, color: 'var(--color-warn)', marginTop: 8, lineHeight: 1.65 }}>
+        这一题上已经有人记过错。拆小题会把「整题错」改记到每个小题上（不会丢），
+        减少或取消小题则会真的删掉一部分记录 —— 动手前会先把名单列给你确认。
       </p>
     </Sheet>
   )
@@ -375,6 +403,18 @@ function GradeSession({
    */
   const [draft] = useState(() => pickDraft(DRAFT_KEY, initialConfirmed))
   const [wrong, setWrong] = useState<Assignment['wrong']>(() => draft?.wrong ?? initialWrong)
+  /**
+   * 错题记录的**最新值**。
+   *
+   * 双击题号时第二下点到的还是**上一次渲染**的那个 QButton 实例 ——
+   * 它闭包里的 `wrong` 停留在第一下之前（少了刚记上的那一条）。
+   * 拆小题要按真实数据算"谁会被动到"，所以这里留一份跟着渲染更新的副本，
+   * 撤销与影响范围都读它。
+   */
+  const wrongRef = useRef(wrong)
+  useEffect(() => {
+    wrongRef.current = wrong
+  }, [wrong])
   const [subs, setSubs] = useState<Record<string, number>>(() => draft?.subs ?? initialSubs)
   const [confirmed, setConfirmed] = useState<string[]>(() => draft?.confirmed ?? initialConfirmed)
   const [showRestored, setShowRestored] = useState(Boolean(draft))
@@ -451,6 +491,13 @@ function GradeSession({
   const [mode, setMode] = useState<Mode>('byStudent')
   const [curQ, setCurQ] = useState(1)
   const [editing, setEditing] = useState<number | null>(null)
+  /** 拆小题前卡住的那一步：确认后才知道动的是哪些人的记录 */
+  const [pendingSub, setPendingSub] = useState<{
+    seq: number
+    n: number
+    /** 已经算好的归一化结果 —— 确认时直接用它落盘，不重算 */
+    impact: SubImpact
+  } | null>(null)
   const [askedDone, setAskedDone] = useState(false)
   /** 弹层里的步骤：先选保存方式，再选改错名单 */
   const [step, setStep] = useState<'choose' | 'select'>('choose')
@@ -470,6 +517,20 @@ function GradeSession({
         : null,
     [assignment, students, wrong, subs, confirmed],
   )
+
+  /**
+   * 未交名单：这些人**不能批改**（不变量 I3）。
+   * 用 Set 是为了在 map 里 O(1) 判断 —— 一份档案几十人，不必每次 includes 扫一遍。
+   */
+  const missingSet = useMemo(
+    () => new Set(assignment?.missingNos ?? []),
+    [assignment?.missingNos],
+  )
+
+  /* 展开的学生在别处被登记成未交时，把面板收掉 —— 不然那里还留着一片可点的题号 */
+  useEffect(() => {
+    if (open && missingSet.has(open)) setOpen(null)
+  }, [open, missingSet])
 
   /* 展开的题号面板若在视口外，自动滚到可见位置 —— 让老师不用手动滑 */
   useEffect(() => {
@@ -494,10 +555,30 @@ function GradeSession({
   const confirm = (no: string) => setConfirmed((c) => (c.includes(no) ? c : [...c, no]))
 
   /**
+   * 这题上"会有记录被搬走或被删掉"的学号（按学号排序，界面好读）。
+   *
+   * ⚠️ 判断"谁在这题上有记录"必须按**当前**的错题记录来 ——
+   * `impact.next` 里已经带上迁移后的新键，拿它当依据的话，
+   * 连"只有别的题记错"的人也会被算进来，凭空多弹一次确认。
+   *
+   * `skip` 是双击第一下刚碰过的那个学号（他正在被撤回）。
+   * 传进来的记录里已经不含他了，但下拉列表是照记录筛的 —— 不排除掉的话，
+   * 弹层里的人数会和"这一题现在记着 N 个人"对不上。
+   */
+  const subAffected = (seq: number, impact: SubImpact, skip: string[] = []) => {
+    const nos = new Set([...impact.migrated, ...impact.dropped])
+    for (const [no, keys] of Object.entries(wrongRef.current)) {
+      if (keys.some((k) => parseQKey(k).seq === seq)) nos.add(no)
+    }
+    for (const no of skip) nos.delete(no)
+    return students.filter((s) => nos.has(s.studentNo)).map((s) => s.studentNo)
+  }
+
+  /**
    * 登记为「未交」的学生**不能批改** —— 人没交本子，哪来的错题。
    * 要批先回收缴页把他改回已交。
    */
-  const isMissing = (no: string) => (assignment?.missingNos ?? []).includes(no)
+  const isMissing = (no: string) => missingSet.has(no)
   const blocked = () => push({ text: '这位同学登记为未交，先去收缴页改回已交才能批', tone: 'warn' })
 
   /**
@@ -535,6 +616,11 @@ function GradeSession({
   }
 
   const toggleSubFor = (no: string, seq: number, sub: number) => {
+    // 小题按钮和三态循环走的是两个入口 —— 判定入口只能有一个（见 §十）
+    if (isMissing(no)) {
+      blocked()
+      return
+    }
     setTaps((t) => t + 1)
     const next = toggleSub(wrong[no], seq, sub)
     setWrong((w) => ({ ...w, [no]: next }))
@@ -542,19 +628,65 @@ function GradeSession({
     else confirm(no)
   }
 
-  const applySubs = (seq: number, n: number) => {
+  /**
+   * 拆 / 减小题会影响**全班**：这一题的错题记录都要跟着变。
+   *
+   * 三步走：
+   *  1. 结构没变（长按面板原样点「完成」）→ 什么都不做，直接关面板；
+   *  2. 算清"动了谁的记录"：已经有记录的这题，整题错会被搬成小题记录（保留），
+   *     缩小或取消小题才会真删；
+   *  3. 有人会被删 → **先把名单摆给教师确认**；没人会被动到 → 直接改，不打断。
+   *
+   * 另外，这里**不能碰 `correctionNos`**：改错名单是"错了要去改的人"的独立名单，
+   * 改小题结构不该顺手把名单也改了。
+   */
+  const applySubs = (seq: number, n: number, undo?: SubUndo) => {
+    const before = subCountOf(seq)
+    /*
+     * 结构没变（比如长按打开面板、原样点了「完成」）而且没有要撤回的单击 ——
+     * 什么都别动。少了这一步，一次无意义的"完成"也会把整题错的记录改写成小题记录，
+     * 白白多弹一次确认。
+     */
+    if (before === n && !undo) {
+      setEditing(null)
+      setPendingSub(null)
+      return
+    }
+    /*
+     * ⚠️ 读 `wrongRef` 而不是闭包里的 `wrong`。
+     * 双击拆小题的第二下，`onSetSubCount` 还是上一次渲染留下的实例，
+     * 闭包里的记录少了第一下刚记上的那一条（那张卡片没有重渲染）。
+     */
+    const live = wrongRef.current
+    // 双击的第一下已经落了一条"记错"，这里按它**之前**的样子撤回来
+    const undone: Assignment['wrong'] = undo ? { ...live, [undo.no]: undo.previous } : live
+    const impact = normalizeForSubCount({ wrong: undone, before, seq, count: n })
+    const touched = subAffected(seq, impact, undo?.no ? [undo.no] : [])
+    if (touched.length === 0) {
+      commitSubs(seq, n, impact)
+      return
+    }
+    setPendingSub({ seq, n, impact })
+    setEditing(null)
+  }
+
+  /** 确认之后才真正改结构、落记录 */
+  const commitSubs = (seq: number, n: number, impact: SubImpact) => {
     setSubs((s) => {
       const next = { ...s }
       if (n <= 0) delete next[String(seq)]
       else next[String(seq)] = n
       return next
     })
-    setWrong((w) => normalizeForSubCount(w, seq, n))
+    setWrong(impact.next)
     setEditing(null)
+    setPendingSub(null)
     push({
       text: n > 0 ? `第 ${seq} 题已拆成 ${n} 个小题` : `第 ${seq} 题已取消小题`,
       tone: 'ok',
-      desc: '已同步到整份档案',
+      desc: impact.migrated.length
+        ? `${impact.migrated.length} 人的记录已改记到小题上，没有丢`
+        : '已同步到整份档案',
     })
   }
 
@@ -625,6 +757,12 @@ function GradeSession({
   const doneSet = new Set(confirmed)
   const todo = students.filter((s) => !doneSet.has(s.studentNo) || open === s.studentNo)
   const doneList = students.filter((s) => doneSet.has(s.studentNo) && open !== s.studentNo)
+
+  /* 待确认的拆小题：要如实告诉他这一题上现在记着谁（不用 useMemo，几十个人直接筛） */
+  const pendingSubNo = pendingSub?.seq ?? -1
+  const pendingWrong = students.filter((s) =>
+    (wrong[s.studentNo] ?? []).some((k) => parseQKey(k).seq === pendingSubNo),
+  )
 
   return (
     <>
@@ -937,6 +1075,10 @@ function GradeSession({
                                 size="sm"
                                 variant="primary"
                                 onClick={() => {
+                                  if (isMissing(s.studentNo)) {
+                                    blocked()
+                                    return
+                                  }
                                   setWrong((w) => ({ ...w, [s.studentNo]: [] }))
                                   setTaps((t) => t + 1)
                                   // 「全对」是要点出来的动作，不点就不算批过
@@ -1000,6 +1142,10 @@ function GradeSession({
                                     key={lv}
                                     type="button"
                                     onClick={() => {
+                                      if (isMissing(s.studentNo)) {
+                                        blocked()
+                                        return
+                                      }
                                       setGrades((g) => ({ ...g, [s.studentNo]: lv }))
                                       setTaps((t) => t + 1)
                                       confirm(s.studentNo)
@@ -1036,7 +1182,9 @@ function GradeSession({
                                   wrong={wrong[s.studentNo] ?? []}
                                   onToggle={() => toggleFor(s.studentNo, seq)}
                                   onSub={(sub) => toggleSubFor(s.studentNo, seq, sub)}
-                                  onSetSubCount={(n) => applySubs(seq, n)}
+                                  onSetSubCount={(n, previous) =>
+                                    applySubs(seq, n, previous ? { no: s.studentNo, previous } : undefined)
+                                  }
                                   onSubSettings={() => setEditing(seq)}
                                 />
                               ))}
@@ -1212,6 +1360,81 @@ function GradeSession({
           onClose={() => setEditing(null)}
           onApply={(n) => applySubs(editing, n)}
         />
+      ) : null}
+
+      {/*
+        拆/减小题前把"谁会被动到"如实摆出来。
+        这道题上已经有人记过错 —— 直接改结构会悄悄抹掉他们的记录（原来的写法就是这样），
+        所以先确认一次：拆小题只是把整题错搬成小题错，减小题才是真的删。
+      */}
+      {pendingSub ? (
+        <Sheet
+          open
+          onClose={() => setPendingSub(null)}
+          title={pendingSub.n > 0 ? `第 ${pendingSub.seq} 题拆成小题？` : `取消第 ${pendingSub.seq} 题的小题？`}
+          footer={
+            <div className="flex gap-2">
+              <Button block onClick={() => setPendingSub(null)}>
+                算了
+              </Button>
+              <Button
+                block
+                variant="primary"
+                onClick={() => commitSubs(pendingSub.seq, pendingSub.n, pendingSub.impact)}
+              >
+                {pendingSub.n > 0 ? '确认拆小题' : '确认取消小题'}
+              </Button>
+            </div>
+          }
+        >
+          <div className="flex items-start gap-2.5">
+            <span
+              style={{
+                color: pendingSub.n > 0 ? 'var(--color-warn)' : 'var(--color-bad)',
+                marginTop: 1,
+              }}
+            >
+              <IconAlert size={17} />
+            </span>
+            <div style={{ fontSize: 13, lineHeight: 1.8, color: 'var(--color-ink2)' }}>
+              这一题现在记着 <b className="num">{pendingWrong.length}</b> 个人的错。
+              {pendingSub.n > 0 ? (
+                <>
+                  <br />
+                  拆成 <b className="num">{pendingSub.n}</b> 个小题后，每一条「整题错」
+                  都会同时记到每个小题上 —— <b>一条都不会少</b>。
+                  谁其实只错了一部分，再点一下对应的小题取消就行。
+                </>
+              ) : (
+                <>
+                  <br />
+                  取消小题会把这一题恢复成一个整题，上面这些人的错题记录
+                  <b>会一起删掉</b>，且不能撤销。
+                </>
+              )}
+            </div>
+          </div>
+          {pendingWrong.length ? (
+            <div className="mt-3 flex flex-wrap gap-1.5">
+              {pendingWrong.map((s) => (
+                <span
+                  key={s.id}
+                  className="num"
+                  style={{
+                    padding: '2px 7px',
+                    background: 'var(--color-badsoft)',
+                    color: 'var(--color-bad)',
+                    borderRadius: 3,
+                    fontSize: 12,
+                    fontWeight: 700,
+                  }}
+                >
+                  {s.studentNo}
+                </span>
+              ))}
+            </div>
+          ) : null}
+        </Sheet>
       ) : null}
 
       {/* 完成批改：两条路 —— 临时保存 / 确认完成（未批改的记为未交） */}

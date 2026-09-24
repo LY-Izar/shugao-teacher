@@ -528,6 +528,13 @@ export const useStore = create<State>()(
              */
             const done = new Set(a.confirmedNos ?? [])
             for (const no of data.confirmedNos ?? []) done.add(no)
+            /**
+             * 「已改错」必须跟着改错名单一起收缩。
+             * 只写名单不清理的话，一次"全选有错"把名单换掉就会留下孤儿记录，
+             * 列表按钮会显示「2/1」这种"已改的比该改的还多"的数。
+             * 名单是 `?? ` 继承来的，所以这里按**合并后**的名单过滤，谁写都能兜住。
+             */
+            const correctionNos = data.correctionNos ?? a.correctionNos ?? []
             return {
               ...a,
               wrong: data.wrong ?? a.wrong,
@@ -537,8 +544,10 @@ export const useStore = create<State>()(
               gradeSeconds: data.gradeSeconds ?? a.gradeSeconds,
               grades: data.grades ?? a.grades,
               focusNos: data.focusNos ?? a.focusNos,
-              correctionNos: data.correctionNos ?? a.correctionNos,
-              correctedNos: data.correctedNos ?? a.correctedNos,
+              correctionNos,
+              correctedNos: (data.correctedNos ?? a.correctedNos ?? []).filter((n) =>
+                correctionNos.includes(n),
+              ),
               missingNos: (data.missingNos ?? a.missingNos).filter((n) => !done.has(n)),
               lateNos: (a.lateNos ?? []).filter((n) => !done.has(n)),
               // 已经有人在批 = 收缴这一步事实上过去了

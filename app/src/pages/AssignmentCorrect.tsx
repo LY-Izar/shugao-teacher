@@ -77,7 +77,17 @@ export default function AssignmentCorrect() {
   }
 
   const setCorrected = (nos: string[]) => updateAssignment(id, { correctedNos: nos })
-  const setCorrection = (nos: string[]) => updateAssignment(id, { correctionNos: nos })
+  /**
+   * 改名单时**顺手把「已改错」里已经不在名单上的人清掉**。
+   *
+   * 不过滤的话，名单一收缩就留下孤儿记录：按钮会显示「2/1」这种
+   * 「已改的比该改的还多」的数，而且那个人再也点不到 —— 撤销入口跟着名单一起没了。
+   */
+  const setCorrection = (nos: string[]) =>
+    updateAssignment(id, {
+      correctionNos: nos,
+      correctedNos: corrected.filter((n) => nos.includes(n)),
+    })
 
   const toggleCorrected = (no: string) =>
     setCorrected(corrected.includes(no) ? corrected.filter((x) => x !== no) : [...corrected, no])

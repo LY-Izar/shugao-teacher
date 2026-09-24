@@ -18,6 +18,7 @@ import { Button, PageHead, Panel, Portal, Sect, Sheet, StatStrip, Tag } from '..
 import { useStore, useToast } from '../data/store'
 import type { Assignment, Student } from '../data/types'
 import { analyzeScan, simulateCollectScan, type ScanAnalysis } from '../lib/assignments'
+import { clearStudentRecords } from '../lib/grading'
 import { recognize, splitByConfidence, type OcrCount } from '../lib/ocr'
 import { preparePhoto, type PreparedPhoto, type Rotate } from '../lib/photo'
 import { isRemote } from '../lib/supabase'
@@ -131,6 +132,14 @@ export default function AssignmentCollect() {
   const [mode, setMode] = useState<'missing' | 'late'>('missing')
   /** 待确认降级为未交的学生学号（他已批改过，要先确认删掉批改记录） */
   const [demoteNo, setDemote] = useState<string | null>(null)
+  /**
+   * 「保存登记」卡在确认上的那一步。
+   * 照片预填出来的未交名单**不经过三态循环**，所以它是最容易绕开降级确认的一条路：
+   * 先批改、后拍照登记，就会产生"未交 ∩ 已批改"的矛盾数据。
+   */
+  const [pendingSave, setPendingSave] = useState<{ missingNos: string[]; lateNos: string[] } | null>(
+    null,
+  )
   const [stage, setStage] = useState<Stage>('idle')
   const [step, setStep] = useState(0)
   const [scan, setScan] = useState<ScanAnalysis | null>(null)
@@ -312,17 +321,53 @@ export default function AssignmentCollect() {
     setMark((prev) => ({ ...prev, [no]: 'missing' }))
   }
 
-  /** 确认把已批改的人改成未交：批改记录一起删，不能留一份"没交却有错题"的数据 */
+  /** 已经批改过的人：有错题记录，或者被确认过（判过"全对"也算批过） */
+  const graded = (no: string) =>
+    (assignment?.confirmedNos ?? []).includes(no) || (assignment?.wrong?.[no]?.length ?? 0) > 0
+
+  /** 名单里"已经批改过、却要被登记成未交"的人 —— 保存前必须先问一句 */
+  const demoteStudents = (nos: string[]) =>
+    students.filter((s) => nos.includes(s.studentNo) && graded(s.studentNo)).map((s) => s.studentNo)
+
+  /**
+   * 确认把已批改的人改成未交：批改记录一起删，不能留一份"没交却有错题"的数据。
+   *
+   * 清哪些字段交给 `clearStudentRecords` 判定（对照 §二 的字段语义表）——
+   * 原来的写法只删了 `wrong` / `confirmedNos`，`correctionNos`、`correctedNos`、
+   * `grades` 全留着，于是改错登记里还挂着一个"没交的人要去改错"。
+   * `focusNos` 保留：那是对人的标注，跟他这次交没交无关。
+   */
   const doDemote = (no: string) => {
     if (!assignment) return
-    const nextWrong = { ...assignment.wrong }
-    delete nextWrong[no]
-    updateAssignment(assignment.id, {
-      wrong: nextWrong,
-      confirmedNos: assignment.confirmedNos.filter((x) => x !== no),
-    })
+    updateAssignment(assignment.id, clearStudentRecords(assignment, [no]))
     setMark((m) => ({ ...m, [no]: 'missing' }))
     setDemote(null)
+  }
+
+  /** 真正落库 —— 名单 + 批改记录的清理一次性写下去 */
+  const commitSave = (missingNos: string[], lateNos: string[], clean: string[] = []) => {
+    if (!assignment) return
+    if (clean.length) updateAssignment(assignment.id, clearStudentRecords(assignment, clean))
+    setCollection(assignment.id, { missingNos, lateNos, collected: true })
+    setPendingSave(null)
+    push({
+      text: `收缴已登记：已交 ${students.length - missingNos.length}/${students.length}`,
+      tone: 'ok',
+      desc: missingNos.length ? `${missingNos.length} 人未交` : '全员交齐',
+    })
+    navigate('/assignments')
+  }
+
+  /** 「保存登记」：有"已批改的人被标成未交"就先确认，否则直接存 */
+  const save = () => {
+    if (!assignment) return
+    const missingNos = missing.map((s) => s.studentNo)
+    const lateNos = late.map((s) => s.studentNo)
+    if (demoteStudents(missingNos).length) {
+      setPendingSave({ missingNos, lateNos })
+      return
+    }
+    commitSave(missingNos, lateNos)
   }
 
   return (
@@ -990,19 +1035,7 @@ export default function AssignmentCollect() {
           block
           variant="primary"
           icon={<IconChevronRight size={16} />}
-          onClick={() => {
-            setCollection(assignment.id, {
-              missingNos: missing.map((s) => s.studentNo),
-              lateNos: late.map((s) => s.studentNo),
-              collected: true,
-            })
-            push({
-              text: `收缴已登记：已交 ${submitted}/${students.length}`,
-              tone: 'ok',
-              desc: missing.length ? `${missing.length} 人未交` : '全员交齐',
-            })
-            navigate('/assignments')
-          }}
+          onClick={save}
         >
           保存登记
         </Button>
@@ -1043,8 +1076,76 @@ export default function AssignmentCollect() {
             {students.find((s) => s.studentNo === demoteNo)?.name ?? ''} 已经有批改记录（错了{' '}
             <b className="num">{assignment?.wrong?.[demoteNo ?? '']?.length ?? 0}</b> 处）。
             <br />
-            改成未交的话，<b>这份批改记录会一起删掉</b>，且不能撤销。
+            改成未交的话，<b>这份批改记录会一起删掉</b> —— 错题、改错名单里的名字、
+            「已改错」的登记都会一并清掉，且不能撤销。
+            <br />
+            <span style={{ color: 'var(--color-ink3)', fontSize: 12 }}>
+              「需重点关注」的标记会留着 —— 那是对人的标注，跟他这次交没交无关。
+            </span>
           </div>
+        </div>
+      </Sheet>
+
+      {/* 名单里混进了已批改的人 → 保存前拦一道，别把"未交 ∩ 已批改"落库 */}
+      <Sheet
+        open={Boolean(pendingSave)}
+        onClose={() => setPendingSave(null)}
+        title="这些人已经批改过了"
+        footer={
+          <div className="flex gap-2">
+            <Button block onClick={() => setPendingSave(null)}>
+              回去改名单
+            </Button>
+            <Button
+              block
+              variant="primary"
+              onClick={() => {
+                if (!pendingSave) return
+                const clean = demoteStudents(pendingSave.missingNos)
+                commitSave(pendingSave.missingNos, pendingSave.lateNos, clean)
+              }}
+            >
+              一起删掉批改记录
+            </Button>
+          </div>
+        }
+      >
+        <div className="flex items-start gap-2.5">
+          <span style={{ color: 'var(--color-bad)', marginTop: 1 }}>
+            <IconAlert size={17} />
+          </span>
+          <div style={{ fontSize: 13, lineHeight: 1.8, color: 'var(--color-ink2)' }}>
+            这次要登记的未交名单里有 <b className="num">{demoteStudents(pendingSave?.missingNos ?? []).length}</b>{' '}
+            个人是有批改记录的 —— 多半是先批改、后拍的照片。
+            <br />
+            直接保存就会留下「没交、却有错题」的矛盾数据。
+            确认保存的话，<b>他们的批改记录会一起删掉</b>，且不能撤销；
+            如果他们其实交了，点「回去改名单」把红格子点回已交更稳妥。
+          </div>
+        </div>
+        <div className="mt-3 flex flex-wrap gap-1.5">
+          {students
+            .filter((s) => demoteStudents(pendingSave?.missingNos ?? []).includes(s.studentNo))
+            .map((s) => (
+              <span
+                key={s.id}
+                className="flex items-center gap-1.5 px-2 py-1"
+                style={{
+                  background: 'var(--color-badsoft)',
+                  borderRadius: 3,
+                  fontSize: 12.5,
+                  color: 'var(--color-bad)',
+                }}
+              >
+                <b className="num">{s.studentNo}</b>
+                {s.name}
+                <span className="num" style={{ fontSize: 11, color: 'var(--color-ink3)' }}>
+                  {assignment?.wrong?.[s.studentNo]?.length
+                    ? `错 ${assignment.wrong[s.studentNo].length}`
+                    : '已批阅'}
+                </span>
+              </span>
+            ))}
         </div>
       </Sheet>
 
