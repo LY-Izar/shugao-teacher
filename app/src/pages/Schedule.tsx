@@ -54,8 +54,13 @@ export default function Schedule() {
   const [perm, setPerm] = useState(() => notifyPermission())
 
   const today = weekdayOf()
-  // 这里只管教师自己的排课表；班级课表由教室端单独维护，不混进来
-  const state = useMemo(() => dayState(schedule.filter((s) => s.scope !== 'class')), [schedule])
+  /**
+   * 这里只管**教师自己的排课表**。
+   * 班级课表（scope='class'，教室端给学生看的那份）由教室端单独维护 ——
+   * 之前周视图直接用了未过滤的 schedule，教室端一录课表就串到这儿来。
+   */
+  const mine = useMemo(() => schedule.filter((s) => s.scope !== 'class'), [schedule])
+  const state = useMemo(() => dayState(mine), [mine])
 
   const startNew = (weekday = today) => {
     setEditing(null)
@@ -100,7 +105,7 @@ export default function Schedule() {
     <>
       <PageHead
         title="我的课表"
-        sub={`每周 ${schedule.length} 项 · 今天 ${state.items.length} 项`}
+        sub={`每周 ${mine.length} 项 · 今天 ${state.items.length} 项`}
         onBack={() => navigate('/settings')}
         right={
           <Button
@@ -241,7 +246,7 @@ export default function Schedule() {
           <Sect>整周课表</Sect>
           <div className="flex flex-col gap-2.5">
             {[1, 2, 3, 4, 5, 6, 7].map((wd) => {
-              const items = itemsOfDay(schedule, wd)
+              const items = itemsOfDay(mine, wd)
               const isToday = wd === today
               return (
                 <Panel key={wd} className="overflow-hidden">
