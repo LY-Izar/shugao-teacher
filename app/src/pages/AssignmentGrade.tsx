@@ -381,12 +381,20 @@ function GradeSession({
 
   /** 极简模式：不记题，只记 优/良/差 */
   const simple = assignment?.statsMode === 'simple'
-  const [grades, setGrades] = useState<Record<string, string>>(() => assignment?.grades ?? {})
+  /*
+   * ⚠️ 草稿优先 —— 等级和重点关注**只存在本地 state**，
+   * 临时保存前不落库，草稿是它们唯一的副本。
+   * 之前只从 assignment 初始化，于是"已恢复上次没批完的进度"这句话是假的：
+   * wrong/confirmed 恢复了，grades/focus 却被清空，下一次 finish 再把空值写回档案。
+   */
+  const [grades, setGrades] = useState<Record<string, string>>(
+    () => draft?.grades ?? assignment?.grades ?? {},
+  )
   /**
    * 「需重点关注」——和改错名单是两回事：
    * 改错名单是"错了要改的人"，这里是教师觉得这孩子不对劲、单独标的（哪怕他全对）。
    */
-  const [focus, setFocus] = useState<string[]>(() => assignment?.focusNos ?? [])
+  const [focus, setFocus] = useState<string[]>(() => draft?.focus ?? assignment?.focusNos ?? [])
   const toggleFocus = (no: string) =>
     setFocus((f) => (f.includes(no) ? f.filter((x) => x !== no) : [...f, no]))
 
@@ -574,11 +582,18 @@ function GradeSession({
    * **未批改的人一律登记为「未交」** —— 教师批的就是交上来的那一摞，
    * 不在里面的就是没交。
    */
-  const finish = () => {
+  const finish = (correctionOverride?: string[]) => {
     const seconds = Math.round((Date.now() - startedAt) / 1000)
     const ungraded = students
       .filter((s) => !confirmed.includes(s.studentNo))
       .map((s) => s.studentNo)
+    /*
+     * ⚠️ 改错名单必须用**实参**，不能只读 state。
+     * 调用方可能在同一个事件里刚 setCorrection(all) 就调 finish() ——
+     * setState 是异步的，这里读到的还是旧值 []，而 store 的 `?? ` 判不出空数组，
+     * 于是把刚写进去的名单覆盖成空（默认路径必现）。
+     */
+    const nextCorrection = correctionOverride ?? correction
     setGrade(assignment.id, {
       wrong,
       confirmedNos: confirmed,
@@ -587,7 +602,7 @@ function GradeSession({
       gradeSeconds: seconds,
       grades,
       focusNos: focus,
-      correctionNos: correction,
+      correctionNos: nextCorrection,
       missingNos: [...new Set([...assignment.missingNos, ...ungraded])],
     })
     // 正式提交了，草稿就没用了 —— 留着下次进来会跟档案对不上
@@ -806,13 +821,17 @@ function GradeSession({
                       <button
                         type="button"
                         onClick={() => {
-                          if (mode === 'byStudent') markOpen(s.studentNo)
-                          else {
-                            toggleFor(s.studentNo, curQ)
-                            setConfirmed((c) =>
-                              c.includes(s.studentNo) ? c : [...c, s.studentNo],
-                            )
+                          if (mode === 'byStudent') {
+                            markOpen(s.studentNo)
+                            return
                           }
+                          /*
+                           * ⚠️ 这里**绝对不能**再无条件 setConfirmed。
+                           * toggleFor 内部已经处理了"记错就确认、错题归零就退回未批"，
+                           * 也无条件会拦下未交学生 —— 之前这两句一叠加，
+                           * 点一下未交学生就把他写成"已交 + 全对"，未交记录被永久删掉。
+                           */
+                          toggleFor(s.studentNo, curQ)
                         }}
                         className="relative flex flex-col items-start gap-0.5 px-2 py-1.5 text-left"
                         aria-label={`${s.studentNo} 号 ${s.name}`}
@@ -1323,15 +1342,15 @@ function GradeSession({
                 block
                 variant="primary"
                 onClick={() => {
-                  // 改错名单默认就是"有错的那些人"，教师没勾就按有错的来
-                  if (!correction.length) {
-                    const all = students
-                      .filter((s) => wrongCountOf(s.studentNo) > 0)
-                      .map((s) => s.studentNo)
-                    setCorrection(all)
-                    updateAssignment(id, { correctionNos: all })
-                  }
-                  finish()
+                  // 改错名单默认就是"有错的那些人"，教师没勾就按有错的来。
+                  // 注意：算出来的名单要**直接传给 finish**，不能只 setCorrection ——
+                  // setState 是异步的，finish 在同一个事件里读到的是旧值。
+                  const next = correction.length
+                    ? correction
+                    : students.filter((s) => wrongCountOf(s.studentNo) > 0).map((s) => s.studentNo)
+                  setCorrection(next)
+                  updateAssignment(id, { correctionNos: next })
+                  finish(next)
                 }}
               >
                 确认完成批改

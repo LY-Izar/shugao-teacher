@@ -190,7 +190,19 @@ export function buildClassWrongBook(
       e.lost += p.lost
       e.classLost += p.lost
       e.who.add(s.studentNo)
-      for (const it of p.items) e.asg.add(it.assignmentId)
+      /*
+       * ⚠️ items 必须往里塞，否则班级错题重练卷永远生成不出来。
+       * 之前这里只喂了 asg（去重计数用），items 一直是空数组 ——
+       * WrongBook 的「生成班级错题重练卷」遍历 p.items 建集合，
+       * 恒为空 → 每次都弹「一个知识点都没勾，没法出卷」。
+       * 同一个学生可能被多个班/多次记录命中，所以按 (作业, 题号) 去重。
+       */
+      for (const it of p.items) {
+        e.asg.add(it.assignmentId)
+        if (!e.items.some((x) => x.assignmentId === it.assignmentId && x.seq === it.seq)) {
+          e.items.push(it)
+        }
+      }
       map.set(p.pointId, e)
     }
   }

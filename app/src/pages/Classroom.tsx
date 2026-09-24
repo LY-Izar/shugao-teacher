@@ -274,7 +274,8 @@ export default function Classroom() {
     return maybeShift(raw, weekdayOf(now))
   }, [schedule, klass?.id, useWeekday, now])
 
-  const day = useMemo(() => dayState(dayItems.items, now), [dayItems.items, now])
+  // 传入 useWeekday：调休日教师手选的那天，不能被设备真实星期再筛一次
+  const day = useMemo(() => dayState(dayItems.items, now, useWeekday), [dayItems.items, now, useWeekday])
   const nowMin = now.getHours() * 60 + now.getMinutes()
 
   const scanSchedule = async (f: File) => {

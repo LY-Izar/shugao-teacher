@@ -49,8 +49,16 @@ export type DayState = {
   minutesToNext: number | null
 }
 
-export function dayState(schedule: ScheduleItem[], d = new Date()): DayState {
-  const items = itemsForDate(schedule, d)
+/**
+ * 今天的状态。
+ *
+ * `weekday` 只在**调休日手动选「今天按周X的课表上」**时传：
+ * 那时 items 已经按选定的星期过滤好了，而 `itemsForDate` 会拿**设备真实星期**
+ * 再过滤一次 —— 调休日真实是周六/日，必然筛成空，整块「今天这个班什么课」就没了。
+ * 传了 weekday 就跳过二次过滤。
+ */
+export function dayState(schedule: ScheduleItem[], d = new Date(), weekday?: number): DayState {
+  const items = weekday === undefined ? itemsForDate(schedule, d) : itemsOfDay(schedule, weekday)
   const m = nowMinutes(d)
   let current: ScheduleItem | null = null
   let next: ScheduleItem | null = null

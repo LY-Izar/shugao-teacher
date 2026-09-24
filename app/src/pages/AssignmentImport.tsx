@@ -86,10 +86,23 @@ export default function AssignmentImport() {
   const save = () => {
     if (!questions?.length) return
     const withImgs = questions.filter((q) => q.imgs.length > 0).length
+    /*
+     * ⚠️ 必须夹到 60 —— schema 有 `check (question_count between 1 and 60)`。
+     * 期末/复习卷超过 60 题很常见，直接写 70 会让整条 upsert 被拒；
+     * 远程模式没有本地持久化 → 刷新即丢，界面却已经提示"已导入"。
+     */
+    const clamped = Math.min(60, Math.max(1, questions.length))
     updateAssignment(id, {
       questionMeta: toQuestionMeta(questions),
-      questionCount: questions.length,
+      questionCount: clamped,
     })
+    if (clamped !== questions.length) {
+      push({
+        text: `识别到 ${questions.length} 题，超出上限只记前 60 题`,
+        tone: 'warn',
+        desc: '题目信息（分值/知识点/配图）都已保存，题量按 60 计',
+      })
+    }
     push({
       text: `已导入 ${questions.length} 题的题目信息${withImgs ? `（含 ${withImgs} 张配图）` : ''}`,
       tone: 'ok',

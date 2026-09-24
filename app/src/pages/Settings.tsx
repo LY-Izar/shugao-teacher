@@ -57,7 +57,8 @@ export default function Settings() {
   }
 
   const total = classes.reduce((n, c) => n + activeStudents(c).length, 0)
-  const todayCount = itemsForDate(schedule).length
+  // 只看教师自己的排课表 —— 班级课表（scope='class'）是教室端给学生看的，混进来数字会对不上
+  const todayCount = itemsForDate(schedule.filter((s) => s.scope !== 'class')).length
   const holidayInfo = holidayDataInfo()
 
   const exportJson = () => {

@@ -284,14 +284,23 @@ export default function AssignmentCollect() {
    * 唯一要小心的是**绿变红**：如果这个人已经批改过（有错题记录），
    * 把他改成未交就自相矛盾了，必须先确认、并把批改记录一并删掉。
    */
-  const cycle = (no: string) => {
+  const cycle = (no: string, m: 'missing' | 'late' = 'missing') => {
+    /*
+     * 「迟交」模式单独一条路 —— 之前 cycle 完全不读 mode，
+     * 切到「迟交」点学生实际走的是未交/已交三态循环，
+     * 教师想记"迟交"却落库成"未交"，而 lateNos 永远写不进去。
+     */
+    if (m === 'late') {
+      setMark((prev) => ({ ...prev, [no]: prev[no] === 'late' ? 'submitted' : 'late' }))
+      return
+    }
     const cur = mark[no]
     if (cur === undefined) {
-      setMark((m) => ({ ...m, [no]: 'missing' }))
+      setMark((prev) => ({ ...prev, [no]: 'missing' }))
       return
     }
     if (cur === 'missing') {
-      setMark((m) => ({ ...m, [no]: 'submitted' }))
+      setMark((prev) => ({ ...prev, [no]: 'submitted' }))
       return
     }
     const wc = assignment?.wrong?.[no]?.length ?? 0
@@ -300,7 +309,7 @@ export default function AssignmentCollect() {
       setDemote(no)
       return
     }
-    setMark((m) => ({ ...m, [no]: 'missing' }))
+    setMark((prev) => ({ ...prev, [no]: 'missing' }))
   }
 
   /** 确认把已批改的人改成未交：批改记录一起删，不能留一份"没交却有错题"的数据 */
@@ -923,7 +932,7 @@ export default function AssignmentCollect() {
                   <button
                     key={s.id}
                     type="button"
-                    onClick={() => cycle(s.studentNo)}
+                    onClick={() => cycle(s.studentNo, mode)}
                     className="flex flex-col items-start gap-0.5 px-2 py-1.5 text-left"
                     style={{
                       background: bg,
