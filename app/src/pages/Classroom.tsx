@@ -23,6 +23,17 @@ import { closePip, openPip, pipSupported } from '../lib/pip'
 import { HEARTBEAT_MS, emit, subscribe } from '../lib/realtime'
 import { isRemote } from '../lib/supabase'
 import * as remote from '../data/remote'
+import {
+  fsSupported,
+  loadHandle,
+  makeBackup,
+  pickFolder,
+  writableFolder,
+  writeToFolder,
+} from '../lib/backup'
+
+/** 备份文件名：固定名字，每次覆盖 —— 免得一天攒几十个文件 */
+const BACKUP_NAME = '树高备份.json'
 import { awayText, dayState, maybeShift, toMinutes, weekdayOf } from '../lib/schedule'
 import { dayKind, nextHoliday, ymdOf } from '../lib/holiday'
 import { parseScheduleText, type ParsedScheduleItem } from '../lib/scheduleParse'
@@ -201,6 +212,41 @@ export default function Classroom() {
   /** 粘贴课表 —— 学校发的电子表直接贴进来，比拍照准得多（也不会漏掉没写时间的节次） */
   const [pasteOpen, setPasteOpen] = useState(false)
   const [pasteText, setPasteText] = useState('')
+
+  /* ---- 自动备份到本机文件夹（C4）----
+     云端之外的第二份保险。注意浏览器**不允许静默写文件夹**：
+     首次授权时勾「允许每次访问时编辑」后，同一会话内可全自动；
+     浏览器重启后权限退回 prompt，必须由用户点一下 —— 所以状态要显示出来。 */
+  const bkSupported = fsSupported()
+  const [bk, setBk] = useState<number | null>(null)
+  const [bkBusy, setBkBusy] = useState(false)
+  const [needsGrant, setNeedsGrant] = useState(false)
+
+  useEffect(() => {
+    if (!bkSupported) return
+    let alive = true
+    const tick = async () => {
+      // 这里**只查询、不申请** —— requestPermission 必须由用户手势触发
+      const dir = await loadHandle()
+      if (!alive) return
+      if (!dir) return
+      const q = await dir.queryPermission?.({ mode: 'readwrite' })
+      if (q !== 'granted') {
+        setNeedsGrant(true)
+        return
+      }
+      const ok = await writeToFolder(BACKUP_NAME, makeBackup(useStore.getState()))
+      if (!alive) return
+      setNeedsGrant(false)
+      if (ok) setBk(Date.now())
+    }
+    void tick()
+    const t = window.setInterval(() => void tick(), 5 * 60_000)
+    return () => {
+      alive = false
+      window.clearInterval(t)
+    }
+  }, [bkSupported])
 
   /** 改一行（时间最容易认错，所以每一格都能直接编辑） */
   const patchRow = (i: number, patch: Partial<ParsedScheduleItem>) =>
@@ -1019,6 +1065,56 @@ export default function Classroom() {
                   </button>
                 </div>
               ) : null}
+
+              {/* 自动备份到这台电脑上的一个文件夹 —— 云端之外的第二份保险 */}
+              <Panel bodyClass="p-4">
+                <div className="flex items-center gap-2" style={{ fontSize: 12.5 }}>
+                  <IconCheck size={15} />
+                  <span style={{ color: 'var(--color-ink2)' }}>自动备份到本机</span>
+                  <span className="flex-1" />
+                  {bkSupported ? (
+                    <button
+                      type="button"
+                      disabled={bkBusy}
+                      onClick={async () => {
+                        setBkBusy(true)
+                        try {
+                          // 两种情况都在点击里处理 —— 浏览器只允许用户手势里要权限
+                          const dir = needsGrant ? await writableFolder() : await pickFolder()
+                          if (!dir) {
+                            push({ text: '没有授权文件夹，自动备份没开', tone: 'warn' })
+                            return
+                          }
+                          const ok = await writeToFolder(BACKUP_NAME, makeBackup(useStore.getState()))
+                          setNeedsGrant(false)
+                          setBk(ok ? Date.now() : null)
+                          push({
+                            text: ok ? '已开启自动备份' : '文件夹不可写，换个位置试试',
+                            tone: ok ? 'ok' : 'bad',
+                          })
+                        } finally {
+                          setBkBusy(false)
+                        }
+                      }}
+                      style={{ fontSize: 11.5, color: 'var(--color-accent)' }}
+                    >
+                      {bkBusy ? '处理中…' : needsGrant ? '点一下恢复' : '设置文件夹'}
+                    </button>
+                  ) : null}
+                </div>
+                <div
+                  className="mt-1.5"
+                  style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.7 }}
+                >
+                  {!bkSupported
+                    ? '这个浏览器不支持自动写文件夹。数据在云端有备份，不受影响。'
+                    : needsGrant
+                      ? '浏览器重启后权限会失效 —— 点右上角「点一下恢复」即可继续自动备份。'
+                      : bk
+                        ? `上次备份：${new Date(bk).toLocaleString('zh-CN')} · 每 5 分钟一次`
+                        : '选一个文件夹（建议放在网盘同步目录里），之后每 5 分钟自动写一份备份。'}
+                </div>
+              </Panel>
 
               {/* 小窗同款面板：不支持置顶小窗时，这就是兜底 */}
               {cur && !closing ? (
