@@ -21,6 +21,7 @@ import ImportPhoto from './pages/ImportPhoto'
 import Login from './pages/Login'
 import NotFound from './pages/NotFound'
 import WrongBook from './pages/WrongBook'
+import WrongBookClass from './pages/WrongBookClass'
 import AssignmentCorrect from './pages/AssignmentCorrect'
 import AssignmentImport from './pages/AssignmentImport'
 import Files from './pages/Files'
@@ -296,11 +297,24 @@ export default function App() {
             </Guard>
           }
         />
+        {/*
+          错题集是**两层**：/wrong = 我任教的班级列表；/wrong/:classId = 某个班的错题档案。
+          /wrong 这个入口路径不能改（导航栏和外面可能都有人在用），只加一层子路由。
+          两层都在 Guard 里 —— 错题集是教师端功能，教室端账号不涉及（见权限与账号体系设计 §七）。
+        */}
         <Route
           path="/wrong"
           element={
             <Guard>
               <WrongBook />
+            </Guard>
+          }
+        />
+        <Route
+          path="/wrong/:classId"
+          element={
+            <Guard>
+              <WrongBookClass />
             </Guard>
           }
         />

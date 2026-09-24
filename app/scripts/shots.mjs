@@ -348,6 +348,45 @@ await page.getByRole('button', { name: /确认完成批改/ }).click()
 await page.getByRole('button', { name: '确认完成批改' }).click()
 await shot('51-countdown-done', { wait: 1100 })
 
+// ---------- S6：错题集，两层（班级列表 → 班级档案） ----------
+/*
+ * 错题集是**两层**：/wrong 先列"我任教的班级"，点一个班才进 /wrong/:classId 的档案
+ * （学生名单在档案里，"班级总结错题"在档案右上角）。
+ * 所以这一节必须**两层都走**：只截 /wrong 的话，第二层坏了也看不出来。
+ */
+await page.evaluate(() => localStorage.setItem('shugao.deviceRole', 'teacher'))
+await page.goto(`${BASE}/wrong`, { waitUntil: 'networkidle' })
+await shot('52-wrong-classes', { full: true })
+
+// 进有数据的班（演示数据里 a-demo-* 都挂在高二(3)班）
+await page.getByRole('button', { name: /高二\(3\)班/ }).first().click()
+await page.waitForTimeout(600)
+await shot('53-wrong-class-detail', { full: true })
+
+// 名单里第一个人 → 个人错题明细（原来就在的 Sheet，功能不能丢）
+await page.locator('.row').first().click()
+await shot('54-wrong-student-sheet', { wait: 900 })
+await page.getByRole('button', { name: '关闭' }).click()
+await page.waitForTimeout(400)
+
+// 右上角「班级总结错题」→ 班级高频错点 + 生成班级错题重练卷
+await page.getByRole('button', { name: '班级总结错题' }).click()
+await page.waitForTimeout(700)
+await shot('55-wrong-class-summary', { full: true })
+await page.getByRole('button', { name: '关闭' }).click()
+await page.waitForTimeout(400)
+
+// 返回按钮要回**班级列表**（而不是首页）
+await page.getByRole('button', { name: '返回' }).click()
+await page.waitForTimeout(700)
+await shot('56-wrong-back-to-classes', { full: true })
+
+// 高二(7)班在演示数据里只有一份未批改的档案 → 班级列表该说"还没批改过作业"，
+// 档案里该是空态，而不是列一堆"全对"（那会把"没数据"渲染成"都会了"）
+await page.getByRole('button', { name: /高二\(7\)班/ }).first().click()
+await page.waitForTimeout(600)
+await shot('57-wrong-class-empty', { full: true })
+
 // ---------- 桌面 ----------
 const wide = await ctx.newPage()
 wide.on('pageerror', (e) => errors.push(`PAGEERROR(wide) :: ${e.message}`))

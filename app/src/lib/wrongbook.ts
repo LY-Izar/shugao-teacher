@@ -49,9 +49,20 @@ export type WrongBook = {
   items: WrongItem[]
 }
 
-/** 只有逐题记录过的作业才有错题可算 —— 极简模式不进错题集 */
-const ranked = (a: Assignment) =>
+/**
+ * 只有逐题记录过的作业才有错题可算 —— 极简模式不进错题集。
+ *
+ * ⚠️ 这个判据**必须只有一处**：它是"这份作业能不能进错题集"的唯一入口，
+ * 页面上的「已批改作业数」也要用它来数（见 WrongBook 班级列表）。
+ * 若页面自己写一遍 `status === 'graded'`，极简模式的档案就会被算进来 ——
+ * 而它没有任何逐题数据，最后渲染成"全班全对"这种看起来很正常、其实错了的结论。
+ */
+export const ranked = (a: Assignment) =>
   (a.status === 'graded' || a.status === 'reviewed') && a.statsMode !== 'simple'
+
+/** 某个班有多少份「能进错题集」的作业 —— 供列表页显示与空态判定 */
+export const rankedCountOf = (classId: string, assignments: Assignment[]) =>
+  assignments.filter((a) => a.classId === classId && ranked(a)).length
 
 /** 一个班、一份作业里，每道题的全班错误率 */
 function classRates(students: Student[], a: Assignment): number[] {
