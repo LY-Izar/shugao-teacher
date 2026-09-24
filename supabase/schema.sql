@@ -47,6 +47,12 @@ create trigger on_auth_user_created
   after insert on auth.users
   for each row execute function public.handle_new_user();
 
+-- ⚠️ 上面这版触发器**只认 `raw_user_meta_data ->> 'subject'`（显示名），学科一律兜底「物理」**。
+--    多学科阶段 3（§13.1）会把它重定义成「能认 `subject_code`，写进 primary_subject_code」——
+--    放在 §13 而不是这里，是因为它依赖 §12.3 那一列存在。
+--    第 12 段跑之前，这一段保持原样是**故意**的：触发器出错会让**所有**新账号建不出来
+--    （auth.users 的插入同事务回滚），所以改它必须带守卫（见 §13.1）。
+
 -- ============================================================
 --  2. 班级与学生
 -- ============================================================
@@ -945,7 +951,356 @@ select coalesce(a.subject, '(空)') as 学科名,
 --  · 多学科知识树（PHYSICS_TREE 之外的第二棵树）→ 第二阶段
 
 -- ============================================================
---  13. 自检：确认每张表都开了 RLS
+--  13. 多学科 · 阶段 3：建号带学科 + 身份判据 + 学科可见性分级
+--      设计见 `权限与账号体系设计.md` §三（角色矩阵）§五（RLS）§六（账号创建）、
+--      `多学科体系方案.md` §3.3；前端见 `app/src/lib/roles.ts`、
+--      `app/src/pages/TeacherAccounts.tsx`、`app/functions/api/teacher-account.ts`
+--
+--  ⚠️⚠️ 这一段的边界（比前几段窄，请照着读）：
+--    ① **只动「读」**：只重写 assignments 的 select 策略（13.4）。
+--       写策略一条都不动 —— `assignments_own`（for all, teacher_id = auth.uid()）原样保留。
+--       于是**自己建的档案永远看得见、改得动**，可见范围收缩不可能让谁丢数据。
+--    ② **只收窄「别人的、别的学科的」**：班主任 / 年级主任 / 行政 / 最高管理员 / 教室端
+--       仍然是「一个班的所有学科」（用户口径）。变窄的只有一种人：
+--       **只教某一科的任课教师，看不到同班别的老师那一科**。
+--    ③ 依赖第 12 段（`subject_code` 三列 + `subjects` 字典表）：**先跑第 12 段**。
+--       整份脚本从头跑到尾当然没问题（幂等）；单独粘第 13 段则必须先有第 12 段。
+--    ④ 前端在这一段还没跑时照常工作：可见范围是数据库收口的，前端读到几行就渲染几行，
+--       不另写一套过滤（见 `功能设计与不变量.md` §11.3 / §12.7 I16）。
+--
+--  本段可重复执行（幂等）。
+-- ============================================================
+
+-- -------- 13.1 建号时把学科带进 teachers（触发器的第二阶段）--------
+--  为什么要有这一段：老师账号一直是在 Supabase Dashboard 手工建的，而
+--  `handle_new_user`（§1）只认 `raw_user_meta_data ->> 'subject'`、兜底「物理」——
+--  于是**新老师第一次登录时，学科 chip 预选的是物理**（哪怕他是语文老师）。
+--
+--  三条写入路径，按"谁先起作用"排：
+--    ① 建号的人（管理员界面 / Dashboard 的 User Metadata）给 `subject`（字典里的显示名）
+--       → 触发器写进 `teachers.subject` → 前端 `teacherPrimarySubjectCode()` 按显示名反查字典
+--       → **chip 预选正确**。这条路**不依赖第 12 段**，是最保底的一条。
+--    ② 同时给 `subject_code` → 这里写进 `teachers.primary_subject_code`（判据那一列）。
+--    ③ 管理员界面的建号走 `functions/api/teacher-account.ts`，它用 service_role
+--       **自己再写一次** teachers 行（不看触发器版本）—— 所以界面建号不依赖这一段跑没跑。
+--
+--  🔴 为什么整段 update 包在异常里：触发器抛错 = **所有**新账号都建不出来
+--     （auth.users 的插入与触发器同事务）。§12.3 的列还不存在时，
+--     `undefined_column` 必须被吞掉 —— 宁可主学科先空着（前端有兜底），
+--     也不能让建号这个动作整个坏掉。这与 §12 的"只做加法"是同一条纪律。
+--
+--  📌 在 Supabase Dashboard 里手工建号时，User Metadata 这样填就能带上学科
+--     （`subject` 是**字典里的中文名**，`subject_code` 是代码；两个都给最稳）：
+--       { "name": "李老师", "subject": "语文", "subject_code": "chinese" }
+--     从教师端的「我的 → 教师账号」建号则不用管这些 —— 那条路走 §13.9 提到的
+--     `functions/api/teacher-account.ts`，它自己会写。两科都教的话，
+--     主学科填一科，另一科靠 `class_subjects`（它才是"看得见哪一科"的判据）。
+create or replace function public.handle_new_user()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_name    text;
+  v_subject text;
+  v_code    text;
+begin
+  v_name := coalesce(
+    nullif(btrim(coalesce(new.raw_user_meta_data ->> 'name', '')), ''),
+    split_part(new.email, '@', 1)
+  );
+  -- 显示名：字典里的写法最好（前端读不到 primary_subject_code 时要按它反查字典）
+  v_subject := coalesce(
+    nullif(btrim(coalesce(new.raw_user_meta_data ->> 'subject', '')), ''),
+    '物理'
+  );
+  v_code := nullif(btrim(coalesce(new.raw_user_meta_data ->> 'subject_code', '')), '');
+
+  insert into public.teachers (id, name, subject, school)
+  values (new.id, v_name, v_subject, coalesce(new.raw_user_meta_data ->> 'school', ''))
+  on conflict (id) do nothing;
+
+  -- 主学科（判据列）：**只认字典里有的代码**，认不出来一律不写（不猜）
+  if v_code is not null then
+    begin
+      update public.teachers t
+      set primary_subject_code = s.code
+      from public.subjects s
+      where t.id = new.id and s.code = v_code;
+    exception
+      when undefined_column or undefined_table or invalid_schema_name then
+        null;   -- 还没跑第 12 段：主学科先空着，前端按显示名反查
+    end;
+  end if;
+
+  return new;
+end;
+$$;
+
+-- -------- 13.2 身份判据：最高管理员 ≠ 行政老师 --------
+--  用户口径：「最高管理员、行政老师是**不同身份**，权限要分开」。
+--  现状：`admin` 这个名字在设计稿的角色清单里根本没有（§三 列的是 principal /
+--  vice_principal / dean），SQL 里却一直写成 `role in ('super','admin')` 把两者当一回事 ——
+--  所以要做的是**拆判据**，不是加角色名：`admin` 就是"行政老师"那一档。
+--
+--  本轮落地的差别（**这两个函数都真的有人调，不是摆设**）：
+--    · 建教师账号 / 维护任课关系 / 重置密码 → super + admin（`can_manage_teachers()`）
+--    · 指派身份（班主任 / 年级主任 / 行政 / 最高管理员）→ **只有 super**（`is_super_admin()`）
+--    · 看全校教学数据（班级 / 学生 / 作业 / 呼叫）→ 两者都可以（设计 §三 已确认口径）
+--  调用方是 `app/functions/api/teacher-account.ts`：它拿**调用者的 JWT** 走
+--  `POST /rest/v1/rpc/<函数名>`（auth.uid() 就是调用者），而不是在 TypeScript 里重写规则。
+--  service_role 绕过 RLS，所以"用管理员密钥代劳"的那条路必须以这两个函数为唯一判据。
+--
+--  ⚠️ 与 `visible_class_ids_for` 同样的锁：`_for` 变体接受任意 uid，
+--     等于"以任意人身份问一句能不能管账号"，必须 revoke 掉，只留给属主核对用。
+create or replace function public.is_super_admin_for(p_uid uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1 from teacher_roles r
+    where r.teacher_id = p_uid and r.role = 'super'
+  );
+$$;
+
+create or replace function public.can_manage_teachers_for(p_uid uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1 from teacher_roles r
+    where r.teacher_id = p_uid and r.role in ('super', 'admin')
+  );
+$$;
+
+revoke all on function is_super_admin_for(uuid)   from public, anon, authenticated;
+revoke all on function can_manage_teachers_for(uuid) from public, anon, authenticated;
+
+-- 当前登录者版本（界面与服务端都用它）
+create or replace function public.is_super_admin()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$ select is_super_admin_for(auth.uid()) $$;
+
+create or replace function public.can_manage_teachers()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$ select can_manage_teachers_for(auth.uid()) $$;
+
+grant execute on function is_super_admin()     to authenticated;
+grant execute on function can_manage_teachers() to authenticated;
+
+-- -------- 13.3 学科可见性：谁看得见「这个班里的这一科」--------
+--  用户口径（原话）：**学科教师只能看见自己所教的学科；班主任 / 年级主任能看见一个班的所有学科。**
+--  拆成两个函数，各答一半 —— 「全科视角」和「本科视角」在读代码时一眼分得开：
+--    can_view_all_subjects(class_id)                → 全科视角
+--    teaches_subject(class_id, code, name)          → 本科视角（任课关系）
+--  它们**都不是**"能不能看见这个班"的判据 —— 那是 `visible_class_ids()` 的活；
+--  策略里两者是 and 关系（先看得见这个班，再谈看得见这一科），见 13.4。
+--
+--  🔴 教室端那一支（全科视角的最后一条）**不能少**：
+--     教室端账号读 assignments 全靠这一条。少了它，教室里那块屏的
+--     "逐题正确率 / 作业区"会整片变空，而且**不报错**（读不到行而已）。
+--     它不是教师，没有 teacher_roles，也没有 class_subjects。
+create or replace function public.can_view_all_subjects_for(p_uid uuid, p_class_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select
+    -- 最高管理员 / 行政老师：全校全科
+    exists (select 1 from teacher_roles r
+             where r.teacher_id = p_uid and r.role in ('super', 'admin'))
+    -- 年级主任：本年级全科
+    or exists (select 1 from teacher_roles r
+                where r.teacher_id = p_uid and r.role = 'grade_head'
+                  and r.scope_type = 'grade'
+                  and r.scope_id = (select c.grade_id from classes c where c.id = p_class_id))
+    -- 班主任：本班全科
+    or exists (select 1 from teacher_roles r
+                where r.teacher_id = p_uid and r.role = 'head_teacher'
+                  and r.scope_type = 'class' and r.scope_id = p_class_id)
+    -- 教室端：本班那块大屏
+    or exists (select 1 from classroom_accounts ca
+                where ca.id = p_uid and ca.class_id = p_class_id and not ca.disabled);
+$$;
+
+-- 我在这班教这一科吗？（任课关系是"能不能改这一科"的判据，也是"看得见哪一科"的判据）
+--  两条路，**兼容期别删第二条**：
+--    ① 新列：class_subjects.subject_code = 这份档案的学科代码
+--    ② 老列：任课关系那行还没回填 subject_code 时（第 12 段没跑、或那行的学科名认不出来），
+--       按**显示名精确比对** —— 与前端 `subjectCodeOf()` 的兜底是同一口径
+--  这份档案的学科同样先看新列、再按显示名反查字典；
+--  **认不出来就是 null → 不匹配 → 只留"自己建的"那条路**，绝不猜
+--  （猜错会让一位老师的整科作业凭空消失，而且不报错）。
+create or replace function public.teaches_subject_for(
+  p_uid uuid,
+  p_class_id uuid,
+  p_subject_code text,
+  p_subject text
+)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  with subj as (
+    select coalesce(
+      nullif(btrim(coalesce(p_subject_code, '')), ''),
+      (select s.code from subjects s where btrim(s.name) = btrim(coalesce(p_subject, '')))
+    ) as code
+  )
+  select exists (
+    select 1
+    from class_subjects cs, subj
+    where cs.teacher_id = p_uid
+      and cs.class_id = p_class_id
+      and (
+        (subj.code is not null and cs.subject_code = subj.code)
+        or (cs.subject_code is null
+            and btrim(cs.subject) = btrim(coalesce(p_subject, '')))
+      )
+  );
+$$;
+
+revoke all on function can_view_all_subjects_for(uuid, uuid) from public, anon, authenticated;
+revoke all on function teaches_subject_for(uuid, uuid, text, text) from public, anon, authenticated;
+
+create or replace function public.can_view_all_subjects(p_class_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$ select can_view_all_subjects_for(auth.uid(), p_class_id) $$;
+
+create or replace function public.teaches_subject(
+  p_class_id uuid,
+  p_subject_code text,
+  p_subject text
+)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$ select teaches_subject_for(auth.uid(), p_class_id, p_subject_code, p_subject) $$;
+
+grant execute on function can_view_all_subjects(uuid) to authenticated;
+grant execute on function teaches_subject(uuid, text, text) to authenticated;
+
+-- -------- 13.4 作业档案的读策略（**本段唯一改权限的一步**）--------
+--  旧：`class_id in (select visible_class_ids())`
+--      —— 任课教师看得见本班**所有科目**的作业（学科维度等于没做）
+--  新：自己建的 ∪ （看得见这个班 且 （全科视角 或 本科视角））
+--
+--  ⚠️ 为什么把「自己建的」显式写进策略：旧策略 `assignments_own`（for all）
+--     今天仍然生效，所以这一句**今天是冗余的**；但收口阶段要删旧策略，
+--     删掉之后 `teacher_id = auth.uid()` 就靠它兜住。
+--     写在策略里，而不是靠"将来记得补"。
+drop policy if exists assignments_visible on assignments;
+create policy assignments_visible on assignments for select to authenticated
+  using (
+    teacher_id = auth.uid()
+    or (
+      class_id in (select visible_class_ids())
+      and (
+        can_view_all_subjects(class_id)
+        or teaches_subject(class_id, subject_code, subject)
+      )
+    )
+  );
+
+-- ⚠️ 写策略**一条都不加**（这是有意的，别顺手补）：
+--    · 现在生效的写判据是 `assignments_own`：`teacher_id = auth.uid()`。
+--    · 想把 `can_grade()` 挂上来之前，必须先回答"班主任 / 年级主任能不能改成绩"
+--      （设计 §三 的矩阵说**不能**，而 `can_grade()` 的函数体说**能** —— 两处自相矛盾）。
+--      挂错了就是**权限事故**：班主任能改全科成绩。
+--    · 反过来，往"写"上加策略只会**放宽**（策略之间是 OR），不可能收紧。
+--      所以"学科教师只能改自己那一科"这件事，等 §5 收口时连着删 `assignments_own` 一起做。
+
+-- -------- 13.5 核对：跑完这一段，先证明"没人丢自己的数据"（把下面整段粘进 SQL 编辑器）--------
+--  这是本段的护栏，和第 10.5 ③ 是同一个套路：**用 `_for` 指定人**，
+--  直接写 auth.uid() 的话 SQL 编辑器里是 NULL，会得到 0 = 0 的**假通过**。
+--
+--  ① 逐行对照（把 uuid 换成要核对的老师 id；教师 id 用 `select id, name from teachers;` 拿）
+--     期望：**新_看得见 = false 的行，全部都是"他自己没建、也不教这一科"的**；
+--           凡是 `teacher_id = 他自己` 的行，新_看得见必须是 true。
+with me as (select '00000000-0000-0000-0000-000000000000'::uuid as uid)
+select
+  a.title                                        as 作业,
+  c.name                                         as 班级,
+  coalesce(a.subject_code, a.subject)             as 学科,
+  a.teacher_id = (select uid from me)             as 是他建的,
+  (select string_agg(cs.subject, '、')
+     from class_subjects cs
+    where cs.class_id = a.class_id and cs.teacher_id = (select uid from me))  as 他在本班任教,
+  (a.class_id in (select visible_class_ids_for((select uid from me))))        as 旧_看得见,
+  (a.teacher_id = (select uid from me)
+     or (a.class_id in (select visible_class_ids_for((select uid from me)))
+         and (can_view_all_subjects_for((select uid from me), a.class_id)
+              or teaches_subject_for((select uid from me), a.class_id, a.subject_code, a.subject)))) as 新_看得见
+from assignments a
+join classes c on c.id = a.class_id
+order by 4 desc, 6 desc, 2, 3;
+
+--  ② 汇总：新 ≤ 旧 必须成立（交集只会变小）；"是他建的却新看不见"必须是 0
+with me as (select '00000000-0000-0000-0000-000000000000'::uuid as uid),
+     j as (
+       select a.teacher_id,
+              (a.class_id in (select visible_class_ids_for((select uid from me)))) as old_ok,
+              (a.teacher_id = (select uid from me)
+                or (a.class_id in (select visible_class_ids_for((select uid from me)))
+                    and (can_view_all_subjects_for((select uid from me), a.class_id)
+                         or teaches_subject_for((select uid from me), a.class_id, a.subject_code, a.subject)))) as new_ok
+       from assignments a
+     )
+select
+  count(*) filter (where old_ok)                                              as 旧_看得见,
+  count(*) filter (where new_ok)                                              as 新_看得见,
+  count(*) filter (where old_ok and not new_ok)                               as 被收窄,
+  count(*) filter (where teacher_id = (select uid from me) and not new_ok)    as 自己建的却看不见_应为0
+from j;
+
+--  ③ 谁的身份是什么（跑完 13.2 之后，一眼看清 super 与 admin 各有几个人）
+select t.name, t.subject, t.primary_subject_code, r.role, r.scope_type
+from teacher_roles r join teachers t on t.id = r.teacher_id
+order by r.role, t.name;
+
+-- -------- 13.6 想退回旧读策略（一行，出问题时用）--------
+--  drop policy if exists assignments_visible on assignments;
+--  create policy assignments_visible on assignments for select to authenticated
+--    using (class_id in (select visible_class_ids()));
+--  退回去只会"看得更多"，不会让谁看不见东西 —— 所以这一步是安全的。
+
+-- -------- 13.7 这一段**不做**什么（免得后来的人以为漏了）--------
+--  · 挂 `can_grade()` 到写策略上 → 要先拍板"班主任 / 年级主任能不能改成绩"（见 13.4 的警告）
+--  · 删 `assignments_own` 等旧策略 → 收口阶段（§5），且必须先并存核对
+--  · `class_subjects` 的 unique 换列（(class_id, subject, teacher_id) → (class_id, subject_code, teacher_id)）
+--  · 教室端账号的创建权限（`functions/api/classroom-account.ts` 里 `admin` 目前与 `super` 同等，
+--    与设计 §三 矩阵不符）—— 那是教室端那条线，本轮刻意不动
+--  · `teacher_roles` 的客户端写策略：指派身份只走服务端（`/api/teacher-account`），
+--    数据库这一层只给"读自己那一行"（§10.4），**不 grant insert/update/delete** ——
+--    免得同一个动作出现"前端直写"和"服务端代写"两个入口
+
+-- ============================================================
+--  14. 自检：确认每张表都开了 RLS
 --     跑完应返回 0 行；返回任何一行都说明有表漏开
 -- ============================================================
 -- select tablename from pg_tables

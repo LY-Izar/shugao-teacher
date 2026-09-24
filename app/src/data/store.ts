@@ -24,6 +24,7 @@ import type {
   Student,
   StudentStatus,
   Teacher,
+  TeacherRole,
 } from './types'
 
 /**
@@ -95,9 +96,24 @@ type State = {
    * 本地演示模式恒为 'teacher'。
    */
   accountKind: 'teacher' | 'classroom'
+  /**
+   * 我的身份（`teacher_roles` 里属于我的行）。**多身份是常态**，所以是数组。
+   *
+   * 用途只有一个：决定界面上**摆不摆**那些入口（「教师账号」页 / 「指派身份」按钮）。
+   * 它**不参与**任何数据行过滤 —— 谁能看到哪些行由数据库 RLS 收口
+   * （见 `功能设计与不变量.md` §11.3、`lib/roles.ts` 的文件头）。
+   * 读不到（表还没建 / 没登录）时是 `[]`，界面按"没指派身份"显示。
+   */
+  myRoles: TeacherRole[]
 
   hydrate: () => Promise<void>
   clearSyncError: () => void
+  /**
+   * 重新读一次「我的身份」。
+   * 只在一种情况下需要：**刚给指到自己头上的身份做了改动**（比如超管给自己加了行政身份）——
+   * 别人改了身份不影响我这次会话里已经拿到的 myRoles。
+   */
+  refreshMyRoles: () => Promise<void>
 
   signIn: (name: string) => void
   signOut: () => void
@@ -311,6 +327,7 @@ export const useStore = create<State>()(
       hydrated: !isRemote,
       syncError: null,
       accountKind: 'teacher',
+      myRoles: [],
 
       /* ---------------- 后端 ---------------- */
 
@@ -343,11 +360,18 @@ export const useStore = create<State>()(
           isDemo: false,
           hydrated: true,
           accountKind: room ? 'classroom' : 'teacher',
+          myRoles: snap.roles,
           lastSeenAt: Date.now(),
         })
       },
 
       clearSyncError: () => set({ syncError: null }),
+
+      refreshMyRoles: async () => {
+        const id = get().userId
+        if (!id) return
+        set({ myRoles: await remote.loadMyRoles(id) })
+      },
 
       signIn: (name) =>
         set((s) => ({
@@ -376,6 +400,7 @@ export const useStore = create<State>()(
           hydrated: !isRemote,
           // 身份跟着会话走，别把上一个账号的类型留在内存里
           accountKind: 'teacher',
+          myRoles: [],
         })
       },
 
@@ -922,6 +947,7 @@ export const useStore = create<State>()(
           isDemo: false,
           streakDays: 1,
           hydrated: !isRemote,
+          myRoles: [],
         })
       },
 

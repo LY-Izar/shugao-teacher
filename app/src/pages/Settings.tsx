@@ -13,6 +13,7 @@ import {
   IconRefresh,
   IconSwap,
   IconUpload,
+  IconUsers,
   IconWifi,
 } from '../components/icons'
 import { Button, KV, PageHead, Panel, Sect, Sheet, Tag } from '../components/ui'
@@ -36,6 +37,7 @@ import {
 } from '../lib/backup'
 import { REMIND_BEFORE, itemsForDate } from '../lib/schedule'
 import { beijingNow, holidayDataInfo, ymdOf } from '../lib/holiday'
+import { canManageTeachers, roleChips } from '../lib/roles'
 import {
   SUBJECTS,
   DEFAULT_SUBJECT_CODE,
@@ -48,6 +50,7 @@ import {
 export default function Settings() {
   const teacher = useStore((s) => s.teacher)
   const classes = useStore((s) => s.classes)
+  const myRoles = useStore((s) => s.myRoles)
   const schedule = useStore((s) => s.schedule)
   const currentClassId = useStore((s) => s.currentClassId)
   const setCurrentClass = useStore((s) => s.setCurrentClass)
@@ -147,6 +150,13 @@ export default function Settings() {
   }
 
   const total = classes.reduce((n, c) => n + activeStudents(c).length, 0)
+  /*
+   * 我的身份（班主任 / 年级主任 / 行政 / 最高管理员）。
+   * ⚠️ 这两个值**只决定界面上摆不摆入口**，不是判据 ——
+   *    「谁能建号、谁能指派身份」由数据库的函数说了算（见 lib/roles.ts 文件头）。
+   */
+  const chips = roleChips(myRoles, (id) => classes.find((c) => c.id === id)?.name)
+  const canManage = isRemote && canManageTeachers(myRoles)
   // 只看教师自己的排课表 —— 班级课表（scope='class'）是教室端给学生看的，混进来数字会对不上
   const todayCount = itemsForDate(schedule.filter((s) => s.scope !== 'class')).length
   const holidayInfo = holidayDataInfo()
@@ -200,6 +210,24 @@ export default function Settings() {
           </div>
           <div className="px-4 pb-3">
             <KV k="任教班级" v={`${classes.length} 个 · ${total} 名学生`} />
+            {isRemote ? (
+              <KV
+                k="我的身份"
+                v={
+                  chips.length ? (
+                    <span className="flex flex-wrap items-center gap-1">
+                      {chips.map((c) => (
+                        <Tag key={c} tone="accent">
+                          {c}
+                        </Tag>
+                      ))}
+                    </span>
+                  ) : (
+                    <span style={{ color: 'var(--color-ink3)' }}>任课教师（还没指派别的身份）</span>
+                  )
+                }
+              />
+            ) : null}
             <KV
               k="当前班级"
               v={
@@ -225,6 +253,35 @@ export default function Settings() {
         <div className="mb-4">
           <Sect>我的</Sect>
           <Panel className="overflow-hidden">
+            {canManage ? (
+              <button
+                type="button"
+                className="row"
+                style={{ padding: 14 }}
+                onClick={() => navigate('/accounts')}
+              >
+                <span
+                  className="grid place-items-center shrink-0"
+                  style={{
+                    width: 36,
+                    height: 36,
+                    border: '1px solid var(--color-line2)',
+                    borderRadius: 4,
+                    background: 'var(--color-surface2)',
+                    color: 'var(--color-accent)',
+                  }}
+                >
+                  <IconUsers size={18} />
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span style={{ fontSize: 14.5, fontWeight: 620 }}>教师账号</span>
+                  <span className="mt-0.5 block" style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
+                    建号（带学科）· 任课关系 · 班主任 / 年级主任
+                  </span>
+                </span>
+                <IconChevronRight size={16} />
+              </button>
+            ) : null}
             <button type="button" className="row" style={{ padding: 14 }} onClick={() => navigate('/files')}>
               <span
                 className="grid place-items-center shrink-0"

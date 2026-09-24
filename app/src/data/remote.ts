@@ -13,6 +13,7 @@ import type {
   Student,
   StudentStatus,
   Teacher,
+  TeacherRole,
 } from './types'
 
 /* ============================================================
@@ -345,6 +346,12 @@ export type Snapshot = {
   schedule: ScheduleItem[]
   classrooms: ClassroomClient[]
   calls: CallRecord[]
+  /**
+   * 我的身份（`teacher_roles` 里属于我的那些行）。
+   * 表还没建 / 没登录 / 网络出错时是**空数组**（＝"身份未知"）——
+   * 界面按"未指派"显示，判据仍在服务端（schema.sql §13.2 的两个函数）。
+   */
+  roles: TeacherRole[]
   userId: string
 }
 
@@ -434,6 +441,37 @@ export async function loadClassroomAccount(): Promise<{
   return { classId: row.class_id, disabled: row.disabled === true }
 }
 
+/**
+ * 读「我的身份」：`teacher_roles` 里属于我的那些行（多身份是常态，所以是数组）。
+ *
+ * 🔴 **绝不能把它混进 `loadSnapshot` 那一组 `Promise.all` 后再统一判错**：
+ *    线上库可能还没跑 `schema.sql` 第 10 段（`teacher_roles` 表还不存在），
+ *    那时这条查询会报错 —— 一旦它进了"任一失败就整份快照作废"的那一组，
+ *    **整个应用会一起看不到数据**（比"身份未知"严重得多）。
+ *    所以它自带兜底：任何失败都返回 `[]`，界面上就是"没指派身份"，
+ *    而真正的判据在服务端（`schema.sql` §13.2），前端读不到身份不影响任何权限。
+ */
+export async function loadMyRoles(userId: string): Promise<TeacherRole[]> {
+  const sb = getSupabase()
+  if (!sb) return []
+  try {
+    const { data, error } = await sb
+      .from('teacher_roles')
+      .select('role, scope_type, scope_id')
+      .eq('teacher_id', userId)
+    if (error) return []
+    return ((data ?? []) as { role?: string; scope_type?: string; scope_id?: string }[])
+      .filter((r) => typeof r.role === 'string' && r.role !== '')
+      .map((r) => ({
+        role: r.role as TeacherRole['role'],
+        scopeType: (r.scope_type ?? undefined) as TeacherRole['scopeType'],
+        scopeId: r.scope_id ?? undefined,
+      }))
+  } catch {
+    return []
+  }
+}
+
 export async function loadSnapshot(): Promise<Snapshot | null> {
   const sb = getSupabase()
   if (!sb) return null
@@ -446,7 +484,7 @@ export async function loadSnapshot(): Promise<Snapshot | null> {
   // 顺便把「新列在不在」探一次（与下面的读并行，省得第一次保存时才多一个来回）
   void ensureSubjectCols()
 
-  const [t, c, s, a, sch, room, calls] = await Promise.all([
+  const [t, c, s, a, sch, room, calls, roles] = await Promise.all([
     sb.from('teachers').select('*').eq('id', user.id).maybeSingle(),
     sb.from('classes').select('*').order('created_at', { ascending: true }),
     sb.from('students').select('*'),
@@ -454,6 +492,8 @@ export async function loadSnapshot(): Promise<Snapshot | null> {
     sb.from('schedule_items').select('*').order('weekday', { ascending: true }),
     sb.from('classrooms').select('*'),
     sb.from('calls').select('*').order('created_at', { ascending: false }).limit(200),
+    // ⚠️ 这一条**自己吞错**（见 loadMyRoles），所以不进下面那组"任一失败就作废"的判错
+    loadMyRoles(user.id),
   ])
 
   const firstErr = [t, c, s, a, sch, room, calls].find((r) => r.error)?.error
@@ -506,6 +546,7 @@ export async function loadSnapshot(): Promise<Snapshot | null> {
     schedule: ((sch.data ?? []) as ScheduleRow[]).map(rowToSchedule),
     classrooms: ((room.data ?? []) as ClassroomRow[]).map(rowToClassroom),
     calls: ((calls.data ?? []) as CallRow[]).map(rowToCall),
+    roles,
   }
 }
 

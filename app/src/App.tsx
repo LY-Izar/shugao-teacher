@@ -27,6 +27,7 @@ import AssignmentImport from './pages/AssignmentImport'
 import Files from './pages/Files'
 import Schedule from './pages/Schedule'
 import Settings from './pages/Settings'
+import TeacherAccounts from './pages/TeacherAccounts'
 import Workbench from './pages/Workbench'
 
 function Guard({ children }: { children: React.ReactNode }) {
@@ -323,6 +324,20 @@ export default function App() {
           element={
             <Guard>
               <Settings />
+            </Guard>
+          }
+        />
+        {/*
+          教师账号（建号 / 主学科 / 任课关系 / 身份）。
+          入口在「我的 → 教师账号」，**只有最高管理员和行政老师看得见那个入口**；
+          页面自己也会在服务端被拒（判据是数据库的 can_manage_teachers()）。
+          路由本身不额外加守卫：藏入口是"少点几下"，不是安全边界。
+        */}
+        <Route
+          path="/accounts"
+          element={
+            <Guard>
+              <TeacherAccounts />
             </Guard>
           }
         />

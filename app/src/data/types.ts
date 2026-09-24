@@ -40,6 +40,27 @@ export type Teacher = {
   school: string
 }
 
+/* ---------------- 身份（角色） ---------------- */
+
+/**
+ * 身份代码。**判据在数据库**（`teacher_roles.role` 的 check 约束 + `schema.sql` §13.2 的
+ * `is_super_admin()` / `can_manage_teachers()`），这里只是它的前端镜像 ——
+ * 前端拿它决定「显示哪些入口 / 标签」，**不用来决定"能不能写"**（见 §11.3 的纪律）。
+ *
+ * 两个容易混的身份，别再当成一个：
+ *  · `super` 最高管理员（平台维护者）
+ *  · `admin` 行政老师（教导处/办公室；能建号、能看全校，但**不能指派身份**）
+ */
+export type RoleCode = 'super' | 'grade_head' | 'head_teacher' | 'admin' | 'teacher'
+
+/** `teacher_roles` 的一行：一个人可以有多条（多身份是常态，不是异常） */
+export type TeacherRole = {
+  role: RoleCode
+  /** 管辖范围：`grade_head` → 年级，`head_teacher` → 班级，`super`/`admin` → 学校或空 */
+  scopeType?: 'school' | 'grade' | 'class'
+  scopeId?: string
+}
+
 /** 导入校对表的行 —— 校验标记决定用户是否需要人工确认 */
 export type ImportFlag = 'dup-no' | 'dup-name' | 'gap' | 'bad' | null
 

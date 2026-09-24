@@ -3,35 +3,19 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import { Logo, IconChevronRight, IconWifi } from '../components/icons'
 import { Button } from '../components/ui'
 import { useStore, useToast } from '../data/store'
+import { toEmail } from '../lib/accounts'
 import { getSupabase, isRemote } from '../lib/supabase'
 import { markLogin, setDeviceRole } from '../lib/session'
 import { APP_VERSION } from '../lib/version'
 
-/**
- * 内部账号的邮箱后缀。
+/*
+ * 登录名 → 邮箱：`toEmail()` 在 `lib/accounts.ts`。
  *
- * 这个平台有三类登录身份，只有第一类是人：
- *   教师 / 管理员：用真实邮箱（`admin2@example.com`、`admin@example.com`）
- *   教室端账号：  一个班一个，登录名是 `g2-4` 这种短名 —— 不是人，也不该收信
- *
- * 所以登录框允许**只敲短名**，这里按输入内容补后缀：
- *   带 @              → 原样放行（教师、管理员都敲完整邮箱）
- *   纯数字 5–11 位    → 当 QQ 号，补 `@qq.com`（管理员平时只记号码）
- *   其余              → 当内部短名，补 `@shugao.local`
- *
- * ⚠️ 这个后缀必须和 `functions/api/classroom-account.ts` 里的 EMAIL_DOMAIN 一致，
- *    否则教室端账号在那边建出来、在这边登不进去。
+ * 🔴 **必须和「教师账号」页建号时用的是同一个函数**（那里也调它）：
+ *    两边规则不一致就会出现"账号建出来了、在登录页却敲不进去"这种查半天的问题。
+ *    ⚠️ 后缀还必须和 `functions/api/classroom-account.ts` 里的 EMAIL_DOMAIN 一致，
+ *       否则教室端账号在那边建出来、在这边登不进去。
  */
-const ACCOUNT_DOMAIN = '@shugao.local'
-const QQ_DOMAIN = '@qq.com'
-const QQ_RE = /^\d{5,11}$/
-
-/** 看输入内容决定补哪个后缀；本来就有 @ 的原样放行。 */
-function toEmail(raw: string): string {
-  const s = raw.trim()
-  if (!s || s.includes('@')) return s
-  return QQ_RE.test(s) ? `${s}${QQ_DOMAIN}` : `${s}${ACCOUNT_DOMAIN}`
-}
 
 export default function Login() {
   const signIn = useStore((s) => s.signIn)
