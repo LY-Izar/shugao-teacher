@@ -113,7 +113,12 @@ export default function Classroom() {
 
   const [seq, setSeq] = useState(1)
   const [pipWin, setPipWin] = useState<Window | null>(null)
-  const [broadcast, setBroadcast] = useState<CallRecord | null>(null)
+  /**
+   * 播报队列 —— 多科老师可能几乎同时叫，**排队依次播，不能互相顶掉**。
+   * 当前正在播的就是队首那条。
+   */
+  const [queue, setQueue] = useState<CallRecord[]>([])
+  const broadcast = queue[0] ?? null
   const [now, setNow] = useState(() => new Date())
   const [armed, setArmed] = useState(false)
   const push = useToast((s) => s.push)
@@ -388,14 +393,16 @@ export default function Classroom() {
 
   useEffect(() => {
     if (!klass) return
+    /*
+     * 只负责**入队**，不负责播 —— 多个学科的老师可能几乎同时叫。
+     * 以前是 setBroadcast(c) 直接顶掉上一条，语文老师刚喊完物理老师就叫，
+     * 学生只听到后半句。现在排队，按先来后到依次播。
+     */
     const play = (c: CallRecord) => {
       const k = callKey(c)
       if (playedRef.current.has(k)) return
       playedRef.current.add(k)
-      setBroadcast(c)
-      chime()
-      window.setTimeout(() => speak(c.text), 680)
-      window.setTimeout(() => setBroadcast(null), 15000)
+      setQueue((q) => [...q, c])
     }
 
     const off = subscribe((m) => {
@@ -435,6 +442,23 @@ export default function Classroom() {
   useEffect(() => {
     setDeviceRole('classroom')
   }, [])
+
+  /**
+   * 播报队首那条：响一声提示音 → 念出来 → 15 秒后出队，接着播下一条。
+   * 依赖队首的「id + 最后播报时间」，所以队列前移时会自动播下一条。
+   */
+  const headKey = broadcast ? callKey(broadcast) : ''
+  useEffect(() => {
+    if (!broadcast) return
+    chime()
+    const t1 = window.setTimeout(() => speak(broadcast.text), 680)
+    const t2 = window.setTimeout(() => setQueue((q) => q.slice(1)), 15000)
+    return () => {
+      window.clearTimeout(t1)
+      window.clearTimeout(t2)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [headKey])
 
   const startPip = async () => {
     unlockAudio()
@@ -1562,6 +1586,21 @@ export default function Classroom() {
           >
             {broadcast.text}
           </div>
+
+          {/* 还有别的老师在叫 —— 让他们知道自己的呼叫没被顶掉，只是排在后面 */}
+          {queue.length > 1 ? (
+            <div
+              style={{
+                marginTop: 18,
+                fontSize: 14,
+                color: 'rgb(255 255 255 / .5)',
+                letterSpacing: '.06em',
+              }}
+            >
+              后面还有 <b className="num">{queue.length - 1}</b> 条呼叫在排队，会依次播报
+            </div>
+          ) : null}
+
           <div className="mt-10 flex gap-3">
             <Button
               onClick={() => {
@@ -1575,7 +1614,8 @@ export default function Classroom() {
               variant="primary"
               onClick={() => {
                 stopSpeaking()
-                setBroadcast(null)
+                // 只出队这一条 —— 后面排着的照常播
+                setQueue((q) => q.slice(1))
               }}
             >
               关闭
