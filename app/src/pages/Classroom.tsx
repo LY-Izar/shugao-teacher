@@ -94,6 +94,19 @@ const MAX_QUEUE = 12
 const BUBBLE_MIN_MS = 3_500
 /** 每个字至少留多少毫秒给人看（默读中文约 5～8 字/秒，取 180ms/字＝5.5 字/秒，宁可慢一点） */
 const BUBBLE_MS_PER_CHAR = 180
+
+/**
+ * 课表条目的标题约定是「**科目 [任课老师]**」—— 科目在前，老师在后、用空格分开。
+ * 「正在上课」那张卡要把这两样分两行显示（科目大、老师小），所以这里拆开。
+ *
+ * 没有空格就整串当科目（「班会」「自习」「体锻」「选修课」这些本来就没有老师）；
+ * `room` 是**另一个字段**，不在这里，别把地点也塞进标题。
+ */
+function splitTitle(title: string): { subject: string; teacher: string } {
+  const i = title.indexOf(' ')
+  if (i < 0) return { subject: title, teacher: '' }
+  return { subject: title.slice(0, i), teacher: title.slice(i + 1).trim() }
+}
 /** 播放记录只留最近这一段（轮询窗口是 15 分钟，比它长就够），不然开一整天会一直涨 */
 const SEEN_TTL_MS = 20 * 60_000
 /** 「叮咚」响完到开口的间隔 */
@@ -1159,7 +1172,59 @@ export default function Classroom() {
                   </div>
                 ) : null}
 
-                {day.items.length === 0 ? (
+                {/*
+                 * 正在上课：整张课表换成一张卡。
+                 * 站在教室前面的人此刻只想知道"这节是什么课、谁上" ——
+                 * 给一列时间表反而要他自己去找哪一行是现在。
+                 */}
+                {day.current ? (
+                  <div
+                    className="mt-2"
+                    style={{
+                      border: '1px solid var(--color-accent)',
+                      background: 'var(--color-accentsoft)',
+                      borderRadius: 6,
+                      padding: '14px 16px',
+                    }}
+                  >
+                    <div
+                      className="flex items-center gap-2"
+                      style={{ fontSize: 12, color: 'var(--color-accentink)' }}
+                    >
+                      <span
+                        className="live-dot"
+                        style={{
+                          width: 7,
+                          height: 7,
+                          borderRadius: 99,
+                          background: 'var(--color-accent)',
+                          display: 'inline-block',
+                        }}
+                      />
+                      正在上课
+                      <span className="flex-1" />
+                      <span className="num">
+                        {day.current.start}–{day.current.end}
+                      </span>
+                    </div>
+                    <div
+                      style={{
+                        fontSize: 30,
+                        fontWeight: 750,
+                        letterSpacing: '-.01em',
+                        marginTop: 8,
+                        lineHeight: 1.15,
+                      }}
+                    >
+                      {splitTitle(day.current.title).subject}
+                    </div>
+                    {splitTitle(day.current.title).teacher ? (
+                      <div style={{ fontSize: 16, color: 'var(--color-ink2)', marginTop: 4 }}>
+                        {splitTitle(day.current.title).teacher}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : day.items.length === 0 ? (
                   <div
                     className="mt-2"
                     style={{ fontSize: 12, color: 'var(--color-ink3)', lineHeight: 1.7 }}
