@@ -73,6 +73,7 @@ export function useMood() {
   const mood: DayMood = dayMood(now, {
     dateStr,
     allScheduleEnded: day.allEnded,
+    hasMoreToday: day.hasMore,
     pending: pending.length,
   })
 

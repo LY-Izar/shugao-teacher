@@ -34,6 +34,15 @@ export type DayState = {
   has: boolean
   /** 今天所有日程都已结束 */
   allEnded: boolean
+  /**
+   * 今天**还有课没上完**（有日程，且至少有一条还没结束）。
+   *
+   * 和 `allEnded` 的区别在"今天没有日程"这种情形：
+   *   · 没有日程 → allEnded=false、hasMore=false
+   *   · 有日程没上完 → allEnded=false、hasMore=true
+   * 「今天工作全部完成」的判定必须看 hasMore，否则晚上还有课也会被报成已完成。
+   */
+  hasMore: boolean
   current: ScheduleItem | null
   next: ScheduleItem | null
   /** 距离下一节课还有多少分钟 */
@@ -61,6 +70,7 @@ export function dayState(schedule: ScheduleItem[], d = new Date()): DayState {
     items,
     has: items.length > 0,
     allEnded: items.length > 0 && items.every((it) => toMinutes(it.end) <= m),
+    hasMore: items.length > 0 && items.some((it) => toMinutes(it.end) > m),
     current,
     next,
     minutesToNext,

@@ -177,13 +177,22 @@ export const MOOD_TEXT: Record<
  */
 export function dayMood(
   now: Date,
-  ctx: { dateStr: string; allScheduleEnded: boolean; pending: number },
+  ctx: { dateStr: string; allScheduleEnded: boolean; hasMoreToday?: boolean; pending: number },
 ): DayMood {
   const h = now.getHours()
   if (h >= 23 || h < 5) return 'lateNight'
   const kind = dayKind(ctx.dateStr)
   if (kind === 'holiday') return 'holiday'
   if (kind === 'weekend') return 'weekend'
+  /*
+   * ⚠️ 还有课没上完时**绝对不能报「全部完成」**。
+   *
+   * 原来是 `allScheduleEnded || h >= 18`：晚上 19:00 还有一节课、现在 18:05 时，
+   * allScheduleEnded=false 但 h>=18 为真 → 弹出「今天的工作已经全部完成，好好休息一下吧」——
+   * 老师明明还有课要上。那个 `h >= 18` 本意是照顾"今天没日程的老师"，
+   * 所以这里必须用 hasMoreToday 把它挡在前面。
+   */
+  if (ctx.hasMoreToday) return 'normal'
   // makeup（调休上班）落在这里，按工作日处理
   if (ctx.pending === 0 && (ctx.allScheduleEnded || h >= 18)) return 'done'
   return 'normal'
