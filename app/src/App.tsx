@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react'
 import { AppShell, ToastHost } from './components/AppShell'
 import { useStore } from './data/store'
 import { useAuthBootstrap } from './hooks/useAuthBootstrap'
-import { authExpired, hasAuthStamp, markLogin } from './lib/session'
+import { authExpired, hasAuthStamp, isClassroomDevice, markLogin } from './lib/session'
 import AssignmentCall from './pages/AssignmentCall'
 import AssignmentCollect from './pages/AssignmentCollect'
 import AssignmentGrade from './pages/AssignmentGrade'
@@ -46,6 +46,14 @@ function Guard({ children }: { children: React.ReactNode }) {
 
   // 连了后端时，先等会话与数据就绪，否则会误判成「未登录」被踢回登录页
   if (!hydrated) return <BootScreen />
+  /*
+   * 这台设备是被当作**教室端**用的（在教室里打开过 /classroom）——
+   * 学生把网址后缀一改就能进教师控制台，所以这里要求重新输一次教师密码。
+   * 拦的是"改网址"这个实际操作；真正的权限隔离要靠独立账号 + 数据库 RLS。
+   */
+  if (isClassroomDevice()) {
+    return <Navigate to="/login" replace state={{ from: loc.pathname, classroom: true }} />
+  }
   if (!teacher || expired) {
     return <Navigate to="/login" replace state={{ from: loc.pathname, expired }} />
   }

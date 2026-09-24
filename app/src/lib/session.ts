@@ -11,6 +11,45 @@
 const KEY = 'shugao.lastAuthAt'
 export const AUTH_DAYS = 7
 
+/* ============================================================
+   本机角色：这台设备是「教室端」还是「教师端」
+   ------------------------------------------------------------
+   为什么需要：教室端和教师端**用的是同一个账号**，学生在教室里
+   把网址后缀一改（/classroom → /）就进了教师控制台，能看到全班成绩、
+   还能改数据。
+
+   这一层拦的是**"改网址"这个实际操作**：教室端登录进来的设备，
+   访问教师端必须重新输一次教师密码。
+
+   ⚠️ 这只是客户端拦截，**不是加密级的安全**：懂开发者工具的学生
+   可以改 localStorage 绕过去。真正的隔离要让教室端用**独立账号**，
+   并在数据库层面（RLS）禁止它改成绩与名单 —— 那是单独立项的架构改动。
+   ============================================================ */
+
+const ROLE_KEY = 'shugao.deviceRole'
+export type DeviceRole = 'teacher' | 'classroom'
+
+export function setDeviceRole(r: DeviceRole) {
+  try {
+    localStorage.setItem(ROLE_KEY, r)
+  } catch {
+    /* 忽略 */
+  }
+}
+
+export function deviceRole(): DeviceRole {
+  try {
+    return localStorage.getItem(ROLE_KEY) === 'classroom' ? 'classroom' : 'teacher'
+  } catch {
+    return 'teacher'
+  }
+}
+
+/** 这台设备是被当作教室端用的 —— 进教师端要重新验证 */
+export function isClassroomDevice(): boolean {
+  return deviceRole() === 'classroom'
+}
+
 const DAY = 86_400_000
 
 /** 登录成功时调用 */

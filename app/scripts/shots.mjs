@@ -237,6 +237,12 @@ await room.screenshot({ path: `${OUT}/33-classroom-list.png` })
 console.log('shot 33-classroom-list')
 
 // 教师端发出一次呼叫 → 教室端应弹出播报浮层
+/*
+ * 上面开过教室端，这台设备已被标成「教室端」—— 再访问教师端会被要求重新登录
+ * （这是**故意**的：学生改网址就进不去教师控制台了）。
+ * 测试要继续跑教师端，所以先把角色改回来。
+ */
+await page.evaluate(() => localStorage.setItem('shugao.deviceRole', 'teacher'))
 await page.goto(`${BASE}/assignments/a-demo-1/call`, { waitUntil: 'networkidle' })
 await page.getByRole('button', { name: /^\d+ 号 / }).nth(0).click()
 await page.getByRole('button', { name: /^\d+ 号 / }).nth(1).click()

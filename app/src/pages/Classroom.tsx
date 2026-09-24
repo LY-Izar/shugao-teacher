@@ -22,6 +22,7 @@ import { BAND_META, gradeStats } from '../lib/grading'
 import { closePip, openPip, pipSupported } from '../lib/pip'
 import { HEARTBEAT_MS, emit, subscribe } from '../lib/realtime'
 import { isRemote } from '../lib/supabase'
+import { setDeviceRole } from '../lib/session'
 import * as remote from '../data/remote'
 import {
   fsSupported,
@@ -425,6 +426,15 @@ export default function Classroom() {
   }, [klass?.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => () => closePip(), [])
+
+  /**
+   * 标记这台设备是「教室端」。
+   * 之后在这台机器上访问教师端（把 /classroom 改成 /）会要求重新输教师密码 ——
+   * 学生在教室里改网址就进不去教师控制台了。
+   */
+  useEffect(() => {
+    setDeviceRole('classroom')
+  }, [])
 
   const startPip = async () => {
     unlockAudio()
