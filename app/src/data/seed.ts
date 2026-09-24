@@ -288,6 +288,23 @@ function makeDemoGrading(students: Student[], questionCount: number): Assignment
   return wrong
 }
 
+/* ---------------- 极简模式：等级（演示） ----------------
+
+   极简模式（`statsMode='simple'`）是**另一套数据模型**：只有「学号 → 优/良/差」，
+   没有任何逐题数据（`wrong` 永远是空的）。这一段造的就是那份数据。
+   ⚠️ 未交的学生**不评等级** —— 与批改页拦未交学生是同一条纪律（§二 I3）。 */
+
+function makeDemoGrades(students: Student[], missingNos: string[]): Record<string, string> {
+  const rng = makeRng(20251005)
+  const out: Record<string, string> = {}
+  for (const s of students) {
+    if (missingNos.includes(s.studentNo)) continue
+    const r = rng()
+    out[s.studentNo] = r < 0.28 ? '优' : r < 0.78 ? '良' : '差'
+  }
+  return out
+}
+
 /* ---------------- S2：演示作业档案 ---------------- */
 
 /**
@@ -309,6 +326,30 @@ export function makeDemoAssignments(classes: Klass[]): Assignment[] {
   const now = Date.now()
   const pickMissing = (count: number, idx: number[]) =>
     idx.map((n) => String(n)).filter((n) => Number(n) <= count)
+
+  /*
+   * 极简模式那一份的数据（**唯一一份 statsMode='simple' 的演示档案**）。
+   *
+   * 为什么必须有它：`seed` 里原来一份极简档案都没有，五个回归脚本也从不创建，
+   * 于是这整套第二数据模型在回归里是 **0 覆盖** —— 而它的表现方式恰好是
+   * "照普通模式渲染、给出一个看起来很正常其实错了的结论"（§九 W16）。
+   *
+   * 结构照**真实极简档案**的样子（对着 `AssignmentNew.tsx` 与 `AssignmentGrade.tsx` 核过）：
+   *  · `questionCount` 仍然是 6 —— 新建页在极简模式下把题量输入框藏起来了，
+   *    但那个 state 还在（默认 `'6'`），所以真实档案里真有这个数。它不参与任何
+   *    极简模式的渲染，**正因为如此**才危险：照普通模式渲染就会拿它算出
+   *    「共 6 题 / 错题 0 / 错误率 0%」；
+   *  · `wrong` / `subQuestions` / `questionMeta` 全空 —— 没有逐题数据；
+   *  · `confirmedNos` = 评过等级的人，`missingNos` = 没评的人（真实流程里
+   *    「确认完成批改」把没批的人登记成未交，见 §二 I3）；
+   *  · 改错名单按等级挑（「全选「差」的」），已改错留两个人，
+   *    这样改错登记页在演示数据里就有内容。
+   */
+  const simpleMissing = pickMissing(a.students.length, [7, 19, 33])
+  const simpleGrades = makeDemoGrades(a.students, simpleMissing)
+  const simpleBad = a.students
+    .filter((s) => s.status === 'active' && simpleGrades[s.studentNo] === '差')
+    .map((s) => s.studentNo)
 
   const out: Assignment[] = [
     {
@@ -335,6 +376,33 @@ export function makeDemoAssignments(classes: Klass[]): Assignment[] {
       focusNos: [a.students[2]?.studentNo, a.students[8]?.studentNo].filter(Boolean) as string[],
       gradeSeconds: 254,
       gradedAt: now - 2 * 86400000 + 7200_000,
+    },
+    {
+      id: 'a-demo-5',
+      title: '课堂练习抽查 · 只记等级',
+      classId: a.id,
+      subject: subjectName(DEFAULT_SUBJECT_CODE),
+      subjectCode: DEFAULT_SUBJECT_CODE,
+      // 与 a-demo-1 同一天：不额外引入一个新日期（教室端「按日期选作业」不受影响）
+      assignDate: isoOffset(-2),
+      // 见上面的说明：极简模式下这个数不参与渲染，但真实档案里就是它
+      questionCount: 6,
+      status: 'graded',
+      createdAt: now - 2 * 86400000 + 3600_000,
+      collected: true,
+      missingNos: simpleMissing,
+      lateNos: [],
+      subQuestions: {},
+      questionMeta: {},
+      wrong: {},
+      confirmedNos: Object.keys(simpleGrades),
+      statsMode: 'simple',
+      grades: simpleGrades,
+      focusNos: [],
+      correctionNos: simpleBad,
+      correctedNos: simpleBad.slice(0, 2),
+      gradeSeconds: 168,
+      gradedAt: now - 2 * 86400000 + 5400_000,
     },
     {
       id: 'a-demo-2',

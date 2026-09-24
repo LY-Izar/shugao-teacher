@@ -32,6 +32,31 @@ export default function AssignmentGradeDone() {
     [assignment, students],
   )
 
+  /**
+   * 极简模式的等级分布。
+   *
+   * 🔴 极简模式是**另一套数据模型**（§四 4.1）：只有「学号 → 优/良/差」，
+   * `wrong` 永远是空的，`questionCount` 只是建档时那个隐藏输入框留下的默认值。
+   * 照普通模式渲染这张完成页，教师看到的是
+   * 「共 6 题 · 错题 0 · 错误率 0% · 本次没有需要集中讲评的题」——
+   * **看起来很正常，其实全是错的**（这是 §九 W16 剩下的最后一处）。
+   */
+  const simple = assignment?.statsMode === 'simple'
+  const grades = assignment?.grades
+  const gradeCounts = useMemo(() => {
+    const c = { 优: 0, 良: 0, 差: 0 }
+    for (const s of students) {
+      const g = grades?.[s.studentNo]
+      if (g === '优' || g === '良' || g === '差') c[g]++
+    }
+    return c
+  }, [students, grades])
+  /** 极简模式里"最该面批"的那批人 —— 代替普通模式的「明天讲评的重点」 */
+  const badOnes = useMemo(
+    () => students.filter((s) => grades?.[s.studentNo] === '差'),
+    [students, grades],
+  )
+
   if (!assignment || !stats) {
     return (
       <>
@@ -48,7 +73,8 @@ export default function AssignmentGradeDone() {
   const seconds = assignment.gradeSeconds ?? 0
   const denominator = stats.total * assignment.questionCount
   const overallRate = denominator ? stats.wrongTotal / denominator : 0
-  const top = stats.ranked.slice(0, 3)
+  /* 极简模式没有逐题数据，`stats.ranked` 恒为空 —— 直接算「差」的名单 */
+  const top = simple ? [] : stats.ranked.slice(0, 3)
   const incomplete = stats.completeness < 1
 
   return (
@@ -76,18 +102,28 @@ export default function AssignmentGradeDone() {
             </svg>
             <div style={{ fontSize: 19, fontWeight: 680, marginTop: 14 }}>本次批改完成</div>
             <div style={{ fontSize: 12.5, color: 'var(--color-ink3)', marginTop: 3 }}>
-              {klass?.name} · {friendlyDate(assignment.assignDate)} · 共{' '}
-              {assignment.questionCount} 题
+              {klass?.name} · {friendlyDate(assignment.assignDate)} ·{' '}
+              {simple ? '极简模式 · 只记等级' : `共 ${assignment.questionCount} 题`}
             </div>
           </div>
 
           <StatStrip
-            items={[
-              { k: '用时', v: seconds ? humanDuration(seconds) : '—' },
-              { k: '记录', v: `${stats.total} 人` },
-              { k: '错题', v: stats.wrongTotal, tone: 'var(--color-bad)' },
-              { k: '错误率', v: `${Math.round(overallRate * 100)}%` },
-            ]}
+            items={
+              simple
+                ? [
+                    { k: '用时', v: seconds ? humanDuration(seconds) : '—' },
+                    { k: '记录', v: `${stats.total} 人` },
+                    { k: '优', v: gradeCounts.优, tone: 'var(--color-ok)' },
+                    { k: '良', v: gradeCounts.良, tone: 'var(--color-warn)' },
+                    { k: '差', v: gradeCounts.差, tone: 'var(--color-bad)' },
+                  ]
+                : [
+                    { k: '用时', v: seconds ? humanDuration(seconds) : '—' },
+                    { k: '记录', v: `${stats.total} 人` },
+                    { k: '错题', v: stats.wrongTotal, tone: 'var(--color-bad)' },
+                    { k: '错误率', v: `${Math.round(overallRate * 100)}%` },
+                  ]
+            }
           />
         </Panel>
 
@@ -105,18 +141,63 @@ export default function AssignmentGradeDone() {
               <IconAlert size={16} />
             </span>
             <div style={{ fontSize: 12.5, color: '***REMOVED***8a5a12', lineHeight: 1.65 }}>
-              批改完整度 {Math.round(stats.completeness * 100)}%：还有{' '}
-              {stats.total - stats.confirmedCount} 人没打开过题号列表。
-              下面的结论按现有数据给出，可能会偏低。
+              {simple ? '等级录入' : '批改完整度'} {Math.round(stats.completeness * 100)}%：还有{' '}
+              {stats.total - stats.confirmedCount} 人{simple ? '没评等级' : '没打开过题号列表'}。
+              {simple
+                ? '下面的等级分布按现在录入的部分给出。'
+                : '下面的结论按现有数据给出，可能会偏低。'}
             </div>
           </div>
         ) : null}
 
-        {/* 讲评重点 */}
+        {/* 讲评重点（普通模式）／最该面批的名单（极简模式） */}
         <div className="mb-4">
-          <Sect>明天讲评的重点已经帮你挑好了</Sect>
+          <Sect>{simple ? '这次评「差」的学生 · 建议面批' : '明天讲评的重点已经帮你挑好了'}</Sect>
           <Panel className="overflow-hidden">
-            {top.length === 0 ? (
+            {simple ? (
+              badOnes.length === 0 ? (
+                <div className="flex items-center gap-2.5 p-3.5">
+                  <span style={{ color: 'var(--color-ok)' }}>
+                    <IconCheck size={17} />
+                  </span>
+                  <span style={{ fontSize: 13, color: 'var(--color-ink2)' }}>
+                    这次没有评「差」的学生 —— 需要盯的人在「需重点关注」里。
+                  </span>
+                </div>
+              ) : (
+                <div className="stagger">
+                  {badOnes.map((s) => (
+                    <div
+                      key={s.id}
+                      className="flex items-center gap-3 px-3.5 py-3"
+                      style={{ borderBottom: '1px solid var(--color-line)' }}
+                    >
+                      <span
+                        className="num grid place-items-center shrink-0"
+                        style={{
+                          width: 38,
+                          height: 38,
+                          border: '1px solid var(--color-bad)',
+                          borderRadius: 4,
+                          background: 'var(--color-badsoft)',
+                          fontSize: 15,
+                          fontWeight: 700,
+                          color: 'var(--color-bad)',
+                        }}
+                      >
+                        {s.studentNo}
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <div style={{ fontSize: 14, fontWeight: 650 }}>{s.name}</div>
+                        <div style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 2 }}>
+                          等级 差 · 建议当面订正
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )
+            ) : top.length === 0 ? (
               <div className="flex items-center gap-2.5 p-3.5">
                 <span style={{ color: 'var(--color-ok)' }}>
                   <IconCheck size={17} />
@@ -170,7 +251,9 @@ export default function AssignmentGradeDone() {
             >
               <IconTarget size={13} />
               <span>
-                分档依据：错误率 30–70% 的题讲评价值最高；低于 10% 建议个别辅导，不占课堂时间。
+                {simple
+                  ? '极简模式只记等级，没有逐题数据 —— 所以不给逐题正确率，也不进错题集。'
+                  : '分档依据：错误率 30–70% 的题讲评价值最高；低于 10% 建议个别辅导，不占课堂时间。'}
               </span>
             </div>
           </Panel>
@@ -204,24 +287,38 @@ export default function AssignmentGradeDone() {
             icon={<IconTarget size={16} />}
             onClick={() => navigate(`/assignments/${assignment.id}/stats`)}
           >
-            逐题统计
+            {simple ? '等级分布' : '逐题统计'}
           </Button>
         </div>
 
+        {/*
+          极简模式没有错题数据，`/assignments/:id/call` 那一页（按错题数排序）
+          在这份档案上只会显示「有错题 0 人」+ 空名单 —— 又一个"看起来正常其实错了"。
+          所以这条入口在极简模式下改去**改错登记**：那里按等级挑人（「全选「差」的」），
+          呼叫逻辑是同一套。
+        */}
         <Button
           block
           className="mt-2"
           icon={<IconMegaphone size={16} />}
-          onClick={() => navigate(`/assignments/${assignment.id}/call`)}
+          onClick={() =>
+            navigate(
+              simple
+                ? `/assignments/${assignment.id}/correct`
+                : `/assignments/${assignment.id}/call`,
+            )
+          }
         >
-          一键呼叫错得较多的学生
+          {simple ? '去改错登记挑人呼叫（按等级）' : '一键呼叫错得较多的学生'}
         </Button>
 
         <div
           className="mt-3 px-1"
           style={{ fontSize: 11.5, color: 'var(--color-ink4)', lineHeight: 1.7 }}
         >
-          逐题正确率可下钻到学生名单，呼叫默认按错题数排序、默认不预选、单次最多 8 人。
+          {simple
+            ? '极简模式只记等级：改错名单在改错登记里按等级挑（差 / 良），单次最多 8 人。'
+            : '逐题正确率可下钻到学生名单，呼叫默认按错题数排序、默认不预选、单次最多 8 人。'}
         </div>
       </Page>
     </>

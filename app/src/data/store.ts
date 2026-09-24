@@ -3,6 +3,7 @@ import { createJSONStorage, persist, type StateStorage } from 'zustand/middlewar
 import { isRemote } from '../lib/supabase'
 import { HEARTBEAT_MS, emit, subscribe } from '../lib/realtime'
 import { normalizePaperName } from '../lib/examPaper'
+import { clampQuestionCount } from '../lib/assignments'
 import {
   alignAssignmentSubject,
   alignTeacherPrimarySubject,
@@ -770,7 +771,17 @@ export const useStore = create<State>()(
           subject: subjectName(code),
           subjectCode: code,
           assignDate,
-          questionCount: Math.max(1, Number(questionCount) || 1),
+          /*
+           * 🔴 题量的**唯一守门人**就在这里（不变量 I8）。
+           *
+           * 数据库有 `check (question_count between 1 and 60)`，越界会让**整条 upsert 被拒**；
+           * 而云端模式本地不做持久化 → 界面提示"已建立"，刷新之后连收缴、批改一起没。
+           * 以前这里只有下界（`Math.max(1, …)`），靠"每个调用方自己记得夹 60"兜着 ——
+           * 那种保证在新加一条写入路径的那天就失效（`lib/assignments.ts` 的
+           * `clampQuestionCount` 是这一段的单一来源，`updateAssignment` 与
+           * `restoreBackup` 也过它）。
+           */
+          questionCount: clampQuestionCount(questionCount),
           status: 'open',
           templateId,
           createdAt: Date.now(),
@@ -811,6 +822,14 @@ export const useStore = create<State>()(
             if (code) {
               next.subjectCode = code
               next.subject = subjectName(code)
+            }
+            /*
+             * 题量在**这条路径上也要守**（I8）：`updateAssignment` 收的是 `Partial<Assignment>`，
+             * 「补导入题目」正是走它写 `questionCount` 的 —— 上次那个"识别到 70 题"的洞
+             * 就是从这里进来的。只在补丁真的带了这一列时才夹，免得无谓地改动别的档案。
+             */
+            if (patch.questionCount !== undefined) {
+              next.questionCount = clampQuestionCount(next.questionCount)
             }
             return next
           }),
@@ -1070,7 +1089,7 @@ export const useStore = create<State>()(
           source: input.source,
           mode: input.mode,
           examDate: input.examDate,
-          questionCount: Math.max(1, Math.min(60, Number(input.questionCount) || 1)),
+          questionCount: clampQuestionCount(input.questionCount),
           questions: input.questions ?? {},
           classIds: ids,
           absentNos: input.absentNos ?? [],
@@ -1228,6 +1247,9 @@ export const useStore = create<State>()(
        * `validateBackup` 已经归一过一遍，这里再对齐一次是**第二道闸**：
        * 恢复是不可逆动作，且它现在/将来可能被别处调用（页面、脚本、测试），
        * 不能假设调用方都先跑过 `validateBackup`。
+       *
+       * 题量同理（I8）：`lib/backup.ts` 的 `normalizeAssignment` 会夹到 1–60，
+       * 但备份是**外部文件**，结构补齐漏一处就是"整条 upsert 被拒、刷新即丢"。
        */
       restoreBackup: (b) => {
         const teacher = b.teacher ? alignTeacherPrimarySubject(b.teacher) : get().teacher
@@ -1235,7 +1257,10 @@ export const useStore = create<State>()(
           teacher,
           classes: b.classes,
           currentClassId: b.classes[0]?.id ?? null,
-          assignments: b.assignments.map(alignAssignmentSubject),
+          assignments: b.assignments.map((a) => ({
+            ...alignAssignmentSubject(a),
+            questionCount: clampQuestionCount(a.questionCount),
+          })),
           schedule: b.schedule,
           calls: b.calls,
           classrooms: b.classrooms,

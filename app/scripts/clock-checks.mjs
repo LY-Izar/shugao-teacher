@@ -43,6 +43,18 @@
  */
 import { withLock } from './lib/lock.mjs'
 import { launchBrowser } from './lib/edge-path.mjs'
+import { registerTsResolve } from './lib/ts-resolve.mjs'
+
+/*
+ * 直接 import 仓库里那份**判据函数**（`lib/wrongbook.ts` 的 `ranked`），
+ * 而不是在脚本里再写一遍 `status === 'graded'`：
+ * 教室端能看哪些档案由它说了算（§11.5「判据只有一处」），
+ * 而 `seed` 里现在有一份**极简模式**的已批改档案（`statsMode='simple'`，
+ * 没有任何逐题数据）—— 脚本要是自己写一遍状态判断，
+ * 就会拿一份产品根本不会显示的档案去算"屏上该显示什么"。
+ */
+registerTsResolve()
+const { ranked } = await import('../src/lib/wrongbook.ts')
 
 /* ---------------- 配置 ---------------- */
 
@@ -881,15 +893,25 @@ await withLock(async () => {
       /*
        * 选中的那份日期 —— 从**快照里产品要读的那份数据**算出来（不是脚本当场拍一个常量）：
        * 教室端默认选中的是 `graded` 里的第一份（`assignment` 由 classId + status 推出）。
+       * ⚠️ 判据用仓库里那份 `ranked`（与产品同一个函数）：它还会排掉**极简模式**那一份
+       *    （`statsMode='simple'`，没有逐题数据）—— 自己写 `status === 'graded'`
+       *    会把产品根本不显示的那份算进来，"屏上该显示哪一天"从根上就算错了。
        */
-      const wantPicked = await page.evaluate(
+      const snapshotForClass = await page.evaluate(
         ([k, classId]) => {
           const st = JSON.parse(localStorage.getItem(k) ?? '{}').state ?? {}
-          const graded = (st.assignments ?? []).filter((a) => a.classId === classId && a.status === 'graded')
-          return graded[0] ? graded[0].assignDate : null
+          return (st.assignments ?? [])
+            .filter((a) => a.classId === classId)
+            .map((a) => ({
+              status: a.status,
+              statsMode: a.statsMode,
+              assignDate: a.assignDate,
+              title: a.title,
+            }))
         },
         [CLS_KEY, DEMO_CLASS_ID],
       )
+      const wantPicked = snapshotForClass.filter(ranked)[0]?.assignDate ?? null
       const picker1 = await readDatePicker(page)
       check(
         picker1.n === 1 &&
@@ -903,6 +925,33 @@ await withLock(async () => {
         /^当前小窗显示：第 \d+ 题/.test(picker1.pip ?? ''),
         '当前小窗那一行也在（作业与小窗都挂上了）',
         String(picker1.pip),
+      )
+
+      /*
+       * 🔴 **极简模式那份档案不能进教室端**（`seed` 的 `a-demo-5`，`statsMode='simple'`）。
+       *
+       * 它没有任何逐题数据（`wrong` 恒为空），混进来的话那一屏会逐题显示
+       * "错误率 0%"、看起来像全班全对（§九 W16 的教室端那一半）。
+       * 判据在产品里是 `lib/wrongbook.ts` 的 `ranked`。
+       *
+       * 这条断言是**独立**的：它钉的是**屏上真有/真没有**那份档案，
+       * 而不是"脚本按同一条判据算出来的东西等于它自己"（那种自证恒真）。
+       */
+      const roomBody1 = await bodyText(page)
+      check(
+        !roomBody1.includes('课堂练习抽查'),
+        '极简模式那份档案没有进教室端（它没有逐题数据）',
+        roomBody1.includes('课堂练习抽查') ? short(roomBody1, 150) : '屏上没有「课堂练习抽查」',
+      )
+      const roomOpts = await page.evaluate(() =>
+        [...document.querySelectorAll('select')]
+          .map((s) => [...s.options].map((o) => (o.textContent ?? '').trim()))
+          .find((list) => list.some((t) => t.includes('作业'))) ?? [],
+      )
+      check(
+        roomOpts.length === 2 && !roomOpts.some((t) => t.includes('课堂练习抽查')),
+        '教室端的作业选择器只列普通模式档案（快照里本班有 2 份能进教室端的已批改档案）',
+        `选项：${roomOpts.join(' | ') || '(没找到作业选择器)'}`,
       )
       if (!card.found) {
         check(false, '出现「正在上课」卡片', `没找到，课表区文案：${short(await schedText(page))}`)
@@ -1016,20 +1065,19 @@ await withLock(async () => {
 
       /**
        * Sheet 里**应该**列出哪些日期：产品是按 `graded` 的 `assignDate` 去重排的
-       * （Classroom.tsx：`[...new Set(graded.map(a => a.assignDate))].sort(desc).slice(0,30)`，
+       * （Classroom.tsx：`[...new Set(graded.map(a => a.assignDate))].sort(desc).slice(0,30)]`，
        *  每行渲染成 `MM/DD` + 星期）。
-       * 这里从**本班的已批改档案**（快照里读，与产品同一个数据源）算出这份集合，
-       * 再和屏上列出来的逐一对齐 —— 原来那条 `>= 1` 兜得太低：
-       * 设计上要列**所有**可选日期，只列 1 个也是"坏了一半"却照样绿。
+       * 这里从**本班的已批改档案**（快照里读，与产品同一个数据源 + 同一个判据
+       * `ranked`）算出这份集合，再和屏上列出来的逐一对齐 ——
+       * 原来那条 `>= 1` 兜得太低：设计上要列**所有**可选日期，只列 1 个也是"坏了一半"却照样绿。
+       * ⚠️ 极简模式那一份也在快照里（`status='graded'`），`ranked` 会把它排掉 ——
+       *    要是这里改成手写状态判断，"Sheet 该有几个日期"会跟着一起错。
        */
-      const wantDates = await page.evaluate(
-        ([k, classId]) => {
-          const st = JSON.parse(localStorage.getItem(k) ?? '{}').state ?? {}
-          const graded = (st.assignments ?? []).filter((a) => a.classId === classId && a.status === 'graded')
-          return [...new Set(graded.map((a) => a.assignDate))].sort((x, y) => (x < y ? 1 : -1)).slice(0, 30)
-        },
-        [CLS_KEY, DEMO_CLASS_ID],
-      )
+      const wantDates = [
+        ...new Set(snapshotForClass.filter(ranked).map((a) => a.assignDate)),
+      ]
+        .sort((x, y) => (x < y ? 1 : -1))
+        .slice(0, 30)
       const wantRowText = wantDates.map((d) => `${d.slice(5).replace('-', '/')}${weekdayTextOf(d)}`.replace(/\s+/g, ''))
 
       await page.locator('button', { hasText: '▾' }).first().click()

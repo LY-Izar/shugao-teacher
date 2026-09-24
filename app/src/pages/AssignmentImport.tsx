@@ -5,6 +5,7 @@ import { WordImport } from '../components/WordImport'
 import { IconCheck } from '../components/icons'
 import { Button, Empty, PageHead, Panel, Sect } from '../components/ui'
 import { useStore, useToast } from '../data/store'
+import { clampQuestionCount } from '../lib/assignments'
 import { docxToParts } from '../lib/docx'
 import {
   parseExam,
@@ -90,8 +91,10 @@ export default function AssignmentImport() {
      * ⚠️ 必须夹到 60 —— schema 有 `check (question_count between 1 and 60)`。
      * 期末/复习卷超过 60 题很常见，直接写 70 会让整条 upsert 被拒；
      * 远程模式没有本地持久化 → 刷新即丢，界面却已经提示"已导入"。
+     * 夹取的定义只有一处（`lib/assignments.ts` 的 clampQuestionCount）；
+     * 这里夹是为了下面那句提示能说清"只记了前 60 题"，store 那道闸仍然在。
      */
-    const clamped = Math.min(60, Math.max(1, questions.length))
+    const clamped = clampQuestionCount(questions.length)
     updateAssignment(id, {
       questionMeta: toQuestionMeta(questions),
       questionCount: clamped,

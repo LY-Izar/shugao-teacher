@@ -1,6 +1,7 @@
 import { getSupabase } from './supabase'
 import { useToast } from '../data/store'
 import { toISODate } from './date'
+import { clampQuestionCount } from './assignments'
 import {
   DEFAULT_SUBJECT_CODE,
   alignAssignmentSubject,
@@ -12,7 +13,7 @@ import {
 import {
   assignmentWriteRow,
   callToRow,
-  classToRow,
+  classRows,
   classroomToRow,
   ensureSubjectCols,
   scheduleToRow,
@@ -209,7 +210,8 @@ function normalizeAssignment(raw: unknown): Assignment {
     ...(subjectCode ? { subjectCode } : {}),
     assignDate: ISO_DATE.test(asText(a.assignDate)) ? asText(a.assignDate) : toISODate(new Date()),
     // 数据库有 check (question_count between 1 and 60)：越界会让**整条 upsert 被拒**（刷新即丢）
-    questionCount: Math.min(60, Math.max(1, Math.round(asNumber(a.questionCount, 1)))),
+    // ——夹取的定义只有一处（`lib/assignments.ts` 的 clampQuestionCount，I8 的守门人）
+    questionCount: clampQuestionCount(asNumber(a.questionCount, 1)),
     status,
     ...(typeof a.templateId === 'string' ? { templateId: a.templateId } : {}),
     createdAt: asNumber(a.createdAt, Date.now()),
@@ -647,7 +649,12 @@ export async function pushBackupToCloud(b: Backup, teacherId: string): Promise<s
       label: '班级',
       key: 'classes',
       table: 'classes',
-      rows: b.classes.map((c) => classToRow(c, teacherId)),
+      /*
+       * 走 `classRows`（与 `saveClass` 同一个落库载荷）：带上 `grade_id`，
+       * 判据也是那三条（列不存在不带 / 认不出不带 / 同名多条不带）。
+       * 只修 `saveClass` 的话，恢复出来的班照样是"年级主任管不动"的班。
+       */
+      rows: await classRows(b.classes, teacherId),
       fatal: true,
     },
     {

@@ -48,6 +48,17 @@ const NAV = [
    */
   { to: '/exams', label: '考试', icon: IconChart, end: false },
   { to: '/wrong', label: '错题集', icon: IconTarget, end: false },
+  /*
+   * 教师的**个人排课表**（`schedule_items.scope='mine'`）—— 显示名叫「日程表」。
+   *
+   * 为什么改这个名（2026-09-27 用户拍板）：平台里有**两套**课表，
+   *   · `scope='mine'`  —— 我什么时候上哪个班（这一条入口）；
+   *   · `scope='class'` —— 班级课表，贴在教室里给学生看，教师端只读（§七 7.2）。
+   * 两套都叫"课表"时，老师根本分不清说的是哪一份。
+   * ⚠️ **只改了显示名与入口位置**：`scope` 的取值、过滤、写入一个字都没动
+   *    （`schedule_items.scope` 的 check 只有 `'mine'` / `'class'`）。
+   */
+  { to: '/schedule', label: '日程表', icon: IconCalendar, end: false },
   { to: '/settings', label: '我的', icon: IconUser, end: false },
 ]
 
@@ -66,6 +77,7 @@ const MORE_HINT: Record<string, string> = {
   '/classes': '花名册 · 拍照录入 · 名单体检',
   '/exams': '导入成绩单 · 手动批阅 · 逐题统计',
   '/wrong': '按班级看错题 · 生成重练题卷',
+  '/schedule': '我什么时候上哪个班 · 上课前提醒',
 }
 
 /* ---------------- Toast ---------------- */
@@ -982,7 +994,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               style={{ fontSize: 11.5, color: 'var(--color-accent)' }}
             >
               <IconCalendar size={13} />
-              <span>{mood.day.items.length ? '调整课表' : '去录入课表'}</span>
+              <span>{mood.day.items.length ? '调整日程' : '去录入日程'}</span>
               <span className="flex-1" />
               <IconChevronRight size={13} />
             </button>

@@ -93,12 +93,32 @@ await withLock(async () => {
        只回 `[]` 的话它会判成"只落库 0/N 行"（那是另一条纪律，别在这里误伤）。
        ============================================================ */
 
-    const NEW_COL = { assignments: 'subject_code', teachers: 'primary_subject_code' }
+    /*
+     * 兼容期的新列：学科那两列（第 12 段）+ `classes.grade_id`（第 10 段）。
+     * 三列同一条纪律：**列不存在就不许出现在载荷里**（否则整条 upsert 被 PostgREST 拒掉）。
+     */
+    const NEW_COL = {
+      assignments: 'subject_code',
+      teachers: 'primary_subject_code',
+      classes: 'grade_id',
+    }
     const WRITE_TABLES = ['teachers', 'classes', 'students', 'assignments', 'schedule_items', 'classrooms', 'calls']
 
     /** 'present' | 'missing-cols' */
     let MODE = 'present'
     const requests = []
+
+    /**
+     * 年级表的内容（`remote.ts` 的 `ensureGradeLookup` 拿它把
+     * `classes.grade` 这个**文本**换成 `grades.id`）。第四节会改写它来验"认不出/歧义"。
+     */
+    const GRADE_GAO2 = '55555555-5555-4555-8555-555555555555'
+    const GRADE_GAO3 = '66666666-6666-4666-8666-666666666666'
+    const GRADE_GAO2B = '77777777-7777-4777-8777-777777777777'
+    let GRADES_ROWS = [
+      { id: GRADE_GAO2, name: '高二' },
+      { id: GRADE_GAO3, name: '高三' },
+    ]
 
     /** 载荷里带不带那两个新列（列不存在时，真实 PostgREST 会因为这两列整条拒绝） */
     function newColInPayload(table, body) {
@@ -145,6 +165,12 @@ await withLock(async () => {
           return
         }
         if (!WRITE_TABLES.includes(table)) {
+          // 年级表只读（前端拿它把班级里的年级文本换成 grade_id）—— 见第四节
+          if (table === 'grades' && req.method === 'GET') {
+            res.writeHead(200, { 'content-type': 'application/json' })
+            res.end(JSON.stringify(GRADES_ROWS))
+            return
+          }
           res.writeHead(404, { 'content-type': 'application/json' })
           res.end(JSON.stringify(tableMissingBody(table)))
           return
@@ -567,6 +593,90 @@ await withLock(async () => {
           Boolean(tPut) && !('primary_subject_code' in tPut),
           JSON.stringify(tPut?.primary_subject_code),
         )
+      }
+
+      /* ============================================================
+         四、建班要带 `grade_id`（2026-09-27：让年级主任/班主任管得动自己建的班）
+         ------------------------------------------------------------
+         为什么值得单独一节：`classes.grade_id` 是**权限判据的一环**
+         （`visible_class_ids()` / `can_manage_class()` 里"年级主任看本年级"那一支），
+         留空 → 自己建的班只有 super/admin 管得动（加不了学生、改不了班级课表）。
+         前端手里只有 `classes.grade` 这个**文本**，要去 `grades` 表换 id；
+         换不出来时**宁可留空也不猜** —— 猜错就是"把班交给错的年级主任"。
+         ============================================================ */
+
+      section('四、建班带 grade_id：换得出才带 · 认不出/歧义/列不存在都不带')
+      {
+        MODE = 'present'
+        GRADES_ROWS = [
+          { id: GRADE_GAO2, name: '高二' },
+          { id: GRADE_GAO3, name: '高三' },
+        ]
+        // 每个小节用**新实例**（探测结果是按模块缓存的，换实例 = 刷新页面）
+        const r3 = await import(mod('src/data/remote.ts', '?grade=1'))
+        requests.length = 0
+        await r3.saveClass(klass(), FAKE_UID)
+        const put = lastPayload('classes')
+        eq('列存在 + 年级名换得出 id → 载荷带上 grade_id', put?.grade_id, GRADE_GAO2)
+        eq(
+          '其它列照旧（name / grade 一个字没动）',
+          { name: put?.name, grade: put?.grade, year: put?.year },
+          { name: '高二(1)班', grade: '高二', year: '2026' },
+        )
+
+        // 不认识这个年级名（老师手填的、或年级表里没有）→ 整列不出现
+        requests.length = 0
+        await r3.saveClass({ ...klass(), grade: '高四' }, FAKE_UID)
+        const putOdd = lastPayload('classes')
+        ok(
+          '认不出的年级名 → 连这一列都不出现（不写 null、不猜）',
+          Boolean(putOdd) && !('grade_id' in putOdd),
+          JSON.stringify(putOdd?.grade_id),
+        )
+
+        // 同名多条（`grades` 的唯一键是 school_id + name，跨学校可以重名）→ 歧义，同样不带
+        GRADES_ROWS = [
+          { id: GRADE_GAO2, name: '高二' },
+          { id: GRADE_GAO2B, name: '高二' },
+        ]
+        const r4 = await import(mod('src/data/remote.ts', '?grade=2'))
+        requests.length = 0
+        await r4.saveClass(klass(), FAKE_UID)
+        const putAmbig = lastPayload('classes')
+        ok(
+          '同一所学校外还有同名年级（歧义）→ 也不带这一列（权限字段绝不猜）',
+          Boolean(putAmbig) && !('grade_id' in putAmbig),
+          JSON.stringify(putAmbig?.grade_id),
+        )
+
+        // 恢复备份 → 回推云端那条路走的是 `classRows`，必须同款
+        GRADES_ROWS = [{ id: GRADE_GAO2, name: '高二' }]
+        const r5 = await import(mod('src/data/remote.ts', '?grade=3'))
+        const rows = await r5.classRows([klass()], FAKE_UID)
+        eq('回推云端用的 classRows 也带 grade_id（同一条判据）', rows[0]?.grade_id, GRADE_GAO2)
+
+        // 老库（还没跑第 10 段：`classes.grade_id` 这一列不存在）→ 整列不出现
+        MODE = 'missing-cols'
+        const r6 = await import(mod('src/data/remote.ts', '?grade=4'))
+        requests.length = 0
+        await r6.saveClass(klass(), FAKE_UID)
+        const putNoCol = lastPayload('classes')
+        ok(
+          'classes.grade_id 这一列不存在时 → 整列不出现（否则整条 upsert 被拒）',
+          Boolean(putNoCol) && !('grade_id' in putNoCol),
+          JSON.stringify(putNoCol?.grade_id),
+        )
+        eq(
+          '这次建班没有被服务端拒（写请求只有一条，且不是探列）',
+          requests.filter((r) => r.method !== 'GET').length,
+          1,
+        )
+
+        MODE = 'present'
+        GRADES_ROWS = [
+          { id: GRADE_GAO2, name: '高二' },
+          { id: GRADE_GAO3, name: '高三' },
+        ]
       }
     } catch (e) {
       failures.push(`脚本自身出错：${e?.stack ?? e}`)

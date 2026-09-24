@@ -104,7 +104,16 @@ export default function Schedule() {
   return (
     <>
       <PageHead
-        title="我的课表"
+        /*
+         * 🔴 这一页叫「日程表」，不叫「课表」（2026-09-27 用户拍板）。
+         *
+         * 因为平台里现在有**两套**课表数据，都叫"课表"就分不清谁是谁：
+         *   · `scope='mine'` —— 教师自己的排课表（就是这一页），只影响"我什么时候上哪个班"；
+         *   · `scope='class'` —— 班级课表，贴在教室里给学生看的那份，教师端只读。
+         * 只改了**显示名**：`scope` 的取值一个字都没动
+         * （`schedule_items.scope` 的 check 只有 `'mine'` / `'class'`）。
+         */
+        title="日程表"
         sub={`每周 ${mine.length} 项 · 今天 ${state.items.length} 项`}
         onBack={() => navigate('/settings')}
         right={
@@ -243,7 +252,7 @@ export default function Schedule() {
 
         {/* 整周 */}
         <div className="mb-4">
-          <Sect>整周课表</Sect>
+          <Sect>整周日程</Sect>
           <div className="flex flex-col gap-2.5">
             {[1, 2, 3, 4, 5, 6, 7].map((wd) => {
               const items = itemsOfDay(mine, wd)
@@ -325,7 +334,7 @@ export default function Schedule() {
         >
           <IconClock size={13} />
           <span>
-            课表只在你的账号里保存。提醒走系统通知，需要浏览器授权；
+            日程只在你的账号里保存。提醒走系统通知，需要浏览器授权；
             未授权时会退化成打开平台时的页内提醒。
           </span>
         </div>

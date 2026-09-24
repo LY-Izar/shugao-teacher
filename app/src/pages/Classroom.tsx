@@ -20,6 +20,7 @@ import { useStore, useToast } from '../data/store'
 import { collectStats } from '../lib/assignments'
 import { BAND_META, gradeStats } from '../lib/grading'
 import { closePip, openPip, pipSupported } from '../lib/pip'
+import { ranked } from '../lib/wrongbook'
 import { HEARTBEAT_MS, emit, subscribe } from '../lib/realtime'
 import { isRemote } from '../lib/supabase'
 import { setDeviceRole } from '../lib/session'
@@ -155,12 +156,19 @@ export default function Classroom() {
   const klass = classes.find((c) => c.id === classId) ?? classes[0]
   const client = classrooms.find((c) => c.classId === klass?.id)
 
+  /**
+   * 教室端能看的「已批改作业」—— 判据**必须**用 `lib/wrongbook.ts` 的 `ranked`，
+   * 不能在这里手写 `status === 'graded'`。
+   *
+   * 为什么（§11.5「判据只有一处」）：`ranked` 还要求 `statsMode !== 'simple'`，
+   * 而极简模式的档案**没有任何逐题数据**（`wrong` 恒为空）。自己写一遍状态判断的话，
+   * 极简档案会混进这个列表，下面那块「逐题正确率」会把它渲染成
+   * **全班全对 + 错误率 0%** —— 看起来很正常，其实是错的（W16 的教室端那一半）。
+   */
   const graded = useMemo(
     () =>
       assignments
-        .filter(
-          (a) => a.classId === klass?.id && (a.status === 'graded' || a.status === 'reviewed'),
-        )
+        .filter((a) => a.classId === klass?.id && ranked(a))
         .sort((x, y) => (x.assignDate < y.assignDate ? 1 : -1)),
     [assignments, klass?.id],
   )
@@ -419,7 +427,9 @@ export default function Classroom() {
         return
       }
       if (!out.lines?.length) {
-        setSchedErr('没从这张图里认出课表。拍正一点、光线均匀些再试，或在教师端「我的课表」里录入。')
+        // 别让老师跑去教师端的「日程表」录 —— 那是另一套数据（scope='mine'），
+        // 教室端只读 scope='class'。这里给的出路是**本页的粘贴入口**。
+        setSchedErr('没从这张图里认出课表。拍正一点、光线均匀些再试，或用本页的「粘贴课表」把电子表贴进来。')
         return
       }
       const parsed = parseScheduleText(out.lines.join('\n'), classes)
@@ -1289,7 +1299,8 @@ export default function Classroom() {
                     贴学校发的电子表最准，也不会漏掉没写时间的节次。
                     <br />
                     <span style={{ color: 'var(--color-ink4)' }}>
-                      注意：教师端「我的课表」是另一套数据，教室端看的是这个班的课表。
+                      注意：教师端「日程表」是另一套数据（我什么时候上哪个班），
+                      教室端看的是这个班的课表。
                     </span>
                   </div>
                 ) : (
@@ -1536,6 +1547,9 @@ export default function Classroom() {
                   <div style={{ fontSize: 15, fontWeight: 620 }}>本班还没有已批改的作业</div>
                   <div style={{ fontSize: 13, color: 'var(--color-ink3)', marginTop: 6 }}>
                     在教师端完成一次批改后，这里的逐题正确率会自动出现。
+                  </div>
+                  <div style={{ fontSize: 12, color: 'var(--color-ink4)', marginTop: 4 }}>
+                    极简模式的档案只记等级，没有逐题正确率，所以不会出现在这里。
                   </div>
                 </Panel>
               ) : (

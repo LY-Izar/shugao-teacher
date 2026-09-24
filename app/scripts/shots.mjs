@@ -191,6 +191,11 @@ const EXPECTED_FILES = [
   '71-exam-finish-choose.png',
   '72-exam-finish-confirm-zero.png',
   '73-exam-draft-saved.png',
+  // 极简模式（`statsMode='simple'`）那三屏 —— 第二套数据模型，
+  // 结构照 seed 里的 a-demo-5（只记等级、没有任何逐题数据）
+  '74-simple-grade.png',
+  '75-simple-correct.png',
+  '76-simple-done.png',
 ]
 
 /* ---------------- 断言与日志 ---------------- */
@@ -549,7 +554,8 @@ await withLock(async () => {
       /* ================= S2：作业列表 / 新建 / 收作业查缺 ================= */
 
       await goto(page, '11 作业列表', '/assignments', {
-        markers: ['4 份档案 · 2 份待收缴', '按上次新建', '全部班级'],
+        // 5 份 = 演示种子那 4 份 + 极简模式那份（a-demo-5，已批改 → 待收缴仍是 2）
+        markers: ['5 份档案 · 2 份待收缴', '按上次新建', '全部班级'],
       })
       await shot(page, '11 作业列表', '11-assignments', { full: true })
 
@@ -728,6 +734,142 @@ await withLock(async () => {
         await page.getByRole('button', { name: /取消/ }).click()
       })
 
+      /* ================= S3c：极简模式（statsMode='simple'） ================= */
+
+      /*
+       * 极简模式是**另一套数据模型**（§四 4.1）：只有「学号 → 优/良/差」，
+       * `wrong` 恒为空，`questionCount` 只是建档时那个被隐藏的输入框留下的值。
+       *
+       * 这一节为什么必须有：`seed` 里原来一份极简档案都没有，五个回归脚本也从不创建它 ——
+       * 于是这整套第二数据模型在回归里是 **0 覆盖**，而它的坏法恰好是
+       * "照普通模式渲染，给出一个看起来很正常、其实错了的结论"（§九 W16）。
+       * 演示档案 = `a-demo-5`（已批改：42 人评了等级 / 3 人未交 / 改错名单按「差」挑）。
+       *
+       * 断言形状统一是 **presence 等级口径 + absent 逐题口径**：
+       * 只断言"页面上有优良差"是不够的 —— 普通模式的口径**可以和它同时出现**，
+       * 而那正是 bug 的样子。
+       */
+      const S5S = '74–76 极简模式（只记等级）'
+
+      const SGR = '/assignments/a-demo-5/grade'
+      await goto(page, S5S, SGR, {
+        // 42/45 = 这份演示档案里评了等级的人数（seed 的 a-demo-5：45 人 / 3 人未交）
+        markers: ['批改录入', '极简模式 · 只记等级', '已评', '42/45'],
+        absent: ['默认全对 · 只点错的', '完整度', '6 题', '全对'],
+      })
+      await step(S5S, async () => {
+        /*
+         * 已批改那张表在最后一张卡片网格里（`div.grid.grid-cols-3` × n，
+         * 最后一张就是「已批改 N 人 · 点一下撤回重批」那张）——
+         * 这是**产品的真实交互**：点一下撤回重批，不是打开面板。
+         * 先量它的角标：极简模式写的是等级，普通模式写的是「错N / 全对」。
+         */
+        const grid = page.locator('div.grid.grid-cols-3')
+        const nGrids = await grid.count()
+        const first = grid.last().locator('button').first()
+        const label = ((await first.textContent()) ?? '').replace(/\s+/g, ' ').trim()
+        check(
+          /[优良差]/.test(label) && !/全对/.test(label),
+          `${S5S}：已批改那张表的角标是等级（不是「全对 / 错N」）`,
+          `第一格：「${label}」（页面共 ${nGrids} 张卡片网格）`,
+        )
+        const no = (label.match(/^(\d+)/) ?? [])[1]
+        await first.click()
+        await page.waitForTimeout(300)
+        const withdrawn = await bodyText(page)
+        check(
+          withdrawn.includes('41/45'),
+          `${S5S}：点一下撤回重批（已评 42/45 → 41/45）`,
+          short(withdrawn, 140),
+        )
+        // 撤回之后他回到上面那张表，再点一下才展开面板
+        await page.getByRole('button', { name: new RegExp(`^${no} 号`) }).click()
+        await page.waitForTimeout(300)
+        const lv = await Promise.all(
+          ['优', '良', '差'].map((n) => page.getByRole('button', { name: n, exact: true }).count()),
+        )
+        check(
+          lv.every((n) => n >= 1),
+          `${S5S}：展开学生后是「优 / 良 / 差」三个等级按钮`,
+          `优 ${lv[0]} 个 · 良 ${lv[1]} 个 · 差 ${lv[2]} 个`,
+        )
+        const qn = await page.getByRole('button', { name: /^第 \d+ 题/ }).count()
+        check(
+          qn === 0,
+          `${S5S}：极简模式**一个题号按钮都没有**（没有逐题数据）`,
+          `匹配到 ${qn} 个「第 N 题」`,
+          '普通模式的批改页这里是一排题号格',
+        )
+        const panelBody = await bodyText(page)
+        check(
+          !panelBody.includes('双击题号') && !panelBody.includes('做错'),
+          `${S5S}：展开面板的说明文字也没有逐题口径（「双击题号 / 红色=做错」）`,
+          panelBody.includes('双击题号') || panelBody.includes('做错')
+            ? short(panelBody, 150)
+            : '说明文字是「点一下记等级（优 / 良 / 差）…」',
+        )
+        // 点一个等级 → 记上（顺带把上面那步撤回的状态补回去）
+        await page.getByRole('button', { name: '优', exact: true }).click()
+        await page.waitForTimeout(300)
+        const regraded = await bodyText(page)
+        check(
+          regraded.includes('42/45'),
+          `${S5S}：点一下就记上等级（已评回到 42/45）`,
+          short(regraded, 140),
+        )
+      })
+      await shot(page, S5S, '74-simple-grade', { full: true, wait: 0 })
+
+      const SCR = '/assignments/a-demo-5/correct'
+      await goto(page, S5S, SCR, {
+        markers: ['改错登记', '待改错', '等级 差'],
+        // 普通模式的两种写法：没人错时显示「全对」、快选按钮叫「错误率 ≥ 30%」
+        absent: ['全对', '错误率 ≥ 30%'],
+      })
+      await step(S5S, async () => {
+        // 更改名单：极简模式按**等级**挑人，不摆那对永远筛出空集的按钮
+        await page.getByRole('button', { name: '更改名单' }).click()
+        await page.waitForTimeout(400)
+        const box = await page.locator('.sheet').innerText()
+        check(
+          box.includes('全选「差」的') && box.includes('选「良」和「差」'),
+          `${S5S}：改名单里是按等级挑人（全选「差」的 / 选「良」和「差」）`,
+          short(box, 150),
+        )
+        check(
+          !box.includes('全选有错的'),
+          `${S5S}：没有「全选有错的」那个必然筛出空集的按钮`,
+          box.includes('全选有错的') ? short(box, 150) : '没有这一条',
+        )
+        await page.getByLabel('关闭').first().click()
+        await page.waitForTimeout(300)
+      })
+      await shot(page, S5S, '75-simple-correct', { full: true, wait: 0 })
+
+      const SDR = '/assignments/a-demo-5/grade/done'
+      await goto(page, S5S, SDR, {
+        markers: ['完成批改', '本次批改完成', '极简模式 · 只记等级', '等级录入', '这次评「差」的学生'],
+        // 普通模式的口径（题量 / 错题率 / 讲评重点）一个都不许出现
+        absent: ['错误率', '共 6 题', '明天讲评的重点'],
+      })
+      await shot(page, S5S, '76-simple-done', { full: true, wait: 0 })
+      await step(S5S, async () => {
+        /*
+         * 完成页那条呼叫入口在极简模式下必须改道：
+         * `/assignments/:id/call`（按错题数排序）在这份档案上只有「有错题 0 人」+ 空名单。
+         */
+        await page.getByRole('button', { name: /去改错登记挑人呼叫/ }).click()
+        await page.waitForURL(`**${SCR}`, { timeout: 8000 })
+        await page.waitForTimeout(400)
+        const info = await pageInfo(page)
+        check(
+          info.url === SCR,
+          `${S5S}：极简模式的呼叫入口去的是改错登记（不是按错题数排序的呼叫页）`,
+          `url = ${info.url}`,
+          `期望 ${SCR}`,
+        )
+      })
+
       /* ================= S4：统计与呼叫 ================= */
 
       const SS = '26–27 作业情况'
@@ -824,6 +966,41 @@ await withLock(async () => {
         await expectRoom(SR)
       })
       await shotRaw(room, SR, '32-classroom')
+
+      /*
+       * 教室端那块「逐题正确率」**不能收极简档案**。
+       *
+       * 极简模式没有任何逐题数据（`wrong` 恒为空），照普通模式渲染的话
+       * 每一题都是 0% 错误率、看起来像"全班全对"（§九 W16 的教室端那一半）。
+       * 判据在 `lib/wrongbook.ts` 的 `ranked` 里（§11.5「判据只有一处」），
+       * 这一条断言就是钉住"教室端真的用了它"。
+       *
+       * ⚠️ 期望值 = **1 份**，不是 2：教室端是 `room.goto()` 打开的，而
+       *    `addInitScript` 每次导航都会把 `shugao.teacher.v1` 覆盖成注入的那份快照，
+       *    快照里**没有** `assignments` → 浅合并之后作业回到 seed 的初始状态
+       *    （a-demo-1 已批改 / a-demo-2 与 a-demo-4 未批改 / a-demo-5 极简已批改）。
+       *    所以这一屏上"能进教室端的"只有 a-demo-1 一份 ——
+       *    把极简那份也算进来的话这里会变成 2 份，那正是要红的。
+       */
+      await step(SR, async () => {
+        const opts = await room.evaluate(() =>
+          [...document.querySelectorAll('select')]
+            .map((s) => [...s.options].map((o) => (o.textContent ?? '').trim()))
+            .find((list) => list.some((t) => t.includes('作业'))) ?? [],
+        )
+        check(
+          opts.length === 1 && opts[0].includes('作业21'),
+          `${SR}：作业选择器里只有普通模式档案（极简模式那份不在）`,
+          `选项：${opts.join(' | ') || '(没找到作业选择器)'}`,
+          '把极简那份也算进来的话这里会是 2 份',
+        )
+        const body = await bodyText(room)
+        check(
+          !body.includes('课堂练习抽查'),
+          `${SR}：极简模式那份档案整个没进教室端`,
+          body.includes('课堂练习抽查') ? short(body, 150) : '屏上没有它',
+        )
+      })
 
       await step(SR, async () => {
         // 展开错误名单（内联兜底面板，与置顶小窗同一份内容）
@@ -938,12 +1115,62 @@ await withLock(async () => {
         expect: { url: '/assignments' },
       })
 
+      /*
+       * 展开层（右边那颗圆按钮）里到底有哪些入口。
+       *
+       * 为什么必须断言它：这一层是**推导**出来的（`COLLAPSED = NAV − PIN_KEYS`），
+       * 往 NAV 里加/改一条，胶囊不会变、这一层会变 —— 而它平时是收起的，
+       * 截图里看不见。用户 2026-09-27 拍板：「日程表」要进这一层
+       * （个人的排课表原来只在「我的」里，而它和班级课表是两套数据，都叫"课表"分不清）；
+       * 同时明确「呼叫记录」**不进**这一层。
+       */
+      const SNM = '35–37 移动端底部导航 · 展开层'
+      await step(SNM, async () => {
+        await page.getByRole('button', { name: '展开更多入口' }).click()
+        await page.waitForTimeout(400)
+        const sheet = await page.evaluate(() => {
+          const box = document.querySelector('.sheet')
+          return {
+            open: Boolean(box),
+            title: (box?.querySelector('h2')?.textContent ?? '').trim(),
+            body: (box?.innerText ?? '').replace(/\s+/g, ' ').trim(),
+          }
+        })
+        check(
+          sheet.open && sheet.title === '更多入口',
+          `${SNM}：点圆按钮弹出「更多入口」`,
+          `open=${sheet.open} title="${sheet.title}"`,
+        )
+        for (const label of ['班级', '考试', '错题集', '日程表']) {
+          check(
+            sheet.body.includes(label),
+            `${SNM}：展开层里有「${label}」`,
+            short(sheet.body, 150),
+          )
+        }
+        check(
+          !sheet.body.includes('呼叫记录'),
+          `${SNM}：展开层里**没有**「呼叫记录」（用户明确说不加）`,
+          sheet.body.includes('呼叫记录') ? short(sheet.body, 150) : '没有这条',
+        )
+        // 展开层里点一条 → 真的跳过去（收起的四条路径之一：点条目先收起再 navigate）
+        await page.locator('.sheet button').filter({ hasText: '日程表' }).first().click()
+        await page.waitForURL('**/schedule', { timeout: 8000 })
+        await page.waitForTimeout(400)
+        const after = await pageInfo(page)
+        check(
+          after.url === '/schedule' && !after.sheetOpen,
+          `${SNM}：点「日程表」跳过去且展开层收起`,
+          `url=${after.url} sheetOpen=${after.sheetOpen}`,
+        )
+      })
+
       /* ================= 作业列表：班级筛选 ================= */
 
       const SF = '40 作业列表筛选'
       await step(SF, async () => {
         await page.goto(`${BASE}/assignments`, { waitUntil: 'networkidle' })
-        await expectPage(page, SF, { url: '/assignments', markers: ['4 份档案'], date: D0919 })
+        await expectPage(page, SF, { url: '/assignments', markers: ['5 份档案'], date: D0919 })
         const rows = await page.locator('.row').count()
         check(rows > 0, '作业列表渲染出了条目（.row）', `数到 ${rows} 行`)
         await page.getByLabel('按班级筛选').selectOption({ index: 1 })
@@ -957,11 +1184,13 @@ await withLock(async () => {
         expect: { url: '/assignments' },
       })
 
-      await goto(page, '41 课表', '/schedule', {
-        // 课表那两块标题跟着时钟走（今天 · 周X），所以这里要的是**结构**不是具体星期
-        markers: ['我的课表', '整周课表', '今天 · 周'],
+      await goto(page, '41 日程表', '/schedule', {
+        // 日程表那两块标题跟着时钟走（今天 · 周X），所以这里要的是**结构**不是具体星期。
+        // ⚠️ 页面标题是「日程表」不是「课表」：平台里有**两套**课表（`scope='mine'`
+        //    的个人排课表 / `scope='class'` 的班级课表），两套都叫"课表"就分不清了。
+        markers: ['日程表', '整周日程', '今天 · 周'],
       })
-      await shot(page, '41 课表', '41-schedule', { full: true, wait: 0 })
+      await shot(page, '41 日程表', '41-schedule', { full: true, wait: 0 })
 
       /* ================= 底栏拖拽：胶囊实时跟手 ================= */
 
@@ -1211,7 +1440,24 @@ await withLock(async () => {
         await page.goto(`${BASE}/wrong`, { waitUntil: 'networkidle' })
         await expectPage(page, SW, {
           url: '/wrong',
-          markers: ['错题集', '我任教的班级 · 点进去看这个班的错题档案', '我任教的 2 个班 · 91 名学生'],
+          /*
+           * 「批过 1 份」= 高二(3)班里**能进错题集**的那些（§11.5 的 `ranked`）。
+           *
+           * ⚠️ 为什么是 1 而不是 2：这一页是 `page.goto()` 打开的，而
+           *    `addInitScript` 每次导航都会把 `shugao.teacher.v1` 覆盖成注入的快照，
+           *    快照里没有 `assignments` → 作业回到 seed 的初始状态
+           *    （a-demo-1 已批改；a-demo-2 / a-demo-4 未批改；a-demo-5 极简已批改）。
+           *    所以"能进错题集"的只有 a-demo-1 一份，而极简那份（也是 graded）
+           *    必须被 `ranked` 排掉 —— 算进来的话这里会写成 2 份，
+           *    而"批过 N 份"正是老师判断"数据够不够看"的依据。
+           */
+          markers: [
+            '错题集',
+            '我任教的班级 · 点进去看这个班的错题档案',
+            '我任教的 2 个班 · 91 名学生',
+            '批过 1 份',
+          ],
+          absent: ['批过 2 份'],
           date: D0919,
         })
       })
@@ -1309,7 +1555,7 @@ await withLock(async () => {
         await page.goto(`${BASE}/assignments`, { waitUntil: 'networkidle' })
         await expectPage(page, SE, {
           url: '/assignments',
-          markers: ['4 份档案 · 2 份待收缴', '考试'],
+          markers: ['5 份档案 · 2 份待收缴', '考试'],
           date: D0919,
         })
       })
@@ -1507,7 +1753,7 @@ await withLock(async () => {
       await step(SDE, async () => {
         await wide.goto(`${BASE}/assignments`, { waitUntil: 'networkidle' })
         await wide.waitForTimeout(700)
-        await expectPage(wide, SDE, { url: '/assignments', markers: ['4 份档案'] })
+        await expectPage(wide, SDE, { url: '/assignments', markers: ['5 份档案'] })
       })
       await shotRaw(wide, SDE, '16-desktop-assignments', { full: true })
     } catch (e) {

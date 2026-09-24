@@ -14,6 +14,7 @@ import {
 import { Button, PageHead, Panel, Sect } from '../components/ui'
 import { WordImport } from '../components/WordImport'
 import { useStore, useToast } from '../data/store'
+import { clampQuestionCount } from '../lib/assignments'
 import { ensureISO, isoOffset } from '../lib/date'
 import { docxToParts } from '../lib/docx'
 import {
@@ -99,7 +100,7 @@ export default function AssignmentNew() {
 
   /** 预览用第一个班就够了（题干、人数只跟题目有关） */
   const klass = classes.find((c) => c.id === classIds[0])
-  const n = Math.max(1, Math.min(60, Number(questionCount) || 0))
+  const n = clampQuestionCount(Number(questionCount) || 0)
 
   const handleFile = async (f: File) => {
     setParsing(true)

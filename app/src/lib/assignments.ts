@@ -1,5 +1,32 @@
 import type { Assignment, Student } from '../data/types'
 
+/* ---------------- 题量：I8 的守门人（**只在这里定义一次**） ---------------- */
+
+/**
+ * `assignments.question_count` 的合法区间，**与数据库的 check 约束一一对应**：
+ * `schema.sql` 里写的是 `check (question_count between 1 and 60)`。
+ *
+ * 🔴 为什么不变量 I8 要求「守门人在 store，而不在页面」：
+ *    越界值不会报错，只会让**整条 upsert 被拒**（PostgREST 把 22P02/23514 当成一次失败），
+ *    而云端模式本地不做持久化（§一「云端是主副本」）——
+ *    界面上写着"已导入"，刷新之后这份档案连同收缴、批改一起没了。
+ *    页面自己夹是**第二道闸**（「补导入题目」还要据此告诉老师"只记了前 60 题"），
+ *    但新加一条写入路径的人不会记得去夹，所以最后一道必须在 `store` 的写入路径上。
+ */
+export const QUESTION_MIN = 1
+export const QUESTION_MAX = 60
+
+/**
+ * 把任意输入夹到 1–60 的整数。
+ * 非数字（`''` / `undefined` / 乱码）→ 1；小数四舍五入（数据库那一列是 int，
+ * 传 6.5 过去同样会被整条拒掉）。
+ */
+export function clampQuestionCount(n: unknown): number {
+  const v = Number(n)
+  if (!Number.isFinite(v)) return QUESTION_MIN
+  return Math.max(QUESTION_MIN, Math.min(QUESTION_MAX, Math.round(v)))
+}
+
 /* ---------------- 收缴统计 ---------------- */
 
 export type CollectStats = {

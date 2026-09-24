@@ -26,6 +26,7 @@ import {
   type DeviceRole,
 } from '../lib/session'
 import { APP_VERSION } from '../lib/version'
+import { CHANGELOG } from '../lib/changelog'
 import {
   backupSummary,
   downloadJson,
@@ -248,7 +249,7 @@ export default function Settings() {
           </div>
         </Panel>
 
-        {/* 我的课表 */}
+        {/* 日程表（教师个人的排课表，scope='mine' —— 与班级课表是两套数据） */}
         <div className="mb-4">
           <Sect>我的</Sect>
           <Panel className="overflow-hidden">
@@ -318,7 +319,7 @@ export default function Settings() {
                 <IconCalendar size={18} />
               </span>
               <span className="min-w-0 flex-1">
-                <span style={{ fontSize: 14.5, fontWeight: 620 }}>我的课表</span>
+                <span style={{ fontSize: 14.5, fontWeight: 620 }}>日程表</span>
                 <span
                   className="mt-0.5 block"
                   style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}
@@ -580,59 +581,12 @@ export default function Settings() {
         <div className="mb-4">
           <Sect>更新日志</Sect>
           <Panel bodyClass="p-3">
-            {[
-              {
-                v: '0.8.0',
-                at: '9 月 26 日',
-                items: [
-                  '作业档案可同时布置给多个班（每个班各生成一份，批改统计各算各的）',
-                  '完成批改分成两条路：临时保存（可随时接着批）／确认完成（未批改的登记为未交）',
-                  '新增「改错登记」：逐个点过关，谁改完了、谁还没改一目了然',
-                  '需重点关注名单：批改时点「找」标一下，改错登记里置顶提醒',
-                  '新增「极简模式」：不带练习册也能用，只记每人 优 / 良 / 差',
-                  '题号上不再有会误触的「+」：双击拆小题、长按改小题数',
-                  '布置日期建完之后也能改',
-                  '教室端：考试一键静音（全屏黑底时钟）、下课前 5 分钟轻声提示',
-                  '教室端：调休日可手动选「今天按周几的课表上」，周一早三节自动顺延',
-                  '教室端：晚上 7:20 后换成收尾语，0 点自动恢复；节日和周末倒计时',
-                  '教室端：拍照识别课表后可逐条核对修改时间再导入',
-                  '教师端可把题图 / PDF / HTML / PPT 传到教室一体机上打开，文件不占云端',
-                  '错题集：按知识点统计丢分、生成错题重练卷（Word）、一键备份与恢复',
-                  '批改中途切出去不会丢进度，回来接着批',
-                  '所有名单统一按学号排序；呼叫记录只留最近 3 条',
-                ],
-              },
-              {
-                v: '0.7.0',
-                at: '9 月 19 日',
-                items: [
-                  '云端同步：手机与教室端共用一份数据，呼叫真的能跨设备送达',
-                  'Word 稿一键导入建立作业档案（题量 / 题型 / 分值 / 小问自动识别，可逐题改）',
-                  '作业情况新增「题型掌握情况」：每个题型丢几分、正确率多少',
-                  '课表支持批量录入与课表文件导入，上课前 10 分钟提醒',
-                  '拍照查缺改为真识别：先数本数，够数直接判全过',
-                  '法定假期与调休按官方安排自动判定（含调休上班日）',
-                ],
-              },
-              {
-                v: '0.5.0',
-                at: '9 月 18 日',
-                items: [
-                  '逐题错误率与讲评优先级（30–70% 优先精讲）',
-                  '改错一键呼叫：教室端全屏播报 + 置顶小窗',
-                  '教室端：系统语音播报、逐题正确率、压在全屏应用之上的小窗',
-                  '快速批改录入：点学号就地展开题号，默认全对只记错的',
-                ],
-              },
-              {
-                v: '0.2.0',
-                at: '9 月 17 日',
-                items: [
-                  '班级与花名册：拍照/粘贴导入、序列自检、名单体检',
-                  '作业档案与收作业查缺、未交与迟交分开记录',
-                ],
-              },
-            ].map((log) => (
+            {/*
+              内容在 `lib/changelog.ts`（与 APP_VERSION 同一处，发版只改那两个文件）。
+              这一页只负责渲染 —— 以前它把整份日志硬编码在这儿，
+              结果「关于」写着 v0.9.0、这份日志停在 0.8.0，同一页自己跟自己打架。
+            */}
+            {CHANGELOG.map((log) => (
               <div key={log.v} className="mb-3 last:mb-0">
                 <div className="flex items-baseline gap-2">
                   <span className="num" style={{ fontSize: 12.5, fontWeight: 700 }}>

@@ -348,8 +348,12 @@ await withLock(async () => {
       ('${U.fresh}', 'fresh@shugao.test', '{"name":"新来的老师","subject":"历史","subject_code":"history"}'::jsonb),
       ('${U.room}',  'room1@shugao.test', '{"name":"高二(1)班教室"}'::jsonb);
 
-    -- c5 是「班主任刚建、还没挂年级」的班（前端 classToRow 不送 grade_id）——
+    -- c5 是「班主任刚建、还没挂年级」的班（grade_id 为空）——
     -- §16.3.0 那条「建完就消失」的回归就靠它。
+    -- ⚠️ 2026-09-27 起前端 saveClass 会**尽力**带上 grade_id（按班里的年级文本
+    --    去 grades 表换 id），但"换不出来"的路仍然存在（年级文本不在表里 / 老库还没跑
+    --    第 10 段 / 同名多条歧义 → 一律留空，见 remote.ts 的 ensureGradeLookup）——
+    --    所以这个空 grade_id 的样本**不是过时的夹具**，"自己建的"那一支照旧不能省。
     insert into classes (id, teacher_id, name, grade, year, school_id, grade_id) values
       ('${C.c1}', '${U.head}',  '高二(1)班', '高二', '2025', ${school}, ${grade('高二')}),
       ('${C.c2}', '${U.phy}',   '高二(4)班', '高二', '2025', ${school}, ${grade('高二')}),
@@ -1030,6 +1034,11 @@ await withLock(async () => {
       eq('I25 的活样本：班主任刚建、还没挂年级的班（grade_id 为空）他自己看得见', await idsAs(db, U.head, `select id from classes where id = $1`, [C.c5]), [C.c5])
       eq('同一个班，年级主任看不见（grade_id 为空 → 按年级收敛判不到）—— 所以"自己建的"那一支不能省', await idsAs(db, U.grade, `select id from classes where id = $1`, [C.c5]), [])
       eq('同一批数据在 A 库上也是同一个结论（不是 B 库特有的）', await idsAs(A.db, U.head, `select id from classes where id = $1`, [C.c5]), [C.c5])
+      /*
+       * `grade_id` 的写入判据在 `remote.ts` 的 `ensureGradeLookup()`（这是纯前端逻辑，
+       * PGlite 这一层验不了"前端有没有送这一列"）。这里只钉**数据库侧的后果**：
+       * 空 `grade_id` = 年级主任管不着这个班，所以前端必须尽力把它填上。
+       */
     }
 
     /* ============================================================

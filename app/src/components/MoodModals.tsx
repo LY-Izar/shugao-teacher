@@ -150,7 +150,7 @@ export function MorningWelcome({
           <Panel bodyClass="p-0" className="overflow-hidden">
             {today.length === 0 ? (
               <div className="px-3 py-2.5" style={{ fontSize: 12.5, color: 'var(--color-ink3)' }}>
-                今天没排课。要记录的话去「我的 → 我的课表」。
+                今天没排课。要记录的话去「我的 → 日程表」。
               </div>
             ) : (
               today.map((it) => (

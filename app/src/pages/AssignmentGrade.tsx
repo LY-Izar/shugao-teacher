@@ -795,7 +795,16 @@ function GradeSession({
     <>
       <PageHead
         title="批改录入"
-        sub={`${klass?.name ?? '—'} · ${friendlyDate(assignment.assignDate)} · ${assignment.questionCount} 题`}
+        /*
+         * 极简模式**没有"题"这个概念**，标题栏里那个「N 题」是普通模式的口径
+         * （它的值来自建档时那个被隐藏的输入框）—— 照普通模式写出来，
+         * 教师会去找"第 3 题在哪"，而这一屏根本没有题号。
+         */
+        sub={
+          simple
+            ? `${klass?.name ?? '—'} · ${friendlyDate(assignment.assignDate)} · 极简模式 · 只记等级`
+            : `${klass?.name ?? '—'} · ${friendlyDate(assignment.assignDate)} · ${assignment.questionCount} 题`
+        }
         onBack={() => navigate('/assignments')}
         right={
           <Button
@@ -1281,7 +1290,15 @@ function GradeSession({
                             className="mt-2"
                             style={{ fontSize: 11, color: 'var(--color-ink3)' }}
                           >
-                            红色 = 做错 · <b>双击</b>题号直接拆小题 · <b>长按</b>调整小题
+                            {simple ? (
+                              <>
+                                点一下记等级（优 / 良 / 差）· 要撤回就点下面「已批改」里的人
+                              </>
+                            ) : (
+                              <>
+                                红色 = 做错 · <b>双击</b>题号直接拆小题 · <b>长按</b>调整小题
+                              </>
+                            )}
                           </div>
                         </div>
                       ) : null}

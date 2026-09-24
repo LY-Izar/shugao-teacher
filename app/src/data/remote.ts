@@ -32,6 +32,12 @@ type ClassRow = {
   name: string
   grade: string
   year: string
+  /**
+   * 年级外键（`schema.sql` 第 10 段加的列）。
+   * ⚠️ **可选**：老库没有这一列，或者"班名里的年级"在 `grades` 表里认不出来时，
+   * 这一列**根本不出现**（不是写 null）—— 见 `ensureGradeLookup`。
+   */
+  grade_id?: string | null
 }
 type StudentRow = {
   id: string
@@ -485,14 +491,87 @@ const ms = (iso?: string | null) => (iso ? new Date(iso).getTime() : undefined)
 /** Postgres 的 time 会返回 HH:MM:SS，界面只用 HH:MM */
 const hhmm = (t: string) => (t ?? '').slice(0, 5)
 
+/* ---------------- 年级：`classes.grade_id` 的写入判据（schema.sql 第 10 段） ----------------
+
+   为什么需要它（2026-09-27 用户拍板的"建班要带 grade_id"）：
+   `classes.grade_id` 是**权限判据的一环** —— `visible_class_ids()` 里"年级主任看本年级"
+   那一支、`can_manage_class()` 里同一条，都按它判。前端建出来的班原来 `grade_id` 是空的，
+   于是"年级主任/班主任自己建的班"只有 super/admin 管得动：**加不了学生、改不了班级课表**
+   （实测结论见 §十六 16.9 第 1 条）。
+
+   前端手里只有 `classes.grade` 这个**文本**（「高二」，班级表单里选的），
+   所以要拿它去 `grades` 表换 id。三条纪律：
+
+     · **列不存在就不带**（线上库可能还没跑第 10 段）—— 与 `ensureSubjectCols` 同一条：
+       带上一列不存在的列，整条 upsert 会被 PostgREST 拒掉（"保存失败 = 刷新即丢"）。
+     · **认不出就不带**（年级表里没有同名行）—— 留空与今天的行为一样，不倒退。
+     · **同名多条也不带**（`grades` 的唯一键是 `school_id + name`，跨学校可以重名）——
+       `grade_id` 决定"哪个年级主任管得着这个班"，**猜错就是权限事故**，
+       所以宁可留空让教导处去指派。 */
+
+type GradeLookup = {
+  /** `classes.grade_id` 这一列在不在 */
+  column: boolean
+  /** 年级名 → `grades.id`；同名多条（歧义）时值为 `null` */
+  byName: Map<string, string | null>
+}
+
+let gradeLookupProbe: Promise<GradeLookup> | null = null
+
+async function probeGradeLookup(): Promise<GradeLookup> {
+  const sb = getSupabase()
+  if (!sb) return { column: false, byName: new Map() }
+  const column = await (async () => {
+    try {
+      const { error } = await sb.from('classes').select('grade_id').limit(1)
+      if (!error) return true
+      const code = String((error as { code?: string }).code ?? '')
+      const msg = String(error.message ?? '')
+      // 只有「列不存在」才判定成还没跑第 10 段；网络抖动/权限问题一律当作**有**
+      return !(code === '42703' || /does not exist/i.test(msg))
+    } catch {
+      return true
+    }
+  })()
+  const byName = new Map<string, string | null>()
+  if (!column) return { column: false, byName }
+  try {
+    const { data, error } = await sb.from('grades').select('id, name')
+    if (error) return { column: true, byName } // 读不到年级表 → 认不出，不猜
+    for (const row of (data ?? []) as { id?: string; name?: string }[]) {
+      const name = (row.name ?? '').trim()
+      if (!name || !row.id) continue
+      // 第二次遇到同一个名字 → 记成"认不出"（歧义），后面一律不带
+      byName.set(name, byName.has(name) ? null : row.id)
+    }
+  } catch {
+    /* 认不出，不猜 */
+  }
+  return { column: true, byName }
+}
+
+/** 探测一次（同一页面内只探一次），给 `saveClass` 用 */
+export function ensureGradeLookup(): Promise<GradeLookup> {
+  if (!gradeLookupProbe) gradeLookupProbe = probeGradeLookup()
+  return gradeLookupProbe
+}
+
 /* ---------------- 本地 → 行 ---------------- */
 
-export const classToRow = (k: Klass, teacherId: string): ClassRow => ({
+/**
+ * 本地班级 → `classes` 行。
+ *
+ * `gradeId` 由调用方（`saveClass`）从 `grades` 表查出来传进来 ——
+ * 这是**纯函数不带可选列**的同一条纪律（对照 `assignmentToRow` 的注释）：
+ * "这一列在不在/认不认得出"的判断不放在纯函数里。
+ */
+export const classToRow = (k: Klass, teacherId: string, gradeId?: string | null): ClassRow => ({
   id: k.id,
   teacher_id: teacherId,
   name: k.name,
   grade: k.grade,
   year: k.year,
+  ...(gradeId ? { grade_id: gradeId } : {}),
 })
 
 export const studentToRow = (s: Student, classId: string): StudentRow => ({
@@ -901,7 +980,38 @@ export const saveTeacher = async (t: Teacher) => {
   return upsert('teachers', row)
 }
 
-export const saveClass = (k: Klass, teacherId: string) => upsert('classes', classToRow(k, teacherId))
+/**
+ * 写班级那一行。
+ *
+ * `grade_id` 是这一轮补上的（见上面 `ensureGradeLookup` 的说明）：
+ * 它是权限判据的一环，留空会让"年级主任/班主任自己建的班"只有 super/admin 管得动。
+ * 三步：列在不在 → 年级名换不换得出 id → 都成立才把这一列放进载荷。
+ * `upsert` 只更新载荷里出现过的列，所以认不出时**老行的 grade_id 不会被抹掉**。
+ */
+export const saveClass = async (k: Klass, teacherId: string) => {
+  const lookup = await ensureGradeLookup()
+  const gradeId = lookup.column ? gradeLookupId(lookup, k.grade) : null
+  return upsert('classes', classToRow(k, teacherId, gradeId))
+}
+
+/** 年级名 → id；认不出或同名多条（歧义）→ null（**不猜**，见 ensureGradeLookup） */
+export function gradeLookupId(lookup: GradeLookup, gradeName: string): string | null {
+  return lookup.byName.get((gradeName ?? '').trim()) ?? null
+}
+
+/**
+ * 一批班级 → `classes` 行（含 `grade_id`，判据与 `saveClass` 完全一致）。
+ *
+ * 「恢复备份 → 回推云端」也走它：那是**第二条写班级的路径**，
+ * 只修 `saveClass` 的话，恢复出来的班照样 `grade_id` 为空 ——
+ * 年级主任/班主任还是加不了学生、改不了班级课表（同一件事两个入口，必须一起守）。
+ */
+export async function classRows(list: Klass[], teacherId: string): Promise<ClassRow[]> {
+  const lookup = await ensureGradeLookup()
+  return list.map((k) =>
+    classToRow(k, teacherId, lookup.column ? gradeLookupId(lookup, k.grade) : null),
+  )
+}
 export const deleteClass = (id: string) => remove('classes', id)
 
 export const saveStudent = (s: Student, classId: string) =>
