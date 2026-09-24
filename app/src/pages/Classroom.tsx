@@ -274,6 +274,12 @@ export default function Classroom() {
   /** 粘贴课表 —— 学校发的电子表直接贴进来，比拍照准得多（也不会漏掉没写时间的节次） */
   const [pasteOpen, setPasteOpen] = useState(false)
   const [pasteText, setPasteText] = useState('')
+  /**
+   * 「按日期选作业」的展开面板。
+   * 以前是平铺一排小日期按钮（最多 10 个）—— 挂墙上那块屏是**手指点的**，
+   * 一排又小又密的按钮点不准；改成先显示当前日期，点一下才展开列表。
+   */
+  const [datePickOpen, setDatePickOpen] = useState(false)
 
   /* ---- 自动备份到本机文件夹（C4）----
      云端之外的第二份保险。注意浏览器**不允许静默写文件夹**：
@@ -1412,47 +1418,91 @@ export default function Classroom() {
                 </Panel>
               ) : (
                 <>
-                  {/* 按日期筛选：一天可能不止一份作业，所以筛选的是"日期"而不是作业 */}
+                  {/*
+                   * 按日期筛选：一天可能不止一份作业，所以筛选的是"日期"而不是作业。
+                   * 挂墙上的那块屏是**手指点的**，平铺一排小按钮又密又难点准 ——
+                   * 改成只显示当前日期，点一下才展开列表（Sheet 整行都是可点区域）。
+                   */}
                   {graded.length > 1 ? (
-                    <div className="mb-2 flex flex-wrap items-center gap-1.5">
+                    <div className="mb-2 flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setDatePickOpen(true)}
+                        style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: 6,
+                          padding: '6px 12px',
+                          borderRadius: 4,
+                          fontSize: 13.5,
+                          border: '1px solid var(--color-accent)',
+                          background: 'var(--color-accentsoft)',
+                          color: 'var(--color-accentink)',
+                          fontWeight: 650,
+                        }}
+                      >
+                        <IconClock size={15} />
+                        <span className="num">{assignment.assignDate.slice(5).replace('-', '/')}</span>
+                        <span style={{ opacity: 0.65 }}>▾</span>
+                      </button>
+                      <span style={{ fontSize: 11.5, color: 'var(--color-ink4)' }}>
+                        按日期选作业 · 共 {graded.length} 份
+                      </span>
+                    </div>
+                  ) : null}
+
+                  <Sheet
+                    open={datePickOpen}
+                    onClose={() => setDatePickOpen(false)}
+                    title="选择日期"
+                  >
+                    <div className="flex flex-col">
                       {[...new Set(graded.map((a) => a.assignDate))]
                         .sort((x, y) => (x < y ? 1 : -1))
-                        .slice(0, 10)
+                        .slice(0, 30)
                         .map((d) => {
                           const on = assignment.assignDate === d
                           const n = graded.filter((a) => a.assignDate === d).length
+                          const first = graded.find((a) => a.assignDate === d)
                           return (
                             <button
                               key={d}
                               type="button"
+                              className="flex items-center gap-3 py-3.5"
+                              style={{
+                                borderBottom: '1px solid var(--color-line2)',
+                                textAlign: 'left',
+                                minHeight: 52,
+                              }}
                               onClick={() => {
-                                const first = graded.find((a) => a.assignDate === d)
                                 if (first) {
                                   setAssignmentId(first.id)
                                   setSeq(1)
                                 }
-                              }}
-                              className="num"
-                              style={{
-                                padding: '3px 9px',
-                                borderRadius: 4,
-                                fontSize: 12,
-                                border: `1px solid ${on ? 'var(--color-accent)' : 'var(--color-line2)'}`,
-                                background: on ? 'var(--color-accentsoft)' : 'var(--color-surface)',
-                                color: on ? 'var(--color-accentink)' : 'var(--color-ink2)',
-                                fontWeight: on ? 650 : 500,
+                                setDatePickOpen(false)
                               }}
                             >
-                              {d.slice(5).replace('-', '/')}
-                              {n > 1 ? ` (${n})` : ''}
+                              <span
+                                className="num"
+                                style={{ fontSize: 16, fontWeight: on ? 700 : 550 }}
+                              >
+                                {d.slice(5).replace('-', '/')}
+                              </span>
+                              <span style={{ fontSize: 12.5, color: 'var(--color-ink3)' }}>
+                                {WEEKDAY_TEXT[weekdayOf(new Date(`${d}T12:00:00`)) - 1]}
+                              </span>
+                              <span className="flex-1" />
+                              {n > 1 ? (
+                                <span style={{ fontSize: 12, color: 'var(--color-ink3)' }}>
+                                  {n} 份
+                                </span>
+                              ) : null}
+                              {on ? <IconCheck size={16} /> : null}
                             </button>
                           )
                         })}
-                      <span style={{ fontSize: 11.5, color: 'var(--color-ink4)', marginLeft: 2 }}>
-                        按日期
-                      </span>
                     </div>
-                  ) : null}
+                  </Sheet>
 
                   <div className="flex flex-wrap items-center gap-3">
                     <select
