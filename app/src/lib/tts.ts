@@ -153,6 +153,23 @@ if (typeof speechSynthesis !== 'undefined') {
   }
 }
 
+/** 正在念的这一条 —— 打断它之前要先把回调摘掉（见 detach） */
+let current: SpeechSynthesisUtterance | null = null
+
+/**
+ * 摘掉当前这条的回调。
+ *
+ * 为什么必须摘：`cancel()` 会让**被取消**的那条也报 end / error，
+ * 播报队列的 onEnd 回调会把它当成"念完了"，于是提前跳下一条 ——
+ * 「再播一遍」和「关闭」都会走到 cancel，回调不摘就会互相打架。
+ */
+function detach() {
+  if (!current) return
+  current.onend = null
+  current.onerror = null
+  current = null
+}
+
 export function speak(text: string, opts?: { rate?: number; onEnd?: () => void }) {
   if (isSilenced()) {
     opts?.onEnd?.()
@@ -166,18 +183,44 @@ export function speak(text: string, opts?: { rate?: number; onEnd?: () => void }
     u.rate = opts?.rate ?? 0.92
     u.pitch = 1
     u.volume = 1
-    if (opts?.onEnd) u.onend = opts.onEnd
+    if (opts?.onEnd) {
+      const done = opts.onEnd
+      u.onend = () => done()
+      // 合成失败（没装语音包 / 被系统打断）也要回调，
+      // 否则队列会卡在这条上等兜底超时
+      u.onerror = () => done()
+    }
+    detach()
     speechSynthesis.cancel()
+    current = u
     speechSynthesis.speak(u)
   } catch {
+    detach()
     opts?.onEnd?.()
   }
 }
 
+/** 立即停声，并让这一条**不再回调**（调用方自己决定队列怎么走） */
 export function stopSpeaking() {
   try {
+    detach()
     speechSynthesis.cancel()
   } catch {
     /* 忽略 */
   }
+}
+
+/* ---------------- 时长兜底 ---------------- */
+
+/**
+ * 这段话念完最多要多久（毫秒）。
+ *
+ * **只做兜底**：正常出队以 speechSynthesis 的 onend 为准 —— 念完才算播完。
+ * 以前队列写死 15 秒出队，长播报会被拦腰截断（教室端 W13）。
+ * 但万一浏览器根本不回调（没装语音包、被系统静音），队列不能卡死，所以给个上限。
+ * 中文 TTS 大约 4~5 字/秒，这里按 3.3 字/秒估，宁可等久一点也不要掐断。
+ */
+export function speechBudgetMs(text: string): number {
+  const chars = text.replace(/\s+/g, '').length
+  return Math.min(60_000, Math.max(8_000, 3_000 + chars * 300))
 }

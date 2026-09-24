@@ -44,6 +44,18 @@ export default function AssignmentCorrect() {
   const correction = assignment?.correctionNos ?? []
   const corrected = assignment?.correctedNos ?? []
   const focus = assignment?.focusNos ?? []
+  /**
+   * 极简模式：这份档案**没有错题数据**（`wrong` 永远是空的），
+   * 结论只有学号 → 优 / 良 / 差。
+   * 照普通模式渲染的话，每个人都会显示"全对"，「全选有错的」「错误率 ≥ 30%」
+   * 也永远是空集 —— 改错名单就永远建不起来（见 §五 的提醒）。
+   */
+  const simple = assignment?.statsMode === 'simple'
+
+  const gradeOf = (no: string) => assignment?.grades?.[no]
+  /** 等级 → 颜色，和批改页那三个等级按钮同一套语义 */
+  const gradeColor = (g?: string) =>
+    g === '优' ? 'var(--color-ok)' : g === '差' ? 'var(--color-bad)' : 'var(--color-warn)'
 
   const rateOf = (no: string) => {
     const wc = assignment?.wrong?.[no]?.length ?? 0
@@ -128,7 +140,16 @@ export default function AssignmentCorrect() {
   const Row = ({ s, on, onClick }: { s: Student; on: boolean; onClick: () => void }) => {
     const wc = wrongOf(s.studentNo)
     const r = rateOf(s.studentNo)
-    const col = r >= 0.3 ? 'var(--color-bad)' : r > 0 ? 'var(--color-warn)' : 'var(--color-ok)'
+    const grade = gradeOf(s.studentNo)
+    const col = simple
+      ? grade
+        ? gradeColor(grade)
+        : 'var(--color-ink3)'
+      : r >= 0.3
+        ? 'var(--color-bad)'
+        : r > 0
+          ? 'var(--color-warn)'
+          : 'var(--color-ok)'
     const focused = focus.includes(s.studentNo)
     return (
       <button
@@ -164,7 +185,13 @@ export default function AssignmentCorrect() {
             {focused ? <Tag tone="warn">需重点关注</Tag> : null}
           </span>
           <span className="num mt-0.5 block" style={{ fontSize: 11.5, color: col }}>
-            {wc ? `错 ${wc} 处 · ${Math.round(r * 100)}%` : '全对'}
+            {simple
+              ? grade
+                ? `等级 ${grade}`
+                : '还没评等级'
+              : wc
+                ? `错 ${wc} 处 · ${Math.round(r * 100)}%`
+                : '全对'}
           </span>
         </span>
         <span style={{ fontSize: 12, color: 'var(--color-ink3)' }}>
@@ -210,7 +237,9 @@ export default function AssignmentCorrect() {
             {todo.length === 0 ? (
               <div className="px-3 py-6 text-center" style={{ fontSize: 13, color: 'var(--color-ink3)' }}>
                 {correction.length === 0
-                  ? '这份作业还没有改错名单。点右上角「更改名单」挑人。'
+                  ? simple
+                    ? '这份作业还没有改错名单。点右上角「更改名单」，可以按等级挑人（差 / 良）。'
+                    : '这份作业还没有改错名单。点右上角「更改名单」挑人。'
                   : '都改完了 🎉'}
               </div>
             ) : (
@@ -297,20 +326,54 @@ export default function AssignmentCorrect() {
       {/* 更改名单：保留已选状态，可增删；已登记过的再点一下取消登记 */}
       <Sheet open={editList} onClose={() => setEditList(false)} title="改错名单">
         <div className="mb-2 flex flex-wrap gap-1.5">
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => setCorrection(students.filter((s) => wrongOf(s.studentNo) > 0).map((s) => s.studentNo))}
-          >
-            全选有错的
-          </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => setCorrection(students.filter((s) => rateOf(s.studentNo) >= 0.3).map((s) => s.studentNo))}
-          >
-            错误率 ≥ 30%
-          </Button>
+          {/*
+            极简模式没有错题，"全选有错的""错误率"两键必然是空集 ——
+            那两键留着只会让人以为"这份作业没人要改错"。按等级挑人。
+          */}
+          {simple ? (
+            <>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => setCorrection(students.filter((s) => gradeOf(s.studentNo) === '差').map((s) => s.studentNo))}
+              >
+                全选「差」的
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() =>
+                  setCorrection(
+                    students
+                      .filter((s) => {
+                        const g = gradeOf(s.studentNo)
+                        return g === '差' || g === '良'
+                      })
+                      .map((s) => s.studentNo),
+                  )
+                }
+              >
+                选「良」和「差」
+              </Button>
+            </>
+          ) : (
+            <>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => setCorrection(students.filter((s) => wrongOf(s.studentNo) > 0).map((s) => s.studentNo))}
+              >
+                全选有错的
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => setCorrection(students.filter((s) => rateOf(s.studentNo) >= 0.3).map((s) => s.studentNo))}
+              >
+                错误率 ≥ 30%
+              </Button>
+            </>
+          )}
           <Button size="sm" variant="ghost" onClick={() => setCorrection([])}>
             清空
           </Button>
@@ -320,7 +383,16 @@ export default function AssignmentCorrect() {
             const on = correction.includes(s.studentNo)
             const wc = wrongOf(s.studentNo)
             const r = rateOf(s.studentNo)
-            const col = r >= 0.3 ? 'var(--color-bad)' : r > 0 ? 'var(--color-warn)' : 'var(--color-ok)'
+            const grade = gradeOf(s.studentNo)
+            const col = simple
+              ? grade
+                ? gradeColor(grade)
+                : 'var(--color-ink3)'
+              : r >= 0.3
+                ? 'var(--color-bad)'
+                : r > 0
+                  ? 'var(--color-warn)'
+                  : 'var(--color-ok)'
             return (
               <div
                 key={s.id}
@@ -343,7 +415,7 @@ export default function AssignmentCorrect() {
                 </span>
                 {focus.includes(s.studentNo) ? <Tag tone="warn">重点</Tag> : null}
                 <span className="num shrink-0" style={{ fontSize: 12.5, fontWeight: 700, color: col }}>
-                  {wc ? `错 ${wc}` : '全对'}
+                  {simple ? (grade ?? '未评') : wc ? `错 ${wc}` : '全对'}
                 </span>
                 {corrected.includes(s.studentNo) ? (
                   <button

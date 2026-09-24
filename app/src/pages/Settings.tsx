@@ -1,22 +1,30 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Page } from '../components/AppShell'
 import {
   Logo,
   IconAlert,
   IconCalendar,
+  IconCheck,
   IconChevronRight,
   IconDownload,
   IconLogout,
   IconPencil,
   IconRefresh,
+  IconSwap,
   IconUpload,
   IconWifi,
 } from '../components/icons'
 import { Button, KV, PageHead, Panel, Sect, Sheet, Tag } from '../components/ui'
 import { activeStudents, useStore, useToast } from '../data/store'
 import { signOutEverywhere } from '../hooks/useAuthBootstrap'
-import { connectionMode } from '../lib/supabase'
+import { connectionMode, getSupabase, isRemote } from '../lib/supabase'
+import {
+  deviceRole,
+  deviceRoleAt,
+  restoreTeacherDevice,
+  type DeviceRole,
+} from '../lib/session'
 import { APP_VERSION } from '../lib/version'
 import {
   backupSummary,
@@ -54,6 +62,70 @@ export default function Settings() {
     setFSchool(teacher?.school ?? '')
     setFSubject(teacher?.subject ?? '物理')
     setEditing(true)
+  }
+
+  /*
+   * 本机角色（这台设备算教室端还是教师端）。
+   *
+   * 角色存在 localStorage 里，**别的标签页**打开一次 /classroom 就会把它改掉，
+   * 所以这里不光在挂载时读，回到这个标签页（focus）时再读一次 ——
+   * 否则"打开教室端 → 切回来"看到的还是旧状态，教师会以为没生效。
+   */
+  const [role, setRole] = useState<DeviceRole>(() => deviceRole())
+  const [roleAt, setRoleAt] = useState<number | null>(() => deviceRoleAt())
+  useEffect(() => {
+    const sync = () => {
+      setRole(deviceRole())
+      setRoleAt(deviceRoleAt())
+    }
+    window.addEventListener('focus', sync)
+    return () => window.removeEventListener('focus', sync)
+  }, [])
+  const [restoring, setRestoring] = useState(false)
+  const [pwd, setPwd] = useState('')
+  const [busyRestore, setBusyRestore] = useState(false)
+
+  /**
+   * 把设备改回教师端。
+   *
+   * 权限：改回教师端 = 拿到教师控制台，门槛必须和"重新登录"一样高 ——
+   * 教室那台一体机是共用的，学生不能随手一点就进教师端。
+   *  · 云端模式：用**当前登录的账号**复验一次密码（Supabase 重新登一次），
+   *    验不过就不改；
+   *  · 本地演示模式：本来就没有密码可校验（登录页任意账号密码都能进），
+   *    这里只做一次显式确认，并在界面上说明白——不假装它有安全性。
+   */
+  const doRestore = async () => {
+    if (busyRestore) return
+    if (isRemote) {
+      const sb = getSupabase()
+      const email = (await sb?.auth.getUser())?.data.user?.email
+      if (!sb || !email) {
+        push({ text: '读不到当前账号，请重新登录后再试', tone: 'bad' })
+        return
+      }
+      setBusyRestore(true)
+      const { error } = await sb.auth.signInWithPassword({ email, password: pwd })
+      setBusyRestore(false)
+      if (error) {
+        push({
+          text: '密码不正确',
+          tone: 'bad',
+          desc: error.message === 'Invalid login credentials' ? '请输这台设备上登录用的教师密码' : error.message,
+        })
+        return
+      }
+    }
+    restoreTeacherDevice()
+    setRole('teacher')
+    setRoleAt(deviceRoleAt())
+    setRestoring(false)
+    setPwd('')
+    push({
+      text: '这台设备已改回教师端',
+      tone: 'ok',
+      desc: isRemote ? '下次进教师端不用再输密码' : '演示环境没有密码可校验，这一步只是本机标记',
+    })
   }
 
   const total = classes.reduce((n, c) => n + activeStudents(c).length, 0)
@@ -324,7 +396,88 @@ export default function Settings() {
                 在新标签页打开教室端
               </Button>
             </div>
+            <p
+              style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 8, lineHeight: 1.7 }}
+            >
+              ⚠️ 打开教室端会把<b>这台设备</b>标记成教室端（浏览器共用一个标记）——
+              之后在这台机器上进教师端，会先要求重新输一次教师密码。
+              要改回来，见下面「本机角色」。
+            </p>
           </Panel>
+        </div>
+
+        {/* 本机角色：教室端 / 教师端 —— 复原入口 */}
+        <div className="mb-4">
+          <Sect>本机角色</Sect>
+          <Panel bodyClass="px-4 py-2">
+            <KV
+              k="这台设备"
+              v={
+                role === 'classroom' ? (
+                  <Tag tone="warn">教室端</Tag>
+                ) : (
+                  <Tag tone="ok">教师端</Tag>
+                )
+              }
+            />
+            <KV
+              k="标记时间"
+              v={
+                roleAt ? (
+                  <span className="num">
+                    {new Date(roleAt).toLocaleString('zh-CN', {
+                      month: 'numeric',
+                      day: 'numeric',
+                      hour: '2-digit',
+                      minute: '2-digit',
+                    })}
+                  </span>
+                ) : (
+                  '—'
+                )
+              }
+            />
+          </Panel>
+          <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 8, lineHeight: 1.7 }}>
+            教室端和教师端用的是<b>同一个账号</b>，所以用「这台设备是不是教室端」来拦住
+            "学生在教室里把网址后缀一改就进教师控制台"。在浏览器里打开过一次
+            <span className="num"> /classroom </span>
+            就会打上教室端标记，想回教师端要重新验一次身份；在这里也可以手动改回来。
+            这只是本机标记，不是加密级的安全 —— 真正的隔离要靠教室端独立账号 + 数据库权限。
+          </p>
+          {role === 'classroom' ? (
+            <div
+              className="mt-2 flex items-start gap-2.5 p-3"
+              style={{
+                background: 'var(--color-warnsoft)',
+                border: '1px solid ***REMOVED***ecd9ae',
+                borderRadius: 6,
+              }}
+            >
+              <span style={{ color: 'var(--color-warn)', marginTop: 1 }}>
+                <IconAlert size={16} />
+              </span>
+              <div style={{ fontSize: 12.5, color: '***REMOVED***8a5a12', lineHeight: 1.65 }}>
+                这台设备现在是<b>教室端</b>：在这台机器上进教师端会先被拦去登录页。
+                输一次教师密码即可自动改回教师端，或者直接点下面的按钮。
+              </div>
+            </div>
+          ) : null}
+          <div className="mt-2.5 flex items-center gap-2">
+            <Button
+              size="sm"
+              block
+              variant={role === 'classroom' ? 'primary' : 'default'}
+              icon={<IconSwap size={14} />}
+              disabled={role !== 'classroom'}
+              onClick={() => {
+                setPwd('')
+                setRestoring(true)
+              }}
+            >
+              {role === 'classroom' ? '改回教师端' : '已是教师端'}
+            </Button>
+          </div>
         </div>
 
         {/* 节假日数据来源 */}
@@ -550,6 +703,61 @@ export default function Settings() {
             placeholder="例如 物理"
           />
         </label>
+      </Sheet>
+
+      {/* 改回教师端：先验身份，再改标记 */}
+      <Sheet
+        open={restoring}
+        onClose={() => {
+          setRestoring(false)
+          setPwd('')
+        }}
+        title="把这台设备改回教师端"
+        footer={
+          <div className="flex gap-2">
+            <Button block onClick={() => setRestoring(false)}>
+              算了
+            </Button>
+            <Button
+              block
+              variant="primary"
+              icon={<IconCheck size={16} />}
+              disabled={busyRestore || (isRemote && !pwd)}
+              onClick={() => void doRestore()}
+            >
+              {busyRestore ? '正在验证…' : '确认改回教师端'}
+            </Button>
+          </div>
+        }
+      >
+        {isRemote ? (
+          <>
+            <p style={{ fontSize: 12.5, color: 'var(--color-ink2)', lineHeight: 1.75 }}>
+              改回教师端以后，这台设备就能直接进教师控制台（成绩、名单都在里面）。
+              为防学生在一体机上随手改回来，请<b>重新输一次教师密码</b>。
+            </p>
+            <label className="mt-3 block">
+              <span className="label">教师密码</span>
+              <input
+                className="input"
+                type="password"
+                value={pwd}
+                onChange={(e) => setPwd(e.target.value)}
+                placeholder="输这台设备上登录用的密码"
+                autoComplete="current-password"
+              />
+            </label>
+          </>
+        ) : (
+          <p style={{ fontSize: 12.5, color: 'var(--color-ink2)', lineHeight: 1.75 }}>
+            这台设备现在被标记成<b>教室端</b>（在本机打开过 /classroom），
+            所以进教师端会被拦去登录页。改回教师端后就不拦了。
+            <br />
+            <br />
+            当前是<b>本地演示模式</b>（没连云端），本机没有可校验的密码，
+            所以这一步只是本机标记 —— 它挡的是"改网址"，不是有心人。
+          </p>
+        )}
       </Sheet>
     </>
   )

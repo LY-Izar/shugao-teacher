@@ -738,7 +738,11 @@ export default function AssignmentCollect() {
                   icon={<IconCheck size={16} />}
                   onClick={() => {
                     setMark({})
-                    push({ text: '已登记：全员交齐', tone: 'ok' })
+                    push({
+                      text: '已设为全员交齐',
+                      tone: 'ok',
+                      desc: '还没保存 —— 点下面的「保存登记」才真正生效',
+                    })
                   }}
                 >
                   确认全员已交
@@ -945,7 +949,11 @@ export default function AssignmentCollect() {
                 icon={<IconCheck size={14} />}
                 onClick={() => {
                   setMark({})
-                  push({ text: '已设为全员交齐', tone: 'ok' })
+                  push({
+                    text: '已设为全员交齐',
+                    tone: 'ok',
+                    desc: '还没保存 —— 点下面的「保存登记」才真正生效',
+                  })
                 }}
               >
                 全部已交

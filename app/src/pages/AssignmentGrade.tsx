@@ -30,6 +30,17 @@ import { friendlyDate } from '../lib/date'
 type Mode = 'byStudent' | 'byQuestion'
 
 /**
+ * 等级 → 颜色 / 浅底色，和批改页那三个等级按钮同一套语义。
+ * 极简模式**只有等级**，没有逐题数据 —— 界面上任何"错几处"的地方都要换成它。
+ */
+function gradeTone(g?: string): string {
+  return g === '优' ? 'var(--color-ok)' : g === '差' ? 'var(--color-bad)' : 'var(--color-warn)'
+}
+function gradeSoft(g?: string): string {
+  return g === '优' ? 'var(--color-oksoft)' : g === '差' ? 'var(--color-badsoft)' : 'var(--color-warnsoft)'
+}
+
+/**
  * 双击拆小题时，第一下单击需要撤销的信息。
  *
  * `previous` 是**点第一下之前**这个学生的错题记录（没有就是空数组）——
@@ -519,6 +530,22 @@ function GradeSession({
   )
 
   /**
+   * 极简模式的等级分布。
+   *
+   * 极简模式**没有错题数据**（`wrong` 永远是空的），概览里那个「错题 0」不是
+   * "这次没人错"，而是"这份档案根本不记题" —— 拿普通模式的指标去渲染极简模式，
+   * 教师会以为全班全对。这里换成等级分布，才是这份档案真正的结论。
+   */
+  const gradeCounts = useMemo(() => {
+    const c = { 优: 0, 良: 0, 差: 0 }
+    for (const s of students) {
+      const g = grades[s.studentNo]
+      if (g === '优' || g === '良' || g === '差') c[g]++
+    }
+    return c
+  }, [students, grades])
+
+  /**
    * 未交名单：这些人**不能批改**（不变量 I3）。
    * 用 Set 是为了在 map 里 O(1) 判断 —— 一份档案几十人，不必每次 includes 扫一遍。
    */
@@ -817,25 +844,39 @@ function GradeSession({
               </button>
             </div>
           ) : null}
-          {/* 概览 */}
+          {/* 概览：极简模式看等级分布，普通模式看错题与完整度 */}
           <Panel className="anim-in mb-3 overflow-hidden">
             <StatStrip
-              items={[
-                {
-                  k: '已确认',
-                  v: `${confirmed.length}/${students.length}`,
-                  tone: confirmed.length === students.length ? 'var(--color-ok)' : undefined,
-                },
-                { k: '错题', v: stats?.wrongTotal ?? 0, tone: 'var(--color-bad)' },
-                {
-                  k: '完整度',
-                  v: `${Math.round((stats?.completeness ?? 0) * 100)}%`,
-                  tone:
-                    (stats?.completeness ?? 0) >= 1
-                      ? 'var(--color-ok)'
-                      : 'var(--color-warn)',
-                },
-              ]}
+              items={
+                simple
+                  ? [
+                      {
+                        k: '已评',
+                        v: `${confirmed.length}/${students.length}`,
+                        tone:
+                          confirmed.length === students.length ? 'var(--color-ok)' : undefined,
+                      },
+                      { k: '优', v: gradeCounts.优, tone: 'var(--color-ok)' },
+                      { k: '良', v: gradeCounts.良, tone: 'var(--color-warn)' },
+                      { k: '差', v: gradeCounts.差, tone: 'var(--color-bad)' },
+                    ]
+                  : [
+                      {
+                        k: '已确认',
+                        v: `${confirmed.length}/${students.length}`,
+                        tone: confirmed.length === students.length ? 'var(--color-ok)' : undefined,
+                      },
+                      { k: '错题', v: stats?.wrongTotal ?? 0, tone: 'var(--color-bad)' },
+                      {
+                        k: '完整度',
+                        v: `${Math.round((stats?.completeness ?? 0) * 100)}%`,
+                        tone:
+                          (stats?.completeness ?? 0) >= 1
+                            ? 'var(--color-ok)'
+                            : 'var(--color-warn)',
+                      },
+                    ]
+              }
             />
           </Panel>
 
@@ -941,7 +982,11 @@ function GradeSession({
           {/* 学生网格 */}
           <div className="mb-3">
             <Sect>
-              {mode === 'byStudent' ? '点学号展开题号' : '点学生记为做错'}
+              {simple
+                ? '点学号选 优 / 良 / 差'
+                : mode === 'byStudent'
+                  ? '点学号展开题号'
+                  : '点学生记为做错'}
               {todo.length ? ` · 还剩 ${todo.length} 人` : ' · 都批完了'}
             </Sect>
             <Panel className="overflow-hidden">
@@ -950,16 +995,31 @@ function GradeSession({
                   const wc = wrongCountOf(s.studentNo)
                   const isOpen = open === s.studentNo
                   const done = confirmed.includes(s.studentNo)
+                  const grade = grades[s.studentNo]
+                  /*
+                   * 极简模式没有"错几处"这回事 —— 卡片上的角标换成等级，
+                   * 颜色也跟着等级走（优绿 / 良黄 / 差红）。照普通模式渲染的话，
+                   * 每个学生都顶着一个"全对"的绿勾，看起来像全班全对。
+                   */
+                  const tone = simple ? (grade ? gradeTone(grade) : undefined) : wc > 0 ? 'var(--color-bad)' : undefined
+                  const soft = simple
+                    ? grade
+                      ? gradeSoft(grade)
+                      : undefined
+                    : wc > 0
+                      ? 'var(--color-badsoft)'
+                      : undefined
                   const inQ =
+                    !simple &&
                     mode === 'byQuestion' &&
                     isQuestionWrong(wrong[s.studentNo], curQ, subCountOf(curQ))
-                  const active = mode === 'byStudent' ? isOpen : inQ
+                  const active = simple ? false : mode === 'byStudent' ? isOpen : inQ
                   return (
                     <Fragment key={s.id}>
                       <button
                         type="button"
                         onClick={() => {
-                          if (mode === 'byStudent') {
+                          if (simple || mode === 'byStudent') {
                             markOpen(s.studentNo)
                             return
                           }
@@ -976,16 +1036,8 @@ function GradeSession({
                         style={{
                           background: active
                             ? 'var(--color-accentsoft)'
-                            : wc > 0
-                              ? 'var(--color-badsoft)'
-                              : 'var(--color-surface)',
-                          border: `1px solid ${
-                            active
-                              ? 'var(--color-accent)'
-                              : wc > 0
-                                ? 'var(--color-bad)'
-                                : 'var(--color-line)'
-                          }`,
+                            : (soft ?? 'var(--color-surface)'),
+                          border: `1px solid ${active ? 'var(--color-accent)' : (tone ?? 'var(--color-line)')}`,
                           borderRadius: 4,
                           transition: 'background-color .16s, border-color .16s',
                         }}
@@ -995,7 +1047,7 @@ function GradeSession({
                           style={{
                             fontSize: 15,
                             fontWeight: 700,
-                            color: wc > 0 ? 'var(--color-bad)' : 'var(--color-ink)',
+                            color: tone ?? 'var(--color-ink)',
                           }}
                         >
                           {s.studentNo}
@@ -1006,7 +1058,41 @@ function GradeSession({
                         >
                           {s.name}
                         </span>
-                        {wc > 0 ? (
+                        {simple ? (
+                          grade ? (
+                            <span
+                              className="num"
+                              style={{
+                                position: 'absolute',
+                                top: 3,
+                                right: 3,
+                                minWidth: 16,
+                                height: 16,
+                                padding: '0 3px',
+                                borderRadius: 99,
+                                background: tone,
+                                color: '***REMOVED***fff',
+                                fontSize: 10,
+                                lineHeight: '16px',
+                                fontWeight: 700,
+                                textAlign: 'center',
+                              }}
+                            >
+                              {grade}
+                            </span>
+                          ) : done ? (
+                            <span
+                              style={{
+                                position: 'absolute',
+                                top: 4,
+                                right: 4,
+                                color: 'var(--color-ok)',
+                              }}
+                            >
+                              <IconCheck size={12} strokeWidth={2.6} />
+                            </span>
+                          ) : null
+                        ) : wc > 0 ? (
                           <span
                             className="num"
                             style={{
@@ -1260,6 +1346,8 @@ function GradeSession({
                 <div className="grid grid-cols-3 gap-2 p-2.5 sm:grid-cols-4">
                   {doneList.map((s) => {
                     const wc = wrongCountOf(s.studentNo)
+                    const grade = grades[s.studentNo]
+                    // 极简模式：结论是等级，不是"错几处"（`wrong` 在这类档案里永远是空的）
                     return (
                       <button
                         key={s.id}
@@ -1269,7 +1357,13 @@ function GradeSession({
                         style={{
                           border: '1px solid var(--color-line2)',
                           borderRadius: 4,
-                          background: wc ? 'var(--color-badsoft)' : 'var(--color-oksoft)',
+                          background: simple
+                            ? grade
+                              ? gradeSoft(grade)
+                              : 'var(--color-surface2)'
+                            : wc
+                              ? 'var(--color-badsoft)'
+                              : 'var(--color-oksoft)',
                         }}
                       >
                         <span
@@ -1286,10 +1380,16 @@ function GradeSession({
                           style={{
                             fontSize: 11,
                             fontWeight: 600,
-                            color: wc ? 'var(--color-bad)' : 'var(--color-ok)',
+                            color: simple
+                              ? grade
+                                ? gradeTone(grade)
+                                : 'var(--color-ink3)'
+                              : wc
+                                ? 'var(--color-bad)'
+                                : 'var(--color-ok)',
                           }}
                         >
-                          {wc ? `错${wc}` : '全对'}
+                          {simple ? (grade ?? '未评') : wc ? `错${wc}` : '全对'}
                         </span>
                       </button>
                     )
@@ -1345,8 +1445,17 @@ function GradeSession({
           >
             <IconInfo size={13} />
             <span>
-              题号上<b>单击</b>记错、<b>双击</b>直接拆小题、<b>长按</b>调整小题。
-              本次已录入 {taps} 次点击。
+              {simple ? (
+                <>
+                  点开学生选<b>优 / 良 / 差</b>；极简模式不记题目，所以没有题号、没有错题统计。
+                  本次已录入 {taps} 次点击。
+                </>
+              ) : (
+                <>
+                  题号上<b>单击</b>记错、<b>双击</b>直接拆小题、<b>长按</b>调整小题。
+                  本次已录入 {taps} 次点击。
+                </>
+              )}
             </span>
           </div>
         </div>

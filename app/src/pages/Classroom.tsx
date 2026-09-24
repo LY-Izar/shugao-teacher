@@ -36,7 +36,7 @@ import {
 /** 备份文件名：固定名字，每次覆盖 —— 免得一天攒几十个文件 */
 const BACKUP_NAME = '树高备份.json'
 import { awayText, dayState, maybeShift, toMinutes, weekdayOf } from '../lib/schedule'
-import { dayKind, nextHoliday, ymdOf } from '../lib/holiday'
+import { dayKind, isRestDay, nextHoliday, ymdOf } from '../lib/holiday'
 import { parseScheduleText, type ParsedScheduleItem } from '../lib/scheduleParse'
 import { preparePhoto } from '../lib/photo'
 import { recognize } from '../lib/ocr'
@@ -59,11 +59,38 @@ import {
   saveToDisk,
   type LocalFile,
 } from '../lib/localStore'
-import { chime, setExamMuted, softChime, speak, stopSpeaking, unlockAudio } from '../lib/tts'
+import {
+  chime,
+  isSilenced,
+  quietNow,
+  setExamMuted,
+  softChime,
+  speak,
+  speechBudgetMs,
+  stopSpeaking,
+  unlockAudio,
+} from '../lib/tts'
 import { friendlyDate } from '../lib/date'
 import type { CallRecord } from '../data/types'
 
 const CLASS_KEY = 'shugao.classroom.classId'
+
+/* ---------------- 播报队列的几个常数 ---------------- */
+
+/** 队列上限。一节课正常也就三五条，这只是防止队列无限涨的阀门；满了就先不收（见 play） */
+const MAX_QUEUE = 12
+/** 播放记录只留最近这一段（轮询窗口是 15 分钟，比它长就够），不然开一整天会一直涨 */
+const SEEN_TTL_MS = 20 * 60_000
+/** 「叮咚」响完到开口的间隔 */
+const SPEAK_AFTER_CHIME_MS = 680
+/** 两次「关闭」之间的最短间隔：双击会连出队两条，被切那条就永远不会响了 */
+const CLOSE_GUARD_MS = 1200
+/** 同一条备份故障的提示间隔 —— 自动备份的 tick 是 5 分钟一次，不节流会一直刷屏 */
+const BK_ISSUE_REPEAT_MS = 10 * 60_000
+
+/** 同一个 call 重复播报时 sentAt 会追加，所以用「id + 最后一次时间」当键 */
+const lastAt = (c: CallRecord) => Math.max(0, ...(c.sentAt ?? []))
+const callKey = (c: CallRecord) => `${c.id}:${lastAt(c)}`
 
 export default function Classroom() {
   const classes = useStore((s) => s.classes)
@@ -117,7 +144,21 @@ export default function Classroom() {
    * 播报队列 —— 多科老师可能几乎同时叫，**排队依次播，不能互相顶掉**。
    * 当前正在播的就是队首那条。
    */
-  const [queue, setQueue] = useState<CallRecord[]>([])
+  const [queue, setQueueState] = useState<CallRecord[]>([])
+  /**
+   * 队列的唯一写入口，state 和 ref 一起改。
+   *
+   * 为什么还要一份 ref：入队发生在**推送 / 轮询的回调**里，不在渲染期，
+   * 那时候闭包里的 state 是上一次渲染的旧值 —— 判断"队列满没满"会判错。
+   * 返回同一个数组表示"没变化"，不会触发重渲染。
+   */
+  const queueRef = useRef<CallRecord[]>([])
+  const mutateQueue = useCallback((fn: (q: CallRecord[]) => CallRecord[]) => {
+    const next = fn(queueRef.current)
+    if (next === queueRef.current) return
+    queueRef.current = next
+    setQueueState(next)
+  }, [])
   const broadcast = queue[0] ?? null
   const [now, setNow] = useState(() => new Date())
   const [armed, setArmed] = useState(false)
@@ -228,6 +269,25 @@ export default function Classroom() {
   const [bkBusy, setBkBusy] = useState(false)
   const [needsGrant, setNeedsGrant] = useState(false)
 
+  /**
+   * 备份出问题必须**弹出来**，不能只在面板里留一行小字。
+   * 这块屏挂在墙上没人盯着：自动备份悄没声地失败，等于没有备份 ——
+   * 真要用它的那天（数据丢了）才发现，就晚了。
+   * 同一条原因 10 分钟只弹一次（这个 tick 自己 5 分钟跑一次，不节流会一直刷屏），
+   * 写文件的失败由 `backup.ts` 的 `writeToFolder` 用同一套口径提示，这里只补它管不到的两条分支。
+   */
+  const bkIssueRef = useRef({ why: '', at: 0 })
+  const reportBkIssue = useCallback(
+    (why: string) => {
+      console.warn('[backup]', why)
+      const at = Date.now()
+      if (bkIssueRef.current.why === why && at - bkIssueRef.current.at < BK_ISSUE_REPEAT_MS) return
+      bkIssueRef.current = { why, at }
+      push({ text: '自动备份没写成', tone: 'bad', desc: why })
+    },
+    [push],
+  )
+
   useEffect(() => {
     if (!bkSupported) return
     let alive = true
@@ -235,10 +295,16 @@ export default function Classroom() {
       // 这里**只查询、不申请** —— requestPermission 必须由用户手势触发
       const dir = await loadHandle()
       if (!alive) return
-      if (!dir) return
+      if (!dir) {
+        // 一次都没设过文件夹：以前这里直接 return，屏上一个字都没有
+        reportBkIssue('还没有选备份文件夹（在教室端「自动备份到本机」里点「设置文件夹」）')
+        return
+      }
       const q = await dir.queryPermission?.({ mode: 'readwrite' })
+      if (!alive) return
       if (q !== 'granted') {
         setNeedsGrant(true)
+        reportBkIssue('浏览器重启后文件夹权限会失效 —— 在「自动备份到本机」里点「点一下恢复」')
         return
       }
       const ok = await writeToFolder(BACKUP_NAME, makeBackup(useStore.getState()))
@@ -252,7 +318,7 @@ export default function Classroom() {
       alive = false
       window.clearInterval(t)
     }
-  }, [bkSupported])
+  }, [bkSupported, reportBkIssue])
 
   /** 改一行（时间最容易认错，所以每一格都能直接编辑） */
   const patchRow = (i: number, patch: Partial<ParsedScheduleItem>) =>
@@ -315,17 +381,31 @@ export default function Classroom() {
   }, [exam])
 
   /**
+   * 现在是不是"不该出声"的时候：考试模式，或落在固定静音时段（周三下午）。
+   * 播报队列据此**暂停**（不是清空）—— 见下面的 play effect。
+   */
+  const silenced = exam || quietNow(now).quiet
+
+  /**
    * 下课铃：下一节课**开始前 5 分钟**响一声很轻的「叮」。
    * 用 rungRef 记住已经响过的 `日期-课id`，避免在同一分钟内重复响。
+   *
+   * 两个"按钟点"的坑：
+   *  ① 放假的日子（法定假期 + 周末）本来就没课，不能照课表响 —— 之前不看 dayKind，
+   *     中秋、寒暑假的早上照样"叮"一声；
+   *  ② 调休上班日教师手选的「今天按周X的课表上」也要算数，否则屏幕上显示的是周三的课，
+   *     铃却按真实的周日课表（空表）不响 —— 和 dayItems 必须是同一个星期。
+   *     maybeShift 仍然看**真实的今天是不是周一**（借周一的课不代表今天要顺延）。
    */
   const rungRef = useRef('')
   useEffect(() => {
     const tick = () => {
       const n = new Date()
+      if (isRestDay(ymdOf(n))) return
       const m = n.getHours() * 60 + n.getMinutes()
       const day = maybeShift(
         schedule.filter(
-          (s) => s.scope === 'class' && s.classId === klass?.id && s.weekday === weekdayOf(n),
+          (s) => s.scope === 'class' && s.classId === klass?.id && s.weekday === useWeekday,
         ),
         weekdayOf(n),
       ).items
@@ -340,7 +420,7 @@ export default function Classroom() {
     tick()
     const t = window.setInterval(tick, 20_000)
     return () => window.clearInterval(t)
-  }, [schedule, klass?.id])
+  }, [schedule, klass?.id, useWeekday])
 
   /**
    * 19:20 之后当天收尾：统计区换成一句收束。
@@ -387,10 +467,12 @@ export default function Classroom() {
      两条路一起走：
        ① Realtime 推送 —— 快，但 websocket 会悄悄断（心跳是另一条 REST 连接，照常活着）
        ② 每 8 秒轮询一次 —— 兜底。上面那条断了也不会漏掉呼叫。 */
-  const playedRef = useRef<Set<string>>(new Set())
+  /**
+   * 已经收下的呼叫：callKey → 记下的时刻。
+   * 用 Map 而不是 Set，是为了能清掉过期的键 —— 这块屏一开一整天，只增不减会一直涨。
+   */
+  const playedRef = useRef<Map<string, number>>(new Map())
   const seededRef = useRef(false)
-  /** 同一个 call 重复播报时 sentAt 会追加，所以用「id + 最后一次时间」当键 */
-  const callKey = (c: CallRecord) => `${c.id}:${Math.max(0, ...(c.sentAt ?? []))}`
 
   useEffect(() => {
     if (!klass) return
@@ -402,9 +484,20 @@ export default function Classroom() {
     const play = (c: CallRecord) => {
       const k = callKey(c)
       if (playedRef.current.has(k)) return
-      playedRef.current.add(k)
-      setQueue((q) => [...q, c])
+      // 队列满了就先**不收，也不打标** —— 下一轮轮询还会把它送来，
+      // 等积压播掉一条自然就进去了（打了标才是真丢）
+      if (queueRef.current.length >= MAX_QUEUE) return
+      playedRef.current.set(k, Date.now())
+      mutateQueue((q) => [...q, c])
     }
+
+    /* 换班：旧班没播完的不能接着在新班的喇叭里念（那是串台），
+       新班也不能把 15 分钟前的旧呼叫补播一遍（那是刚开机就该跳过的）。
+       所以队列、播放记录、seeded 标记三个一起归零。 */
+    stopSpeaking()
+    mutateQueue(() => [])
+    playedRef.current.clear()
+    seededRef.current = false
 
     const off = subscribe((m) => {
       if (m.type !== 'call') return
@@ -416,13 +509,21 @@ export default function Classroom() {
     const tick = async () => {
       const list = await remote.loadRecentCalls(klass.id, Date.now() - 15 * 60_000)
       if (!alive) return
+      // 轮询回来的是 created_at **倒序**（最新在前），照原样入队就会倒着念。
+      // 先翻成"最旧的在前"，再按最后一次播报时间稳定排序（同一毫秒的保持原先后）。
+      const ordered = [...list].reverse().sort((a, b) => lastAt(a) - lastAt(b))
       if (!seededRef.current) {
         // 第一次只把"已经存在的"记下来，不播 —— 免得刚打开就把几分钟前的旧呼叫播一遍
-        for (const c of list) playedRef.current.add(callKey(c))
+        for (const c of ordered) playedRef.current.set(callKey(c), Date.now())
         seededRef.current = true
         return
       }
-      for (const c of list) play(c)
+      // 顺手清掉过期的键：轮询只回看 15 分钟，比这更老的键不会再出现
+      const nowMs = Date.now()
+      for (const [k, at] of playedRef.current) {
+        if (nowMs - at > SEEN_TTL_MS) playedRef.current.delete(k)
+      }
+      for (const c of ordered) play(c)
     }
     void tick()
     const t = window.setInterval(() => void tick(), 8000)
@@ -445,21 +546,61 @@ export default function Classroom() {
   }, [])
 
   /**
-   * 播报队首那条：响一声提示音 → 念出来 → 15 秒后出队，接着播下一条。
-   * 依赖队首的「id + 最后播报时间」，所以队列前移时会自动播下一条。
+   * 播报队首那条：响一声提示音 → 念出来 → **念完**才出队，接着播下一条。
+   *
+   * 以前是固定 15 秒出队：长播报会被拦腰截断，短播报又白占着屏。现在以
+   * speechSynthesis 的 onend 为准（`speechBudgetMs` 只是"万一不回调"的兜底）。
+   *
+   * 静音（考试模式 / 周三下午）期间**什么都不做**：不响、不念、不倒计时，
+   * 浮层也不显示 —— 也就是"暂停"，队列原样留着，静音一结束从队首接着播。
+   * 这里不能改成"静音期间直接出队丢掉"：丢掉的那条在 playedRef 里已经打了标，
+   * 轮询不会再送第二次，它就永远不会有人念了 —— 而老师以为学生已经听见了。
+   * 也不能靠"静音期间不入队、等静音结束由轮询补"：轮询只回看 15 分钟，
+   * 而静音时段有 2.5 小时（周三下午），过了窗口的呼叫就真没了。
    */
+  const playHeadRef = useRef<() => void>(() => {})
+  /** 上一次点「关闭」的时刻 —— 防双击连切两条（见浮层里的关闭按钮） */
+  const closeAtRef = useRef(-Infinity)
   const headKey = broadcast ? callKey(broadcast) : ''
   useEffect(() => {
-    if (!broadcast) return
-    chime()
-    const t1 = window.setTimeout(() => speak(broadcast.text), 680)
-    const t2 = window.setTimeout(() => setQueue((q) => q.slice(1)), 15000)
+    if (!broadcast || silenced) return
+    const key = callKey(broadcast)
+    let done = false
+    let speakTimer = 0
+    let fallbackTimer = 0
+    /** 出队。onEnd 和兜底定时器会抢，只认先到的那个 */
+    const advance = () => {
+      if (done) return
+      done = true
+      mutateQueue((q) => (q[0] && callKey(q[0]) === key ? q.slice(1) : q))
+    }
+    /** 响铃 → 开口；「再播一遍」也走这里，所以兜底计时会重新起算 */
+    const playHead = () => {
+      chime()
+      window.clearTimeout(speakTimer)
+      window.clearTimeout(fallbackTimer)
+      speakTimer = window.setTimeout(() => {
+        // 这 0.68 秒里静音开始了（静音时段刚好跨过这一秒）：
+        // 什么都别做，队列留着 —— silenced 一变 effect 会重跑，静音结束再念
+        if (isSilenced()) return
+        speak(broadcast.text, { onEnd: advance })
+      }, SPEAK_AFTER_CHIME_MS)
+      fallbackTimer = window.setTimeout(
+        () => {
+          if (!isSilenced()) advance()
+        },
+        SPEAK_AFTER_CHIME_MS + speechBudgetMs(broadcast.text),
+      )
+    }
+    playHeadRef.current = playHead
+    playHead()
     return () => {
-      window.clearTimeout(t1)
-      window.clearTimeout(t2)
+      window.clearTimeout(speakTimer)
+      window.clearTimeout(fallbackTimer)
+      playHeadRef.current = () => {}
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [headKey])
+  }, [headKey, silenced])
 
   const startPip = async () => {
     unlockAudio()
@@ -489,6 +630,7 @@ export default function Classroom() {
   if (isRemote && !hydrated) {
     return (
       <Shell>
+        <SyncWrap />
         <Panel bodyClass="p-8 text-center" className="anim-in">
           <div style={{ fontSize: 15, fontWeight: 640 }}>正在同步数据…</div>
         </Panel>
@@ -498,6 +640,7 @@ export default function Classroom() {
   if (isRemote && !teacher) {
     return (
       <Shell>
+        <SyncWrap />
         <Panel bodyClass="p-8 text-center" className="anim-in">
           <div style={{ fontSize: 16, fontWeight: 640 }}>教室端还没有登录</div>
           <div style={{ fontSize: 13, color: 'var(--color-ink3)', marginTop: 6, lineHeight: 1.7 }}>
@@ -521,6 +664,7 @@ export default function Classroom() {
   if (!klass) {
     return (
       <Shell>
+        <SyncWrap />
         <Panel bodyClass="p-8 text-center" className="anim-in">
           <div style={{ fontSize: 16, fontWeight: 640 }}>还没有班级数据</div>
           <div style={{ fontSize: 13, color: 'var(--color-ink3)', marginTop: 6 }}>
@@ -753,6 +897,9 @@ export default function Classroom() {
         </div>
 
         <div className="mx-auto w-full px-5 py-5" style={{ maxWidth: 1360 }}>
+          {/* 同步失败：教室里这块屏也得自己说出来 */}
+          <SyncBanner />
+
           {/* 小窗不可用提示 */}
           {!pipSupported() ? (
             <div
@@ -1035,7 +1182,7 @@ export default function Classroom() {
                     chime()
                     window.setTimeout(
                       () => speak(`请 12 号、37 号，到${klass.name}的物理老师办公室。`),
-                      680,
+                      SPEAK_AFTER_CHIME_MS,
                     )
                   }}
                 >
@@ -1552,8 +1699,9 @@ export default function Classroom() {
           )
         : null}
 
-      {/* 播报浮层 */}
-      {broadcast ? (
+      {/* 播报浮层 —— 静音期间不显示（考试本来就是黑屏，静音时段不该打扰），
+          队列留着不动，等静音结束再接着播 */}
+      {broadcast && !silenced ? (
         <div
           className="anim-in fixed inset-0 z-[70] flex flex-col items-center justify-center px-10"
           style={{ background: 'rgb(10 14 20 / .95)' }}
@@ -1605,8 +1753,9 @@ export default function Classroom() {
           <div className="mt-10 flex gap-3">
             <Button
               onClick={() => {
-                chime()
-                window.setTimeout(() => speak(broadcast.text), 680)
+                // 重播队首：走队列那套（响铃 → 开口 → 重新计兜底时间），
+                // 不能再自己 speak，否则兜底定时器会在重播到一半时把这条切掉
+                playHeadRef.current()
               }}
             >
               再播一遍
@@ -1614,9 +1763,14 @@ export default function Classroom() {
             <Button
               variant="primary"
               onClick={() => {
+                /* 只出队这一条 —— 后面排着的照常播。
+                   双击会连出队两条：第二条被切掉时 playedRef 已经打了标，
+                   轮询不会再送来，那条呼叫就永远不响了。所以一秒内只认一次。 */
+                const at = Date.now()
+                if (at - closeAtRef.current < CLOSE_GUARD_MS) return
+                closeAtRef.current = at
                 stopSpeaking()
-                // 只出队这一条 —— 后面排着的照常播
-                setQueue((q) => q.slice(1))
+                mutateQueue((q) => q.slice(1))
               }}
             >
               关闭
@@ -1631,4 +1785,54 @@ export default function Classroom() {
 /* 教室端不套教师端的应用壳 */
 function Shell({ children }: { children: React.ReactNode }) {
   return <div className="relative z-[1] mx-auto min-h-full w-full">{children}</div>
+}
+
+/**
+ * 「数据没能存到服务器」提示。
+ *
+ * 这条以前只有教师端 AppShell 有 —— 可教室端是**挂在墙上的一块屏**：
+ * 断网、会话过期、写库被拒的时候，屏上照旧显示着一切正常，
+ * 教室里没人会去教师端核对，等发现时这节课的记录已经没了。
+ * 这里的样式与教师端那条一致（同一句话、同样的 warnsoft 底）。
+ */
+function SyncBanner() {
+  const syncError = useStore((s) => s.syncError)
+  const clearSyncError = useStore((s) => s.clearSyncError)
+  if (!syncError) return null
+  return (
+    <button
+      type="button"
+      onClick={clearSyncError}
+      className="anim-in mb-4 flex w-full items-start gap-2.5 p-3.5 text-left"
+      style={{
+        background: 'var(--color-warnsoft)',
+        border: '1px solid ***REMOVED***ecd9ae',
+        borderRadius: 6,
+      }}
+    >
+      <span style={{ color: 'var(--color-warn)', marginTop: 1, flexShrink: 0 }}>
+        <IconAlert size={17} />
+      </span>
+      <span style={{ flex: 1 }}>
+        <span style={{ display: 'block', fontSize: 13.5, fontWeight: 620, color: '***REMOVED***8a5a12' }}>
+          数据没能存到服务器
+        </span>
+        <span style={{ display: 'block', fontSize: 12, color: '***REMOVED***96702f', marginTop: 3, lineHeight: 1.7 }}>
+          {syncError} · 这台屏上的改动只在本机，网络恢复后请重新操作一次
+        </span>
+      </span>
+      <span style={{ fontSize: 11.5, color: '***REMOVED***96702f', flexShrink: 0 }}>知道了</span>
+    </button>
+  )
+}
+
+/** 未登录 / 同步中 / 没有班级这三种整屏状态下也要能看见同步失败（没错时不占位置） */
+function SyncWrap() {
+  const syncError = useStore((s) => s.syncError)
+  if (!syncError) return null
+  return (
+    <div className="mx-auto w-full px-5 pt-4" style={{ maxWidth: 1360 }}>
+      <SyncBanner />
+    </div>
+  )
 }

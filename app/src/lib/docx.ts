@@ -125,6 +125,181 @@ export type DocxParts = {
    * 这时候必须让教师人工核对，不能默认它对。
    */
   anchored: number
+  /**
+   * 压缩后的体积报告（题图会以 base64 存进 `question_meta`，见下面的「题图体积上限」）。
+   *
+   * `dropped > 0` 意味着**有图没进档案** —— 调用方应当把这件事说出来，
+   * 而不是让教师以为图都在。
+   */
+  imageBudget: ImageBudget
+}
+
+export type ImageBudget = {
+  /** 保留的图片张数 */
+  kept: number
+  /** 因为太大被重新编码（分辨率/画质下调）的张数 */
+  reduced: number
+  /** 压缩到地板仍然装不下、最终没保留的张数 */
+  dropped: number
+  /** 保留的图片合计字符数（data URL 长度） */
+  chars: number
+}
+
+/* ------------------------------------------------------------
+   题图体积上限
+   ------------------------------------------------------------
+   为什么要有：题图是**以 base64 直接塞进 `question_meta`（jsonb）** 的。
+   练习册 Word 稿里的照片/扫描图动辄几 MB，一张 3000×4000 的 PNG 转成
+   base64 就有十几 MB —— 一旦超出发送端的请求体积，**整条 assignment upsert
+   都会被拒**：题量、分值、知识点、收缴与批改记录一起丢（云端模式刷新即丢，
+   而界面已经提示"已导入"）。这是"静默丢数据"里最贵的一种。
+
+   取舍：**先把图压小，而不是把图丢掉**。
+   铁律是「AI/OCR 只是加速器，不能变成拦路虎，识别结果必须人工可确认」——
+   所以这里不拒绝导入、不让保存失败：
+     1. 单张够小（<= IMG_MAX_CHARS）就**原样保留**，不动一个像素；
+     2. 太大就按阶梯重编码（长边逐级下调 + JPEG 画质逐级下调），
+        打印在 A4 上（正文宽约 10.5 cm）1200 px 已经够清楚；
+     3. 一整份稿子的合计还超（IMGS_TOTAL_MAX_CHARS）时，**所有图一起再降一档**，
+        而不是从后面砍图 —— 保住"每题都有图"，宁可略糊；
+     4. 阶梯到底仍然装不下的极端情况（几十张大图），才按小的优先保留，
+        并把张数如实报给调用方（`imageBudget.dropped`）。
+   ------------------------------------------------------------ */
+
+/** 单张题图上限：data URL 字符数（base64 约 4/3 膨胀，≈180 KB 二进制） */
+export const IMG_MAX_CHARS = 240_000
+/** 一份稿子所有题图合计上限：≈1.2 MB 二进制，留足余量给同一行的其它字段 */
+export const IMGS_TOTAL_MAX_CHARS = 1_600_000
+
+/** 重编码阶梯：长边像素 × JPEG 画质，从好到差 */
+const IMG_LADDER: Array<{ maxDim: number; quality: number }> = [
+  { maxDim: 1600, quality: 0.85 },
+  { maxDim: 1280, quality: 0.78 },
+  { maxDim: 1000, quality: 0.7 },
+  { maxDim: 820, quality: 0.6 },
+  { maxDim: 640, quality: 0.5 },
+]
+
+/** 画到 canvas 上重编码。解码不了（浏览器不认的格式）就返回 null，由调用方兜底。 */
+async function reencode(
+  dataUrl: string,
+  step: { maxDim: number; quality: number },
+): Promise<string | null> {
+  if (typeof document === 'undefined') return null
+  try {
+    const img = new Image()
+    img.decoding = 'sync'
+    const loaded = await new Promise<boolean>((resolve) => {
+      img.onload = () => resolve(true)
+      img.onerror = () => resolve(false)
+      img.src = dataUrl
+    })
+    if (!loaded) return null
+    const w = img.naturalWidth || img.width
+    const h = img.naturalHeight || img.height
+    if (!w || !h) return null
+
+    const scale = Math.min(1, step.maxDim / Math.max(w, h))
+    const cw = Math.max(1, Math.round(w * scale))
+    const ch = Math.max(1, Math.round(h * scale))
+    const canvas = document.createElement('canvas')
+    canvas.width = cw
+    canvas.height = ch
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return null
+    // 白底：PNG 的透明区域转 JPEG 会变黑，物理题图基本都在白纸上
+    ctx.fillStyle = '***REMOVED***fff'
+    ctx.fillRect(0, 0, cw, ch)
+    ctx.imageSmoothingQuality = 'high'
+    ctx.drawImage(img, 0, 0, cw, ch)
+    const out = canvas.toDataURL('image/jpeg', step.quality)
+    // 有些图（纯色/线框）JPEG 反而更大，那就退回原来的
+    return out && out.length < dataUrl.length ? out : null
+  } catch {
+    return null
+  }
+}
+
+/** 按阶梯把一张图压到 maxChars 以内；压不动就返回原图（由总量那一步兜底） */
+export async function shrinkToLimit(dataUrl: string, maxChars: number): Promise<string> {
+  if (dataUrl.length <= maxChars) return dataUrl
+  for (const step of IMG_LADDER) {
+    const next = await reencode(dataUrl, step)
+    if (next && next.length <= maxChars) return next
+  }
+  // 阶梯走完还是大：至少把它降到地板（画质最差的那一档）
+  const floor = await reencode(dataUrl, IMG_LADDER[IMG_LADDER.length - 1])
+  return floor && floor.length < dataUrl.length ? floor : dataUrl
+}
+
+/**
+ * 把一组题图压进预算。
+ *
+ * 先逐张压到单张上限，再整份看合计：超了就**所有图一起降到下一档**
+ * （宁可大家都略糊一点，也不能"前 5 题有图、后面全没图"）。
+ */
+export async function fitImages(
+  images: Map<string, string>,
+  opts: { imgMax?: number; totalMax?: number } = {},
+): Promise<{ images: Map<string, string>; budget: ImageBudget }> {
+  const imgMax = opts.imgMax ?? IMG_MAX_CHARS
+  const totalMax = opts.totalMax ?? IMGS_TOTAL_MAX_CHARS
+  const budget: ImageBudget = { kept: 0, reduced: 0, dropped: 0, chars: 0 }
+  if (images.size === 0) return { images: new Map(), budget }
+
+  const entries = [...images.entries()]
+  const out = new Map<string, string>()
+  let reduced = 0
+
+  // 第一遍：逐张压到单张上限
+  for (const [rid, url] of entries) {
+    const next = await shrinkToLimit(url, imgMax)
+    if (next !== url) reduced++
+    out.set(rid, next)
+  }
+
+  // 第二遍：合计还超就整份再降档（保留每一张，只牺牲分辨率）
+  const sum = () => [...out.values()].reduce((n, u) => n + u.length, 0)
+  if (sum() > totalMax) {
+    for (const step of IMG_LADDER) {
+      for (const [rid, url] of entries) {
+        const next = await reencode(url, step)
+        if (next) out.set(rid, next)
+      }
+      if (sum() <= totalMax) break
+      // 整份都到了地板还是超：只能少留几张，小的优先（大的压缩收益更低）
+      if (step === IMG_LADDER[IMG_LADDER.length - 1]) break
+    }
+    reduced = [...out.entries()].filter(([rid, u]) => u !== images.get(rid)).length
+  }
+
+  // 第三遍：仍然超预算（阶梯到底了）→ 按小的优先保留，如实报出丢了几张
+  if (sum() > totalMax) {
+    const ranked = [...out.entries()].sort((a, b) => a[1].length - b[1].length)
+    const kept = new Map<string, string>()
+    let used = 0
+    for (const [rid, url] of ranked) {
+      if (used + url.length > totalMax) continue
+      kept.set(rid, url)
+      used += url.length
+    }
+    // 恢复正文顺序（Map 的插入顺序就是图在稿子里出现的顺序）
+    const ordered = new Map<string, string>()
+    for (const [rid] of entries) {
+      const url = kept.get(rid)
+      if (url) ordered.set(rid, url)
+    }
+    budget.dropped = entries.length - ordered.size
+    budget.reduced = reduced
+    budget.kept = ordered.size
+    budget.chars = used
+    return { images: ordered, budget }
+  }
+
+  budget.reduced = reduced
+  budget.kept = out.size
+  budget.chars = sum()
+  return { images: out, budget }
 }
 
 /** 图片占位符用的哨兵字符：私有区 U+E000，正文里不可能自然出现 */
@@ -239,5 +414,12 @@ export async function docxToParts(file: File | Blob): Promise<DocxParts> {
     images.set(rid, `data:${mime};base64,${toBase64(data)}`)
   }
 
-  return { text: xmlToText(marked), images, anchored }
+  /*
+   * 题图最后要**以 base64 存进 question_meta**，所以在这里就把体积收进预算内 ——
+   * 超限的话整条 assignment upsert 会被拒（题量/分值/收缴/批改一起丢）。
+   * 详见上面「题图体积上限」那段取舍说明。
+   */
+  const fitted = await fitImages(images)
+
+  return { text: xmlToText(marked), images: fitted.images, anchored, imageBudget: fitted.budget }
 }

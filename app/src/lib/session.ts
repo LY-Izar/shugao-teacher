@@ -24,14 +24,27 @@ export const AUTH_DAYS = 7
    ⚠️ 这只是客户端拦截，**不是加密级的安全**：懂开发者工具的学生
    可以改 localStorage 绕过去。真正的隔离要让教室端用**独立账号**，
    并在数据库层面（RLS）禁止它改成绩与名单 —— 那是单独立项的架构改动。
+
+   ⚠️ **必须有复原入口**（原来只进不出）：
+   教室一体机是共用的，教师自己的手机/电脑上只要打开过一次 /classroom
+   （比如「我的 → 教室端 → 在新标签页打开」），这台设备就一直是教室端，
+   之后每次进教师端都被拦去登录页，而界面上**没有任何地方**能看见这件事、
+   也没有地方改回来。现在：
+     · 角色写入时**记下时间**（`deviceRoleAt`），设置页显示"标记于 …"；
+     · 设置页有明确的「改回教师端」（`restoreTeacherDevice`），
+       并且**要重新验证教师密码**才放行 —— 权限判断见 Settings.tsx：
+       改回教师端 = 拿到教师控制台，所以门槛必须和"重新登录"一样高，
+       不能让教室那台机器上的学生随手一点就进教师端。
    ============================================================ */
 
 const ROLE_KEY = 'shugao.deviceRole'
+const ROLE_AT_KEY = 'shugao.deviceRoleAt'
 export type DeviceRole = 'teacher' | 'classroom'
 
 export function setDeviceRole(r: DeviceRole) {
   try {
     localStorage.setItem(ROLE_KEY, r)
+    localStorage.setItem(ROLE_AT_KEY, String(Date.now()))
   } catch {
     /* 忽略 */
   }
@@ -43,6 +56,26 @@ export function deviceRole(): DeviceRole {
   } catch {
     return 'teacher'
   }
+}
+
+/** 这个角色是什么时候打上的（没记录过就是 null）。给设置页解释"为什么被拦"用 */
+export function deviceRoleAt(): number | null {
+  try {
+    const v = Number(localStorage.getItem(ROLE_AT_KEY) ?? 0)
+    return v > 0 ? v : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 把这台设备改回教师端 —— 教师端的复原入口。
+ *
+ * ⚠️ 调用前必须重新验证教师密码（远程模式走 Supabase 复验），
+ * 否则它就等于给教室里的学生开了一道直通教师控制台的门。
+ */
+export function restoreTeacherDevice() {
+  setDeviceRole('teacher')
 }
 
 /** 这台设备是被当作教室端用的 —— 进教师端要重新验证 */
