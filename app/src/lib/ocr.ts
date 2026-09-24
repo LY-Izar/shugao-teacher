@@ -131,7 +131,13 @@ function sanitize(raw: unknown): OcrOutcome {
 
 export async function recognize(
   image: string,
-  opts: { scene: 'collect' | 'roster' | 'count' | 'schedule'; className?: string; nos?: string[] },
+  opts: {
+    scene: 'collect' | 'roster' | 'count' | 'schedule'
+    className?: string
+    nos?: string[]
+    /** 学科显示名（语文 / 物理…）。服务端只拿它拼提示词里那句「帮一位高中X老师」，洗过再用 */
+    subject?: string
+  },
 ): Promise<OcrOutcome> {
   const ctl = new AbortController()
   const timer = window.setTimeout(() => ctl.abort(), TIMEOUT_MS)
@@ -145,6 +151,7 @@ export async function recognize(
         scene: opts.scene,
         className: opts.className,
         nos: opts.nos?.slice(0, 400),
+        subject: opts.subject,
       }),
     })
 

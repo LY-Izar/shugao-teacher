@@ -1343,7 +1343,8 @@ export default function Classroom() {
                     setArmed(true)
                     chime()
                     window.setTimeout(
-                      () => speak(`请 12 号、37 号，到${klass.name}的物理老师办公室。`),
+                      // 试播样例：地点写中性词，不要写死某一科（真实呼叫的地点是教师填的）
+                      () => speak('请 12 号、37 号，到老师办公室。'),
                       SPEAK_AFTER_CHIME_MS,
                     )
                   }}

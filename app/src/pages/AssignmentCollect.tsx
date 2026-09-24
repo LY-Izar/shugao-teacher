@@ -217,7 +217,11 @@ export default function AssignmentCollect() {
 
     /* ---------- 第一步：数本数 ----------
        数本数比认手写学号可靠得多。交齐了就一步到位，不用认号。 */
-    const counted = await recognize(prep.dataUrl, { scene: 'count', className: klass?.name })
+    const counted = await recognize(prep.dataUrl, {
+      scene: 'count',
+      className: klass?.name,
+      subject: assignment?.subject,
+    })
 
     if (counted.status === 'ok' && counted.count) {
       setBookCount(counted.count)
@@ -243,6 +247,7 @@ export default function AssignmentCollect() {
       scene: 'collect',
       className: klass?.name,
       nos: allNos,
+      subject: assignment?.subject,
     })
 
     timers.forEach((t) => window.clearTimeout(t))

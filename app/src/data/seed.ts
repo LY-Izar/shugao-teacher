@@ -1,4 +1,5 @@
 import { isoOffset } from '../lib/date'
+import { DEFAULT_SUBJECT_CODE, subjectName } from '../lib/subjects'
 import type {
   Assignment,
   AssignmentTemplate,
@@ -112,28 +113,65 @@ export function makeScanDemoRows() {
   return base.map(([studentNo, name]) => ({ studentNo, name }))
 }
 
-/* ---------------- S2：练习册模板（物理 · 教科版 必修第三册） ---------------- */
-
+/* ---------------- S2：练习册模板（物理 · 教科版 必修第三册） ----------------
+ *
+ * ⚠️ 这 6 条是**物理**演示模板，而 `makeTemplates()` 在**云端模式也会被调用**
+ *    （没有 templates 表，它们只存在本地 store）→ 语文老师一进来也会看见。
+ *    所以每条都带上 `subjectCode`，新建作业页按当前学科过滤显示：
+ *    选了语文就看不到这 6 条。历史遗留的本地模板没有 code，
+ *    用 `subjectCodeOf()` 按显示名反查（`lib/subjects.ts`）。
+ */
 export function makeTemplates(): AssignmentTemplate[] {
+  const physics = DEFAULT_SUBJECT_CODE
   return [
-    { id: 't-19', name: '作业19 电路的基本概念', questionCount: 6, subject: '物理', score: 50 },
-    { id: 't-20', name: '作业20 电阻定律', questionCount: 8, subject: '物理', score: 70 },
+    {
+      id: 't-19',
+      name: '作业19 电路的基本概念',
+      questionCount: 6,
+      subject: subjectName(physics),
+      subjectCode: physics,
+      score: 50,
+    },
+    {
+      id: 't-20',
+      name: '作业20 电阻定律',
+      questionCount: 8,
+      subject: subjectName(physics),
+      subjectCode: physics,
+      score: 70,
+    },
     {
       id: 't-21',
       name: '作业21 实验：描绘 I-U 特性曲线',
       questionCount: 6,
-      subject: '物理',
+      subject: subjectName(physics),
+      subjectCode: physics,
       score: 50,
     },
     {
       id: 't-22',
       name: '作业22 电源 闭合电路欧姆定律',
       questionCount: 8,
-      subject: '物理',
+      subject: subjectName(physics),
+      subjectCode: physics,
       score: 70,
     },
-    { id: 't-23', name: '作业23 电功与电功率', questionCount: 7, subject: '物理', score: 60 },
-    { id: 't-24', name: '作业24 多用电表的原理', questionCount: 6, subject: '物理', score: 50 },
+    {
+      id: 't-23',
+      name: '作业23 电功与电功率',
+      questionCount: 7,
+      subject: subjectName(physics),
+      subjectCode: physics,
+      score: 60,
+    },
+    {
+      id: 't-24',
+      name: '作业24 多用电表的原理',
+      questionCount: 6,
+      subject: subjectName(physics),
+      subjectCode: physics,
+      score: 50,
+    },
   ]
 }
 
@@ -275,7 +313,8 @@ export function makeDemoAssignments(classes: Klass[]): Assignment[] {
       id: 'a-demo-1',
       title: '作业21 实验：描绘 I-U 特性曲线',
       classId: a.id,
-      subject: '物理',
+      subject: subjectName(DEFAULT_SUBJECT_CODE),
+      subjectCode: DEFAULT_SUBJECT_CODE,
       assignDate: isoOffset(-2),
       questionCount: 6,
       status: 'graded',
@@ -299,7 +338,8 @@ export function makeDemoAssignments(classes: Klass[]): Assignment[] {
       id: 'a-demo-2',
       title: '作业22 电源 闭合电路欧姆定律',
       classId: a.id,
-      subject: '物理',
+      subject: subjectName(DEFAULT_SUBJECT_CODE),
+      subjectCode: DEFAULT_SUBJECT_CODE,
       assignDate: isoOffset(-1),
       questionCount: 8,
       status: 'open',
@@ -316,7 +356,8 @@ export function makeDemoAssignments(classes: Klass[]): Assignment[] {
       id: 'a-demo-4',
       title: '作业23 电功与电功率',
       classId: a.id,
-      subject: '物理',
+      subject: subjectName(DEFAULT_SUBJECT_CODE),
+      subjectCode: DEFAULT_SUBJECT_CODE,
       assignDate: isoOffset(-1),
       questionCount: 7,
       status: 'collected',
@@ -336,7 +377,8 @@ export function makeDemoAssignments(classes: Klass[]): Assignment[] {
       id: 'a-demo-3',
       title: '作业22 电源 闭合电路欧姆定律',
       classId: b.id,
-      subject: '物理',
+      subject: subjectName(DEFAULT_SUBJECT_CODE),
+      subjectCode: DEFAULT_SUBJECT_CODE,
       assignDate: isoOffset(-1),
       questionCount: 8,
       status: 'open',

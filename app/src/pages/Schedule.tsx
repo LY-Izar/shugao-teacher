@@ -375,7 +375,7 @@ export default function Schedule() {
             <span className="label">标题</span>
             <input
               className="input"
-              placeholder="例如 高二(3)班 物理"
+              placeholder="例如 高二(3)班 语文"
               value={form.title}
               onChange={(e) => setForm({ ...form, title: e.target.value })}
               autoFocus
@@ -439,7 +439,7 @@ export default function Schedule() {
               <span className="label">地点（可选）</span>
               <input
                 className="input"
-                placeholder="如 物理实验室"
+                placeholder="如 实验楼 302"
                 value={form.room ?? ''}
                 onChange={(e) => setForm({ ...form, room: e.target.value })}
               />

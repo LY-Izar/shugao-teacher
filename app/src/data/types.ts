@@ -22,7 +22,21 @@ export type Klass = {
 export type Teacher = {
   id: string
   name: string
+  /**
+   * **显示标签**（老师自己填的，可能是「物理竞赛」这种非规范写法）。
+   * ⚠️ 它**不是**新作业学科默认值的来源 —— 那件事已经交给 `primarySubjectCode`。
+   * 一个字段只能有一种语义：显示归显示、默认值归默认值（见 `lib/subjects.ts`）。
+   */
   subject: string
+  /**
+   * **主学科**：学科字典里的代码（`lib/subjects.ts` 的 `SubjectCode`）。
+   * 新建作业时学科 chip 的预选值就是它。
+   *
+   * 为 `undefined` 时表示"库里还没显式设置过"（兼容期：线上库可能还没有
+   * `teachers.primary_subject_code` 这一列）—— 读的人一律走
+   * `teacherPrimarySubjectCode()`，不要自己写兜底，更不要拿 `subject` 直接当判据。
+   */
+  primarySubjectCode?: string
   school: string
 }
 
@@ -57,7 +71,10 @@ export type AssignmentTemplate = {
   id: string
   name: string
   questionCount: number
+  /** 学科显示名（`subjectCode` 的显示缓存，别拿它当判据） */
   subject: string
+  /** 学科代码（`lib/subjects.ts`）。老模板可能没有 —— 用 `subjectCodeOf()` 兼容读 */
+  subjectCode?: string
   /** 分值，仅作展示 */
   score?: number
 }
@@ -98,7 +115,13 @@ export type QuestionMeta = {
   stars?: number
   /** 题干摘要，用于核对 */
   stem?: string
-  /** 知识点 id（见 lib/knowledge.ts），导入时按关键词自动打标 */
+  /**
+   * 知识点 id（见 `lib/knowledge.ts` 的知识树）。
+   *
+   * 导入时按关键词自动打标 —— **只是加速器，教师随时可以改**。
+   * 今天树只有物理一棵（第二阶段的活）；换成多学科字典之前，
+   * 这里存的就是物理知识树的 id（`coulomb` / `ohm` …），历史档案不要迁移。
+   */
   points?: string[]
   /** 题目配图（data URL）—— 生成「错题重练」文档要用 */
   imgs?: string[]
@@ -108,7 +131,19 @@ export type Assignment = {
   id: string
   title: string
   classId: string
+  /**
+   * 学科显示名。**它是 `subjectCode` 的显示缓存，没有第二种语义** ——
+   * 唯一写入入口是 `store.addAssignment` / `store.updateAssignment`，
+   * 值恒等于该 code 在字典里的名字，页面里不许单独写它。
+   */
   subject: string
+  /**
+   * 学科代码（`lib/subjects.ts` 的 `SubjectCode`）。
+   *
+   * ⚠️ 兼容期读法：老档案（以及线上库还没跑多学科那一段 SQL 时）可能没有这一列 ——
+   * 一律用 `subjectCodeOf(a)` 读，不要直接 `a.subjectCode!`。
+   */
+  subjectCode?: string
   /** 布置日期 YYYY-MM-DD，默认前一天 */
   assignDate: string
   questionCount: number

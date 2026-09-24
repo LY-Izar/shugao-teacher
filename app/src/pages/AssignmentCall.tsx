@@ -18,12 +18,12 @@ import { gradeStats } from '../lib/grading'
 import {
   CALL_LIMIT,
   CUSTOM_MAX,
-  DEFAULT_ROOM,
   composeCallText,
   latestCallStates,
   wrongStudents,
   wrongStudentsOfQuestion,
 } from '../lib/calls'
+import { roomOf } from '../lib/subjects'
 import { friendlyDate } from '../lib/date'
 
 export default function AssignmentCall() {
@@ -45,7 +45,12 @@ export default function AssignmentCall() {
   const [sending, setSending] = useState(false)
   const [seq, setSeq] = useState(1)
   const [selected, setSelected] = useState<string[]>([])
-  const [room, setRoom] = useState(DEFAULT_ROOM)
+  /**
+   * 呼叫地点：默认按这一份作业的学科算（「物理老师办公室」/「语文老师办公室」）。
+   * 以前是写死的「物理老师办公室」，语文老师发出去的呼叫会被念成物理办公室。
+   * 这里只是**初始值**，下面那个输入框随时能改。
+   */
+  const [room, setRoom] = useState(() => roomOf(assignment?.subject))
   const [custom, setCustom] = useState('')
   const [preview, setPreview] = useState(false)
 
@@ -419,7 +424,7 @@ export default function AssignmentCall() {
                 className="input"
                 value={room}
                 onChange={(e) => setRoom(e.target.value)}
-                placeholder={DEFAULT_ROOM}
+                placeholder={roomOf(assignment.subject)}
               />
             </label>
             <label className="mt-3 block">

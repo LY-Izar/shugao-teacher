@@ -17,6 +17,13 @@ import { useStore, useToast } from '../data/store'
 import { ensureISO, isoOffset } from '../lib/date'
 import { docxToParts } from '../lib/docx'
 import {
+  SUBJECTS,
+  subjectCodeOf,
+  subjectName,
+  teacherPrimarySubjectCode,
+  type SubjectCode,
+} from '../lib/subjects'
+import {
   KIND_TEXT,
   parseExam,
   resolveImages,
@@ -30,6 +37,7 @@ export default function AssignmentNew() {
   const classes = useStore((s) => s.classes)
   const currentClassId = useStore((s) => s.currentClassId)
   const templates = useStore((s) => s.templates)
+  const teacher = useStore((s) => s.teacher)
   const addAssignment = useStore((s) => s.addAssignment)
   const saveTemplate = useStore((s) => s.saveTemplate)
   const navigate = useNavigate()
@@ -41,10 +49,46 @@ export default function AssignmentNew() {
   const [title, setTitle] = useState('')
   const [questionCount, setQuestionCount] = useState('6')
   const [assignDate, setAssignDate] = useState(isoOffset(-1))
+  /**
+   * 学科：**默认已经预选好**，来自老师自己的主学科（`teachers.primary_subject_code`，
+   * 没设过就按显示名反查 → 字典兜底），所以老师不需要做任何额外操作。
+   *
+   * 🔴 反指标：每次作业教师新增手工录入字段数 = 0。
+   *    · 它**不是必填校验**，也不参与"建立并去收缴"是否可点；
+   *    · 用 chip 而不是下拉框/输入框：改选只要点一下，不改就一眼看见当前是哪一科；
+   *    · 这里是 useState 初值 —— 页面挂在 `Guard` 里等 `hydrated` 之后，
+   *      所以拿到的一定是已经就绪的老师（别改成在 effect 里补，那样晚到的数据
+   *      会覆盖老师刚点的选择）。
+   */
+  const [subjectCode, setSubjectCode] = useState<SubjectCode>(() =>
+    teacherPrimarySubjectCode(teacher),
+  )
   /** 统计模式：普通 = 逐题记录；极简 = 只记优/良/差 */
   const [statsMode, setStatsMode] = useState<'normal' | 'simple'>('normal')
   const [templateId, setTemplateId] = useState<string | undefined>(undefined)
   const [alsoTemplate, setAlsoTemplate] = useState(false)
+
+  /**
+   * 只显示当前学科的练习册模板。
+   *
+   * 演示模板（`seed.ts` 的 6 条）是物理的，而 `makeTemplates()` 在**云端模式也会被调用**
+   * （模板只存在本地 store，没有 templates 表）—— 不过滤的话，语文老师一进来
+   * 就看见 6 个物理练习册模板。
+   * 认不出学科的（历史遗留本地模板）**照常显示**：宁可多显示一条，
+   * 也不能把老师自己存过的模板藏起来。
+   */
+  const shownTemplates = templates.filter((t) => {
+    const c = subjectCodeOf(t)
+    return !c || c === subjectCode
+  })
+
+  /** 换学科：顺手把不属于新学科的已选模板清掉，免得拿物理模板建语文作业 */
+  const pickSubject = (code: SubjectCode) => {
+    setSubjectCode(code)
+    const picked = templates.find((t) => t.id === templateId)
+    const pickedCode = subjectCodeOf(picked)
+    if (pickedCode && pickedCode !== code) setTemplateId(undefined)
+  }
 
   /* ---- Word 稿导入 ---- */
   const [parsed, setParsed] = useState<ParsedExam | null>(null)
@@ -172,8 +216,13 @@ export default function AssignmentNew() {
             <div className="mb-4">
               <Sect>第 2 步 · 或选练习册模板（可跳过）</Sect>
               <Panel bodyClass="p-3">
+                {shownTemplates.length === 0 ? (
+                  <p style={{ fontSize: 12.5, color: 'var(--color-ink3)', lineHeight: 1.7 }}>
+                    这一科还没有模板。下面勾上「存为模板」，下次就能一键带出。
+                  </p>
+                ) : (
                 <div className="flex flex-wrap gap-2">
-                  {templates.map((t) => {
+                  {shownTemplates.map((t) => {
                     const on = templateId === t.id
                     return (
                       <button
@@ -209,9 +258,11 @@ export default function AssignmentNew() {
                     )
                   })}
                 </div>
+                )}
                 <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 10, lineHeight: 1.65 }}>
-                  模板存的是「这个作业有几道题」。建过一次就永久复用 —— 之后批改页展开的题号就是
-                  1…N，<b>完全不依赖图像识别</b>。周末卷子直接手填题数即可。
+                  模板存的是「这个作业有几道题」，<b>按学科分开</b>（换了上面的学科，这里只显示这一科的）。
+                  建过一次就永久复用 —— 之后批改页展开的题号就是 1…N，
+                  <b>完全不依赖图像识别</b>。周末卷子直接手填题数即可。
                 </p>
               </Panel>
             </div>
@@ -220,11 +271,54 @@ export default function AssignmentNew() {
             <div className="mb-4">
               <Sect>第 3 步 · 档案信息</Sect>
               <Panel bodyClass="p-4">
+                {/*
+                  学科 chip：**已经预选好了**（老师的主学科），所以它不是必填项、
+                  也不拦着下面的按钮。想换一科点一下就行 —— 那是可选动作。
+                */}
+                <div className="mb-4">
+                  <span className="label">学科</span>
+                  <div className="flex flex-wrap gap-1.5">
+                    {SUBJECTS.map((s) => {
+                      const on = subjectCode === s.code
+                      return (
+                        <button
+                          key={s.code}
+                          type="button"
+                          aria-pressed={on}
+                          onClick={() => pickSubject(s.code)}
+                          style={{
+                            padding: '4px 10px',
+                            borderRadius: 4,
+                            fontSize: 12.5,
+                            border: `1px solid ${on ? 'var(--color-accent)' : 'var(--color-line2)'}`,
+                            background: on ? 'var(--color-accentsoft)' : 'var(--color-surface)',
+                            color: on ? 'var(--color-accentink)' : 'var(--color-ink2)',
+                            fontWeight: on ? 650 : 500,
+                          }}
+                        >
+                          {s.name}
+                        </button>
+                      )
+                    })}
+                  </div>
+                  <p
+                    style={{
+                      fontSize: 11.5,
+                      color: 'var(--color-ink3)',
+                      marginTop: 6,
+                      lineHeight: 1.6,
+                    }}
+                  >
+                    默认按你的主学科（{subjectName(teacherPrimarySubjectCode(teacher))}）选好，不用管；
+                    教别的科时点一下换掉。
+                  </p>
+                </div>
+
                 <label className="block">
                   <span className="label">作业名称</span>
                   <input
                     className="input"
-                    placeholder="例如 作业22 电源 闭合电路欧姆定律"
+                    placeholder="例如 作业22 第 3 章练习"
                     value={title}
                     onChange={(e) => {
                       setTitle(e.target.value)
@@ -441,6 +535,10 @@ export default function AssignmentNew() {
                   {klass?.name ?? '未选班级'}
                 </span>
                 <span className="flex items-center gap-1.5">
+                  <IconList size={14} />
+                  {subjectName(subjectCode)}
+                </span>
+                <span className="flex items-center gap-1.5">
                   <IconGrid size={14} />
                   <span className="num">{n}</span> 题
                 </span>
@@ -493,6 +591,7 @@ export default function AssignmentNew() {
                       questionCount: n,
                       statsMode,
                       templateId,
+                      subjectCode,
                       ...structure,
                     })
                   }
@@ -525,14 +624,17 @@ export default function AssignmentNew() {
                       questionCount: n,
                       statsMode,
                       templateId,
+                      subjectCode,
                       ...structure,
                     })
                   }
                   if (alsoTemplate) {
+                    // 模板跟着当前选的学科走（以前这里写死 '物理'，与老师教什么无关）
                     saveTemplate({
                       name: title,
                       questionCount: n,
-                      subject: '物理',
+                      subject: subjectName(subjectCode),
+                      subjectCode,
                     })
                     push({ text: '已存为模板', tone: 'ok' })
                   }

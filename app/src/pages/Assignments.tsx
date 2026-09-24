@@ -7,6 +7,7 @@ import {
   IconClipboard,
   IconGrid,
   IconHash,
+  IconList,
   IconPlus,
   IconRefresh,
   IconScan,
@@ -19,9 +20,13 @@ import { useStore, useToast } from '../data/store'
 import { STATUS_TEXT, type Assignment, type AssignmentStatus } from '../data/types'
 import { collectStats } from '../lib/assignments'
 import { friendlyDate, isoOffset, parseISODate, toISODate } from '../lib/date'
+import { SUBJECTS, subjectCodeOf, subjectName } from '../lib/subjects'
 
 const wrongTotal = (a: Assignment) =>
   Object.values(a.wrong ?? {}).reduce((n, keys) => n + keys.length, 0)
+
+/** 这一科显示什么：字典名优先，认不出来就照原样显示（兼容期老档案） */
+const subjectLabelOf = (a: Assignment) => subjectName(subjectCodeOf(a), a.subject || '未标学科')
 
 type Filter = 'all' | 'open' | 'collected'
 type TimeFilter = 'all' | 'today' | 'week' | 'month'
@@ -103,10 +108,28 @@ export default function Assignments() {
   const push = useToast((s) => s.push)
   const [filter, setFilter] = useState<Filter>('all')
   const [classFilter, setClassFilter] = useState<string>('all')
+  const [subjectFilter, setSubjectFilter] = useState<string>('all')
   const [timeFilter, setTimeFilter] = useState<TimeFilter>('all')
   const [confirmId, setConfirmId] = useState<string | null>(null)
   /** 正在改布置日期的档案 id */
   const [dateFor, setDateFor] = useState<string | null>(null)
+
+  /**
+   * 学科筛选项只列**数据里真出现过的**学科。
+   *
+   * 不把字典 15 科全列出来的理由：没数据的那几项选了就是空列表，
+   * 教师会以为是坏了。判据走 `subjectCodeOf()`（兼容期：老档案没有 code，
+   * 按显示名反查），**认不出来的学科不会出现在筛选里** ——
+   * 它们仍然在「全部学科」下看得见，不静默藏数据。
+   */
+  const subjectOptions = useMemo(() => {
+    const seen = new Set<string>()
+    for (const a of assignments) {
+      const c = subjectCodeOf(a)
+      if (c) seen.add(c)
+    }
+    return SUBJECTS.filter((s) => seen.has(s.code))
+  }, [assignments])
 
   const rows = useMemo(
     () =>
@@ -117,6 +140,7 @@ export default function Assignments() {
         })
         .filter((r) => (filter === 'all' ? true : r.a.status === filter))
         .filter((r) => (classFilter === 'all' ? true : r.a.classId === classFilter))
+        .filter((r) => (subjectFilter === 'all' ? true : subjectCodeOf(r.a) === subjectFilter))
         .filter((r) => inTimeRange(r.a.assignDate, timeFilter))
         // 默认排序：时间最近的在最上面
         .sort(
@@ -124,10 +148,11 @@ export default function Assignments() {
             (x.a.assignDate < y.a.assignDate ? 1 : x.a.assignDate > y.a.assignDate ? -1 : 0) ||
             y.a.createdAt - x.a.createdAt,
         ),
-    [assignments, classes, filter, classFilter, timeFilter],
+    [assignments, classes, filter, classFilter, subjectFilter, timeFilter],
   )
 
-  const filtered = filter !== 'all' || classFilter !== 'all' || timeFilter !== 'all'
+  const filtered =
+    filter !== 'all' || classFilter !== 'all' || subjectFilter !== 'all' || timeFilter !== 'all'
 
   const pending = assignments.filter((a) => a.status === 'open').length
   const last = [...assignments].sort((x, y) => (x.assignDate < y.assignDate ? 1 : -1))[0]
@@ -167,6 +192,22 @@ export default function Assignments() {
                 </option>
               ))}
             </select>
+            {subjectOptions.length > 1 ? (
+              <select
+                className="input"
+                style={{ width: 'auto', height: 34, fontSize: 13 }}
+                value={subjectFilter}
+                onChange={(e) => setSubjectFilter(e.target.value)}
+                aria-label="按学科筛选"
+              >
+                <option value="all">全部学科</option>
+                {subjectOptions.map((s) => (
+                  <option key={s.code} value={s.code}>
+                    {s.name}
+                  </option>
+                ))}
+              </select>
+            ) : null}
             <select
               className="input"
               style={{ width: 'auto', height: 34, fontSize: 13 }}
@@ -187,6 +228,7 @@ export default function Assignments() {
                 onClick={() => {
                   setFilter('all')
                   setClassFilter('all')
+                  setSubjectFilter('all')
                   setTimeFilter('all')
                 }}
                 style={{ fontSize: 12, color: 'var(--color-ink3)' }}
@@ -229,7 +271,8 @@ export default function Assignments() {
                     assignDate: toISODate(new Date()),
                     questionCount: last.questionCount,
                     templateId: last.templateId,
-                    subject: last.subject,
+                    // 学科沿用上一份（显式传参，这次不是"老师的主学科"）
+                    subjectCode: last.subjectCode,
                     statsMode: last.statsMode,
                     subQuestions: last.subQuestions,
                     questionMeta: last.questionMeta,
@@ -311,6 +354,10 @@ export default function Assignments() {
                       <span className="flex items-center gap-1.5">
                         <IconUsers size={13} />
                         {klass?.name ?? '班级已删除'}
+                      </span>
+                      <span className="flex items-center gap-1.5">
+                        <IconList size={13} />
+                        {subjectLabelOf(a)}
                       </span>
                       <span className="flex items-center gap-1.5">
                         <IconGrid size={13} />

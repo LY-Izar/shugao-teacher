@@ -127,7 +127,7 @@ export default function Login() {
               lineHeight: 1.6,
             }}
           >
-            面向高中物理作业全链路：批量录名单、点选批改、一键讲评
+            面向高中各科作业全链路：批量录名单、点选批改、一键讲评
           </div>
         </div>
 

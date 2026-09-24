@@ -19,8 +19,23 @@ type Body = {
   className?: string
   /** 本班在册学号，用来把识别范围收窄，大幅降低误读 */
   nos?: string[]
+  /** 学科名（语文 / 物理 / …）。**可选**：只是让提示词里那句"帮一位高中X老师"更贴合场景，
+   *  不传就是「高中老师」；老客户端不带这个字段照样工作。 */
+  subject?: string
   /** 'collect' 查缺；'roster' 花名册；'count' 数本数；'schedule' 课表转写 */
   scene?: 'collect' | 'roster' | 'count' | 'schedule'
+}
+
+/**
+ * 学科名是**用户可填的输入**（老师能在设置页写任意显示名），而它会被拼进提示词 ——
+ * 所以先洗一遍：只留中英文字符，最多 8 个字。
+ * 洗不出来就当没传（宁可提示词少一句，也不让输入改写提示词）。
+ */
+function safeSubject(v: unknown): string {
+  const s = String(v ?? '')
+    .replace(/[\r\n\t]/g, '')
+    .trim()
+  return /^[\u4e00-\u9fa5A-Za-z]{1,8}$/.test(s) ? s : ''
 }
 
 function json(data: unknown, status = 200): Response {
@@ -54,6 +69,10 @@ function normalizeNos(nos: string[] | undefined): string[] {
 
 function buildPrompt(b: Body, nos: string[]): string {
   const scene = b.scene ?? 'collect'
+  // 「你在帮一位高中物理老师…」—— 以前这里写死了物理，语文/数学老师用同一个提示词。
+  // 现在按请求里带的学科算，没带就只说「高中老师」。
+  const subject = safeSubject(b.subject)
+  const who = subject ? `高中${subject}老师` : '高中老师'
 
   /* ---- 先数本数：比认手写学号可靠得多 ---- */
   if (scene === 'count') {
@@ -83,14 +102,14 @@ confidence 用 high 或 low。notes 写一两句数不清的地方。只输出 J
 规则：
 - 星期用「周一…周日」
 - 时间统一成 24 小时制 HH:MM；若表里只有节次没有时间，按常见的中学节次表推算并照实写出
-- 课程名照抄，比如「高二(3)班 物理」「备课组活动」
+- 课程名照抄，比如「高二(3)班 语文」「备课组活动」
 - 有地点就写在最后
 - **表格里空格的部分不要编**（那是没课）
 - 不是课表的文字（标题、备注、页眉）不要输出
 - 只输出 JSON，不要解释
 
 输出格式：
-{"lines":["周二 08:55-09:40 高二(3)班 物理 物理实验室","周三 14:30-15:15 备课组活动 办公室"],"notes":""}`
+{"lines":["周二 08:55-09:40 高二(3)班 语文 高二(3)班教室","周三 14:30-15:15 备课组活动 办公室"],"notes":""}`
   }
 
   const rangeText = nos.length
@@ -98,7 +117,7 @@ confidence 用 high 或 low。notes 写一两句数不清的地方。只输出 J
     : '不知道完整的学号列表，请只按图像本身判断。'
 
   if (scene === 'roster') {
-    return `你在帮一位高中物理老师识别花名册照片里的学生。
+    return `你在帮一位${who}识别花名册照片里的学生。
 ${rangeText}
 
 照片里是一张手写或打印的学生名单，每行通常有「学号 + 姓名」。
@@ -119,7 +138,7 @@ ${rangeText}
 {"students":[{"studentNo":"12","name":"张三","confidence":"high","row":1}],"unreadableCount":0,"notes":"第 5 行被手指挡住"}`
   }
 
-  return `你在帮一位高中物理老师做「收作业查缺」。
+  return `你在帮一位${who}做「收作业查缺」。
 ${rangeText}
 
 照片说明：一摞学生作业本，学号用笔写在侧面或书脊上，镜头对着这一列号码。

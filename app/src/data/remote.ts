@@ -1,4 +1,5 @@
 import { getSupabase } from '../lib/supabase'
+import { asSubjectCode, subjectCodeOfName } from '../lib/subjects'
 import type {
   Assignment,
   AssignmentStatus,
@@ -43,6 +44,11 @@ type AssignmentRow = {
   teacher_id: string
   title: string
   subject: string
+  /**
+   * 学科代码（schema.sql 第 12 段加的列）。
+   * ⚠️ **可选**：线上库可能还没跑那一段，这时读不到、也不能写（见 ensureSubjectCols）。
+   */
+  subject_code?: string | null
   assign_date: string
   question_count: number
   status: string
@@ -99,6 +105,57 @@ type CallRow = {
   created_at?: string | null
 }
 
+/* ---------------- 兼容期：新列在不在？（多学科阶段 1） ----------------
+
+   多学科那一段 schema 只做加法：给 assignments / teachers / class_subjects
+   各加一个 subject_code 类的新列。**前端不能假设它已经跑过** ——
+   线上库现在就没有这些列，而 PostgREST 遇到不存在的列会直接报错：
+
+     · 读：`select('subject_code')` → 报错；但 `select('*')` 只是读不到那个键，**不报错**。
+     · 写：upsert 的行里带上这个键 → **整条 upsert 被拒**。
+       而本项目的纪律是「乐观更新 + 保存失败 = 刷新即丢」（见 功能设计与不变量.md §一），
+       所以一旦在没跑 SQL 的库上带这一列去写，老师刚建的档案刷新就没了。
+
+   手法与权限体系阶段 1 的「先并存、后收口」一致：
+     · 读：一律带兜底（`subject_code` 读不到就按显示名 `subject` 反查）；
+     · 写：先探测一次列在不在，不在就把这一列从行里摘掉；
+     · SQL 真跑过之后，**前端一行都不用改**，新列自动开始写（刷新生效）。
+
+   ⚠️ 探测结果按页面缓存一次（刷新即重探）。判据只看「列不存在」这一种错误，
+      网络抖动/权限问题**一律当作有**，免得一次抖动就把新列永久写停了。 */
+
+type SubjectCols = { assignments: boolean; teachers: boolean }
+
+let colsProbe: Promise<SubjectCols> | null = null
+
+async function probeSubjectCols(): Promise<SubjectCols> {
+  const sb = getSupabase()
+  if (!sb) return { assignments: false, teachers: false }
+  const has = async (table: string, column: string): Promise<boolean> => {
+    try {
+      const { error } = await sb.from(table).select(column).limit(1)
+      if (!error) return true
+      const msg = String(error.message ?? '')
+      const code = String((error as { code?: string }).code ?? '')
+      // 只有「列不存在」才判定成还没跑 SQL
+      return !(code === '42703' || /does not exist/i.test(msg))
+    } catch {
+      return true
+    }
+  }
+  const [assignments, teachers] = await Promise.all([
+    has('assignments', 'subject_code'),
+    has('teachers', 'primary_subject_code'),
+  ])
+  return { assignments, teachers }
+}
+
+/** 探测一次（同一页面内只探一次），给写路径用 */
+export function ensureSubjectCols(): Promise<SubjectCols> {
+  if (!colsProbe) colsProbe = probeSubjectCols()
+  return colsProbe
+}
+
 /* ---------------- 错误上报 ---------------- */
 
 let onError: ((message: string, detail?: string) => void) | null = null
@@ -136,6 +193,15 @@ export const studentToRow = (s: Student, classId: string): StudentRow => ({
   status: s.status,
 })
 
+/**
+ * 本地 → 行。
+ *
+ * ⚠️ **故意不带 `subject_code`**：带不带取决于那一列在不在（见 ensureSubjectCols），
+ *    而这是一个纯函数。真正的写入点在 `saveAssignment`，那里按探测结果补上。
+ *    另一个好处是"备份回推云端"（backup.ts 也调这个函数）沿用同一套安全性：
+ *    备份 v1 里没有 `subjectCode`，也就不会往可能不存在的列上写。
+ *    （upsert 只更新载荷里出现过的列，所以老行的 subject_code 不会被抹掉。）
+ */
 export const assignmentToRow = (a: Assignment, teacherId: string): AssignmentRow => ({
   id: a.id,
   class_id: a.classId,
@@ -212,6 +278,11 @@ const rowToAssignment = (r: AssignmentRow): Assignment => ({
   classId: r.class_id,
   title: r.title,
   subject: r.subject,
+  /*
+   * 兼容期读法：新列有值就用；没有（列还没建，或老行没回填）就按显示名反查字典。
+   * 反查不出来就留 undefined —— 绝不猜，页面上退回显示 `subject` 原样。
+   */
+  subjectCode: asSubjectCode(r.subject_code) ?? subjectCodeOfName(r.subject),
   assignDate: r.assign_date,
   questionCount: r.question_count,
   status: r.status as AssignmentStatus,
@@ -372,6 +443,9 @@ export async function loadSnapshot(): Promise<Snapshot | null> {
   } = await sb.auth.getUser()
   if (!user) return null
 
+  // 顺便把「新列在不在」探一次（与下面的读并行，省得第一次保存时才多一个来回）
+  void ensureSubjectCols()
+
   const [t, c, s, a, sch, room, calls] = await Promise.all([
     sb.from('teachers').select('*').eq('id', user.id).maybeSingle(),
     sb.from('classes').select('*').order('created_at', { ascending: true }),
@@ -406,14 +480,25 @@ export async function loadSnapshot(): Promise<Snapshot | null> {
     ),
   }))
 
-  const tRow = t.data as { name?: string; subject?: string; school?: string } | null
+  const tRow = t.data as {
+    name?: string
+    subject?: string
+    primary_subject_code?: string | null
+    school?: string
+  } | null
 
   return {
     userId: user.id,
     teacher: {
       id: user.id,
       name: tRow?.name ?? user.email?.split('@')[0] ?? '老师',
-      subject: tRow?.subject ?? '物理',
+      /*
+       * 显示标签：**不再兜底成「物理」**。空着就让读的人用
+       * `teacherSubjectLabel()` 去取主学科的名字 —— 一个值只能有一个来源。
+       */
+      subject: tRow?.subject ?? '',
+      // 新列没有就是 undefined（兼容期），读的人走 teacherPrimarySubjectCode()
+      primarySubjectCode: asSubjectCode(tRow?.primary_subject_code),
       school: tRow?.school ?? '',
     },
     classes,
@@ -448,8 +533,24 @@ async function remove(table: string, id: string) {
   }
 }
 
-export const saveTeacher = (t: Teacher) =>
-  upsert('teachers', { id: t.id, name: t.name, subject: t.subject, school: t.school })
+/**
+ * 写教师那一行。
+ *
+ * `primary_subject_code` 只在**列真的存在**时才写（见 ensureSubjectCols）：
+ * 线上库还没跑多学科那一段时，带上它会让整条 upsert 被拒 —— 而 teachers
+ * 是外键的根，那条失败会连累后面所有表。
+ */
+export const saveTeacher = async (t: Teacher) => {
+  const cols = await ensureSubjectCols()
+  const row: Record<string, unknown> = {
+    id: t.id,
+    name: t.name,
+    subject: t.subject,
+    school: t.school,
+  }
+  if (cols.teachers) row.primary_subject_code = asSubjectCode(t.primarySubjectCode) ?? null
+  return upsert('teachers', row)
+}
 
 export const saveClass = (k: Klass, teacherId: string) => upsert('classes', classToRow(k, teacherId))
 export const deleteClass = (id: string) => remove('classes', id)
@@ -460,8 +561,19 @@ export const saveStudents = (classId: string, list: Student[]) =>
   list.length ? upsert('students', list.map((s) => studentToRow(s, classId))) : Promise.resolve()
 export const deleteStudent = (id: string) => remove('students', id)
 
-export const saveAssignment = (a: Assignment, teacherId: string) =>
-  upsert('assignments', assignmentToRow(a, teacherId))
+/**
+ * 写作业档案。
+ *
+ * 🔴 `subject_code` 的**唯一写入点**就是这里（`store.addAssignment` /
+ * `store.updateAssignment` 是上游唯一入口，页面里不许写这两个字段）。
+ * 列不存在时把这一列摘掉，而不是让整条 upsert 被拒 —— 这是"SQL 还没跑时前端不崩"的关键。
+ */
+export const saveAssignment = async (a: Assignment, teacherId: string) => {
+  const cols = await ensureSubjectCols()
+  const row: Record<string, unknown> = { ...assignmentToRow(a, teacherId) }
+  if (cols.assignments) row.subject_code = asSubjectCode(a.subjectCode) ?? null
+  return upsert('assignments', row)
+}
 export const deleteAssignment = (id: string) => remove('assignments', id)
 
 export const saveSchedule = (s: ScheduleItem, teacherId: string) =>

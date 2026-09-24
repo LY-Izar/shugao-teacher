@@ -1,6 +1,7 @@
 import { getSupabase } from './supabase'
 import { useToast } from '../data/store'
 import { toISODate } from './date'
+import { DEFAULT_SUBJECT_CODE, subjectName } from './subjects'
 import {
   assignmentToRow,
   callToRow,
@@ -168,7 +169,8 @@ function normalizeAssignment(raw: unknown): Assignment {
     id: asText(a.id) || uuid(),
     title: asText(a.title, '未命名作业'),
     classId: asText(a.classId),
-    subject: asText(a.subject, '物理'),
+    // 兜底值来自学科字典（这个文件以前手写了第二份「物理」）
+    subject: asText(a.subject, subjectName(DEFAULT_SUBJECT_CODE)),
     assignDate: ISO_DATE.test(asText(a.assignDate)) ? asText(a.assignDate) : toISODate(new Date()),
     // 数据库有 check (question_count between 1 and 60)：越界会让**整条 upsert 被拒**（刷新即丢）
     questionCount: Math.min(60, Math.max(1, Math.round(asNumber(a.questionCount, 1)))),
@@ -255,7 +257,7 @@ function normalizeTeacher(raw: unknown): Teacher | null {
   return {
     id: asText(t.id, 't-1'),
     name: asText(t.name, '老师'),
-    subject: asText(t.subject, '物理'),
+    subject: asText(t.subject, subjectName(DEFAULT_SUBJECT_CODE)),
     school: asText(t.school),
   }
 }

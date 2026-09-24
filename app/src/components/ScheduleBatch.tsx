@@ -227,7 +227,7 @@ export function ScheduleBatch({
             <textarea
               className="input mt-2"
               style={{ height: 96, fontSize: 12.5, lineHeight: 1.6, resize: 'vertical' }}
-              placeholder={'每行一条，例如：\n周二 08:55-09:40 高二(3)班 物理\n周三 14:30-15:15 备课组活动 办公室'}
+              placeholder={'每行一条，例如：\n周二 08:55-09:40 高二(3)班 语文\n周三 14:30-15:15 备课组活动 办公室'}
               value={paste}
               onChange={(e) => setPaste(e.target.value)}
             />
@@ -349,7 +349,7 @@ export function ScheduleBatch({
                 <input
                   className="input"
                   style={{ height: 32, fontSize: 12.5, flex: 1, minWidth: 0 }}
-                  placeholder="课程 / 事项，如 高二(3)班 物理"
+                  placeholder="课程 / 事项，如 高二(3)班 语文"
                   value={r.title}
                   onChange={(e) => patch(r.key, { title: e.target.value })}
                 />

@@ -24,6 +24,7 @@ import { awayText, weekdayOf } from '../lib/schedule'
 import { collectStats } from '../lib/assignments'
 import { friendlyDate } from '../lib/date'
 import { analyzeRoster } from '../lib/roster'
+import { teacherSubjectLabel } from '../lib/subjects'
 
 const todoPath = (a: { id: string; status: string }) =>
   a.status === 'collected' ? `/assignments/${a.id}/grade` : `/assignments/${a.id}/collect`
@@ -128,7 +129,7 @@ export default function Workbench() {
           {greeting()}，{teacher?.name ?? '老师'}
         </h1>
         <div className="mt-2 flex flex-wrap items-center gap-2">
-          <Tag tone="accent">{teacher?.subject ?? '物理'}</Tag>
+          <Tag tone="accent">{teacherSubjectLabel(teacher)}</Tag>
           <Tag tone="idle">高二 · 2025-2026</Tag>
           {streakDays > 1 ? <Tag tone="ok">连续使用 {streakDays} 天</Tag> : null}
         </div>

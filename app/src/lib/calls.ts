@@ -1,16 +1,20 @@
 import type { Assignment, CallRecord, CallState, Student } from '../data/types'
 import { isQuestionWrong } from './grading'
+import { roomOf } from './subjects'
 
 /** 单次播报人数上限 —— 一次叫太多学生既不现实也拆散课堂 */
 export const CALL_LIMIT = 8
 /** 自定义后缀字数上限：这句话会公开放音 */
 export const CUSTOM_MAX = 30
-export const DEFAULT_ROOM = '物理老师办公室'
 
 /**
  * 播报文案。
- * 默认：「请 12 号、37 号，到物理老师办公室。」
+ * 默认：「请 12 号、37 号，到物理老师办公室。」（地点按学科算）
  * 带自定义：「……。物理老师叫你带上作业本。」
+ *
+ * ⚠️ 地点以前是一个写死的常量 `DEFAULT_ROOM = '物理老师办公室'`：
+ *    语文老师发呼叫时默认地点是物理办公室，而且这句话会被**真的念出来**。
+ *    现在按学科算（`roomOf`），地点仍然是教师可以改的输入框内容。
  */
 export function composeCallText(
   studentNos: string[],
@@ -19,7 +23,7 @@ export function composeCallText(
   custom: string,
 ): string {
   const nums = studentNos.map((n) => `${n} 号`).join('、')
-  const head = nums ? `请 ${nums}，到${room || DEFAULT_ROOM}。` : '（还没有选学生）'
+  const head = nums ? `请 ${nums}，到${room || roomOf(subject)}。` : '（还没有选学生）'
   const c = custom.trim()
   return c ? `${head}${subject}老师叫你${c}。` : head
 }

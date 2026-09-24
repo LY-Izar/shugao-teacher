@@ -2,6 +2,13 @@ import { create } from 'zustand'
 import { createJSONStorage, persist, type StateStorage } from 'zustand/middleware'
 import { isRemote } from '../lib/supabase'
 import { HEARTBEAT_MS, emit, subscribe } from '../lib/realtime'
+import {
+  asSubjectCode,
+  subjectCodeOfName,
+  subjectName,
+  teacherPrimarySubjectCode,
+  DEFAULT_SUBJECT_CODE,
+} from '../lib/subjects'
 import * as remote from './remote'
 import { makeClassrooms, makeDemoAssignments, makeDemoClasses, makeDemoSchedule, makeTemplates } from './seed'
 import type {
@@ -94,8 +101,14 @@ type State = {
 
   signIn: (name: string) => void
   signOut: () => void
-  /** 改自己的姓名 / 学校 / 学科 */
-  updateTeacher: (patch: Partial<Pick<Teacher, 'name' | 'school' | 'subject'>>) => void
+  /**
+   * 改自己的姓名 / 学校 / 学科。
+   * `subject` 是**显示标签**，`primarySubjectCode` 是**主学科**（新作业默认值），
+   * 两者分开写、分开读 —— 见 `lib/subjects.ts`。
+   */
+  updateTeacher: (
+    patch: Partial<Pick<Teacher, 'name' | 'school' | 'subject' | 'primarySubjectCode'>>,
+  ) => void
 
   addClass: (input: { name: string; grade: string; year: string }) => string
   updateClass: (id: string, patch: Partial<Pick<Klass, 'name' | 'grade' | 'year'>>) => void
@@ -120,7 +133,11 @@ type State = {
     assignDate: string
     questionCount: number
     templateId?: string
-    subject?: string
+    /**
+     * 学科代码（`lib/subjects.ts`）。**不传也行** —— 会按老师的主学科预选好，
+     * 永远有值、永不弹窗（反指标：每次作业新增手工录入字段数 = 0）。
+     */
+    subjectCode?: string
     /** 统计模式：普通（逐题）或极简（只记优/良/差） */
     statsMode?: 'normal' | 'simple'
     /** 从 Word 稿识别出的结构，可直接带上 */
@@ -336,8 +353,10 @@ export const useStore = create<State>()(
         set((s) => ({
           teacher: {
             id: 't-1',
-            name: name.trim() || '物理老师',
-            subject: '物理',
+            name: name.trim() || '老师',
+            // 本地演示模式：学科取字典兜底值，别再手写「物理」第二份
+            subject: subjectName(DEFAULT_SUBJECT_CODE),
+            primarySubjectCode: DEFAULT_SUBJECT_CODE,
             school: '树高中学',
           },
           lastSeenAt: Date.now(),
@@ -555,17 +574,31 @@ export const useStore = create<State>()(
         assignDate,
         questionCount,
         templateId,
-        subject,
+        subjectCode,
         subQuestions,
         questionMeta,
         statsMode,
       }) => {
         const id = uid()
+        /*
+         * 🔴 学科是**唯一写入入口**在这里（页面里不许写 `subject` / `subjectCode`）。
+         *
+         * 取值顺序：显式传参（新建页选中的 chip、「按上次新建」带过来的）→ 老师的主学科。
+         * **永远有值**，所以这里既不会弹窗、也不会把学科变成必填项
+         * （反指标：每次作业教师新增手工录入字段数 = 0）。
+         *
+         * `subject` 与 `subjectCode` 是同一次赋值的两个面：
+         * `subject` 只是 code 的显示缓存，**不再**是"老师是谁教什么的"那个标签 ——
+         * 以前它俩共用一个字段，老师在设置页改一下学科，之后新作业全变科，
+         * 而 `class_subjects` 里的任课关系没变，两边从此不一致。
+         */
+        const code = asSubjectCode(subjectCode) ?? teacherPrimarySubjectCode(get().teacher)
         const item: Assignment = {
           id,
           title: title.trim() || '未命名作业',
           classId,
-          subject: subject ?? get().teacher?.subject ?? '物理',
+          subject: subjectName(code),
+          subjectCode: code,
           assignDate,
           questionCount: Math.max(1, Number(questionCount) || 1),
           status: 'open',
@@ -591,7 +624,26 @@ export const useStore = create<State>()(
       updateAssignment: (id, patch) => {
         set((s) => ({
           isDemo: false,
-          assignments: s.assignments.map((a) => (a.id === id ? { ...a, ...patch } : a)),
+          assignments: s.assignments.map((a) => {
+            if (a.id !== id) return a
+            const next = { ...a, ...patch }
+            /*
+             * 学科不变量要在**所有**写入路径上守（不只 addAssignment）：
+             * `subject` 永远是 `subjectCode` 的显示缓存。
+             *  · 传了合法 code       → 显示名跟着 code 走
+             *  · 只改了显示名        → 按名字反查 code（兼容期老写法）
+             *  · 两个都认不出来      → 原样留着，绝不猜（猜错会写进不可逆的历史数据）
+             */
+            const code =
+              asSubjectCode(next.subjectCode) ??
+              subjectCodeOfName(next.subject) ??
+              asSubjectCode(a.subjectCode)
+            if (code) {
+              next.subjectCode = code
+              next.subject = subjectName(code)
+            }
+            return next
+          }),
         }))
         const a = get().assignments.find((x) => x.id === id)
         const tid = get().teacher?.id
@@ -623,11 +675,30 @@ export const useStore = create<State>()(
         if (a && tid) void remote.saveAssignment(a, tid)
       },
 
-      saveTemplate: ({ name, questionCount, subject, score }) => {
+      /*
+       * 存练习册模板。
+       *
+       * `subjectCode` 决定这份模板属于哪一科：新建页按当前学科过滤显示。
+       * 以前模板写死 `subject: '物理'`（而且与老师教什么无关，恒为物理），
+       * 而 `makeTemplates()` 在**云端模式**也会被调用 → 语文老师一进来
+       * 就看见 6 个物理练习册模板。
+       */
+      saveTemplate: ({ name, questionCount, subject, subjectCode, score }) => {
         const id = `t-${uid()}`
+        const code = asSubjectCode(subjectCode) ?? teacherPrimarySubjectCode(get().teacher)
         set((s) => ({
           isDemo: false,
-          templates: [...s.templates, { id, name: name.trim(), questionCount, subject, score }],
+          templates: [
+            ...s.templates,
+            {
+              id,
+              name: name.trim(),
+              questionCount,
+              subject: subject.trim() || subjectName(code),
+              subjectCode: code,
+              score,
+            },
+          ],
         }))
         return id
       },

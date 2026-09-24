@@ -36,6 +36,14 @@ import {
 } from '../lib/backup'
 import { REMIND_BEFORE, itemsForDate } from '../lib/schedule'
 import { beijingNow, holidayDataInfo, ymdOf } from '../lib/holiday'
+import {
+  SUBJECTS,
+  DEFAULT_SUBJECT_CODE,
+  subjectName,
+  teacherPrimarySubjectCode,
+  teacherSubjectLabel,
+  type SubjectCode,
+} from '../lib/subjects'
 
 export default function Settings() {
   const teacher = useStore((s) => s.teacher)
@@ -57,10 +65,20 @@ export default function Settings() {
   const [fName, setFName] = useState('')
   const [fSchool, setFSchool] = useState('')
   const [fSubject, setFSubject] = useState('')
+  /**
+   * 主学科（新作业默认值）与显示名是两个字段、两种语义：
+   *  · `primarySubjectCode` 决定"新建作业时学科 chip 预选哪一科"（有约束的字典代码）
+   *  · `subject` 只是显示标签（老师想写「物理竞赛」也随他）
+   * 以前两件事共用一个字段：在设置页改一下学科，之后新建的作业全变科，
+   * 而 `class_subjects` 里的任课关系没动 → 两边不一致（权限判据与实际不符）。
+   */
+  const [fPrimary, setFPrimary] = useState<SubjectCode>(DEFAULT_SUBJECT_CODE)
   const openEdit = () => {
     setFName(teacher?.name ?? '')
     setFSchool(teacher?.school ?? '')
-    setFSubject(teacher?.subject ?? '物理')
+    // 显示名留空 = 跟主学科一致；这里照实填当前值，不替老师改东西
+    setFSubject(teacher?.subject ?? '')
+    setFPrimary(teacherPrimarySubjectCode(teacher))
     setEditing(true)
   }
 
@@ -172,7 +190,7 @@ export default function Settings() {
             <div className="min-w-0 flex-1">
               <div style={{ fontSize: 17, fontWeight: 660 }}>{teacher?.name ?? '未登录'}</div>
               <div className="mt-1 flex items-center gap-1.5">
-                <Tag tone="accent">{teacher?.subject ?? '物理'}</Tag>
+                <Tag tone="accent">{teacherSubjectLabel(teacher)}</Tag>
                 <Tag tone="idle">{teacher?.school || '未填学校'}</Tag>
               </div>
             </div>
@@ -546,7 +564,7 @@ export default function Settings() {
           <Panel bodyClass="px-4 py-2">
             <KV k="平台" v="树高教师平台" />
             <KV k="版本" v={<span className="num">v{APP_VERSION}</span>} />
-            <KV k="学段学科" v="高中 · 物理（教科版）" />
+            <KV k="学段学科" v={`高中 · ${subjectName(teacherPrimarySubjectCode(teacher))}`} />
             <KV
               k="存储"
               v={mode === 'remote' ? '云端 · 手机与教室端共用一份' : '本机浏览器 · 未连云端'}
@@ -663,7 +681,9 @@ export default function Settings() {
               updateTeacher({
                 name: fName.trim(),
                 school: fSchool.trim(),
-                subject: fSubject.trim() || '物理',
+                // 显示名留空 = 跟主学科一致（不是"没填"，所以不留空串）
+                subject: fSubject.trim() || subjectName(fPrimary),
+                primarySubjectCode: fPrimary,
               })
               setEditing(false)
               push({ text: '已保存', tone: 'ok' })
@@ -695,13 +715,35 @@ export default function Settings() {
           />
         </label>
         <label className="mt-4 block">
-          <span className="label">学科</span>
+          <span className="label">主学科</span>
+          <select
+            className="input"
+            value={fPrimary}
+            onChange={(e) => setFPrimary(e.target.value as SubjectCode)}
+          >
+            {SUBJECTS.map((s) => (
+              <option key={s.code} value={s.code}>
+                {s.name}
+              </option>
+            ))}
+          </select>
+          <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 6, lineHeight: 1.65 }}>
+            新建作业时，学科会<b>默认选好这一科</b>，不用每次去点。
+            改这里只影响之后新建的档案，已经建好的作业不受影响。
+          </p>
+        </label>
+        <label className="mt-4 block">
+          <span className="label">显示名称（可留空）</span>
           <input
             className="input"
             value={fSubject}
             onChange={(e) => setFSubject(e.target.value)}
-            placeholder="例如 物理"
+            placeholder={subjectName(fPrimary)}
           />
+          <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 6, lineHeight: 1.65 }}>
+            只在顶部和设置页显示。留空就跟主学科一致；写「物理竞赛」这类也行 ——
+            它<b>不参与</b>任何判据。
+          </p>
         </label>
       </Sheet>
 

@@ -207,7 +207,7 @@ async function reencode(
     canvas.height = ch
     const ctx = canvas.getContext('2d')
     if (!ctx) return null
-    // 白底：PNG 的透明区域转 JPEG 会变黑，物理题图基本都在白纸上
+    // 白底：PNG 的透明区域转 JPEG 会变黑，而练习册的题图基本都在白纸上
     ctx.fillStyle = '***REMOVED***fff'
     ctx.fillRect(0, 0, cw, ch)
     ctx.imageSmoothingQuality = 'high'

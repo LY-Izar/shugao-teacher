@@ -18,6 +18,7 @@ import { FLAG_TEXT, simulateScan, validateRows } from '../lib/roster'
 import { recognize } from '../lib/ocr'
 import { preparePhoto, type PreparedPhoto, type Rotate } from '../lib/photo'
 import { isRemote } from '../lib/supabase'
+import { teacherSubjectLabel } from '../lib/subjects'
 
 type Stage = 'capture' | 'preview' | 'scanning' | 'review'
 
@@ -63,6 +64,7 @@ export default function ImportPhoto() {
   const push = useToast((s) => s.push)
   const klass = useStore((s) => s.classes.find((c) => c.id === id))
   const addStudents = useStore((s) => s.addStudents)
+  const teacher = useStore((s) => s.teacher)
 
   const [stage, setStage] = useState<Stage>('capture')
   const [photo, setPhoto] = useState<string | null>(null)
@@ -117,6 +119,8 @@ export default function ImportPhoto() {
       scene: 'roster',
       className: klass?.name,
       nos: klass?.students.map((s) => s.studentNo),
+      // 花名册不分科，用老师自己的学科；提示词里那句「高中X老师」更贴合场景
+      subject: teacherSubjectLabel(teacher),
     })
 
     if (out.status !== 'ok') {

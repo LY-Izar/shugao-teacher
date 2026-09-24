@@ -271,7 +271,7 @@ export function parseScheduleRows(rows: string[][], classes: Klass[] = []): Pars
     return {
       items,
       layout: 'unknown',
-      warnings: ['没认出课表结构。可以试试：① 用学校发的 Excel 原文件；② 每一行写成「周二 08:55-09:40 高二(3)班 物理」'],
+      warnings: ['没认出课表结构。可以试试：① 用学校发的 Excel 原文件；② 每一行写成「周二 08:55-09:40 高二(3)班 语文」'],
     }
   }
   return { items, layout: 'list', warnings }

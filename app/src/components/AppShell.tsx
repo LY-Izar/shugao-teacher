@@ -7,6 +7,7 @@ import { useMood } from '../hooks/useMood'
 import { useScheduleReminder } from '../hooks/useScheduleReminder'
 import { analyzeRoster } from '../lib/roster'
 import { awayText, toMinutes, weekdayOf } from '../lib/schedule'
+import { teacherSubjectLabel } from '../lib/subjects'
 import { connectionMode } from '../lib/supabase'
 import { APP_VERSION } from '../lib/version'
 import { DoneCelebration, MorningWelcome } from './MoodModals'
@@ -417,7 +418,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </div>
             <div className="mt-1 flex items-center gap-2">
               <span style={{ fontSize: 15, fontWeight: 620 }}>{teacher?.name ?? '未登录'}</span>
-              <span className="tag tag-accent">{teacher?.subject ?? '物理'}</span>
+              <span className="tag tag-accent">{teacherSubjectLabel(teacher)}</span>
             </div>
             <div
               className="mt-2.5"

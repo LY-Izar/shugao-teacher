@@ -115,7 +115,7 @@ function countOptions(block: string): number {
     if (uniq.size < 2) continue
 
     // 关键区分：真实选项的字母之间是**成句的文字**；
-    // 而物理题干里「A、B、C 三点」「A、C₁ 固定电荷」这种点命名是紧挨着的。
+    // 而题干里「A、B、C 三点」「A、C₁ 固定电荷」这种点命名是紧挨着的。
     // 用相邻标记之间的平均间隔把它们分开 —— 不这么做，第 9 题会被误判成选择题。
     let gapSum = 0
     for (let i = 1; i < hits.length; i++) {

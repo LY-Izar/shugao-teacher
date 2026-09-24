@@ -782,7 +782,170 @@ create policy schedule_classroom_write on schedule_items for all to authenticate
 --    上面 assignments 只加了 for select，写权限仍然只属于教师。
 
 -- ============================================================
---  12. 自检：确认每张表都开了 RLS
+--  12. 多学科 · 阶段 1（学科字典 / subject_code 加列 / 回填）
+--      设计见 `多学科体系方案.md` §3.0，前端见 `app/src/lib/subjects.ts`
+--
+--  ⚠️⚠️ 这一段的边界（与前两段同一个纪律）：
+--    ① **只做加法**：一条旧策略都不动、一个旧列都不删。
+--       `assignments.subject` / `teachers.subject` / `class_subjects.subject`
+--       全部原样保留 —— 它们从此是「显示名」，`subject_code` 才是判据。
+--    ② **不做破坏性迁移**：不加 not null、不改类型、不换 unique 约束、
+--       不动 can_grade 的函数签名。`class_subjects` 的 unique 从
+--       (class_id, subject, teacher_id) 换成 (class_id, subject_code, teacher_id)
+--       是**第三阶段**（多学科协作）的事，那一步要连着写策略一起做。
+--    ③ **回填只做能确证的**：学科名与字典的 `name` 去空白后**完全相同**才回填。
+--       对不上的**留 null 并在 §12.5 报出来**，绝不 `coalesce(...,'物理')` ——
+--       那样会把库里的异常值静默改写成物理，体检 SQL 永远是 0 行，"通过"是假的。
+--    ④ 前端在**这一段还没跑**时必须照常工作（读：列读不到就按显示名反查；
+--       写：探测到列不存在就不带这一列）—— 见 app/src/data/remote.ts 的 ensureSubjectCols()。
+--       也就是说：先跑 SQL 还是先发前端，两种顺序都不会坏。
+--
+--  本段可重复执行（幂等）。
+-- ============================================================
+
+-- -------- 12.1 学科字典 --------
+--  「15 个科目」在字典里是**数据**，不是代码里的 if ——
+--  以后加一科（或学校改叫法）只需要往这张表插一行 + 前端 subjects.ts 补一行。
+create table if not exists subjects (
+  code       text primary key,          -- 'chinese' / 'math' / 'physics' …
+  name       text not null,             -- 语文 / 数学 / 物理 …
+  short      text not null default '',  -- 两个字短名，手机上用
+  -- 走班候选：**只是字典里的一条数据**，界面入口是否打开由它决定
+  can_stream boolean not null default false,
+  sort       int  not null default 0,
+  created_at timestamptz not null default now()
+);
+
+-- 字典的读权限：学科名不敏感，同 schools / grades 的做法（§10.4）
+alter table subjects enable row level security;
+drop policy if exists subjects_read on subjects;
+create policy subjects_read on subjects
+  for select to authenticated using (true);
+grant select on subjects to authenticated;
+revoke all on subjects from anon;
+
+-- -------- 12.2 字典数据（15 行）--------
+--  显示名 / 短名 / 顺序**由代码管**：重跑本段就同步（改文案不用手工改库）。
+--  `can_stream`（走班候选）**冲突时不覆盖** —— 它是学校可以自己改的业务数据。
+--  分工：代码管文案，学校管业务开关。
+insert into subjects (code, name, short, can_stream, sort) values
+  ('chinese',       '语文',     '语', false,  1),
+  ('math',          '数学',     '数', false,  2),
+  ('english',       '英语',     '英', false,  3),
+  ('physics',       '物理',     '物', false,  4),
+  ('chemistry',     '化学',     '化', false,  5),
+  ('biology',       '生物',     '生', true,   6),
+  ('politics',      '政治',     '政', true,   7),
+  ('history',       '历史',     '史', false,  8),
+  ('geography',     '地理',     '地', true,   9),
+  ('it',            '信息技术', '信', false, 10),
+  ('general_tech',  '通用技术', '通', false, 11),
+  ('pe',            '体育',     '体', false, 12),
+  ('music',         '音乐',     '音', false, 13),
+  ('art',           '美术',     '美', false, 14),
+  ('mental_health', '心理健康', '心', false, 15)
+on conflict (code) do update
+  set name = excluded.name, short = excluded.short, sort = excluded.sort;
+
+-- -------- 12.3 加列（旧列一律留着）--------
+--  用 `add column if not exists`：已经手工加过的库不会被重复折腾。
+--  外键指向 subjects(code)：字典外的学科代码**写不进去**（这是好事 ——
+--  前端只会送字典里的 code，见 lib/subjects.ts 的 asSubjectCode）。
+--  ⚠️ 没有 `not null` 也没有默认值：这一列允许为空，因为总有回填不了的老数据，
+--     而"空"必须能被看见（§12.5），不能被一个默认值盖住。
+alter table assignments    add column if not exists subject_code text references subjects (code);
+alter table teachers       add column if not exists primary_subject_code text references subjects (code);
+alter table class_subjects add column if not exists subject_code text references subjects (code);
+
+create index if not exists assignments_subject_idx on assignments (subject_code);
+
+-- -------- 12.4 回填（只填能确证的）--------
+--  判据：学科名与字典 name 去空白后完全相同。
+--  说明：方案 §3.0.4 写的是三条只认 '物理' 的 UPDATE；这里写成**按字典连接**，
+--  效果包含它，而且顺手覆盖了"已经有老师把学科改成化学、也建过作业"的情形 ——
+--  仍然是精确匹配、仍然不猜（对不上的留 null 并报出来）。
+
+-- ① 作业档案（`assignments.subject` 是显示名，抄进 subject_code 当判据）
+update assignments a
+set subject_code = s.code
+from subjects s
+where a.subject_code is null
+  and btrim(a.subject) = s.name;
+
+-- ② 教师的主学科。**注意它是从 `teachers.subject` 反查**，
+--    改的是新列：`teachers.subject` 本身一个字都不改（它继续当显示标签）。
+update teachers t
+set primary_subject_code = s.code
+from subjects s
+where t.primary_subject_code is null
+  and btrim(t.subject) = s.name;
+
+-- ③ 任课关系：**以它自己的 `subject` 为准**，不看 teachers.subject。
+--    这两者在旧模型里可能已经不一致（老师在设置页改过学科、而这里没跟着变），
+--    任课关系是「谁教这个班这一科」的事实记录，必须以它自己那行为准。
+update class_subjects cs
+set subject_code = s.code
+from subjects s
+where cs.subject_code is null
+  and btrim(cs.subject) = s.name;
+
+-- -------- 12.5 自检（把下面整段粘进 SQL 编辑器跑）--------
+
+-- ① 🔴 回填体检：**每一项都应该是 0**。
+--    不为 0 说明库里有"字典外的学科字符串"（或空值）——这时**不要改脚本去凑**，
+--    先看 ② 的明细，再按 §12.6 显式指派。留 null 是安全的：
+--    前端读不到 code 会退回显示名，界面照常能用。
+select '作业没有学科代码'   as 检查项, count(*) as 应为0 from assignments    where subject_code is null
+union all
+select '教师没有主学科',            count(*)        from teachers       where primary_subject_code is null
+union all
+select '任课关系没有学科代码',      count(*)        from class_subjects where subject_code is null;
+
+-- ② 明细：字典外的学科字符串到底长什么样（上面全 0 时这一条返回 0 行）
+select '作业' as 来源, a.subject as 学科名, count(*) as 行数
+  from assignments a where a.subject_code is null group by 2
+union all
+select '教师', t.subject, count(*) from teachers t where t.primary_subject_code is null group by 2
+union all
+select '任课关系', cs.subject, count(*) from class_subjects cs where cs.subject_code is null group by 2
+order by 1, 2;
+
+-- ③ 字典本身（应该是 15 行；`can_stream = true` 的是走班候选）
+select code, name, short, can_stream, sort from subjects order by sort;
+
+-- ④ 回填前后对账：两个分组的行数应当**完全一致**
+--    （`subject_code is null` 的那些行会在上面 ① 里被报出来，不会被藏起来）
+select coalesce(a.subject, '(空)') as 学科名,
+       count(*) as 总行数,
+       count(a.subject_code) as 已有代码,
+       count(*) filter (where a.subject_code is null) as 缺代码
+  from assignments a group by 1 order by 2 desc;
+
+-- -------- 12.6 主学科显式指派（模板，按真实的人换成实际语句）--------
+--  老师自己在「我的 → 编辑」里能选主学科；这里是给"批量一次性理干净"和
+--  "学科名字写得不是字典里的词"（例如「高中语文」）的老师用的。
+--
+--  -- 按字典名指派（把姓名和学科名换成真实的）
+--  update teachers t set primary_subject_code = s.code
+--  from subjects s
+--  where s.name = '语文' and t.name = '某某';
+--
+--  -- 顺便把显示名也改成字典里的写法（可选，只影响观感）
+--  update teachers t set subject = s.name
+--  from subjects s where s.code = t.primary_subject_code and t.subject <> s.name;
+
+-- -------- 12.7 这一段**不做**什么（免得后来的人以为漏了）--------
+--  · `class_subjects` 的 unique 换列 → 第三阶段（要连着写策略一起做）
+--  · `class_subjects` 的 insert/update/delete 策略 → 第三阶段
+--     （今天前端写不进去，"谁教哪一科"仍然只能靠 SQL 维护）
+--  · `can_grade()` 挂到策略上 → 第三/四阶段。**现在挂上去会让班主任
+--     连作业都建不了**（没有对应动作的策略 = 该动作被拒）
+--  · 删 `assignments.subject` / `teachers.subject` / `class_subjects.subject`
+--     → 收口阶段；在体检连续为 0 之前不动它们
+--  · 多学科知识树（PHYSICS_TREE 之外的第二棵树）→ 第二阶段
+
+-- ============================================================
+--  13. 自检：确认每张表都开了 RLS
 --     跑完应返回 0 行；返回任何一行都说明有表漏开
 -- ============================================================
 -- select tablename from pg_tables
