@@ -15,10 +15,37 @@ function normalizeUrl(raw: string): string {
 const RAW_URL = (import.meta.env.VITE_SUPABASE_URL ?? '').trim()
 const KEY = (import.meta.env.VITE_SUPABASE_ANON_KEY ?? '').trim()
 
-/** 是否已接后端。false 时全部走本地 localStorage。 */
-export const isRemote = Boolean(RAW_URL && KEY)
+/**
+ * 实际使用的基础地址。
+ *
+ * ⚠️ 部署在 Cloudflare Pages 上时**一律改走自己的中转 `/api/sb`**，
+ *    不管构建时配的是什么。两个理由：
+ *
+ *    ① 国内网络对 `*.supabase.co` **整域做 SNI 阻断** —— TCP 能连上，
+ *       但 TLS ClientHello 一被识别出这个域名就被 RST，前端所有请求报
+ *       `Failed to fetch`（很容易被误判成密码错或权限问题）。必须经自己的域名出去。
+ *
+ *    ② 🔴 Cloudflare Pages 的**构建环境变量会覆盖 `.env.production`，而且完全不报错**。
+ *       症状极具迷惑性：仓库里改了 `.env.production`、部署也显示成功，
+ *       但构建产物**一字未变**（连内容哈希都一样），看起来就像"部署卡住了"。
+ *       用 `location.origin` 拼中转地址是同一个部署内的路径，永远不会指错，
+ *       也就不再受"构建变量和 .env 文件谁赢"这件事影响。
+ *
+ * 本地开发（localhost / 局域网 IP）不受影响：照旧用配置值，没配就退回本地模式。
+ */
+function resolveUrl(configured: string): string {
+  if (!configured) return ''
+  const host = typeof location === 'undefined' ? '' : location.hostname
+  if (/\.pages\.dev$/i.test(host)) return `${location.origin}/api/sb`
+  return configured
+}
 
-export const SUPABASE_URL = RAW_URL ? normalizeUrl(RAW_URL) : ''
+const RESOLVED_URL = resolveUrl(RAW_URL)
+
+/** 是否已接后端。false 时全部走本地 localStorage。 */
+export const isRemote = Boolean(RESOLVED_URL && KEY)
+
+export const SUPABASE_URL = RESOLVED_URL ? normalizeUrl(RESOLVED_URL) : ''
 
 let client: SupabaseClient | null = null
 
