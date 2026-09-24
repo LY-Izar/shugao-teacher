@@ -505,15 +505,25 @@ on conflict do nothing;
 --    重新触发策略 → 策略再调函数 → 无限递归。
 --    表属主默认绕过 RLS，所以这条链是断的。**不要在 SQL 编辑器以外、用别的角色建这两个函数。**
 
--- 当前登录者能看到的班级 id 集合
-create or replace function visible_class_ids()
+-- 核心：给定一个人，他能看到哪些班。
+-- 拆出 _for 变体的唯一理由是**可验证性**：SQL 编辑器里没有登录态，
+-- auth.uid() 是 NULL，直接跑 visible_class_ids() 会一律返回 0 行 ——
+-- 那样「新旧策略看到的数据量一致」的核对会得到 0 = 0 的**假通过**，
+-- 而这恰恰是设计 §七「第 5 步是唯一危险步骤」的护栏。
+-- 有了 _for，就能在编辑器里指定某个教师来核对。
+--
+-- 🔴 它接受任意 uid，等于「以任意人身份看班级」，所以**必须锁死**：
+--    下面紧跟着 revoke，只留给属主（postgres）用。
+--    新建函数默认对 PUBLIC 开放 EXECUTE，不 revoke 就等于任何教师
+--    都能枚举别人的班级 —— 这条比什么都重要。
+create or replace function visible_class_ids_for(p_uid uuid)
 returns setof uuid
 language sql
 stable
 security definer
 set search_path = public
 as $$
-  with me as (select auth.uid() as uid)
+  with me as (select p_uid as uid)
   select c.id
   from classes c
   where
@@ -535,6 +545,17 @@ as $$
     or exists (select 1 from classroom_accounts ca, me
                 where ca.id = me.uid and ca.class_id = c.id and not ca.disabled);
 $$;
+
+revoke all on function visible_class_ids_for(uuid) from public, anon, authenticated;
+
+-- 当前登录者能看到的班级 id 集合（策略里用的就是它）
+create or replace function visible_class_ids()
+returns setof uuid
+language sql
+stable
+security definer
+set search_path = public
+as $$ select * from visible_class_ids_for(auth.uid()) $$;
 
 -- 能不能批改「这个班的这一科」
 -- 注意：教室端**故意不在这里** —— 学生能碰到教室端那台机器，
@@ -562,6 +583,8 @@ as $$
                   and cs.subject = p_subject);
 $$;
 
+-- 注意：visible_class_ids_for() **故意不在这里 grant**（见上面的 revoke），
+-- 它只给属主在 SQL 编辑器里做核对用。
 grant execute on function visible_class_ids() to authenticated;
 grant execute on function can_grade(uuid, text) to authenticated;
 
@@ -600,17 +623,44 @@ revoke all on schools, grades, teacher_roles, class_subjects, classroom_accounts
 --    教室端的两个有限写权限（心跳 / 本班课表 scope='class'）留到阶段 3 ——
 --    那时才有真账号可以验，现在加进去只是无法验证的攻击面。
 
--- -------- 10.5 阶段 2 的验证查询（先别执行，等新旧并存时用）--------
---  这一步是设计 §七 的「第 5 步是唯一危险步骤」的护栏：
---  新函数看到的必须 ⊇ 旧策略看到的，且数量一致，才能删旧策略。
---
--- select (select count(*) from classes where id in (select visible_class_ids())) as 新函数的班级数,
---        (select count(*) from classes where teacher_id = auth.uid())            as 旧策略的班级数;
--- select (select count(*) from students where class_id in (select visible_class_ids())) as 新学生数,
---        (select count(*) from students s join classes c on c.id = s.class_id
---          where c.teacher_id = auth.uid())                                            as 旧学生数;
--- -- 回填是否漏了班（应为 0 行）
--- select id, name, grade from classes where grade_id is null;
+-- -------- 10.5 阶段 2 的验证：把下面整段粘进 SQL 编辑器跑 --------
+--  这是设计 §七「第 5 步是唯一危险步骤」的护栏：在删旧策略之前，
+--  必须先证明新函数看到的数据 ⊇ 旧策略看到的数据。
+--  用 visible_class_ids_for 指定人，所以**不必等前端登录** ——
+--  直接写 visible_class_ids() 的话 auth.uid() 是 NULL，会得到 0 = 0 的假通过。
+
+-- ① 回填体检：每一项都应该是 0
+select '班级没挂到学校' as 检查项, count(*) as 应为0 from classes where school_id is null
+union all
+select '班级没挂到年级', count(*) from classes where grade_id is null
+union all
+select '教师没有角色', count(*) from teachers t
+  where not exists (select 1 from teacher_roles r where r.teacher_id = t.id)
+union all
+select '有班级却没人任课', count(*) from classes c
+  where not exists (select 1 from class_subjects cs where cs.class_id = c.id);
+
+-- ② 回填明细：对着设计 §七 的现有数据核对
+--    期望 1 所学校 / 3 个年级 / 2 个班 / 1 条 super / 2 条班主任 / 2 行任课关系
+select '学校' as 表, count(*)::text as 行数 from schools
+union all select '年级', count(*)::text from grades
+union all select '班级', count(*)::text from classes
+union all select '角色-super', count(*)::text from teacher_roles where role = 'super'
+union all select '角色-班主任', count(*)::text from teacher_roles where role = 'head_teacher'
+union all select '任课关系', count(*)::text from class_subjects;
+
+-- ③ 🔴 新旧策略对比（阶段 5 的放行条件）
+--    把 uuid 换成要核对的教师 id（教师 id 用 select id, name, subject from teachers; 拿）
+--    左右两组数**必须完全相等**，才允许进阶段 5 去删旧策略。
+with me as (select '00000000-0000-0000-0000-000000000000'::uuid as uid)
+select
+  (select count(*) from classes  where id in (select visible_class_ids_for((select uid from me)))) as 新_班级数,
+  (select count(*) from classes  where teacher_id = (select uid from me))                           as 旧_班级数,
+  (select count(*) from students where class_id in (select visible_class_ids_for((select uid from me)))) as 新_学生数,
+  (select count(*) from students s join classes c on c.id = s.class_id
+     where c.teacher_id = (select uid from me))                                                      as 旧_学生数,
+  (select count(*) from assignments where class_id in (select visible_class_ids_for((select uid from me)))) as 新_作业数,
+  (select count(*) from assignments where teacher_id = (select uid from me))                          as 旧_作业数;
 
 -- ============================================================
 --  11. 自检：确认每张表都开了 RLS
