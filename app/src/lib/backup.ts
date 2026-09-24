@@ -1,5 +1,28 @@
 import { getSupabase } from './supabase'
-import type { Assignment, CallRecord, ClassroomClient, Klass, ScheduleItem, Teacher } from '../data/types'
+import { useToast } from '../data/store'
+import { toISODate } from './date'
+import {
+  assignmentToRow,
+  callToRow,
+  classToRow,
+  classroomToRow,
+  scheduleToRow,
+  studentToRow,
+} from '../data/remote'
+import type {
+  Assignment,
+  AssignmentStatus,
+  CallRecord,
+  CallState,
+  ClassroomClient,
+  Klass,
+  QuestionMeta,
+  ScheduleItem,
+  ScheduleKind,
+  Student,
+  StudentStatus,
+  Teacher,
+} from '../data/types'
 
 /* ============================================================
    备份与恢复
@@ -44,6 +67,199 @@ export function makeBackup(s: {
   }
 }
 
+/* ============================================================
+   归一化：备份是**外部文件**，字段可能缺、类型可能不对
+   ------------------------------------------------------------
+   恢复是不可逆的，而且恢复完每个页面都会去读这些数据：
+   少一个数组字段（老备份没有 `correctionNos` / `focusNos`）就会让
+   `a.missingNos.filter(...)` 直接抛异常 —— 页面白屏，而且全仓没有 ErrorBoundary 兜。
+   所以在唯一的入口这里把结构补齐、把明显越界/类型不对的值收回来。
+   ⚠️ 只补结构，**不改语义**：没记录的字段一律给"空例外集"，不给任何"已批/已交"的默认值。
+   ============================================================ */
+
+const STATUSES: AssignmentStatus[] = ['open', 'collected', 'graded', 'reviewed', 'archived']
+
+/** 与 store.ts 里的同名函数一致（uuid 列不接受短串）；lib 不该反过来 import store，所以本地留一份 */
+function uuid(): string {
+  const c = globalThis.crypto
+  if (c && typeof c.randomUUID === 'function') return c.randomUUID()
+  const b = new Uint8Array(16)
+  if (c && typeof c.getRandomValues === 'function') c.getRandomValues(b)
+  else for (let i = 0; i < 16; i++) b[i] = Math.floor(Math.random() * 256)
+  b[6] = (b[6] & 0x0f) | 0x40
+  b[8] = (b[8] & 0x3f) | 0x80
+  const h = Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('')
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`
+}
+
+const asText = (v: unknown, fallback = ''): string =>
+  typeof v === 'string' ? v : typeof v === 'number' && Number.isFinite(v) ? String(v) : fallback
+
+const asNumber = (v: unknown, fallback: number): number => {
+  const n = typeof v === 'number' ? v : Number(v)
+  return Number.isFinite(n) ? n : fallback
+}
+
+const asTextList = (v: unknown): string[] =>
+  Array.isArray(v) ? v.filter((x) => typeof x === 'string' || typeof x === 'number').map(String) : []
+
+function asRecord<T>(v: unknown, map: (x: unknown) => T | undefined): Record<string, T> {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return {}
+  const out: Record<string, T> = {}
+  for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+    const mapped = map(val)
+    if (mapped !== undefined) out[k] = mapped
+  }
+  return out
+}
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
+const HHMM = /^(\d{1,2}):(\d{2})/
+
+/** 学生：`id` 是 React key 也是数据库主键；学号是档案里所有记录的键，两个都不能空 */
+function normalizeStudent(raw: unknown, index: number, seenIds: Set<string>): Student {
+  const s = (raw ?? {}) as Partial<Student>
+  let id = asText(s.id)
+  if (!id || seenIds.has(id)) id = uuid()
+  seenIds.add(id)
+  const status: StudentStatus = s.status === 'left' ? 'left' : 'active'
+  return {
+    id,
+    studentNo: asText(s.studentNo) || String(index + 1),
+    name: asText(s.name),
+    status,
+    ...(typeof s.note === 'string' ? { note: s.note } : {}),
+    createdAt: asNumber(s.createdAt, Date.now()),
+  }
+}
+
+function normalizeKlass(raw: unknown): Klass {
+  const k = (raw ?? {}) as Partial<Klass>
+  const id = asText(k.id) || uuid()
+  const seen = new Set<string>()
+  const list = Array.isArray(k.students) ? k.students : []
+  const students = list.map((s, i) => normalizeStudent(s, i, seen))
+  // 学号是班内唯一索引（数据库还有 unique 约束）：撞号会让整条 upsert 被拒
+  const usedNos = new Set<string>()
+  for (const s of students) {
+    if (usedNos.has(s.studentNo)) {
+      let n = students.length + 1
+      while (usedNos.has(String(n))) n++
+      s.studentNo = String(n)
+    }
+    usedNos.add(s.studentNo)
+  }
+  return {
+    id,
+    name: asText(k.name, '未命名班级'),
+    grade: asText(k.grade),
+    year: asText(k.year),
+    createdAt: asNumber(k.createdAt, Date.now()),
+    students,
+  }
+}
+
+function normalizeAssignment(raw: unknown): Assignment {
+  const a = (raw ?? {}) as Partial<Assignment>
+  const status = STATUSES.includes(a.status as AssignmentStatus)
+    ? (a.status as AssignmentStatus)
+    : 'open'
+  return {
+    id: asText(a.id) || uuid(),
+    title: asText(a.title, '未命名作业'),
+    classId: asText(a.classId),
+    subject: asText(a.subject, '物理'),
+    assignDate: ISO_DATE.test(asText(a.assignDate)) ? asText(a.assignDate) : toISODate(new Date()),
+    // 数据库有 check (question_count between 1 and 60)：越界会让**整条 upsert 被拒**（刷新即丢）
+    questionCount: Math.min(60, Math.max(1, Math.round(asNumber(a.questionCount, 1)))),
+    status,
+    ...(typeof a.templateId === 'string' ? { templateId: a.templateId } : {}),
+    createdAt: asNumber(a.createdAt, Date.now()),
+    collected: a.collected === true,
+    missingNos: asTextList(a.missingNos),
+    lateNos: asTextList(a.lateNos),
+    subQuestions: asRecord(a.subQuestions, (x) => {
+      const n = Math.round(asNumber(x, 0))
+      return n > 0 ? n : undefined
+    }),
+    questionMeta: asRecord<QuestionMeta>(a.questionMeta, (x) =>
+      x && typeof x === 'object' && !Array.isArray(x) ? (x as QuestionMeta) : undefined,
+    ),
+    wrong: asRecord(a.wrong, (x) => asTextList(x)),
+    confirmedNos: asTextList(a.confirmedNos),
+    ...(a.gradeSeconds === undefined ? {} : { gradeSeconds: asNumber(a.gradeSeconds, 0) }),
+    ...(a.gradedAt === undefined ? {} : { gradedAt: asNumber(a.gradedAt, 0) }),
+    statsMode: a.statsMode === 'simple' ? 'simple' : 'normal',
+    focusNos: asTextList(a.focusNos),
+    grades: asRecord(a.grades, (x) => (typeof x === 'string' && x ? x : undefined)),
+    correctionNos: asTextList(a.correctionNos),
+    correctedNos: asTextList(a.correctedNos),
+  }
+}
+
+function normalizeSchedule(raw: unknown): ScheduleItem {
+  const s = (raw ?? {}) as Partial<ScheduleItem>
+  const hhmm = (v: unknown, fallback: string) => {
+    const m = HHMM.exec(asText(v))
+    return m ? `${m[1].padStart(2, '0')}:${m[2]}` : fallback
+  }
+  return {
+    id: asText(s.id) || uuid(),
+    // 数据库 check (weekday between 1 and 7)
+    weekday: Math.min(7, Math.max(1, Math.round(asNumber(s.weekday, 1)))),
+    start: hhmm(s.start, '08:00'),
+    end: hhmm(s.end, '08:40'),
+    title: asText(s.title, '未命名'),
+    ...(typeof s.classId === 'string' && s.classId ? { classId: s.classId } : {}),
+    ...(typeof s.room === 'string' && s.room ? { room: s.room } : {}),
+    kind: (s.kind === 'other' ? 'other' : 'class') as ScheduleKind,
+    notify: s.notify !== false,
+    scope: s.scope === 'class' ? 'class' : 'mine',
+  }
+}
+
+function normalizeClassroom(raw: unknown): ClassroomClient {
+  const c = (raw ?? {}) as Partial<ClassroomClient>
+  return {
+    id: asText(c.id) || uuid(),
+    classId: asText(c.classId),
+    name: asText(c.name, '一体机'),
+    online: c.online === true,
+    lastSeenAt: asNumber(c.lastSeenAt, 0),
+  }
+}
+
+function normalizeCall(raw: unknown): CallRecord {
+  const c = (raw ?? {}) as Partial<CallRecord>
+  const sentAt = Array.isArray(c.sentAt)
+    ? c.sentAt.map((t) => asNumber(t, 0)).filter((t) => t > 0)
+    : []
+  return {
+    id: asText(c.id) || uuid(),
+    assignmentId: asText(c.assignmentId),
+    classId: asText(c.classId),
+    studentNos: asTextList(c.studentNos),
+    text: asText(c.text),
+    room: asText(c.room),
+    // 空的时间戳数组会让 `Math.max(0, ...[])` 变成 0 → 去重键恒定，重播就再也播不出来
+    sentAt: sentAt.length ? sentAt : [Date.now()],
+    states: asRecord<CallState>(c.states, (x) =>
+      x === 'arrived' || x === 'corrected' || x === 'called' ? x : undefined,
+    ),
+  }
+}
+
+function normalizeTeacher(raw: unknown): Teacher | null {
+  if (!raw || typeof raw !== 'object') return null
+  const t = raw as Partial<Teacher>
+  return {
+    id: asText(t.id, 't-1'),
+    name: asText(t.name, '老师'),
+    subject: asText(t.subject, '物理'),
+    school: asText(t.school),
+  }
+}
+
 /** 一份备份值不值得信 —— 恢复是不可逆的，宁可不恢复也不能恢复半份 */
 export function validateBackup(raw: unknown): { ok: true; data: Backup } | { ok: false; why: string } {
   if (!raw || typeof raw !== 'object') return { ok: false, why: '不是有效的备份文件' }
@@ -51,19 +267,29 @@ export function validateBackup(raw: unknown): { ok: true; data: Backup } | { ok:
   if (b.v !== 1) return { ok: false, why: `备份版本不认识（v${String(b.v)}）` }
   if (!Array.isArray(b.classes)) return { ok: false, why: '缺少班级数据' }
   if (!Array.isArray(b.assignments)) return { ok: false, why: '缺少作业数据' }
-  const students = b.classes.reduce((n, c) => n + (c.students?.length ?? 0), 0)
+  const classes = b.classes.map(normalizeKlass)
+  const students = classes.reduce((n, c) => n + c.students.length, 0)
   if (students === 0) return { ok: false, why: '备份里一个学生都没有，可能是坏文件' }
+
+  // 教室端一台设备对一个班（数据库还有 unique (class_id)）：重复的只留一台，
+  // 否则回推云端时整批 upsert 会被唯一约束拒掉
+  const roomByClass = new Map<string, ClassroomClient>()
+  for (const rawRoom of Array.isArray(b.classrooms) ? b.classrooms : []) {
+    const c = normalizeClassroom(rawRoom)
+    if (!roomByClass.has(c.classId)) roomByClass.set(c.classId, c)
+  }
+
   return {
     ok: true,
     data: {
       v: 1,
-      at: b.at ?? 0,
-      teacher: b.teacher ?? null,
-      classes: b.classes,
-      assignments: b.assignments,
-      schedule: b.schedule ?? [],
-      calls: b.calls ?? [],
-      classrooms: b.classrooms ?? [],
+      at: asNumber(b.at, 0),
+      teacher: normalizeTeacher(b.teacher),
+      classes,
+      assignments: (b.assignments as unknown[]).map(normalizeAssignment),
+      schedule: (Array.isArray(b.schedule) ? b.schedule : []).map(normalizeSchedule),
+      calls: (Array.isArray(b.calls) ? b.calls : []).map(normalizeCall),
+      classrooms: [...roomByClass.values()],
     },
   }
 }
@@ -151,14 +377,65 @@ export function fsSupported(): boolean {
   return typeof (window as { showDirectoryPicker?: unknown }).showDirectoryPicker === 'function'
 }
 
+/* ---- 备份失败必须让教师看见（自动备份是**后台**跑的，静默失败 = 等于没备份） ---- */
+
+/** 上一条已经提示过的原因 / 时间 —— 同一条错不刷屏（自动备份每 5 分钟一次） */
+let lastIssue = ''
+let lastIssueAt = 0
+const ISSUE_REPEAT_MS = 10 * 60_000
+
+const reasonOf = (e: unknown): string =>
+  e && typeof e === 'object' && 'message' in e
+    ? String((e as { message: unknown }).message)
+    : String(e)
+
+function reportBackupIssue(why: string) {
+  console.warn('[backup]', why)
+  const now = Date.now()
+  if (why === lastIssue && now - lastIssueAt < ISSUE_REPEAT_MS) return
+  lastIssue = why
+  lastIssueAt = now
+  /*
+   * 走站内 toast：备份是在后台定时跑的，失败时教师多半没盯着控制台 ——
+   * 以前三条失败路径（没选文件夹 / 权限失效 / 写文件抛异常）都是 `return false` 或 `return null`，
+   * 界面上一个字都没有，教师会一直以为"自动备份开着呢"。
+   */
+  try {
+    useToast.getState().push({ text: '自动备份没写成', tone: 'bad', desc: why })
+  } catch {
+    /* toast 起不来也不能反过来把备份流程搞崩 */
+  }
+}
+
+/** 拿不到可写目录时，说清是哪一种情况 —— 提示要能落到一个具体动作上 */
+async function whyNoFolder(): Promise<string> {
+  const h = await loadHandle()
+  if (!h) return '还没有选备份文件夹（在教室端点「设置文件夹」）'
+  const q = await h.queryPermission?.({ mode: 'readwrite' })
+  if (q === 'granted') return '文件夹句柄失效了，请重新选一次备份文件夹'
+  return '浏览器重启后文件夹权限会失效 —— 点一下「点一下恢复」重新授权'
+}
+
 /** 让教师选一个文件夹（必须由点击触发） */
 export async function pickFolder(): Promise<DirHandle | null> {
   const picker = (window as unknown as { showDirectoryPicker: () => Promise<DirHandle> })
     .showDirectoryPicker
   if (!picker) return null
-  const h = await picker()
-  await saveHandle(h)
-  return h
+  try {
+    const h = await picker()
+    await saveHandle(h)
+    lastIssue = ''
+    return h
+  } catch (e) {
+    /*
+     * 教师点「取消」也是走 reject（AbortError）—— 那不是故障，不提示。
+     * 但**不能把异常原样抛出去**：调用方是 onClick 里的 async 函数，
+     * 抛出去就成了一条没人接的 unhandled rejection，界面上什么都不显示。
+     */
+    const name = e && typeof e === 'object' && 'name' in e ? String((e as { name: unknown }).name) : ''
+    if (name !== 'AbortError') reportBackupIssue(`选文件夹失败：${reasonOf(e)}`)
+    return null
+  }
 }
 
 /**
@@ -185,54 +462,181 @@ export async function folderNeedsGrant(): Promise<boolean> {
   return (await h.queryPermission?.({ mode: 'readwrite' })) !== 'granted'
 }
 
+/**
+ * 写一份备份到授权文件夹。
+ *
+ * ⚠️ 失败**不能只是 `return false`**：调用方（教室端的自动备份）是 5 分钟一次的后台定时器，
+ * 拿到 false 什么也不显示 —— 教师会一直以为备份在写，直到真需要恢复那天。
+ * 这里负责把"为什么没写成"说出口（同一条错 10 分钟只提示一次）。
+ */
 export async function writeToFolder(name: string, data: unknown): Promise<boolean> {
   const dir = await writableFolder()
-  if (!dir) return false
+  if (!dir) {
+    reportBackupIssue(await whyNoFolder())
+    return false
+  }
   try {
     const fh = await dir.getFileHandle(name, { create: true })
     const w = await fh.createWritable()
     await w.write(JSON.stringify(data))
     await w.close()
+    lastIssue = ''
     return true
-  } catch {
+  } catch (e) {
+    reportBackupIssue(`写「${name}」失败：${reasonOf(e)}`)
     return false
   }
 }
 
 /* ---------------- 恢复时把数据推回云端 ---------------- */
 
+/** 一批 upsert 多少行（学生名单可能有几百条） */
+const PUSH_BATCH = 200
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
 /**
- * 恢复不只是"写回本地" —— 云端才是主副本，必须一起推上去，
- * 否则下次刷新就被云端覆盖回去了。
+ * 恢复不只是"写回本地" —— **云端才是主副本**，必须一起推上去。
+ *
+ * 之前只推了班级和学生：云端模式下恢复完界面看着一切正常，
+ * 一刷新 `hydrate()` 从云端重建，作业 / 课表 / 呼叫全没了 —— 静默丢数据。
+ *
+ * 现在按外键依赖的顺序把每一类都推上去：
+ *   teachers → classes → students → assignments → schedule_items → classrooms → calls
+ * 并且三点必须做到，否则"已恢复"就是句谎话：
+ *  ① **每一批都看 error**（以前只 await，Supabase 不抛异常，错就咽掉了）；
+ *  ② 用 `.select('id')` 数回真正落库的行数 —— 被 RLS 挡下的更新是 **0 行且不报错**；
+ *  ③ 备份里引用了不存在的班级 / 档案的行（本地删班留下的孤儿）**跳过并写进结果**，
+ *     不让一条脏数据把整批 upsert 拖垮，也不假装推成功了。
  */
 export async function pushBackupToCloud(b: Backup, teacherId: string): Promise<string> {
   const sb = getSupabase()
   if (!sb) return '本地模式：只恢复到本机'
-  try {
-    if (b.teacher) {
-      await sb.from('teachers').upsert({ id: teacherId, name: b.teacher.name, subject: b.teacher.subject, school: b.teacher.school })
-    }
-    const cls = b.classes.map((c) => ({
-      id: c.id,
-      teacher_id: teacherId,
-      name: c.name,
-      grade: c.grade,
-      year: c.year,
-    }))
-    if (cls.length) await sb.from('classes').upsert(cls)
-
-    const stu = b.classes.flatMap((c) =>
-      (c.students ?? []).map((s) => ({
-        id: s.id,
-        class_id: c.id,
-        student_no: s.studentNo,
-        name: s.name,
-        status: s.status,
-      })),
-    )
-    for (let i = 0; i < stu.length; i += 200) await sb.from('students').upsert(stu.slice(i, i + 200))
-    return `已恢复到云端：${cls.length} 个班级 / ${stu.length} 名学生`
-  } catch (e) {
-    return `本地已恢复，但推云端失败：${e instanceof Error ? e.message : String(e)}`
+  if (!UUID_RE.test(teacherId)) {
+    return '本地已恢复，但当前没有登录账号 —— 云端收不下，刷新会丢，请先登录再恢复一次'
   }
+
+  const classIds = new Set(b.classes.map((c) => c.id))
+  const keepAssignments = (b.assignments ?? []).filter((a) => classIds.has(a.classId))
+  const assignmentIds = new Set(keepAssignments.map((a) => a.id))
+  const keepRooms = (b.classrooms ?? []).filter((c) => classIds.has(c.classId))
+  const keepCalls = (b.calls ?? []).filter(
+    (c) => classIds.has(c.classId) && assignmentIds.has(c.assignmentId),
+  )
+  const dropped =
+    (b.assignments?.length ?? 0) -
+    keepAssignments.length +
+    ((b.classrooms?.length ?? 0) - keepRooms.length) +
+    ((b.calls?.length ?? 0) - keepCalls.length)
+
+  const push = async (table: string, rows: object[]): Promise<{ why?: string }> => {
+    for (let i = 0; i < rows.length; i += PUSH_BATCH) {
+      const chunk = rows.slice(i, i + PUSH_BATCH)
+      const { data, error } = await sb
+        .from(table)
+        .upsert(chunk as never, { onConflict: 'id' })
+        .select('id')
+      if (error) return { why: error.message }
+      const got = data?.length ?? 0
+      if (got < chunk.length) {
+        return { why: `只落库 ${got}/${chunk.length} 行（账号不匹配或约束冲突）` }
+      }
+    }
+    return {}
+  }
+
+  const errors: string[] = []
+  const counts = { classes: 0, students: 0, assignments: 0, schedule: 0, classrooms: 0, calls: 0 }
+
+  // teachers 那一行绑定 auth 用户；它缺失的话下面全都会卡在外键上
+  if (b.teacher) {
+    const t = await push('teachers', [
+      {
+        id: teacherId,
+        name: b.teacher.name,
+        subject: b.teacher.subject,
+        school: b.teacher.school,
+      },
+    ])
+    if (t.why) errors.push(`教师资料：${t.why}`)
+  }
+
+  const steps: Array<{
+    label: string
+    key: keyof typeof counts
+    table: string
+    rows: object[]
+    /** 后面几张表都靠它的外键，没推上去就别接着推了 */
+    fatal: boolean
+  }> = [
+    {
+      label: '班级',
+      key: 'classes',
+      table: 'classes',
+      rows: b.classes.map((c) => classToRow(c, teacherId)),
+      fatal: true,
+    },
+    {
+      label: '学生',
+      key: 'students',
+      table: 'students',
+      rows: b.classes.flatMap((c) => c.students.map((s) => studentToRow(s, c.id))),
+      fatal: true,
+    },
+    {
+      label: '作业档案',
+      key: 'assignments',
+      table: 'assignments',
+      rows: keepAssignments.map((a) => assignmentToRow(a, teacherId)),
+      fatal: true,
+    },
+    {
+      label: '课表',
+      key: 'schedule',
+      table: 'schedule_items',
+      // 备份里引用了已经删掉的班 → 和云端 `on delete set null` 一样置空，而不是整条丢掉
+      rows: (b.schedule ?? []).map((s) =>
+        scheduleToRow(s.classId && !classIds.has(s.classId) ? { ...s, classId: undefined } : s, teacherId),
+      ),
+      fatal: false,
+    },
+    {
+      label: '教室端设备',
+      key: 'classrooms',
+      table: 'classrooms',
+      rows: keepRooms.map((c) => classroomToRow(c, teacherId)),
+      fatal: false,
+    },
+    {
+      label: '呼叫记录',
+      key: 'calls',
+      table: 'calls',
+      rows: keepCalls.map((c) => callToRow(c, teacherId)),
+      fatal: false,
+    },
+  ]
+
+  for (const step of steps) {
+    const r = await push(step.table, step.rows)
+    if (r.why) {
+      errors.push(`${step.label}：${r.why}`)
+      if (step.fatal) break
+      continue
+    }
+    counts[step.key] = step.rows.length
+  }
+
+  const parts = [
+    `${counts.classes} 个班级`,
+    `${counts.students} 名学生`,
+    `${counts.assignments} 份作业档案`,
+    counts.schedule ? `${counts.schedule} 条课表` : '',
+    counts.classrooms ? `${counts.classrooms} 台教室端` : '',
+    counts.calls ? `${counts.calls} 条呼叫` : '',
+  ].filter(Boolean)
+  const tail = dropped ? `（另有 ${dropped} 条挂在备份里没有的班级/档案上，已跳过）` : ''
+
+  if (errors.length) {
+    return `⚠️ 本地已恢复，但回推云端没完成（现在刷新就会丢）：${errors.join('；')}｜已推上：${parts.join(' / ')}${tail}`
+  }
+  return `已恢复到云端：${parts.join(' / ')}${tail}`
 }

@@ -25,7 +25,6 @@ import {
   wrongStudentsOfQuestion,
 } from '../lib/calls'
 import { friendlyDate } from '../lib/date'
-import { emit } from '../lib/realtime'
 
 export default function AssignmentCall() {
   const { id = '' } = useParams()
@@ -124,14 +123,14 @@ export default function AssignmentCall() {
         /* 读不到状态不影響发送 —— 呼叫该发还是要发 */
       }
 
-      const rec = sendCall({
+      // 广播由 store 的 sendCall 统一发出（四条呼叫路径共用），这里不再重复 emit
+      sendCall({
         assignmentId: assignment.id,
         classId: assignment.classId,
         studentNos: selected,
         text,
         room,
       })
-      emit({ type: 'call', call: rec })
       push({
         text: online ? '已发送到教室端' : '已发送，但教室端当前离线',
         tone: online ? 'ok' : 'warn',

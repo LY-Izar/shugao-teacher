@@ -216,12 +216,23 @@ export default function Assignments() {
                 variant="ghost"
                 icon={<IconRefresh size={14} />}
                 onClick={() => {
+                  /*
+                   * 「按上次新建」要**照着上一次的整份结构**建，不只是标题和题数。
+                   * 少带 `statsMode` 时，极简模式的档案会被建成普通模式（页面按逐题渲染，
+                   * 而这份档案根本没有逐题数据）；少带 `subQuestions` / `questionMeta` 时，
+                   * 拆过的小题、识别出来的题型分值全都得重新录一遍 ——
+                   * 而这正是"按上次新建"唯一的用处。
+                   */
                   const id = addAssignment({
                     title: last.title,
                     classId: last.classId,
                     assignDate: toISODate(new Date()),
                     questionCount: last.questionCount,
                     templateId: last.templateId,
+                    subject: last.subject,
+                    statsMode: last.statsMode,
+                    subQuestions: last.subQuestions,
+                    questionMeta: last.questionMeta,
                   })
                   push({ text: '已按上次新建', tone: 'ok', desc: last.title })
                   navigate(`/assignments/${id}/collect`)

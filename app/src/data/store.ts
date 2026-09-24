@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { createJSONStorage, persist, type StateStorage } from 'zustand/middleware'
 import { isRemote } from '../lib/supabase'
+import { HEARTBEAT_MS, emit, subscribe } from '../lib/realtime'
 import * as remote from './remote'
 import { makeClassrooms, makeDemoAssignments, makeDemoClasses, makeDemoSchedule, makeTemplates } from './seed'
 import type {
@@ -181,6 +182,62 @@ type State = {
   touchStreak: () => void
 }
 
+/**
+ * 给「转进来」的学生挑一个学号（W7）。
+ *
+ * 为什么不能原样搬：**学号即身份** —— 收缴（`missingNos`/`lateNos`）、
+ * 批改（`confirmedNos`/`wrong`）、等级（`grades`）、改错名单全都以学号为键存在**班级的档案**上。
+ * 一个孩子从 3 班转到 7 班、还叫 12 号，他在 7 班立刻"继承"了原来那个 12 号的全部成绩；
+ * 更糟的是数据库 `students` 有 `unique (class_id, student_no)`，
+ * 撞号会让整条 upsert 被拒 —— 云端模式下这才是**静默丢数据**。
+ *
+ * 规则：
+ *  · 目标班这个号**空着**，而且**从来没有任何记录引用过** → 保留原号（教师看着最自然）；
+ *  · 否则取「目标班出现过的最大号 + 1」。
+ *    刻意**不复用空号**：空号多半是转走/转出的人留下的，复用就等于把他的记录接着往下记。
+ */
+function pickTransferNo(
+  s: Pick<State, 'classes' | 'assignments' | 'calls'>,
+  target: Klass,
+  want: string,
+): string {
+  const used = new Set<string>()
+  const taken = new Set(target.students.map((st) => st.studentNo))
+  for (const a of s.assignments) {
+    if (a.classId !== target.id) continue
+    for (const list of [
+      a.missingNos,
+      a.lateNos,
+      a.confirmedNos,
+      a.focusNos,
+      a.correctionNos,
+      a.correctedNos,
+    ]) {
+      for (const n of list ?? []) used.add(String(n))
+    }
+    for (const n of Object.keys(a.wrong ?? {})) used.add(n)
+    for (const n of Object.keys(a.grades ?? {})) used.add(n)
+  }
+  // 呼叫记录也按学号存（"已叫/已到/已订正"），同样不能继承
+  for (const c of s.calls ?? []) {
+    if (c.classId !== target.id) continue
+    for (const n of c.studentNos ?? []) used.add(String(n))
+    for (const n of Object.keys(c.states ?? {})) used.add(n)
+  }
+
+  const free = (n: string) => n !== '' && !taken.has(n) && !used.has(n)
+  if (free(want)) return want
+
+  let max = 0
+  for (const n of [...taken, ...used]) {
+    const v = Number(n)
+    if (n !== '' && Number.isFinite(v) && v > max) max = Math.floor(v)
+  }
+  let candidate = String(max + 1)
+  while (!free(candidate)) candidate = String(Number(candidate) + 1)
+  return candidate
+}
+
 function freshDemo() {
   const classes = makeDemoClasses()
   return {
@@ -319,9 +376,32 @@ export const useStore = create<State>()(
       removeClass: (id) => {
         set((s) => {
           const classes = s.classes.filter((c) => c.id !== id)
+          /*
+           * 删班要**照着云端的级联一起删**。
+           *
+           * 数据库里 `assignments / students / classrooms / calls` 都是
+           * `class_id ... on delete cascade`，班级课表是 `on delete set null` ——
+           * 云端模式删一个班，这个班的作业档案当天就一起没了。
+           * 本地模式没有数据库帮忙：只删班级的话，那些档案会永远挂在「班级已删除」上，
+           * 既打不开也删不掉（列表里还占着统计），只是攒垃圾。
+           * 所以这里就地做一遍同样的清理，两种模式的结果保持一致。
+           */
+          const gone = new Set(
+            s.assignments.filter((a) => a.classId === id).map((a) => a.id),
+          )
           return {
             classes,
             currentClassId: s.currentClassId === id ? (classes[0]?.id ?? null) : s.currentClassId,
+            assignments: s.assignments.filter((a) => a.classId !== id),
+            // 呼叫挂在这两个键上（assignment_id + class_id），按档案和班级各清一遍
+            calls: (s.calls ?? []).filter(
+              (c) => c.classId !== id && !gone.has(c.assignmentId),
+            ),
+            classrooms: (s.classrooms ?? []).filter((c) => c.classId !== id),
+            // 班级课表**不删**：云端是 set null（教师自己录的课不该因为删班就消失）
+            schedule: (s.schedule ?? []).map((it) =>
+              it.classId === id ? { ...it, classId: undefined } : it,
+            ),
             isDemo: false,
           }
         })
@@ -415,20 +495,37 @@ export const useStore = create<State>()(
       },
 
       transferStudent: (studentId, fromClassId, toClassId) => {
-        const from = get().classes.find((c) => c.id === fromClassId)
-        const moved = from?.students.find((st) => st.id === studentId)
-        if (!moved || fromClassId === toClassId) return
+        if (fromClassId === toClassId) return
+        const st = get()
+        const from = st.classes.find((c) => c.id === fromClassId)
+        const moved = from?.students.find((x) => x.id === studentId)
+        const to = st.classes.find((c) => c.id === toClassId)
+        if (!moved || !to) return
+        /*
+         * 学号要重新定（见 pickTransferNo）：原样搬过去就是**继承别人的记录**。
+         * 目标班这个号空着、也从没被任何记录用过时才保留原号。
+         */
+        const no = pickTransferNo(st, to, moved.studentNo)
+        const next: Student = no === moved.studentNo ? moved : { ...moved, studentNo: no }
         set((s) => ({
           isDemo: false,
           classes: s.classes.map((c) => {
             if (c.id === fromClassId) {
-              return { ...c, students: c.students.filter((st) => st.id !== studentId) }
+              return { ...c, students: c.students.filter((x) => x.id !== studentId) }
             }
-            if (c.id === toClassId) return { ...c, students: [...c.students, moved] }
+            if (c.id === toClassId) {
+              // 插进去之后照样按学号排序，别让新来的挂在名单末尾
+              return {
+                ...c,
+                students: [...c.students, next].sort(
+                  (a, b) => Number(a.studentNo) - Number(b.studentNo) || a.name.localeCompare(b.name),
+                ),
+              }
+            }
             return c
           }),
         }))
-        void remote.saveStudent(moved, toClassId)
+        void remote.saveStudent(next, toClassId)
       },
 
       /* ---- S2：作业档案 ---- */
@@ -550,8 +647,19 @@ export const useStore = create<State>()(
               ),
               missingNos: (data.missingNos ?? a.missingNos).filter((n) => !done.has(n)),
               lateNos: (a.lateNos ?? []).filter((n) => !done.has(n)),
-              // 已经有人在批 = 收缴这一步事实上过去了
-              collected: a.collected || Boolean(data.confirmedNos?.length) || Boolean(data.missingNos),
+              /*
+               * ⚠️ `collected` 是**收缴登记**的标记（列表据此说"已交 36/36 · 全员交齐"），
+               * 只有「收缴登记」和「确认完成批改」这两条真正点过全班的路才能置它。
+               *
+               * 以前这里还有一句 `|| Boolean(data.confirmedNos?.length)` ——
+               * 只要临时保存时批了几个人，列表就宣称"全员交齐"（`missingNos` 还是空的），
+               * 教师会以为收缴登记做过了。批改过的人算"已交"这件事，
+               * 已经由上一行的 `missingNos.filter(!done)` 表达，不需要动 `collected`。
+               *
+               * `missingNos` 只有「确认完成批改」会传（未批改的人一律登记为未交），
+               * 那一步确实把全班都定下来了，所以那一种情况可以置。
+               */
+              collected: a.collected || data.missingNos !== undefined,
               gradedAt:
                 data.status === 'graded' || data.status === 'reviewed' ? Date.now() : a.gradedAt,
             }
@@ -578,18 +686,34 @@ export const useStore = create<State>()(
         set((s) => ({ isDemo: false, calls: [record, ...s.calls] }))
         const tid = get().teacher?.id
         if (tid) void remote.saveCall(record, tid)
+        /*
+         * 广播归 store 管。
+         *
+         * 本地模式没有数据库推送，教室端**只能**靠这条广播收到呼叫；
+         * 而发出呼叫的地方有四处（作业页、改错登记页、班级页自由播报、再播一遍），
+         * 以前只有作业页那一处 emit —— 另外三条路教室里一声不响，
+         * 教师还以为学生已经听见了。收在唯一的写入口上就不会再漏。
+         */
+        emit({ type: 'call', call: record })
         return record
       },
 
       repeatCall: (callId) => {
         set((s) => ({
           calls: s.calls.map((c) =>
-            c.id === callId ? { ...c, sentAt: [...c.sentAt, Date.now()] } : c,
+            c.id === callId ? { ...c, sentAt: [...(c.sentAt ?? []), Date.now()] } : c,
           ),
         }))
         const c = get().calls.find((x) => x.id === callId)
+        if (!c) return
         const tid = get().teacher?.id
-        if (c && tid) void remote.saveCall(c, tid)
+        if (tid) void remote.saveCall(c, tid)
+        /*
+         * 「再播一遍」= 追加一个时间戳，也是一次**新的播报**：
+         * 教室端按「id + 最后一次时间」去重，所以必须把改过的这条重新广播出去。
+         * 后端模式下这条走 Realtime 的 UPDATE（见 lib/realtime.ts）。
+         */
+        emit({ type: 'call', call: c })
       },
 
       setCallState: (callId, studentNo, state) => {
@@ -742,6 +866,30 @@ export const useStore = create<State>()(
     },
   ),
 )
+
+/* ---------------- 教室端心跳（本地模式） ---------------- */
+
+/*
+ * 本地模式下两个标签页各有各的 store：教室端每 4 秒广播一次心跳，
+ * 教师端收到后必须**把 lastSeenAt 也刷新掉** —— 只把 online 从 false 翻成 true 是不够的。
+ * 在线判定读的是 `now - lastSeenAt > OFFLINE_AFTER_MS(12s)`：
+ * 心跳不刷时间戳，刚被翻成"在线"的教室端 12 秒后又被判离线，
+ * 于是 4 秒一次的心跳反而让状态每 16 秒抖一次（教师端一会儿在线一会儿离线，
+ * 呼叫前的"教室端在线吗"提示跟着乱跳）。
+ *
+ * 后端模式不走这里：那时心跳是写库 + Realtime，写回环由 useClassroomPresence 挡住。
+ */
+if (!isRemote) {
+  subscribe((m) => {
+    if (m.type !== 'heartbeat') return
+    const st = useStore.getState()
+    const c = st.classrooms.find((x) => x.id === m.classroomId)
+    if (!c) return
+    // 同一条心跳不必反复改 state（每次改都会让订阅了 classrooms 的页面重渲染，也写一次本地存档）
+    if (c.online && Date.now() - c.lastSeenAt < HEARTBEAT_MS / 2) return
+    st.setClassroomOnline(m.classroomId, true)
+  })
+}
 
 /* ---------------- 同步失败提示 ---------------- */
 

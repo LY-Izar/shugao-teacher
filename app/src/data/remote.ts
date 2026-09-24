@@ -95,6 +95,8 @@ type CallRow = {
   room: string
   sent_at: string[]
   states: Record<string, CallState>
+  /** 由数据库默认值生成，只在读取时才有（轮询按它取时间窗） */
+  created_at?: string | null
 }
 
 /* ---------------- 错误上报 ---------------- */
@@ -288,6 +290,9 @@ export async function loadClassrooms(): Promise<ClassroomClient[] | null> {
   return (data ?? []).map(rowToClassroom)
 }
 
+/** 轮询一次最多看多少条：够覆盖"最近这一会儿"的呼叫，又不至于每次拉回整个学期 */
+const POLL_LIMIT = 30
+
 /**
  * 读某个班最近的呼叫 —— 给教室端做**轮询兜底**。
  *
@@ -295,6 +300,11 @@ export async function loadClassrooms(): Promise<ClassroomClient[] | null> {
  * 这两条连接是独立的 —— **websocket 悄悄断掉时心跳照常**，
  * 于是教师端看到"在线"、呼叫也发出去了，教室端却一声不响。
  * 教室端要开一整天，这种事迟早会发生，所以不能只靠推送。
+ *
+ * ⚠️ 窗口按「**新建时间 or 最后一次播报时间**」取，不能只按 `created_at`：
+ * 「再播一遍」只是往 `sent_at` 里追加一个时间戳（行还是老行），
+ * 只按 created_at 过滤的话，超过 15 分钟的老呼叫重播时轮询永远看不到它。
+ * 表里没有 updated_at（也不为此改 schema），所以先把最近 N 条拉回来再在本地筛。
  */
 export async function loadRecentCalls(classId: string, sinceMs: number): Promise<CallRecord[]> {
   const sb = getSupabase()
@@ -303,11 +313,19 @@ export async function loadRecentCalls(classId: string, sinceMs: number): Promise
     .from('calls')
     .select('*')
     .eq('class_id', classId)
-    .gte('created_at', new Date(sinceMs).toISOString())
     .order('created_at', { ascending: false })
-    .limit(10)
+    .limit(POLL_LIMIT)
   if (error) return []
-  return (data ?? []).map(rowToCall)
+  return ((data ?? []) as CallRow[])
+    .filter((r) => {
+      const created = ms(r.created_at) ?? 0
+      const lastSent = Math.max(
+        0,
+        ...(r.sent_at ?? []).map((t) => new Date(t).getTime()).filter((n) => Number.isFinite(n)),
+      )
+      return created >= sinceMs || lastSent >= sinceMs
+    })
+    .map(rowToCall)
 }
 
 export async function loadSnapshot(): Promise<Snapshot | null> {

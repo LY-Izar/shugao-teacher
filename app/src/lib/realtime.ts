@@ -46,7 +46,12 @@ export function emit(m: BusMessage) {
     return
   }
   getChannel()?.postMessage(m)
-  window.dispatchEvent(new CustomEvent(LOCAL_EVENT, { detail: m }))
+  /*
+   * 心跳**不往本页派发**：它是"我还活着"的自我介绍，只有别的标签页收到才有意义。
+   * 在本页也派发的话，教室端会收到自己的心跳，反过来把自己的 lastSeenAt 一直刷新 ——
+   * 那块屏开着一整天，每 4 秒白写一次本地存档（还会把教师端更新的快照覆盖回去）。
+   */
+  if (m.type !== 'heartbeat') window.dispatchEvent(new CustomEvent(LOCAL_EVENT, { detail: m }))
 }
 
 export function subscribe(fn: (m: BusMessage) => void): () => void {
@@ -57,8 +62,17 @@ export function subscribe(fn: (m: BusMessage) => void): () => void {
       .channel('shugao-classroom')
       .on(
         'postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'calls' },
-        (p) => fn({ type: 'call', call: rowToCall(p.new as never) }),
+        { event: '*', schema: 'public', table: 'calls' },
+        /*
+         * 这里必须是 `*` 而不是 `INSERT`。
+         * 「再播一遍」不改行数，它是**追加一个 sent_at 时间戳**（UPDATE）——
+         * 只订阅 INSERT 的话，教师点了重播、教室端什么都不会发生，
+         * 而教师界面上写着"已重播一遍"。DELETE 没有可播的新行，跳过即可。
+         */
+        (p) => {
+          if (p.eventType === 'DELETE') return
+          fn({ type: 'call', call: rowToCall(p.new as never) })
+        },
       )
       .on(
         'postgres_changes',
