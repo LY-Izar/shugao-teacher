@@ -268,7 +268,17 @@ export function Sheet({
           </button>
         </div>
         <div className="flex-1 overflow-y-auto p-4">{children}</div>
-        {footer ? <div className="border-t border-line p-3">{footer}</div> : null}
+        {/*
+          🔴 `sheet-foot-safe`：只加**底部**安全区，把页脚从移动端底部那两颗悬浮控件
+          （`.glass-light` 胶囊 + 圆按钮，58 高、底距 18px）下面让出来 ——
+          它们展开态时层叠被抬到这张 Sheet 之上（见 AppShell 的 `MobileNav`），
+          不留这一块的话页脚那个「收起」按钮会被压住。
+          ⚠️ 它**不动上半部分的内边距**（还是 `p-3`），也**只在窄屏生效**（见 index.css），
+             所以桌面那些 Sheet（改错名单 / 建号…）的页脚高度与从前逐像素相同。
+        */}
+        {footer ? (
+          <div className="border-t border-line p-3 sheet-foot-safe">{footer}</div>
+        ) : null}
       </div>
     </Portal>
   )

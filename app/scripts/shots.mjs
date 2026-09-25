@@ -254,7 +254,19 @@ function check(ok, label, observed, extra = '') {
 
 /** 每一步一个名字：失败摘要要能一眼看出停在哪（同名步骤只印一次标题） */
 const printedSteps = new Set()
+/** 只给排查这一节用的临时开关（见下）：是否已经走过移动端导航那一节 */
+let sawMobileNavShot = false
 async function step(name, fn) {
+  /*
+   * 只给**排查这一节**用的临时开关（正常跑不受影响、不设它就没有任何变化）：
+   * `SHUGAO_ONLY_NAV=1` → 跑完「更多入口 · 展开层」那一节就停，不跑后面 90 多张图。
+   * 调层叠/安全区这种改动时，整套要几分钟而这一节只要几十秒。
+   * ⚠️ 它会故意报一条"异常中断"，所以**只能在排查时用**，别在正式验收里带这个变量。
+   */
+  if (name.startsWith('35–37')) sawMobileNavShot = true
+  else if (process.env.SHUGAO_ONLY_NAV && sawMobileNavShot) {
+    throw new Error(`SHUGAO_ONLY_NAV：只跑到展开层那一节，不跑后面的「${name}」`)
+  }
   if (!printedSteps.has(name)) {
     printedSteps.add(name)
     console.log(`\n── ${name}`)
@@ -1620,6 +1632,237 @@ await withLock(async () => {
           `${SNM}：展开层里**没有**「呼叫记录」（用户明确说不加）`,
           sheet.body.includes('呼叫记录') ? short(sheet.body, 150) : '没有这条',
         )
+
+        /*
+         * ============================================================
+         * 🆕 2026-09-28：**"它到底看不看得见"** —— 这一轮的核心交付
+         *
+         * 上面那两条只量了 `aria-expanded` 与箭头 `transform`：它们能证明**状态对了**，
+         * 却证明不了**那颗按钮没被盖住**。真出过的事故就是"状态全对、按钮被 Sheet 盖住"
+         * ——展开发出 0.26s 之后用户只看到一张 Sheet，"朝下的收起箭头"只在收起动画里闪一下
+         * （§十五 15.3 原本记着的那条"已知限制"）。
+         *
+         * 判据用 `document.elementFromPoint()` —— **真几何**：在目标的正中心放一个点，
+         * 问浏览器"**这个位置上，最上面那个能被点到的元素是谁**"。谁被别的层盖住，
+         * 这里返回的就是盖住它的那个（`.sheet` / `.scrim` / `.nav` 那条包裹带）。
+         *
+         * 🔴 三条纪律（缺一条这条断言就变成摆设）：
+         *   ① **带反向对照**：每条断言都配一个"把层叠改回去"的对照，**必须**红。
+         *      对照用**内联 `style.setProperty(…, 'important')`**（量完就撤），
+         *      不依赖"某次手工改源码"—— 否则下一个人只能靠信我一句话。
+         *      ⚠️ 圆按钮那条的对照**打在 AppShell 根节点上**，不是打在 `<nav>` 上：
+         *        这一轮真正的坑就是"根节点 `z-[1]` 自成层叠上下文，nav 里的 z-index 出不去"，
+         *        打在 nav 上写什么值都还原不出坏的样子（见 `neg-circle` 那段注释）。
+         *   ② **点要取真中心**（`getBoundingClientRect` 算），不写死坐标：尺寸一漂，
+         *      点就漂到按钮外面，那会变成"恒绿的假断言"。
+         *   ③ 只认"命中的元素是目标本身或它的子元素"（`contains`）：
+         *      圆按钮里那颗 SVG、胶囊里那个高亮 `<span>` 都是子元素，不许因为这点红。
+         *
+         * 两条被钉的事：
+         *   · `stack-circle`：展开态圆按钮中心 → 命中的必须是**那颗按钮**，不是 Sheet/遮罩。
+         *     ⚠️ 它同时钉住"**点它 = 关 Sheet**"（开关语义）：它浮在遮罩之上，
+         *        所以点它是**按钮自己**收到 click（`setMoreAt(null)`），不是"点遮罩关闭"。
+         *        真浏览器里点过一次：`sheet: true → false`、`aria-expanded: true → false`、
+         *        URL 不动、无障碍名回到「展开更多入口」（§十五 15.3）。
+         *   · `stack-foot`：Sheet 页脚那个「收起」按钮的中心**必须在导航之上**。
+         *     `<nav>` 只有 `pointer-events-none`、**没有背景**，所以"压在导航下面"时
+         *     `elementFromPoint` 会**穿过它**返回 `.sheet`（实测就是这么回事：命中
+         *     `.sheet` 的页脚 div，而按钮其实被那两颗控件盖着）—— 单看命中元素会漏判。
+         *     所以这里问的是**位置**：按钮中心（连同页脚垫起来的那块）必须落在
+         *     `<nav>` 的上沿之上。层叠抬上去之后，页脚靠 `.sheet-foot-safe`
+         *     （index.css）补出等效于主列 `pb-24` 的安全区，这一条就是它的机器版。
+         *     实测（414×880）：页脚垫起来后按钮中心 y=783、`nav` 上沿 y=804 ——
+         *     差 21px；抽掉那块安全区就掉到 847（落在 804 以下的带子里）。
+         * ============================================================
+         */
+        const stackProbe = async (c) =>
+          await page.evaluate(async ({ c }) => {
+            const nav = document.querySelector('nav[aria-label="主导航"]')
+            const circle = nav?.querySelector('button[aria-haspopup="dialog"]')
+            const sheet = document.querySelector('.sheet')
+            const box = sheet?.querySelector('.sheet-foot-safe')
+            /* AppShell 的根节点：`neg-circle` 那条对照改的就是它（见下） */
+            const root = document.querySelector('div.relative.mx-auto.flex.min-h-full.w-full')
+            const foot = box
+              ? [...box.querySelectorAll('button')].find(
+                  (b) => (b.innerText ?? '').trim() === '收起',
+                )
+              : null
+            if (!nav || !circle || !sheet || !box || !foot || !root) {
+              return {
+                c,
+                missing:
+                  'nav / 圆按钮 / .sheet / .sheet-foot-safe / 页脚「收起」按钮 / AppShell 根节点 有一样没找到',
+              }
+            }
+            /* 对照场景：把"圆按钮被 Sheet 盖住"那件事**原样做回去** / 去掉页脚那块安全区 */
+            if (c === 'neg-circle') {
+              /*
+               * 🔴 这个对照**必须打在根节点上，不能打在 `<nav>` 上** —— 这正是这次踩到的坑：
+               * `.sheet`（z-51）走 Portal 挂在 body 上，而 `<nav>` 在 AppShell 根节点
+               * `div.relative.z-[1]` 里面；`z-index` 非 auto 的定位元素自成**层叠上下文**，
+               * 子树里的 z-index 出不去 —— 给 nav 写 `z-40` 还是 `z-52` 结果**完全一样**
+               * （都困在 z-1 里）。所以"还原成看不见"= **把那个层叠上下文还给根节点**。
+               *
+               * ⚠️ **用内联 `setProperty(…, 'important')`，不要注入 `<style>`**（实测教训）：
+               *   注入 `<style>` 那版（选择器 `.z-\[1\].mx-auto…`）在真页面上**一点作用都没有**
+               *   —— 因为它按类名选，而这一轮把根节点的 `z-[1]` 摘掉之后那个类**已经不在 DOM 上**了；
+               *   选择器失配是**静默的**（不报错、也不红），对照于是变成一条永远绿的摆设。
+               *   内联样式按**元素**打，与类名无关；`important` 又能压过 Tailwind 的 utility 类。
+               *   同一轮里"页脚安全区"那条对照也有同样的坑（`<style>` 里的 `!important`
+               *   规则同样没生效）—— 两处都改成内联。
+               */
+              root.style.setProperty('z-index', '1', 'important')
+            } else if (c === 'neg-foot') {
+              box.style.setProperty('padding-bottom', '12px', 'important')
+            }
+            /*
+             * 等两帧再量：改完样式到"计算值真的变了"之间隔一次样式重算，
+             * 而 `elementFromPoint` **不触发**重算 —— 立刻量会拿到旧值（也会让对照永远不红）。
+             */
+            await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))
+            const undo = () => {
+              if (c === 'neg-circle') root.style.removeProperty('z-index')
+              if (c === 'neg-foot') box.style.removeProperty('padding-bottom')
+            }
+            const rectOf = (el) => {
+              const r = el.getBoundingClientRect()
+              /* `raw` 留**未取整**的浮点值：命中点要用它算中心（取整会让点在按钮里偏 0.5px） */
+              return {
+                raw: r,
+                left: Math.round(r.left),
+                top: Math.round(r.top),
+                width: Math.round(r.width),
+                height: Math.round(r.height),
+                /* 元素自己的层叠：`.sheet` 的 z-index 不在内联样式上，所以读计算值 */
+                z: getComputedStyle(el).zIndex,
+                /* 谁是"能被点到"的：`pointer-events` 继承，nav 那条带子是 none */
+                pe: getComputedStyle(el).pointerEvents,
+              }
+            }
+            const circleRect = rectOf(circle)
+            /* 中心点：取**视口坐标**（elementFromPoint 要的就是这个坐标系） */
+            const cx = circleRect.raw.left + circleRect.raw.width / 2
+            const cy = circleRect.raw.top + circleRect.raw.height / 2
+            const atCircle = document.elementFromPoint(cx, cy)
+            const footRect = rectOf(foot)
+            const fcx = footRect.raw.left + footRect.raw.width / 2
+            const fcy = footRect.raw.top + footRect.raw.height / 2
+            const atFoot = document.elementFromPoint(fcx, fcy)
+            const navRect = nav.getBoundingClientRect()
+            /*
+             * ⚠️ 这两句必须在 `undo()` **之前**读：它们就是"对照到底改上没有"的证据，
+             *    放在还原之后读永远是常态值（`neg-circle` 那条就会显示 root z=auto，
+             *    看着像"对照没生效"）。
+             */
+            const rootZ = getComputedStyle(root).zIndex
+            const padBottom = getComputedStyle(box).paddingBottom
+            /* 量完了就把对照还原（下面的 `hitIsCircle` / `centerInNavBand` 都是量出来的标量） */
+            undo()
+            const describe = (el) => {
+              if (!el) return '(什么都没有)'
+              const cls =
+                typeof el.className === 'string' && el.className
+                  ? `.${el.className.trim().split(/\s+/).join('.')}`
+                  : ''
+              return `${el.tagName.toLowerCase()}${cls}`
+            }
+            return {
+              case: c,
+              /* 根节点（AppShell 那个 `relative mx-auto flex min-h-full w-full`）的计算 z-index ——
+                 `neg-circle` 那条对照就是改它；把它读回来，对照失效时能一眼看出"是没生效还是没在量" */
+              rootZ,
+              circle: {
+                hit: describe(atCircle),
+                hitIsCircle: Boolean(atCircle) && circle.contains(atCircle),
+                /* 只带取整后的那份（含 `raw` 的 DOMRect 序列化出来是一坨，读不动） */
+                rect: {
+                  left: circleRect.left,
+                  top: circleRect.top,
+                  width: circleRect.width,
+                  height: circleRect.height,
+                  z: circleRect.z,
+                  pe: circleRect.pe,
+                },
+                center: [Math.round(cx), Math.round(cy)],
+              },
+              foot: {
+                hit: describe(atFoot),
+                hitIsFoot: Boolean(atFoot) && foot.contains(atFoot),
+                rect: {
+                  left: footRect.left,
+                  top: footRect.top,
+                  width: footRect.width,
+                  height: footRect.height,
+                  z: footRect.z,
+                  pe: footRect.pe,
+                },
+                center: [Math.round(fcx), Math.round(fcy)],
+                /* 页脚那块安全区**算出来是多少**（`neg-foot` 那条对照就是压它） */
+                padBottom,
+                /* 按钮中心在不在导航那条带子里（`nav` 只有 pointer-events-none、没有背景，
+                   所以这里要问**位置**，不能只看 elementFromPoint 命中了谁） */
+                centerInNavBand: fcy >= navRect.top,
+              },
+              nav: {
+                top: Math.round(navRect.top),
+                height: Math.round(navRect.height),
+                z: getComputedStyle(nav).zIndex,
+              },
+              sheet: {
+                z: getComputedStyle(sheet).zIndex,
+                rect: {
+                  left: Math.round(sheet.getBoundingClientRect().left),
+                  top: Math.round(sheet.getBoundingClientRect().top),
+                  width: Math.round(sheet.getBoundingClientRect().width),
+                  height: Math.round(sheet.getBoundingClientRect().height),
+                },
+              },
+            }
+          }, { c })
+
+        /*
+         * 三次取数，各处只取一次：
+         *   · `real`       —— 真层叠（nav 展开态 z-52 在 .sheet 的 z-51 之上）
+         *   · `negCircle`  —— 对照①：给 AppShell 根节点加回 `z-[1]`（= 修之前），圆按钮必须被 Sheet 盖住
+         *   · `negFoot`    —— 对照②：抽掉页脚安全区，页脚按钮必须落进导航那条带子
+         */
+        const real = await stackProbe('real')
+        const negCircle = await stackProbe('neg-circle')
+        const negFoot = await stackProbe('neg-foot')
+        /* 探针本身缺东西（选择器漂了 / 页脚没了）→ 后面每条都会是"看着红其实没在量"的假红 */
+        for (const [c, r] of [['real', real], ['neg-circle', negCircle], ['neg-foot', negFoot]]) {
+          if (r?.missing) throw new Error(`${SNM}：层叠探针（${c}）取数失败 —— ${r.missing}`)
+        }
+        check(
+          real.circle?.hitIsCircle === true,
+          `${SNM}：**展开态的圆按钮真的在最上面**（elementFromPoint 命中的是它自己，不是 Sheet / 遮罩）`,
+          `按钮实占=${JSON.stringify(real.circle?.rect)} 中心=${JSON.stringify(real.circle?.center)} → 命中 ${real.circle?.hit}`,
+          `nav z=${real.nav?.z} · .sheet z=${real.sheet?.z} · .sheet=${JSON.stringify(real.sheet?.rect)}`,
+        )
+
+        // 🔴 **反向对照**：把"根节点自成层叠上下文"加回去（= 这次修之前的样子）→ 这一条**必须**红
+        check(
+          negCircle.circle?.hitIsCircle === false,
+          `${SNM}：🧪 反向对照 —— 给根节点加回 z-[1]（按钮重新被 Sheet 盖住）时，上面那条**必须**红`,
+          `加回根节点 z-index 之后命中 ${negCircle.circle?.hit}（hitIsCircle=${negCircle.circle?.hitIsCircle}，nav z=${negCircle.nav?.z}，root z=${negCircle.rootZ}）`,
+          '若这里还是 true，说明上面那条断言是摆设（它根本没在量层叠）',
+        )
+
+        check(
+          real.foot?.centerInNavBand === false,
+          `${SNM}：页脚那个「收起」按钮**整体落在导航之上**（不会被抬上去的那对控件压住）`,
+          `按钮实占=${JSON.stringify(real.foot?.rect)} 中心=${JSON.stringify(real.foot?.center)} · nav.top=${real.nav?.top}（centerInNavBand=${real.foot?.centerInNavBand}）→ 命中 ${real.foot?.hit}`,
+          '这一条是 `.sheet-foot-safe`（index.css）那块等效 pb-24 安全区的机器版',
+        )
+        // 🔴 反向对照：抽掉页脚那块安全区（padding-bottom 压回 12px）→ 按钮中心落进导航那条带子
+        check(
+          negFoot.foot?.centerInNavBand === true,
+          `${SNM}：🧪 反向对照 —— 抽掉页脚安全区时，上面那条**必须**红`,
+          `padding-bottom 压回 12px 之后 nav.top=${negFoot.nav?.top}、按钮中心 y=${negFoot.foot?.center?.[1]}（centerInNavBand=${negFoot.foot?.centerInNavBand}，页脚 pad-bottom=${negFoot.foot?.padBottom}）`,
+          '红不了就说明页脚其实没被压住，或者这条断言量的不是位置',
+        )
+
         // 展开层里点一条 → 真的跳过去（收起的四条路径之一：点条目先收起再 navigate）
         await page.locator('.sheet button').filter({ hasText: '日程表' }).first().click()
         await page.waitForURL('**/schedule', { timeout: 8000 })

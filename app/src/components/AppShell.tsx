@@ -544,7 +544,25 @@ function MobileNav() {
     <>
       <nav
         aria-label="主导航"
-        className="pointer-events-none fixed inset-x-0 z-40 lg:hidden"
+        /*
+         * 🔴 **层叠**（2026-09-28 用户拍板 A：把这一对控件抬到 Sheet 之上）：
+         *   · 收起态 `z-40` —— 和从前一样，被 `pb-24` 让出来的那条空白区里悬浮；
+         *   · 展开态 `z-52` —— 展开层 Sheet 是 `z-51`（`.sheet`，走 Portal 挂在 body 上），
+         *     不抬的话"朝下的收起箭头"在 Sheet 升起（0.26s）之后就被盖住，用户只在
+         *     收起动画里一闪而过（§十五 15.3 原本那条"已知限制"）。
+         *
+         * ⚠️ **为什么是"整个 <nav> 抬"而不是"只抬圆按钮"**：
+         *   ① 胶囊与圆按钮是**一对视觉单元**（参考图里就是并排的），只抬一个看着像断了一半；
+         *   ② 更要紧的是**语义**：不抬胶囊的话，胶囊会被**遮罩**.scrim（z-50）盖住 ——
+         *      而 `.scrim` 是"可点 = 关闭"的一整片，**点胶囊等于点遮罩**，
+         *      那就变成"在遮罩上点了个图标、导航没反应、Sheet 却关了"。
+         *      两个一起抬，点击语义才干净（实测见 §十五 15.3）。
+         * ⚠️ 代价：Sheet 底部那 58px 会压在导航下面 → 由 `.sheet-foot-safe`
+         *    （index.css，加在 `Sheet` 的页脚上）给页脚留出等效的安全区，
+         *    否则底部那个「收起」按钮会被这两颗控件压住（§十五 15.3）。
+         * ⚠️ **尺寸一个字没动**：底距、58、48、52 全照旧（I21）。
+         */
+        className={cx('pointer-events-none fixed inset-x-0 lg:hidden', more ? 'z-[52]' : 'z-40')}
         style={{ bottom: 'calc(env(safe-area-inset-bottom, 0px) + 18px)' }}
       >
         {/*
@@ -622,6 +640,11 @@ function MobileNav() {
                     更容易读成"同一件事的开关"；桌面那侧没有这个按钮，不用跟着改。
               🔴 无障碍名**跟着状态变**（视觉与 aria-label 必须一致，§十五 I21 那一挂）：
                  `展开更多入口` ↔ `收起更多入口`。`shots.mjs` 是按**收起态那个名字**点的。
+              🔴 **展开态它必须真的看得见**（2026-09-28）：`<nav>` 展开时整个抬到 `z-52`
+                 （在 Sheet 的 `z-51` 之上），所以"朝下"那个形态是用户**真能看到、真能点到**
+                 的，不再是只在收起动画里闪一下。`shots.mjs` 用
+                 `document.elementFromPoint(按钮中心)` 钉住这一点 —— 只量 `transform`
+                 验不出"到底看不看得见"（详见 §十五 15.3）。
               ⚠️ 颜色用 `--color-accentink`（***REMOVED***0847c4）：它压在近白的玻璃上 ≈ **7.3:1**。
                  原来那个暖黄 `***REMOVED***f5c469` 是"深底上的显眼强调物"，在这套亮色玻璃上只有
                  ≈ **1.5:1**，而且按钮现在的语义是个功能开关 —— 与全站其它控件同用
@@ -922,7 +945,22 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }, [pathname])
 
   return (
-    <div className="relative z-[1] mx-auto flex min-h-full w-full" style={{ maxWidth: 1220 }}>
+    /*
+     * 🔴 **这里故意没有 `z-[1]`**（2026-09-28 挪走的，别加回来）—— 见 §十五 15.3。
+     *
+     * 移动端那颗展开按钮要"抬到 Sheet（`.sheet`，z-51，走 Portal 挂在 body 上）之上"，
+     * 是**在这一层的 z-index 上失败的**：`z-index` 非 `auto` 的定位元素会**自成层叠上下文**，
+     * 子树里的 `z-index` 再也出不去 —— `<nav>` 里写 `z-[52]` 也没用，整棵子树仍然被
+     * 关在 `z-index: 1` 里，永远压不过 body 下那个 `z-51` 的 Sheet。
+     * 实测（414×880、展开态）：`elementFromPoint(圆按钮中心)` 命中的是 `.sheet` 的页脚，
+     * 不是按钮；把这行的 `z-index` 摘掉之后立刻命中按钮里的 `<svg>`（`shots.mjs` 有这条断言）。
+     *
+     * ⚠️ 摘掉它**不会**让页面里的东西盖住浮层：页面内容仍然是普通流/`z-index:auto`，
+     *    而 `.scrim`（z-50）与 `.sheet`（z-51）是**定位元素且排在后面**，照样盖住整页 ——
+     *    实测移动端顶栏（`z-30`）在 Sheet 开着时命中的仍然是 `.scrim`。
+     * ⚠️ `relative` 留着（页面里那些 `absolute` 的东西要按它定位）。
+     */
+    <div className="relative mx-auto flex min-h-full w-full" style={{ maxWidth: 1220 }}>
       {/* 桌面左栏 —— 悬浮在画布之上的一层 */}
       <aside className="hidden shrink-0 lg:block" style={{ width: 266, paddingLeft: 14 }}>
         <div
