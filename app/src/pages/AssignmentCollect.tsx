@@ -19,6 +19,7 @@ import { useStore, useToast } from '../data/store'
 import type { Assignment, Student } from '../data/types'
 import { analyzeScan, simulateCollectScan, type ScanAnalysis } from '../lib/assignments'
 import { clearStudentRecords } from '../lib/grading'
+import { archiveKeyOf, archiveValue, displayNoOfArchiveKey } from '../lib/keys'
 import { recognize, splitByConfidence, type OcrCount } from '../lib/ocr'
 import { preparePhoto, type PreparedPhoto, type Rotate } from '../lib/photo'
 import { isRemote } from '../lib/supabase'
@@ -184,9 +185,17 @@ export default function AssignmentCollect() {
     )
   }
 
+  /*
+   * ⚠️ 两套号，别混：
+   *  · `allNos` = **班内学号** —— 拍照识别出来的是它，`analyzeScan` 的"相邻跳号"推断也按它算；
+   *  · `mark` / `missingNos` / `lateNos` 的键 = **档案键**（迁移后是序列号）→ 一律经 `toKey()` 换。
+   *    界面上仍然显示班内学号（渲染处一行没改）。
+   */
   const allNos = students.map((s) => s.studentNo)
-  const missing = students.filter((s) => mark[s.studentNo] === 'missing')
-  const late = students.filter((s) => mark[s.studentNo] === 'late')
+  const keyOfNo = new Map(students.map((s) => [s.studentNo, archiveKeyOf(s)]))
+  const toKey = (no: string) => keyOfNo.get(no) ?? no
+  const missing = students.filter((s) => mark[archiveKeyOf(s)] === 'missing')
+  const late = students.filter((s) => mark[archiveKeyOf(s)] === 'late')
   const submitted = students.length - missing.length
 
   /** 选到照片后先做本机预处理，让教师看一眼再决定要不要识别 */
@@ -278,7 +287,7 @@ export default function AssignmentCollect() {
     }
 
     const next: Record<string, Mark> = {}
-    for (const n of analysis.unreadable) next[n] = 'missing'
+    for (const n of analysis.unreadable) next[toKey(n)] = 'missing'
     setMark(next)
     setScan(analysis)
     setDetectedCount(all.length)
@@ -332,7 +341,7 @@ export default function AssignmentCollect() {
 
   /** 名单里"已经批改过、却要被登记成未交"的人 —— 保存前必须先问一句 */
   const demoteStudents = (nos: string[]) =>
-    students.filter((s) => nos.includes(s.studentNo) && graded(s.studentNo)).map((s) => s.studentNo)
+    students.filter((s) => nos.includes(archiveKeyOf(s)) && graded(archiveKeyOf(s))).map((s) => archiveKeyOf(s))
 
   /**
    * 确认把已批改的人改成未交：批改记录一起删，不能留一份"没交却有错题"的数据。
@@ -366,8 +375,8 @@ export default function AssignmentCollect() {
   /** 「保存登记」：有"已批改的人被标成未交"就先确认，否则直接存 */
   const save = () => {
     if (!assignment) return
-    const missingNos = missing.map((s) => s.studentNo)
-    const lateNos = late.map((s) => s.studentNo)
+    const missingNos = missing.map((s) => archiveKeyOf(s))
+    const lateNos = late.map((s) => archiveKeyOf(s))
     if (demoteStudents(missingNos).length) {
       setPendingSave({ missingNos, lateNos })
       return
@@ -671,7 +680,7 @@ export default function AssignmentCollect() {
                         const { detected } = simulateCollectScan(allNos)
                         const analysis = analyzeScan(detected, allNos)
                         const next: Record<string, Mark> = {}
-                        for (const n of analysis.unreadable) next[n] = 'missing'
+                        for (const n of analysis.unreadable) next[toKey(n)] = 'missing'
                         setMark(next)
                         setScan(analysis)
                         setDetectedCount(detected.length)
@@ -976,7 +985,7 @@ export default function AssignmentCollect() {
 
             <div className="grid grid-cols-3 gap-2 p-2.5 sm:grid-cols-4">
               {students.map((s) => {
-                const st = mark[s.studentNo] ?? 'submitted'
+                const st = mark[archiveKeyOf(s)] ?? 'submitted'
                 const bg =
                   st === 'missing'
                     ? 'var(--color-badsoft)'
@@ -999,7 +1008,7 @@ export default function AssignmentCollect() {
                   <button
                     key={s.id}
                     type="button"
-                    onClick={() => cycle(s.studentNo, mode)}
+                    onClick={() => cycle(archiveKeyOf(s), mode)}
                     className="flex flex-col items-start gap-0.5 px-2 py-1.5 text-left"
                     style={{
                       background: bg,
@@ -1094,8 +1103,8 @@ export default function AssignmentCollect() {
             <IconAlert size={17} />
           </span>
           <div style={{ fontSize: 13, lineHeight: 1.8, color: 'var(--color-ink2)' }}>
-            <b className="num">{demoteNo}</b> 号
-            {students.find((s) => s.studentNo === demoteNo)?.name ?? ''} 已经有批改记录（错了{' '}
+            <b className="num">{displayNoOfArchiveKey(students, demoteNo ?? '')}</b> 号
+            {students.find((s) => archiveKeyOf(s) === demoteNo || s.studentNo === demoteNo)?.name ?? ''} 已经有批改记录（错了{' '}
             <b className="num">{assignment?.wrong?.[demoteNo ?? '']?.length ?? 0}</b> 处）。
             <br />
             改成未交的话，<b>这份批改记录会一起删掉</b> —— 错题、改错名单里的名字、
@@ -1147,7 +1156,7 @@ export default function AssignmentCollect() {
         </div>
         <div className="mt-3 flex flex-wrap gap-1.5">
           {students
-            .filter((s) => demoteStudents(pendingSave?.missingNos ?? []).includes(s.studentNo))
+            .filter((s) => demoteStudents(pendingSave?.missingNos ?? []).includes(archiveKeyOf(s)))
             .map((s) => (
               <span
                 key={s.id}
@@ -1162,8 +1171,8 @@ export default function AssignmentCollect() {
                 <b className="num">{s.studentNo}</b>
                 {s.name}
                 <span className="num" style={{ fontSize: 11, color: 'var(--color-ink3)' }}>
-                  {assignment?.wrong?.[s.studentNo]?.length
-                    ? `错 ${assignment.wrong[s.studentNo].length}`
+                  {(archiveValue(assignment?.wrong, s)?.length ?? 0) > 0
+                    ? `错 ${archiveValue(assignment?.wrong, s)?.length ?? 0}`
                     : '已批阅'}
                 </span>
               </span>

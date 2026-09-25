@@ -2,8 +2,23 @@ export type StudentStatus = 'active' | 'left'
 
 export type Student = {
   id: string
-  /** 班内学号，唯一 */
+  /** 班内学号，唯一。**它仍然可改**（班主任 / 年级主任 / 教导处三档） */
   studentNo: string
+  /**
+   * **序列号**（Q6）：`入校年份 4 位 + 该届内 3 位`（如 `2025001`），**全校唯一、生成后永久不可改**。
+   *
+   * 🔴 **它才是那 10 个字段（+2 处考试字段）的键** —— 见 `lib/keys.ts` 的 `archiveKeyOf()`。
+   * 兼容期（线上库还没跑 `supabase/schema.sql` §20）：它为空 → 键退回 `studentNo`，老行为不变。
+   * ⚠️ 空串不写 `undefined`：与 `subjectCode` 那套兼容期读法同一口径（"没有值"只有一种写法）。
+   */
+  serial?: string
+  /**
+   * **迁移那一刻的班内学号存档**（= 老键）。只有"从老键迁过来的"学生才有值。
+   *
+   * ⚠️ 它**只读不写**：前端任何时候都不许改它（数据库 §20.2 的触发器会拒），
+   * 它的用途只有一个 —— 让键迁移**幂等**（`schema.sql` 的 20.4 / U-3 = B）。
+   */
+  legacyStudentNo?: string
   name: string
   status: StudentStatus
   note?: string

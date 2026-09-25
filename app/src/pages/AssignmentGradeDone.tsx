@@ -12,6 +12,7 @@ import { Button, PageHead, Panel, Sect, StatStrip, Tag } from '../components/ui'
 import { useStore } from '../data/store'
 import { BAND_META, gradeStats, humanDuration } from '../lib/grading'
 import { friendlyDate } from '../lib/date'
+import { archiveValue } from '../lib/keys'
 
 export default function AssignmentGradeDone() {
   const { id = '' } = useParams()
@@ -46,14 +47,14 @@ export default function AssignmentGradeDone() {
   const gradeCounts = useMemo(() => {
     const c = { 优: 0, 良: 0, 差: 0 }
     for (const s of students) {
-      const g = grades?.[s.studentNo]
+      const g = archiveValue(grades, s)
       if (g === '优' || g === '良' || g === '差') c[g]++
     }
     return c
   }, [students, grades])
   /** 极简模式里"最该面批"的那批人 —— 代替普通模式的「明天讲评的重点」 */
   const badOnes = useMemo(
-    () => students.filter((s) => grades?.[s.studentNo] === '差'),
+    () => students.filter((s) => archiveValue(grades, s) === '差'),
     [students, grades],
   )
 

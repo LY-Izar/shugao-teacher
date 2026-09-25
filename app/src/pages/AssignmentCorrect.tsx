@@ -7,6 +7,7 @@ import { useStore, useToast } from '../data/store'
 import type { Student } from '../data/types'
 import { friendlyDate } from '../lib/date'
 import { CALL_LIMIT, composeCallText } from '../lib/calls'
+import { archiveKeyOf } from '../lib/keys'
 
 /**
  * 改错登记。
@@ -44,6 +45,12 @@ export default function AssignmentCorrect() {
   const correction = assignment?.correctionNos ?? []
   const corrected = assignment?.correctedNos ?? []
   const focus = assignment?.focusNos ?? []
+  /*
+   * 🔴 上面这三个名单的键、以及下面 `grades` / `wrong` 的键，**都是档案键**
+   *    （迁移后 = 序列号，I40 / `schema.sql` §20）。
+   *    所以凡是"读写这些集合"的地方一律 `k(s)`；`{s.studentNo}` 那种**显示**保持不动。
+   */
+  const k = archiveKeyOf
   /**
    * 极简模式：这份档案**没有错题数据**（`wrong` 永远是空的），
    * 结论只有学号 → 优 / 良 / 差。
@@ -69,13 +76,13 @@ export default function AssignmentCorrect() {
    * memo 既挡不住重算又会报依赖警告；班级几十人，直接算更省心。
    */
   const todoList = students.filter(
-    (s) => correction.includes(s.studentNo) && !corrected.includes(s.studentNo),
+    (s) => correction.includes(k(s)) && !corrected.includes(k(s)),
   )
   const todo = [
-    ...todoList.filter((s) => focus.includes(s.studentNo)),
-    ...todoList.filter((s) => !focus.includes(s.studentNo)),
+    ...todoList.filter((s) => focus.includes(k(s))),
+    ...todoList.filter((s) => !focus.includes(k(s))),
   ]
-  const done = students.filter((s) => corrected.includes(s.studentNo))
+  const done = students.filter((s) => corrected.includes(k(s)))
 
   if (!assignment) {
     return (
@@ -138,9 +145,9 @@ export default function AssignmentCorrect() {
   }
 
   const Row = ({ s, on, onClick }: { s: Student; on: boolean; onClick: () => void }) => {
-    const wc = wrongOf(s.studentNo)
-    const r = rateOf(s.studentNo)
-    const grade = gradeOf(s.studentNo)
+    const wc = wrongOf(k(s))
+    const r = rateOf(k(s))
+    const grade = gradeOf(k(s))
     const col = simple
       ? grade
         ? gradeColor(grade)
@@ -150,7 +157,7 @@ export default function AssignmentCorrect() {
         : r > 0
           ? 'var(--color-warn)'
           : 'var(--color-ok)'
-    const focused = focus.includes(s.studentNo)
+    const focused = focus.includes(k(s))
     return (
       <button
         type="button"
@@ -226,7 +233,7 @@ export default function AssignmentCorrect() {
               icon={<IconMegaphone size={15} />}
               onClick={() => {
                 // 默认勾上待改错的人 —— 叫的就是他们
-                setCallSel(todo.map((s) => s.studentNo).slice(0, CALL_LIMIT))
+                setCallSel(todo.map((s) => k(s)).slice(0, CALL_LIMIT))
                 setCalling(true)
               }}
             >
@@ -245,7 +252,7 @@ export default function AssignmentCorrect() {
             ) : (
               todo.map((s, i) => (
                 <div key={s.id} style={{ borderBottom: i === todo.length - 1 ? undefined : '1px solid var(--color-line)' }}>
-                  <Row s={s} on={false} onClick={() => toggleCorrected(s.studentNo)} />
+                  <Row s={s} on={false} onClick={() => toggleCorrected(k(s))} />
                 </div>
               ))
             )}
@@ -259,7 +266,7 @@ export default function AssignmentCorrect() {
             <Panel className="overflow-hidden">
               {done.map((s, i) => (
                 <div key={s.id} style={{ borderBottom: i === done.length - 1 ? undefined : '1px solid var(--color-line)' }}>
-                  <Row s={s} on onClick={() => toggleCorrected(s.studentNo)} />
+                  <Row s={s} on onClick={() => toggleCorrected(k(s))} />
                 </div>
               ))}
             </Panel>
@@ -279,9 +286,9 @@ export default function AssignmentCorrect() {
         </p>
         <div style={{ maxHeight: '50vh', overflowY: 'auto' }}>
           {students
-            .filter((s) => correction.includes(s.studentNo))
+            .filter((s) => correction.includes(k(s)))
             .map((s) => {
-              const on = callSel.includes(s.studentNo)
+              const on = callSel.includes(k(s))
               return (
                 <label
                   key={s.id}
@@ -293,11 +300,11 @@ export default function AssignmentCorrect() {
                     checked={on}
                     onChange={() =>
                       setCallSel((c) =>
-                        c.includes(s.studentNo)
-                          ? c.filter((x) => x !== s.studentNo)
+                        c.includes(k(s))
+                          ? c.filter((x) => x !== k(s))
                           : c.length >= CALL_LIMIT
                             ? c
-                            : [...c, s.studentNo],
+                            : [...c, k(s)],
                       )
                     }
                     style={{ width: 16, height: 16, accentColor: 'var(--color-accent)' }}
@@ -308,7 +315,7 @@ export default function AssignmentCorrect() {
                   <span className="min-w-0 flex-1 truncate" style={{ fontSize: 13.5 }}>
                     {s.name}
                   </span>
-                  {corrected.includes(s.studentNo) ? <Tag tone="ok">已改</Tag> : null}
+                  {corrected.includes(k(s)) ? <Tag tone="ok">已改</Tag> : null}
                 </label>
               )
             })}
@@ -335,7 +342,7 @@ export default function AssignmentCorrect() {
               <Button
                 size="sm"
                 variant="ghost"
-                onClick={() => setCorrection(students.filter((s) => gradeOf(s.studentNo) === '差').map((s) => s.studentNo))}
+                onClick={() => setCorrection(students.filter((s) => gradeOf(k(s)) === '差').map((s) => k(s)))}
               >
                 全选「差」的
               </Button>
@@ -346,10 +353,10 @@ export default function AssignmentCorrect() {
                   setCorrection(
                     students
                       .filter((s) => {
-                        const g = gradeOf(s.studentNo)
+                        const g = gradeOf(k(s))
                         return g === '差' || g === '良'
                       })
-                      .map((s) => s.studentNo),
+                      .map((s) => k(s)),
                   )
                 }
               >
@@ -361,14 +368,14 @@ export default function AssignmentCorrect() {
               <Button
                 size="sm"
                 variant="ghost"
-                onClick={() => setCorrection(students.filter((s) => wrongOf(s.studentNo) > 0).map((s) => s.studentNo))}
+                onClick={() => setCorrection(students.filter((s) => wrongOf(k(s)) > 0).map((s) => k(s)))}
               >
                 全选有错的
               </Button>
               <Button
                 size="sm"
                 variant="ghost"
-                onClick={() => setCorrection(students.filter((s) => rateOf(s.studentNo) >= 0.3).map((s) => s.studentNo))}
+                onClick={() => setCorrection(students.filter((s) => rateOf(k(s)) >= 0.3).map((s) => k(s)))}
               >
                 错误率 ≥ 30%
               </Button>
@@ -380,10 +387,10 @@ export default function AssignmentCorrect() {
         </div>
         <div style={{ maxHeight: '56vh', overflowY: 'auto' }}>
           {students.map((s) => {
-            const on = correction.includes(s.studentNo)
-            const wc = wrongOf(s.studentNo)
-            const r = rateOf(s.studentNo)
-            const grade = gradeOf(s.studentNo)
+            const on = correction.includes(k(s))
+            const wc = wrongOf(k(s))
+            const r = rateOf(k(s))
+            const grade = gradeOf(k(s))
             const col = simple
               ? grade
                 ? gradeColor(grade)
@@ -403,7 +410,7 @@ export default function AssignmentCorrect() {
                   type="checkbox"
                   checked={on}
                   onChange={() =>
-                    setCorrection(on ? correction.filter((x) => x !== s.studentNo) : [...correction, s.studentNo])
+                    setCorrection(on ? correction.filter((x) => x !== k(s)) : [...correction, k(s)])
                   }
                   style={{ width: 16, height: 16, accentColor: 'var(--color-accent)', flexShrink: 0 }}
                 />
@@ -413,14 +420,14 @@ export default function AssignmentCorrect() {
                 <span className="min-w-0 flex-1 truncate" style={{ fontSize: 13.5 }}>
                   {s.name}
                 </span>
-                {focus.includes(s.studentNo) ? <Tag tone="warn">重点</Tag> : null}
+                {focus.includes(k(s)) ? <Tag tone="warn">重点</Tag> : null}
                 <span className="num shrink-0" style={{ fontSize: 12.5, fontWeight: 700, color: col }}>
                   {simple ? (grade ?? '未评') : wc ? `错 ${wc}` : '全对'}
                 </span>
-                {corrected.includes(s.studentNo) ? (
+                {corrected.includes(k(s)) ? (
                   <button
                     type="button"
-                    onClick={() => toggleCorrected(s.studentNo)}
+                    onClick={() => toggleCorrected(k(s))}
                     style={{ fontSize: 11.5, color: 'var(--color-ok)', textDecoration: 'underline', flexShrink: 0 }}
                   >
                     已改·撤销

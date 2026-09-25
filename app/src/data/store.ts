@@ -4,6 +4,7 @@ import { isRemote } from '../lib/supabase'
 import { HEARTBEAT_MS, emit, subscribe } from '../lib/realtime'
 import { normalizePaperName } from '../lib/examPaper'
 import { clampQuestionCount } from '../lib/assignments'
+import { withSerial } from '../lib/serial'
 import {
   alignAssignmentSubject,
   alignTeacherPrimarySubject,
@@ -359,34 +360,46 @@ type State = {
  *  · 目标班这个号**空着**，而且**从来没有任何记录引用过** → 保留原号（教师看着最自然）；
  *  · 否则取「目标班出现过的最大号 + 1」。
  *    刻意**不复用空号**：空号多半是转走/转出的人留下的，复用就等于把他的记录接着往下记。
+ *
+ * 🔴 **P1（序列号键迁移）之后这条规则松了一半**（`schema.sql` §20 / Q6）：
+ *    学生一旦有了**序列号**，那 10 个字段的键就**不再是学号**了 ——
+ *    转班**不用换号**也不会继承任何东西（W33 从"策略问题"变成"结构上不可能"）。
+ *    所以"这个号有没有被记录引用过"这件事**只在学生还没有序列号时**才需要看
+ *    （= 线上库还没跑 §20，或者这一行还没生成序列号）。
+ *    ⚠️ 但**目标班名单里已经有人用这个号**这一条**任何情况下都不能省**：
+ *       `unique (class_id, student_no)` 是数据库的硬约束，撞了 = 整条 upsert 被拒。
  */
 function pickTransferNo(
   s: Pick<State, 'classes' | 'assignments' | 'calls'>,
   target: Klass,
   want: string,
+  /** 这个学生**已经有序列号**吗？有 → 档案键不再是学号，不用再避让历史记录 */
+  keyedBySerial = false,
 ): string {
   const used = new Set<string>()
   const taken = new Set(target.students.map((st) => st.studentNo))
-  for (const a of s.assignments) {
-    if (a.classId !== target.id) continue
-    for (const list of [
-      a.missingNos,
-      a.lateNos,
-      a.confirmedNos,
-      a.focusNos,
-      a.correctionNos,
-      a.correctedNos,
-    ]) {
-      for (const n of list ?? []) used.add(String(n))
+  if (!keyedBySerial) {
+    for (const a of s.assignments) {
+      if (a.classId !== target.id) continue
+      for (const list of [
+        a.missingNos,
+        a.lateNos,
+        a.confirmedNos,
+        a.focusNos,
+        a.correctionNos,
+        a.correctedNos,
+      ]) {
+        for (const n of list ?? []) used.add(String(n))
+      }
+      for (const n of Object.keys(a.wrong ?? {})) used.add(n)
+      for (const n of Object.keys(a.grades ?? {})) used.add(n)
     }
-    for (const n of Object.keys(a.wrong ?? {})) used.add(n)
-    for (const n of Object.keys(a.grades ?? {})) used.add(n)
-  }
-  // 呼叫记录也按学号存（"已叫/已到/已订正"），同样不能继承
-  for (const c of s.calls ?? []) {
-    if (c.classId !== target.id) continue
-    for (const n of c.studentNos ?? []) used.add(String(n))
-    for (const n of Object.keys(c.states ?? {})) used.add(n)
+    // 呼叫记录也按学号存（"已叫/已到/已订正"），同样不能继承
+    for (const c of s.calls ?? []) {
+      if (c.classId !== target.id) continue
+      for (const n of c.studentNos ?? []) used.add(String(n))
+      for (const n of Object.keys(c.states ?? {})) used.add(n)
+    }
   }
 
   const free = (n: string) => n !== '' && !taken.has(n) && !used.has(n)
@@ -650,13 +663,17 @@ export const useStore = create<State>()(
                 }
                 continue
               }
-              const st: Student = {
-                id: uid(),
-                studentNo: no || String(base.length + 1),
-                name,
-                status: 'active',
-                createdAt: Date.now(),
-              }
+              const st: Student = withSerial(
+                {
+                  id: uid(),
+                  studentNo: no || String(base.length + 1),
+                  name,
+                  status: 'active',
+                  createdAt: Date.now(),
+                },
+                c,
+                s.classes,
+              )
               base.push(st)
               byNo.set(st.studentNo, st)
               touched.push(st)
@@ -713,8 +730,9 @@ export const useStore = create<State>()(
         /*
          * 学号要重新定（见 pickTransferNo）：原样搬过去就是**继承别人的记录**。
          * 目标班这个号空着、也从没被任何记录用过时才保留原号。
+         * 🔴 P1 之后：学生**有序列号**时档案键不再是学号 → 只需要避开目标班已占用的号。
          */
-        const no = pickTransferNo(st, to, moved.studentNo)
+        const no = pickTransferNo(st, to, moved.studentNo, !!moved.serial)
         const next: Student = no === moved.studentNo ? moved : { ...moved, studentNo: no }
         set((s) => ({
           isDemo: false,
@@ -1052,9 +1070,23 @@ export const useStore = create<State>()(
       },
 
       refreshExamTables: async () => {
-        // 探测结果是按页面缓存的（`remote.ensureExamTables`），
-        // 老师跑完 SQL 后要点一下这个 → 先把缓存清掉再重探。
-        // 这里通过"重新加载"顺带重探：`loadExams` 内部会再问一次。
+        /*
+         * 探测结果是按页面缓存的（`remote.ensureExamTables`），
+         * 老师跑完 SQL 后要点一下这个 → **先把缓存清掉**再重探。
+         *
+         * 🔴 这里原来说着"先清缓存"、其实**没有清**（`功能设计与不变量.md` §十 留档）：
+         *    以前只有 `set({ examTables: 'unknown' })`，然后 `hydrateExams()`
+         *    → `ensureExamTables()` → **命中同一个已经 resolve 的 Promise** →
+         *    拿到的是上次那份"表不在"。全仓对 `examTablesProbe` 只有三处引用
+         *    （定义 / 探测内部自清 / 没有别处），**没有任何外部清理入口**。
+         *    后果：`Exams.tsx` 上那个「重试」按钮**是空操作** ——
+         *    跑完 §15 必须**整页刷新**才生效，而界面看上去是"点过了、还是不行"。
+         *
+         *    这正是本面板要抓的那一族故障（"按钮看起来在动、其实什么都没做"），
+         *    所以修法是**给探测缓存补上唯一的外部清理入口**（`remote.resetExamTablesProbe()`），
+         *    而不是在页面里绕过它。
+         */
+        remote.resetExamTablesProbe()
         set({ examTables: 'unknown' })
         await get().hydrateExams()
       },

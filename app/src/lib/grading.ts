@@ -1,5 +1,6 @@
 import type { Assignment, QuestionKind, Student } from '../data/types'
 import { parseQKey, qKey } from '../data/types'
+import { archiveHas, archiveValue } from './keys'
 
 /* ============================================================
    批改录入的纯函数
@@ -150,7 +151,7 @@ export function clearStudentRecords(
 /** 反向题：某题的错题数 */
 export function wrongCountOf(students: Student[], wrong: Assignment['wrong']) {
   let total = 0
-  for (const s of students) total += wrong[s.studentNo]?.length ?? 0
+  for (const s of students) total += archiveValue(wrong, s)?.length ?? 0
   return total
 }
 
@@ -276,8 +277,13 @@ export function gradeStats(students: Student[], a: Assignment): GradeStats {
   const questions: QuestionStat[] = Array.from({ length: a.questionCount }, (_, i) => {
     const seq = i + 1
     const subCount = a.subQuestions[String(seq)] ?? 0
+    /*
+     * ⚠️ `.map(s => s.studentNo)` 是**故意的**：`wrongNos` 只用于**显示**（"哪几个号错了"），
+     *    而界面上永远显示**班内学号**（Q6：老师看到的东西一模一样）。
+     *    判断"谁错了"走的是 `archiveValue(a.wrong, s)`（键 = 序列号，兼容期两条路）。
+     */
     const wrongNos = active
-      .filter((s) => isQuestionWrong(a.wrong[s.studentNo], seq, subCount))
+      .filter((s) => isQuestionWrong(archiveValue(a.wrong, s), seq, subCount))
       .map((s) => s.studentNo)
     const rate = wrongNos.length / total
     const band = bandOf(rate)
@@ -297,9 +303,9 @@ export function gradeStats(students: Student[], a: Assignment): GradeStats {
     }
   })
 
-  const confirmedCount = active.filter((s) => a.confirmedNos.includes(s.studentNo)).length
-  const wrongTotal = active.reduce((n, s) => n + (a.wrong[s.studentNo]?.length ?? 0), 0)
-  const studentsWithWrong = active.filter((s) => (a.wrong[s.studentNo]?.length ?? 0) > 0).length
+  const confirmedCount = active.filter((s) => archiveHas(a.confirmedNos, s)).length
+  const wrongTotal = active.reduce((n, s) => n + (archiveValue(a.wrong, s)?.length ?? 0), 0)
+  const studentsWithWrong = active.filter((s) => (archiveValue(a.wrong, s)?.length ?? 0) > 0).length
 
   /* ---- 分值：只在「每道题都知道分值」时才算平均分 ---- */
   const scored = questions.filter((q) => q.fullScore !== undefined)

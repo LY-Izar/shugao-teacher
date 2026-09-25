@@ -120,6 +120,10 @@ const EXPECTED_FILES = [
   '07-photo-review.png',
   '08-paste-import.png',
   '09-settings.png',
+  // P1 序列号键（2026-09-25）：名单上的序列号列 · 改班内学号之后 · 档案不受影响
+  '09b-roster-serial.png',
+  '09b-after-rename.png',
+  '09c-collect-after-rename.png',
   '10-desktop.png',
   '11-assignments.png',
   '12-assignment-new.png',
@@ -202,6 +206,20 @@ const EXPECTED_FILES = [
   '77-role-multi-3.png',
   '78-role-multi-4.png',
   '79-role-multi-mobile.png',
+  // 超管运维面板（`超管运维面板方案.md` 第一期）。四张各自钉一件事：
+  //   80 = **设备被标成教室端时敲 /admin 也进得来**（方案 §七 T6，这一期最要紧的一条画面）
+  //   81 = 面板首屏（L0 健康条 + 五张卡 + 本地模式那条红警告）
+  //   82 = E7 矛盾明细（五类检查 + 隐私那一行，**默认只有学号**）
+  //   83 = 点了「显示姓名」之后（隐私 B 类的"显式操作"那一层）
+  '80-admin-locked-entry.png',
+  '81-admin-overview.png',
+  '82-admin-e7-detail.png',
+  '83-admin-e7-names.png',
+  // G7（用户 2026-09-28 拍板）：教师账号在**被标成教室端的设备**上打开 `/classroom` → 拦住。
+  //   84 = 拦截卡（三条出路写全）；85 = 反向对照：教师账号 + **自己的**设备 → 照常预览。
+  //   ⚠️ "拦住"的判据不只是那张卡，还有**屏上没有任何学生数据**（断言里逐项查过）。
+  '84-classroom-teacher-blocked.png',
+  '85-classroom-teacher-preview-ok.png',
 ]
 
 /* ---------------- 断言与日志 ---------------- */
@@ -556,6 +574,150 @@ await withLock(async () => {
         markers: ['账号 · 数据 · 关于', '备份与恢复', '教室端', '关于'],
       })
       await shot(page, '09 设置页', '09-settings', { full: true })
+
+      /* ================= S1·补：序列号键（P1）—— 改班内学号不影响档案 =================
+       *
+       * 验收口径（`选科走班实施计划.md` P1 第 5/6 条）：
+       *   · 「序列号」一栏**只读**（数据库层还有触发器兜底，这里只看界面给不给改）；
+       *   · **改班级内学号 → 历史档案一个字不受影响**（键已经是序列号）。
+       *
+       * 为什么必须在**真浏览器**里钉：`rls-checks` 那一节验的是数据库那一侧
+       * （触发器 + RLS + 迁移幂等），而"界面上老师改完之后，试卷档案里还是不是他"
+       * 走的是 `lib/keys.ts` 那层映射 + store + 页面渲染 —— 只有真界面能覆盖。
+       *
+       * 做法：把**第 7 号**（`a-demo-1` 的未交名单里有他）改成 99 号，
+       * 再去收缴页看那份档案 —— 未交的人必须还是"同一个孩子"，只是屏上号码变了。
+       * 跑完**改回原样**，后面的步骤看到的仍是 7 号。
+       */
+      await goto(page, '09b 改班内学号', '/classes/c-demo-1', {
+        markers: ['学生名单 · 45 人', '序列号'],
+      })
+      await shot(page, '09b 改班内学号', '09b-roster-serial', { full: true })
+      await step('09b 改班内学号', async () => {
+        // 名字从注入的快照里算（不拍字面量：seed 一改就成假通过）
+        const who = DEMO_CLASSES[0].students[6] // 第 7 号
+        check(Boolean(who), '演示名单里第 7 个学生在（夹具前提）', `students[6] = ${who?.name ?? '(没有)'}`)
+        if (!who) return
+
+        const rowText = await page.evaluate(
+          (name) =>
+            [...document.querySelectorAll('tbody tr')]
+              .map((tr) => (tr.innerText ?? '').replace(/\s+/g, ' ').trim())
+              .find((t) => t.includes(name)) ?? '',
+          who.name,
+        )
+        check(
+          '🔴 名单里**序列号那一列**显示的是 7 位序列号（不是班内学号）',
+          /2025\d{3}/.test(rowText),
+          short(rowText, 90),
+          `期望含 2025xxx（该生序列号 = ${who.serial}）`,
+        )
+
+        // 打开编辑面板 → 序列号必须是**只读**
+        await page.getByRole('button', { name: '编辑' }).nth(6).click()
+        await page.waitForTimeout(300)
+        const serialBox = page.locator('.sheet input.num').nth(1)
+        const ro = await serialBox.evaluate((el) => ({
+          readOnly: el.hasAttribute('readonly'),
+          disabled: el.hasAttribute('disabled'),
+          value: el.value,
+        }))
+        check(
+          '🔴 编辑面板上「序列号」是**只读**（readOnly/disabled 都算）',
+          ro.readOnly || ro.disabled,
+          JSON.stringify(ro),
+        )
+        check(
+          '🔴 只读框里显示的就是这个学生的序列号',
+          ro.value === (who.serial ?? ''),
+          `框里 = ${ro.value}，快照里 = ${who.serial}`,
+        )
+
+        // 改班内学号：7 → 99
+        const noBox = page.locator('.sheet input.num').first()
+        await noBox.fill('99')
+        await page.getByRole('button', { name: '保存' }).click()
+        await page.waitForTimeout(500)
+
+        const after = await page.evaluate(
+          (name) =>
+            [...document.querySelectorAll('tbody tr')]
+              .map((tr) => (tr.innerText ?? '').replace(/\s+/g, ' ').trim())
+              .find((t) => t.includes(name)) ?? '',
+          who.name,
+        )
+        check('改完之后名单里出现 99 号', /\b99\b/.test(after), short(after, 90))
+        check(
+          '🔴 改完之后**序列号没变**（被改的只是班内学号）',
+          after.includes(who.serial ?? '***REMOVED******REMOVED******REMOVED***'),
+          short(after, 90),
+        )
+      })
+      await shot(page, '09b 改班内学号', '09b-after-rename', { full: true })
+
+      await goto(page, '09c 档案不受影响', '/assignments/a-demo-1/collect', {
+        markers: ['收作业查缺', '已交'],
+      })
+      await step('09c 档案不受影响', async () => {
+        /*
+         * `a-demo-1` 的未交名单在演示数据里是"第 7、19、33 个学生"（按档案键存的）。
+         * 改完学号之后：**未交的仍是同样 3 个人**，只是其中一个现在显示 99。
+         * 这正是"档案只认序列号、不认班内学号"的直接证据。
+         */
+        const info = await page.evaluate(() => {
+          const cells = [...document.querySelectorAll('button')]
+            .map((b) => (b.innerText ?? '').replace(/\s+/g, ' ').trim())
+            .filter((t) => /^\d+(\s|$)/.test(t) && t.length <= 24)
+          const missing = [...document.querySelectorAll('button')]
+            .filter((b) => (getComputedStyle(b).backgroundColor || '').includes('rgb'))
+            .map((b) => (b.innerText ?? '').replace(/\s+/g, ' ').trim())
+          return { cells, missing, body: String(document.body.innerText ?? '').replace(/\s+/g, ' ') }
+        })
+        check(
+          '🔴 收缴页上，这个孩子现在显示成 **99 号**（改的确实生效了）',
+          /(^|\s)99(\s|$)/.test(info.body),
+          short(info.body, 140),
+        )
+        const stat = await page.evaluate(() => {
+          const m = String(document.body.innerText ?? '').match(/未交\s*(\d+)/)
+          return m ? Number(m[1]) : -1
+        })
+        check(
+          '🔴 未交人数**没变**（还是 3）—— 改学号没有把任何人从名单里挤出去',
+          stat === 3,
+          `屏上「未交 ${stat}」`,
+          '演示数据 a-demo-1 的未交名单是 3 个人',
+        )
+      })
+      await shot(page, '09c 档案不受影响', '09c-collect-after-rename', { full: true })
+
+      // 改回去（后面的步骤看到的世界必须与这一轮开始时一致）
+      await goto(page, '09d 改回原学号', '/classes/c-demo-1', { markers: ['学生名单 · 45 人'] })
+      await step('09d 改回原学号', async () => {
+        const who = DEMO_CLASSES[0].students[6]
+        if (!who) return
+        const idx = await page.evaluate(
+          (name) =>
+            [...document.querySelectorAll('tbody tr')].findIndex((tr) =>
+              (tr.innerText ?? '').includes(name),
+            ),
+          who.name,
+        )
+        check('改回之前：还能在名单里找到他（按 99 号那行）', idx >= 0, `第 ${idx + 1} 行`)
+        await page.getByRole('button', { name: '编辑' }).nth(idx).click()
+        await page.waitForTimeout(300)
+        await page.locator('.sheet input.num').first().fill(who.studentNo)
+        await page.getByRole('button', { name: '保存' }).click()
+        await page.waitForTimeout(400)
+        const back = await page.evaluate(
+          (name) =>
+            [...document.querySelectorAll('tbody tr')]
+              .map((tr) => (tr.innerText ?? '').replace(/\s+/g, ' ').trim())
+              .find((t) => t.includes(name)) ?? '',
+          who.name,
+        )
+        check('🔴 学号改回原值（这一轮结束时世界与开始时一致）', back.includes(who.studentNo), short(back, 90))
+      })
 
       /* ================= S2：作业列表 / 新建 / 收作业查缺 ================= */
 
@@ -1170,6 +1332,142 @@ await withLock(async () => {
         )
       })
       await shotRaw(room, SR, '34-classroom-broadcast')
+
+      /*
+       * ============================================================
+       * G7（用户 2026-09-28 拍板）：教师账号在**被标成教室端的设备**上打开 /classroom → 拦住
+       * ============================================================
+       * 为什么这不是"把黄条改红"那么轻的一件事：
+       *   这块屏是**挂在教室里给学生看的**，而教师账号在它上面渲染的是**他自己的全部班级数据**
+       *   （名单、收缴、讲评材料）。只提醒一句就放行 = **用一条提示代替了一道安全边界**，
+       *   而这条边界两端不对等：拦错的代价是"老师去自己电脑上看"，
+       *   放过的代价是"全班学生看到教师数据"。
+       *
+       * 三条断言，**正反两路都要**（只钉"拦住"的话，把教室端账号也一起拦掉照样绿）：
+       *   ① 教师账号 + 设备被标成教室端 → **拦住**，而且屏上没有任何班级数据；
+       *   ② 教室端账号 + 同一台设备      → **照常放行**（那正是这块屏的主人）；
+       *   ③ 教师账号 + 自己的设备        → **照常是预览**（否则老师没法核对那块屏长什么样）。
+       */
+      const SG7 = 'G7 教师账号不许在一体机上开教室端'
+
+      const ctxG7 = await browser.newContext({ viewport: { width: 1280, height: 800 }, locale: 'zh-CN' })
+      await ctxG7.clock.install({ time: new Date('2026-09-19T10:00:00') })
+      await ctxG7.addInitScript((base) => {
+        const kind = new URLSearchParams(location.search).get('kind')
+        const role = new URLSearchParams(location.search).get('role') ?? 'classroom'
+        // 身份注入沿用身份标签那一节的 `?roles=` 手法（见那里的长注释）
+        const raw = new URLSearchParams(location.search).get('roles')
+        const state = raw ? { ...base, myRoles: JSON.parse(raw) } : base
+        window.localStorage.setItem('shugao.teacher.v1', JSON.stringify({ state, version: 1 }))
+        window.localStorage.setItem('shugao.deviceRole', role)
+        if (kind) window.localStorage.setItem('shugao.accountKindProbe', kind)
+      }, TEACHER_STATE.state)
+      const g7Page = await ctxG7.newPage()
+      g7Page.on('pageerror', (e) => errors.push(`PAGEERROR(${SG7}) :: ${e.message}`))
+      g7Page.on('console', (m) => {
+        if (m.type() === 'error') errors.push(`CONSOLE(${SG7}) :: ${m.text()}`)
+      })
+
+      await step(SG7, async () => {
+        /*
+         * ① 教师账号 + 设备被标成教室端。
+         * 本地模式（这个脚本跑的就是本地模式）里 `accountKind` 恒为 'teacher'
+         * —— 那正是"教师账号"，判据 `accountKind !== 'classroom'` 成立。
+         * ⚠️ 这里**不用** `?roles=` 注入身份：判据读的是 `accountKind`（账号类型），
+         *    与 `teacher_roles` 无关 —— 而且 `ADMIN_ROLES` 那个常量定义在更后面
+         *    （超管面板那一节），在这里引用会 TDZ 报错（第一版就踩了）。
+         */
+        await g7Page.goto(`${BASE}/classroom?role=classroom`, { waitUntil: 'networkidle' })
+        await g7Page.waitForTimeout(600)
+        const b = await bodyText(g7Page)
+        const blocked = await g7Page.evaluate(
+          () => document.querySelectorAll('[data-classroom-blocked]').length,
+        )
+        check(
+          blocked === 1,
+          `${SG7}：教师账号 + 这台设备被标成教室端 → **拦住**（出的是拦截卡，不是那块屏）`,
+          `[data-classroom-blocked] 节点数 = ${blocked}`,
+        )
+        check(
+          b.includes('教师账号不能在这台设备上打开教室端'),
+          `${SG7}：而且把"为什么"写清楚（那块屏是给学生看的，教师账号在上面是自己的班级数据）`,
+          short(b, 200),
+        )
+        check(
+          b.includes('教室端账号') && b.includes('/classroom') && b.includes('教师密码'),
+          `${SG7}：给出三条出路（用教室端账号 / 去另一台设备核对 / 登一次教师密码改回教师端）`,
+          short(b.match(/.{0,20}三条出路.{0,120}/)?.[0] ?? b, 200),
+        )
+        /*
+         * 🔴 最要紧的一条：**屏上不许有任何班级数据**。
+         *    拦住的判据不是"有个卡片"，而是"名单/收缴/讲评一个字都没渲染出来"。
+         *
+         * ⚠️ 判据要**只看真数据**，不能查"未交""名单"这种词 ——
+         *    拦截卡自己的说明文字里就写着「名单、收缴、讲评材料」，那样查会自证失败
+         *    （第一版就踩了：`b.includes('未交')` 命中的是卡片文案）。
+         *    这里换成三类**只可能来自数据**的东西：班名、学生姓名、收缴计数格子。
+         */
+        const demo = DEMO_CLASSES[0]
+        const studentNames = demo.students.slice(0, 15).map((s) => s.name)
+        const leaked = [
+          demo.name,
+          `… ${demo.name}`,
+          ...studentNames,
+          // 教室端「本次作业」那块面板的三格标题；拦截卡不长这样
+          '本次作业',
+        ].filter((x) => x && b.includes(x))
+        check(
+          leaked.length === 0,
+          `${SG7}：**屏上一个字的学生数据都没有**（这才是"拦住"的判据，不是"有张卡片"）`,
+          leaked.length ? `泄漏了：${leaked.join('、')}` : '没有班名 / 学生姓名 / 「本次作业」面板',
+        )
+        // 反向对照：同一份数据在**放行**的那一轮里**必须**出现 —— 否则上面那条是恒真的
+        await shotRaw(g7Page, SG7, '84-classroom-teacher-blocked')
+
+        /* ② 数据确实"本该出现在屏上" —— 这一条是 ① 的**反向对照**。
+         *
+         * 为什么要它：① 那条断言"屏上没有班名/学生姓名"**有可能是恒真的**
+         * （比如注入的数据根本没进去）。所以这里先证明"同一份数据在**没被拦**的时候
+         * 真的会渲染出来" —— 两条合起来才说明"拦住"这个动作真的起了作用。
+         */
+        const probeCtx = await browser.newContext({ viewport: { width: 1280, height: 800 }, locale: 'zh-CN' })
+        await probeCtx.clock.install({ time: new Date('2026-09-19T10:00:00') })
+        await probeCtx.addInitScript(
+          (base) => {
+            window.localStorage.setItem('shugao.teacher.v1', JSON.stringify({ state: base, version: 1 }))
+            window.localStorage.setItem('shugao.deviceRole', 'teacher')
+          },
+          TEACHER_STATE.state,
+        )
+        const probePage = await probeCtx.newPage()
+        await probePage.goto(`${BASE}/classroom`, { waitUntil: 'networkidle' })
+        await probePage.waitForTimeout(600)
+        const probeBody = await bodyText(probePage)
+        const probeShowsClass = probeBody.includes(demo.name)
+        const probeShowsStudent = demo.students.slice(0, 15).some((s) => probeBody.includes(s.name))
+        check(
+          probeShowsClass || probeShowsStudent,
+          `${SG7}：反向对照 —— 同一份数据在**放行**时确实会渲染出班级数据（所以①那条不是恒真）`,
+          `放行那一轮：班名=${probeShowsClass}，学生姓名=${probeShowsStudent}`,
+        )
+        await probeCtx.close()
+
+        /* ③ 教师账号 + 自己的设备（deviceRole=teacher）→ 照常放行 */
+        await g7Page.goto(`${BASE}/classroom?role=teacher`, { waitUntil: 'networkidle' })
+        await g7Page.waitForTimeout(600)
+        const ownBlocked = await g7Page.evaluate(
+          () => document.querySelectorAll('[data-classroom-blocked]').length,
+        )
+        const ownBody = await bodyText(g7Page)
+        check(
+          ownBlocked === 0,
+          `${SG7}：教师账号 + **自己的**设备 → 照常放行（老师要能核对那块屏长什么样）`,
+          `拦截卡节点数 = ${ownBlocked}；屏上：${short(ownBody, 120)}`,
+        )
+        await shotRaw(g7Page, SG7, '85-classroom-teacher-preview-ok')
+      })
+      await ctxG7.close()
+
 
       /* ================= 移动端底部导航：磨砂玻璃 + 液态玻璃胶囊 ================= */
 
@@ -2383,6 +2681,298 @@ await withLock(async () => {
           markers: ['教室端文件', '还没连接'],
           absent: ['给哪些班看', '选择文件'],
         })
+      })
+
+      /*
+       * ============================================================
+       * 超管运维面板（`超管运维面板方案.md` 第一期）
+       * ============================================================
+       * 这个脚本能验的是**前端那一半**：入口不被 `Guard` 拦、五条指标各自的画面、
+       * E7 的矛盾真的能被点出来。**服务端那一半**（权限判据、GitHub/配置回话）
+       * 在 `admin-checks.mjs`（假 Supabase + 真 Function），两边都要跑才算覆盖。
+       *
+       * 🔴 三轮，对应方案里两条拍板：
+       *   ① **设备被标成教室端 + 没有登录态** → 敲 `/admin` **必须留在面板**（T6）。
+       *      这是这一期最要紧的一条画面：修之前，`Guard` 会把这类设备一律送 `/login`，
+       *      而 `/settings`（面板入口所在页）**也在 `Guard` 里** ——
+       *      超管这台机器被锁住时**连面板都进不去**，而面板恰恰是用来救这种情况的。
+       *   ② 恢复成正常教师端 → 面板渲染出 L0 健康条 + 五张卡 + 本地模式那条红警告（A3）。
+       *   ③ 展开 E7 明细 → 演示数据里那份已知矛盾的档案被点出来。
+       *
+       * ⚠️ 身份注入沿用上面 SID 那一节的 `?roles=` 手法（`myRoles` 不落盘，
+       *    所以只能靠 initScript 把快照喂进去）。**面板不读它**（判据在服务端），
+       *    这里注入只是为了顺带验一下入口那一条不走 `canManageTeachers`。
+       */
+      const SAD = '超管运维面板'
+      const ADMIN_ROLES = encodeURIComponent(JSON.stringify([{ role: 'super' }]))
+
+      /* 独立 context：这个脚本主流程的 initScript 写死了 deviceRole='teacher'，
+       * 而第 ① 轮**必须**是 classroom —— 共用一个 context 会互相打架。 */
+      const ctxAd = await browser.newContext({ viewport: { width: 414, height: 880 }, locale: 'zh-CN' })
+      await ctxAd.clock.install({ time: new Date('2026-09-19T10:00:00') })
+      await ctxAd.addInitScript((base) => {
+        const raw = new URLSearchParams(location.search).get('roles')
+        const state = raw ? { ...base, myRoles: JSON.parse(raw) } : base
+        window.localStorage.setItem('shugao.teacher.v1', JSON.stringify({ state, version: 1 }))
+        // 🔴 这一行就是第 ① 轮的全部前提：这台机器"被标成教室端"
+        window.localStorage.setItem('shugao.deviceRole', 'classroom')
+      }, TEACHER_STATE.state)
+
+      const adPage = await ctxAd.newPage()
+      adPage.on('pageerror', (e) => errors.push(`PAGEERROR(面板) :: ${e.message}`))
+      adPage.on('console', (m) => {
+        if (m.type() === 'error') errors.push(`CONSOLE(面板) :: ${m.text()}`)
+      })
+
+      await step(SAD, async () => {
+        await adPage.goto(`${BASE}/admin?roles=${ADMIN_ROLES}`, { waitUntil: 'networkidle' })
+        await adPage.waitForTimeout(600)
+        const info = await pageInfo(adPage)
+        /*
+         * ⚠️ `pageInfo().url` 是 `pathname + search`，而面板这一页带着 `?roles=`（注入身份用）。
+         *    所以判据是 **startsWith**，不是相等 —— 要钉的是"**没被送去 /login**"，
+         *    而不是"URL 里没有查询串"。
+         */
+        check(
+          info.url.startsWith('/admin'),
+          `${SAD}：**被标成教室端的设备敲 /admin 不会被 Guard 送去 /login**（停在 /admin）`,
+          `停在 ${info.url}`,
+          '这正是方案 §七 T6 那条拍板：面板必须能被"半坏状态"下的超管打开',
+        )
+        /*
+         * 最硬的证据：**面板的 L0 健康条在**（本地模式 = 没登录态、设备又是 classroom）。
+         * 旧行为是"设备标记为教室端 → 只给登录卡"，那样最该看到信息的人反而看不到 ——
+         * 这一条断言钉的就是"体检结果照样拿得出来"。
+         */
+        const l0Locked = await adPage.evaluate(() =>
+          document.querySelector('[data-admin-l0]')
+            ? document.querySelector('[data-admin-l0]').getAttribute('data-admin-l0')
+            : null,
+        )
+        check(
+          l0Locked !== null,
+          `${SAD}：而且在锁定状态下**照样渲染出体检结果**（L0 健康条在），不是只给一张登录卡`,
+          `data-admin-l0 = ${l0Locked}`,
+          '面板存在的全部意义就是"被锁住时也看得到"',
+        )
+        check(
+          info.body.includes('这台设备被标成教室端') &&
+            info.body.includes('教师端的每个页面') &&
+            info.body.includes('/admin'),
+          `${SAD}：并且显式说清"这台设备被标成教室端 → 教师端每个页面都进不去，而这一页不经过 Guard"`,
+          short(info.body.match(/.{0,20}这台设备被标成教室端.{0,80}/)?.[0] ?? info.body, 180),
+        )
+        await shot(adPage, SAD, '80-admin-locked-entry', { full: true })
+      })
+
+      /* ②③ 正常态：改回教师端，再进一次 */
+      await ctxAd.addInitScript(() => window.localStorage.setItem('shugao.deviceRole', 'teacher'))
+
+      await step(SAD, async () => {
+        await adPage.goto(`${BASE}/admin?roles=${ADMIN_ROLES}`, { waitUntil: 'networkidle' })
+        await adPage.waitForTimeout(600)
+        const info = await pageInfo(adPage)
+        const b = info.body
+        check(info.url.startsWith('/admin'), `${SAD}：正常态也停在 /admin`, `停在 ${info.url}`)
+
+        /* --- L0 健康条：一句话 + 一个颜色 --- */
+        const l0 = await adPage.evaluate(() => {
+          const el = document.querySelector('[data-admin-l0]')
+          return el ? el.getAttribute('data-admin-l0') : null
+        })
+        check(
+          l0 === 'bad' || l0 === 'warn' || l0 === 'unknown',
+          `${SAD}：L0 健康条给出了颜色（本地模式下不该是绿）`,
+          `data-admin-l0 = ${l0}`,
+          '本地模式 = 最危险的静默降级，必须压过其他一切',
+        )
+        check(
+          b.includes('平台') && (b.includes('项需要处理') || b.includes('拿不到数据') || b.includes('没有发现异常')),
+          `${SAD}：L0 是一句人话（"基本正常 · N 项需要处理"这种），不是一串数字`,
+          short(b.split('\n').find((x) => x.includes('平台')) ?? '', 100),
+        )
+
+        /* --- A3：本地模式那条红警告必须**首屏可见** --- */
+        check(
+          b.includes('本地模式') && b.includes('只写在这台浏览器里'),
+          `${SAD}：**A3 本地模式**是最显眼的那一条（"所有数据只写在这台浏览器里"）`,
+          short(b.match(/.{0,10}本地模式.{0,60}/)?.[0] ?? '', 140),
+          '线上出现这个状态 = 构建变量丢了，而老师照样能建班批改、一个字都不报错',
+        )
+        check(
+          b.includes('VITE_SUPABASE_URL') && b.includes('VITE_SUPABASE_ANON_KEY'),
+          `${SAD}：而且给出了下一步（去 Cloudflare 检查这两个变量）`,
+          '屏上有 VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY',
+        )
+
+        /* --- 五张卡都在，且标题对得上第一批交付的五条指标 --- */
+        for (const t of ['① 部署与版本', '② 配置完整性', '③ 备份（G2）', '④ 数据库结构漂移（C1）', '⑤ 作业档案内部矛盾（E7）']) {
+          check(b.includes(t), `${SAD}：卡「${t}」在首屏`, b.includes(t) ? '在' : short(b, 200))
+        }
+
+        /* --- A1：版本号 + 构建哈希（开发态取不到哈希也必须说出来） --- */
+        check(
+          /v\d+\.\d+\.\d+/.test(b),
+          `${SAD}：A1 显示版本号`,
+          b.match(/v\d+\.\d+\.\d+[^\s]*/)?.[0] ?? '',
+        )
+
+        /* --- B1/B3：本地模式下必须写"无法判断"，**绝不能画绿** --- */
+        check(
+          b.includes('无法判断'),
+          `${SAD}：B1/B3 在本地模式下显示"无法判断"（不是绿）`,
+          short(b.match(/.{0,10}无法判断.{0,40}/)?.[0] ?? '', 120),
+          '本项目最贵的教训：拿不到 ≠ 正常',
+        )
+
+        /* --- G2：字节数那一行必须在（哪怕当时是"捞不到"） ---
+         * ⚠️ 明细默认**折叠**（方案 §3.4 第 1 条：L1 卡上不放明细），
+         *    所以下面**先点开**再断言 —— 写成"首屏就该有"那是错的期望。
+         *    找按钮用 `[data-admin-toggle]` 这个稳定钩子，不按可见文案找（文案改一个字不该弄红断言）。
+         */
+        await adPage.locator('[data-admin-toggle="③ 备份（G2）"]').click()
+        await adPage.waitForTimeout(250)
+        const g2 = (await pageInfo(adPage)).body
+        check(
+          g2.includes('最新备份大小') && g2.includes('字节数'),
+          `${SAD}：点开 G2 之后，**字节数**单独摆了一行（只看成功/失败抓不住"合法但空的 .gz"那个坑）`,
+          g2.includes('最新备份大小') ? '在' : short(g2, 220),
+        )
+        check(
+          g2.includes('捞不到') || /\d+(\.\d+)?\s*(B|KB|MB)/.test(g2),
+          `${SAD}：那一行要么给字节数、要么明写"捞不到"（**不许空着、也不许画成绿**）`,
+          short(g2.match(/.{0,12}(捞不到|\d+(\.\d+)?\s*(B|KB|MB)).{0,50}/)?.[0] ?? '', 160),
+        )
+        check(
+          g2.includes('服务端回话'),
+          `${SAD}：拿不到的时候要说清**为什么**（"服务端回话"那一行是无条件的）`,
+          g2.includes('服务端回话') ? '在' : short(g2, 220),
+        )
+
+        /* --- C1：§10–§19 十段，且 §17/§18 明确"不适用" --- */
+        await adPage.locator('[data-admin-toggle="④ 数据库结构漂移（C1）"]').click()
+        await adPage.waitForTimeout(250)
+        const c1 = (await pageInfo(adPage)).body
+        for (const st of ['§10', '§15', '§17', '§18', '§19']) {
+          check(c1.includes(st), `${SAD}：C1 总表列出了 ${st}`, c1.includes(st) ? '在' : '没找到')
+        }
+        check(
+          c1.includes('不适用') && c1.includes('探不到'),
+          `${SAD}：§17 / §18 明写"不适用（面板探不到）"，**没有假装它是绿的**`,
+          short(c1.match(/.{0,20}不适用.{0,40}/)?.[0] ?? '', 140),
+        )
+        check(
+          c1.includes('pg_policies') || c1.includes('revoke'),
+          `${SAD}：而且给得出理由（不是一句"探不到"就完了）`,
+          short(c1.match(/.{0,12}(pg_policies|revoke).{0,50}/)?.[0] ?? '', 170),
+        )
+
+        /* --- E7 卡：报出矛盾份数（演示数据里 a-demo-1 有一处已知矛盾） --- */
+        check(
+          /作业档案\s*\d+\s*份/.test(b),
+          `${SAD}：E7 卡报了扫了几份档案`,
+          b.match(/作业档案[^\n]{0,20}/)?.[0] ?? '',
+        )
+        check(
+          b.includes('自相矛盾') || b.includes('内部一致'),
+          `${SAD}：E7 给出结论（自相矛盾 / 内部一致），不是只给一个数字`,
+          b.match(/作业档案[^\n]{0,30}/)?.[0] ?? '',
+        )
+
+        await shot(adPage, SAD, '81-admin-overview', { full: true })
+
+        /* --- ③ 展开 E7 明细：那五类检查逐条列出来 --- */
+        await adPage.getByRole('button', { name: '看矛盾清单' }).click()
+        await adPage.waitForTimeout(350)
+        const b2 = await bodyText(adPage)
+        for (const kind of ['未交 ∩ 已批改', '未交 ∩ 改错名单', '孤儿', 'collected 假真', '极简模式']) {
+          check(b2.includes(kind), `${SAD}：E7 五类检查里有「${kind}」这一类`, b2.includes(kind) ? '在' : short(b2, 200))
+        }
+        /*
+         * 🔴 隐私三级里的 B 类：明细**默认只给学号**，姓名必须显式点开。
+         *
+         * 两条硬断言，都按**结构**判、不按"具体是谁"判（换一份演示数据不该红）：
+         *   ① 默认态：`[data-admin-names]` 这个节点**不存在**（姓名那一层根本没渲染），
+         *      而且明细里读出来的学号**全是班内学号**（1–3 位数字，不是 7 位序列号 ——
+         *      序列号是内部键，老师看到的东西不变，见 `lib/keys.ts`）；
+         *   ② 点开之后：姓名那一层出现，而且读到的姓名**能在名单里找到**。
+         */
+        const namesLayerBefore = await adPage.evaluate(
+          () => document.querySelectorAll('[data-admin-names]').length,
+        )
+        check(
+          namesLayerBefore === 0,
+          `${SAD}：E7 明细里**默认不渲染姓名那一层**（隐私 B 类：默认只给学号）`,
+          `[data-admin-names] 节点数 = ${namesLayerBefore}`,
+        )
+        const nosText = await adPage.evaluate(() => {
+          const els = [...document.querySelectorAll('[data-admin-nos]')]
+          return els.map((e) => String(e.textContent ?? '').replace(/\s+/g, ' ').trim())
+        })
+        /*
+         * 逐项判：每个学号都是 **1–3 位数字**，而且**一个 7 位序列号都没有**。
+         * ⚠️ 别写成"整串匹配一个正则" —— `…另 N 人` 那句会被误伤（第一版就踩了）。
+         */
+        const nosTokens = nosText
+          .join(' ')
+          .split(/[、,\s]+/)
+          .filter((x) => /^\d+$/.test(x))
+        check(
+          nosText.length > 0 &&
+            nosTokens.length > 0 &&
+            nosTokens.every((n) => n.length <= 3) &&
+            !nosText.some((t) => /\d{7}/.test(t)),
+          `${SAD}：明细里显示的是**班内学号**（1–3 位），不是 7 位序列号（序列号是内部键）`,
+          short(nosText.join(' ｜ '), 120),
+        )
+        check(
+          b2.includes('请勿投屏或截图'),
+          `${SAD}：明细里固定一行"此页含学号／姓名，请勿投屏或截图"（方案 §5.4 的替代方案）`,
+          b2.includes('请勿投屏或截图') ? '在' : '没找到',
+        )
+        check(
+          b2.includes('未交 ∩ 改错名单') &&
+            /-\s*\d+\s*人|有\s*\d+\s*人是未交|未交名单里有/.test(b2),
+          `${SAD}：演示数据里那份已知矛盾（未交的人挂在改错名单里）**真的被点出来了**`,
+          short(b2.match(/.{0,40}改错名单.{0,80}/)?.[0] ?? '', 200),
+        )
+        await shot(adPage, SAD, '82-admin-e7-detail', { full: true })
+
+        /* --- 反过来：点「显示姓名」才出现姓名（B 类的"点开才看"那一层） --- */
+        const nameBtn = adPage.getByRole('button', { name: '显示姓名' })
+        check(
+          (await nameBtn.count()) === 1,
+          `${SAD}：明细里有「显示姓名」这个动作（B 类的第二层要有一个显式开关）`,
+          `按钮数 ${await nameBtn.count()}`,
+        )
+        await nameBtn.click()
+        let namesText = null
+        for (let i = 0; i < 20; i++) {
+          namesText = await adPage.evaluate(() => {
+            const el = document.querySelector('[data-admin-names]')
+            return el ? String(el.textContent ?? '').replace(/\s+/g, ' ').trim() : null
+          })
+          // 等到"真的读出人名"为止（`—` 是分隔符，不算）
+          if (namesText && /[\u4e00-\u9fa5]/.test(namesText)) break
+          await adPage.waitForTimeout(120)
+        }
+        check(
+          namesText !== null && /[\u4e00-\u9fa5]/.test(namesText),
+          `${SAD}：点了「显示姓名」之后才渲染姓名那一层（B 类要"显式操作"，且姓名排在学号之后）`,
+          namesText === null ? '点了还是没有姓名那一层' : `读到「${short(namesText, 80)}」`,
+        )
+        const rosterNames = new Set(DEMO_CLASSES[0].students.map((s) => s.name))
+        const readNames = String(namesText ?? '')
+          .replace(/^—\s*/, '')
+          .split('、')
+          .map((x) => x.trim())
+          .filter(Boolean)
+        check(
+          readNames.length > 0 && readNames.every((n) => rosterNames.has(n)),
+          `${SAD}：而且读到的姓名**都在名单里**（不是空串、也不是编出来的）`,
+          `读到 ${readNames.length} 个：${short(readNames.join('、'), 80)}`,
+        )
+        await shot(adPage, SAD, '83-admin-e7-names', { full: true })
       })
     } catch (e) {
       console.log(`\n💥 脚本在第「${currentStep}」步异常中断：${e instanceof Error ? e.message : String(e)}`)

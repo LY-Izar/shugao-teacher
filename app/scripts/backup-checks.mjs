@@ -103,6 +103,8 @@ await withLock(async () => {
       teachers: 'primary_subject_code',
       classes: 'grade_id',
       shared_files: 'class_ids',
+      // 第 20 段（P1 序列号键迁移）：`students.serial` 列不在时**一个字都不许带**
+      students: 'serial',
     }
     const WRITE_TABLES = ['teachers', 'classes', 'students', 'assignments', 'schedule_items', 'classrooms', 'calls', 'shared_files']
 
@@ -378,7 +380,7 @@ await withLock(async () => {
       {
         const v1 = B.validateBackup(backupFile())
         eq('v1 老备份仍然能导入（向后兼容）', v1.ok, true)
-        eq('收进来的版本一律归一成 v2', v1.data.v, 2)
+        eq('收进来的版本一律归一成 v3', v1.data.v, 3)
         eq('v1 的「物理」按显示名反查 → physics', v1.data.assignments[0].subjectCode, 'physics')
         eq('v1 的老师「物理」→ primarySubjectCode physics', v1.data.teacher.primarySubjectCode, 'physics')
 
@@ -439,7 +441,7 @@ await withLock(async () => {
           '化学竞赛',
         )
 
-        eq('v3 不认（宁可报错也不猜一份看不懂的结构）', B.validateBackup(backupFile({ v: 3 })).ok, false)
+        eq('v4 不认（宁可报错也不猜一份看不懂的结构）', B.validateBackup(backupFile({ v: 4 })).ok, false)
         eq('没有 v 也不认', B.validateBackup({ classes: [klass()], assignments: [] }).ok, false)
 
         const exported = B.makeBackup({
@@ -450,7 +452,7 @@ await withLock(async () => {
           calls: [],
           classrooms: [],
         })
-        eq('makeBackup 导出的是 v2', exported.v, 2)
+        eq('makeBackup 导出的是 v3', exported.v, 3)
         ok(
           '导出的文件里真的带着 subjectCode（不是靠 import 时反查）',
           exported.assignments[0].subjectCode === 'chemistry' &&
@@ -814,6 +816,252 @@ await withLock(async () => {
 
         FILE_ROWS = []
         MODE = 'present'
+      }
+
+      /* ============================================================
+         六、序列号键迁移（§20 / P1）：v3 与 v1 **双向**断言
+         ------------------------------------------------------------
+         为什么单开一节：P1 把"那 10 个字段的键"从**班内学号**换成了**序列号**（I40），
+         而备份是唯一一份"离线也能把数据搬回来"的东西 —— 它必须**同时**满足两件事：
+           · 导出（v3）带着序列号，导入回来键还是序列号（**不降级、不丢**）；
+           · 导入一份 v1/v2 老备份（键是班内学号、学生没有序列号）时，
+             按"班内学号 → 序列号"反查着**补成序列号**；补不到的**留原键**并报出来。
+         两条都不是"看着对"就够 —— 它们决定恢复之后老师还能不能找到自己的学生。
+         ============================================================ */
+
+      section('六、序列号键（§20 / P1）：v3 导出不降级 · v1 老备份补成序列号 · 补不到留原键')
+      {
+        /*
+         * 夹具：一份**迁移后**形状的备份（v3）：学生有序列号，档案键就是序列号。
+         * ⚠️ 这份刻意用 `validateBackup` 走一遍再断言 —— 导出→写文件→读回来
+         *    这条路才是真实发生的（`makeBackup` 的返回值不会被直接使用）。
+         */
+        const v3klass = () => ({
+          id: CLASS_ID,
+          name: '高二(1)班',
+          grade: '高二',
+          year: '2026',
+          createdAt: 1,
+          students: [
+            { id: STUDENT_ID, studentNo: '1', serial: '2025001', name: '甲', status: 'active', createdAt: 1 },
+            { id: '44444444-4444-4444-8444-444444444445', studentNo: '2', serial: '2025002', name: '乙', status: 'active', createdAt: 1 },
+          ],
+        })
+        const v3asg = () =>
+          asg({
+            missingNos: ['2025002'],
+            lateNos: ['2025001'],
+            confirmedNos: ['2025001'],
+            focusNos: ['2025002'],
+            correctionNos: ['2025001'],
+            correctedNos: ['2025002'],
+            wrong: { '2025001': ['3.1'] },
+            grades: { '2025002': '良' },
+          })
+
+        const exported3 = B.makeBackup({
+          teacher: teacher(),
+          classes: [v3klass()],
+          assignments: [v3asg()],
+          schedule: [],
+          calls: [],
+          classrooms: [],
+        })
+        eq('导出版本是 v3', exported3.v, 3)
+        eq('v3 导出：学生的序列号进文件', exported3.classes[0].students[0].serial, '2025001')
+
+        const back3 = B.validateBackup(JSON.parse(JSON.stringify(exported3)))
+        eq('v3 → 导入：版本仍是 v3', back3.data.v, 3)
+        eq('🔴 v3 → 导入：学生的序列号**不丢**', back3.data.classes[0].students[1].serial, '2025002')
+        eq(
+          '🔴 v3 → 导入：档案键仍是序列号（不降级回班内学号）',
+          [
+            back3.data.assignments[0].missingNos,
+            back3.data.assignments[0].lateNos,
+            back3.data.assignments[0].confirmedNos,
+            back3.data.assignments[0].focusNos,
+            back3.data.assignments[0].correctionNos,
+            back3.data.assignments[0].correctedNos,
+          ],
+          [['2025002'], ['2025001'], ['2025001'], ['2025002'], ['2025001'], ['2025002']],
+        )
+        eq('🔴 v3 → 导入：wrong 的键仍是序列号', Object.keys(back3.data.assignments[0].wrong), ['2025001'])
+        eq('🔴 v3 → 导入：grades 的键仍是序列号', Object.keys(back3.data.assignments[0].grades), ['2025002'])
+        eq('v3 → 导入时**没有发生升级**（本来就不用升）', B.lastKeyUpgrade, undefined)
+
+        /*
+         * v1 老备份：学生没有序列号、键是班内学号。
+         * 届从哪来？本机/云端**已经**有这一届的学生（序列号 2025001…）→
+         * `upgradeKeysToSerial` 拿它当编号基数，从 2025003 往后发，**不从 001 重来**。
+         */
+        /*
+         * ⚠️ **必须用与 `backup.ts` 同一个 store 实例**：`?xxx` 后缀会 import 出一个
+         *    *新模块*（这是本脚本故意用来"刷新页面"的手法），而 `backup.ts` 里的
+         *    `useStore` 指向**没有后缀**的那个实例 —— 拿错了就永远读到空状态，
+         *    表现成"届认不出来、一个号都没发"。
+         */
+        const store = (await import(mod('src/data/store.ts'))).useStore
+        store.setState({
+          classes: [
+            {
+              id: '99999999-9999-4999-8999-999999999999',
+              name: '高二(9)班',
+              grade: '高二',
+              year: '2026',
+              createdAt: 1,
+              students: [
+                { id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1', studentNo: '1', serial: '2025001', name: '丙', status: 'active', createdAt: 1 },
+                { id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2', studentNo: '2', serial: '2025002', name: '丁', status: 'active', createdAt: 1 },
+              ],
+            },
+          ],
+        })
+
+        const v1 = B.validateBackup(
+          backupFile({
+            classes: [
+              {
+                id: CLASS_ID,
+                name: '高二(1)班',
+                grade: '高二',
+                year: '2026',
+                createdAt: 1,
+                students: [
+                  { id: STUDENT_ID, studentNo: '1', name: '甲', status: 'active', createdAt: 1 },
+                  { id: '44444444-4444-4444-8444-444444444445', studentNo: '2', name: '乙', status: 'active', createdAt: 1 },
+                ],
+              },
+            ],
+            assignments: [
+              asg({
+                missingNos: ['2'],
+                lateNos: ['1'],
+                confirmedNos: ['1'],
+                focusNos: ['2'],
+                correctionNos: ['1'],
+                correctedNos: ['2'],
+                wrong: { '1': ['3.1'] },
+                grades: { '2': '良' },
+              }),
+            ],
+          }),
+        )
+        eq('v1 老备份仍然能导入', v1.ok, true)
+        eq(
+          '🔴 v1 → 导入：学生**按 U-2 追加到年级末尾**拿到序列号（不从 001 重来）',
+          v1.data.classes[0].students.map((s) => s.serial),
+          ['2025003', '2025004'],
+        )
+        eq(
+          '🔴 v1 → 导入：档案键被补成**序列号**（六个数组成员全查一遍）',
+          [
+            v1.data.assignments[0].missingNos,
+            v1.data.assignments[0].lateNos,
+            v1.data.assignments[0].confirmedNos,
+            v1.data.assignments[0].focusNos,
+            v1.data.assignments[0].correctionNos,
+            v1.data.assignments[0].correctedNos,
+          ],
+          [['2025004'], ['2025003'], ['2025003'], ['2025004'], ['2025003'], ['2025004']],
+        )
+        eq('🔴 v1 → 导入：`wrong` 的键补成序列号', Object.keys(v1.data.assignments[0].wrong), ['2025003'])
+        eq('🔴 v1 → 导入：`grades` 的键补成序列号', Object.keys(v1.data.assignments[0].grades), ['2025004'])
+        eq('🔴 v1 → 导入：`calls.studentNos` 也一起补（两个字段，不是十个）', v1.data.calls, [])
+        ok(
+          '升级统计报得出来（谁被补了几个号）',
+          B.lastKeyUpgrade && B.lastKeyUpgrade.assigned === 2 && B.lastKeyUpgrade.unresolved === 0,
+          JSON.stringify(B.lastKeyUpgrade),
+        )
+        eq(
+          'v1 → 导入：`students.legacyStudentNo` **故意不进备份**（它是迁移判据，不许被恢复写坏）',
+          'legacyStudentNo' in v1.data.classes[0].students[0],
+          false,
+        )
+
+        // ---- 补不到的键：**留原键** + 报出来（I14：认不出不许猜） ----
+        const orphan = B.validateBackup(
+          backupFile({
+            classes: [
+              {
+                id: CLASS_ID,
+                name: '高二(1)班',
+                grade: '高二',
+                year: '2026',
+                createdAt: 1,
+                students: [{ id: STUDENT_ID, studentNo: '1', name: '甲', status: 'active', createdAt: 1 }],
+              },
+            ],
+            assignments: [asg({ missingNos: ['1', '77'] })],
+          }),
+        )
+        eq('🔴 班里查不到的键（77）**留原键**，绝不清空', orphan.data.assignments[0].missingNos, ['2025003', '77'])
+        ok(
+          '🔴 补不到的条数被**报出来**（不是静默丢弃）',
+          B.lastKeyUpgrade && B.lastKeyUpgrade.unresolved === 1,
+          JSON.stringify(B.lastKeyUpgrade),
+        )
+
+        // ---- 幂等：同一份 v1 备份跑两遍，结果一模一样 ----
+        const again = B.validateBackup(
+          backupFile({
+            classes: [
+              {
+                id: CLASS_ID,
+                name: '高二(1)班',
+                grade: '高二',
+                year: '2026',
+                createdAt: 1,
+                students: [
+                  { id: STUDENT_ID, studentNo: '1', name: '甲', status: 'active', createdAt: 1 },
+                  { id: '44444444-4444-4444-8444-444444444445', studentNo: '2', name: '乙', status: 'active', createdAt: 1 },
+                ],
+              },
+            ],
+            assignments: [
+              asg({
+                missingNos: ['2'],
+                lateNos: ['1'],
+                confirmedNos: ['1'],
+                focusNos: ['2'],
+                correctionNos: ['1'],
+                correctedNos: ['2'],
+                wrong: { '1': ['3.1'] },
+                grades: { '2': '良' },
+              }),
+            ],
+          }),
+        )
+        eq(
+          '🔴 幂等：同一份 v1 备份再跑一遍，键与序列号**与上一次逐字相同**',
+          JSON.stringify([again.data.classes[0].students, again.data.assignments[0]]),
+          JSON.stringify([v1.data.classes[0].students, v1.data.assignments[0]]),
+        )
+
+        // ---- 认不出届 → **不发号**（留着原键 + 报出来），绝不猜一个年份 ----
+        store.setState({ classes: [] })
+        const noYear = B.validateBackup(
+          backupFile({
+            classes: [
+              {
+                id: CLASS_ID,
+                name: '初三(1)班',
+                grade: '初三',
+                year: '',
+                createdAt: 1,
+                students: [{ id: STUDENT_ID, studentNo: '1', name: '甲', status: 'active', createdAt: 1 }],
+              },
+            ],
+            assignments: [asg({ missingNos: ['1'] })],
+          }),
+        )
+        eq('认不出届 → 学生**没有**序列号（不猜年份）', noYear.data.classes[0].students[0].serial, undefined)
+        eq('认不出届 → 档案键**留原键**', noYear.data.assignments[0].missingNos, ['1'])
+        ok(
+          '认不出届 → 报成"补不到"（而不是悄悄当成成功）',
+          B.lastKeyUpgrade && B.lastKeyUpgrade.assigned === 0 && B.lastKeyUpgrade.unresolved === 1,
+          JSON.stringify(B.lastKeyUpgrade),
+        )
+        store.setState({ classes: [] })
       }
     } catch (e) {
       failures.push(`脚本自身出错：${e?.stack ?? e}`)

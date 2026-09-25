@@ -1,7 +1,8 @@
 import { getSupabase } from './supabase'
-import { useToast } from '../data/store'
+import { useStore, useToast } from '../data/store'
 import { toISODate } from './date'
 import { clampQuestionCount } from './assignments'
+import { isSerial, assignMissingSerials, yearLookupFromClasses } from './serial'
 import {
   DEFAULT_SUBJECT_CODE,
   alignAssignmentSubject,
@@ -51,14 +52,17 @@ import type {
  *
  * · **v1**：没有 `subjectCode` / `primarySubjectCode` 两个字段（学科只有中文显示名）。
  * · **v2**（2026-09-25）：带上它们，恢复时才能把"判据"一起搬回去。
+ * · **v3**（2026-09-25 · P1 序列号键迁移）：`students[].serial` 进备份，
+ *   而**那 10 个字段的键的含义从"班内学号"变成"序列号"**（`schema.sql` §20 / I40）。
  *
- * 🔴 **v1 老备份必须永远能导入**，不许因为"v1 已经淘汰"就删掉兼容分支：
- *    导入方按**显示名反查字典**把 code 补回来（`subjectCodeOfName`），
- *    反查不出来（老师写的是「物理竞赛」这种字典外显示名）就留 `undefined`，
- *    **绝不写 `null`、也绝不猜**（I14）。理由见 功能设计与不变量.md §12.7。
+ * 🔴 **v1 / v2 老备份必须永远能导入**，不许因为"淘汰了"就删掉兼容分支：
+ *    v1 按**显示名反查字典**把学科 code 补回来（`subjectCodeOfName`），反查不出来
+ *    （老师写的是「物理竞赛」这种字典外显示名）就留 `undefined`，**绝不写 `null`、也绝不猜**（I14）；
+ *    v1/v2 的**档案键**按"班内学号 → 该生的序列号"反查着补（见 `upgradeKeysToSerial`），
+ *    **补不到的留原键，并把条数报给用户**（"绝不静默丢弃"）。理由见 功能设计与不变量.md §12.7。
  */
 export type Backup = {
-  v: 2
+  v: 3
   at: number
   teacher?: Teacher | null
   classes: Klass[]
@@ -77,7 +81,7 @@ export function makeBackup(s: {
   classrooms: ClassroomClient[]
 }): Backup {
   return {
-    v: 2,
+    v: 3,
     at: Date.now(),
     teacher: s.teacher,
     classes: s.classes,
@@ -144,9 +148,17 @@ function normalizeStudent(raw: unknown, index: number, seenIds: Set<string>): St
   if (!id || seenIds.has(id)) id = uuid()
   seenIds.add(id)
   const status: StudentStatus = s.status === 'left' ? 'left' : 'active'
+  /*
+   * 序列号（v3 才有）：**原样收下**（非空字符串就要），但**不在这里校验形状、也不补号** ——
+   * 补号是 `upgradeKeysToSerial` 的活（它要看到整班名单才能按 U-2 的规则"追加到年级末尾"）。
+   * `legacyStudentNo` **故意不收**：它是迁移判据（数据库 §20.2 的触发器会拒写），
+   * 备份里带上它只会让"恢复"多一个能把它写坏的机会。
+   */
+  const serial = typeof s.serial === 'string' ? s.serial.trim() : ''
   return {
     id,
     studentNo: asText(s.studentNo) || String(index + 1),
+    ...(serial ? { serial } : {}),
     name: asText(s.name),
     status,
     ...(typeof s.note === 'string' ? { note: s.note } : {}),
@@ -313,16 +325,17 @@ function normalizeTeacher(raw: unknown): Teacher | null {
 /**
  * 一份备份值不值得信 —— 恢复是不可逆的，宁可不恢复也不能恢复半份。
  *
- * 🔴 **版本判据：`v1` 与 `v2` 都收**，收完一律按当前版本（v2）返回。
+ * 🔴 **版本判据：`v1` / `v2` / `v3` 都收**，收完一律按当前版本（v3）返回。
  *    v1 没有 `subjectCode` / `primarySubjectCode`，由两个 normalize 按显示名反查字典兜住；
- *    反查不出来的（字典外显示名）留 `undefined` —— 那正是"没有判据"的诚实表达。
- *    版本比当前高（v3+）或没有 `v` 的**不认**：宁可报错，也不要猜一份看不懂的结构。
+ *    v1/v2 的**档案键是班内学号**，由 `upgradeKeysToSerial()` 补成序列号
+ *    （补不到的**留原键**并把条数报出来 —— 绝不静默丢弃）。
+ *    版本比当前高（v4+）或没有 `v` 的**不认**：宁可报错，也不要猜一份看不懂的结构。
  */
 export function validateBackup(raw: unknown): { ok: true; data: Backup } | { ok: false; why: string } {
   if (!raw || typeof raw !== 'object') return { ok: false, why: '不是有效的备份文件' }
-  // `v` 单独按 number 读：Backup['v'] 是字面量 2，直接比较 1 会被 TS 判成"不可能相等"
+  // `v` 单独按 number 读：Backup['v'] 是字面量 3，直接比较 1 会被 TS 判成"不可能相等"
   const b = raw as Omit<Partial<Backup>, 'v'> & { v?: number }
-  if (b.v !== 1 && b.v !== 2) return { ok: false, why: `备份版本不认识（v${String(b.v)}）` }
+  if (b.v !== 1 && b.v !== 2 && b.v !== 3) return { ok: false, why: `备份版本不认识（v${String(b.v)}）` }
   if (!Array.isArray(b.classes)) return { ok: false, why: '缺少班级数据' }
   if (!Array.isArray(b.assignments)) return { ok: false, why: '缺少作业数据' }
   const classes = b.classes.map(normalizeKlass)
@@ -337,19 +350,153 @@ export function validateBackup(raw: unknown): { ok: true; data: Backup } | { ok:
     if (!roomByClass.has(c.classId)) roomByClass.set(c.classId, c)
   }
 
+  /*
+   * v1/v2 的档案键是**班内学号**（Q6 迁移之前的口径）——
+   * 这里把它们补成序列号：先给缺号的学生按 U-2 的规则发号，再按
+   * "班内学号 → 序列号" 一对一重写那 10 个字段的键。**查不到的留原键**。
+   */
+  const upgraded = upgradeKeysToSerial({
+    classes,
+    assignments: (b.assignments as unknown[]).map(normalizeAssignment),
+    calls: (Array.isArray(b.calls) ? b.calls : []).map(normalizeCall),
+  })
+
   return {
     ok: true,
     data: {
-      // 收进来的是 v1 还是 v2 都好，**从这里往后一律是 v2**（归一化后的结构）
-      v: 2,
+      // 收进来的是 v1 / v2 / v3 都好，**从这里往后一律是 v3**（归一化后的结构）
+      v: 3,
       at: asNumber(b.at, 0),
       teacher: normalizeTeacher(b.teacher),
-      classes,
-      assignments: (b.assignments as unknown[]).map(normalizeAssignment),
+      classes: upgraded.classes,
+      assignments: upgraded.assignments,
       schedule: (Array.isArray(b.schedule) ? b.schedule : []).map(normalizeSchedule),
-      calls: (Array.isArray(b.calls) ? b.calls : []).map(normalizeCall),
+      calls: upgraded.calls,
       classrooms: [...roomByClass.values()],
     },
+  }
+}
+
+/* ---------------- v1/v2 → v3：把档案键从"班内学号"补成"序列号" ----------------
+ *
+ * 规矩与 `supabase/schema.sql` §20 的迁移**逐条相同**（同一个不变量，两条路径都要守）：
+ *   ① **先给缺号的学生发号**（U-2 = A：追加到年级末尾）—— 用 `lib/serial.ts`（那里是
+ *      `serial_year_of_class()` 的镜像）；
+ *   ② **映射一对一**：`班内学号 → 序列号`（同一个班内唯一，因为 `unique (class_id, student_no)`）；
+ *   ③ **查不到的键留原键**，并把条数报出来（I14：认不出不许猜）；
+ *   ④ **幂等**：已经全是序列号的、以及已经补过的，重跑一遍不会变（序列号查不到对应关系就原样）。
+ * ============================================================ */
+
+export type KeyUpgradeStats = { converted: number; unresolved: number; assigned: number }
+
+/** 上面那次升级的统计（给"恢复完成"的提示用；`undefined` = 没有发生过升级） */
+export let lastKeyUpgrade: KeyUpgradeStats | undefined
+
+function upgradeKeysToSerial(input: {
+  classes: Klass[]
+  assignments: Assignment[]
+  calls: CallRecord[]
+}): { classes: Klass[]; assignments: Assignment[]; calls: CallRecord[]; stats: KeyUpgradeStats } {
+  const before = countNonSerialKeys(input)
+  const hasMissing = input.classes.some((c) => c.students.some((s) => !s.serial))
+  if (!hasMissing && before === 0) {
+    // 已经是 v3 形状（或这份备份本来就是从迁移后的库里导出的）→ **一个字都不动**
+    lastKeyUpgrade = undefined
+    return { ...input, stats: { converted: 0, unresolved: 0, assigned: 0 } }
+  }
+
+  // ① 发号：届的来路与数据库同顺序（先问当前 store 里同年级的已有序列号）；
+  //    **编号基数要带上当前 app 已有的班** —— 否则恢复会从 001 重来、撞上唯一索引
+  const current = currentStoreClasses()
+  const yearOf = yearLookupFromClasses(current)
+  const { classes, assigned } = assignMissingSerials(input.classes, yearOf, current)
+
+  // ② 每个班一张 `班内学号 → 序列号` 表
+  const maps = new Map<string, Map<string, string>>()
+  for (const k of classes) {
+    const m = new Map<string, string>()
+    for (const s of k.students) if (s.serial) m.set(s.studentNo, s.serial)
+    maps.set(k.id, m)
+  }
+  let unresolved = 0
+  const conv = (classId: string, key: string): string => {
+    const hit = maps.get(classId)?.get(key)
+    if (hit) return hit
+    // 认不出就留原键 —— "已经是序列号"也走这一支（原样返回，所以重跑是幂等的）
+    if (!isSerial(key) && key !== '') unresolved++
+    return key
+  }
+  const convList = (classId: string, list: string[] | undefined): string[] =>
+    (list ?? []).map((n) => conv(classId, n))
+  const convRec = <T,>(classId: string, rec: Record<string, T> | undefined): Record<string, T> => {
+    const out: Record<string, T> = {}
+    for (const [k, v] of Object.entries(rec ?? {})) out[conv(classId, k)] = v
+    return out
+  }
+
+  const assignments = input.assignments.map((a) => ({
+    ...a,
+    missingNos: convList(a.classId, a.missingNos),
+    lateNos: convList(a.classId, a.lateNos),
+    confirmedNos: convList(a.classId, a.confirmedNos),
+    focusNos: convList(a.classId, a.focusNos),
+    correctionNos: convList(a.classId, a.correctionNos),
+    correctedNos: convList(a.classId, a.correctedNos),
+    wrong: convRec(a.classId, a.wrong),
+    grades: convRec(a.classId, a.grades),
+  }))
+
+  const calls = input.calls.map((c) => ({
+    ...c,
+    studentNos: convList(c.classId, c.studentNos),
+    states: convRec(c.classId, c.states),
+  }))
+
+  lastKeyUpgrade = { converted: before - unresolved, unresolved, assigned }
+  return { classes, assignments, calls, stats: lastKeyUpgrade }
+}
+
+/** 数一下"还不是序列号"的键（= 需要升级的规模）；空键不算 */
+function countNonSerialKeys(input: {
+  classes: Klass[]
+  assignments: Assignment[]
+  calls: CallRecord[]
+}): number {
+  let n = 0
+  const count = (list: string[] | undefined) => {
+    for (const k of list ?? []) if (k !== '' && !isSerial(k)) n++
+  }
+  for (const a of input.assignments) {
+    count(a.missingNos)
+    count(a.lateNos)
+    count(a.confirmedNos)
+    count(a.focusNos)
+    count(a.correctionNos)
+    count(a.correctedNos)
+    for (const k of Object.keys(a.wrong ?? {})) if (k !== '' && !isSerial(k)) n++
+    for (const k of Object.keys(a.grades ?? {})) if (k !== '' && !isSerial(k)) n++
+  }
+  for (const c of input.calls) {
+    count(c.studentNos)
+    for (const k of Object.keys(c.states ?? {})) if (k !== '' && !isSerial(k)) n++
+  }
+  return n
+}
+
+/**
+ * 当前 app 里的班级（恢复备份时用）。
+ *
+ * 两个用途：① 届的来路（同年级已有学生的序列号前缀）；
+ * ② **编号基数** —— 恢复一份没有序列号的老备份时不能从 001 重来。
+ * 云端那份权威来源是 `grades.cohort` / `grades.year`（见 `remote.ensureGradeLookup`），
+ * 恢复备份时它不一定在手上 —— 那就退化成"同年级已有序列号"这条**事实**（仍然不是猜）。
+ */
+function currentStoreClasses(): Klass[] {
+  try {
+    const st = useStore.getState() as { classes?: Klass[] }
+    return st.classes ?? []
+  } catch {
+    return []
   }
 }
 

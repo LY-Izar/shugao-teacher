@@ -741,7 +741,8 @@ export default function Classroom() {
   }
 
   const nameOf = useCallback(
-    (no: string) => students.find((s) => s.studentNo === no)?.name ?? '',
+    // `no` 是**档案键**（迁移后 = 序列号）—— 两条路都要认（见 `lib/keys.ts`）
+    (no: string) => students.find((s) => s.studentNo === no || s.serial === no)?.name ?? '',
     [students],
   )
 

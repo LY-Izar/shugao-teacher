@@ -2,7 +2,15 @@ name: 数据库备份
 
 ***REMOVED*** Supabase 免费版**没有自动备份**。
 ***REMOVED*** 作业数据、成绩、错题记录一旦误删或被错误脚本清空，不可恢复 —— 这对学校是事故级风险。
-***REMOVED*** 这个任务每晚把整个数据库 dump 出来，压缩后传到 Cloudflare R2，保留最近 30 份。
+***REMOVED*** 这个任务每晚把整个数据库 dump 出来，压缩、**AES-256 加密**，传到 Cloudflare R2，保留最近 30 份。
+***REMOVED***
+***REMOVED*** 🔴 加密（2026-09-25 加）：dump 里是全校学生的姓名 / 学号 / 成绩，所以上传的必须是密文。
+***REMOVED***    产物名 `backup-<stamp>.sql.gz.enc`；**解密命令与口令纪律**见仓库
+***REMOVED***    `app/README.md` 的「备份加密与恢复」一节（也有 `部署与打包指南.md` §4.6）。
+***REMOVED***    ⚠️ 口令（secret `BACKUP_ENCRYPTION_PASSPHRASE`）**丢了 = 所有备份永久打不开**，
+***REMOVED***       请存进密码管理器；**绝不要**把它写进仓库。
+***REMOVED***    ⚠️ 口令缺失时本工作流**故意报错退出、一个字节都不传** ——
+***REMOVED***       宁可今晚没有备份，也不能"以为加密了、其实传的是明文"。
 ***REMOVED***
 ***REMOVED*** ── 诊断增强：上次红灯复盘 ────────────────────────────────────────────
 ***REMOVED*** 上次失败只是因为 SUPABASE_DB_URL 没配，但它只说了「缺失」，不打印它到底拿到了什么。
@@ -31,6 +39,7 @@ jobs:
           R2_SECRET_ACCESS_KEY_RAW: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_ENDPOINT_RAW: ${{ secrets.R2_ENDPOINT }}
           R2_BUCKET_RAW: ${{ secrets.R2_BUCKET }}
+          BACKUP_PASS_RAW: ${{ secrets.BACKUP_ENCRYPTION_PASSPHRASE }}
         run: |
           ***REMOVED*** 每个 run: 都是独立 shell，所以这个 trim 小函数在需要的步骤里各留一份
           ***REMOVED*** （故意的，别抽成共享文件：单看一步就能读明白）。
@@ -74,9 +83,24 @@ jobs:
           ***REMOVED*** 两个 key 连长度都不打：它们不是诊断缺口，没必要多给一点信息。
           report R2_ACCESS_KEY_ID "$R2_ACCESS_KEY_ID_RAW" no
           report R2_SECRET_ACCESS_KEY "$R2_SECRET_ACCESS_KEY_RAW" no
+          ***REMOVED*** 🔴 备份加密口令：**连长度都不打**。长度会缩小暴力破解的搜索空间，
+          ***REMOVED***    而这个口令是"所有备份的唯一钥匙"（详见 README「备份加密」一节）。
+          report BACKUP_ENCRYPTION_PASSPHRASE "$BACKUP_PASS_RAW" no
 
           if [ -z "$(trim "$DB_URL_RAW")" ]; then
             echo "::error::缺少 SUPABASE_DB_URL（trim 后为空）。控制台 → Project Settings → Database → Connection string → Direct connection（5432）那条"
+            exit 1
+          fi
+
+          ***REMOVED*** 🔴🔴 这一条是**整个工作流最要紧的一道闸**（2026-09-25 加）：
+          ***REMOVED***   备份里有全校学生姓名 / 学号 / 成绩。**口令不在就宁可整晚不备份**，
+          ***REMOVED***   绝不能"悄悄降级成明文传上 R2" —— 那是最危险的失败模式：
+          ***REMOVED***   日志全绿、对象也在，但 R2 上躺着一份明文的全校成绩单，
+          ***REMOVED***   而所有人都以为它是加密的（比"没有备份"更糟：没有人会去修它）。
+          ***REMOVED***   ⚠️ 口令丢了 = 所有备份永久打不开（openssl 没有后门），
+          ***REMOVED***   所以这里只报存在性、绝不回值，口令请自己存进密码管理器。
+          if [ -z "$(trim "$BACKUP_PASS_RAW")" ]; then
+            echo "::error::缺少 BACKUP_ENCRYPTION_PASSPHRASE —— 拒绝以**明文**上传备份，本次不生成任何备份文件。到仓库 Settings → Secrets and variables → Actions 添加上它（怎么配与口令纪律见 README「备份加密」一节）"
             exit 1
           fi
 
@@ -89,9 +113,10 @@ jobs:
           psql --version
 
       ***REMOVED*** ── 第 3 步：先单独连一次，把「连不上 / 密码错」和「pg_dump 自己的毛病」分开 ──
-      - name: 数据库预检 + pg_dump（失败时按类型给诊断）
+      - name: 数据库预检 + pg_dump + 加密（失败时按类型给诊断）
         env:
           DB_URL_RAW: ${{ secrets.SUPABASE_DB_URL }}
+          BACKUP_PASS_RAW: ${{ secrets.BACKUP_ENCRYPTION_PASSPHRASE }}
         run: |
           ***REMOVED*** 这一步的纪律：连接串只在「喂给 psql / pg_dump」时出现，
           ***REMOVED*** 任何要进日志的地方都必须先过 mask_db_url / redact。
@@ -259,8 +284,83 @@ jobs:
             exit 1
           fi
           gzip -9 "$raw"
-          ls -lh "$out"
-          echo "FILE=$out" >> "$GITHUB_ENV"
+          echo "  压缩后：$(ls -lh "$out" | awk '{print $5}')（明文字节 $(wc -c < "$out" | tr -d '[:space:]')）"
+
+          ***REMOVED*** ── 加密（2026-09-25 加）──────────────────────────────────────────
+          ***REMOVED*** 🔴 为什么必须有这一步：dump 里是**全校学生的姓名 / 学号 / 成绩**。
+          ***REMOVED***    加密前它在 R2 上（以及 Artifact 里）是**明文**的：拿到那个对象的人
+          ***REMOVED***    不需要任何口令就能读。这一层是这份数据的唯一保护。
+          ***REMOVED***
+          ***REMOVED*** 选型说明（为什么是 openssl enc 而不是别的）：
+          ***REMOVED***   · ubuntu-latest 自带 openssl 3.x，**零依赖**（`age` / `gpg` 都要额外装包）；
+          ***REMOVED***   · 对称口令 → 没有密钥文件要保管，运维成本最低（用户就一个人维护这套系统）；
+          ***REMOVED***   · 解密只要一行命令、任何装了 openssl 的机器都行（Windows 的 Git Bash 也自带）——
+          ***REMOVED***     "关键时刻打不开的备份等于没有备份"，这一条比算法先进更重要。
+          ***REMOVED***
+          ***REMOVED*** 参数（**解密时必须一模一样**，只有 -pass 换成你的口令）：
+          ***REMOVED***   -aes-256-cbc  对称算法
+          ***REMOVED***   -pbkdf2       口令派生用 PBKDF2（不加的话是 openssl 那套过时的 EVP_BytesToKey）
+          ***REMOVED***   -iter 600000  迭代次数：拉高暴力破解成本。多花几秒，换"口令别太弱也还扛得住"
+          ***REMOVED***   -md sha256    PBKDF2 的摘要算法（openssl 3 已经是默认，显式写出来免得换机器时变）
+          ***REMOVED***   -salt（默认开）**绝不要加 -nosalt**：固定盐 = 同一份 dump 每次密文都一样，
+          ***REMOVED***                 等于告诉拿到对象的人"这两天的备份内容没变"，也方便字典攻击。
+          ***REMOVED***
+          ***REMOVED*** ⚠️ 口令从环境变量喂给 openssl，**用管道 `printf` 而不是 `<<<`**：
+          ***REMOVED***    here-string 会**多送一个换行**，那一个字节就会让解密的密钥对不上
+          ***REMOVED***    （而且报错是"bad decrypt"，看着像口令记错了，极难查）。
+          ***REMOVED***    同理 `printf '%s'` 不带 \n —— 两端必须**逐字节**一致。
+          ***REMOVED*** ⇣⇣ 加密块开始（上下两行标记是给 scripts/lib/backup-enc-selfcheck.mjs 抠代码用的，别删）
+          BACKUP_PASS="$(trim "$BACKUP_PASS_RAW")"
+          if [ -z "$BACKUP_PASS" ]; then
+            ***REMOVED*** 第 1 步已经拦过一次；这里再拦一次是**故意的**：
+            ***REMOVED*** 这一步才是真正写文件的地方，"绝不静默降级成明文"这条不变量
+            ***REMOVED*** 必须钉在**产生文件的那一处**，而不是只钉在入口（§2.3 的教训：
+            ***REMOVED*** 同一个不变量要在所有写入路径上守）。
+            echo "::error::BACKUP_ENCRYPTION_PASSPHRASE 为空 —— 拒绝生成明文备份，这一步到此为止（没有 .enc 文件产生）"
+            rm -f "$out"
+            exit 1
+          fi
+
+          enc="${out}.enc"
+          rm -f "$enc"
+          enc_rc=0
+          printf '%s' "$BACKUP_PASS" \
+            | openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -md sha256 -salt \
+                -in "$out" -out "$enc" -pass stdin 2>/tmp/enc.err || enc_rc=$?
+          if [ "$enc_rc" -ne 0 ]; then
+            echo "::error::加密失败（openssl 退出码 $enc_rc）—— 备份没有生成，**也不会**有明文被传上去"
+            tail -n 10 /tmp/enc.err | sed 's/^/    /'
+            rm -f "$out" "$enc"
+            exit 1
+          fi
+
+          ***REMOVED*** 加密的产物必须**真的不是明文**：先看 openssl 的魔数（`Salted__`），
+          ***REMOVED*** 再确认 gzip 魔数（1f 8b）已经不在里面。两条都过才允许往下走。
+          if ! head -c 8 "$enc" | grep -q 'Salted__'; then
+            echo "::error::加密产物的头部不是 openssl 的 Salted__ 魔数 —— 这一步没有真的加密，按失败处理"
+            rm -f "$out" "$enc"
+            exit 1
+          fi
+          if [ "$(head -c 2 "$out" | od -An -tx1 | tr -d '[:space:]')" != "1f8b" ]; then
+            echo "::error::源文件头部不是 gzip 魔数（1f 8b）—— 压缩这一步出了问题，按失败处理"
+            rm -f "$out" "$enc"
+            exit 1
+          fi
+          echo "  源文件确实是 gzip（魔数 1f 8b）；密文头部是 Salted__ —— 明文没有直接落到 .enc 里"
+          ***REMOVED*** 密文比明文短 = 不可能（CBC + PKCS***REMOVED***7 只会更长），说明写坏了
+          plain_bytes=$(wc -c < "$out" | tr -d '[:space:]')
+          enc_bytes=$(wc -c < "$enc" | tr -d '[:space:]')
+          if [ "$enc_bytes" -le "$plain_bytes" ]; then
+            echo "::error::密文 $enc_bytes 字节 ≤ 明文 $plain_bytes 字节，不可能是 AES-CBC 的产物"
+            rm -f "$out" "$enc"
+            exit 1
+          fi
+          ***REMOVED*** 明文一定删掉：R2 上传、Artifact 兜底、清理三处都只认 `backup-*.sql.gz.enc`
+          rm -f "$out"
+          echo "  ✅ 已加密：$enc（$enc_bytes 字节）。明文 .gz 已删除，本步之后工作区里没有明文备份"
+          ls -lh "$enc"
+          echo "FILE=$enc" >> "$GITHUB_ENV"
+          ***REMOVED*** ⇡⇡ 加密块结束
 
       ***REMOVED*** ── 第 4 步：上传 R2。未配置 R2 时保留原来的 Artifact 降级路径 ──────
       - name: 上传到 Cloudflare R2（失败时按类型给诊断）
@@ -379,12 +479,14 @@ jobs:
       ***REMOVED*** 兜底：作为 Artifact 保留 30 天
       ***REMOVED*** if: always() 是故意的：R2 传失败、甚至 pg_dump 失败时这一步也要跑，
       ***REMOVED*** 能捞一份就捞一份（没有产物时 upload-artifact 只会给个 warning，不会掩盖真正的错误）。
+      ***REMOVED*** 🔴 通配符**只认加密后的 `.sql.gz.enc`**：明文那份在加密成功后已经被删掉，
+      ***REMOVED***    这里再收窄一道，等于"这个仓库里没有任何一条路能把明文备份传出去"。
       - name: 兜底：作为 Artifact 保留 30 天
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: db-backup
-          path: backup-*.sql.gz
+          path: backup-*.sql.gz.enc
           retention-days: 30
 
       - name: 清理 R2 上超过 30 份的旧备份
@@ -417,6 +519,17 @@ jobs:
           ***REMOVED*** 列出全部备份（按文件名倒序），删掉第 31 份之后的。
           ***REMOVED*** 先单独拿退出码：旧写法从管道里读，`aws s3 ls` 失败会被 sort 的 0 盖掉，
           ***REMOVED*** 结果「列举失败」看起来像「清理完成」。
+          ***REMOVED***
+          ***REMOVED*** ── 新旧两种备份的共存纪律（2026-09-25 加）────────────────────────
+          ***REMOVED*** 加密之前传上去的是 `backup-<stamp>.sql.gz`（**明文**），
+          ***REMOVED*** 加密之后是 `backup-<stamp>.sql.gz.enc`。两件事都按这里办：
+          ***REMOVED***   ① **保留名额合在一起算**（都按名字排序，共留最新 30 份）——
+          ***REMOVED***      不分开算，免得"30 份明文 + 30 份密文"把 R2 占成两倍；
+          ***REMOVED***   ② **顺手把明文那批清掉，但只在它已经被同一时刻的密文取代时**：
+          ***REMOVED***      这一轮 R2 上出现 `X.sql.gz.enc`，说明 ①`X` 是同一份 dump 的密文、
+          ***REMOVED***      ②工作流已经跑在加密版本上了。那种情况下明文副本没有任何理由留着
+          ***REMOVED***      （留着就是"全校成绩单明文躺在云上"）。**只删同一时刻的那一个**，
+          ***REMOVED***      不碰比它更老、还没有对应密文的明文 —— 那可能是唯一的备份。
           raw_list="$(mktemp)"
           list="$(mktemp)"
           ls_rc=0
@@ -426,14 +539,27 @@ jobs:
             tail -n 15 /tmp/r2ls.err | sed 's/^/    /'
             exit 1
           fi
-          awk '{print $4}' "$raw_list" | sort -r > "$list"
+          awk '{print $4}' "$raw_list" | grep -E '^backup-[0-9]{8}-[0-9]{4}\.sql\.gz(\.enc)?$' | sort -r > "$list"
           total=$(grep -c . "$list" || true)
-          echo "R2 上现有 $total 份备份；第 31 份之后（更老的）会被删掉"
+          enc_total=$(grep -c '\.enc$' "$list" || true)
+          plain_total=$((total - enc_total))
+          echo "R2 上现有 $total 份备份（加密 $enc_total 份 · 明文 $plain_total 份）；第 31 份之后（更老的）会被删掉"
+
+          ***REMOVED*** ① 已经被同一时刻的密文取代的明文副本 —— 删掉
+          grep '\.sql\.gz$' "$list" > "$list.plain" || true
+          while read -r p; do
+            [ -n "$p" ] || continue
+            if grep -qx "$p.enc" "$list"; then
+              echo "  删除 $p（已被 $p.enc 取代：工作流跑在加密版本上，明文副本没有理由留着）"
+              aws s3 rm "s3://$R2_BUCKET/db-backups/$p" --endpoint-url "$R2_ENDPOINT"
+            fi
+          done < "$list.plain"
+
           tail -n +31 "$list" | while read -r key; do
               if [ -n "$key" ]; then
                 echo "  删除 $key"
                 aws s3 rm "s3://$R2_BUCKET/db-backups/$key" --endpoint-url "$R2_ENDPOINT"
               fi
             done
-          rm -f "$raw_list" "$list"
+          rm -f "$raw_list" "$list" "$list.plain"
           echo "清理完成"

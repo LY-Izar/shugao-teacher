@@ -1,5 +1,6 @@
 import type { Assignment, CallRecord, CallState, Student } from '../data/types'
 import { isQuestionWrong } from './grading'
+import { archiveKeyOf, archiveValue } from './keys'
 import { roomOf } from './subjects'
 
 /** 单次播报人数上限 —— 一次叫太多学生既不现实也拆散课堂 */
@@ -45,7 +46,7 @@ export function wrongStudents(students: Student[], a: Assignment): WrongStudent[
   const active = students.filter((s) => s.status === 'active')
   return active
     .map((student) => {
-      const keys = a.wrong[student.studentNo] ?? []
+      const keys = archiveValue(a.wrong, student) ?? []
       const seqSet = new Set<number>()
       let hasSub = false
       for (const k of keys) {
@@ -68,10 +69,10 @@ export function wrongStudentsOfQuestion(
 ): WrongStudent[] {
   const subCount = a.subQuestions[String(seq)] ?? 0
   return students
-    .filter((s) => s.status === 'active' && isQuestionWrong(a.wrong[s.studentNo], seq, subCount))
+    .filter((s) => s.status === 'active' && isQuestionWrong(archiveValue(a.wrong, s), seq, subCount))
     .map((student) => ({
       student,
-      count: (a.wrong[student.studentNo] ?? []).filter((k) => Number(k.split('.')[0]) === seq).length,
+      count: (archiveValue(a.wrong, student) ?? []).filter((k) => Number(k.split('.')[0]) === seq).length,
       seqs: [seq],
       hasSub: subCount > 0,
     }))
@@ -80,7 +81,13 @@ export function wrongStudentsOfQuestion(
 
 /* ---------------- 呼叫记录 ---------------- */
 
-/** 本次作业里，每个学生最近一次的呼叫状态 —— 用于「已叫过标灰」 */
+/**
+ * 本次作业里，每个学生最近一次的呼叫状态 —— 用于「已叫过标灰」。
+ *
+ * ⚠️ 返回的 Map 的键是**档案里存着的那个键**（迁移后 = 序列号）——
+ *    调用方一律走 `latestCallStateOf(map, student)` 读，**别自己拿 `studentNo` 去 get**
+ *    （那样在迁移后会全部读成"没叫过"，而且不报错）。
+ */
 export function latestCallStates(calls: CallRecord[], assignmentId: string): Map<string, CallState> {
   const map = new Map<string, CallState>()
   const list = calls
@@ -90,6 +97,19 @@ export function latestCallStates(calls: CallRecord[], assignmentId: string): Map
     for (const no of c.studentNos) map.set(no, c.states[no] ?? 'called')
   }
   return map
+}
+
+/** 读上面那张表（**两条路**：先序列号、再班内学号） */
+export function latestCallStateOf(
+  map: Map<string, CallState>,
+  s: Pick<Student, 'serial' | 'studentNo'>,
+): CallState | undefined {
+  if (!map.size) return undefined
+  for (const k of [archiveKeyOf(s), s.studentNo]) {
+    const v = map.get(k)
+    if (v) return v
+  }
+  return undefined
 }
 
 export function formatClock(ts: number): string {

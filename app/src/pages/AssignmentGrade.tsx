@@ -26,6 +26,19 @@ import {
   toggleSub,
 } from '../lib/grading'
 import { friendlyDate } from '../lib/date'
+import { archiveKeyOf } from '../lib/keys'
+
+/*
+ * 🔴 **档案键**（`wrong` / `confirmedNos` / `focusNos` / `correctionNos` /
+ *    `correctedNos` / `grades`）：迁移后是**序列号**（I40 / `schema.sql` §20）。
+ *    所以本文件里凡是"读写这些集合"的地方一律 `k(s)`；
+ *    凡是**显示**（`{s.studentNo}`、aria-label）的地方保持 `s.studentNo` 不动 ——
+ *    老师看到的东西和迁移前一模一样（Q6 的原话）。
+ *
+ * ⚠️ 别名放在**模块层**（不是组件内）：放组件里会被 `react-hooks/exhaustive-deps`
+ *    当成响应式依赖（"useMemo 少了一个依赖 k"），而它其实是个纯函数。
+ */
+const k = archiveKeyOf
 
 type Mode = 'byStudent' | 'byQuestion'
 
@@ -402,6 +415,7 @@ function GradeSession({
     () =>
       (klass?.students ?? [])
         .filter((s) => s.status === 'active')
+        // 名单一律**按班内学号**排（老师认这个号；序列号只进档案、不上屏）
         .sort((a, b) => Number(a.studentNo) - Number(b.studentNo)),
     [klass],
   )
@@ -539,7 +553,7 @@ function GradeSession({
   const gradeCounts = useMemo(() => {
     const c = { 优: 0, 良: 0, 差: 0 }
     for (const s of students) {
-      const g = grades[s.studentNo]
+      const g = grades[k(s)]
       if (g === '优' || g === '良' || g === '差') c[g]++
     }
     return c
@@ -598,7 +612,7 @@ function GradeSession({
       if (keys.some((k) => parseQKey(k).seq === seq)) nos.add(no)
     }
     for (const no of skip) nos.delete(no)
-    return students.filter((s) => nos.has(s.studentNo)).map((s) => s.studentNo)
+    return students.filter((s) => nos.has(k(s))).map((s) => k(s))
   }
 
   /**
@@ -744,8 +758,8 @@ function GradeSession({
   const finish = (correctionOverride?: string[]) => {
     const seconds = Math.round((Date.now() - startedAt) / 1000)
     const ungraded = students
-      .filter((s) => !confirmed.includes(s.studentNo))
-      .map((s) => s.studentNo)
+      .filter((s) => !confirmed.includes(k(s)))
+      .map((s) => k(s))
     /*
      * ⚠️ 改错名单必须用**实参**，不能只读 state。
      * 调用方可能在同一个事件里刚 setCorrection(all) 就调 finish() ——
@@ -782,13 +796,13 @@ function GradeSession({
      所以**正在展开的那个人必须留在原表**，否则一点开就跳走、面板跟着消失。
      收起之后才落到下面的已批改表。 */
   const doneSet = new Set(confirmed)
-  const todo = students.filter((s) => !doneSet.has(s.studentNo) || open === s.studentNo)
-  const doneList = students.filter((s) => doneSet.has(s.studentNo) && open !== s.studentNo)
+  const todo = students.filter((s) => !doneSet.has(k(s)) || open === k(s))
+  const doneList = students.filter((s) => doneSet.has(k(s)) && open !== k(s))
 
   /* 待确认的拆小题：要如实告诉他这一题上现在记着谁（不用 useMemo，几十个人直接筛） */
   const pendingSubNo = pendingSub?.seq ?? -1
   const pendingWrong = students.filter((s) =>
-    (wrong[s.studentNo] ?? []).some((k) => parseQKey(k).seq === pendingSubNo),
+    (wrong[k(s)] ?? []).some((k) => parseQKey(k).seq === pendingSubNo),
   )
 
   return (
@@ -1001,10 +1015,10 @@ function GradeSession({
             <Panel className="overflow-hidden">
               <div className="grid grid-cols-3 gap-2 p-2.5 sm:grid-cols-4">
                 {todo.map((s) => {
-                  const wc = wrongCountOf(s.studentNo)
-                  const isOpen = open === s.studentNo
-                  const done = confirmed.includes(s.studentNo)
-                  const grade = grades[s.studentNo]
+                  const wc = wrongCountOf(k(s))
+                  const isOpen = open === k(s)
+                  const done = confirmed.includes(k(s))
+                  const grade = grades[k(s)]
                   /*
                    * 极简模式没有"错几处"这回事 —— 卡片上的角标换成等级，
                    * 颜色也跟着等级走（优绿 / 良黄 / 差红）。照普通模式渲染的话，
@@ -1021,7 +1035,7 @@ function GradeSession({
                   const inQ =
                     !simple &&
                     mode === 'byQuestion' &&
-                    isQuestionWrong(wrong[s.studentNo], curQ, subCountOf(curQ))
+                    isQuestionWrong(wrong[k(s)], curQ, subCountOf(curQ))
                   const active = simple ? false : mode === 'byStudent' ? isOpen : inQ
                   return (
                     <Fragment key={s.id}>
@@ -1029,7 +1043,7 @@ function GradeSession({
                         type="button"
                         onClick={() => {
                           if (simple || mode === 'byStudent') {
-                            markOpen(s.studentNo)
+                            markOpen(k(s))
                             return
                           }
                           /*
@@ -1038,7 +1052,7 @@ function GradeSession({
                            * 也无条件会拦下未交学生 —— 之前这两句一叠加，
                            * 点一下未交学生就把他写成"已交 + 全对"，未交记录被永久删掉。
                            */
-                          toggleFor(s.studentNo, curQ)
+                          toggleFor(k(s), curQ)
                         }}
                         className="relative flex flex-col items-start gap-0.5 px-2 py-1.5 text-left"
                         aria-label={`${s.studentNo} 号 ${s.name}`}
@@ -1155,29 +1169,29 @@ function GradeSession({
                             </span>
                             <span style={{ fontSize: 13.5, fontWeight: 600 }}>{s.name}</span>
                             {simple ? (
-                              <Tag tone={grades[s.studentNo] ? 'accent' : 'idle'}>
-                                {grades[s.studentNo] ?? '未评'}
+                              <Tag tone={grades[k(s)] ? 'accent' : 'idle'}>
+                                {grades[k(s)] ?? '未评'}
                               </Tag>
                             ) : (
                               <Tag tone={wc > 0 ? 'bad' : 'ok'}>
                                 {wc > 0 ? `${wc} 处错` : '全对'}
                               </Tag>
                             )}
-                            {focus.includes(s.studentNo) ? <Tag tone="warn">重点关注</Tag> : null}
+                            {focus.includes(k(s)) ? <Tag tone="warn">重点关注</Tag> : null}
                             <span className="flex-1" />
                             {!simple ? (
                               <Button
                                 size="sm"
                                 variant="primary"
                                 onClick={() => {
-                                  if (isMissing(s.studentNo)) {
+                                  if (isMissing(k(s))) {
                                     blocked()
                                     return
                                   }
-                                  setWrong((w) => ({ ...w, [s.studentNo]: [] }))
+                                  setWrong((w) => ({ ...w, [k(s)]: [] }))
                                   setTaps((t) => t + 1)
                                   // 「全对」是要点出来的动作，不点就不算批过
-                                  confirm(s.studentNo)
+                                  confirm(k(s))
                                 }}
                               >
                                 确认全对
@@ -1186,9 +1200,9 @@ function GradeSession({
                             {/* 「找」：标记需重点关注。和改错名单是两回事 —— 全对也可能要盯 */}
                             <button
                               type="button"
-                              onClick={() => toggleFocus(s.studentNo)}
+                              onClick={() => toggleFocus(k(s))}
                               aria-label={`${s.name} 标记需重点关注`}
-                              title={focus.includes(s.studentNo) ? '取消重点关注' : '标记为需重点关注'}
+                              title={focus.includes(k(s)) ? '取消重点关注' : '标记为需重点关注'}
                               style={{
                                 width: 30,
                                 height: 30,
@@ -1197,14 +1211,14 @@ function GradeSession({
                                 fontSize: 13,
                                 fontWeight: 700,
                                 border: `1.5px solid ${
-                                  focus.includes(s.studentNo)
+                                  focus.includes(k(s))
                                     ? 'var(--color-warn)'
                                     : 'var(--color-line2)'
                                 }`,
-                                background: focus.includes(s.studentNo)
+                                background: focus.includes(k(s))
                                   ? 'var(--color-warnsoft)'
                                   : 'transparent',
-                                color: focus.includes(s.studentNo)
+                                color: focus.includes(k(s))
                                   ? 'var(--color-warn)'
                                   : 'var(--color-ink3)',
                               }}
@@ -1225,7 +1239,7 @@ function GradeSession({
                           {simple ? (
                             <div className="flex gap-2">
                               {(['优', '良', '差'] as const).map((lv) => {
-                                const on = grades[s.studentNo] === lv
+                                const on = grades[k(s)] === lv
                                 const tone =
                                   lv === '优'
                                     ? 'var(--color-ok)'
@@ -1237,13 +1251,13 @@ function GradeSession({
                                     key={lv}
                                     type="button"
                                     onClick={() => {
-                                      if (isMissing(s.studentNo)) {
+                                      if (isMissing(k(s))) {
                                         blocked()
                                         return
                                       }
-                                      setGrades((g) => ({ ...g, [s.studentNo]: lv }))
+                                      setGrades((g) => ({ ...g, [k(s)]: lv }))
                                       setTaps((t) => t + 1)
-                                      confirm(s.studentNo)
+                                      confirm(k(s))
                                     }}
                                     className="flex-1"
                                     style={{
@@ -1274,11 +1288,11 @@ function GradeSession({
                                   key={seq}
                                   seq={seq}
                                   subCount={subCountOf(seq)}
-                                  wrong={wrong[s.studentNo] ?? []}
-                                  onToggle={() => toggleFor(s.studentNo, seq)}
-                                  onSub={(sub) => toggleSubFor(s.studentNo, seq, sub)}
+                                  wrong={wrong[k(s)] ?? []}
+                                  onToggle={() => toggleFor(k(s), seq)}
+                                  onSub={(sub) => toggleSubFor(k(s), seq, sub)}
                                   onSetSubCount={(n, previous) =>
-                                    applySubs(seq, n, previous ? { no: s.studentNo, previous } : undefined)
+                                    applySubs(seq, n, previous ? { no: k(s), previous } : undefined)
                                   }
                                   onSubSettings={() => setEditing(seq)}
                                 />
@@ -1316,12 +1330,12 @@ function GradeSession({
               <Panel className="overflow-hidden">
                 <div className="grid grid-cols-3 gap-2 p-2.5 sm:grid-cols-4">
                   {students
-                    .filter((s) => focus.includes(s.studentNo))
+                    .filter((s) => focus.includes(k(s)))
                     .map((s) => (
                       <button
                         key={s.id}
                         type="button"
-                        onClick={() => toggleFocus(s.studentNo)}
+                        onClick={() => toggleFocus(k(s))}
                         className="flex items-center gap-1.5 px-2 py-2 text-left"
                         style={{
                           border: '1px solid var(--color-warn)',
@@ -1343,9 +1357,9 @@ function GradeSession({
                           style={{ fontSize: 11, color: 'var(--color-ink3)' }}
                         >
                           {simple
-                            ? (grades[s.studentNo] ?? '未评')
-                            : wrongCountOf(s.studentNo)
-                              ? `错${wrongCountOf(s.studentNo)}`
+                            ? (grades[k(s)] ?? '未评')
+                            : wrongCountOf(k(s))
+                              ? `错${wrongCountOf(k(s))}`
                               : '全对'}
                         </span>
                       </button>
@@ -1362,14 +1376,14 @@ function GradeSession({
               <Panel className="overflow-hidden">
                 <div className="grid grid-cols-3 gap-2 p-2.5 sm:grid-cols-4">
                   {doneList.map((s) => {
-                    const wc = wrongCountOf(s.studentNo)
-                    const grade = grades[s.studentNo]
+                    const wc = wrongCountOf(k(s))
+                    const grade = grades[k(s)]
                     // 极简模式：结论是等级，不是"错几处"（`wrong` 在这类档案里永远是空的）
                     return (
                       <button
                         key={s.id}
                         type="button"
-                        onClick={() => setConfirmed((c) => c.filter((x) => x !== s.studentNo))}
+                        onClick={() => setConfirmed((c) => c.filter((x) => x !== k(s)))}
                         className="flex items-center gap-1.5 px-2 py-2 text-left"
                         style={{
                           border: '1px solid var(--color-line2)',
@@ -1614,7 +1628,7 @@ function GradeSession({
                 size="sm"
                 variant="ghost"
                 onClick={() => {
-                  const all = students.filter((s) => wrongCountOf(s.studentNo) > 0).map((s) => s.studentNo)
+                  const all = students.filter((s) => wrongCountOf(k(s)) > 0).map((s) => k(s))
                   setCorrection(all)
                   updateAssignment(id, { correctionNos: all })
                 }}
@@ -1626,8 +1640,8 @@ function GradeSession({
                 variant="ghost"
                 onClick={() => {
                   const bad = students
-                    .filter((s) => wrongCountOf(s.studentNo) / Math.max(1, assignment.questionCount) >= 0.3)
-                    .map((s) => s.studentNo)
+                    .filter((s) => wrongCountOf(k(s)) / Math.max(1, assignment.questionCount) >= 0.3)
+                    .map((s) => k(s))
                   setCorrection(bad)
                   updateAssignment(id, { correctionNos: bad })
                 }}
@@ -1648,11 +1662,11 @@ function GradeSession({
 
             <div style={{ maxHeight: '52vh', overflowY: 'auto' }}>
               {students.map((s) => {
-                const wc = wrongCountOf(s.studentNo)
+                const wc = wrongCountOf(k(s))
                 const rate = wc / Math.max(1, assignment.questionCount)
                 const col =
                   wc === 0 ? 'var(--color-ok)' : rate >= 0.3 ? 'var(--color-bad)' : 'var(--color-warn)'
-                const on = correction.includes(s.studentNo)
+                const on = correction.includes(k(s))
                 return (
                   <label
                     key={s.id}
@@ -1662,7 +1676,7 @@ function GradeSession({
                     <input
                       type="checkbox"
                       checked={on}
-                      onChange={() => toggleCorrection(s.studentNo)}
+                      onChange={() => toggleCorrection(k(s))}
                       style={{ width: 16, height: 16, accentColor: 'var(--color-accent)', flexShrink: 0 }}
                     />
                     <span className="num shrink-0" style={{ fontSize: 13.5, fontWeight: 700, minWidth: 24 }}>
@@ -1671,7 +1685,7 @@ function GradeSession({
                     <span className="min-w-0 flex-1 truncate" style={{ fontSize: 13.5 }}>
                       {s.name}
                     </span>
-                    {focus.includes(s.studentNo) ? <Tag tone="warn">重点</Tag> : null}
+                    {focus.includes(k(s)) ? <Tag tone="warn">重点</Tag> : null}
                     <span
                       className="num shrink-0"
                       style={{ fontSize: 13, fontWeight: 700, color: col, minWidth: 48, textAlign: 'right' }}
@@ -1696,7 +1710,7 @@ function GradeSession({
                   // setState 是异步的，finish 在同一个事件里读到的是旧值。
                   const next = correction.length
                     ? correction
-                    : students.filter((s) => wrongCountOf(s.studentNo) > 0).map((s) => s.studentNo)
+                    : students.filter((s) => wrongCountOf(k(s)) > 0).map((s) => k(s))
                   setCorrection(next)
                   updateAssignment(id, { correctionNos: next })
                   finish(next)

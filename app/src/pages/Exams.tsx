@@ -31,6 +31,7 @@ import { xlsxSheets } from '../lib/xlsx'
 import { ymdOf, beijingNow } from '../lib/holiday'
 import { friendlyDate } from '../lib/date'
 import { examReport } from '../lib/examStats'
+import { archiveKeyOf } from '../lib/keys'
 
 /* ============================================================
    考试列表
@@ -126,21 +127,23 @@ export default function Exams() {
       how: '学号' | '姓名' | '没对上'
     }> = []
     for (const r of parsed?.rows ?? []) {
+      // ⚠️ 文件里的 `r.studentNo` 是**班内学号**（纸上印的），所以按 `s.studentNo` 找；
+      //    找到之后**存进档案的键是 `archiveKeyOf(s)`**（迁移后 = 序列号）。
       const hitNo = byNo.get(r.studentNo)
-      if (hitNo && !used.has(hitNo.studentNo)) {
-        used.add(hitNo.studentNo)
-        rows.push({ imported: r, studentNo: hitNo.studentNo, name: hitNo.name, how: '学号' })
+      if (hitNo && !used.has(archiveKeyOf(hitNo))) {
+        used.add(archiveKeyOf(hitNo))
+        rows.push({ imported: r, studentNo: archiveKeyOf(hitNo), name: hitNo.name, how: '学号' })
         continue
       }
       const hitName = byName.get(r.name.replace(/\s/g, ''))
-      if (hitName && !used.has(hitName.studentNo)) {
-        used.add(hitName.studentNo)
-        rows.push({ imported: r, studentNo: hitName.studentNo, name: hitName.name, how: '姓名' })
+      if (hitName && !used.has(archiveKeyOf(hitName))) {
+        used.add(archiveKeyOf(hitName))
+        rows.push({ imported: r, studentNo: archiveKeyOf(hitName), name: hitName.name, how: '姓名' })
         continue
       }
       rows.push({ imported: r, name: r.name, how: '没对上' })
     }
-    const missing = roster.filter((s) => !used.has(s.studentNo))
+    const missing = roster.filter((s) => !used.has(archiveKeyOf(s)))
     return { rows, missing, roster }
   }, [parsed, pickClass, classes])
 
@@ -176,13 +179,14 @@ export default function Exams() {
         answer: isChoice ? q?.answer : undefined,
       }
     }
-    /* 缺考名单：文件里的「未交名单」按姓名对到学号上（对不上的**不猜**，只提示） */
+    /* 缺考名单：文件里的「未交名单」按姓名对到学生上（对不上的**不猜**，只提示）；存的是**键** */
     const absentNos = parsed.absentNames
-      .map(
-        (a) =>
-          matched.roster.find((s) => s.name.replace(/\s/g, '') === a.name.replace(/\s/g, ''))
-            ?.studentNo,
-      )
+      .map((a) => {
+        const hit = matched.roster.find(
+          (s) => s.name.replace(/\s/g, '') === a.name.replace(/\s/g, ''),
+        )
+        return hit ? archiveKeyOf(hit) : undefined
+      })
       .filter((x): x is string => Boolean(x))
 
     /*
@@ -314,7 +318,7 @@ export default function Exams() {
                       const klass = classes.find((c) => c.id === e.classIds[0])
                       const roster = (klass?.students ?? [])
                         .filter((s) => s.status === 'active')
-                        .map((s) => ({ studentNo: s.studentNo, name: s.name }))
+                        .map((s) => ({ studentNo: archiveKeyOf(s), displayNo: s.studentNo, name: s.name }))
                       const rep = examReport(e, rows, roster)
                       return (
                         <Panel key={e.id} className="overflow-hidden">

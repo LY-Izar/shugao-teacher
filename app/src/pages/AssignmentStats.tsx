@@ -19,6 +19,7 @@ import { collectStats } from '../lib/assignments'
 import { BAND_META, BAND_ORDER, gradeStats } from '../lib/grading'
 import { wrongStudents } from '../lib/calls'
 import { friendlyDate, isoOffset } from '../lib/date'
+import { archiveHas, archiveValue } from '../lib/keys'
 
 export default function AssignmentStats() {
   const { id = '' } = useParams()
@@ -39,7 +40,8 @@ export default function AssignmentStats() {
     [klass],
   )
   const focusList = useMemo(
-    () => students.filter((s) => assignment?.focusNos?.includes(s.studentNo)),
+    // `focusNos` 的键是**档案键**（迁移后 = 序列号）—— 两条路都要认（见 `lib/keys.ts`）
+    () => students.filter((s) => archiveHas(assignment?.focusNos, s)),
     [students, assignment],
   )
   const stats = useMemo(
@@ -70,7 +72,8 @@ export default function AssignmentStats() {
 
   const incomplete = stats.completeness < 1
   const top = stats.ranked.slice(0, 3)
-  const nameOf = (no: string) => students.find((s) => s.studentNo === no)?.name ?? ''
+  const nameOf = (no: string) =>
+    students.find((s) => s.studentNo === no || s.serial === no)?.name ?? ''
 
   /* 极简模式：没有逐题数据，只显示等级分布 —— 不能沿用逐题那套界面 */
   if (assignment.statsMode === 'simple') {
@@ -80,8 +83,8 @@ export default function AssignmentStats() {
       良: 'var(--color-warn)',
       差: 'var(--color-bad)',
     }
-    const counts = LV.map((lv) => students.filter((s) => assignment.grades?.[s.studentNo] === lv))
-    const ungraded = students.filter((s) => !assignment.grades?.[s.studentNo])
+    const counts = LV.map((lv) => students.filter((s) => archiveValue(assignment.grades, s) === lv))
+    const ungraded = students.filter((s) => !archiveValue(assignment.grades, s))
     const total = students.length || 1
     return (
       <>
@@ -161,7 +164,7 @@ export default function AssignmentStats() {
                       <b className="num">{s.studentNo}</b>
                       {s.name}
                       <span style={{ color: 'var(--color-ink3)' }}>
-                        {assignment.grades?.[s.studentNo] ?? '未评'}
+                        {archiveValue(assignment.grades, s) ?? '未评'}
                       </span>
                     </span>
                   ))}

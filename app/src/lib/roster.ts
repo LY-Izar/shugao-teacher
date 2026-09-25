@@ -1,4 +1,26 @@
 import type { ImportRow, Student } from '../data/types'
+import { isSerial } from './serial'
+
+/* ---------------- 名单的统一排序（**唯一一处**） ----------------
+
+   P1（序列号键迁移）之后，"按学号排"这句话有了两个候选：**序列号**还是**班内学号**。
+   选**序列号**（`选科走班实施计划.md` P1 的"名单排序改成按序列号排"），理由：
+     · 序列号是**全校唯一**的 → 走班班（跨行政班）的名单用它排才不会出现"两个 12 号"；
+     · 它按届 + 届内序号生成，同一届的名单顺序在任何班里都一致。
+   ⚠️ 兼容期：**还没有序列号的学生**（线上库还没跑 §20）按班内学号排 ——
+      老库上的显示顺序一个字节都不变。
+   ⚠️ 界面上**显示**的仍然是班内学号（Q6：老师看到的东西一模一样）。 */
+export function compareRoster(
+  a: Pick<Student, 'serial' | 'studentNo' | 'name'>,
+  b: Pick<Student, 'serial' | 'studentNo' | 'name'>,
+): number {
+  const sa = isSerial(a.serial) ? String(a.serial) : ''
+  const sb = isSerial(b.serial) ? String(b.serial) : ''
+  if (sa && sb) return sa.localeCompare(sb) || a.name.localeCompare(b.name)
+  if (sa) return -1
+  if (sb) return 1
+  return Number(a.studentNo) - Number(b.studentNo) || a.name.localeCompare(b.name)
+}
 
 /* ---------------- 名单体检：学号连续性 / 重号 / 重名 ---------------- */
 

@@ -4,12 +4,40 @@
  * 为什么必须放服务端：DeepSeek 的 API Key 绝不能出现在前端 ——
  * 前端产物是公开的，谁都能扒出来。
  *
+ * 🔴 调用者自校验（2026-09-25 加）：**这个 Function 以前谁都能调** ——
+ *    只要知道地址（`<站点>/api/ocr`），任何人都能拿它去烧**这位老师的 DeepSeek 配额**，
+ *    而且请求里可以塞任意大图。所以现在照 `teacher-account.ts` 那套做：
+ *    先验 JWT 拿 uid，再问数据库"这个 uid 是不是本系统的人"。
+ *
+ *    **谁能用 OCR（口径）**：**本系统的登录账号 —— 教师、管理员、以及教室端账号都算。**
+ *      · 教室端算进来的**理由**：教室一体机上本来就有「拍课表 → 识别 → 逐条核对」这一步
+ *        （`Classroom.tsx` 的 `recognize(..., { scene: 'schedule' })`），
+ *        它的登录身份就是教室端账号；把它挡掉等于**当场弄坏一个已经在用的功能**。
+ *      · 判据不是"像不像老师"，而是**"这个 uid 在 `teachers` 表里有没有一行"** ——
+ *        本系统的账号（含教室端）都由 `handle_new_user` 触发器建那一行
+ *        （见 `schema.sql` §1 / §13.1，`remote.ts` 的 `loadClassroomAccount()` 也解释了这件事）。
+ *        **没有这一行的 auth 用户 = 不是本校的人**，一律拒。
+ *      · ⚠️ 没有为此新写一条"TS 里的规则"：判断"是不是本校的人"在数据库里就是
+ *        "`teachers` 里有没有这一行"（RLS 的口径也是它），这里没有再抄一遍角色逻辑。
+ *
+ *    未通过时返回**人话 + 合适的 HTTP 码**（401 没登录 / 403 不是本校账号 / 503 库还没建），
+ *    **不是 500**；前端 `lib/ocr.ts` 已经把这些 message 原样显示给老师。
+ *
  * 部署：这是 Cloudflare Pages Function，放在 <项目根>/functions/api/ocr.ts，
  * 推送到 GitHub 后 Cloudflare 会自动带上，不需要任何额外工具。
- * Key 配在 Pages 项目 → Settings → Variables and secrets，变量名 DEEPSEEK_API_KEY。
+ * 环境变量（Pages 项目 → Settings → Variables and secrets）：
+ *   DEEPSEEK_API_KEY                              🔴 Secret，绝不能进前端
+ *   SUPABASE_URL / VITE_SUPABASE_URL              校验调用者 JWT 用
+ *   SUPABASE_ANON_KEY / VITE_SUPABASE_ANON_KEY    同上（公开无妨）
  */
 
-type Env = { DEEPSEEK_API_KEY?: string }
+type Env = {
+  DEEPSEEK_API_KEY?: string
+  SUPABASE_URL?: string
+  VITE_SUPABASE_URL?: string
+  SUPABASE_ANON_KEY?: string
+  VITE_SUPABASE_ANON_KEY?: string
+}
 
 const MODEL = 'deepseek-flash'
 const ENDPOINT = 'https://api.deepseek.com/chat/completions'
@@ -46,6 +74,63 @@ function json(data: unknown, status = 200): Response {
       'Cache-Control': 'no-store',
     },
   })
+}
+
+function baseUrl(env: Env): string {
+  return (env.SUPABASE_URL || env.VITE_SUPABASE_URL || '').replace(/\/+$/, '')
+}
+
+function anonKey(env: Env): string {
+  return env.SUPABASE_ANON_KEY || env.VITE_SUPABASE_ANON_KEY || ''
+}
+
+/**
+ * 调用者是谁：拿他自己的 JWT 去问 Supabase Auth（`/auth/v1/user`）。
+ * 与 `teacher-account.ts` / `classroom-account.ts` 的 `caller()` 同一个做法 —— 不自己解 JWT，
+ * 免得"验签漏一处"这种事发生。token 一起返回：下面问 `teachers` 还要用它。
+ */
+async function caller(request: Request, env: Env): Promise<{ id: string; token: string } | null> {
+  const auth = request.headers.get('Authorization') ?? ''
+  const token = auth.replace(/^Bearer\s+/i, '').trim()
+  if (!token) return null
+  const key = anonKey(env)
+  if (!key) return null
+  const res = await fetch(`${baseUrl(env)}/auth/v1/user`, {
+    headers: { apikey: key, Authorization: `Bearer ${token}` },
+  })
+  if (!res.ok) return null
+  const user = (await res.json()) as { id?: string }
+  return user?.id ? { id: user.id, token } : null
+}
+
+/**
+ * 他是不是本系统的人：`teachers` 表里有没有 id = 他的那一行。
+ *
+ * 为什么用**调用者自己的 JWT**（不是 service_role）问这一句：
+ *   ① 这条路走的正是那套 RLS（"教师只能读自己那一行"`teachers_self`），
+ *      所以它同时验证了"这张表存在 + 这一行归他管"，不需要额外的密钥；
+ *   ② anon key 是公开的、JWT 是调用者的 —— 这个 Function 因此**不需要 service_role**，
+ *      少一个高危密钥。
+ *
+ * 返回值三态：`true` 是本校账号 / `false` 不是 / `'missing'` 表还没建（要翻译成人话，
+ * **不能当成 false** —— 那会告诉老师"你没权限"，而其实是库还没跑 schema.sql）。
+ */
+async function isSchoolMember(env: Env, token: string, uid: string): Promise<boolean | 'missing'> {
+  const res = await fetch(
+    `${baseUrl(env)}/rest/v1/teachers?select=id&id=eq.${encodeURIComponent(uid)}`,
+    { headers: { apikey: anonKey(env), Authorization: `Bearer ${token}` } },
+  )
+  const text = await res.text()
+  if (res.ok) {
+    try {
+      const rows = JSON.parse(text || '[]') as unknown[]
+      return Array.isArray(rows) && rows.length > 0
+    } catch {
+      return false
+    }
+  }
+  if (res.status === 404 || /42P01|PGRST205|does not exist|schema cache/i.test(text)) return 'missing'
+  return false
 }
 
 /** 把「1,2,3,5-9」这类写法展开，也容忍直接给数组 */
@@ -169,7 +254,8 @@ export async function onRequestPost(context: {
   request: Request
   env: Env
 }): Promise<Response> {
-  const key = context.env.DEEPSEEK_API_KEY
+  const { request, env } = context
+  const key = env.DEEPSEEK_API_KEY
   if (!key) {
     return json(
       {
@@ -181,9 +267,56 @@ export async function onRequestPost(context: {
     )
   }
 
+  /*
+   * ---- 调用者自校验（在**读 body、动上游之前**）----
+   * 🔴 顺序是故意的：先确认"这是谁"，再去碰图片和 DeepSeek 配额。
+   *    放在后面（比如等解析完 body 再校验）等于让任何人都能先塞一张大图进来。
+   */
+  if (!baseUrl(env) || !anonKey(env)) {
+    return json(
+      {
+        status: 'not_configured',
+        message:
+          '识别服务的登录校验还没配好：缺 SUPABASE_URL / SUPABASE_ANON_KEY。到 Cloudflare Pages 的环境变量里补上，然后重新部署。',
+      },
+      503,
+    )
+  }
+  const me = await caller(request, env)
+  if (!me) {
+    return json(
+      {
+        status: 'error',
+        message: '登录已过期，请重新登录后再用拍照识别',
+      },
+      401,
+    )
+  }
+  const member = await isSchoolMember(env, me.token, me.id)
+  if (member === 'missing') {
+    return json(
+      {
+        status: 'error',
+        message:
+          '数据库还没建权限体系的表（仓库里 supabase/schema.sql 第 10 段）。先跑一遍 schema.sql，再回来用拍照识别。',
+      },
+      503,
+    )
+  }
+  if (!member) {
+    return json(
+      {
+        status: 'error',
+        message:
+          '这个账号不是本校的教师账号，不能用拍照识别（识别用的是学校的额度）。请用老师自己的账号登录。',
+      },
+      403,
+    )
+  }
+
   let body: Body
   try {
-    body = (await context.request.json()) as Body
+    body = (await request.json()) as Body
   } catch {
     return json({ status: 'error', message: '请求格式不对' }, 400)
   }

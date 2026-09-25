@@ -134,6 +134,87 @@ $env:SHUGAO_EDGE = 'D:\Edge\Application\msedge.exe'   ***REMOVED*** 装在不常
 
 ---
 
+***REMOVED******REMOVED*** 🔐 备份加密与恢复（**2026-09-25 加，出事时按这一节做**）
+
+数据库备份里有**全校学生的姓名 / 学号 / 成绩**，所以从 2026-09-25 起，
+`.github/workflows/backup.yml` 导出的备份**一律加密后才允许离开机器**。
+
+| 项 | 内容 |
+| --- | --- |
+| 算法 | `AES-256-CBC` + `PBKDF2`（`-iter 600000`，`-md sha256`，带随机盐） |
+| 谁加密 | 工作流第 3 步；用的是 GitHub Secret **`BACKUP_ENCRYPTION_PASSPHRASE`** |
+| 产物名 | `backup-<日期>-<时分>.sql.gz.enc` —— **`.enc` 就是"这是密文"的标记** |
+| 留在哪 | Cloudflare R2 的 `db-backups/`（保留最新 30 份）；没配 R2 时作为 Actions Artifact 留 30 天 |
+| 为什么用 openssl 而不是别的 | ubuntu-latest 自带、**零依赖**（`age` / `gpg` 都要额外装包）；解密一行命令、任何机器的 openssl 都能开 —— **关键时刻打不开的备份等于没有备份** |
+
+***REMOVED******REMOVED******REMOVED*** ▶ 解密：**一行命令**（复制粘贴就能用）
+
+```bash
+***REMOVED*** ① 解出 .sql.gz（把 <口令> 换成 BACKUP_ENCRYPTION_PASSPHRASE 的值）
+openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -md sha256 -in backup-20260925-1830.sql.gz.enc -out backup.sql.gz -pass pass:'<口令>'
+
+***REMOVED*** ② 还原成一个 .sql
+gunzip backup.sql.gz
+
+***REMOVED*** ③ 找个 Postgres 导进去（Supabase 的 SQL Editor 里贴也行）
+psql "<一个空库的连接串>" -f backup.sql
+```
+
+🔴 **参数必须逐字照抄**（`-aes-256-cbc -pbkdf2 -iter 600000 -md sha256`）：
+少一个、或者把迭代次数改成别的数字，都会得到一句 `bad decrypt` —— 那句报错看着像"口令记错了"，
+其实往往是**参数不一致**。加密那一段的注释里也抄了同一份参数（`backup.yml` 第 3 步）。
+
+> **口令里带特殊字符**（`!` `$` `'` `"` 空格）时，用上面那条 `-pass pass:'…'` 容易被 shell 吃掉字符。
+> 稳妥写法是让 openssl 从**标准输入**读口令（与工作流内部完全一致 —— 它就是这么喂的）：
+>
+> ```bash
+> read -rs -p '口令: ' P; echo
+> printf '%s' "$P" | openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -md sha256 -in backup-20260925-1830.sql.gz.enc -out backup.sql.gz -pass stdin
+> unset P
+> ```
+>
+> ⚠️ 两种写法都**不能**在口令后面多一个换行 —— 工作流用的是 `printf '%s'`（不带 `\n`），
+> 多那一个字节，密钥就不一样了。
+
+***REMOVED******REMOVED******REMOVED*** 🔑 口令纪律（**比算法重要**）
+
+1. **口令存在密码管理器里**（1Password / Bitwarden / 微信收藏加密笔记 / 纸质保险柜都行）。
+   **绝不要写进仓库、不要写进代码注释、不要贴进聊天记录** —— 这个仓库（以及它的 Actions 日志）
+   不是放密钥的地方。
+2. **口令丢了 = 所有 `.enc` 备份永久打不开。** openssl 没有后门、没有找回渠道，
+   连 GitHub 也帮不上忙（它只存密文）。
+   👉 所以口令至少要**两处**：GitHub Secrets（给机器用）+ 你自己的密码管理器（给人用）。
+3. **换口令要成群换**：旧备份只能用旧口令开。真要换，先留一份旧口令的托管记录，
+   或者等旧备份都过期（30 份 / 约一个月）再改。
+4. 口令**首尾的空白会被自动 trim**（和别的 secret 一样）；值里带空格没问题，带首尾空白才会被削。
+
+***REMOVED******REMOVED******REMOVED*** 🚫 口令缺失时会发生什么（这一条是**故意**的）
+
+**工作流会报错退出，当晚一份备份都不生成。** 这是有意设计的：
+
+> 最危险的失败模式不是"没有备份"，而是**"以为加密了、其实传的是明文"** ——
+> 日志全绿、R2 上有对象、所有人都以为它是安全的，而那份对象就是一张全校成绩单。
+> 所以宁可今晚没有备份（第二天日志会红，你一定会看到），也绝不静默降级成明文。
+
+证据在日志里：配了口令的那次会打下 `✅ 已加密：backup-….sql.gz.enc`；
+没配的那次会以 `::error::缺少 BACKUP_ENCRYPTION_PASSPHRASE` 结束，**且工作区里连 `.gz` 都不剩**。
+
+> 实测脚本：`node scripts/lib/backup-enc-selfcheck.mjs`（27 条断言，真跑 Git Bash + 真 openssl）。
+> 它把 `backup.yml` 里那段 shell **原样抠出来**跑 —— 所以改工作流不需要同步第二份代码。
+
+***REMOVED******REMOVED******REMOVED*** 🗂 新旧备份共存（2026-09-25 之前传上去的都是**明文**）
+
+| 名字 | 是什么 | 怎么处理 |
+| --- | --- | --- |
+| `backup-….sql.gz.enc` | 加密后的（**现在唯一还会产生的**） | 用上面那条命令解 |
+| `backup-….sql.gz` | 2026-09-25 之前传的**明文**副本 | 直接 `gunzip` 就能读。**别当成坏文件删掉** —— 它可能是某天的唯一备份 |
+
+清理逻辑（保留最新 30 份）**两种名字一起按名字排序数**，不会因为改名就把老备份当成"新格式"漏掉；
+另外，**同一时刻的 `.enc` 一旦出现，它对应的那份明文副本会被删掉**（留着就是"明文躺在云上"），
+而没有对应密文的更老的明文**一律不动**。
+
+---
+
 ***REMOVED******REMOVED*** 设计语言
 
 刻意避开「大圆角卡片 + 柔和投影 + 渐变紫 + 填充图标」那套通用观感。

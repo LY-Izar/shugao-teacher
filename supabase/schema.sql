@@ -2829,3 +2829,672 @@ create policy classroom_files_read on storage.objects
 -- 赋权与 §9 一致（这一节不新增任何 grant）。
 -- ⚠️ 这里**故意不** grant 任何东西给 anon；`can_share_file_to_class_for` 已 revoke。
 
+-- ============================================================
+--  20. 序列号键迁移（P1，2026-09-25）
+--      「每个学生一个全校唯一、生成后永久不可改的序列号」+
+--      「那 10 个以学号为键的字段 + 两处考试字段的键**值迁移**到序列号」
+-- ============================================================
+--  为什么要有这一节（`年级管理与选科走班方案.md` §2.1 / §4.4，`选科走班实施计划.md` 的 P1）：
+--   · 今天那 10 个字段的键是**班内学号**，而学号只在班内唯一（`unique (class_id, student_no)`）；
+--   · 走班一上线，一个走班班里同时有 1 班的 3 人和 4 班的 33 人 → **两个"12 号"**
+--     → `wrong = {"12": [...]}` 把两个孩子**静默合并**（本项目最忌讳的"看起来很正常"的失败模式）；
+--   · 所以键换成**全校唯一**的 `students.serial`（Q6），**生成后永久不可改**，**由数据库强制**。
+--
+--  本节四件事（**全部幂等，可重复执行**）：
+--    ① 加两列 + 唯一索引 + **DB 层强制"不可改"**（触发器，不是界面灰化）
+--    ② 给存量学生生成序列号（生成的同时把**旧学号**存进 `legacy_student_no`）
+--    ③ 键**值迁移**（列类型一个字节不改：仍是 `text[]` / `jsonb` —— Q6 明确"值迁移，不是改类型"）
+--    ④ 自检函数 + 迁移前快照 + **回退函数**（回退脚本与正向脚本一起写、一起测）
+--
+--  🔴 **幂等的唯一根据是 `students.legacy_student_no`（待确认 U-3 的结论 = B）**，
+--     **不是"猜键的形状"**：老方案那条判据（`key !~ '^[0-9a-f]{8}-'` = "不是 uuid 形状"）
+--     **在序列号下失效** —— 序列号也是一串数字。
+--     本节的口径：**"这个键能不能通过 `legacy_student_no` 反查到序列号、
+--     而且它本身还不是本班任何学生的序列号"** —— 能，就是"还没迁"；不能，就是"迁过了 / 认不出"。
+--     于是**重跑一遍，受影响行数 = 0**。
+--     ⚠️ 为什么必须**存一列**而不是每次去读 `students.student_no`：**班内学号是可改的**
+--        （Q6：班主任 / 年级主任 / 教导处三档都能改）→ 改过之后老键再也反查不出来。
+--        `legacy_student_no` 是"**迁移那一刻的老键存档**"，**不是 `student_no` 的副本**。
+--
+--  ⚠️ **范围包含 `exams.absent_nos` 与 `exam_scores.student_no`**：它们不在用户点名的
+--     "那 10 个"里，但**语义完全相同**（同样以学号为键）。不迁 = 同一个学生两套键
+--     → 年级排名 / 缺考在迁移后对不上。**这一条是执行方按「一个字段只能有一种语义」+
+--     「同一不变量要在所有写入路径上守」推定的**（`选科走班实施计划.md` §八 第 4 条已登记）。
+--
+--  ⚠️ **本节不做**什么（免得后来的人以为漏了）：
+--     · **不删 `students.student_no`**、**不改 `unique (class_id, student_no)`**（Q6：班内学号照旧可改）；
+--     · **不碰 `exams.grade` 文本、不加 `exams.grade_id`**（那是 Q33 / P2 的活）；
+--     · **不碰 `assignments.class_id` 的 not null、不碰 `calls.assignment_id`**（Q21 / Q32 = P5 / P9）；
+--     · **不新增任何 RLS 策略**："不可改"落在触发器上，比策略更硬（连 SQL 编辑器也拦）。
+-- ============================================================
+
+-- -------- 20.1 加列 + 唯一索引（幂等）--------
+-- `not null default ''` 一次到位：老行全部落到"还没生成"（下面 20.3 补）。
+alter table students add column if not exists serial text not null default '';
+-- 迁移那一刻的**班内学号存档**（= 老键）。空串 = "不是从老键迁过来的"（建档时就有的新学生）。
+alter table students add column if not exists legacy_student_no text not null default '';
+
+-- 全校唯一：空串不参与（"还没生成"不是重复）。
+create unique index if not exists students_serial_key on students (serial) where serial <> '';
+-- 反查索引：键迁移按 `(class_id, legacy_student_no)` 查，几百行也要走索引
+create index if not exists students_legacy_no_idx
+  on students (class_id, legacy_student_no) where legacy_student_no <> '';
+
+-- -------- 20.2 DB 层强制："序列号生成后永久不可改" --------
+-- 为什么不用 `revoke update (serial)`：前端 upsert 的载荷里带着这一列，
+-- 列级 revoke 会把**值没变的正常保存**也一起拒掉（"保存失败 = 刷新即丢"，§一）。
+-- 触发器只说清一件事：**非空的序列号不许变成另一个值、也不许被清空**。
+create or replace function public.students_serial_guard()
+returns trigger
+language plpgsql
+as $$
+begin
+  -- ① 序列号：'' → 有值 = 允许（生成/回填）；有值 → 另一个值 / 清空 = **拒**
+  if old.serial <> '' and new.serial is distinct from old.serial then
+    raise exception '序列号生成后永久不可改（students.serial，见 选科走班问题清单 Q6）'
+      using errcode = '23514';
+  end if;
+  -- ② 老键存档同理：它是**幂等的唯一根据**，被人改掉 = 迁移判据失效（而且不报错）
+  if old.legacy_student_no <> '' and new.legacy_student_no is distinct from old.legacy_student_no then
+    raise exception 'students.legacy_student_no 是迁移判据，写一次之后不许再改（见 schema.sql §20）'
+      using errcode = '23514';
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists students_serial_guard on students;
+create trigger students_serial_guard
+  before update on students
+  for each row execute function public.students_serial_guard();
+
+-- -------- 20.2b 新建学生时自动发号（**所有写入路径**共用这一条规则，I16）--------
+-- 为什么必须有它：建档 / 粘贴导入 / 拍照导入 / 备份恢复 / 手工 SQL —— 五条路径，
+-- 少覆盖一条就会出现"这个学生没有键"，而那正是"转班/插班后档案对不上"的来源。
+--
+-- 🔴 **为什么还要一张计数器表**（`student_serial_counters`）：
+--    一次性插入**多行**时（粘贴导入就是一次 upsert 几十行），BEFORE INSERT 触发器里
+--    那句 `select max(serial)` **看不见同一条语句里刚插进去的行**（语句开始时取的快照）——
+--    于是每一行都会算出**同一个号**，整批撞唯一索引。
+--    计数器用 `insert … on conflict do update … returning` 取号：它在语句内**逐行**递增，
+--    所以一次插 50 行也能拿到 50 个不同的号。
+--    这一列同时兜住"有人手工插了一个更大的号"（`greatest` 会跳上去）。
+--    ⚠️ 它**不是**"能推出来的状态存第二份"：它就是发号器本身，没有第二个真相。
+create table if not exists student_serial_counters (
+  year   text primary key,          -- 4 位入校年份
+  last_n int  not null default 0    -- 这个届**已经发出去**的最大序号
+);
+alter table student_serial_counters enable row level security;
+-- 只给触发器用（`security definer`），前端一个权限都不给：
+-- 谁都能改它 = 谁能把号发重。
+revoke all on table student_serial_counters from anon, authenticated;
+
+-- ⚠️ 认不出入校年份时**留空 serial 并且不报错**（I14：认不出不许猜）——
+--    报错会让"保存失败 = 刷新即丢"落到老师头上；留空则由自检函数报出来让人补数据。
+-- ⚠️ `security definer`：它要读写上面那张**没有给任何角色权限**的计数器表。
+--    函数体只做三件事：看这一行在不在、认年份、取号 —— 不返回任何别人的数据。
+create or replace function public.students_serial_fill()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_year text;
+  v_base int;
+  v_n int;
+begin
+  if coalesce(new.serial, '') <> '' then
+    return new;
+  end if;
+  /*
+   * ⚠️ upsert（PostgREST 的 `on conflict (id) do update`）**也会走 BEFORE INSERT**：
+   *    那一行本来就存在、本来就有序列号 —— 这里**不能再生成一个**，
+   *    否则 BEFORE UPDATE 的守卫会当场把整条 upsert 拒掉（= 老师保存不了名单）。
+   *    判据是"这一行在不在"（语句开始前的快照），不是"载荷里有没有值"。
+   */
+  if exists (select 1 from students s where s.id = new.id) then
+    return new;
+  end if;
+
+  v_year := public.serial_year_of_class(new.class_id);
+  if v_year = '' then
+    return new;   -- 认不出 → 留空，等自检清单报出来（**不猜**）
+  end if;
+
+  -- 这个届**已经有**的最大序号（= "追加到年级末尾"的基准，U-2 = A）
+  select coalesce(max((substr(s.serial, 5))::int), 0)
+    into v_base
+    from students s
+   where s.serial ~ '^[0-9]{4}[0-9]{3}$'
+     and left(s.serial, 4) = v_year;
+
+  insert into student_serial_counters (year, last_n)
+  values (v_year, v_base + 1)
+  on conflict (year) do update
+     set last_n = greatest(student_serial_counters.last_n, v_base) + 1
+  returning last_n into v_n;
+
+  if v_n is null or v_n > 999 then
+    return new;   -- 3 位序号用完了（Q23 说每届 3 位够用）→ 留空 + 清单，不猜
+  end if;
+
+  new.serial := v_year || lpad(v_n::text, 3, '0');
+  return new;
+end;
+$$;
+
+drop trigger if exists students_serial_fill on students;
+create trigger students_serial_fill
+  before insert on students
+  for each row execute function public.students_serial_fill();
+
+-- -------- 20.3 入校年份从哪来（**唯一一处判定入口**，认不出就返回空串）--------
+-- 顺序：① `grades.cohort`（P3 之后才有的列 —— 用 `to_jsonb` 兼容"列还没建"的库）
+--       ② `grades.year`（**老列，注释就写着"2026 级"** —— 它本来就是"届"，§2.13.1）
+--       ③ 按年级名在本校**唯一**匹配（同名多条 = 歧义 = **不认**，I14）
+--       ④ 同年级**已有学生**的序列号前缀（**一致时**才算 —— 这是从数据里读出来的事实，不是猜）
+-- ⚠️ **不用 `classes.year`**：那是"学年"（`2025-2026`），与"届"是两回事（§2.13.1 的教训）。
+-- ⚠️ 前端 `lib/serial.ts` 是这条规则的**镜像**（顺序逐条相同）—— 两边改一处就要改两处，
+--    所以前端那份只用于"本地演示模式"与"导入没有序列号的老备份"，云端一律以数据库为准。
+create or replace function public.serial_year_of_class(p_class_id uuid)
+returns text
+language sql
+stable
+as $$
+  with c as (
+    select cl.id, cl.grade_id, cl.grade, cl.school_id
+      from classes cl where cl.id = p_class_id
+  ), direct as (
+    select nullif(btrim(coalesce(to_jsonb(g) ->> 'cohort', '')), '') as cohort,
+           nullif(btrim(coalesce(to_jsonb(g) ->> 'year',   '')), '') as year
+      from c left join grades g on g.id = c.grade_id
+  ), named as (
+    select (select count(*) from grades gg
+             where gg.school_id = c.school_id and gg.name = c.grade) as n,
+           (select min(btrim(coalesce(to_jsonb(gg) ->> 'cohort', ''))) from grades gg
+             where gg.school_id = c.school_id and gg.name = c.grade) as cohort,
+           (select min(btrim(coalesce(to_jsonb(gg) ->> 'year',   ''))) from grades gg
+             where gg.school_id = c.school_id and gg.name = c.grade) as year
+      from c
+  ), peers as (
+    select distinct left(s.serial, 4) as y
+      from students s
+      join classes c2 on c2.id = s.class_id
+     where c2.school_id = (select school_id from c)
+       and c2.grade = (select grade from c)
+       and s.serial ~ '^[0-9]{4}[0-9]{3}$'
+  )
+  select case
+    when (select cohort from direct) ~ '^[0-9]{4}' then left((select cohort from direct), 4)
+    when (select year   from direct) ~ '^[0-9]{4}' then left((select year   from direct), 4)
+    when (select n from named) = 1
+     and (select cohort from named) ~ '^[0-9]{4}' then left((select cohort from named), 4)
+    when (select n from named) = 1
+     and (select year   from named) ~ '^[0-9]{4}' then left((select year   from named), 4)
+    when (select count(*) from peers) = 1 then (select y from peers)
+    else ''      -- 认不出 → 空串（**不猜**）
+  end
+$$;
+
+-- -------- 20.4 键的三态判定（**唯一一处判定入口**）--------
+--   'empty'   —— 空键（不在例外集里的学生本来就不该有键；原样返回）
+--   'serial'  —— 已经是本班某个学生的序列号   → **原样**（"重跑不动"就靠这一支）
+--   'legacy'  —— 能通过 `legacy_student_no` 反查出序列号 → **要迁**
+--   'unknown' —— 都查不到 → **留原键**（I14：认不出不许猜；进自检清单，人工判断）
+-- ⚠️ 作用域是**班级**（那 10 个字段全都挂在一个班/一份档案上 —— §2.1 核对过的那条）。
+--    两处考试字段的作用域见 20.6。
+create or replace function public.serial_key_state_classes(p_class_ids uuid[], p_key text)
+returns text
+language sql
+stable
+as $$
+  select case
+    when p_key is null or p_key = '' then 'empty'
+    when exists (
+      select 1 from students s
+       where s.class_id = any (coalesce(p_class_ids, '{}'::uuid[]))
+         and s.serial <> '' and s.serial = p_key
+    ) then 'serial'
+    when exists (
+      select 1 from students s
+       where s.class_id = any (coalesce(p_class_ids, '{}'::uuid[]))
+         and s.legacy_student_no <> '' and s.legacy_student_no = p_key
+         and s.serial <> ''
+    ) then 'legacy'
+    else 'unknown'
+  end
+$$;
+
+/** 单班版（10 个字段用）：薄包装，判据只有上面那一处 */
+create or replace function public.serial_key_state(p_class_id uuid, p_key text)
+returns text
+language sql
+stable
+as $$ select public.serial_key_state_classes(array[p_class_id], p_key) $$;
+
+/** 新键（序列号）；'unknown' 与 'empty' 一律**原样返回** */
+create or replace function public.serial_key_of_classes(p_class_ids uuid[], p_key text)
+returns text
+language sql
+stable
+as $$
+  select case public.serial_key_state_classes(p_class_ids, p_key)
+    when 'legacy' then (
+      select s.serial from students s
+       where s.class_id = any (coalesce(p_class_ids, '{}'::uuid[]))
+         and s.legacy_student_no = p_key and s.serial <> ''
+       order by s.serial limit 1
+    )
+    else p_key
+  end
+$$;
+
+create or replace function public.serial_key_of(p_class_id uuid, p_key text)
+returns text
+language sql
+stable
+as $$ select public.serial_key_of_classes(array[p_class_id], p_key) $$;
+
+/** "这一行的这个键还没迁" —— **幂等 WHERE 的唯一根据** */
+create or replace function public.serial_key_pending_classes(p_class_ids uuid[], p_key text)
+returns boolean
+language sql
+stable
+as $$ select public.serial_key_state_classes(p_class_ids, p_key) = 'legacy' $$;
+
+create or replace function public.serial_key_pending(p_class_id uuid, p_key text)
+returns boolean
+language sql
+stable
+as $$ select public.serial_key_pending_classes(array[p_class_id], p_key) $$;
+
+-- -------- 20.5 生成序列号（幂等：**只给 `serial = ''` 的学生**）--------
+-- U-2 = A：同一届内**追加到末尾**（已用最大号 + 1），**不复用空号**。
+-- ⚠️ "年级内首字母序"落地口径：**库支持 ICU 中文排序（`zh-x-icu`）时按拼音序**，
+--    否则退化为库的默认排序（再加 `student_no, id` 兜底，保证**确定性**）。
+--    **顺序只决定"谁排在前面"，不影响迁移正确性**（映射靠 `legacy_student_no` 一对一）。
+-- ⚠️ 生成的同时写 `legacy_student_no = student_no` —— **只给这一次补号的老学生**写；
+--    建档时就发号的新学生这一列恒为空串（"不是从老键迁过来的"）。
+create or replace function public.assign_student_serials()
+returns table (assigned int, unresolved int)
+language plpgsql
+as $$
+declare
+  v_coll text := '';
+  v_assigned int := 0;
+begin
+  -- 拼音序优先（ICU）；库里没有这个 collation 就退化为默认排序（**不是失败**）
+  begin
+    perform 'x'::text collate "zh-x-icu";
+    v_coll := ' collate "zh-x-icu"';
+  exception when others then
+    v_coll := '';
+  end;
+
+  execute format($f$
+    with base as (
+      select s.id, s.student_no, s.name, public.serial_year_of_class(s.class_id) as y
+        from students s
+       where s.serial = ''
+         and s.legacy_student_no = ''      -- 老键存档已经有值的行 = 别动（异常态，交给自检清单）
+    ), ranked as (
+      select id, y, row_number() over (partition by y order by name%s, student_no, id) as rn
+        from base where y <> ''
+    ), used as (
+      select left(s.serial, 4) as y, max(substr(s.serial, 5)::int) as mx
+        from students s
+       where s.serial ~ '^[0-9]{4}[0-9]{3}$'
+       group by 1
+    )
+    update students t
+       set serial = r.y || lpad((coalesce(u.mx, 0) + r.rn)::text, 3, '0'),
+           legacy_student_no = t.student_no
+      from ranked r
+      left join used u on u.y = r.y
+     where t.id = r.id
+       and coalesce(u.mx, 0) + r.rn <= 999
+  $f$, v_coll);
+  get diagnostics v_assigned = row_count;
+
+  /*
+   * ⚠️ 发完号要**把计数器跟上**（否则下一个新建学生会拿到一个已经被用掉的号）。
+   *    这一句是幂等的：`greatest` 只往上抬，从不往下拉。
+   */
+  insert into student_serial_counters (year, last_n)
+  select left(s.serial, 4), max((substr(s.serial, 5))::int)
+    from students s
+   where s.serial ~ '^[0-9]{4}[0-9]{3}$'
+   group by 1
+  on conflict (year) do update
+     set last_n = greatest(student_serial_counters.last_n, excluded.last_n);
+
+  return query
+    select v_assigned,
+           (select count(*)::int from students s where s.serial = '');
+end;
+$$;
+
+-- -------- 20.6 键值迁移（幂等）--------
+-- 12 个字段一次跑完，逐个报"受影响行数"（验收第 10 条就是看第二次跑全为 0）。
+-- 作用域：10 个字段用**档案所属的那个班**；`exams.absent_nos` 用 `exams.class_ids`（可能多班）；
+--        `exam_scores.student_no` 用 `exam_scores.class_id`。
+create or replace function public.migrate_nos_to_serial()
+returns table (step text, rows_affected bigint)
+language plpgsql
+as $$
+declare
+  n bigint;
+begin
+  -- ---- ① assignments 的 6 个 text[] ----
+  update assignments a set
+    missing_nos    = (select coalesce(array_agg(public.serial_key_of(a.class_id, k) order by ord), '{}'::text[])
+                        from unnest(a.missing_nos) with ordinality as t(k, ord)),
+    late_nos       = (select coalesce(array_agg(public.serial_key_of(a.class_id, k) order by ord), '{}'::text[])
+                        from unnest(a.late_nos) with ordinality as t(k, ord)),
+    confirmed_nos  = (select coalesce(array_agg(public.serial_key_of(a.class_id, k) order by ord), '{}'::text[])
+                        from unnest(a.confirmed_nos) with ordinality as t(k, ord)),
+    focus_nos      = (select coalesce(array_agg(public.serial_key_of(a.class_id, k) order by ord), '{}'::text[])
+                        from unnest(a.focus_nos) with ordinality as t(k, ord)),
+    correction_nos = (select coalesce(array_agg(public.serial_key_of(a.class_id, k) order by ord), '{}'::text[])
+                        from unnest(a.correction_nos) with ordinality as t(k, ord)),
+    corrected_nos  = (select coalesce(array_agg(public.serial_key_of(a.class_id, k) order by ord), '{}'::text[])
+                        from unnest(a.corrected_nos) with ordinality as t(k, ord))
+   where exists (
+     select 1 from unnest(a.missing_nos || a.late_nos || a.confirmed_nos
+                       || a.focus_nos || a.correction_nos || a.corrected_nos) k
+      where public.serial_key_pending(a.class_id, k)
+   );
+  get diagnostics n = row_count;
+  step := 'assignments.text[]（6 个）'; rows_affected := n; return next;
+
+  -- ---- ② assignments.wrong（jsonb：键 → 错题键数组）----
+  update assignments a set
+    wrong = (select coalesce(jsonb_object_agg(public.serial_key_of(a.class_id, k), v), '{}'::jsonb)
+               from jsonb_each(a.wrong) as t(k, v))
+   where exists (select 1 from jsonb_object_keys(a.wrong) k
+                  where public.serial_key_pending(a.class_id, k));
+  get diagnostics n = row_count;
+  step := 'assignments.wrong'; rows_affected := n; return next;
+
+  -- ---- ③ assignments.grades（jsonb：键 → 优/良/差）----
+  update assignments a set
+    grades = (select coalesce(jsonb_object_agg(public.serial_key_of(a.class_id, k), v), '{}'::jsonb)
+                from jsonb_each(a.grades) as t(k, v))
+   where exists (select 1 from jsonb_object_keys(a.grades) k
+                  where public.serial_key_pending(a.class_id, k));
+  get diagnostics n = row_count;
+  step := 'assignments.grades'; rows_affected := n; return next;
+
+  -- ---- ④ calls.student_nos（text[]）----
+  update calls c set
+    student_nos = (select coalesce(array_agg(public.serial_key_of(c.class_id, k) order by ord), '{}'::text[])
+                     from unnest(c.student_nos) with ordinality as t(k, ord))
+   where exists (select 1 from unnest(c.student_nos) k
+                  where public.serial_key_pending(c.class_id, k));
+  get diagnostics n = row_count;
+  step := 'calls.student_nos'; rows_affected := n; return next;
+
+  -- ---- ⑤ calls.states（jsonb：键 → called/arrived/corrected）----
+  update calls c set
+    states = (select coalesce(jsonb_object_agg(public.serial_key_of(c.class_id, k), v), '{}'::jsonb)
+                from jsonb_each(c.states) as t(k, v))
+   where exists (select 1 from jsonb_object_keys(c.states) k
+                  where public.serial_key_pending(c.class_id, k));
+  get diagnostics n = row_count;
+  step := 'calls.states'; rows_affected := n; return next;
+
+  -- ---- ⑥ exams.absent_nos（text[]；作用域 = 这次考试的**班级集合**）----
+  update exams e set
+    absent_nos = (select coalesce(array_agg(public.serial_key_of_classes(e.class_ids, k) order by ord), '{}'::text[])
+                    from unnest(e.absent_nos) with ordinality as t(k, ord))
+   where exists (select 1 from unnest(e.absent_nos) k
+                  where public.serial_key_pending_classes(e.class_ids, k));
+  get diagnostics n = row_count;
+  step := 'exams.absent_nos'; rows_affected := n; return next;
+
+  -- ---- ⑦ exam_scores.student_no（**值**迁移；列类型与 `unique (exam_id, student_no)` 都不动）----
+  update exam_scores es set
+    student_no = public.serial_key_of(es.class_id, es.student_no)
+   where public.serial_key_pending(es.class_id, es.student_no);
+  get diagnostics n = row_count;
+  step := 'exam_scores.student_no'; rows_affected := n; return next;
+end;
+$$;
+
+-- -------- 20.7 自检（验收口径的**唯一一处实现**：跑它就能看到所有该为 0 的数）--------
+-- 前两组是"硬指标"（必须为 0）；第三组是"查不到的键"——**留原键 + 必须有一份写明原因的清单**（I14）。
+-- ⚠️ **12 个字段无论有没有数据都会各出一行**（用 `left join` 兜零）：
+--    否则"全 0"这件事在输出里根本看不见 —— 看不见的绿灯等于没有绿灯（§18.6 的教训）。
+create or replace function public.serial_migration_report()
+returns table (kind text, item text, n bigint)
+language sql
+stable
+as $$
+  with items(item) as (
+    values ('assignments.missing_nos'), ('assignments.late_nos'), ('assignments.confirmed_nos'),
+           ('assignments.focus_nos'), ('assignments.correction_nos'), ('assignments.corrected_nos'),
+           ('assignments.wrong'), ('assignments.grades'),
+           ('calls.student_nos'), ('calls.states'),
+           ('exams.absent_nos'), ('exam_scores.student_no')
+  ), stu as (
+    select count(*) filter (where serial = '')::bigint            as no_serial,
+           (count(*) - count(distinct nullif(serial, '')))::bigint as dup_serial
+      from students
+  ), keys as (
+    select 'assignments.missing_nos'::text as item, array[a.class_id] as cids, k
+      from assignments a, unnest(a.missing_nos) k
+    union all select 'assignments.late_nos',       array[a.class_id], k from assignments a, unnest(a.late_nos) k
+    union all select 'assignments.confirmed_nos',  array[a.class_id], k from assignments a, unnest(a.confirmed_nos) k
+    union all select 'assignments.focus_nos',      array[a.class_id], k from assignments a, unnest(a.focus_nos) k
+    union all select 'assignments.correction_nos', array[a.class_id], k from assignments a, unnest(a.correction_nos) k
+    union all select 'assignments.corrected_nos',  array[a.class_id], k from assignments a, unnest(a.corrected_nos) k
+    union all select 'assignments.wrong',          array[a.class_id], k from assignments a, jsonb_object_keys(a.wrong) k
+    union all select 'assignments.grades',         array[a.class_id], k from assignments a, jsonb_object_keys(a.grades) k
+    union all select 'calls.student_nos',     array[c.class_id], k from calls c, unnest(c.student_nos) k
+    union all select 'calls.states',          array[c.class_id], k from calls c, jsonb_object_keys(c.states) k
+    -- ⚠️ 考试这一处的作用域是**班级集合**（年级考试一次覆盖多个班）
+    union all select 'exams.absent_nos',      e.class_ids, k from exams e, unnest(e.absent_nos) k
+    union all select 'exam_scores.student_no', array[es.class_id], es.student_no from exam_scores es
+  ), stat as (
+    select item,
+           count(*) filter (where public.serial_key_pending_classes(cids, k))::bigint as pending,
+           count(*) filter (where k <> ''
+                              and public.serial_key_state_classes(cids, k) = 'unknown')::bigint as unknown
+      from keys group by item
+  )
+  select '硬指标'::text, 'students 没有序列号'::text, (select no_serial from stu)
+  union all select '硬指标', 'students 序列号重复', (select dup_serial from stu)
+  union all select '待迁键（必须为 0）', i.item, coalesce(s.pending, 0)
+    from items i left join stat s on s.item = i.item
+  union all select '查不到的键（留原键 + 出清单）', i.item, coalesce(s.unknown, 0)
+    from items i left join stat s on s.item = i.item
+  order by 1 desc, 2
+$$;
+
+-- -------- 20.8 回退（**与正向脚本一起写、一起测**，§4.4 的纪律）--------
+-- 回退把键从序列号写回"迁移那一刻的班内学号"（`legacy_student_no`）。
+-- ⚠️ 它**只对"从老键迁过来的"学生有效**（`legacy_student_no <> ''`）；
+--    建档时就发号的新学生（legacy 为空）**没有老键可回** → 那些键留原样（进清单）。
+create or replace function public.legacy_key_state_classes(p_class_ids uuid[], p_key text)
+returns text
+language sql
+stable
+as $$
+  select case
+    when p_key is null or p_key = '' then 'empty'
+    when exists (
+      select 1 from students s
+       where s.class_id = any (coalesce(p_class_ids, '{}'::uuid[]))
+         and s.legacy_student_no <> '' and s.legacy_student_no = p_key
+    ) then 'legacy'
+    when exists (
+      select 1 from students s
+       where s.class_id = any (coalesce(p_class_ids, '{}'::uuid[]))
+         and s.legacy_student_no <> '' and s.serial = p_key
+    ) then 'serial'
+    else 'unknown'
+  end
+$$;
+
+create or replace function public.legacy_key_of_classes(p_class_ids uuid[], p_key text)
+returns text
+language sql
+stable
+as $$
+  select case public.legacy_key_state_classes(p_class_ids, p_key)
+    when 'serial' then (
+      select s.legacy_student_no from students s
+       where s.class_id = any (coalesce(p_class_ids, '{}'::uuid[]))
+         and s.serial = p_key and s.legacy_student_no <> ''
+       order by s.legacy_student_no limit 1
+    )
+    else p_key
+  end
+$$;
+
+create or replace function public.legacy_key_of(p_class_id uuid, p_key text)
+returns text
+language sql
+stable
+as $$ select public.legacy_key_of_classes(array[p_class_id], p_key) $$;
+
+create or replace function public.revert_nos_to_legacy()
+returns table (step text, rows_affected bigint)
+language plpgsql
+as $$
+declare
+  n bigint;
+begin
+  update assignments a set
+    missing_nos    = (select coalesce(array_agg(public.legacy_key_of(a.class_id, k) order by ord), '{}'::text[])
+                        from unnest(a.missing_nos) with ordinality as t(k, ord)),
+    late_nos       = (select coalesce(array_agg(public.legacy_key_of(a.class_id, k) order by ord), '{}'::text[])
+                        from unnest(a.late_nos) with ordinality as t(k, ord)),
+    confirmed_nos  = (select coalesce(array_agg(public.legacy_key_of(a.class_id, k) order by ord), '{}'::text[])
+                        from unnest(a.confirmed_nos) with ordinality as t(k, ord)),
+    focus_nos      = (select coalesce(array_agg(public.legacy_key_of(a.class_id, k) order by ord), '{}'::text[])
+                        from unnest(a.focus_nos) with ordinality as t(k, ord)),
+    correction_nos = (select coalesce(array_agg(public.legacy_key_of(a.class_id, k) order by ord), '{}'::text[])
+                        from unnest(a.correction_nos) with ordinality as t(k, ord)),
+    corrected_nos  = (select coalesce(array_agg(public.legacy_key_of(a.class_id, k) order by ord), '{}'::text[])
+                        from unnest(a.corrected_nos) with ordinality as t(k, ord))
+   where exists (
+     select 1 from unnest(a.missing_nos || a.late_nos || a.confirmed_nos
+                       || a.focus_nos || a.correction_nos || a.corrected_nos) k
+      where public.legacy_key_state_classes(array[a.class_id], k) = 'serial'
+   );
+  get diagnostics n = row_count;
+  step := 'assignments.text[]（6 个）'; rows_affected := n; return next;
+
+  update assignments a set
+    wrong = (select coalesce(jsonb_object_agg(public.legacy_key_of(a.class_id, k), v), '{}'::jsonb)
+               from jsonb_each(a.wrong) as t(k, v))
+   where exists (select 1 from jsonb_object_keys(a.wrong) k
+                  where public.legacy_key_state_classes(array[a.class_id], k) = 'serial');
+  get diagnostics n = row_count;
+  step := 'assignments.wrong'; rows_affected := n; return next;
+
+  update assignments a set
+    grades = (select coalesce(jsonb_object_agg(public.legacy_key_of(a.class_id, k), v), '{}'::jsonb)
+                from jsonb_each(a.grades) as t(k, v))
+   where exists (select 1 from jsonb_object_keys(a.grades) k
+                  where public.legacy_key_state_classes(array[a.class_id], k) = 'serial');
+  get diagnostics n = row_count;
+  step := 'assignments.grades'; rows_affected := n; return next;
+
+  update calls c set
+    student_nos = (select coalesce(array_agg(public.legacy_key_of(c.class_id, k) order by ord), '{}'::text[])
+                     from unnest(c.student_nos) with ordinality as t(k, ord))
+   where exists (select 1 from unnest(c.student_nos) k
+                  where public.legacy_key_state_classes(array[c.class_id], k) = 'serial');
+  get diagnostics n = row_count;
+  step := 'calls.student_nos'; rows_affected := n; return next;
+
+  update calls c set
+    states = (select coalesce(jsonb_object_agg(public.legacy_key_of(c.class_id, k), v), '{}'::jsonb)
+                from jsonb_each(c.states) as t(k, v))
+   where exists (select 1 from jsonb_object_keys(c.states) k
+                  where public.legacy_key_state_classes(array[c.class_id], k) = 'serial');
+  get diagnostics n = row_count;
+  step := 'calls.states'; rows_affected := n; return next;
+
+  update exams e set
+    absent_nos = (select coalesce(array_agg(public.legacy_key_of_classes(e.class_ids, k) order by ord), '{}'::text[])
+                    from unnest(e.absent_nos) with ordinality as t(k, ord))
+   where exists (select 1 from unnest(e.absent_nos) k
+                  where public.legacy_key_state_classes(e.class_ids, k) = 'serial');
+  get diagnostics n = row_count;
+  step := 'exams.absent_nos'; rows_affected := n; return next;
+
+  update exam_scores es set
+    student_no = public.legacy_key_of(es.class_id, es.student_no)
+   where public.legacy_key_state_classes(array[es.class_id], es.student_no) = 'serial';
+  get diagnostics n = row_count;
+  step := 'exam_scores.student_no'; rows_affected := n; return next;
+end;
+$$;
+
+-- 🔴 三个**会改数据**的函数一律 revoke：它们是迁移工具，不是给前端调的接口
+--    （前端能调到 = 有人能把键写回老学号，而且不报错）。
+revoke all on function public.assign_student_serials()   from public, anon, authenticated;
+revoke all on function public.migrate_nos_to_serial()    from public, anon, authenticated;
+revoke all on function public.revert_nos_to_legacy()     from public, anon, authenticated;
+
+-- -------- 20.9 跑一遍（**幂等**：这一段就是"迁移脚本"，重复执行第二遍 0 行）--------
+--  ⚠️ 入校年份先要有着落。Q18 已经给了三个年级的届（**用户给的值，不是猜的**）：
+--     高二 = 2025、高一 = 2026、高三 = 2024。
+--     这一段只填**空的**（`where coalesce(year,'') = ''`）→ 已有值一个都不覆盖。
+--     ⚠️ P3 会把"届"正式落到 `grades.cohort`（那时 §20.3 会**优先**读 cohort）；
+--        这里填的是**老列** `grades.year`（它的注释本来就写着"2026 级"）。
+--     ⚠️ 它只碰 `year` 这一列，**绝不碰 `name` / `stage`**（`grades` 的字段是权限判据的一环，I30）。
+update grades set year = '2025' where name = '高二' and coalesce(year, '') = '';
+update grades set year = '2026' where name = '高一' and coalesce(year, '') = '';
+update grades set year = '2024' where name = '高三' and coalesce(year, '') = '';
+
+do $$
+declare
+  v_assigned int;
+  v_unresolved int;
+  r record;
+  v_pending bigint := 0;
+begin
+  select assigned, unresolved into v_assigned, v_unresolved from public.assign_student_serials();
+  raise notice '[§20] 序列号生成：本次发出 % 个；仍然没有序列号 % 个（认不出入校年份的会在下面报出来）',
+    v_assigned, v_unresolved;
+
+  for r in select * from public.migrate_nos_to_serial() loop
+    raise notice '[§20] 键迁移 %：受影响 % 行', r.step, r.rows_affected;
+    v_pending := v_pending + r.rows_affected;
+  end loop;
+
+  raise notice '[§20] 本轮键迁移合计受影响 % 行（**再跑一遍这一节应当是 0 行**）', v_pending;
+end $$;
+
+-- -------- 20.10 迁移前的整份导出存档（**可回滚的根据**，§4.4）--------
+--  跑 20.9 之前**必须**先跑这两条并把结果存到迁移脚本之外的地方
+--  （Supabase SQL Editor 里 `select jsonb_agg(...)` 的结果可以直接下载成 JSON）。
+--  这里以注释形式留档，**不在 schema.sql 里自动执行**（自动执行 = 每次都导一份没人看的档）。
+--
+--  select jsonb_agg(jsonb_build_object(
+--    'id', id, 'class_id', class_id,
+--    'wrong', wrong, 'missing_nos', missing_nos, 'late_nos', late_nos,
+--    'confirmed_nos', confirmed_nos, 'focus_nos', focus_nos,
+--    'correction_nos', correction_nos, 'corrected_nos', corrected_nos,
+--    'grades', grades)) from assignments;
+--
+--  select jsonb_agg(jsonb_build_object(
+--    'id', id, 'class_id', class_id,
+--    'student_nos', student_nos, 'states', states)) from calls;
+--
+--  select jsonb_agg(jsonb_build_object(
+--    'id', id, 'class_ids', class_ids, 'absent_nos', absent_nos)) from exams;
+--
+--  select jsonb_agg(jsonb_build_object(
+--    'id', id, 'exam_id', exam_id, 'class_id', class_id, 'student_no', student_no)) from exam_scores;
+--
+--  ⚠️ 回退 SQL 是 **20.8 的 `revert_nos_to_legacy()`**（与正向脚本同一套判据，也幂等）：
+--     `select * from public.revert_nos_to_legacy();`
+--     注意它与上面那份"整份 JSON 存档"是**两套**回退手段，别只留一套：
+--     存档能回到"迁移前的字节"，`revert` 只能回到"迁移前的键"。
+-- ============================================================

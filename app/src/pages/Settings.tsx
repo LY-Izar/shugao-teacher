@@ -10,6 +10,7 @@ import {
   IconDownload,
   IconLogout,
   IconPencil,
+  IconSliders,
   IconSwap,
   IconUpload,
   IconUsers,
@@ -39,7 +40,13 @@ import { REMIND_BEFORE, itemsForDate } from '../lib/schedule'
 // 只用到时间工具：节假日「数据来源」面板已删（见 功能设计与不变量.md §十七 17.2），
 // 判定函数（isRestDay / dayKind / holidayOn / nextHoliday）仍在别处使用，没有动。
 import { beijingNow, ymdOf } from '../lib/holiday'
-import { canManageTeachers, currentIdentityLabel, IDENTITY_TAG_STYLE, roleChips } from '../lib/roles'
+import {
+  canManageTeachers,
+  currentIdentityLabel,
+  IDENTITY_TAG_STYLE,
+  isSuperAdmin,
+  roleChips,
+} from '../lib/roles'
 import {
   SUBJECTS,
   DEFAULT_SUBJECT_CODE,
@@ -286,6 +293,49 @@ export default function Settings() {
                   <span style={{ fontSize: 14.5, fontWeight: 620 }}>教师账号</span>
                   <span className="mt-0.5 block" style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
                     建号（带学科）· 任课关系 · 班主任 / 年级主任
+                  </span>
+                </span>
+                <IconChevronRight size={16} />
+              </button>
+            ) : null}
+            {/*
+              平台运维（超管面板，`超管运维面板方案.md` 第一期）。
+
+              🔴 判据用 `isSuperAdmin()`，**不是** `canManageTeachers()` ——
+                 后者含教导处，而这块屏的定位是**平台维护者**（方案 §3.5 / §5.5 T7）。
+                 `lib/roles.ts` 里那个函数一直"没有调用方"，注释写着"留着它是因为
+                 『只有最高管理员』这件事仍然是一个**独立的判据**" —— 这里就是它的调用方。
+
+              ⚠️ 这里只是**摆不摆入口**（"少点几下"），**不是安全边界**：
+                 真正的闸门在服务端（`/api/admin/config-check` 问数据库的 `is_super_admin()`）。
+                 所以 `myRoles` 读不到（表还没建 / 网络错）时这个入口不出现 ——
+                 那时候直接从地址栏敲 `/admin` 照样进得去，而且**它不经过 `Guard`**，
+                 被标成教室端的机器也打得开（方案 §七 T6）。
+            */}
+            {isSuperAdmin(myRoles) ? (
+              <button
+                type="button"
+                className="row"
+                style={{ padding: 14 }}
+                onClick={() => navigate('/admin')}
+              >
+                <span
+                  className="grid place-items-center shrink-0"
+                  style={{
+                    width: 36,
+                    height: 36,
+                    border: '1px solid var(--color-line2)',
+                    borderRadius: 4,
+                    background: 'var(--color-surface2)',
+                    color: 'var(--color-accent)',
+                  }}
+                >
+                  <IconSliders size={18} />
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span style={{ fontSize: 14.5, fontWeight: 620 }}>平台运维</span>
+                  <span className="mt-0.5 block" style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
+                    版本 / 配置 / 备份 / 结构漂移 / 数据矛盾 —— 只读体检屏
                   </span>
                 </span>
                 <IconChevronRight size={16} />

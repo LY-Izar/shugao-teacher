@@ -15,7 +15,14 @@ import { pointName } from './knowledge'
 import { isChoiceKind, objectiveSubjective, questionCountOf, questionsOf, round2, scoreOf, totalOf } from './examPaper'
 import type { Exam, ExamQuestion, ExamScore } from '../data/examTypes'
 
-export type ExamRosterEntry = { studentNo: string; name: string }
+/**
+ * 参与统计的名单一行。
+ *
+ * ⚠️ `studentNo` 是**档案键**（迁移后 = 序列号，见 `lib/keys.ts`） —— 它要和
+ *    `ExamScore.studentNo`（数据库那一列的值）对得上才能 join。
+ *    **`displayNo` 才是给人看的班内学号**；没给就退回 `studentNo`（兼容期）。
+ */
+export type ExamRosterEntry = { studentNo: string; name: string; displayNo?: string }
 
 /* ---------------- 基础 ---------------- */
 
@@ -298,7 +305,10 @@ export function pointStats(e: Exam, rows: readonly ExamScore[]): PointStat[] {
 /* ---------------- 个人诊断 ---------------- */
 
 export type StudentDiagnosis = {
+  /** **档案键**（迁移后 = 序列号）；界面上要显示的话用它对应的 `displayNo` */
   studentNo: string
+  /** 给人看的**班内学号**（兼容期就是 `studentNo` 本身） */
+  displayNo: string
   name: string
   total: number
   /** 与班级均分之差（正数 = 高于均分） */
@@ -381,7 +391,7 @@ export function diagnose(
   const pts = pointStats(e, rows)
   const classRate = new Map(pts.map((p) => [p.id, p.rate]))
 
-  return roster.map(({ studentNo, name }) => {
+  return roster.map(({ studentNo, name, displayNo }) => {
     const row = rows.find((r) => r.studentNo === studentNo)
     const absent = row?.absent === true
     const ungraded = !row || (!row.graded && !absent)
@@ -399,6 +409,7 @@ export function diagnose(
     }
     return {
       studentNo,
+      displayNo: displayNo ?? studentNo,
       name: row?.name || name,
       total,
       diffFromAvg: round2(total - avg),
@@ -487,7 +498,14 @@ export function studentTrendOf(
 
 /* ---------------- 缺考 / 未交 ---------------- */
 
-export type MissingEntry = { studentNo: string; name: string; why: 'absent' | 'ungraded' }
+export type MissingEntry = {
+  /** **档案键**（迁移后 = 序列号） */
+  studentNo: string
+  /** 给人看的**班内学号** */
+  displayNo: string
+  name: string
+  why: 'absent' | 'ungraded'
+}
 
 /**
  * 缺考 / 未批改名单（用户列的 ⑥ 号新指标）。
@@ -505,10 +523,13 @@ export function missingList(
   roster: readonly ExamRosterEntry[],
 ): MissingEntry[] {
   const out: MissingEntry[] = []
-  for (const { studentNo, name } of roster) {
+  for (const { studentNo, name, displayNo } of roster) {
+    const shown = displayNo ?? studentNo
     const row = rows.find((r) => r.studentNo === studentNo)
-    if (row?.absent) out.push({ studentNo, name: row.name || name, why: 'absent' })
-    else if (!row || !row.graded) out.push({ studentNo, name: row?.name || name, why: 'ungraded' })
+    if (row?.absent) out.push({ studentNo, displayNo: shown, name: row.name || name, why: 'absent' })
+    else if (!row || !row.graded) {
+      out.push({ studentNo, displayNo: shown, name: row?.name || name, why: 'ungraded' })
+    }
   }
   return out
 }

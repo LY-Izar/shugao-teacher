@@ -5,6 +5,7 @@ import { useStore } from './data/store'
 import { useAuthBootstrap } from './hooks/useAuthBootstrap'
 import { authExpired, hasAuthStamp, isClassroomDevice, markLogin } from './lib/session'
 import { isRemote } from './lib/supabase'
+import Admin from './pages/Admin'
 import AssignmentCall from './pages/AssignmentCall'
 import AssignmentCollect from './pages/AssignmentCollect'
 import AssignmentGrade from './pages/AssignmentGrade'
@@ -96,14 +97,90 @@ function ClassroomGate({ children }: { children: React.ReactNode }) {
   if (!teacher) {
     return <Navigate to="/login" replace state={{ from: loc.pathname }} />
   }
+  /*
+   * 🔴 **G7（用户 2026-09-28 拍板）：教师账号在"被标成教室端的设备"上打开 /classroom —— 直接拦住。**
+   *
+   * 为什么必须拦，而不是像以前那样只挂一条黄条放行：
+   *   这块屏是**给学生看的**（挂在教室墙上/一体机上），而教师账号在这上面渲染的是
+   *   **他自己的全部班级数据**（名单、收缴、讲评材料）—— 学生把网址后缀一改、
+   *   或者上一位老师在这台机器上登过、没退出，屏上就是那些数据。
+   *   只挂黄条 = **用一条提示代替了一道安全边界**，而这条边界的两端不对等：
+   *   拦错的代价是"老师去自己电脑上看"，放过的代价是"全班学生看到教师数据"。
+   *
+   * 判据是「**这台设备被标成教室端**（`isClassroomDevice()`）× **当前是教师账号**」：
+   *   · 教室端账号（`accountKind === 'classroom'`）→ **照常放行**，那正是这块屏的主人；
+   *   · 教师账号 + 设备**没**被标成教室端 → 照常放行。老师在自己电脑/手机上
+   *     打开 `/classroom` 是想核对那块屏长什么样（比如看课表排版），
+   *     而**他自己的设备**上不存在"学生围过来看"这个场景；
+   *   · 教师账号 + 设备**已被标成教室端** → 拦住并说明出路。
+   *
+   * ⚠️ 这不是"教师端 Guard"那条分支的重复：Guard 拦的是**反方向**
+   *    （教室端设备去访问教师端），而且它只把人送去登录页；这里说的是
+   *    "这台机器本来就是教室端，拿教师账号打开等于在教室里摊开教师数据"。
+   */
+  const isTeacherAccount = accountKind !== 'classroom'
+  if (isTeacherAccount && isClassroomDevice()) {
+    return (
+      <div className="grid min-h-full place-items-center px-6 py-10">
+        <div className="w-full anim-in" style={{ maxWidth: 420 }}>
+          <div className="panel overflow-hidden" data-classroom-blocked>
+            <div className="panel-head">
+              <h2>这台机器是教室端</h2>
+            </div>
+            <div className="p-4" style={{ fontSize: 13, lineHeight: 1.85 }}>
+              <p style={{ color: 'var(--color-bad)', fontWeight: 620 }}>
+                教师账号不能在这台设备上打开教室端。
+              </p>
+              <p className="mt-2" style={{ color: 'var(--color-ink2)' }}>
+                这块屏是<b>挂在教室里给学生看</b>的，而教师账号在它上面渲染的是
+                <b>你自己的全部班级数据</b>（名单、收缴、讲评材料）。
+                只提醒一句就放行，等于让学生有机会看到这些 —— 所以这里直接拦住。
+              </p>
+              <p className="mt-3" style={{ color: 'var(--color-ink2)' }}>
+                <b>三条出路：</b>
+              </p>
+              <ul className="mt-1" style={{ color: 'var(--color-ink3)', paddingLeft: 18 }}>
+                <li>
+                  一体机上请用<b>教室端账号</b>登录 —— 教室端账号只看得见它自己那个班，
+                  这正是它的用途（在「我的 → 教室端账号」里建）。
+                </li>
+                <li>
+                  想核对这块屏长什么样：去<b>另一台设备</b>（自己的电脑/手机）打开
+                  <code> /classroom</code>，那边的设备标记不是教室端，照常可看。
+                </li>
+                <li>
+                  这台机器本来就是教师端：到<b>登录页用教师密码登一次</b>
+                  （登录会把设备角色改回教师端），之后就能正常进教师控制台。
+                </li>
+              </ul>
+              <div className="mt-4 flex flex-wrap gap-2">
+                {/*
+                 * 这里**刻意不用 `useNavigate()`** —— `ClassroomGate` 是包在
+                 * `<Route element={…}>` 上的组件，而 `App.tsx` 的 `useNavigate`
+                 * 之前没有在这个文件里出现过。用普通链接最稳：教室端那一屏
+                 * 本来就不该（也不需要）参与教师端的路由动画与历史栈。
+                 */}
+                <a className="btn btn-primary btn-sm" href="/">
+                  回教师端
+                </a>
+                <a className="btn btn-sm" href="/login">
+                  去登录页换个账号
+                </a>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+  /*
+   * 教师账号 + **自己的**设备（设备标记不是教室端）→ 照旧是"预览"：
+   * 拿自己的班当样本看看这块屏长什么样。它和一体机上那台（教室端账号，
+   * 只看得见自己那个班）不是一回事，不写清楚很容易被当成同一个东西。
+   * 用 fixed 定位，不参与布局，也不影响截图。
+   */
   return (
     <>
-      {/*
-       * 教师账号打开教室端 = **预览**：拿自己的班当样本看看这块屏长什么样。
-       * 它和一体机上那台（教室端账号，只看得见自己那个班）不是一回事，
-       * 不写清楚很容易被当成同一个东西 —— 上一次的困惑就是这么来的。
-       * 用 fixed 定位，不参与布局，也不影响截图。
-       */}
       {isRemote && accountKind === 'teacher' ? (
         <div
           style={{
@@ -123,10 +200,69 @@ function ClassroomGate({ children }: { children: React.ReactNode }) {
         >
           预览模式 —— 你用的是<b>教师账号</b>，显示的是你自己的班。
           一体机上那台用的是教室端账号，只看得见它自己那个班。
+          ⚠️ 在<b>被标成教室端的设备</b>上这条路是**拦住**的（那台屏是给学生看的）。
         </div>
       ) : null}
       {children}
     </>
+  )
+}
+
+/**
+ * 全局的 `syncError` 横幅。
+ *
+ * 🔴 **它为什么必须在这一层（`<Router>` 里、所有路由之外）**
+ *
+ * `syncError` 原来只有两个消费者：教师端 `AppShell` 与教室端 `Classroom` 的 `SyncBanner`。
+ * 而 `hydrate()` 失败那条路的症状是：
+ *   `loadSnapshot()` 返回 null → `store.hydrate()` 只 `set({hydrated:true})` **不设 teacher**
+ *   → `Guard` 把用户 `<Navigate to="/login">` → **而登录页不渲染 `syncError`**（它不在 `AppShell` 里）。
+ * → 实际症状是「**莫名被踢回登录页，毫无解释**」：顶栏那条报错横幅**永远没机会出现**，
+ *   因为用户已经不在 `AppShell` 里了。
+ *
+ * 修法就是**把它抬到所有路由之上** —— 这样登录页、教室端、以及超管面板都能看见它。
+ * ⚠️ 这也正是"超管面板不能长在 `AppShell` 里"的同一个理由（面板方案 §二 D2 / §3.6）：
+ *    **同一个状态要在所有读它的人面前显示**，而"半坏状态"下恰恰是最需要它的时刻。
+ *
+ * ⚠️ 刻意**不改 `syncError` 的形态**（它仍然是一个字符串槽位、没有时间、没有历史）——
+ *    那是 D1/D2 的事（要改 `remote.upsert/remove` + 环形缓冲），第二期。
+ *    这里只解决"没人看得到"。
+ */
+function SyncErrorBanner() {
+  const syncError = useStore((s) => s.syncError)
+  const clearSyncError = useStore((s) => s.clearSyncError)
+  if (!syncError) return null
+  return (
+    <div
+      role="alert"
+      data-sync-error-banner
+      className="fixed inset-x-0 top-0 z-[70] flex items-start gap-2 px-3 py-2"
+      style={{
+        background: 'var(--color-badsoft)',
+        borderBottom: '1px solid ***REMOVED***f3c9cd',
+        color: '***REMOVED***8f1c26',
+        fontSize: 12.5,
+        lineHeight: 1.65,
+      }}
+    >
+      <span className="min-w-0 flex-1">
+        <b>云端同步出错，改动可能没有保存。</b>
+        <span style={{ display: 'block', opacity: 0.9 }}>
+          {syncError}
+          <span style={{ opacity: 0.8 }}>
+            {' '}
+            —— 若你刚才被踢回登录页，原因大概率就是它（数据没读全，路由守卫会当成"未登录"）。
+          </span>
+        </span>
+      </span>
+      <button
+        type="button"
+        onClick={clearSyncError}
+        style={{ flex: 'none', color: '***REMOVED***8f1c26', opacity: 0.75, fontSize: 12 }}
+      >
+        知道了
+      </button>
+    </div>
   )
 }
 
@@ -155,8 +291,27 @@ export default function App() {
   return (
     <BrowserRouter>
       <ToastHost />
+      <SyncErrorBanner />
       <Routes>
         <Route path="/login" element={<Login />} />
+        {/*
+          超管运维面板（`超管运维面板方案.md` 第一期）。
+
+          🔴 **它刻意不套 `Guard`，也不套 `AppShell`** —— 这是方案 §七 T6 那条设计决定：
+          `Guard` 会把"被标成教室端的设备"一律送去 `/login`（见上面那一段），
+          而 `/settings`（面板入口所在页）**也在 `Guard` 里**。
+          → 超管这台机器被标成教室端时，他连面板都进不去，
+            而面板恰恰是用来救这种情况的（§九 W22 就是这个状态）。
+          → 还有第二半：`hydrate()` 失败时用户也会被踢去登录页，
+            面板要能在"半坏状态"下打开，所以它**自己取数**（不依赖 `store` 的 hydrate 结果）。
+
+          ⚠️ **"不套 Guard"不等于"不设防"**：
+             · 面板自己检查 Supabase 会话（没会话就在**页面内**给一张登录卡，不跳转）；
+             · 真正的权限判据在**服务端** —— `POST /api/admin/config-check` 拿调用者的
+               JWT 去问数据库的 `is_super_admin()`，不是 `can_manage_teachers()`
+               （那个含教导处，见方案 §5.5 T7）。前端只是"摆不摆入口"。
+        */}
+        <Route path="/admin" element={<Admin />} />
         {/* 教室端：独立的一整屏，不套教师端应用壳；但要登录（见 ClassroomGate） */}
         <Route
           path="/classroom"

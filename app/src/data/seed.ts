@@ -1,4 +1,5 @@
 import { isoOffset } from '../lib/date'
+import { archiveKeyOf } from '../lib/keys'
 import { DEFAULT_SUBJECT_CODE, subjectName } from '../lib/subjects'
 import { normalizePaperName, round2, totalOf } from '../lib/examPaper'
 import type { Exam, ExamQuestion, ExamScore } from './examTypes'
@@ -47,7 +48,23 @@ function makeName(rng: () => number): string {
   return pick(SURNAMES, rng) + pick(GIVEN1, rng) + (twoChar ? '' : pick(GIVEN2, rng))
 }
 
-export function makeStudents(count: number, seed: number): Student[] {
+/**
+ * 演示学生的序列号前缀（= **届 = 入校年份**，Q22）。
+ *
+ * ⚠️ 演示数据只有高二两个班，照着 Q22 的口径「现在高二 = 2025 级」写死。
+ *    **不是**从 `Klass.year`（学年 `2025-2026`）推出来的 —— 那是"学年"，
+ *    与"届"是两回事（§2.13.1 的教训），推出来的值这次碰巧对、下次就错。
+ */
+const DEMO_COHORT = '2025'
+
+export function makeStudents(
+  count: number,
+  seed: number,
+  /** 这一批的届（4 位入校年份）；用于生成序列号 */
+  serialYear = DEMO_COHORT,
+  /** 本届**已经用掉的序号**（上一批发到几号）—— U-2 = A：追加到年级末尾 */
+  serialFrom = 0,
+): Student[] {
   const rng = makeRng(seed)
   const used = new Set<string>()
   const out: Student[] = []
@@ -59,6 +76,12 @@ export function makeStudents(count: number, seed: number): Student[] {
     out.push({
       id: `s-${seed}-${i}`,
       studentNo: String(i),
+      /*
+       * 序列号（Q6）：`入校年份 4 位 + 该届内 3 位`。
+       * 演示数据**直接以"迁移后"的形状出现** —— 那 10 个字段的键就是它（见下面 makeDemoGrading）。
+       * 这样本地演示模式走的是与云端迁移后**同一条路**，而不是"另一套老形状"。
+       */
+      serial: `${serialYear}${String(serialFrom + i).padStart(3, '0')}`,
       name,
       status: 'active',
       createdAt: Date.now(),
@@ -67,8 +90,23 @@ export function makeStudents(count: number, seed: number): Student[] {
   return out
 }
 
+/**
+ * 名单里第 N 个人的**档案键**（迁移后 = 序列号）。
+ *
+ * ⚠️ 「第 N 号」在演示数据里恰好等于 `studentNo`，但**写进档案的必须是键** ——
+ *    这就是"界面上显示学号、档案里存序列号"那条口径的演示样本（见 `lib/keys.ts`）。
+ */
+function keyAt(klass: Klass, n: number): string {
+  const s = klass.students[n - 1]
+  return s ? archiveKeyOf(s) : ''
+}
+
 export function makeDemoClasses(): Klass[] {
   const now = Date.now()
+  const first = makeStudents(45, 20250303, DEMO_COHORT, 0)
+  // ⚠️ 第二个班要从**上一批的末尾接着发**：序列号是**全校唯一**的，
+  //    两个班都从 001 开始就是重复（数据库那条部分唯一索引会直接拒掉整批 upsert）。
+  const second = makeStudents(46, 20250707, DEMO_COHORT, first.length)
   return [
     {
       id: 'c-demo-1',
@@ -76,7 +114,7 @@ export function makeDemoClasses(): Klass[] {
       grade: '高二',
       year: '2025-2026',
       createdAt: now,
-      students: makeStudents(45, 20250303),
+      students: first,
     },
     {
       id: 'c-demo-2',
@@ -84,7 +122,7 @@ export function makeDemoClasses(): Klass[] {
       grade: '高二',
       year: '2025-2026',
       createdAt: now,
-      students: makeStudents(46, 20250707),
+      students: second,
     },
   ]
 }
@@ -264,7 +302,7 @@ function makeDemoGrading(students: Student[], questionCount: number): Assignment
 
   const ability = students.map(() => rng())
   const wrong: Assignment['wrong'] = {}
-  for (const s of students) wrong[s.studentNo] = []
+  for (const s of students) wrong[archiveKeyOf(s)] = []
 
   for (let q = 1; q <= questionCount; q++) {
     const target = Math.round(rates[(q - 1) % rates.length] * n)
@@ -276,10 +314,10 @@ function makeDemoGrading(students: Student[], questionCount: number): Assignment
     for (const { s } of picked) {
       if (q === 3) {
         // 第 3 题拆了两个小题，按小题记
-        if (rng() < 0.78) wrong[s.studentNo].push('3.1')
-        if (rng() < 0.58) wrong[s.studentNo].push('3.2')
+        if (rng() < 0.78) wrong[archiveKeyOf(s)].push('3.1')
+        if (rng() < 0.58) wrong[archiveKeyOf(s)].push('3.2')
       } else {
-        wrong[s.studentNo].push(String(q))
+        wrong[archiveKeyOf(s)].push(String(q))
       }
     }
   }
@@ -297,10 +335,11 @@ function makeDemoGrading(students: Student[], questionCount: number): Assignment
 function makeDemoGrades(students: Student[], missingNos: string[]): Record<string, string> {
   const rng = makeRng(20251005)
   const out: Record<string, string> = {}
+  const missing = new Set(missingNos)
   for (const s of students) {
-    if (missingNos.includes(s.studentNo)) continue
+    if (missing.has(archiveKeyOf(s))) continue
     const r = rng()
-    out[s.studentNo] = r < 0.28 ? '优' : r < 0.78 ? '良' : '差'
+    out[archiveKeyOf(s)] = r < 0.28 ? '优' : r < 0.78 ? '良' : '差'
   }
   return out
 }
@@ -324,8 +363,14 @@ export function makeDemoAssignments(classes: Klass[]): Assignment[] {
   const [a, b] = classes
   if (!a) return []
   const now = Date.now()
-  const pickMissing = (count: number, idx: number[]) =>
-    idx.map((n) => String(n)).filter((n) => Number(n) <= count)
+  /*
+   * ⚠️ 「第 N 号」在这里指的是**名单里的第 N 个人**（演示数据里 `studentNo` 恰好等于序号），
+   *    但**写进档案的必须是键**（= 序列号，见 `lib/keys.ts`）——
+   *    这就是"界面上显示学号、档案里存序列号"这条口径的演示样本。
+   */
+  const keyOf = keyAt
+  const pickMissing = (klass: Klass, idx: number[]) =>
+    idx.map((n) => keyOf(klass, n)).filter(Boolean)
 
   /*
    * 极简模式那一份的数据（**唯一一份 statsMode='simple' 的演示档案**）。
@@ -345,11 +390,11 @@ export function makeDemoAssignments(classes: Klass[]): Assignment[] {
    *  · 改错名单按等级挑（「全选「差」的」），已改错留两个人，
    *    这样改错登记页在演示数据里就有内容。
    */
-  const simpleMissing = pickMissing(a.students.length, [7, 19, 33])
+  const simpleMissing = pickMissing(a, [7, 19, 33])
   const simpleGrades = makeDemoGrades(a.students, simpleMissing)
   const simpleBad = a.students
-    .filter((s) => s.status === 'active' && simpleGrades[s.studentNo] === '差')
-    .map((s) => s.studentNo)
+    .filter((s) => s.status === 'active' && simpleGrades[archiveKeyOf(s)] === '差')
+    .map((s) => archiveKeyOf(s))
 
   const out: Assignment[] = [
     {
@@ -364,16 +409,16 @@ export function makeDemoAssignments(classes: Klass[]): Assignment[] {
       templateId: 't-21',
       createdAt: now - 2 * 86400000,
       collected: true,
-      missingNos: pickMissing(a.students.length, [7, 19, 33]),
-      lateNos: pickMissing(a.students.length, [12]),
+      missingNos: pickMissing(a, [7, 19, 33]),
+      lateNos: pickMissing(a, [12]),
       subQuestions: { '3': 2 },
       questionMeta: DEMO_META_21,
       wrong: makeDemoGrading(a.students, 6),
-      confirmedNos: a.students.filter((s) => s.status === 'active').map((s) => s.studentNo),
+      confirmedNos: a.students.filter((s) => s.status === 'active').map((s) => archiveKeyOf(s)),
       // 改错名单 / 已改错 / 需重点关注 —— 让改错登记页在演示数据里就有内容
-      correctionNos: a.students.filter((s) => s.status === 'active').slice(0, 12).map((s) => s.studentNo),
-      correctedNos: a.students.filter((s) => s.status === 'active').slice(0, 5).map((s) => s.studentNo),
-      focusNos: [a.students[2]?.studentNo, a.students[8]?.studentNo].filter(Boolean) as string[],
+      correctionNos: a.students.filter((s) => s.status === 'active').slice(0, 12).map((s) => archiveKeyOf(s)),
+      correctedNos: a.students.filter((s) => s.status === 'active').slice(0, 5).map((s) => archiveKeyOf(s)),
+      focusNos: [a.students[2], a.students[8]].filter(Boolean).map((s) => archiveKeyOf(s!)),
       gradeSeconds: 254,
       gradedAt: now - 2 * 86400000 + 7200_000,
     },
@@ -434,7 +479,7 @@ export function makeDemoAssignments(classes: Klass[]): Assignment[] {
       templateId: 't-23',
       createdAt: now - 86400000,
       collected: true,
-      missingNos: pickMissing(a.students.length, [4, 26]),
+      missingNos: pickMissing(a, [4, 26]),
       lateNos: [],
       subQuestions: {},
       wrong: {},
@@ -519,11 +564,26 @@ export function makeDemoExams(classes: Klass[]): { exams: Exam[]; scores: ExamSc
   ) => {
     const rng = makeRng(seed)
     const students = klass.students.filter((s) => s.status === 'active')
+    /*
+     * 🔴 **考试这两处以学号为键的字段，值同样迁到序列号**（`schema.sql` §20 的范围）：
+     *    `exams.absent_nos`（缺考名单）与 `exam_scores.student_no`（每行的键）。
+     *    所以下面一律用 `archiveKeyOf(s)`（= 序列号），而不是 `s.studentNo` ——
+     *    界面上照旧显示班内学号，但**档案里存的是键**。
+     */
+    const skey = (s: Student) => archiveKeyOf(s)
     // 每个学生一个固定"水平"，再加题目层面的抖动
-    const ability = new Map(students.map((s) => [s.studentNo, 0.35 + rng() * 0.62]))
+    const ability = new Map(students.map((s) => [skey(s), 0.35 + rng() * 0.62]))
     const rows: ExamScore[] = []
+    const absentKeys = absent.map((no) => {
+      const hit = students.find((s) => s.studentNo === no)
+      return hit ? skey(hit) : no
+    })
+    const ungradedKeys = ungraded.map((no) => {
+      const hit = students.find((s) => s.studentNo === no)
+      return hit ? skey(hit) : no
+    })
     for (const s of students) {
-      const lv = ability.get(s.studentNo) ?? 0.6
+      const lv = ability.get(skey(s)) ?? 0.6
       const scores: Record<string, number> = {}
       const answers: Record<string, string> = {}
       for (const q of qs) {
@@ -545,12 +605,12 @@ export function makeDemoExams(classes: Klass[]): { exams: Exam[]; scores: ExamSc
         }
       }
       const merged = { scores, answers }
-      if (absent.includes(s.studentNo)) {
+      if (absentKeys.includes(skey(s))) {
         rows.push({
-          id: `ex-${examId}-${s.studentNo}`,
+          id: `ex-${examId}-${skey(s)}`,
           examId,
           classId: klass.id,
-          studentNo: s.studentNo,
+          studentNo: skey(s),
           name: s.name,
           scores: {},
           answers: {},
@@ -560,12 +620,12 @@ export function makeDemoExams(classes: Klass[]): { exams: Exam[]; scores: ExamSc
         })
         continue
       }
-      if (ungraded.includes(s.studentNo)) {
+      if (ungradedKeys.includes(skey(s))) {
         rows.push({
-          id: `ex-${examId}-${s.studentNo}`,
+          id: `ex-${examId}-${skey(s)}`,
           examId,
           classId: klass.id,
-          studentNo: s.studentNo,
+          studentNo: skey(s),
           name: s.name,
           scores: {},
           answers: {},
@@ -576,10 +636,10 @@ export function makeDemoExams(classes: Klass[]): { exams: Exam[]; scores: ExamSc
         continue
       }
       rows.push({
-        id: `ex-${examId}-${s.studentNo}`,
+        id: `ex-${examId}-${skey(s)}`,
         examId,
         classId: klass.id,
-        studentNo: s.studentNo,
+        studentNo: skey(s),
         name: s.name,
         scores,
         answers,
@@ -606,7 +666,8 @@ export function makeDemoExams(classes: Klass[]): { exams: Exam[]; scores: ExamSc
     questionCount: qs.length,
     questions: DEMO_EXAM_QUESTIONS,
     classIds: [a.id],
-    absentNos: ['7'],
+    // ⚠️ 缺考名单存的是**键**（序列号）—— 与 `missingNos` 同一条纪律（schema.sql §20）
+    absentNos: [keyAt(a, 7)],
     status: 'graded',
     createdBy: 't-1',
     createdAt: Date.now() - 3 * 86400000,
@@ -627,7 +688,7 @@ export function makeDemoExams(classes: Klass[]): { exams: Exam[]; scores: ExamSc
       ...examA,
       id: 'ex-demo-2',
       classIds: [b.id],
-      absentNos: ['12'],
+      absentNos: [keyAt(b, 12)],
       createdBy: 't-2',
       createdAt: Date.now() - 3 * 86400000,
     }

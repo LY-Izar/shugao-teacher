@@ -1,5 +1,6 @@
 import { getSupabase } from '../lib/supabase'
 import { asSubjectCode, subjectCodeOfName } from '../lib/subjects'
+import { compareRoster } from '../lib/roster'
 import type { Exam, ExamScore } from './examTypes'
 import type {
   Assignment,
@@ -45,6 +46,17 @@ type StudentRow = {
   student_no: string
   name: string
   status: string
+  /**
+   * 序列号（`schema.sql` §20 加的列）：`入校年份 4 位 + 该届内 3 位`。
+   * ⚠️ **可选**：线上库可能还没跑 §20 —— 这时读不到、也不能写（见 `ensureSerialCols`）。
+   * 读不到 = 那一行还没生成序列号 → 档案键退回班内学号（老行为，见 `lib/keys.ts`）。
+   */
+  serial?: string | null
+  /**
+   * 迁移那一刻的班内学号存档（`schema.sql` §20 加的列）。
+   * ⚠️ **永远不写**（数据库触发器会拒），只在读取时带着；用途只有一个：让键迁移幂等。
+   */
+  legacy_student_no?: string | null
 }
 type AssignmentRow = {
   id: string
@@ -218,7 +230,10 @@ async function probeSubjectCols(): Promise<SubjectCols> {
 
 /** 探测一次（同一页面内只探一次），给写路径用 */
 export function ensureSubjectCols(): Promise<SubjectCols> {
-  if (!colsProbe) colsProbe = probeSubjectCols()
+  if (!colsProbe) {
+    const p = probeSubjectCols()
+    colsProbe = watchProbe('subjectCols', p, (v) => (v.assignments && v.teachers ? 'present' : 'missing'))
+  }
   return colsProbe
 }
 
@@ -241,6 +256,12 @@ export type ExamTablesState = 'present' | 'missing'
 
 let examTablesProbe: Promise<ExamTablesState> | null = null
 
+/**
+ * 上一次探测**到底问出了什么**（与 `examTablesProbe` 的返回值区分开，见下面 `getExamTablesProbeStatus`）。
+ * 取值只有三种：还没问完 / 真的不在 / 没问出来。
+ */
+let lastExamTablesProbe: ExamProbeStatus = 'pending'
+
 /** 表不存在的三种表述：PG 原生错误码 / PostgREST 的 schema cache 错误码 / 兜底文案 */
 function isMissingTable(error: { message?: string; code?: string } | null | undefined): boolean {
   if (!error) return false
@@ -256,7 +277,11 @@ function isMissingTable(error: { message?: string; code?: string } | null | unde
 
 async function probeExamTables(): Promise<ExamTablesState> {
   const sb = getSupabase()
-  if (!sb) return 'missing'
+  if (!sb) {
+    examTablesProbeSettled = true
+    lastExamTablesProbe = 'indeterminate'
+    return 'missing'
+  }
   const has = async (table: string): Promise<boolean | null> => {
     try {
       const { error } = await sb.from(table).select('id').limit(1)
@@ -268,19 +293,221 @@ async function probeExamTables(): Promise<ExamTablesState> {
     }
   }
   const [exams, scores] = await Promise.all([has('exams'), has('exam_scores')])
-  if (exams === false || scores === false) return 'missing'
+  examTablesProbeSettled = true
+  /*
+   * ⚠️ 这三支的**返回值一个字都没改**（`'present' | 'missing'` 是对外契约，
+   *    考试功能的读写路径按它判）。下面那三行只是把"这次到底问出了什么"
+   *    另外记一份，给面板区分「表真的不在」与「我没问出来」——
+   *    这两件事在返回值里长得一模一样，而它们的处置完全不同。
+   */
+  if (exams === false || scores === false) {
+    lastExamTablesProbe = 'missing'
+    return 'missing'
+  }
   if (exams === null || scores === null) {
     // 探测本身没结论：**不缓存**，让下一次重探（可能只是断网）
     examTablesProbe = null
+    examTablesProbeSettled = false
+    lastExamTablesProbe = 'indeterminate'
     return 'missing'
   }
+  lastExamTablesProbe = 'present'
   return 'present'
 }
 
 /** 探测一次（同一页面内只探一次），给考试功能的读写路径用 */
 export function ensureExamTables(): Promise<ExamTablesState> {
-  if (!examTablesProbe) examTablesProbe = probeExamTables()
+  if (!examTablesProbe) {
+    // 与上面三个同一件事：先挂旁听，再返回原 Promise（不改变任何调用方的时序）
+    const p = probeExamTables()
+    examTablesProbe = watchProbe('examTables', p)
+  }
   return examTablesProbe
+}
+
+/**
+ * `examTablesProbe` 的**唯一外部清理入口**。
+ *
+ * 这个函数是补上一个真实的缺陷（`功能设计与不变量.md` §十 留档）：
+ * `store.refreshExamTables()` 的注释自称"先把缓存清掉再重探"，
+ * 但它只 `set({ examTables: 'unknown' })` 然后调 `hydrateExams()`
+ * → `ensureExamTables()` → **命中同一个已经 resolve 的 Promise**。
+ * 全仓对 `examTablesProbe` 只有三处引用（定义 / `:274` 的自清 / 这里），
+ * **没有任何外部清理入口** —— 后果是 `Exams.tsx` 上那个「重试」按钮**是空操作**，
+ * 跑完 §15 必须整页刷新才生效。
+ *
+ * ⚠️ 语义与 `probeExamTables()` 内部的"探测无结论时自清"**是同一件事**：
+ *    清掉 = 下一次 `ensureExamTables()` 重新发一次请求。它**只清缓存、不写任何东西**。
+ */
+export function resetExamTablesProbe(): void {
+  examTablesProbe = null
+  examTablesProbeSettled = false
+}
+
+/**
+ * `ensureExamTables()` 到底有没有**结论**？
+ *
+ * 为什么需要单独一个 getter：它对外只返回 `'present' | 'missing'` 两个值，
+ * 而"探测本身失败（断网 / 权限错误）"也被折成了 `'missing'`。
+ * 于是界面上"表真的不在"和"我没问出来"长得一模一样 ——
+ * 而本项目的纪律是**"无法判断"必须是独立的第四种状态，不能归到绿、也不能归到红**
+ * （面板方案 §3.4 第 4 条；`自检.sql` 的"查不到人 = 假通过"是同一条教训）。
+ *
+ * 返回 `'unknown'` 的两种情形都要说清楚：
+ *   · `pending` —— 探测还没跑完；
+ *   · `indeterminate` —— 跑完了但没有结论（网络抖动），**这个结果没有被缓存**。
+ */
+export type ExamProbeStatus = 'pending' | 'present' | 'missing' | 'indeterminate'
+
+let examTablesProbeSettled = false
+
+export function getExamTablesProbeStatus(): ExamProbeStatus {
+  if (!examTablesProbe) return 'pending'
+  if (!examTablesProbeSettled) return 'pending'
+  return lastExamTablesProbe
+}
+
+/* ---------------- 四个探测的**汇总**（超管运维面板 C2） ----------------
+
+   现状（面板方案 §二 C2）：四个 `ensureXxx()` 各自把结果缓存在**模块级 let** 里，
+   一个页面会话只探一次、刷新才重探、**没有任何一处汇总**。
+   后果很具体：「某功能用不了但不知道为什么」时，看不到"前端自己以为哪些列/表在"。
+
+   ⚠️ 这一段的纪律（三条，都写在方案的 C2 里）：
+    ① **不改缓存语义** —— "同页面一次"是刻意的（见上面 `ensureSubjectCols` 的注释），
+       这里只在既有的 resolve 上**旁听**，不改变任何一次探测的时机与次数；
+    ② **不改任何写入路径的行为** —— 面板只"看"；
+    ③ **不新写一套判据** —— 汇总里每一项的来源仍是原来那个 `ensureXxx()`。
+
+   ⚠️ 第**四**个探测（`lib/files.ts` 的 `ensureFileClassCols`）**不在这份汇总里**：
+      它的缓存变量在另一个模块里，且**没有对外的只读 getter**；
+      而"给文件列加一个 getter"要动 `lib/files.ts`，那是本轮明确不许碰的文件。
+       面板里这一列的现状由 `probeSchemaDrift()` 对 `shared_files.class_ids`
+       独立探一次得到（同一个判据、两条互不相干的路径）。 */
+
+/** 一个探测的结论：`present` 在 / `missing` 不在 / `indeterminate` 认不出来 */
+export type ProbeState = 'present' | 'missing' | 'indeterminate'
+
+type ProbeRecord = { state: ProbeState; at: number }
+
+/** 每个探测的**最后一次结论**与时刻（模块级，与探测缓存的寿命一致） */
+const probeRecords = new Map<string, ProbeRecord>()
+
+/** 旁听一次探测：**先挂 then 再返回原 Promise**，不改变任何调用方的时序 */
+function watchProbe<P>(
+  key: string,
+  p: Promise<P>,
+  interpret: (v: P) => ProbeState = (v) => (v === true ? 'present' : 'missing'),
+): Promise<P> {
+  void Promise.resolve(p).then(
+    (v) => probeRecords.set(key, { state: interpret(v), at: Date.now() }),
+    () => probeRecords.set(key, { state: 'indeterminate', at: Date.now() }),
+  )
+  return p
+}
+
+export type ProbeReportItem = {
+  /** 稳定标识（给断言与测试用，界面文案另算） */
+  key: string
+  label: string
+  /** 它探的是哪张表/哪一列 —— 界面上要写出来，否则"四行都是 present"没有信息量 */
+  target: string
+  state: ProbeState
+  /** 最后一次探测时刻（epoch ms）；从没探过是 null */
+  at: number | null
+  /** `indeterminate` 时那句人话 */
+  note?: string
+}
+
+export type ProbeReport = {
+  /** 这次汇总取的时刻 */
+  collectedAt: number
+  items: ProbeReportItem[]
+}
+
+/**
+ * 把四个（实际能看到的三个 + 考试表）探测结果汇总给面板。
+ *
+ * 顺序固定，不随探测发生的先后变 —— 界面上四行来回跳会让人以为状态在变。
+ */
+export function probeReport(): ProbeReport {
+  const of = (key: string): ProbeState => probeRecords.get(key)?.state ?? 'indeterminate'
+  const at = (key: string): number | null => probeRecords.get(key)?.at ?? null
+  const IND = '探测无结论（网络抖动 / 权限错误一律当作"有"，所以这个结果**不可信**）'
+
+  const items: ProbeReportItem[] = [
+    {
+      key: 'subjectCols',
+      label: '学科两列',
+      target: 'assignments.subject_code · teachers.primary_subject_code',
+      state: of('subjectCols'),
+      at: at('subjectCols'),
+      note: IND,
+    },
+    {
+      key: 'gradeLookup',
+      label: '年级外键',
+      target: 'classes.grade_id + grades 映射',
+      state: of('gradeLookup'),
+      at: at('gradeLookup'),
+      note: `它影响的正是**权限判据**（年级主任那一支）。${IND}`,
+    },
+    {
+      key: 'examTables',
+      label: '考试两张表',
+      target: 'exams · exam_scores',
+      state: of('examTables'),
+      at: at('examTables'),
+      note: '这是四个探测里**唯一会自我清缓存**的一个（无结论时下次重探）。',
+    },
+    {
+      key: 'serialCols',
+      label: '序列号列',
+      target: 'students.serial（+ legacy_student_no 只读不写）',
+      state: of('serialCols'),
+      at: at('serialCols'),
+      note: IND,
+    },
+  ]
+  return { collectedAt: Date.now(), items }
+}
+/* ---------------- 兼容期：`students.serial` 这一列在不在？（schema.sql §20） ----------------
+
+   与 `ensureSubjectCols()` 同一套纪律，判据是**列**：
+     · 读：`select('*')` 读不到那个键**不报错**，`rowToStudent` 按"没有序列号"处理
+          → 档案键退回班内学号（`lib/keys.ts`），老库上的行为**一个字节都不变**；
+     · 写：upsert 的载荷里带上这一列 → 列不存在时**整条 upsert 被拒**
+          → "保存失败 = 刷新即丢"（老师刚加的名单刷新就没了）。
+          所以**列不存在就把这一列从行里摘掉**（不是写 null）。
+     · `legacy_student_no` **任何时候都不写**：它是迁移判据，数据库 §20.2 的触发器会拒。
+
+   ⚠️ 判据只看「列不存在」这一种错误；网络抖动/权限问题**一律当作有**。 */
+
+type SerialCols = { students: boolean }
+
+let serialColsProbe: Promise<SerialCols> | null = null
+
+async function probeSerialCols(): Promise<SerialCols> {
+  const sb = getSupabase()
+  if (!sb) return { students: false }
+  try {
+    const { error } = await sb.from('students').select('serial').limit(1)
+    if (!error) return { students: true }
+    const msg = String(error.message ?? '')
+    const code = String((error as { code?: string }).code ?? '')
+    return { students: !(code === '42703' || /does not exist/i.test(msg)) }
+  } catch {
+    return { students: true }
+  }
+}
+
+/** 探测一次（同一页面内只探一次），给写路径用 */
+export function ensureSerialCols(): Promise<SerialCols> {
+  if (!serialColsProbe) {
+    const p = probeSerialCols()
+    serialColsProbe = watchProbe('serialCols', p, (v) => (v.students ? 'present' : 'missing'))
+  }
+  return serialColsProbe
 }
 
 /** 第 15 段还没跑时，界面上要显示的那句话（**下一步动作写在错误信息里**） */
@@ -514,13 +741,22 @@ type GradeLookup = {
   column: boolean
   /** 年级名 → `grades.id`；同名多条（歧义）时值为 `null` */
   byName: Map<string, string | null>
+  /**
+   * 年级名 → **4 位入校年份**（`grades.cohort` 优先、老列 `grades.year` 兜底）。
+   *
+   * 用途只有一个：本地 / 恢复备份时按 U-2 的规则给新学生发序列号（`lib/serial.ts`）。
+   * ⚠️ **同名多条 / 认不出 / 值不是 4 位数字 → 不放进这张表**（不猜，I14）。
+   * ⚠️ 云端新建学生**以数据库那条规则为准**（`students_serial_fill()` 触发器）——
+   *    这里只是它的镜像，推不出年份就不带序列号，留给数据库发。
+   */
+  years: Record<string, string>
 }
 
 let gradeLookupProbe: Promise<GradeLookup> | null = null
 
 async function probeGradeLookup(): Promise<GradeLookup> {
   const sb = getSupabase()
-  if (!sb) return { column: false, byName: new Map() }
+  if (!sb) return { column: false, byName: new Map(), years: {} }
   const column = await (async () => {
     try {
       const { error } = await sb.from('classes').select('grade_id').limit(1)
@@ -534,25 +770,41 @@ async function probeGradeLookup(): Promise<GradeLookup> {
     }
   })()
   const byName = new Map<string, string | null>()
-  if (!column) return { column: false, byName }
+  const years: Record<string, string> = {}
+  if (!column) return { column: false, byName, years }
   try {
-    const { data, error } = await sb.from('grades').select('id, name')
-    if (error) return { column: true, byName } // 读不到年级表 → 认不出，不猜
-    for (const row of (data ?? []) as { id?: string; name?: string }[]) {
+    /*
+     * `cohort`（P3 之后才有的列）用 `*` 读 —— 列不存在时它只是读不到那个键，**不报错**。
+     * 这正是本项目兼容期读法的标准手法（`select('*')` + mapper 兜底）。
+     */
+    const { data, error } = await sb.from('grades').select('*')
+    if (error) return { column: true, byName, years } // 读不到年级表 → 认不出，不猜
+    const seen = new Set<string>()
+    for (const row of (data ?? []) as { id?: string; name?: string; cohort?: string; year?: string }[]) {
       const name = (row.name ?? '').trim()
       if (!name || !row.id) continue
       // 第二次遇到同一个名字 → 记成"认不出"（歧义），后面一律不带
       byName.set(name, byName.has(name) ? null : row.id)
+      if (seen.has(name)) {
+        delete years[name]
+        continue
+      }
+      seen.add(name)
+      const y = String(row.cohort ?? '').trim() || String(row.year ?? '').trim()
+      if (/^[0-9]{4}/.test(y)) years[name] = y.slice(0, 4)
     }
   } catch {
     /* 认不出，不猜 */
   }
-  return { column: true, byName }
+  return { column: true, byName, years }
 }
 
 /** 探测一次（同一页面内只探一次），给 `saveClass` 用 */
 export function ensureGradeLookup(): Promise<GradeLookup> {
-  if (!gradeLookupProbe) gradeLookupProbe = probeGradeLookup()
+  if (!gradeLookupProbe) {
+    const p = probeGradeLookup()
+    gradeLookupProbe = watchProbe('gradeLookup', p, (v) => (v.column ? 'present' : 'missing'))
+  }
   return gradeLookupProbe
 }
 
@@ -574,13 +826,42 @@ export const classToRow = (k: Klass, teacherId: string, gradeId?: string | null)
   ...(gradeId ? { grade_id: gradeId } : {}),
 })
 
+/**
+ * 本地学生 → `students` 行（**纯函数**，不判"列在不在"）。
+ *
+ * `serial`：有值就带上（云端以数据库那条规则为准，前端只是把已知的值送回去）；
+ *          空串**不带** —— 让数据库的 `students_serial_fill()` 触发器去发号，
+ *          而不是把一个空值写进去（写空值 = 把数据库已经发好的号擦掉，见 §20.2 的守卫）。
+ * `legacy_student_no`：**永远不带**。它是迁移判据，写它会被数据库拒（§20.2）。
+ */
 export const studentToRow = (s: Student, classId: string): StudentRow => ({
   id: s.id,
   class_id: classId,
   student_no: s.studentNo,
   name: s.name,
   status: s.status,
+  ...(s.serial ? { serial: s.serial } : {}),
 })
+
+/**
+ * 学生的**落库载荷** —— `serial` 带不带，只有这一处说了算。
+ *
+ * 🔴 与 `assignmentWriteRow` 同一条纪律：**列不存在就不带这一列**。
+ *    线上库还没跑 `schema.sql` §20 时带上它，整条 upsert 会被 PostgREST 拒掉 ——
+ *    而"保存失败 = 刷新即丢"。`legacy_student_no` 更是一个字节都不许出现。
+ *
+ * ⚠️ 三条写学生的路径**共用它**：`saveStudent`（单条）/ `saveStudents`（批量导入）/
+ *    `pushBackupToCloud`（恢复备份）—— 少覆盖一条就是"某个入口悄悄写不进去"。
+ */
+export async function studentWriteRow(
+  s: Student,
+  classId: string,
+): Promise<Record<string, unknown>> {
+  const cols = await ensureSerialCols()
+  const row: Record<string, unknown> = { ...studentToRow(s, classId) }
+  if (!cols.students) delete row.serial
+  return row
+}
 
 /**
  * 本地 → 行。
@@ -658,6 +939,14 @@ const rowToStudent = (r: StudentRow): Student => ({
   studentNo: r.student_no,
   name: r.name,
   status: (r.status as StudentStatus) ?? 'active',
+  /*
+   * 序列号：`select('*')` 读不到那个键（列还没建）时是 `undefined` → 空串。
+   * ⚠️ **不在这里发号**：号码只能由数据库那条规则发（`students_serial_fill()`），
+   *    前端另发一个 = 两个真相（同一个学生两边不一致，而且不可改）。
+   *    本地演示模式/导入老备份那两条路才由 `lib/serial.ts` 发（那里没有数据库）。
+   */
+  serial: typeof r.serial === 'string' ? r.serial : '',
+  legacyStudentNo: typeof r.legacy_student_no === 'string' ? r.legacy_student_no : '',
   createdAt: Date.now(),
 })
 
@@ -902,9 +1191,8 @@ export async function loadSnapshot(): Promise<Snapshot | null> {
     grade: row.grade,
     year: row.year,
     createdAt: Date.now(),
-    students: (studentsByClass.get(row.id) ?? []).sort(
-      (x, y) => Number(x.studentNo) - Number(y.studentNo),
-    ),
+    // 名单统一排序只有一处：`compareRoster`（有序列号按序列号，没有才按班内学号）
+    students: (studentsByClass.get(row.id) ?? []).sort(compareRoster),
   }))
 
   const tRow = t.data as {
@@ -1014,10 +1302,12 @@ export async function classRows(list: Klass[], teacherId: string): Promise<Class
 }
 export const deleteClass = (id: string) => remove('classes', id)
 
-export const saveStudent = (s: Student, classId: string) =>
-  upsert('students', studentToRow(s, classId))
-export const saveStudents = (classId: string, list: Student[]) =>
-  list.length ? upsert('students', list.map((s) => studentToRow(s, classId))) : Promise.resolve()
+export const saveStudent = async (s: Student, classId: string) =>
+  upsert('students', await studentWriteRow(s, classId))
+export const saveStudents = async (classId: string, list: Student[]) =>
+  list.length
+    ? upsert('students', await Promise.all(list.map((s) => studentWriteRow(s, classId))))
+    : Promise.resolve()
 export const deleteStudent = (id: string) => remove('students', id)
 
 /**

@@ -2018,6 +2018,365 @@ await withLock(async () => {
     }
 
     /* ============================================================
+       十五、序列号键迁移（`schema.sql` §20 / P1 · 2026-09-25）
+       ------------------------------------------------------------
+       为什么单开一节：P1 把"那 10 个字段的键"从**班内学号**换成**序列号**（I40），
+       而这件事有三处**只能靠真数据库验**、前端与浏览器都覆盖不到：
+         ① **"序列号生成后永久不可改"必须是数据库层拒的**（触发器，不是界面灰化）——
+            这里真跑一条 `update students set serial=…`，必须报错；
+         ② **迁移必须幂等**：同一个函数跑第二遍**受影响行数必须是 0** ——
+            这一条是本期的头号风险（U-3：判据选错 = 把成果当垃圾再迁一次，而且不报错）；
+         ③ **两处考试字段**（`exams.absent_nos` / `exam_scores.student_no`）的作用域是
+            **班级集合**，与那 10 个字段的单班作用域不同，很容易漏。
+       本节刻意**自己造一批"迁移前"的夹具**（一个新年级 + 一个新班 + 3 个没有序列号的学生），
+       不动上面那批固定数据 —— 上面各节的可见量断言因此一个都不受影响。
+       ============================================================ */
+
+    section('十五、序列号键迁移（§20：不可改 · 幂等 · 两处考试字段）')
+    {
+      const G7 = mk('90', 1) // 新年级（**故意先不给届** —— 验"认不出就不生成"）
+      const C7 = mk('c7', 1)
+      const S7 = [mk('70', 1), mk('70', 2), mk('70', 3)]
+      const A7 = mk('e7', 1)
+      const CA7 = mk('cb', 1)
+      const X7 = mk('e8', 1)
+      const XS7 = mk('e9', 1)
+
+      const q = (sql, params) => db.query(sql, params).then((r) => r.rows)
+      const num = async (sql, params) => Number((await q(sql, params))[0]?.n ?? -1)
+
+      // ---- 夹具：一个**认不出届**的新年级 + 迁移前形状的班/学生/档案 ----
+      await db.exec(`
+        insert into grades (id, school_id, name, year)
+          values ('${G7}', (select id from schools order by created_at limit 1), '初一', '');
+        insert into classes (id, teacher_id, school_id, name, grade, year, grade_id)
+          values ('${C7}', '${U.phy}', (select id from schools order by created_at limit 1),
+                  '初一(1)班', '初一', '', '${G7}');
+        insert into students (id, class_id, student_no, name) values
+          ('${S7[0]}', '${C7}', '1', '子'), ('${S7[1]}', '${C7}', '2', '丑'), ('${S7[2]}', '${C7}', '12', '寅');
+        insert into assignments (id, class_id, teacher_id, title, subject, subject_code,
+          assign_date, question_count, missing_nos, late_nos, confirmed_nos, focus_nos,
+          correction_nos, corrected_nos, wrong, grades)
+        values ('${A7}', '${C7}', '${U.phy}', '初一练习1', '物理', 'physics', '2026-09-20', 10,
+          array['1','12'], array['2'], array['1','2'], array['12'], array['1'], array['2'],
+          '{"1":["3"],"12":["4.1"]}'::jsonb, '{"2":"良"}'::jsonb);
+        insert into calls (id, teacher_id, assignment_id, class_id, student_nos, text, states)
+        values ('${CA7}', '${U.phy}', '${A7}', '${C7}', array['1','12'], '请子同学到办公室',
+          '{"1":"called","12":"arrived"}'::jsonb);
+        insert into exams (id, teacher_id, title, paper_key, subject, subject_code, scope, grade,
+          exam_date, question_count, class_ids, absent_nos)
+        values ('${X7}', '${U.phy}', '初一练习8', '初一练习8', '物理', 'physics', 'class', '初一',
+          '2026-09-20', 10, array['${C7}']::uuid[], array['1','12']);
+        insert into exam_scores (id, exam_id, class_id, student_no, name, graded)
+        values ('${XS7}', '${X7}', '${C7}', '1', '子', true);
+      `)
+      /*
+       * 把上面那批固定数据也摆成**迁移前**的形状（只补 `legacy_student_no`，不动 serial）：
+       *   §20.9 的"届回填"在**建库那一刻**就跑过了 → 那 8 个学生是被 §20.2b 的触发器
+       *   自动发的号，`legacy_student_no` 还是空的。于是他们班里那些**老档案**
+       *   （`exam_scores` 里那两行 `student_no = '1' / '2'`）在迁移时**反查不出来**，
+       *   会被算成"查不到的键"。
+       *   这不是 bug，而是**真实会发生的一种状态**（先跑 SQL、后导入老档案）；
+       *   本节要验的是"老键能反查"那条路，所以在这里把老键存档补上 ——
+       *   等价于"这批档案是迁移前产生的"。
+       *   ⚠️ 初一的 3 个**故意不补**：它们要留在"从没发过号"的状态，
+       *      否则下面第①步"认不出届 → 不生成"就无从验起。
+       */
+      await db.exec(`
+        update students set legacy_student_no = student_no
+         where class_id <> '${C7}' and legacy_student_no = ''
+      `)
+
+      // ---- ① 认不出入校年份 → **不生成**（I14：认不出不许猜）----
+      let gen = (await q(`select * from assign_student_serials()`))[0]
+      eq('认不出届 → 一个号都不发（绝不用"今年"顶上去）', [Number(gen.assigned), Number(gen.unresolved)], [0, 3])
+      eq(
+        '认不出届 → 3 个学生的 serial 仍是空串',
+        await num(`select count(*)::int as n from students where class_id = $1 and serial = ''`, [C7]),
+        3,
+      )
+
+      // ---- ② 补上届（Q18 口径：届 = 4 位入校年份）→ 按 U-2 = A 追加到年级末尾 ----
+      await db.exec(`update grades set year = '2027' where id = '${G7}'`)
+      gen = (await q(`select * from assign_student_serials()`))[0]
+      eq('补上届之后 → 3 个人都拿到了号', [Number(gen.assigned), Number(gen.unresolved)], [3, 0])
+      eq(
+        '🔴 序列号形状 = 4 位入校年份 + 3 位届内序号（2027xxx）',
+        await num(`select count(*)::int as n from students where class_id = $1 and serial ~ '^2027[0-9]{3}$'`, [C7]),
+        3,
+      )
+      eq(
+        '🔴 生成序列号时**同时**写下了老键存档（`legacy_student_no` = 当时的班内学号）',
+        Object.fromEntries(
+          (await q(`select student_no, legacy_student_no from students where class_id = $1`, [C7])).map((r) => [
+            r.student_no,
+            r.legacy_student_no,
+          ]),
+        ),
+        { '1': '1', '2': '2', '12': '12' },
+      )
+      eq(
+        '再跑一遍生成：一个号都不发（它只给还没有序列号的人发）',
+        Number((await q(`select * from assign_student_serials()`))[0].assigned),
+        0,
+      )
+
+      // ---- ③ 唯一索引：新学生的号由**触发器**发，且**追加到年级末尾**（U-2 = A）----
+      const S7N = mk('70', 4)
+      await db.exec(`insert into students (id, class_id, student_no, name) values ('${S7N}', '${C7}', '20', '卯')`)
+      eq(
+        '🔴 新建学生：`students_serial_fill` 触发器自动发号，且**接在末尾**（不复用空号）',
+        (await q(`select serial, legacy_student_no from students where id = $1`, [S7N]))[0],
+        { serial: '2027004', legacy_student_no: '' },
+      )
+      eq(
+        '新发的号**不写** legacy_student_no（"不是从老键迁过来的"）',
+        (await q(`select legacy_student_no from students where id = $1`, [S7N]))[0].legacy_student_no,
+        '',
+      )
+      /*
+       * 🔴 **一次插多行**（粘贴导入就是一次 upsert 几十行）：
+       *    BEFORE INSERT 触发器里那句 `select max(serial)` **看不见同一条语句里刚插的行**
+       *    （语句开始时的快照）—— 没有计数器的话这 3 行会算出**同一个号**，整批撞唯一索引。
+       *    这一条就是"导入 50 个学生"的真实形状。
+       */
+      await db.exec(`
+        insert into students (id, class_id, student_no, name) values
+          ('${mk('70', 5)}', '${C7}', '21', '辰'),
+          ('${mk('70', 6)}', '${C7}', '22', '巳'),
+          ('${mk('70', 7)}', '${C7}', '23', '午')
+      `)
+      eq(
+        '🔴 一次插 3 行：拿到 3 个**不同**的号，且接在末尾（计数器逐行取号，不靠 max()）',
+        (await q(`select serial from students where class_id = $1 and student_no in ('21','22','23') order by student_no`, [C7])).map(
+          (x) => x.serial,
+        ),
+        ['2027005', '2027006', '2027007'],
+      )
+      // 收尾：把这 3 行删掉，免得影响下面的"信号"断言（本节最后还会整份重跑一遍 schema）
+      await db.exec(`delete from students where id in ('${mk('70', 5)}','${mk('70', 6)}','${mk('70', 7)}')`)
+      /*
+       * 🔴 upsert（PostgREST 的 `on conflict (id) do update`）**也会走 BEFORE INSERT**：
+       *    那一行本来就有序列号，触发器**不许再发一个** —— 否则 BEFORE UPDATE 的守卫
+       *    会当场把整条 upsert 拒掉，而"保存失败 = 刷新即丢"（前端不能崩）。
+       */
+      let r = await db.query(
+        `insert into students (id, class_id, student_no, name) values ($1, $2, '20', '卯(改名)')
+         on conflict (id) do update set name = excluded.name returning id, serial, name`,
+        [S7N, C7],
+      )
+      eq(
+        '🔴 upsert 改学生（载荷不带 serial）→ **不被拒**，序列号一个字不动',
+        r.rows[0] && { serial: r.rows[0].serial, name: r.rows[0].name },
+        { serial: '2027004', name: '卯(改名)' },
+      )
+
+      // ---- ④ 键值迁移（**第一遍**）----
+      const run1 = await q(`select * from migrate_nos_to_serial()`)
+      eq('迁移一共 7 段（6 个 text[]/jsonb + 2 处考试字段合并成 7 步）', run1.length, 7)
+      ok(
+        '🔴 第一遍：7 段**都真的改到了行**（不是"跑过了但什么都没做"）',
+        run1.every((x) => Number(x.rows_affected) > 0),
+        run1.map((x) => `${x.step}=${x.rows_affected}`).join(' · '),
+      )
+
+      // ---- ⑤ 迁移（**第二遍**）：受影响行数必须全为 0（幂等 = U-3 的验收）----
+      const run2 = await q(`select * from migrate_nos_to_serial()`)
+      ok(
+        '🔴🔴 第二遍：7 段**全部 0 行**（幂等 —— 判据靠 `legacy_student_no`，不猜形状）',
+        run2.every((x) => Number(x.rows_affected) === 0),
+        run2.map((x) => `${x.step}=${x.rows_affected}`).join(' · '),
+      )
+
+      // ---- ⑥ 迁移结果：12 个字段的键**全是序列号** ----
+      const a7 = (await q(`select * from assignments where id = $1`, [A7]))[0]
+      const serialOf = Object.fromEntries(
+        (await q(`select student_no, serial from students where class_id = $1`, [C7])).map((x) => [
+          x.student_no,
+          x.serial,
+        ]),
+      )
+      eq(
+        '🔴 `assignments` 的 6 个 text[] 字段：键全变成序列号',
+        [a7.missing_nos, a7.late_nos, a7.confirmed_nos, a7.focus_nos, a7.correction_nos, a7.corrected_nos],
+        [
+          [serialOf['1'], serialOf['12']],
+          [serialOf['2']],
+          [serialOf['1'], serialOf['2']],
+          [serialOf['12']],
+          [serialOf['1']],
+          [serialOf['2']],
+        ],
+      )
+      eq(
+        '🔴 `assignments.wrong` 的键：序列号（值里的错题键一个字没动）',
+        a7.wrong,
+        { [serialOf['1']]: ['3'], [serialOf['12']]: ['4.1'] },
+      )
+      eq('🔴 `assignments.grades` 的键：序列号', a7.grades, { [serialOf['2']]: '良' })
+      const c7 = (await q(`select * from calls where id = $1`, [CA7]))[0]
+      eq(
+        '🔴 `calls.student_nos` + `calls.states`：两个字段一起迁（少一个就是"两套键"）',
+        [c7.student_nos, c7.states],
+        [
+          [serialOf['1'], serialOf['12']],
+          { [serialOf['1']]: 'called', [serialOf['12']]: 'arrived' },
+        ],
+      )
+      eq(
+        '🔴 `exams.absent_nos`（作用域 = 班级集合）：也迁了',
+        (await q(`select absent_nos from exams where id = $1`, [X7]))[0].absent_nos,
+        [serialOf['1'], serialOf['12']],
+      )
+      eq(
+        '🔴 `exam_scores.student_no`（**值**迁移；列类型与 unique 约束都没动）：键变成序列号',
+        (await q(`select student_no from exam_scores where id = $1`, [XS7]))[0].student_no,
+        serialOf['1'],
+      )
+      eq(
+        '列类型自检：两处考试字段仍是 text / text[]（Q6："值迁移，不是改类型"）',
+        await q(`
+          select (select data_type from information_schema.columns
+                   where table_name = 'exam_scores' and column_name = 'student_no') as a,
+                 (select data_type from information_schema.columns
+                   where table_name = 'exams' and column_name = 'absent_nos') as b`),
+        [{ a: 'text', b: 'ARRAY' }],
+      )
+
+      // ---- ⑦ 自检函数：所有"该为 0"的数都是 0 ----
+      const report = await q(`select * from serial_migration_report()`)
+      const hard = report.filter((x) => x.kind === '硬指标')
+      eq(
+        '🔴 硬指标：没有序列号的人数 = 0、序列号重复数 = 0',
+        hard.map((x) => `${x.item}=${x.n}`),
+        ['students 序列号重复=0', 'students 没有序列号=0'],
+      )
+      const pending = report.filter((x) => x.kind === '待迁键（必须为 0）')
+      ok(
+        '🔴 十键（+2）自检：**待迁键全部为 0**，而且 12 个字段**每个都出了一行**（全 0 看得见）',
+        pending.length === 12 && pending.every((x) => Number(x.n) === 0),
+        pending.map((x) => `${x.item}=${x.n}`).join(' · '),
+      )
+      const unknown = report.filter((x) => x.kind.startsWith('查不到的键'))
+      ok(
+        '查不到的键：也逐字段列出（0 就是 0，有的话必须人工看）',
+        unknown.length === 12 && unknown.every((x) => Number(x.n) === 0),
+        unknown.map((x) => `${x.item}=${x.n}`).join(' · '),
+      )
+
+      // ---- ⑧ 🔴 "序列号生成后永久不可改" —— **数据库层拒**（不是界面灰化）----
+      /*
+       * ⚠️ 这一组**必须**满足两个条件，否则就是一条假断言（负向对照实测踩过）：
+       *   ① 用**管得着这个班**的身份（教导处）去改 —— 用任课老师的话，
+       *      `students_update` 的 RLS 会先把他筛成 0 行，于是"被拒"看起来成立，
+       *      而**触发器有没有生效根本验不到**（把守卫删掉照样是 0 行、照样绿）；
+       *   ② 判据必须是 `denied`（**报错**），不能是 `blocked`（0 行）——
+       *      前者是触发器抛的异常，后者是策略静默筛掉的行。
+       *   同一身份紧接着改一次**班内学号**（下面 ⑨）必须通过 ——
+       *   那一条是"他确实改得动这一行"的对照，没有它上面那两条也可能是"他什么都改不了"。
+       */
+      const strictDenied = (name, res, expectMsg) =>
+        ok(
+          `${name} → **报错拒绝**，且报的就是守卫那句话（不是被策略静默筛成 0 行、也不是别的错）`,
+          res.outcome === 'denied' && new RegExp(expectMsg).test(res.detail),
+          `${res.outcome}：${res.detail}`,
+          `期望报错里含「${expectMsg}」`,
+        )
+      // ⚠️ `attempt(db, uid, sql, params)` 的签名与 `write(db, uid, {sql, values})` **不同**
+      let w = await attempt(db, U.admin, `update students set serial = '2027999' where id = $1 returning id`, [S7[0]])
+      strictDenied('🔴 教导处改序列号（值 → 另一个值）', w, '序列号生成后永久不可改')
+      w = await attempt(db, U.admin, `update students set serial = '' where id = $1 returning id`, [S7[0]])
+      strictDenied('🔴 教导处把序列号**清空**（想绕开唯一索引）', w, '序列号生成后永久不可改')
+      w = await attempt(db, U.super, `update students set legacy_student_no = 'x' where id = $1 returning id`, [S7[0]])
+      strictDenied('🔴 改 `legacy_student_no`（迁移判据）', w, 'legacy_student_no 是迁移判据')
+      eq(
+        '被拒之后那两行一个字都没变',
+        await q(`select serial, legacy_student_no from students where id = $1`, [S7[0]]),
+        [{ serial: serialOf['1'], legacy_student_no: '1' }],
+      )
+      // 对照：**同一个身份**改成"值没变"的序列号 → 通过（不是"他什么都改不了"）
+      w = await attempt(db, U.admin, `update students set serial = serial where id = $1 returning id`, [S7[0]])
+      allowed('对照：教导处把序列号写成**它自己**（值没变）→ 通过 —— 证明上两条不是"他改不动这一行"', w)
+
+      // ---- ⑨ 班内学号**可改**，而且改它不影响档案（键已经是序列号）----
+      // 三档：班主任 / 年级主任 / 教导处（Q6）—— 这里用教导处；任课老师**不算**（下面那条对照）
+      w = await attempt(db, U.admin, `update students set student_no = '99' where id = $1 returning id`, [S7[0]])
+      allowed('🔴 改**班级内学号**（教导处）→ 通过', w)
+      w = await attempt(db, U.phy, `update students set student_no = '98' where id = $1 returning id`, [S7[0]])
+      denied('对照：**任课老师**改学号 → 被拒（他不在"三档"里，RLS 判的是 can_manage_class）', w)
+      eq(
+        '🔴 改班内学号之后：档案里的键**一个字都没动**（它认的是序列号）',
+        [
+          (await q(`select missing_nos, wrong from assignments where id = $1`, [A7]))[0],
+          (await q(`select absent_nos from exams where id = $1`, [X7]))[0].absent_nos,
+          (await q(`select student_no from exam_scores where id = $1`, [XS7]))[0].student_no,
+        ],
+        [
+          { missing_nos: [serialOf['1'], serialOf['12']], wrong: { [serialOf['1']]: ['3'], [serialOf['12']]: ['4.1'] } },
+          [serialOf['1'], serialOf['12']],
+          serialOf['1'],
+        ],
+      )
+
+      // ---- ⑩ 回退脚本（与正向一起写、一起测）：键写回老学号，也幂等 ----
+      const rev1 = await q(`select * from revert_nos_to_legacy()`)
+      ok(
+        '回退：7 段都改到了行',
+        rev1.every((x) => Number(x.rows_affected) > 0),
+        rev1.map((x) => `${x.step}=${x.rows_affected}`).join(' · '),
+      )
+      eq(
+        '🔴 回退之后：键回到**迁移前那个样子**（班内学号）',
+        [
+          (await q(`select missing_nos, wrong from assignments where id = $1`, [A7]))[0],
+          (await q(`select absent_nos from exams where id = $1`, [X7]))[0].absent_nos,
+          (await q(`select student_no from exam_scores where id = $1`, [XS7]))[0].student_no,
+        ],
+        [
+          { missing_nos: ['1', '12'], wrong: { '1': ['3'], '12': ['4.1'] } },
+          ['1', '12'],
+          '1',
+        ],
+      )
+      const rev2 = await q(`select * from revert_nos_to_legacy()`)
+      ok(
+        '回退也可以重跑（第二遍 7 段全 0）',
+        rev2.every((x) => Number(x.rows_affected) === 0),
+        rev2.map((x) => `${x.step}=${x.rows_affected}`).join(' · '),
+      )
+      const run3 = await q(`select * from migrate_nos_to_serial()`)
+      ok('再正向迁回去（键又全是序列号）', run3.every((x) => Number(x.rows_affected) > 0))
+      const run4 = await q(`select * from migrate_nos_to_serial()`)
+      ok(
+        '🔴 来回一轮之后再跑一遍：仍然 7 段全 0（幂等不依赖"只跑过一次"）',
+        run4.every((x) => Number(x.rows_affected) === 0),
+        run4.map((x) => `${x.step}=${x.rows_affected}`).join(' · '),
+      )
+
+      // ---- ⑪ 三个会改数据的函数**不给前端调**（revoke）----
+      w = await attempt(db, U.phy, `select * from assign_student_serials()`)
+      denied('🔴 `assign_student_serials()` 已 revoke：教师调不到', w)
+      w = await attempt(db, U.phy, `select * from migrate_nos_to_serial()`)
+      denied('🔴 `migrate_nos_to_serial()` 已 revoke：教师调不到', w)
+      w = await attempt(db, U.phy, `select * from revert_nos_to_legacy()`)
+      denied('🔴 `revert_nos_to_legacy()` 已 revoke：**教师不能把键写回老学号**', w)
+
+      // ---- ⑫ 第二遍整份 schema.sql：全量幂等（不能因为 §20 已经迁过就报错或再迁）----
+      await db.exec(SCHEMA_FULL)
+      const after = await q(`select * from serial_migration_report()`)
+      ok(
+        '🔴 重跑整份 `schema.sql` 之后：硬指标与待迁键**仍然全 0**（这一段可以安全重复执行）',
+        after.filter((x) => x.kind !== '查不到的键（留原键 + 出清单）').every((x) => Number(x.n) === 0),
+        after.filter((x) => Number(x.n) !== 0).map((x) => `${x.kind}/${x.item}=${x.n}`).join(' · '),
+      )
+      eq(
+        '重跑之后序列号没被改过（学生 1 号仍是原来那个号）',
+        (await q(`select serial from students where id = $1`, [S7[0]]))[0].serial,
+        serialOf['1'],
+      )
+    }
+
+    /* ============================================================
        收尾
        ============================================================ */
 

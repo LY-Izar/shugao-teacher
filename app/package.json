@@ -13,6 +13,7 @@
     "exam-checks": "node scripts/exam-checks.mjs",
     "backup-checks": "node scripts/backup-checks.mjs",
     "rls-checks": "node scripts/rls-checks.mjs",
+    "admin-checks": "node scripts/admin-checks.mjs",
     "fetch:holidays": "node scripts/fetch-holidays.mjs"
   },
   "dependencies": {

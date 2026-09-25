@@ -3,6 +3,7 @@ import { Button, Panel, Tag } from './ui'
 import type { CallRecord, CallState, Student } from '../data/types'
 import { CALL_STATE_TEXT } from '../data/types'
 import { formatClock } from '../lib/calls'
+import { displayNoOfArchiveKey } from '../lib/keys'
 
 const NEXT_STATE: Record<CallState, CallState> = {
   called: 'arrived',
@@ -31,7 +32,13 @@ export function CallCard({
   onAdvance: (studentNo: string) => void
 }) {
   const last = call.sentAt[call.sentAt.length - 1] ?? 0
-  const nameOf = (no: string) => students.find((s) => s.studentNo === no)?.name ?? ''
+  /*
+   * ⚠️ `call.studentNos` 里存的是**档案键**（迁移后 = 序列号），
+   *    而界面上要显示**班内学号** → 一律经 `displayNoOfArchiveKey()` 换一次。
+   *    以前这里直接 `s.studentNo === no`，迁移后会全部认不出（名字显示成空，而且不报错）。
+   */
+  const nameOf = (key: string) =>
+    students.find((s) => s.studentNo === key || s.serial === key)?.name ?? ''
   const done = call.studentNos.filter((n) => call.states[n] === 'corrected').length
 
   return (
@@ -55,6 +62,7 @@ export function CallCard({
           {call.studentNos.map((no) => {
             const st = call.states[no] ?? 'called'
             const t = TONE[st]
+            const shown = displayNoOfArchiveKey(students, no)
             return (
               <button
                 key={no}
@@ -72,7 +80,7 @@ export function CallCard({
                 }}
                 title={st === 'corrected' ? '已订正' : '点一下推进状态'}
               >
-                <b className="num">{no}</b>
+                <b className="num">{shown}</b>
                 {nameOf(no)}
                 <span style={{ fontSize: 10.5, fontWeight: 600 }}>{CALL_STATE_TEXT[st]}</span>
               </button>

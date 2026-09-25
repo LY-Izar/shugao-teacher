@@ -17,7 +17,7 @@ import {
 } from '../components/icons'
 import { Button, PageHead, Panel, Sect, Sheet, StatStrip, Tag } from '../components/ui'
 import { useStore, useToast } from '../data/store'
-import { analyzeRoster } from '../lib/roster'
+import { analyzeRoster, compareRoster } from '../lib/roster'
 
 export default function ClassDetail() {
   const { id = '' } = useParams()
@@ -64,9 +64,11 @@ export default function ClassDetail() {
     .filter((s) => {
       if (!q.trim()) return true
       const k = q.trim()
-      return s.name.includes(k) || s.studentNo.includes(k)
+      // 搜学号时**序列号也认**（老师手上可能是导出表里的那一列）
+      return s.name.includes(k) || s.studentNo.includes(k) || (s.serial ?? '').includes(k)
     })
-    .sort((a, b) => Number(a.studentNo) - Number(b.studentNo) || a.name.localeCompare(b.name))
+    // 统一排序只有一处（`compareRoster`）：有序列号按序列号，没有才按班内学号
+    .sort(compareRoster)
 
   const openEdit = (sid: string) => {
     const s = klass.students.find((x) => x.id === sid)
@@ -74,6 +76,9 @@ export default function ClassDetail() {
     setEditing(sid)
     setForm({ studentNo: s.studentNo, name: s.name, status: s.status })
   }
+
+  /** 正在编辑的那个学生 —— 编辑面板上要显示他的**序列号（只读）** */
+  const editingStudent = klass.students.find((x) => x.id === editing)
 
   const problems = health.gaps.length + health.dupNos.length + health.dupNames.length
 
@@ -249,6 +254,7 @@ export default function ClassDetail() {
                           学号
                         </span>
                       </th>
+                      <th style={{ width: 86 }}>序列号</th>
                       <th>姓名</th>
                       <th style={{ width: 74 }}>状态</th>
                       <th style={{ width: 46 }} />
@@ -259,6 +265,18 @@ export default function ClassDetail() {
                       <tr key={s.id}>
                         <td className="num" style={{ fontWeight: 600, color: 'var(--color-ink2)' }}>
                           {s.studentNo}
+                        </td>
+                        {/*
+                          序列号：**只读**。它是那 10 个字段的键（I40），
+                          而且数据库层已经禁止改（`schema.sql` §20.2 的触发器）——
+                          这里连输入框都不摆，免得老师以为能点。
+                        */}
+                        <td
+                          className="num"
+                          style={{ color: 'var(--color-ink3)', fontSize: 12 }}
+                          title="序列号：全校唯一，生成后不可修改"
+                        >
+                          {s.serial || '—'}
                         </td>
                         <td style={{ fontWeight: 550 }}>{s.name || '—'}</td>
                         <td>
@@ -335,6 +353,23 @@ export default function ClassDetail() {
               />
             </label>
           </div>
+
+          {/*
+            🔴 **序列号只读**：它是那 10 个字段的键，生成后永久不可改
+            （Q6；数据库层由 `schema.sql` §20.2 的触发器强制，不只是界面灰化）。
+            班内学号**照旧可改**（三档：班主任 / 年级主任 / 教导处）——
+            改它不会影响任何历史档案，因为键已经是序列号。
+          */}
+          <label>
+            <span className="label">序列号（只读 · 生成后不可修改）</span>
+            <input
+              className="input num"
+              value={editingStudent?.serial || '（还没生成）'}
+              readOnly
+              disabled
+              aria-readonly="true"
+            />
+          </label>
 
           <div>
             <span className="label">在班状态</span>

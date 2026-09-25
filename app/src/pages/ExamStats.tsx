@@ -27,6 +27,7 @@ import {
 } from '../lib/examPaper'
 import { examReport, studentTrendOf, trendOf, type QuestionStat } from '../lib/examStats'
 import { friendlyDate } from '../lib/date'
+import { archiveKeyOf } from '../lib/keys'
 
 /* ============================================================
    考试 · 数据统计
@@ -83,16 +84,23 @@ export default function ExamStats() {
 
   const roster = useMemo(() => {
     const ids = exam?.classIds ?? []
-    const out: Array<{ studentNo: string; name: string }> = []
+    /*
+     * ⚠️ `studentNo` 这一栏放的是**档案键**（迁移后 = 序列号）——
+     *    它要和 `exam_scores.student_no`（数据库那一列的值）对得上才能 join。
+     *    给人看的班内学号放在 `displayNo` 里；**排序照旧按班内学号**（老师认这个号）。
+     */
+    const out: Array<{ studentNo: string; name: string; displayNo: string }> = []
     for (const cid of ids) {
       const k = classes.find((c) => c.id === cid)
       if (!k) continue
       for (const s of k.students) {
         if (s.status !== 'active') continue
-        out.push({ studentNo: s.studentNo, name: s.name })
+        out.push({ studentNo: archiveKeyOf(s), displayNo: s.studentNo, name: s.name })
       }
     }
-    return out.sort((a, b) => Number(a.studentNo) - Number(b.studentNo))
+    return out.sort(
+      (a, b) => Number(a.displayNo) - Number(b.displayNo) || a.name.localeCompare(b.name),
+    )
   }, [exam?.classIds, classes])
 
   /**
@@ -258,7 +266,7 @@ export default function ExamStats() {
                       fontSize: 12.5,
                     }}
                   >
-                    <b className="num">{m.studentNo}</b>
+                    <b className="num">{m.displayNo}</b>
                     {m.name}
                     <span style={{ color: 'var(--color-ink3)' }}>
                       {m.why === 'absent' ? '缺考' : '没批改（0 分）'}
@@ -491,14 +499,14 @@ export default function ExamStats() {
                     type="button"
                     className="flex items-center gap-2 px-3 py-2 text-left"
                     style={{ borderBottom: '1px solid var(--color-line)' }}
-                    aria-label={`${s.studentNo} 号 ${s.name}`}
+                    aria-label={`${s.displayNo} 号 ${s.name}`}
                     onClick={() => setOpenStudent(s.studentNo)}
                   >
                     <span className="num" style={{ fontSize: 12, color: 'var(--color-ink3)', width: 34 }}>
                       {s.classRank || '—'}
                     </span>
                     <span className="num" style={{ fontSize: 12.5, width: 44 }}>
-                      {s.studentNo}
+                      {s.displayNo}
                     </span>
                     <span className="min-w-0 flex-1 truncate" style={{ fontSize: 13.5 }}>
                       {s.name}
@@ -627,7 +635,7 @@ export default function ExamStats() {
       <Sheet
         open={openStudent !== null}
         onClose={() => setOpenStudent(null)}
-        title={studentDiag ? `${studentDiag.studentNo} ${studentDiag.name}` : '学生'}
+        title={studentDiag ? `${studentDiag.displayNo} ${studentDiag.name}` : '学生'}
         footer={
           <Button block onClick={() => setOpenStudent(null)}>
             关闭
@@ -775,7 +783,12 @@ export default function ExamStats() {
           {exam.absentNos.length ? (
             <div className="flex items-start gap-2">
               <IconAlert size={14} />
-              <span>缺考学号：{exam.absentNos.join('、')}</span>
+              <span>
+                缺考学号：
+                {exam.absentNos
+                  .map((k) => roster.find((r) => r.studentNo === k)?.displayNo ?? k)
+                  .join('、')}
+              </span>
             </div>
           ) : null}
         </div>

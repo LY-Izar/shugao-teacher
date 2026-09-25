@@ -1,4 +1,5 @@
 import type { Assignment, Student } from '../data/types'
+import { archiveHas } from './keys'
 
 /* ---------------- 题量：I8 的守门人（**只在这里定义一次**） ---------------- */
 
@@ -41,8 +42,13 @@ export type CollectStats = {
 export function collectStats(students: Student[], a: Assignment): CollectStats {
   const active = students.filter((s) => s.status === 'active')
   const total = active.length
-  const missing = a.missingNos.filter((n) => active.some((s) => s.studentNo === n)).length
-  const late = a.lateNos.filter((n) => active.some((s) => s.studentNo === n)).length
+  /*
+   * 「未交 / 迟交」按**学生**数，不按键的个数：
+   * 键已经是序列号（迁移后），而这里要回答的是"名单里还有几个人没交"。
+   * 走 `archiveHas` = 两条路（序列号 / 班内学号）任一命中即算。
+   */
+  const missing = active.filter((s) => archiveHas(a.missingNos, s)).length
+  const late = active.filter((s) => archiveHas(a.lateNos, s)).length
   return {
     total,
     submitted: Math.max(0, total - missing),

@@ -19,12 +19,22 @@ import {
   CALL_LIMIT,
   CUSTOM_MAX,
   composeCallText,
+  latestCallStateOf,
   latestCallStates,
   wrongStudents,
   wrongStudentsOfQuestion,
 } from '../lib/calls'
+import { archiveKeyOf, archiveValue, displayNoOfArchiveKey } from '../lib/keys'
 import { roomOf } from '../lib/subjects'
 import { friendlyDate } from '../lib/date'
+import { ranked } from '../lib/wrongbook'
+
+/**
+ * 等级排序用：差 → 良 → 优 → 还没评（最该叫的人排最前）。
+ * 与批改页那三个等级按钮、完成页的等级分布是**同一套语义**。
+ */
+const GRADE_ORDER: Record<string, number> = { 差: 0, 良: 1, 优: 2 }
+const gradeRank = (g: string | undefined) => (g ? (GRADE_ORDER[g] ?? 3) : 4)
 
 export default function AssignmentCall() {
   const { id = '' } = useParams()
@@ -54,6 +64,21 @@ export default function AssignmentCall() {
   const [custom, setCustom] = useState('')
   const [preview, setPreview] = useState(false)
 
+  /**
+   * 🔴 极简模式（`statsMode='simple'`）是**另一套数据模型**（§四 4.1；这一页是 §九 W35）。
+   *
+   * 这一页原来是**按错题数排序**的：而极简档案的 `wrong` 恒为空 → 概览写「有错题 0 人」、
+   * 名单一列全空、按题号那排格子全是 0。**看起来很正常，其实全是错的**（与 W16 同源）。
+   * 极简档案里唯一能排序的东西是**等级**，所以整页按 `statsMode` 分流 ——
+   * 口径与「完成批改页」`AssignmentGradeDone.tsx` 完全一致（标题栏 / 概览 / 名单 / 按钮说明）。
+   *
+   * 判据复用 `lib/wrongbook.ts` 的 `ranked`（§11.5「判据只有一处」）：
+   * "这份作业有没有逐题数据"全仓只有那一个定义，**不要**在这里再手写一遍 `statsMode === 'simple'`。
+   * 它额外要求 `status ∈ {graded, reviewed}` —— 所以批改**进行中**的档案在这里也会走极简分支；
+   * 这正好落在保守的一侧：宁可按等级渲染，也绝不在空数据上写出「有错题 0 人」这种假结论。
+   */
+  const simple = !assignment || !ranked(assignment)
+
   const students: Student[] = useMemo(
     () =>
       (klass?.students ?? [])
@@ -69,8 +94,31 @@ export default function AssignmentCall() {
 
   const list = useMemo(() => {
     if (!assignment) return []
+    /* 极简档案没有逐题数据：一条"错题学生"都算不出来，别让下游把空列表当结论 */
+    if (simple) return []
     return mode === 'all' ? wrongStudents(students, assignment) : wrongStudentsOfQuestion(students, assignment, seq)
-  }, [assignment, students, mode, seq])
+  }, [assignment, students, mode, seq, simple])
+
+  /** 极简模式的名单：全班在册学生，按 差 → 良 → 优 → 未评 排（最该叫的排最前） */
+  const gradeList = useMemo(() => {
+    if (!assignment) return []
+    return [...students].sort(
+      (a, b) =>
+        gradeRank(archiveValue(assignment.grades, a)) - gradeRank(archiveValue(assignment.grades, b)) ||
+        Number(a.studentNo) - Number(b.studentNo),
+    )
+  }, [assignment, students])
+
+  /** 极简模式的概览：优 / 良 / 差 / 还没评等级（"没评"也是要叫的人，所以单独露出来） */
+  const gradeCounts = useMemo(() => {
+    const c = { 优: 0, 良: 0, 差: 0, 未评: 0 }
+    for (const s of students) {
+      const g = archiveValue(assignment?.grades, s)
+      if (g === '优' || g === '良' || g === '差') c[g]++
+      else c.未评++
+    }
+    return c
+  }, [students, assignment])
 
   const myCalls = useMemo(
     () =>
@@ -97,7 +145,11 @@ export default function AssignmentCall() {
 
   const room_client = classrooms.find((c) => c.classId === assignment.classId)
   const subject = assignment.subject
-  const text = composeCallText(selected, room, subject, custom)
+  /*
+   * ⚠️ `selected` 里存的是**档案键**（迁移后 = 序列号），因为 `studentNos` 要落库；
+   *    而喊出来的话里必须是**班内学号**（"请 12 号…"）→ 显示前换一次。
+   */
+  const text = composeCallText(selected.map((k) => displayNoOfArchiveKey(students, k)), room, subject, custom)
   const atLimit = selected.length >= CALL_LIMIT
 
   const toggle = (no: string) => {
@@ -152,7 +204,15 @@ export default function AssignmentCall() {
     <>
       <PageHead
         title="改错呼叫"
-        sub={`${klass?.name ?? '—'} · ${friendlyDate(assignment.assignDate)}`}
+        /*
+         * 极简模式**没有"题"这个概念**（只记 优/良/差），标题栏的话术与批改页 / 收缴页
+         * 保持同一句「极简模式 · 只记等级」，别让老师以为这一屏能按题找错。
+         */
+        sub={
+          simple
+            ? `${klass?.name ?? '—'} · ${friendlyDate(assignment.assignDate)} · 极简模式 · 只记等级`
+            : `${klass?.name ?? '—'} · ${friendlyDate(assignment.assignDate)}`
+        }
         onBack={() => navigate('/assignments')}
         right={
           <Button
@@ -231,30 +291,57 @@ export default function AssignmentCall() {
           )}
         </Panel>
 
-        {/* 概览 */}
+        {/* 概览：普通模式看错题，极简模式看等级分布（两套数据模型，不能共用一句话） */}
         <Panel className="mb-3 overflow-hidden">
           <StatStrip
-            items={[
-              { k: '有错题', v: wrongStudents(students, assignment).length, tone: 'var(--color-bad)' },
-              { k: '已选', v: `${selected.length}/${CALL_LIMIT}` },
-              { k: '已叫过', v: calledStates.size, tone: 'var(--color-ink3)' },
-            ]}
+            items={
+              simple
+                ? [
+                    { k: '记录', v: `${students.length} 人` },
+                    { k: '优', v: gradeCounts.优, tone: 'var(--color-ok)' },
+                    { k: '良', v: gradeCounts.良, tone: 'var(--color-warn)' },
+                    { k: '差', v: gradeCounts.差, tone: 'var(--color-bad)' },
+                    { k: '未评', v: gradeCounts.未评, tone: 'var(--color-ink3)' },
+                  ]
+                : [
+                    { k: '有错题', v: wrongStudents(students, assignment).length, tone: 'var(--color-bad)' },
+                    { k: '已选', v: `${selected.length}/${CALL_LIMIT}` },
+                    { k: '已叫过', v: calledStates.size, tone: 'var(--color-ink3)' },
+                  ]
+            }
           />
         </Panel>
 
-        {/* 筛选 */}
+        {/* 筛选：普通模式按错题挑人，极简模式按等级挑人 */}
         <div className="mb-3 flex flex-wrap items-center gap-2">
           <div className="seg">
-            <button type="button" data-on={mode === 'all'} onClick={() => setMode('all')}>
-              全部错题学生
-            </button>
-            <button
-              type="button"
-              data-on={mode === 'byQuestion'}
-              onClick={() => setMode('byQuestion')}
-            >
-              按题号
-            </button>
+            {simple ? (
+              <>
+                <button type="button" data-on={mode === 'all'} onClick={() => setMode('all')}>
+                  全部学生（按等级）
+                </button>
+                <button
+                  type="button"
+                  data-on={mode === 'byQuestion'}
+                  onClick={() => setMode('byQuestion')}
+                >
+                  只看没评等级
+                </button>
+              </>
+            ) : (
+              <>
+                <button type="button" data-on={mode === 'all'} onClick={() => setMode('all')}>
+                  全部错题学生
+                </button>
+                <button
+                  type="button"
+                  data-on={mode === 'byQuestion'}
+                  onClick={() => setMode('byQuestion')}
+                >
+                  按题号
+                </button>
+              </>
+            )}
           </div>
           <span className="flex-1" />
           <button
@@ -266,7 +353,16 @@ export default function AssignmentCall() {
           </button>
         </div>
 
-        {mode === 'byQuestion' ? (
+        {mode === 'byQuestion' && simple ? (
+          <Panel className="mb-3" bodyClass="p-3">
+            <div style={{ fontSize: 12, color: 'var(--color-ink3)', lineHeight: 1.7 }}>
+              极简模式只记 优 / 良 / 差，<b>没有逐题数据</b> —— 所以这里没有「按题号叫人」。
+              要按题叫人，那份档案得是普通（逐题）模式建的。
+            </div>
+          </Panel>
+        ) : null}
+
+        {mode === 'byQuestion' && !simple ? (
           <Panel className="mb-3" bodyClass="p-3">
             <div className="mb-2" style={{ fontSize: 12, color: 'var(--color-ink3)' }}>
               选一道题，把错这道题的人都叫来 —— 面批同一道题效率最高
@@ -327,25 +423,115 @@ export default function AssignmentCall() {
           </Panel>
         ) : null}
 
-        {/* 学生列表：按错题数从多到少 */}
+        {/* 学生列表：普通模式按错题数、极简模式按等级 */}
         <div className="mb-3">
-          <Sect>按错题数排序 · 点一下选中</Sect>
+          <Sect>{simple ? '按等级排序 · 点一下选中' : '按错题数排序 · 点一下选中'}</Sect>
           <Panel className="overflow-hidden">
-            {list.length === 0 ? (
+            {simple ? (
+              gradeList.length === 0 ? (
+                <div className="p-3.5" style={{ fontSize: 12.5, color: 'var(--color-ink3)' }}>
+                  这个班还没有在册学生
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 gap-2 p-2.5 sm:grid-cols-3">
+                  {gradeList.map((s) => {
+                    const key = archiveKeyOf(s)
+                    const on = selected.includes(key)
+                    const disabled = !on && atLimit
+                    const grade = archiveValue(assignment.grades, s)
+                    /* 不评等级的人用灰（他不在"等级"这套口径里），别借"红"来说事 */
+                    const tone = grade
+                      ? grade === '差'
+                        ? 'var(--color-bad)'
+                        : grade === '良'
+                          ? 'var(--color-warn)'
+                          : 'var(--color-ok)'
+                      : 'var(--color-ink3)'
+                    const called = latestCallStateOf(calledStates, s)
+                    return (
+                      <button
+                        key={s.id}
+                        type="button"
+                        onClick={() => toggle(key)}
+                        className="relative flex flex-col items-start gap-0.5 px-2 py-1.5 text-left"
+                        aria-label={`${s.studentNo} 号 ${s.name}`}
+                        style={{
+                          background: on
+                            ? 'var(--color-accentsoft)'
+                            : called
+                              ? 'var(--color-idlesoft)'
+                              : 'var(--color-surface)',
+                          border: `1px solid ${
+                            on
+                              ? 'var(--color-accent)'
+                              : called
+                                ? 'var(--color-line)'
+                                : 'var(--color-line2)'
+                          }`,
+                          borderRadius: 4,
+                          opacity: disabled ? 0.45 : 1,
+                          transition: 'background-color .16s, border-color .16s',
+                        }}
+                      >
+                        <span className="flex w-full items-center gap-1.5">
+                          <span
+                            className="num"
+                            style={{ fontSize: 15, fontWeight: 700, color: tone }}
+                          >
+                            {s.studentNo}
+                          </span>
+                          <span
+                            className="flex-1 truncate"
+                            style={{ fontSize: 12, color: 'var(--color-ink2)' }}
+                          >
+                            {s.name}
+                          </span>
+                          {on ? <IconCheck size={14} strokeWidth={2.6} /> : null}
+                        </span>
+                        <span
+                          className="flex w-full items-center gap-1.5"
+                          style={{ fontSize: 10.5, color: 'var(--color-ink3)' }}
+                        >
+                          <span style={{ color: tone, fontWeight: 700 }}>
+                            {grade ? `等级 ${grade}` : '还没评等级'}
+                          </span>
+                          {called ? (
+                            <span
+                              style={{
+                                marginLeft: 'auto',
+                                color:
+                                  called === 'corrected'
+                                    ? 'var(--color-ok)'
+                                    : called === 'arrived'
+                                      ? 'var(--color-accent)'
+                                      : 'var(--color-ink3)',
+                                fontWeight: 600,
+                              }}
+                            >
+                              {CALL_STATE_TEXT[called]}
+                            </span>
+                          ) : null}
+                        </span>
+                      </button>
+                    )
+                  })}
+                </div>
+              )
+            ) : list.length === 0 ? (
               <div className="p-3.5" style={{ fontSize: 12.5, color: 'var(--color-ink3)' }}>
                 没有需要呼叫的学生
               </div>
             ) : (
               <div className="grid grid-cols-2 gap-2 p-2.5 sm:grid-cols-3">
                 {list.map((w) => {
-                  const on = selected.includes(w.student.studentNo)
-                  const called = calledStates.get(w.student.studentNo)
+                  const on = selected.includes(archiveKeyOf(w.student))
+                  const called = latestCallStateOf(calledStates, w.student)
                   const disabled = !on && atLimit
                   return (
                     <button
                       key={w.student.id}
                       type="button"
-                      onClick={() => toggle(w.student.studentNo)}
+                      onClick={() => toggle(archiveKeyOf(w.student))}
                       className="relative flex flex-col items-start gap-0.5 px-2 py-1.5 text-left"
                       aria-label={`${w.student.studentNo} 号 ${w.student.name}`}
                       style={{
@@ -490,7 +676,9 @@ export default function AssignmentCall() {
           >
             <IconInfo size={13} />
             <span>
-              默认不预选 —— 从上面按错题数从多到少挑 3–8 个人即可，单次最多 {CALL_LIMIT} 人。
+              {simple
+                ? `默认不预选 —— 从上面按等级（差 → 良 → 未评）挑 3–8 个人即可，单次最多 ${CALL_LIMIT} 人。`
+                : `默认不预选 —— 从上面按错题数从多到少挑 3–8 个人即可，单次最多 ${CALL_LIMIT} 人。`}
             </span>
           </div>
         ) : null}
@@ -570,7 +758,11 @@ export default function AssignmentCall() {
             {text}
           </div>
 
-          {/* 置顶小窗示意 */}
+          {/*
+            置顶小窗示意：普通模式显示"最该讲评那道题的正确率"；
+            极简模式**没有逐题数据**（`stats.ranked` 恒为空），照普通模式渲染会写死成
+            「第 1 题 正确率 0%」—— 又一个看起来正常、其实错的数字，所以整块换成一句实话。
+          */}
           <div
             className="glass-dark"
             style={{
@@ -584,12 +776,18 @@ export default function AssignmentCall() {
               color: '***REMOVED***fff',
             }}
           >
-            <span className="num" style={{ fontWeight: 700 }}>
-              第 {stats.ranked[0]?.seq ?? 1} 题
-            </span>
-            <span style={{ opacity: 0.7, marginLeft: 6 }}>
-              正确率 {Math.round((stats.ranked[0]?.rate ?? 0) * 100)}%
-            </span>
+            {simple ? (
+              <span style={{ opacity: 0.85 }}>极简模式 · 不显示逐题正确率</span>
+            ) : (
+              <>
+                <span className="num" style={{ fontWeight: 700 }}>
+                  第 {stats.ranked[0]?.seq ?? 1} 题
+                </span>
+                <span style={{ opacity: 0.7, marginLeft: 6 }}>
+                  正确率 {Math.round((stats.ranked[0]?.rate ?? 0) * 100)}%
+                </span>
+              </>
+            )}
           </div>
         </div>
 
@@ -600,6 +798,7 @@ export default function AssignmentCall() {
           <IconAlert size={13} />
           <span>
             教室里其他班的学生路过时也会听到。所以播报的是<b>学号</b>而不是姓名。
+            {simple ? '极简模式只记等级，所以小窗里不显示逐题正确率。' : ''}
           </span>
         </div>
       </Sheet>

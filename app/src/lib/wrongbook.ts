@@ -1,5 +1,6 @@
 import type { Assignment, Klass, Student } from '../data/types'
 import { isQuestionWrong } from './grading'
+import { archiveValue } from './keys'
 import { POINT_CHAPTER, POINT_NAME } from './knowledge'
 
 /* ============================================================
@@ -71,7 +72,7 @@ function classRates(students: Student[], a: Assignment): number[] {
   return Array.from({ length: a.questionCount }, (_, i) => {
     const seq = i + 1
     const sub = a.subQuestions[String(seq)] ?? 0
-    return active.filter((s) => isQuestionWrong(a.wrong[s.studentNo], seq, sub)).length / n
+    return active.filter((s) => isQuestionWrong(archiveValue(a.wrong, s), seq, sub)).length / n
   })
 }
 
@@ -91,7 +92,7 @@ export function buildWrongBook(
 
   for (const a of mine) {
     const rates = classRates(all, a)
-    const wrongKeys = a.wrong[student.studentNo] ?? []
+    const wrongKeys = archiveValue(a.wrong, student) ?? []
     if (!wrongKeys.length) continue
 
     for (let i = 0; i < a.questionCount; i++) {

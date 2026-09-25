@@ -12,6 +12,7 @@ import {
 } from '../components/icons'
 import { Button, PageHead, Panel, Sect, Sheet, StatStrip, Tag } from '../components/ui'
 import { useStore, useToast } from '../data/store'
+import { archiveKeyOf } from '../lib/keys'
 import { EXAM_MODE_TEXT, type Exam, type ExamQuestion, type ExamScore } from '../data/examTypes'
 import {
   EXAM_KIND_TEXT,
@@ -358,19 +359,33 @@ function ExamGradeSession({ id }: { id: string }) {
   const updateExam = useStore((s) => s.updateExam)
   const DRAFT_KEY = draftKey(id)
 
-  /* 名单：这次考试勾的班里的在读学生（按学号排） */
+  /* 名单：这次考试勾的班里的在读学生（**按班内学号排**；`studentNo` 这一栏是**档案键**） */
   const students = useMemo(() => {
     const ids = exam?.classIds ?? []
-    const out: Array<{ studentNo: string; name: string; classId: string; className: string }> = []
+    const out: Array<{
+      studentNo: string
+      displayNo: string
+      name: string
+      classId: string
+      className: string
+    }> = []
     for (const cid of ids) {
       const k = classes.find((c) => c.id === cid)
       if (!k) continue
       for (const s of k.students) {
         if (s.status !== 'active') continue
-        out.push({ studentNo: s.studentNo, name: s.name, classId: k.id, className: k.name })
+        out.push({
+          studentNo: archiveKeyOf(s),
+          displayNo: s.studentNo,
+          name: s.name,
+          classId: k.id,
+          className: k.name,
+        })
       }
     }
-    return out.sort((a, b) => Number(a.studentNo) - Number(b.studentNo) || a.name.localeCompare(b.name))
+    return out.sort(
+      (a, b) => Number(a.displayNo) - Number(b.displayNo) || a.name.localeCompare(b.name),
+    )
   }, [exam?.classIds, classes])
 
   const saved = useMemo(() => {
@@ -682,7 +697,10 @@ function ExamGradeSession({ id }: { id: string }) {
           <Panel className="mb-3" bodyClass="p-3">
             <div style={{ fontSize: 12.5, lineHeight: 1.7 }}>
               <IconInfo size={13} /> 缺考 {exam.absentNos.length} 人（
-              {exam.absentNos.join('、')}）—— 他们不参与均分，也不会被"按 0 分"处理。
+              {exam.absentNos
+                .map((k) => students.find((s) => s.studentNo === k)?.displayNo ?? k)
+                .join('、')}
+              ）—— 他们不参与均分，也不会被"按 0 分"处理。
             </div>
           </Panel>
         ) : null}
@@ -710,7 +728,7 @@ function ExamGradeSession({ id }: { id: string }) {
               style={{ borderBottom: '1px solid var(--color-line)', background: 'var(--color-surface2)' }}
             >
               <span className="num" style={{ fontSize: 18, fontWeight: 750 }}>
-                {openStudent.studentNo}
+                {openStudent.displayNo}
               </span>
               <span style={{ fontSize: 15, fontWeight: 650 }}>{openStudent.name}</span>
               {openStudent.className ? (
@@ -791,11 +809,11 @@ function ExamGradeSession({ id }: { id: string }) {
                         type="button"
                         className="row"
                         style={{ padding: 12 }}
-                        aria-label={`${s.studentNo} 号 ${s.name}`}
+                        aria-label={`${s.displayNo} 号 ${s.name}`}
                         onClick={() => setOpen(s.studentNo)}
                       >
                         <span className="num" style={{ fontSize: 16, fontWeight: 700, width: 44 }}>
-                          {s.studentNo}
+                          {s.displayNo}
                         </span>
                         <span className="min-w-0 flex-1">
                           <span className="block truncate" style={{ fontSize: 14.5, fontWeight: 620 }}>
@@ -837,7 +855,7 @@ function ExamGradeSession({ id }: { id: string }) {
                       style={{ borderBottom: '1px solid var(--color-line)' }}
                     >
                       <span className="num" style={{ fontSize: 13, color: 'var(--color-ink3)', width: 44 }}>
-                        {s.studentNo}
+                        {s.displayNo}
                       </span>
                       <span className="min-w-0 flex-1 truncate" style={{ fontSize: 13.5 }}>
                         {s.name}
@@ -944,7 +962,7 @@ function ExamGradeSession({ id }: { id: string }) {
                 {ungradedNos
                   .map((no) => {
                     const s = students.find((x) => x.studentNo === no)
-                    return `${no} ${s?.name ?? ''}`
+                    return `${s?.displayNo ?? no} ${s?.name ?? ''}`
                   })
                   .join('、')}
               </div>

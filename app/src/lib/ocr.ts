@@ -3,7 +3,13 @@
    ------------------------------------------------------------
    走自己的 /api/ocr 中转（Cloudflare Pages Function），
    由它去调 DeepSeek 多模态模型 —— API Key 只在服务端。
+
+   🔴 调用必须带上登录凭据（2026-09-25 加）：
+   服务端现在会校验"你是不是本系统的登录账号"，没有 JWT 一律 401。
+   以前这里不带 `Authorization`，谁拿到地址都能调 —— 烧的是老师的 DeepSeek 额度。
    ============================================================ */
+
+import { getSupabase } from './supabase'
 
 export type OcrNumber = {
   value: number
@@ -139,12 +145,27 @@ export async function recognize(
     subject?: string
   },
 ): Promise<OcrOutcome> {
+  /*
+   * 先拿登录凭据。**拿不到就不发请求** —— 让服务端回 401 再翻译成一句错，
+   * 不如在这里直接说清楚（而且少一次必然失败的往返）。
+   * 本地演示模式（没有 Supabase 环境变量）下本来也调不通这个 Function，提示是一致的。
+   */
+  const sb = getSupabase()
+  const session = sb ? (await sb.auth.getSession()).data.session : null
+  const token = session?.access_token
+  if (!token) {
+    return {
+      status: 'error',
+      message: '拍照识别要用登录账号（识别额度是学校的）。请先登录老师账号再试。',
+    }
+  }
+
   const ctl = new AbortController()
   const timer = window.setTimeout(() => ctl.abort(), TIMEOUT_MS)
   try {
     const res = await fetch('/api/ocr', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       signal: ctl.signal,
       body: JSON.stringify({
         image,
