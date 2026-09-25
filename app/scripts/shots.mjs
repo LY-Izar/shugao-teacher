@@ -2270,6 +2270,120 @@ await withLock(async () => {
           await shotRaw(idPage, SID, name)
         }
       })
+
+      /*
+       * ============================================================
+       * 文件传教室端：**上传时选班级（多选）** 这条链路的回归（2026-09-28，schema.sql §19）
+       * ============================================================
+       * 为什么"读/写权限"那一半**不在这个脚本里**：它跑的是本地演示模式，
+       * 而"教室端读得到本班的文件"是**数据库 RLS** 的事 —— 见 `rls-checks.mjs` 第七 / 十四节。
+       *
+       * ⚠️ 覆盖边界（写下来，免得以后有人以为这里验过了）：
+       *    `/files` 这一页**只有连了云端才渲染上传界面**，本地模式那一支是
+       *    「这个功能要把文件存到云端，现在还没连接」—— 所以**多选控件在浏览器里走不到**，
+       *    "只教一个班时默认勾上那个班"这条只能钉在**纯函数**上（页面调的就是同一个函数，
+       *    见 `lib/files.ts` 的 `defaultFileClassIds`）；落库载荷与"SQL 没跑也不崩"那两条
+       *    在 `backup-checks.mjs` **第五节**（假 PostgREST + 真的 `lib/files.ts`）。
+       *    这里另外补一条**真实页面**断言：本地模式下这一页照旧是那句"还没连接"，
+       *    既不白屏、也**不摆上传控件**（摆出来就是点了没反应的假入口）。
+       *
+       * 时钟：主 context 停在 09-19 10:00（周六，且不在 6:30–9:00 欢迎弹窗窗口里），
+       * 所以这一步不需要再拨表，也不会被欢迎弹窗干扰。
+       */
+      const SFL = '文件传教室（班级归属）'
+
+      await step(SFL, async () => {
+        const FL = await import('../src/lib/files.ts')
+        const cA = { id: 'c1', name: '高二(1)班' }
+        const cB = { id: 'c2', name: '高二(4)班' }
+        const cC = { id: 'c3', name: '高三(1)班' }
+        const J = (v) => JSON.stringify(v)
+
+        /* ① 默认勾哪个班 —— "只教一个班就默认勾上"这条是用户点名的 */
+        check(
+          J(FL.defaultFileClassIds([cA], null)) === J(['c1']),
+          `${SFL}：**只教一个班 → 默认就勾上那一个**（他不用操作）`,
+          `读到 ${J(FL.defaultFileClassIds([cA], null))}`,
+        )
+        check(
+          J(FL.defaultFileClassIds([cA], 'c1')) === J(['c1']),
+          `${SFL}：在某个班的上下文里进来 → 默认勾那个班`,
+          `读到 ${J(FL.defaultFileClassIds([cA], 'c1'))}`,
+        )
+        check(
+          J(FL.defaultFileClassIds([cA, cB, cC], 'c2')) === J(['c2']),
+          `${SFL}：教三个班、当前班是 4 班 → 只预填 4 班（既不是全勾，也不是一个都不勾）`,
+          `读到 ${J(FL.defaultFileClassIds([cA, cB, cC], 'c2'))}`,
+        )
+        check(
+          J(FL.defaultFileClassIds([cA, cB], null)) === J([]),
+          `${SFL}：教多个班、又没有可用的上下文 → 一个都不勾（**不猜**，让他自己挑）`,
+          `读到 ${J(FL.defaultFileClassIds([cA, cB], null))}`,
+        )
+        check(
+          J(FL.defaultFileClassIds([cA], 'c9')) === J(['c1']),
+          `${SFL}：当前班是个**陈旧的 id**（班被删了/换设备了）→ 不认它，退回"只教一个班"那条`,
+          `读到 ${J(FL.defaultFileClassIds([cA], 'c9'))}`,
+        )
+        check(
+          J(FL.defaultFileClassIds([], 'c1')) === J([]),
+          `${SFL}：一个班都没有 → 空（页面上另有一句话说明"传上去只有你自己看得见"）`,
+          `读到 ${J(FL.defaultFileClassIds([], 'c1'))}`,
+        )
+
+        /* ② 勾选动作：多选要"加上去"；老库（列还没有）退化成单选 */
+        check(
+          J(FL.toggleFileClassIds(['c1'], 'c2')) === J(['c1', 'c2']),
+          `${SFL}：多选 —— 再点一个班是**加**上去（同一个课件发给几个班）`,
+          `读到 ${J(FL.toggleFileClassIds(['c1'], 'c2'))}`,
+        )
+        check(
+          J(FL.toggleFileClassIds(['c1', 'c2'], 'c1')) === J(['c2']),
+          `${SFL}：多选 —— 点已勾上的班是取消`,
+          `读到 ${J(FL.toggleFileClassIds(['c1', 'c2'], 'c1'))}`,
+        )
+        check(
+          J(FL.toggleFileClassIds(['c1'], 'c2', false)) === J(['c2']),
+          `${SFL}：老库（class_ids 这一列还没有）→ 退化成单选：点另一个是**换过去**，不是并存`,
+          `读到 ${J(FL.toggleFileClassIds(['c1'], 'c2', false))}`,
+        )
+        check(
+          J(FL.toggleFileClassIds(['c1'], 'c1', false)) === J([]),
+          `${SFL}：老库 + 取消勾选 → 空（"未指派"是合法状态，不是必填校验）`,
+          `读到 ${J(FL.toggleFileClassIds(['c1'], 'c1', false))}`,
+        )
+
+        /* ③ 列表里那一行怎么写归属（"未指派"必须说出来，不能显示成空白） */
+        check(
+          FL.fileClassLabel([cA, cB], ['c1', 'c2']) === '高二(1)班、高二(4)班',
+          `${SFL}：一行的归属写成班名（顿号分隔）`,
+          `读到「${FL.fileClassLabel([cA, cB], ['c1', 'c2'])}」`,
+        )
+        check(
+          FL.fileClassLabel([cA, cB], []).includes('教室端看不到'),
+          `${SFL}：**没有归属的空态不许显示成空白** —— 写「未指派班级 · 教室端看不到」`,
+          `读到「${FL.fileClassLabel([cA, cB], [])}」`,
+        )
+        check(
+          FL.fileClassLabel([cA], ['c9']).includes('教室端看不到') && !FL.fileClassAssigned([cA], ['c9']),
+          `${SFL}：归属指向一个**已经删掉的班** → 等于没归属（文案与强调色用同一个判据）`,
+          `读到「${FL.fileClassLabel([cA], ['c9'])}」，assigned=${FL.fileClassAssigned([cA], ['c9'])}`,
+        )
+        check(
+          FL.fileClassAssigned([cA], ['c1']),
+          `${SFL}：认得出的归属才算"有归属"（下一行那条"未指派"不是恒假的装饰）`,
+          `assigned=${FL.fileClassAssigned([cA], ['c1'])}`,
+        )
+
+        /* ④ 真界面：本地模式下这一页还是"还没连接"，且不许把上传控件摆出来 */
+        crumb('goto /files')
+        await page.goto(`${BASE}/files`, { waitUntil: 'networkidle' })
+        await expectPage(page, SFL, {
+          url: '/files',
+          markers: ['教室端文件', '还没连接'],
+          absent: ['给哪些班看', '选择文件'],
+        })
+      })
     } catch (e) {
       console.log(`\n💥 脚本在第「${currentStep}」步异常中断：${e instanceof Error ? e.message : String(e)}`)
       if (crumbs.length) {

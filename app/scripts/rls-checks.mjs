@@ -38,6 +38,9 @@
  *   $env:RLS_NEGATIVE='crack-b'            ; node scripts/rls-checks.mjs   ***REMOVED*** 把「教室端不许写 scope=mine 排课表」改回去
  *   $env:RLS_NEGATIVE='crack-c'            ; node scripts/rls-checks.mjs   ***REMOVED*** 把「教室端不许写 shared_files」改回去
  *   $env:RLS_NEGATIVE='exam-for-everyone'  ; node scripts/rls-checks.mjs   ***REMOVED*** 让考试写判据对**所有人**为真（谁都能改别人的考试档案）
+ *   $env:RLS_NEGATIVE='file-read-wider'    ; node scripts/rls-checks.mjs   ***REMOVED*** 文件的班级归属读策略改成恒真（谁都能读所有文件）
+ *   $env:RLS_NEGATIVE='file-read-closed'   ; node scripts/rls-checks.mjs   ***REMOVED*** 读策略改成恒假（教室端的文件列表又变成空的）
+ *   $env:RLS_NEGATIVE='file-object-wider'  ; node scripts/rls-checks.mjs   ***REMOVED*** 存储对象的读策略改成恒真（桶里任何文件都能签直链）
  *   （改的全是**内存里的 SQL 文本**，仓库文件一个字节都不动。）
  */
 
@@ -147,13 +150,29 @@ await withLock(async () => {
     /** 教室端账号行的 id **就是**它的 auth uid（`classroom_accounts.id references auth.users`） */
     const ACCT = { a1: U.room }
     /**
-     * `shared_files` 的两行夹具（裂缝 C，2026-09-27）：
-     *   f1 = 物理老师传的文件（真实形状）；
+     * `shared_files` 的夹具（裂缝 C 2026-09-27；班级归属 2026-09-28 / schema.sql §19）：
+     *   f1 = 物理老师传给 1 班的文件（真实形状）；
      *   f2 = **挂在教室端账号名下**的一行 —— 真实的教室端没有上传入口，
      *        这一行是**夹具**，专门用来钉"收紧写权限时不许把读也一起挡掉"
-     *        （restrictive 的 `using` 对 SELECT 也生效，写成一条 `for all` 就会挡掉它）。
+     *        （restrictive 的 `using` 对 SELECT 也生效，写成一条 `for all` 就会挡掉它）；
+     *   f3 / f4 = 两条写断言的空位（教室端插、老师插）；
+     *   f5 = **同班另一位老师**（语文）传给 1 班的 —— 钉"两位老师互相看得到材料"；
+     *   f6 = 物理老师**一次传给两个班**（1 班 + 4 班）—— 钉多选那条语义；
+     *   f7 = 无身份新老师传给**他自己那个班**（高一）的 —— 别班/别人看不见的样本；
+     *   f8 = 物理老师传的**没有班级归属**的老文件（class_ids 空）—— 教室端看不到；
+     *   f9 = **老形状**（只写了老列 `class_id`，`class_ids` 还空着）—— §19.2 搬迁的样本。
      */
-    const F = { f1: mk('f0', 1), f2: mk('f0', 2), f3: mk('f0', 3), f4: mk('f0', 4) }
+    const F = {
+      f1: mk('f0', 1),
+      f2: mk('f0', 2),
+      f3: mk('f0', 3),
+      f4: mk('f0', 4),
+      f5: mk('f0', 5),
+      f6: mk('f0', 6),
+      f7: mk('f0', 7),
+      f8: mk('f0', 8),
+      f9: mk('f0', 9),
+    }
 
     /** 身份名（打印用）与顺序 —— 与文档 §16.4 那张表同一组人 */
     const WHO = {
@@ -404,6 +423,51 @@ await withLock(async () => {
         if (!m) throw new Error('负向对照锚点没找到：can_edit_exam_for 的形状变了（模式 exam-for-everyone）')
         return text.replace(re, `$1\n  select true\n$3`)
       }
+      if (mode === 'file-read-wider' || mode === 'file-read-closed') {
+        /*
+         * 第十四节的负向对照（`shared_files` 的班级归属**读**策略，§19.3）：
+         *   · `file-read-wider`  —— 条件换成 `true` = "谁都能读所有文件"：
+         *     教室那块屏就会看到别班的材料、连**没标班**的也看得到；
+         *   · `file-read-closed` —— 条件换成 `false` = "教室端又变成空列表"：
+         *     正是这一节要修的那个毛病本身（空列表而且不报错）。
+         * 🔴 两个方向都要各跑一次：只钉"读不到别班"会漏掉"读不到本班"，反之亦然。
+         * ⚠️ 只换这一条策略的正文（按策略名切片），其余 SQL 一个字不动。
+         */
+        const re = /(create policy shared_files_class_read on shared_files[\s\S]*?using \()[\s\S]*?(\);\n)/
+        const m = text.match(re)
+        if (!m) throw new Error(`负向对照锚点没找到：shared_files_class_read 的形状变了（模式 ${mode}）`)
+        return text.replace(re, `$1${mode === 'file-read-wider' ? 'true' : 'false'}$2`)
+      }
+      if (mode === 'file-object-wider') {
+        /*
+         * 第十二节的负向对照（**存储对象**那一侧的读策略，§19.4.3）：
+         * 条件换成 `true` = "桶里任何对象都能签出直链" ——
+         * 那样"教室端读不到别班/没标班的**字节**"这几条必须红
+         * （行读策略还拦着，但直链拿到手就等于材料泄出去了）。
+         *
+         * 🔴 锚点必须钉在**最后那一版**（§19.4.3）：`classroom_files_read` 这个名字在文件里
+         *    出现**两次**（§9 定义一次、§19.4.3 又 drop + create 一次），而 §9 那一版**不含**
+         *    `objects.name`。第一版锚点写成"从第一个 `create policy` 起、一直到 `objects.name` 为止"，
+         *    `[\s\S]*?` 于是**跨过了 §9 到 §19.3 的全部内容**，把 schema 咬掉一大块 ——
+         *    报出来的是 `column "school_id" of relation "classes" does not exist`（A 库建不起来），
+         *    **而 `if (!m) throw` 那条守卫抓不到它**（正则照样匹配上了）。
+         *    教训：负向对照的锚点自己写歪，比不做对照更危险。所以这里用 `lastIndexOf` 显式取最后一版，
+         *    并要求正文里必须出现 `objects.name`（只有 §19.4.3 那一版有）。
+         */
+        const marker = 'create policy classroom_files_read on storage.objects'
+        const at = text.lastIndexOf(marker)
+        if (at < 0) throw new Error('负向对照锚点没找到：classroom_files_read 不见了（模式 file-object-wider）')
+        const seg = text.slice(at)
+        const m = seg.match(/^create policy classroom_files_read on storage\.objects[\s\S]*?using \(([\s\S]*?)\);\n/)
+        if (!m || !/objects\.name/.test(m[1])) {
+          throw new Error('负向对照锚点没找到：最后一版 classroom_files_read 的形状变了（模式 file-object-wider）')
+        }
+        return (
+          text.slice(0, at) +
+          'create policy classroom_files_read on storage.objects\n  for select to authenticated\n  using (true);\n' +
+          seg.slice(m[0].length)
+        )
+      }
       throw new Error(`不认识的 RLS_NEGATIVE=${mode}`)
     }
 
@@ -420,7 +484,7 @@ await withLock(async () => {
     const SCHEMA_BEFORE_STAGE5 = applyNegative(SCHEMA_RAW_SPLIT, NEGATIVE, { abOnly: true })
 
     /** 建一个库：替身 → create publication → schema.sql 原文 → 固定数据 */
-    async function makeDb(schemaText) {
+    async function makeDb(schemaText, withFileFixtures) {
       const db = new PGlite({ extensions: { pgcrypto } })
       await db.waitReady
       await db.exec(STUBS)
@@ -436,6 +500,13 @@ await withLock(async () => {
 
       await db.exec(text)
       await db.exec(seedSql())
+      /*
+       * ⚠️ 文件夹具（`shared_files`）**只灌 B 库**：A 库是"§16 之前"那一份，
+       *    而 §19（班级归属）也在切掉的范围里 —— 它连 `class_ids` 这一列都没有，
+       *    灌进去会当场 42703。A 库的职责只有"删旧策略之前的可见量"，与文件无关
+       *    （逐人可见量那张快照里没有 shared_files，见 SNAPSHOT_SQL）。
+       */
+      if (withFileFixtures) await db.exec(fileSeedSql())
       return { db, realtime }
     }
 
@@ -513,11 +584,8 @@ await withLock(async () => {
       ('${SCH.s2}', '${U.head}', 1, '08:50', '09:30', '高二(1)班 语文', '${C.c1}', 'class'),
       ('${SCH.s3}', '${U.phy}',  1, '10:50', '11:30', '高二(4)班 物理', '${C.c2}', 'class');
 
-    -- 文件互传（§9）：裂缝 C 的夹具。f1 是老师真传的一份；f2 挂在教室端账号名下
-    -- （真实教室端没有上传入口 —— 它是夹具，用来钉"收紧写不许把读一起挡掉"）。
-    insert into shared_files (id, teacher_id, class_id, name, mime, size, storage_path) values
-      ('${F.f1}', '${U.phy}',  '${C.c1}', '老师传的题图.png', 'image/png', 1024, '${U.phy}/aa-题图.png'),
-      ('${F.f2}', '${U.room}', '${C.c1}', '夹具-教室端名下那一行.png', 'image/png', 2048, '${U.room}/bb-夹具.png');
+    -- 文件互传（shared_files）的夹具**不在这里** —— 它在 fileSeedSql() 里、只有 B 库会灌：
+    --   class_ids（§19）这一列在 A 库上根本不存在（A 是"§16 之前"那一份，§19 也被切掉了）。
 
     -- 考试档案（第十三节）：四份，把"读得宽 / 写得窄"的每一面都摆出来
     --   e1 物理老师建的**单班**物理（c1）        → 他自己可写；班主任/年级主任只读；教室端读得到
@@ -533,6 +601,38 @@ await withLock(async () => {
     insert into exam_scores (id, exam_id, class_id, student_no, name, graded, total) values
       ('${EXS.s1}', '${EX.e1}', '${C.c1}', '1', '甲', true, 88),
       ('${EXS.s2}', '${EX.e1}', '${C.c1}', '2', '乙', false, null);
+    `
+    }
+
+    /**
+     * `shared_files` 的夹具（§9 裂缝 C + §19 班级归属）—— **只有 B 库会跑**（理由见 `makeDb`）：
+     *   f1 老师真传的一份（归 1 班）；f2 挂在教室端账号名下（真实教室端没有上传入口 ——
+     *   它是夹具，用来钉"收紧写不许把读一起挡掉"）；f5 **同班另一位老师**传的；
+     *   f6 一个文件**同时归两个班**；f7 别班（高一，无身份老师自己建的班）的；
+     *   f8 **没有班级归属**（教室端看不到）；f9 **老形状**：只写了老列 `class_id`（§19.2 搬迁样本）。
+     *   ⚠️ 这里是超级用户直接插的（RLS 不过），所以 f9 这种"新前端已经不会再写"的形状插得进去。
+     */
+    function fileSeedSql() {
+      return `
+    insert into shared_files (id, teacher_id, class_id, class_ids, name, mime, size, storage_path) values
+      ('${F.f1}', '${U.phy}',   '${C.c1}', array['${C.c1}']::uuid[],           '老师传的题图.png', 'image/png', 1024, '${U.phy}/aa-题图.png'),
+      ('${F.f2}', '${U.room}',  '${C.c1}', array['${C.c1}']::uuid[],           '夹具-教室端名下那一行.png', 'image/png', 2048, '${U.room}/bb-夹具.png'),
+      ('${F.f5}', '${U.chn}',   '${C.c1}', array['${C.c1}']::uuid[],           '同班语文老师传的答案.pdf', 'application/pdf', 4096, '${U.chn}/cc-答案.pdf'),
+      ('${F.f6}', '${U.phy}',   '${C.c1}', array['${C.c1}','${C.c2}']::uuid[], '一个课件给两个班.png', 'image/png', 8192, '${U.phy}/dd-两个班.png'),
+      ('${F.f7}', '${U.fresh}', '${C.c4}', array['${C.c4}']::uuid[],           '别班的文件.png', 'image/png', 512, '${U.fresh}/ee-别班.png'),
+      ('${F.f8}', '${U.phy}',   null,      '{}',                               '老文件-没有班级归属.png', 'image/png', 256, '${U.phy}/ff-没归属.png'),
+      ('${F.f9}', '${U.phy}',   '${C.c3}', '{}',                               '老形状-只写了老列.png', 'image/png', 128, '${U.phy}/gg-老列.png');
+
+    -- 桶里对应的对象（§19.4.3 那一条读策略按 storage_path = objects.name 关联）：
+    --   "行读得到 → 对象也读得到"，所以这一半必须和上面那七行**一一对上**。
+    insert into storage.objects (bucket_id, name) values
+      ('classroom-files', '${U.phy}/aa-题图.png'),
+      ('classroom-files', '${U.room}/bb-夹具.png'),
+      ('classroom-files', '${U.chn}/cc-答案.pdf'),
+      ('classroom-files', '${U.phy}/dd-两个班.png'),
+      ('classroom-files', '${U.fresh}/ee-别班.png'),
+      ('classroom-files', '${U.phy}/ff-没归属.png'),
+      ('classroom-files', '${U.phy}/gg-老列.png');
     `
     }
 
@@ -748,8 +848,8 @@ await withLock(async () => {
       console.log('     （改的是内存里的 SQL 文本；仓库文件没有被改动。）')
     }
 
-    const B = await makeDb(SCHEMA_FULL)
-    const A = await makeDb(SCHEMA_BEFORE_STAGE5)
+    const B = await makeDb(SCHEMA_FULL, true)
+    const A = await makeDb(SCHEMA_BEFORE_STAGE5, false)
     const db = B.db
 
     /* ============================================================
@@ -1117,14 +1217,14 @@ await withLock(async () => {
       const fileRow = (o) => ({
         id: o.id,
         teacher_id: o.teacherId,
-        class_id: o.classId ?? null,
+        class_ids: o.classIds ?? [],
         name: o.name ?? '题图.png',
         mime: 'image/png',
         size: 1234,
         storage_path: `${o.teacherId}/cc-${o.name ?? '题图.png'}`,
       })
 
-      r = await write(db, U.room, insertSql('shared_files', fileRow({ id: F.f3, teacherId: U.room, classId: C.c1, name: '教室端自己传的.png' })))
+      r = await write(db, U.room, insertSql('shared_files', fileRow({ id: F.f3, teacherId: U.room, classIds: [C.c1], name: '教室端自己传的.png' })))
       denied('🔴 教室端往 shared_files **插**一行（裂缝 C：前端真实上传载荷，teacher_id = 它自己）', r)
 
       r = await write(db, U.room, { sql: `update shared_files set name = '被教室端改名了' where id = $1 returning id`, values: [F.f2] })
@@ -1136,29 +1236,42 @@ await withLock(async () => {
       // 反向对照一：**真正的教师**三条路（插 / 改 / 删）必须照旧通 —— 收裂缝不许误伤老师
       // ⚠️ 删的那一条要删**种子里的**那一行：每次 attempt 都在自己的事务里跑完就 rollback，
       //    所以"上一条刚插进去的行"到下一条已经不存在了（那样量到的是 0 行 = 假失败）。
-      r = await write(db, U.phy, insertSql('shared_files', fileRow({ id: F.f4, teacherId: U.phy, classId: C.c1, name: '老师新传的答案.pdf' })))
+      r = await write(db, U.phy, insertSql('shared_files', fileRow({ id: F.f4, teacherId: U.phy, classIds: [C.c1], name: '老师新传的答案.pdf' })))
       allowed('对照：真老师照旧能**上传**（插自己名下那一行 shared_files）', r)
       r = await write(db, U.phy, { sql: `update shared_files set name = '题图（改过名）.png' where id = $1 returning id`, values: [F.f1] })
       allowed('对照：真老师照旧能**改**自己传的那一行', r)
       r = await write(db, U.phy, { sql: `delete from shared_files where id = $1 returning id`, values: [F.f1] })
       allowed('对照：真老师照旧能**删**自己传的那一行', r)
 
-      // 反向对照二：**读**那一半没被误伤（这就是"写成一条 for all"会挡掉的东西）
-      // ⚠️ 这里刻意只断言"**读得到自己那一行**"，**不**钉总行数：今天教室端读不到
-      //    老师上传的行（`shared_files_own` 只给"自己传的"），那是 §9 的老形状、
-      //    本轮没动它（发现记在 `功能设计与不变量.md` §十七·补 的补.4）。
-      //    钉成精确清单的话，将来谁把那条读补宽（让教室端看得见本班的文件）都会撞红
-      //    —— 而那不是"收紧把读弄坏了"，是修另一件事。
+      /*
+       * ---- 反向对照二：收紧"写"不许把"读"一起弄坏 ----
+       *
+       * ⚠️ 这一段 2026-09-28 改过：原来是"只断言读得到自己那一行，刻意**不**钉总行数"，
+       *    因为那时教室端**读不到老师上传的行**（`shared_files_own` 只给"自己传的"，
+       *    §9 的老形状）—— 钉精确清单会让"将来把读补宽"撞红。
+       *    那个"将来"就是 **§19**（班级归属，用户拍板 A）。现在读得到本班的文件是**要求**，
+       *    所以这里换成**精确清单**：多一条（读宽了）少一条（读坏了）都要红。
+       */
       const roomFiles = await idsAs(db, U.room, `select id from shared_files order by id`)
+      eq(
+        '🔴 教室端读得到**本班**的文件（§19 的读策略：老师传的 f1 · 同班另一位老师传的 f5 · 多班共用的 f6 · 自己名下那行 f2）',
+        roomFiles,
+        [F.f1, F.f2, F.f5, F.f6].sort(),
+      )
       ok(
-        '🔴 裂缝 C 的**读**那一半没被误伤：教室端照旧读得到自己名下那一行 shared_files（restrictive 里没有 SELECT）',
-        roomFiles.includes(F.f2),
-        `读到 ${JSON.stringify(roomFiles)}（期望含 ${F.f2}；今天它读不到老师上传的那行 —— §9 老形状，本轮没动读）`,
+        '🔴 教室端读不到**别班**的文件（f7 是高一那个班的）',
+        !roomFiles.includes(F.f7),
+        `读到 ${JSON.stringify(roomFiles)}（不该含 ${F.f7}）`,
+      )
+      ok(
+        '🔴 教室端读不到**没标班**的文件（f8 空归属 —— "无归属 = 教室端看不到"这条语义）',
+        !roomFiles.includes(F.f8),
+        `读到 ${JSON.stringify(roomFiles)}（不该含 ${F.f8}）`,
       )
       eq(
-        '对照：物理老师照旧读得到自己传的文件那一行',
+        '对照：物理老师读得到"自己传的 ∪ 自己任教班的"（含同班语文老师传的 f5 与教室端名下那行 f2 —— 前一条就是"两位老师互相看得见"）',
         await idsAs(db, U.phy, `select id from shared_files order by id`),
-        [F.f1],
+        [F.f1, F.f2, F.f5, F.f6, F.f8, F.f9].sort(),
       )
 
       // ---- 静态审计：设计红线在策略清单上也要看得见 ----
@@ -1236,31 +1349,51 @@ await withLock(async () => {
        * ⚠️ 这里刻意**不钉** `shared_files_own` 的正文（它一个字没动，见 §17.6 的理由：
        *    它一条 `for all` 同时给着 SELECT，改正文会把教室端的读一起改掉）。
        *    所以"清单上看得出来"这件事由三条**名字里带 not_classroom** 的 restrictive 承担。
+       * 🔴 2026-09-28（§19）之后这张清单多了三条：一条读（`shared_files_class_read`）
+       *    与两条归属写守卫（`shared_files_class_scope_*`）。**它们一条 SELECT 的 restrictive
+       *    都不是** —— restrictive 的 `using` 对 SELECT 也生效，多一条就会把读挡掉。
        */
       const fPol = await db.query(
         `select policyname, cmd, permissive, coalesce(qual,'') || ' ' || coalesce(with_check,'') as body
            from pg_policies where schemaname = 'public' and tablename = 'shared_files' order by cmd, policyname`,
       )
       eq(
-        '裂缝 C：shared_files 上的策略清单（§9 的 for all + §17.6 三条逐动作 restrictive）',
+        'shared_files 上的策略清单（§9 的 for all + §17.6 三条教室端守卫 + §19 一条读 + 两条归属守卫）',
         fPol.rows.map((x) => `${x.policyname}:${x.cmd}:${x.permissive}`),
         [
           'shared_files_own:ALL:PERMISSIVE',
           'shared_files_not_classroom_delete:DELETE:RESTRICTIVE',
+          'shared_files_class_scope_insert:INSERT:RESTRICTIVE',
           'shared_files_not_classroom_insert:INSERT:RESTRICTIVE',
+          'shared_files_class_read:SELECT:PERMISSIVE',
+          'shared_files_class_scope_update:UPDATE:RESTRICTIVE',
           'shared_files_not_classroom_update:UPDATE:RESTRICTIVE',
         ],
       )
       const fGuard = fPol.rows.filter((x) => x.permissive === 'RESTRICTIVE')
       ok(
         '🔴 裂缝 C：三条逐动作 restrictive（insert/update/delete）都调教室端判据',
-        fGuard.length === 3 && fGuard.every((x) => /classroom_account/.test(x.body)),
+        fGuard.filter((x) => /not_classroom/.test(x.policyname)).length === 3 &&
+          fGuard.filter((x) => /not_classroom/.test(x.policyname)).every((x) => /classroom_account/.test(x.body)),
         fGuard.map((x) => `${x.policyname}:${/classroom_account/.test(x.body) ? '有' : '没有'}`).join(' · ') || '(没有 restrictive 策略)',
       )
       eq(
-        '🔴 裂缝 C 的**读**那一半没被误伤：restrictive 里没有 SELECT（写成 for all 会把教室端读文件列表也挡掉）',
+        '🔴 restrictive 里一条 SELECT 都没有（写成 for all 会把教室端"读文件列表"也挡掉）',
         fGuard.filter((x) => x.cmd === 'SELECT').length,
         0,
+      )
+      ok(
+        '🔴 §19：两条班级归属写守卫都调归属判据（`can_share_file_to_class`），"只能发给自己的班"在清单上看得见',
+        fGuard.filter((x) => /class_scope/.test(x.policyname)).length === 2 &&
+          fGuard.filter((x) => /class_scope/.test(x.policyname)).every((x) => /can_share_file_to_class/.test(x.body)),
+        fGuard.filter((x) => /class_scope/.test(x.policyname)).map((x) => `${x.policyname}:${/can_share_file_to_class/.test(x.body) ? '有' : '没有'}`).join(' · '),
+      )
+      ok(
+        '🔴 §19：读策略里用的是既有判据 `visible_class_ids()`（同一件事只有一个判定入口，没有另写一套过滤）',
+        fPol.rows
+          .filter((x) => x.policyname === 'shared_files_class_read')
+          .every((x) => /visible_class_ids/.test(x.body)),
+        fPol.rows.filter((x) => x.policyname === 'shared_files_class_read').map((x) => shortErr(x.body)).join(' · '),
       )
     }
 
@@ -1416,14 +1549,85 @@ await withLock(async () => {
        十二、存储策略（教师端 → 教室端 的文件互传）
        ============================================================ */
 
-    section('十二、storage：只能读写自己目录下的文件（§9）')
+    section('十二、storage：自己目录 · 以及"指向我读得到的那一行"的对象（§9 + §19.4.3）')
     {
-      const mine = await write(db, U.phy, { sql: `insert into storage.objects (bucket_id, name) values ('classroom-files', $1) returning id`, values: [`${U.phy}/aa-题图.png`] })
+      const mine = await write(db, U.phy, { sql: `insert into storage.objects (bucket_id, name) values ('classroom-files', $1) returning id`, values: [`${U.phy}/zz-新传的.png`] })
       allowed('往自己目录里传文件', mine)
-      const other = await write(db, U.phy, { sql: `insert into storage.objects (bucket_id, name) values ('classroom-files', $1) returning id`, values: [`${U.chn}/aa-别人的.png`] })
+      const other = await write(db, U.phy, { sql: `insert into storage.objects (bucket_id, name) values ('classroom-files', $1) returning id`, values: [`${U.chn}/zz-别人的.png`] })
       denied('往**别人**目录里传文件', other)
-      const readOther = await countAs(db, U.phy, `select count(*)::int as n from storage.objects where name like $1`, [`${U.chn}/%`])
-      eq('读不到别人目录里的文件', readOther, 0)
+      /*
+       * ⚠️ 这一条原来量的是"读不到 `{语文老师}/` 下的任何对象"（= 0）。
+       *    §19.4.3（2026-09-28）之后那句不再成立：语文老师传给**1 班**的那一份，
+       *    物理老师（教 1 班）**应该**读得到 —— 从 `Files.tsx` 里点开同事那份文件靠的就是它。
+       *    所以判据收窄成"**别人目录里、又没有归到我读得到的行**的那些"。
+       */
+      const readOther = await countAs(db, U.phy, `select count(*)::int as n from storage.objects where name = $1`, [`${U.fresh}/ee-别班.png`])
+      eq('读不到**别人目录里、又没有归到自己班**的文件对象', readOther, 0)
+
+      /*
+       * ---- 🔴 §19.4.3：对象的**读**要跟着表走（"行读通了、字节读不通"那一半）----
+       *
+       * 少了这一支：教室端读得到 `shared_files` 那一行、列表上也看得见，
+       * 但 `createSignedUrl()` 签不出直链 → `fetchBlob()` 拿到 null →
+       * 那一行**永远停在「待取回」，而且不报错**（列表里看得见、点开没反应）。
+       * 判据是**委托**给 §19.3 的："`shared_files` 里有一行指着我读得到的对象"。
+       */
+      const objectsIn = async (uid) =>
+        asUser(db, uid, async () =>
+          (await db.query(`select name from storage.objects order by name`)).rows.map((r) => r.name),
+        )
+
+      eq(
+        '🔴 教室端读得到**本班那几份文件的对象**（f1 物理老师的 / f5 语文老师的 / f6 两个班共用的 / f2 自己名下那行）',
+        await objectsIn(U.room),
+        [`${U.chn}/cc-答案.pdf`, `${U.phy}/aa-题图.png`, `${U.phy}/dd-两个班.png`, `${U.room}/bb-夹具.png`].sort(),
+      )
+      ok(
+        '🔴 教室端读不到**别班**文件的对象（f7 是高一那个班的）',
+        !(await objectsIn(U.room)).includes(`${U.fresh}/ee-别班.png`),
+      )
+      ok(
+        '🔴 教室端读不到**没标班**文件的对象（f8 —— 老师自己留着的，教室里不该拿到）',
+        !(await objectsIn(U.room)).includes(`${U.phy}/ff-没归属.png`),
+      )
+      eq(
+        '🔴 物理老师读得到**同事**（语文老师）传给同一个班的那一份对象 —— 否则 Files 页里点「打开」没反应',
+        await objectsIn(U.phy),
+        [`${U.chn}/cc-答案.pdf`, `${U.phy}/aa-题图.png`, `${U.phy}/dd-两个班.png`, `${U.phy}/ff-没归属.png`, `${U.phy}/gg-老列.png`, `${U.room}/bb-夹具.png`].sort(),
+      )
+      eq(
+        '语文老师读得到 1 班的那几份（与表的读口径一致）、读不到物理老师没标班的那份',
+        await objectsIn(U.chn),
+        [`${U.chn}/cc-答案.pdf`, `${U.phy}/aa-题图.png`, `${U.phy}/dd-两个班.png`, `${U.room}/bb-夹具.png`].sort(),
+      )
+      eq('无身份新老师只读得到自己目录里的', await objectsIn(U.fresh), [`${U.fresh}/ee-别班.png`])
+      eq(
+        '（对照）超管读得到 5 个（有班级归属的那 5 份）—— 上面那些清单不是"恒真"（换个人读出来就不一样）',
+        (await objectsIn(U.super)).length,
+        5,
+      )
+      ok(
+        '🔴 连超管也**读不到那两份"没有班级归属"的对象**（它们只认上传者，与表的读口径逐条一致）',
+        !(await objectsIn(U.super)).includes(`${U.phy}/ff-没归属.png`) &&
+          !(await objectsIn(U.super)).includes(`${U.phy}/gg-老列.png`),
+        JSON.stringify(await objectsIn(U.super)),
+      )
+
+      // 反向对照：**写**那两条一个字没动（别为了放宽读把写也放了）
+      const delOther = await write(db, U.phy, { sql: `delete from storage.objects where name = $1 returning id`, values: [`${U.chn}/cc-答案.pdf`] })
+      denied('对照：老师**删不掉**别人目录下的对象（写策略没被放宽）', delOther)
+      const roomDel = await write(db, U.room, { sql: `delete from storage.objects where name = $1 returning id`, values: [`${U.phy}/aa-题图.png`] })
+      denied('🔴 对照：教室端**删不掉**老师那份对象（读得到，但写一律拒 —— 所以"取走即删"做不到）', roomDel)
+      const roomPutOther = await write(db, U.room, { sql: `insert into storage.objects (bucket_id, name) values ('classroom-files', $1) returning id`, values: [`${U.phy}/教室端想塞的东西.png`] })
+      denied('🔴 对照：教室端往**老师的目录**里插对象 → 被拒', roomPutOther)
+      /*
+       * ⚠️ 这一条钉的是**既有行为**（不是本次改动带来的）：桶的三条策略是**按路径第一段**判归属的，
+       *    所以任何登录者都能往**自己目录**里塞对象 —— 教室端账号也不例外。
+       *    它为什么没造成"教室里多出东西"：**它建不出 shared_files 那一行**（§17.6 三条 restrictive），
+       *    而列表读的是表、不是桶。钉在这里是为了"以后谁改了它会红"，不是"这是对的"。
+       */
+      const roomPutOwn = await write(db, U.room, { sql: `insert into storage.objects (bucket_id, name) values ('classroom-files', $1) returning id`, values: [`${U.room}/教室端自己目录里的.png`] })
+      allowed('（既有行为）教室端能往**自己目录**插对象，但建不出元数据行 —— 所以列表里永远看不到它', roomPutOwn)
     }
 
     /* ============================================================
@@ -1541,7 +1745,7 @@ await withLock(async () => {
          order by 1`)
       eq('🔴 §18.5：所有 `*_for` 判据对 authenticated / anon 都 revoke 了（一个都不能执行）', forFns.rows.map((r) => r.proname), [])
       const forCount = await db.query(`select count(*)::int as n from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' and p.proname like '%\\_for'`)
-      eq('`_for` 变体一共 12 个（id 变体也算判据的两件套 —— 新增判据别只写裸版）', Number(forCount.rows[0].n), 12)
+      eq('`_for` 变体一共 13 个（id 变体也算判据的两件套 —— 新增判据别只写裸版；§19 新增了 can_share_file_to_class_for）', Number(forCount.rows[0].n), 13)
       const hasBare = await db.query(`select has_function_privilege('authenticated', 'public.can_edit_exam(uuid[], text, text)', 'EXECUTE') as v`)
       eq('裸版 can_edit_exam 对 authenticated **有** EXECUTE（策略要调它）', Boolean(hasBare.rows[0].v), true)
       const hasFor = await db.query(`select has_function_privilege('authenticated', 'public.can_edit_exam_for(uuid, uuid[], text, text)', 'EXECUTE') as v`)
@@ -1652,6 +1856,164 @@ await withLock(async () => {
         '🔴 exams / exam_scores 的任何一条策略里都**不出现** classroom_accounts（教室端绝无写权限）',
         exPol.rows.every((x) => !/classroom_accounts/.test(x.body)),
         exPol.rows.filter((x) => /classroom_accounts/.test(x.body)).map((x) => x.policyname).join(','),
+      )
+    }
+
+    /* ============================================================
+       十四、教师端 → 教室端：文件的**班级归属**（`schema.sql` §19，2026-09-28）
+       ------------------------------------------------------------
+       为什么单开一节：在这一节之前，`shared_files` 上只有一条 `for all`（§9），
+       教室端**读不到老师上传的行**（列表恒为空、**而且不报错**），教师之间也互相看不到对方的材料。
+       这条链路在**本地演示模式下完全正常**（本地不走 RLS），所以它只能靠这一节守 ——
+       `shots.mjs` 永远覆盖不到它（dev 下没有 Supabase 变量，那一页渲染的是"还没连接云端"）。
+       四件事：① 归属判据（两件套）② 逐身份读矩阵 ③ "只能发给自己的班"的写守卫 ④ 老数据搬迁。
+       第五件事（**存储对象那一侧的读**）在**第十二节**：行读通了、字节读不通一样是白修。
+       负向对照（`schema.sql` 里改的是内存文本，仓库文件不动）：
+         · `RLS_NEGATIVE=file-read-wider`  —— 读策略改成恒真（谁都能读所有文件）→ 必须红；
+         · `RLS_NEGATIVE=file-read-closed` —— 读策略改成恒假（教室端又变成空列表）→ 必须红；
+         · `RLS_NEGATIVE=file-object-wider` —— 存储对象的读策略改成恒真（直链谁都能签）→ 必须红。
+       ============================================================ */
+
+    section('十四、文件的班级归属（§19：读得通 + 只能发给自己的班 + 老数据搬迁）')
+    {
+      const sorted = (a) => [...a].sort()
+      const fileIds = (uid) => idsAs(db, uid, `select id from shared_files order by id`)
+      const share = (uid, cid) =>
+        db.query(`select can_share_file_to_class_for($1, $2) as v`, [uid, cid]).then((r) => Boolean(r.rows[0].v))
+      /** 裸版（读 auth.uid()）：只能"以某人的身份"问 */
+      const shareAs = (uid, cid) =>
+        asUser(db, uid, async () => Boolean((await db.query(`select can_share_file_to_class($1) as v`, [cid])).rows[0].v))
+
+      // ---- ① 归属判据：与 `classes_visible` 逐字同款（看得见这个班 · 或这个班是我建的）----
+      eq(
+        '归属判据：物理老师 → 他教的两个班 true',
+        [await share(U.phy, C.c1), await share(U.phy, C.c2)],
+        [true, true],
+      )
+      eq('归属判据：物理老师 → 别班（高三 1 班，他不教、也不是他建的）false', await share(U.phy, C.c3), false)
+      eq(
+        '🔴 归属判据：无身份新老师 → **自己建的班** true（少了这一支，他建的班自己反而发不进去 —— 与 §16.3.0 同一条纪律）',
+        await share(U.fresh, C.c4),
+        true,
+      )
+      eq('归属判据：无身份新老师 → 别人的班 false', await share(U.fresh, C.c1), false)
+      eq(
+        '归属判据：班主任 → 本班 true / 同年级别的班 false',
+        [await share(U.head, C.c1), await share(U.head, C.c2)],
+        [true, false],
+      )
+      eq(
+        '归属判据：年级主任 → 本年级两个班都 true',
+        [await share(U.grade, C.c1), await share(U.grade, C.c2)],
+        [true, true],
+      )
+      eq(
+        '归属判据：超管 / 教导处 → 任意班 true（兜底）',
+        [await share(U.super, C.c3), await share(U.admin, C.c3)],
+        [true, true],
+      )
+      eq(
+        '归属判据：教室端 → 本班 true（它确实"看得见这个班"）；写仍然被 §17.6 三条挡住 —— 两条闸各管一件事',
+        await share(U.room, C.c1),
+        true,
+      )
+      eq(
+        '薄包装等价：裸版（读 auth.uid()）与 _for 同结论',
+        [await shareAs(U.phy, C.c1), await shareAs(U.phy, C.c3)],
+        [true, false],
+      )
+      const shareNoLogin = await db.query(`select can_share_file_to_class($1) as v`, [C.c1])
+      eq(
+        '🔴 没有登录态（auth.uid() = NULL）时裸版恒 false —— 所以必须有 _for 变体（§18.1）',
+        Boolean(shareNoLogin.rows[0].v),
+        false,
+      )
+
+      // ---- ② 逐身份读矩阵（教室端那一半在第七节，这里看教师侧）----
+      eq(
+        '物理老师：自己传的（f1/f6/f8/f9）∪ 自己任教班的（f2 教室端名下那行 / f5 同班语文老师传的）',
+        await fileIds(U.phy),
+        sorted([F.f1, F.f2, F.f5, F.f6, F.f8, F.f9]),
+      )
+      eq(
+        '🔴 语文老师：看得见 1 班的全部（含**物理老师**传的 f1/f6）—— 同一个班的两位老师互相看得到材料',
+        await fileIds(U.chn),
+        sorted([F.f1, F.f2, F.f5, F.f6]),
+      )
+      eq('班主任（本班）：同上一份清单（读得宽，与 assignments/students 同口径）', await fileIds(U.head), sorted([F.f1, F.f2, F.f5, F.f6]))
+      eq('年级主任（本年级 = 1 班 + 4 班）：同样看得见这几份', await fileIds(U.grade), sorted([F.f1, F.f2, F.f5, F.f6]))
+      eq('无身份新老师：只看得到自己传的那一份（f7）', await fileIds(U.fresh), [F.f7])
+      ok(
+        '🔴 **没有班级归属**的那一份（f8）除了上传者谁都看不到（班主任也看不到 —— "无归属 = 教室端看不到"这条语义的另一面）',
+        !(await fileIds(U.head)).includes(F.f8) && !(await fileIds(U.grade)).includes(F.f8),
+        `班主任读到 ${JSON.stringify(await fileIds(U.head))}`,
+      )
+      ok('🔴 别班的文件（f7 是高一那个班的）物理老师看不到', !(await fileIds(U.phy)).includes(F.f7))
+      ok('🔴 老形状那一行（f9：只写了老列 class_id、class_ids 还空着）在搬迁之前谁都看不到（上传者除外）', !(await fileIds(U.head)).includes(F.f9))
+
+      // ---- ③ 写：只能把文件归到自己看得见的班（判据在数据库，不在前端）----
+      const fileRow2 = (o) => ({
+        id: o.id,
+        teacher_id: o.teacherId,
+        class_ids: o.classIds ?? [],
+        name: o.name ?? '新传的题图.png',
+        mime: 'image/png',
+        size: 1234,
+        storage_path: `${o.teacherId}/hh-新传.png`,
+      })
+
+      let r = await write(db, U.phy, insertSql('shared_files', fileRow2({ id: mk('f0', 90), teacherId: U.phy, classIds: [C.c1] })))
+      allowed('物理老师上传到**自己教的班**（1 班）→ 通过', r)
+      r = await write(db, U.phy, insertSql('shared_files', fileRow2({ id: mk('f0', 91), teacherId: U.phy, classIds: [C.c1, C.c2] })))
+      allowed('🔴 物理老师**一次发给两个班**（1 班 + 4 班，两个都是他教的）→ 通过（多选那条语义落到了策略上）', r)
+      r = await write(db, U.phy, insertSql('shared_files', fileRow2({ id: mk('f0', 92), teacherId: U.phy, classIds: [C.c1, C.c3] })))
+      denied('🔴 一个班是自己教的、另一个不是 → **整条被拒**（数组里每一个都要过判据）', r)
+      r = await write(db, U.phy, insertSql('shared_files', fileRow2({ id: mk('f0', 93), teacherId: U.phy, classIds: [C.c3] })))
+      denied('🔴 物理老师想把文件发给**自己看不见的班**（高三 1 班）→ 被拒（前端也不会列出来，但判据在数据库）', r)
+      r = await write(db, U.phy, insertSql('shared_files', fileRow2({ id: mk('f0', 94), teacherId: U.phy, classIds: [] })))
+      allowed('物理老师传一份**不指定班级**的（只有自己看得见）→ 通过（空归属是合法状态，不是"必填校验"）', r)
+      r = await write(db, U.fresh, insertSql('shared_files', fileRow2({ id: mk('f0', 95), teacherId: U.fresh, classIds: [C.c4] })))
+      allowed('🔴 无身份新老师发给自己**建的**班 → 通过（写判据与读判据同款，不能比他看得见的更窄）', r)
+      r = await write(db, U.admin, insertSql('shared_files', fileRow2({ id: mk('f0', 96), teacherId: U.admin, classIds: [C.c3] })))
+      allowed('教导处发给任意班 → 通过（兜底）', r)
+      r = await write(db, U.phy, { sql: `update shared_files set class_ids = array[$1]::uuid[] where id = $2 returning id`, values: [C.c3, F.f1] })
+      denied('🔴 老师**改**自己那行的归属、把它挪到自己看不见的班 → 被拒（using 与 with check 同款，I28）', r)
+      r = await write(db, U.phy, { sql: `update shared_files set class_ids = array[$1, $2]::uuid[] where id = $3 returning id`, values: [C.c1, C.c2, F.f1] })
+      allowed('对照：老师把自己那行改成"两个自己教的班" → 通过（守卫没有误伤正常改法）', r)
+      r = await write(db, U.room, insertSql('shared_files', fileRow2({ id: mk('f0', 97), teacherId: U.room, classIds: [C.c1] })))
+      denied('🔴 教室端上传（judgment 那一层它是 true：本班）→ 仍被 §17.6 三条 restrictive 拒掉', r)
+
+      /*
+       * ---- ④ 老数据搬迁（§19.2）：只搬 `class_id` 非空的那一批 ----
+       *
+       * 这一段**真的把那句 SQL 跑一遍**（从 schema 原文里切出来，跑的是仓库里那一句，
+       * 不是脚本里手抄的一份 —— 与 §16 的 A/B 切分同一个手法）。
+       * 它跑在 B 库上、在**所有读断言之后**，所以不会影响上面的矩阵。
+       * ⚠️ 跑它的身份是**属主**（没有 RLS）—— 与在 Supabase SQL 编辑器里跑本节是同一种情形。
+       */
+      const backfillRe = /update shared_files\n\s+set class_ids = array\[class_id\][\s\S]*?;\n/
+      const backfill = RAW_SCHEMA.match(backfillRe)
+      if (!backfill) throw new Error('§19.2 的搬迁 SQL 找不到（schema.sql 里那句 update 被改写了？）')
+
+      const before9 = await db.query(`select class_ids from shared_files where id = $1`, [F.f9])
+      eq('搬迁前：老形状那一行（f9）的 class_ids 还是空的', before9.rows[0].class_ids, [])
+      await db.exec(backfill[0])
+      const after9 = await db.query(`select class_ids from shared_files where id = $1`, [F.f9])
+      eq('🔴 搬迁：`class_id` 非空的老行填上了那一个班（f9 → [高三 1 班]）', after9.rows[0].class_ids, [C.c3])
+      const after8 = await db.query(`select class_ids from shared_files where id = $1`, [F.f8])
+      eq('🔴 搬迁：`class_id` 为空的老行**一个字不动**（f8 仍是空归属 = 教室端看不到，绝不猜一个班）', after8.rows[0].class_ids, [])
+      await db.exec(backfill[0])
+      const again8 = await db.query(`select class_ids from shared_files where id = $1`, [F.f8])
+      const again9 = await db.query(`select class_ids from shared_files where id = $1`, [F.f9])
+      eq(
+        '搬迁可以重跑（幂等）：空归属照旧留空、搬过的不会被改回去',
+        [again8.rows[0].class_ids, again9.rows[0].class_ids],
+        [[], [C.c3]],
+      )
+      // 搬迁之后：那一行仍然只归**高三**，教室端（高二 1 班）照旧看不到
+      ok(
+        '搬迁之后教室端仍然看不到它（归属是高三 1 班，不是本班）',
+        !(await idsAs(db, U.room, `select id from shared_files order by id`)).includes(F.f9),
       )
     }
 

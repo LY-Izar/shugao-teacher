@@ -94,15 +94,23 @@ await withLock(async () => {
        ============================================================ */
 
     /*
-     * 兼容期的新列：学科那两列（第 12 段）+ `classes.grade_id`（第 10 段）。
-     * 三列同一条纪律：**列不存在就不许出现在载荷里**（否则整条 upsert 被 PostgREST 拒掉）。
+     * 兼容期的新列：学科那两列（第 12 段）+ `classes.grade_id`（第 10 段）
+     * + `shared_files.class_ids`（第 19 段，2026-09-28）。
+     * 同一批纪律：**列不存在就不许出现在载荷里**（否则整条 upsert / insert 被 PostgREST 拒掉）。
      */
     const NEW_COL = {
       assignments: 'subject_code',
       teachers: 'primary_subject_code',
       classes: 'grade_id',
+      shared_files: 'class_ids',
     }
-    const WRITE_TABLES = ['teachers', 'classes', 'students', 'assignments', 'schedule_items', 'classrooms', 'calls']
+    const WRITE_TABLES = ['teachers', 'classes', 'students', 'assignments', 'schedule_items', 'classrooms', 'calls', 'shared_files']
+
+    /**
+     * `shared_files` 的读结果（第五节用）：`remote` 那一层读的是 `.select('*')`，
+     * 列不存在时**只是没有那个键**、不报错 —— 这里就照那个形状喂。
+     */
+    let FILE_ROWS = []
 
     /** 'present' | 'missing-cols' */
     let MODE = 'present'
@@ -164,6 +172,16 @@ await withLock(async () => {
           res.end('{}')
           return
         }
+        /*
+         * 存储端点（`uploadFile` 会先把文件传上去）：回 200 + 一个 Key 就够。
+         * 不拦的话它会掉进下面那条 404（"表不存在"），`uploadFile` 会在上传这一步就抛错，
+         * 第五节的"写载荷"就永远看不到了。
+         */
+        if (url.pathname.startsWith('/storage/v1/')) {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ Key: `classroom-files/${url.pathname.split('/').slice(4).join('/')}` }))
+          return
+        }
         if (!WRITE_TABLES.includes(table)) {
           // 年级表只读（前端拿它把班级里的年级文本换成 grade_id）—— 见第四节
           if (table === 'grades' && req.method === 'GET') {
@@ -185,7 +203,7 @@ await withLock(async () => {
             res.end(JSON.stringify(columnMissingBody(table, probed)))
             return
           }
-          // 写：载荷里带上不存在的列 → 整条 upsert 被拒
+          // 写：载荷里带上不存在的列 → 整条 upsert / insert 被拒
           if (req.method !== 'GET' && newColInPayload(table, body)) {
             res.writeHead(400, { 'content-type': 'application/json' })
             res.end(JSON.stringify(columnMissingBody(table, NEW_COL[table])))
@@ -194,13 +212,22 @@ await withLock(async () => {
         }
 
         if (req.method === 'GET') {
+          // 文件列表：喂 FILE_ROWS（第五节用它验"列不存在时读也不崩、classIds 兜底成空数组"）
           res.writeHead(200, { 'content-type': 'application/json' })
-          res.end('[]')
+          res.end(JSON.stringify(table === 'shared_files' ? FILE_ROWS : []))
           return
         }
         const rows = Array.isArray(body) ? body : body && typeof body === 'object' ? [body] : []
+        /*
+         * 回显。真实 PostgREST 在 `.single()`（Accept: application/vnd.pgrst.object+json）
+         * 时回**一个对象**、否则回数组；而 `uploadFile` 走的是 `.select().single()`。
+         * 这里把载荷原样回显（补上 id / created_at 两个服务端默认值）——
+         * 于是 `rowToFile()` 的映射也能被断言（第五节），不只是"请求发出去了"。
+         */
+        const echo = rows.map((r) => ({ ...r, id: r?.id ?? crypto.randomUUID(), created_at: r?.created_at ?? new Date().toISOString() }))
+        const wantsObject = String(req.headers.accept ?? '').includes('vnd.pgrst.object')
         res.writeHead(201, { 'content-type': 'application/json' })
-        res.end(JSON.stringify(rows.map((r) => ({ id: r?.id ?? null }))))
+        res.end(JSON.stringify(wantsObject ? (echo[0] ?? null) : echo))
       })
     })
 
@@ -677,6 +704,116 @@ await withLock(async () => {
           { id: GRADE_GAO2, name: '高二' },
           { id: GRADE_GAO3, name: '高三' },
         ]
+      }
+
+      /* ============================================================
+         五、文件的班级归属（`shared_files.class_ids`，schema.sql §19，2026-09-28）
+         ------------------------------------------------------------
+         为什么单独一节：它是**又一条"新列 + 老库"的路**，而且比学科列更狠 ——
+         学科列写错了只是偏一科，归属这一列写错/漏写就是"**传了但教室里看不见**"
+         （本轮要修的那个缺口的原样重演），而且**一个字都不报**。
+         三条纪律：
+           ① 列在 → 写数组（一个文件可以同时属于几个班）；
+           ② 列不在 → **不带这一列**（带上一列不存在的列，整条 insert 被 PostgREST 拒 → 刷新即丢），
+              改走老列 `class_id`（单个班），跑完 §19 再搬（§19.2）；
+           ③ 列不在 + 选了**两个以上**的班 → **当场报错**，绝不静默只存一个。
+         跑的是仓库里真的 `src/lib/files.ts` + 真的 supabase-js（只把服务端换成假的）。
+         ============================================================ */
+
+      section('五、文件班级归属（class_ids，§19）：列在写数组 · 列不在就不带 · 多选+老库要报错')
+      {
+        const CLS_A = '99999999-9999-4999-8999-999999999991'
+        const CLS_B = '99999999-9999-4999-8999-999999999992'
+        /** 一个最小的"文件"：只要求 size / name / type 三样（Node 24 里 File 是全局的） */
+        const PNG = () => new File([new Uint8Array([137, 80, 78, 71])], '题图.png', { type: 'image/png' })
+        const fileWrites = () => requests.filter((r) => r.method !== 'GET' && r.path.split('/')[0] === 'shared_files')
+
+        // ---- ① 列存在（跑过 §19）：归属写进数组，老列一个字都不写 ----
+        MODE = 'present'
+        const FA = await import(mod('src/lib/files.ts', '?files=1'))
+        eq('探测：class_ids 这一列在 → { classIds: true }', await FA.ensureFileClassCols(), { classIds: true })
+
+        requests.length = 0
+        const up1 = await FA.uploadFile(PNG(), FAKE_UID, [CLS_A, CLS_B])
+        const put1 = lastPayload('shared_files')
+        eq('🔴 载荷带上了 class_ids（两个班都在 —— 这就是"一个课件几个班都能看"）', put1?.class_ids, [CLS_A, CLS_B])
+        ok(
+          '载荷里**没有**老列 class_id（一个字段一种语义：归属只在 class_ids 一处）',
+          Boolean(put1) && !('class_id' in put1),
+          JSON.stringify(put1?.class_id),
+        )
+        eq(
+          '载荷的其它列照旧（teacher_id / name / mime / size）',
+          { teacher_id: put1?.teacher_id, name: put1?.name, mime: put1?.mime, size: put1?.size },
+          { teacher_id: FAKE_UID, name: '题图.png', mime: 'image/png', size: 4 },
+        )
+        ok(
+          '存储路径仍按 `{teacher_id}/{uuid}-{文件名}`（§9 的桶策略就靠路径第一段判归属）',
+          String(put1?.storage_path ?? '').startsWith(`${FAKE_UID}/`),
+          String(put1?.storage_path),
+        )
+        eq('上传返回的那一行带着两个班（界面上那一行的归属显示不会错）', up1.classIds, [CLS_A, CLS_B])
+        eq('这一次上传只发了一条 shared_files 写请求', fileWrites().length, 1)
+
+        requests.length = 0
+        await FA.uploadFile(PNG(), FAKE_UID, [])
+        const put0 = lastPayload('shared_files')
+        eq('一个班都不选 → class_ids 写成**空数组**（不是 null：null 会让读策略判不出来）', put0?.class_ids, [])
+        eq(
+          '整场下来 class_ids 被写成 null 的次数 = 0',
+          nullSubjectWrites().filter((s) => s === 'shared_files.class_ids'),
+          [],
+        )
+
+        // ---- ② 列不存在（线上库还没跑 §19）：不带这一列、改走老列；多选要当场报错 ----
+        MODE = 'missing-cols'
+        const FB = await import(mod('src/lib/files.ts', '?files=2'))
+        eq('探测：列不存在 → { classIds: false }', await FB.ensureFileClassCols(), { classIds: false })
+
+        requests.length = 0
+        await FB.uploadFile(PNG(), FAKE_UID, [CLS_A])
+        const putOld = lastPayload('shared_files')
+        ok(
+          '🔴 列不存在：载荷里**不含** class_ids（否则整条 insert 被 PostgREST 拒 → 刷新即丢）',
+          Boolean(putOld) && !('class_ids' in putOld),
+          JSON.stringify(putOld?.class_ids),
+        )
+        eq('列不存在：单个班改走**老列** class_id（先留住数据，跑完 §19 由 §19.2 搬）', putOld?.class_id, CLS_A)
+        eq('这次上传没有被服务端拒（shared_files 写请求只有一条）', fileWrites().length, 1)
+
+        requests.length = 0
+        let multiErr = null
+        try {
+          await FB.uploadFile(PNG(), FAKE_UID, [CLS_A, CLS_B])
+        } catch (e) {
+          multiErr = e
+        }
+        ok(
+          '🔴 列不存在 + 选了**两个**班 → 当场报错（绝不静默只存一个班）',
+          Boolean(multiErr) && /只能选一个班/.test(String(multiErr?.message)),
+          String(multiErr?.message ?? '(没有报错 —— 这正是最坏的那种"以为发出去了")'),
+        )
+        ok('  报错文案里给出了下一步（schema.sql 第 19 段）', /第 19 段/.test(String(multiErr?.message ?? '')))
+        eq('🔴 报错时**一个请求都没发**（文件也没传上存储，不留孤儿）', requests.length, 0)
+
+        // ---- ③ 读：列不存在时不崩，classIds 兜底成空数组（= 未指派 · 教室端看不到）----
+        FILE_ROWS = [
+          { id: 'r1', name: '有的.png', mime: 'image/png', size: 10, class_ids: [CLS_A, CLS_B], storage_path: 'x/a.png', created_at: '2026-09-28T00:00:00Z' },
+          { id: 'r2', name: '没有归属的.png', mime: 'image/png', size: 20, class_ids: [], storage_path: 'x/b.png', created_at: '2026-09-28T00:00:00Z' },
+          // ⚠️ 老库（没跑 §19）读出来就是这个形状：**没有 class_ids 这个键**，而不是 null
+          { id: 'r3', name: '老库读出来的.png', mime: 'image/png', size: 30, class_id: CLS_A, storage_path: 'x/c.png', created_at: '2026-09-28T00:00:00Z' },
+        ]
+        const FC = await import(mod('src/lib/files.ts', '?files=3'))
+        const list = await FC.listFiles()
+        eq('读：有归属 / 空归属两行原样映射', [list[0]?.classIds, list[1]?.classIds], [[CLS_A, CLS_B], []])
+        eq(
+          '🔴 读：列不存在那一行**不报错**，classIds 兜底成空数组；老列 class_id **故意不兜底**（策略不看它，读了就是"界面显示一个班、教室端其实看不见"的分叉）',
+          [list.length, list[2]?.classIds],
+          [3, []],
+        )
+
+        FILE_ROWS = []
+        MODE = 'present'
       }
     } catch (e) {
       failures.push(`脚本自身出错：${e?.stack ?? e}`)

@@ -303,7 +303,12 @@ alter table calls replica identity full;
 create table if not exists shared_files (
   id            uuid primary key default gen_random_uuid(),
   teacher_id    uuid not null references teachers (id) on delete cascade,
-  -- 为空 = 所有班级可见；否则只给这个班
+  -- ⚠️ **老列，历史遗留**：旧界面是"给哪个班看（不选 = 所有班）"这个下拉框，所以
+  --    这一列为空曾经表示"所有班级可见"。**从 §19（2026-09-28）起这句话作废**：
+  --    班级归属改用 `class_ids uuid[]`（空数组 = 无归属 = 教室端看不到），
+  --    这一列**没有任何策略、也没有任何前端代码读它**，只剩两个作用：
+  --      ① §19.2 的搬迁来源（老师当时明确选过的那个班）；② "线上库还没跑 §19"时前端的兼容写入列。
+  --    别照下面这句老注释去理解现在的行为。
   class_id      uuid references classes (id) on delete cascade,
   name          text not null,
   mime          text not null default '',
@@ -328,7 +333,10 @@ insert into storage.buckets (id, name, public)
 values ('classroom-files', 'classroom-files', false)
 on conflict (id) do nothing;
 
--- 存储策略：只能读写自己目录下的文件
+-- 存储策略：读写**自己目录**下的文件。
+-- ⚠️ `classroom_files_read` 从 **§19.4.3（2026-09-28）** 起被**放宽了一次**（多一支
+--    "这一份文件我读得到那一行，就读得到这个对象"）—— 否则教室端读得到 `shared_files` 的行、
+--    却拿不到文件直链（"行读通了、字节读不通"）。**写（insert / delete）两条一个字没动。**
 drop policy if exists classroom_files_read on storage.objects;
 create policy classroom_files_read on storage.objects
   for select to authenticated
@@ -1719,6 +1727,10 @@ revoke all on exams, exam_scores from anon;
 --        （2026-09-25 收紧裂缝 A：`teachers`；2026-09-27 收紧裂缝 C：`shared_files`）。
 --        ⚠️ **两张表的原策略正文本身都没动**（`teachers_self` / `shared_files_own`
 --        仍是 `for all`）—— 理由见 §17 开头与 §17.6：加 AND 不放宽任何权限，拆 OR 会漏动作。
+--     · `shared_files` 另有 **§19**（2026-09-28，用户拍板 A）：**班级归属** `class_ids uuid[]`
+--       + 一条按班的读策略（看得见这个班的人读得到本班的文件 —— 教室端那一半就靠它）
+--       + 两条"只能发给自己的班"的归属写守卫。读矩阵见 `功能设计与不变量.md` §十九。
+--       ⚠️ `shared_files_own` 仍然**一个字没动**：它给的那条读（自己传的）与 §19 的读是 **OR**。
 --   teacher_roles / class_subjects / classroom_accounts / subjects / schools / grades：
 --     只读（§10.4 / §12.1），写一律走服务端 `functions/api/*`（service_role），
 --     数据库这一层**不 grant** insert/update/delete —— 免得同一个动作有两个入口
@@ -2439,12 +2451,16 @@ create policy shared_files_not_classroom_delete on shared_files
   as restrictive for delete to authenticated
   using (not is_classroom_account());
 
---  ⚠️ **收紧之后仍然存在的一件事（不是本轮引入的，别当成回归）**：
+--  ✅ **上面这件事已经在 §19（2026-09-28）修掉了** —— 下面这段留档留着，是为了说明
+--     "当时为什么只收写、没动读"，别再照它去怀疑现在的行为：
 --     `shared_files_own` 只给"自己传的那一行"，所以云端模式下
 --     **教室端读不到老师上传的行**（教师 A 也读不到教师 B 的行）——
 --     "教师端 → 教室端的文件互传"这条路在**读**这一侧本来就不成立（§9 的老形状）。
---     本轮按用户口径只收紧"写"，**没有动读**（动读要另拍板、且要连着客户端一起改）。
---     发现与影响写在 `功能设计与不变量.md` §十七·补 的补.4。
+--     上一轮按用户口径只收紧"写"，**没有动读**（动读要另拍板、且要连着客户端一起改）。
+--     用户 2026-09-28 拍板 A（**按班隔离 + 上传时从自己的教学班多选**）之后，
+--     读这一侧由 **§19** 补齐：`shared_files_class_read`（看得见这个班的人读得到本班的文件）
+--     + 两条归属写守卫（只能发给自己的班）。当时的影响记录见
+--     `功能设计与不变量.md` §十七·补 的补.4 —— 那一节现在写的是「已修」。
 
 -- ============================================================
 --  18. 判据函数的 `_for` 变体（2026-09-27 补）：为什么每个判据都要两件套
@@ -2539,7 +2555,8 @@ create policy shared_files_not_classroom_delete on shared_files
 --  §16.2 `is_school_admin_for(uuid)` · `has_role_for(uuid, text)` · `can_manage_class_for(uuid, uuid)`
 --        · `teaches_in_class_for(uuid, uuid)` · `owns_class_for(uuid, uuid)`
 --        · `can_grade_subject_for(uuid, uuid, text, text)`
---  合计 **12 个**，**每一个后面都紧跟一句 `revoke all on function … from public, anon, authenticated`**。
+--  §19.4 **`can_share_file_to_class_for(uuid, uuid)`** ← 2026-09-28 新增（文件能发给哪个班）
+--  合计 **13 个**，**每一个后面都紧跟一句 `revoke all on function … from public, anon, authenticated`**。
 --  新增判据时四样一起加：`_for` + 裸版 + revoke + rls-checks 里至少一条断言（否则就是"加了没人钉"）。
 --
 -- -------- 18.6 这一段跑完之后，前端会怎样（"SQL 没跑也不崩"）--------
@@ -2548,4 +2565,267 @@ create policy shared_files_not_classroom_delete on shared_files
 --    只是函数体改成转调 `can_edit_exam_for`）—— 多出来的只是"考试写判据第一次可以被验证"。
 --  · 回退（幂等，两行）：把 §15.2 的薄包装正文换回原来的 `with me as (select auth.uid() as uid) …`，
 --    再 `drop function if exists can_edit_exam_for(uuid, uuid[], text, text);`。
+
+-- ============================================================
+--  19. 共享文件的**班级归属**（2026-09-28）：教师端 → 教室端 的文件互传，**读**这一侧修通
+--
+--  来源：用户拍板 A —— 「一个老师可能会同时教几个班级，所以科任老师上传的时候
+--        需要从自己的教学班中选择，也可以多选」。
+--  §17.6 上一轮只收紧了**写**，读一个字没动，并把"读这一侧本来就不通"留了档
+--  （见 §17.6 末尾那段）。**这一节就是那件事的收尾**。
+--
+--  为什么非修不可（上一轮 `npm run rls-checks` 实测出来的缺口，不是读代码猜的）：
+--    `shared_files` 上**只有一条**策略 `shared_files_own`（§9）
+--    = `for all ... teacher_id = auth.uid()`，意思是"只能看**自己传的**那一行"。后果两条：
+--      · 教室端 `listFiles()` 拉到的**永远是空列表，而且不报错**（`Classroom.tsx`）——
+--        本地演示模式看不出来（本地不走 RLS），**一到云端就是"传了但教室里看不见"**；
+--      · 两位老师互相看不到对方给同一个班传的材料（同一张卷子得各传一次）。
+--
+--  ⚠️ 这一节**只做加法**：`shared_files_own` 的正文一个字不动（它一条 `for all` 同时给着
+--     "读自己那行"与"写自己那行"两条路），§17.6 那三条"教室端不算教师"的 restrictive 也不动。
+--     新增的是：一条**班级归属的读策略**、一个**归属判据**、两条把归属收在自己班里的写守卫，
+--     外加**存储对象那一侧的读**放宽一次（19.4.3 —— 少了它，"行读通了、字节还是读不通"）。
+--     本段可重复执行（幂等）。
+--
+--  -------- 19.1 数据模型：为什么是 `class_ids uuid[]` --------
+--  三个候选，选第一个：
+--    ① **`class_ids uuid[]`（选它）**：一个文件一行、一份存储对象，班级归属是**这一行的属性**。
+--       "同一个课件传一次、几个班都能看"落到库里就是"这一行的数组里有几个班"。
+--    ② 关联表 `shared_file_classes(file_id, class_id)`：更范式化，但代价是
+--       a) 读策略要跨表 `exists`；b) `shared_files_own` 给不了关联表的权限，
+--          得再给关联表写一整套读/写策略 —— **判据从一个变两个**（本项目反复踩过的坑，§十）；
+--       c) 教室端每次列表都要多一次 join。这一节要修的是"读不通"，不值得顺手把判据拆成两处。
+--    ③ 一个班一行（把文件摊成 N 行）：**直接排除**。云端那份存储对象只有一份，而教室端
+--       "取回本机"是按行处理的 —— 第一个班取走就会牵动另一个班（"几个班都能看"当场不成立），
+--       而且每行都要各算一次存储路径。
+--
+--  `class_ids` 的语义（**钉死，改它之前先读这里；回归也钉着它**）：
+--    · **空数组 = 没有任何班级归属**：只有上传者自己看得见（教师端列表里显示「未指派班级」），
+--      **教室端看不到** —— 这是**最安全**的那个解释。
+--      ⚠️ §9 老列 `class_id` 那句注释（"为空 = 所有班级可见"）**从本节起作废**：
+--      本节之后**没有任何策略、也没有任何前端代码读 `class_id`**（见 19.2）。
+--    · 数组里出现"已删掉的班"的 id 是**无害**的：`&& visible_class_ids()` 匹配不上，
+--      等于无归属，不会泄漏给任何人。
+--    · 数组**建不了外键**（Postgres 的数组列不支持）—— 所以删班**不会**级联删文件行。
+--      老列 `class_id` 的 `on delete cascade` 因此只对"那一列还写着这个班"的老行有效。
+--      ⚠️ 这是**有意的**：删班（W30 连二次确认都没有）不该顺手删掉老师传上来的课件。
+--      留下的"指向已删班"的 id 就是上一条说的无害形状；要清理跑 19.5 的自检 ③。
+--
+--  -------- 19.2 老数据：空归属 = 教室端看不到；只搬"老师明确选过的那一个班" --------
+--  · `class_ids` 加列时带 `not null default '{}'` → **所有老行一律是"无归属"**（教室端看不到）。
+--  · 唯一会被搬的是 `class_id` **非空**的老行 —— 那是老师上传时在旧下拉框里
+--    **明确选过**的一个班（旧界面的默认值是"所有班级"= 空，所以非空的一定是手选的）。
+--    **这不是猜**：
+--      - 空的一律留空（旧语义"所有班级可见"从本节起作废；**绝不**解释成"所有班都发"，
+--        那会把一份旧课件同时捅进每一个教室，"最安全"的选择就是不猜）；
+--      - 非空的是一个**已经躺在库里的显式选择**。不搬的话，这些文件（以及"线上库还没跑本节时
+--        上传的文件"，见 19.6 那条兼容路径）会在跑完本节之后**静默地**永远进不了教室 ——
+--        而那正是这一节要修的那个毛病。
+--  · 想改成"一个都不搬"？把下面那条 `update` 注释掉再跑即可。它的条件是
+--    `class_ids = '{}'`，而新前端**不再写 `class_id`**（那一列从此一直是 NULL），
+--    所以"`class_id` 非空 + `class_ids` 为空"这种形状只可能来自"本节还没跑时的老形状"——
+--    重跑这条 `update` 只会把它们补上，不会覆盖老师故意留空的归属。
+--
+--  -------- 19.3 读策略：看得见这个班的人，就看得见这个班的文件 --------
+--  🔴 判据用 `visible_class_ids()`（**同一件事只有一个判定入口**）：
+--    · 教室端 → 它的班（§10.3 `visible_class_ids_for` 里"教室端：本班"那一支）；
+--    · 任课老师 → 他任教的班（同一个函数里 `class_subjects` 那一支）；
+--    · 班主任 / 年级主任 / 教导处 / 超管 → 各自"看得见"的范围（**读得宽**，
+--      与 `assignments_visible` / `students_visible` / `calls_visible` 完全同一口径）。
+--    换成"只给任教老师"（`teaches_in_class`）是**另一套口径**：班主任打开本班材料会什么都看不到，
+--    而且它和"班级列表里看得见的班"从此分叉 —— 本项目最忌讳的那种分叉。
+--  ⚠️ 这里**没有**新写 `_for` 判据：复用的是既有判据（I33 要求的是"**新增**判据要两件套"）。
+--
+--  -------- 19.4 写的守卫：**只能把文件归到自己看得见的班**（判据在数据库，不在前端）----
+--  19.4.1 判据 `can_share_file_to_class()` = "这个班在**我的班级列表**里"，
+--         定义与 `classes_visible`（§16.3.0）**逐字同款**：
+--         `id in (select visible_class_ids()) or teacher_id = auth.uid()`。
+--  🔴 **为什么必须同款**：上传界面里的班级列表就是 `store.classes` = 数据库按
+--     `classes_visible` 筛过的那一份（§11.3「前端不另写过滤」）。两边只要差一支，
+--     就会出现"列表里有这个班、勾了它却存不进去（RLS 报错）"——**同一件事两个判定入口**的
+--     典型症状。反面同样要防：写判据比读宽 = "能把文件发给自己看不见的班"，
+--     而教室端会照单全收（那块屏是给学生看的）。
+--  🔴 **为什么写这一层**（而不是"前端只列自己的班就够了"）：§17.2 裂缝 B 的结论——
+--     前端走不到不等于策略清单上成立，而策略清单是这个项目的安全边界说明书。
+--     `shared_files_own` 只要求"行是我的"，**不关心**归属写给谁；不补这一层，
+--     任何一位老师都能把文件归到任意一个班（一份没有判据的写入路径）。
+--
+--  -------- 19.5 自检（把下面整段粘进 SQL 编辑器跑）--------
+--  ① 这次搬迁动了什么（跑本节**之前**先看一眼预期，跑完再对一眼）：
+-- select '有明确班级归属（class_id 非空）的老文件' as 检查项, count(*)::text as 值
+--   from shared_files where class_id is not null
+-- union all
+-- select '其中 class_ids 已填上（跑过本节）', count(*)::text from shared_files
+--   where class_id is not null and class_ids <> '{}'::uuid[];
+--  ② 现在"教室端看不到"的文件有几份（空归属 = 只有上传者自己看得见）：
+-- select f.id, f.name, t.name as 上传者 from shared_files f
+--   left join teachers t on t.id = f.teacher_id
+--  where coalesce(f.class_ids, '{}'::uuid[]) = '{}'::uuid[] order by f.created_at desc;
+--  期望：跑完本节之后这里只剩"老师故意没选班"的那些 —— 每一条在教师端上传页里都写着「未指派班级」。
+--  ③ 归属指向了已删的班（无害，教室端谁也看不到；要清理就删掉这些 id）：
+-- select f.id, f.name, f.class_ids from shared_files f
+--  where exists (select 1 from unnest(f.class_ids) as cid
+--                 where not exists (select 1 from classes c where c.id = cid));
+--  ④ 逐人核对"谁能看见哪些文件"（`_for` 变体的用处，见 §18.1）：
+-- select t.name as 老师,
+--        (select count(*) from shared_files f
+--          where coalesce(f.class_ids,'{}'::uuid[]) && array(select visible_class_ids_for(t.id))) as 他看得见的文件数
+--   from teachers t order by 1;
+--
+--  -------- 19.6 这一段跑之前 / 跑之后，前端会怎样（"SQL 没跑也不崩"）--------
+--  与 §12.4 / §15.6 同一套纪律，落在 `app/src/lib/files.ts` 的 `ensureFileClassCols()`：
+--   · **没跑本节**：探测到 `class_ids` 这一列不存在 →
+--        - 写：**不带**这一列（带上一列不存在的列，整条 insert 会被 PostgREST 拒掉，
+--          而本项目是"保存失败 = 刷新即丢"），改**只带老列 `class_id`**（单个班时）；
+--          选了**两个以上**的班 → **明确报错**，绝不静默只存一个（19.5 ② 那种"以为发出去了"最坏）；
+--        - 读：`select('*')` 读不到那个键**不报错**，`classIds` 兜底成空数组；
+--        - 教室端照旧看不到老师的文件 —— 这正是本节要修的那半边，跑之前别指望它好。
+--   · **跑了本节**：教室端只见本班；教师见得"自己传的 ∪ 自己班的"（**含同事传的，而且点得开** ——
+--     19.4.3 那一支就是给"点得开"用的）；多选生效。**前端一行都不用改**（探测自动切换）。
+--
+--  -------- 19.7 回退（幂等）--------
+-- drop policy if exists shared_files_class_read on shared_files;
+-- drop policy if exists shared_files_class_scope_insert on shared_files;
+-- drop policy if exists shared_files_class_scope_update on shared_files;
+-- drop index if exists shared_files_class_ids_idx;
+-- drop function if exists can_share_file_to_class(uuid);
+-- drop function if exists can_share_file_to_class_for(uuid, uuid);
+-- 列可以留着（前端探到列在就会写它，留着不影响任何权限）；
+-- 但要让教室端重新看不见，**读策略那一条必须删掉**。
+-- ⚠️ 存储那一条（19.4.3）要单独回退：把 §9 的 `classroom_files_read` 正文
+--    （`drop policy` + `create policy` 两句）**重新跑一遍**即可 —— 它是幂等的。
+--
+--  -------- 19.8 这一段**不做**什么（免得后来的人以为漏了）--------
+--  · `shared_files_own`、§17.6 三条 restrictive **一个字没动**；
+--    存储那一侧**只放宽了读**（19.4.3）：`classroom_files_insert` / `classroom_files_delete`
+--    两条写策略**原样**，对象的路径约定 `{teacher_id}/…` 也没变；
+--  · **不做**"教室端取走之后自动删云端那一行"：教室端是**零写权限**（§17.6，用户拍板），
+--    它删不掉那一行（DELETE 被策略筛成 0 行，而且**不报错**），**也删不掉桶里那份对象**。
+--    所以本节之后云端那份会**留着** —— 多班共用本来也必须留着。教师端「教室端文件」里的
+--    删除按钮是唯一的清理入口，上传页的老文案"教室里取走后就从云端删除"已按实际改掉
+--    （见 `功能设计与不变量.md` §十九）；
+--  · **不做**"哪台教室端取过了"的追踪（要教室端写标记 = 又给它写权限）；
+--  · **不做**走班 / 教学班（阶段 4）：这里只认 `classes`（行政班），与 §16.9 第 7 条的留档一致；
+--  · **不做**"给无归属的老文件自动找一个班"（19.2 只搬 `class_id` 非空那一批，其余留空）。
+-- ============================================================
+
+-- -------- 19.1 加列（幂等）+ 索引 --------
+-- `not null default '{}'` 一次到位：**老行全部落到"无归属"**（教室端看不到，19.2）。
+alter table shared_files
+  add column if not exists class_ids uuid[] not null default '{}';
+
+-- 归属数组的查询用 `&&`，给它一个 GIN 索引
+create index if not exists shared_files_class_ids_idx on shared_files using gin (class_ids);
+
+-- -------- 19.2 搬迁：只搬"老师明确选过的那一个班"（class_id 非空）--------
+update shared_files
+   set class_ids = array[class_id]
+ where class_id is not null
+   and coalesce(class_ids, '{}'::uuid[]) = '{}'::uuid[];
+
+-- -------- 19.3 读：本班的文件，教室里那块屏要看得到 --------
+--  这是本节的核心一条。**没有 SELECT 之前，教室端的文件列表恒为空且不报错。**
+--  ⚠️ 它是 permissive（默认）—— 与 `shared_files_own` 之间是 **OR**：
+--     "自己传的"（老路）∪"自己班的"（新路），一条都没被拿掉。
+drop policy if exists shared_files_class_read on shared_files;
+create policy shared_files_class_read on shared_files
+  for select to authenticated
+  using (coalesce(class_ids, '{}'::uuid[]) && array(select visible_class_ids()));
+
+-- -------- 19.4 写：归属只能落在"我看得见的班"上 --------
+--  19.4.1 判据**两件套**（I33：`_for` 是函数体、显式传人、**一律 revoke**；
+--         裸版读 `auth.uid()`，策略**只准**引用裸版）。
+--  ⚠️ 顺序：`create policy` 会**当场解析函数名**（§18.4 有实测），所以判据必须建在下面两条策略之前。
+create or replace function public.can_share_file_to_class_for(p_uid uuid, p_class_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1
+      from classes c
+     where c.id = p_class_id
+       -- 与 classes_visible（§16.3.0）**逐字同款**：看得见这个班 · 或者这个班是我建的
+       and (c.id in (select visible_class_ids_for(p_uid)) or c.teacher_id = p_uid)
+  );
+$$;
+
+revoke all on function can_share_file_to_class_for(uuid, uuid) from public, anon, authenticated;
+
+create or replace function public.can_share_file_to_class(p_class_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$ select can_share_file_to_class_for(auth.uid(), p_class_id) $$;
+
+grant execute on function can_share_file_to_class(uuid) to authenticated;
+
+--  19.4.2 两条**逐动作 restrictive**（insert / update）：**AND 上去**，不放宽任何东西。
+--  ⚠️ 与 §17 同一个理由：**不拆** `shared_files_own` 那条 `for all`
+--     （拆 OR 漏一个动作 = "老师传完文件、刷新即丢且不报错"，§16.3 发现一）。
+--  ⚠️ **不含 SELECT**：restrictive 的 `using` 对 SELECT 同样生效，写成一条 `for all`
+--     会把"读"一起改掉（裂缝 A 就是这么踩的，§7.5 坑 1）。
+--  ⚠️ `bool_and` 对**空数组**是 NULL → `coalesce(..., true)`：不选班是合法状态（无归属）。
+drop policy if exists shared_files_class_scope_insert on shared_files;
+create policy shared_files_class_scope_insert on shared_files
+  as restrictive
+  for insert to authenticated
+  with check (
+    (select coalesce(bool_and(can_share_file_to_class(cid)), true)
+       from unnest(coalesce(class_ids, '{}'::uuid[])) as cid)
+  );
+
+drop policy if exists shared_files_class_scope_update on shared_files;
+create policy shared_files_class_scope_update on shared_files
+  as restrictive
+  for update to authenticated
+  using (
+    (select coalesce(bool_and(can_share_file_to_class(cid)), true)
+       from unnest(coalesce(class_ids, '{}'::uuid[])) as cid)
+  )
+  with check (
+    (select coalesce(bool_and(can_share_file_to_class(cid)), true)
+       from unnest(coalesce(class_ids, '{}'::uuid[])) as cid)
+  );
+
+-- -------- 19.4.3 🔴 存储那一侧：对象的**读**要跟着表走（不然"行读通了、字节读不通"）--------
+--  这是"教室端读不到老师上传的文件"的**另一半**，别漏：
+--    §9 的桶策略 `classroom_files_read` 只允许读**自己目录**下的对象
+--    （`(storage.foldername(name))[1] = auth.uid()`），而老师传的文件放在 `{老师的 uid}/…` 下面 ——
+--    于是教室端就算**读得到 `shared_files` 那一行**（19.3 的读策略），
+--    `createSignedUrl()` 也签不出直链：`files.ts` 的 `signedUrl()` 出错返回 null
+--    → `fetchBlob()` 返回 null → 教室里那一行**永远停在「待取回」，而且不报错**。
+--    （列表里看得见、点开没反应 —— 本项目最忌讳的那类"看起来正常其实坏了"。）
+--    `Files.tsx` 里老师点**同事**那一份的「打开」走的也是这条路，同样会被挡。
+--
+--  写法：**读哪个对象 = 读不读得到指向它的那一行** —— 把判据**委托**给 19.3，不另写一套：
+--      自己的目录  ∪  `shared_files` 里有一行的 `storage_path` 就是它（子查询以当前登录者求值，
+--      自动带上 `shared_files` 自己的 RLS）。
+--  所以"教室端看得见本班、老师看得见自己任教班"这套口径**自动一致**：
+--  以后改 19.3 不用回来改这里（同一件事只有一个判定入口）。
+--  ⚠️ **写（insert / delete）一个字没动**：还是只能在自己目录下动 ——
+--     教室端**依旧不能**往桶里写任何东西、也不能删老师那份对象（它删不掉，见 19.8）。
+--  🔴 **`f.storage_path = objects.name` 那个限定词不能省**（实测踩过）：
+--     `shared_files` 自己有一个 `name` 列，写成不带限定的 `= name` 时，
+--     SQL 会把它解析成**子查询里那个** `f.name`（就近作用域）→ 条件恒假 →
+--     整条 EXISTS 永远不成立，而**一条错都不报**（对象就是读不到，症状和没改一样）。
+drop policy if exists classroom_files_read on storage.objects;
+create policy classroom_files_read on storage.objects
+  for select to authenticated
+  using (
+    bucket_id = 'classroom-files'
+    and (
+      -- ① 自己目录下的（§9 的老规矩，原样保留：连"元数据行已经删掉、对象还在"的孤儿也读得到）
+      (storage.foldername(name))[1] = auth.uid()::text
+      -- ② 或者：这一份文件在 shared_files 里有一行**我读得到**（判据就那么一处，见 19.3）
+      or exists (select 1 from shared_files f where f.storage_path = objects.name)
+    )
+  );
+
+-- 赋权与 §9 一致（这一节不新增任何 grant）。
+-- ⚠️ 这里**故意不** grant 任何东西给 anon；`can_share_file_to_class_for` 已 revoke。
 

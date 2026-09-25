@@ -45,7 +45,6 @@ import { WEEKDAY_TEXT } from '../data/types'
 import {
   KIND_TEXT,
   canViewInline,
-  deleteFile,
   fetchBlob,
   humanSize,
   kindOf,
@@ -238,10 +237,16 @@ export default function Classroom() {
     ensureClassroom(klass.id, '一体机')
   }, [klass?.id, ensureClassroom]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  /* 教师传来的文件：拉到本机就立刻从云端删掉，云端只做中转 */
+  /* 教师传来的文件：教室端**只读**（零写权限，§17.6），拉到本机就存下来自己用 */
   const [cloudFiles, setCloudFiles] = useState<SharedFile[]>([])
   const [localFiles, setLocalFiles] = useState<LocalFile[]>([])
   const [pulling, setPulling] = useState('')
+  /**
+   * 读文件列表失败的原因。
+   * 🔴 **不能吞**（这里原来是 `catch { return }`）：屏上挂着"还没有文件"，
+   *    值班老师会以为"没人传"而不是"这台机器读不到" —— §9 那一整类"空态不报错也不说明"的坑。
+   */
+  const [filesErr, setFilesErr] = useState('')
 
   const refreshLocal = useCallback(async () => {
     try {
@@ -258,14 +263,24 @@ export default function Classroom() {
     const pull = async () => {
       let pending: SharedFile[] = []
       try {
-        pending = (await listFiles()).filter((f) => !f.classId || f.classId === klass?.id)
-      } catch {
+        /*
+         * 🔴 这里**不再**按班级过滤（原来是 `.filter((f) => !f.classId || f.classId === klass?.id)`）：
+         *    能读到哪些行由数据库的读策略说了算 —— `shared_files_class_read`（schema.sql §19.3）
+         *    把"本班的文件"给到这块屏。前端再筛一遍就是"同一件事两个判定入口"（§11.3）：
+         *    多选共用的文件会被筛掉，策略改口径时这里也跟着错。
+         */
+        pending = await listFiles()
+        if (alive) setFilesErr('')
+      } catch (e) {
+        if (alive) setFilesErr(e instanceof Error ? e.message : String(e))
         return
       }
       if (!alive) return
-      setCloudFiles(pending)
 
       const have = new Set((await allFiles()).map((f) => f.id))
+      // 「待取回」= 还没落到这台电脑上的那些（已经取回来的在下面本机列表里，不重复显示）
+      setCloudFiles(pending.filter((f) => !have.has(f.id)))
+
       for (const f of pending) {
         if (have.has(f.id) || !alive) continue
         setPulling(f.name)
@@ -280,15 +295,18 @@ export default function Classroom() {
             blob,
             savedAt: Date.now(),
           })
-          // 已经落到本机硬盘上了，云端这份就没必要留着
-          await deleteFile(f).catch(() => {})
+          /*
+           * ⚠️ 这里**故意不再**调 `deleteFile(f)`（原来那句是"落到本机就把云端那份删掉"）：
+           *    教室端是**零写权限**（schema.sql §17.6，用户拍板）—— 这一行不是它传的，
+           *    DELETE 会被策略静默筛成 0 行（连报错都没有），所以那句话**从来没有生效过**。
+           *    而多班共用的文件（同一个课件发给几个班）也**必须**留着云端那份：
+           *    第一个班取走就删，别的班就再也取不到了 —— 那正是"几个班都能看"的反面。
+           *    清理入口只有一个：教师端「教室端文件」里的删除按钮。
+           */
         }
         setPulling('')
       }
-      if (alive) {
-        setCloudFiles((await listFiles().catch(() => [])) as SharedFile[])
-        await refreshLocal()
-      }
+      if (alive) await refreshLocal()
     }
 
     void pull()
@@ -1766,10 +1784,38 @@ export default function Classroom() {
                       </div>
                     ) : null}
 
+                    {/*
+                      ⚠️ 读不到列表时**必须说出来**：这块屏挂在墙上没人盯，
+                      显示成"还没有文件"会被当成"老师没传"（而不是"这台机器读不到"）。
+                      这条以前是 `catch { return }`，一个字都不显示。
+                    */}
+                    {filesErr ? (
+                      <div
+                        className="px-3 py-2.5"
+                        style={{
+                          fontSize: 12,
+                          color: '***REMOVED***8f2b2b',
+                          background: 'var(--color-badsoft)',
+                          borderBottom: '1px solid ***REMOVED***f0c9c9',
+                          lineHeight: 1.7,
+                        }}
+                      >
+                        读不到文件列表：{filesErr}
+                        <br />
+                        每隔一分钟会自动重试一次。
+                      </div>
+                    ) : null}
+
                     {localFiles.length === 0 && cloudFiles.length === 0 ? (
                       <div className="px-3 py-4" style={{ fontSize: 12.5, color: 'var(--color-ink3)' }}>
-                        还没有文件。教师端在「我的 → 教室端文件」里上传，
-                        传过来会自动存到这台电脑上。
+                        {filesErr ? (
+                          '（这一栏现在是空的，不代表没人传 —— 见上面那行提示）'
+                        ) : (
+                          <>
+                            这个班还没有文件。教师端在「我的 → 教室端文件」里上传时勾上本班，
+                            传过来会自动存到这台电脑上。
+                          </>
+                        )}
                       </div>
                     ) : (
                       <>
@@ -1840,7 +1886,8 @@ export default function Classroom() {
                       lineHeight: 1.7,
                     }}
                   >
-                    文件已经存在<b>这台电脑上</b>，云端不留 —— 断网也能打开。
+                    取回的文件已经存在<b>这台电脑上</b>，断网也能打开；
+                    云端那份还留着（换一台教室电脑也能再取一次，教师端那边删除）。
                     {localFiles.length ? (
                       <>
                         {' '}
