@@ -22,6 +22,7 @@
       而"显示哪些入口"按设计就是前端的事（`多学科体系方案.md` §3.3.4）。
    ============================================================ */
 
+import type { CSSProperties } from 'react'
 import type { RoleCode, Teacher, TeacherRole } from '../data/types'
 import { teacherSubjectLabel } from './subjects'
 
@@ -117,31 +118,62 @@ export function roleChips(
  * `teacher`（任课教师）**不在表里**：它是"没有管理身份"的那一档，
  * 只有它的老师照旧显示学科。
  *
- * ⚠️ 这张表只决定**标签上先写哪个字**，与权限无关 ——
+ * ⚠️ 这张表只决定**标签上按什么顺序写**，与权限无关 ——
  *    "谁能建号 / 谁能指派身份 / 谁改得了成绩"一律以数据库为准（§13.5 I16、§16）。
  *    别拿它去写任何 if 判断（那正是 I17 说的"第二处判据"）。
  */
 const MANAGING_ROLES: readonly RoleCode[] = ['super', 'admin', 'grade_head', 'head_teacher']
 
 /**
+ * 多个身份之间的分隔符：` · `（与 `roleChips()` 里「班主任 · 高二(4)班」同一个符号）。
+ *
+ * 刻意用「空格 · 空格」而不是逗号/顿号：**空格是断行机会**，
+ * 侧栏那种窄容器里（内容宽 194px）标签需要能在两个身份之间折行 ——
+ * 配上 `word-break: keep-all` 就只会在分隔符处断，不会把「最高管理员」拆成"最高管理 / 员"。
+ */
+const ROLE_SEP = ' · '
+
+/**
  * 这个人的**管理身份**显示名；没有管理身份返回 `''`。
  *
- * 多身份时**取最高那一档**（`super` > `admin` > `grade_head` > `head_teacher`），
- * **不拼接**：这个标签在侧栏里挨着姓名、在工作台那一行里还有两个同级标签，
- * 拼成「教导处 · 年级主任 · 班主任」就把它撑成一条长串了。
- * 要"列全"的地方是「我的 → 我的身份」那一行（`roleChips()`），那里才是清单。
+ * 🔴 **多身份全部露出来**（用户 2026-09-27 拍板），例如「教导处 · 年级主任」。
+ *    上一轮曾经只显示最高一档（`super` > `admin` > `grade_head` > `head_teacher`），
+ *    理由是"标签在侧栏里挨着姓名，拼成长串会撑破" —— 用户否掉了那个取舍：
+ *    一个人同时是年级主任和班主任，只写「年级主任」等于把另一重身份藏起来。
+ *    由此带来的**布局约束**写在 `功能设计与不变量.md` §13.10：
+ *    调用点的容器必须允许折行（侧栏那行是 `flex-wrap` + 标签自己 `keep-all` 折在分隔符处）。
  *
- * ⚠️ **认不出的角色代码按身份显示**（`roleName()` 原样回显，优先级排最后）：
- *    把一个身份显示成学科正是这一轮要修的那个错，宁可显示一个生代码，
- *    也不要谎报"物理"。`teacher` 那一档不算管理身份。
+ * 顺序 = `MANAGING_ROLES` 的优先级（与数组先后无关），所以
+ * `[head_teacher, super]` 与 `[super, head_teacher]` 都写「最高管理员 · 班主任」。
+ *
+ * 同名身份**只写一次**：`teacher_roles` 允许同一个人有多行同一档身份
+ * （班主任带两个班就是两行 `head_teacher`），而这一行标签不带班名 ——
+ * 不去重就会出现「班主任 · 班主任」。带班名的完整清单在 `roleChips()`。
+ *
+ * ⚠️ **认不出的角色代码按身份显示**（`roleName()` 原样回显，排在最后 ——
+ *    它们在优先级表里没有位置，只能按数组先后）：把一个身份显示成学科正是
+ *    2026-09-25 那一轮要修的那个错，宁可显示一个生代码，也不要谎报"物理"。
+ *    `teacher` 那一档不算管理身份。
  */
 export function managingRoleLabel(roles?: readonly TeacherRole[] | null): string {
   const list = roles ?? []
-  for (const code of MANAGING_ROLES) {
-    if (list.some((r) => r.role === code)) return roleName(code)
+  const names: string[] = []
+  const seen = new Set<string>()
+  const push = (name: string) => {
+    if (!name || seen.has(name)) return
+    seen.add(name)
+    names.push(name)
   }
-  const other = list.find((r) => r.role !== 'teacher' && roleName(r.role))
-  return other ? roleName(other.role) : ''
+  // ① 认得出的管理身份：按优先级表排（顺序不取决于 `roles` 数组的先后）
+  for (const code of MANAGING_ROLES) {
+    if (list.some((r) => r.role === code)) push(roleName(code))
+  }
+  // ② 认不出的角色代码：原样回显，排在最后（表里没有它们的位置）
+  for (const r of list) {
+    if (r.role === 'teacher' || MANAGING_ROLES.includes(r.role)) continue
+    push(roleName(r.role))
+  }
+  return names.join(ROLE_SEP)
 }
 
 /**
@@ -163,4 +195,39 @@ export function currentIdentityLabel(
   fallback = '老师',
 ): string {
   return managingRoleLabel(roles) || teacherSubjectLabel(t, fallback)
+}
+
+/**
+ * 「当前身份」标签的**排版约束**——三个显示点共用这一处，别再各写一份内联样式
+ * （同 `currentIdentityLabel()` 的理由：同一件事只有一个定义）。
+ *
+ * 为什么需要它（2026-09-27 改成"多身份全露"之后**实测**出来的，不是设想的）：
+ *
+ * | 位置 | 可用宽度 | 1 个身份 | 2 个 | 3 个 | 4 个 |
+ * | --- | --- | --- | --- | --- | --- |
+ * | 侧栏那一行（266 − 14 留白 − 2 边框 − 32 `p-4` − 24 `rail-block` 内边距） | **194px** | 72 | 104 | 158 | **212** |
+ * | 设置页身份卡那一行（414px 手机上） | 约 **216px** | 72 | 104 | 158 | **212** |
+ *
+ * 实测到的两个坏样子（修之前，截图在报告里）：
+ *   ① 名字被挤成竖排 —— 姓名 `span` 和标签在同一行、标签 `nowrap` 又有 `min-width: auto`，
+ *      于是**能屈能伸的只有姓名**：「王老师」被压成三行（王 / 老 / 师）；
+ *   ② 标签自己捅出侧栏（4 个身份时溢出 **41px**，被面板边裁掉）。
+ *
+ * 所以：容器那一行必须 `flex-wrap`（见三个显示点），**标签自己**也要能在
+ * 两个身份之间折行（`whiteSpace: normal` + `wordBreak: keep-all` 只断在分隔符的空格处，
+ * 不会把「最高管理员」拆成"最高管理 / 员"）；`height: auto` + `minHeight: 21`
+ * 保证只有一个身份时**仍然是原来那 21px 的一行**（上下内边距留 0：`.tag` 自己有
+ * `height: 21px` + 1px 边框 + `box-sizing: border-box`，多给内边距会把它撑到 23px ——
+ * 实测过，"顺手加 2px"就是会让所有单身份账号的标签悄悄变高）。
+ *
+ * ⚠️ 别把 `.tag` 这个类改掉：它是全站共用的（`index.css`），这里只覆盖这一个标签。
+ */
+export const IDENTITY_TAG_STYLE: CSSProperties = {
+  maxWidth: '100%',
+  whiteSpace: 'normal',
+  wordBreak: 'keep-all',
+  height: 'auto',
+  minHeight: 21,
+  lineHeight: 1.6,
+  textAlign: 'left',
 }

@@ -6,7 +6,7 @@ import { useClassroomPresence } from '../hooks/useClassroomPresence'
 import { useMood } from '../hooks/useMood'
 import { useScheduleReminder } from '../hooks/useScheduleReminder'
 import { analyzeRoster } from '../lib/roster'
-import { currentIdentityLabel } from '../lib/roles'
+import { currentIdentityLabel, IDENTITY_TAG_STYLE } from '../lib/roles'
 import { awayText, toMinutes, weekdayOf } from '../lib/schedule'
 import { connectionMode } from '../lib/supabase'
 import { APP_VERSION_LABEL } from '../lib/version'
@@ -739,14 +739,23 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <div style={{ fontSize: 11, color: 'var(--color-ink3)', letterSpacing: '.08em' }}>
               当前身份
             </div>
-            <div className="mt-1 flex items-center gap-2">
-              <span style={{ fontSize: 15, fontWeight: 620 }}>{teacher?.name ?? '未登录'}</span>
+            <div className="mt-1 flex flex-wrap items-center gap-2">
+              {/*
+                ⚠️ 姓名这一格必须 `white-space: nowrap`：标签是 `nowrap` 又有 `min-width: auto`，
+                不禁住姓名的话，多身份时被压缩的是**姓名**（「王老师」会变成竖排三个字，实测）。
+                折行交给容器（`flex-wrap`），标签内部只在分隔符处折 —— 见 IDENTITY_TAG_STYLE。
+              */}
+              <span style={{ fontSize: 15, fontWeight: 620, whiteSpace: 'nowrap' }}>
+                {teacher?.name ?? '未登录'}
+              </span>
               {/*
                 学科是"教什么"，身份是"是谁" —— 有管理身份的人先答"是谁"。
                 ⛔ 别退回 `teacherSubjectLabel(teacher)`：`teachers.subject` 有列默认值
                 「物理」，每个账号都有值，管理员会被挂上"物理"（2026-09-25 用户截图）。
               */}
-              <span className="tag tag-accent">{currentIdentityLabel(myRoles, teacher)}</span>
+              <span className="tag tag-accent" style={IDENTITY_TAG_STYLE}>
+                {currentIdentityLabel(myRoles, teacher)}
+              </span>
             </div>
             <div
               className="mt-2.5"

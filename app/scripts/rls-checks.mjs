@@ -36,6 +36,7 @@
  *   $env:RLS_NEGATIVE='classes-insert'     ; node scripts/rls-checks.mjs   ***REMOVED*** 拿掉 classes_insert 里的 owns_class(id)
  *   $env:RLS_NEGATIVE='crack-a'            ; node scripts/rls-checks.mjs   ***REMOVED*** 把「教室端不许改自己那行 teachers」改回去
  *   $env:RLS_NEGATIVE='crack-b'            ; node scripts/rls-checks.mjs   ***REMOVED*** 把「教室端不许写 scope=mine 排课表」改回去
+ *   $env:RLS_NEGATIVE='crack-c'            ; node scripts/rls-checks.mjs   ***REMOVED*** 把「教室端不许写 shared_files」改回去
  *   $env:RLS_NEGATIVE='exam-for-everyone'  ; node scripts/rls-checks.mjs   ***REMOVED*** 让考试写判据对**所有人**为真（谁都能改别人的考试档案）
  *   （改的全是**内存里的 SQL 文本**，仓库文件一个字节都不动。）
  */
@@ -145,6 +146,14 @@ await withLock(async () => {
     const EXS = { s1: mk('e2', 1), s2: mk('e2', 2) }
     /** 教室端账号行的 id **就是**它的 auth uid（`classroom_accounts.id references auth.users`） */
     const ACCT = { a1: U.room }
+    /**
+     * `shared_files` 的两行夹具（裂缝 C，2026-09-27）：
+     *   f1 = 物理老师传的文件（真实形状）；
+     *   f2 = **挂在教室端账号名下**的一行 —— 真实的教室端没有上传入口，
+     *        这一行是**夹具**，专门用来钉"收紧写权限时不许把读也一起挡掉"
+     *        （restrictive 的 `using` 对 SELECT 也生效，写成一条 `for all` 就会挡掉它）。
+     */
+    const F = { f1: mk('f0', 1), f2: mk('f0', 2), f3: mk('f0', 3), f4: mk('f0', 4) }
 
     /** 身份名（打印用）与顺序 —— 与文档 §16.4 那张表同一组人 */
     const WHO = {
@@ -365,6 +374,25 @@ await withLock(async () => {
         out = out.replace(re2, m2[1].replace(/not is_classroom_account\(\) or scope = 'class'/g, 'true'))
         return out
       }
+      if (mode === 'crack-c') {
+        /*
+         * 裂缝 C 的负向对照：把 `shared_files` 上那三条 restrictive 策略里的守卫拿掉
+         * （`not is_classroom_account()` → `true` = 策略恒真 = **不存在**），
+         * 正是"2026-09-27 收紧之前"的样子。其余 SQL 一个字不动。
+         * ⚠️ 只在 shared_files 那三条里改（按策略名切片），别全局 replace ——
+         *    那会把裂缝 A / B 的守卫一起改掉，三条断言一起红，看不出是哪一条在起作用。
+         */
+        let out = text
+        for (const p of ['shared_files_not_classroom_insert', 'shared_files_not_classroom_update', 'shared_files_not_classroom_delete']) {
+          const seg = new RegExp(`(create policy ${p}[\\s\\S]*?;\\n)`)
+          const m = out.match(seg)
+          if (!m) throw new Error(`负向对照锚点没找到：${p} 这条策略不见了（模式 crack-c）`)
+          const stripped = m[1].replace(/not is_classroom_account\(\)/g, 'true')
+          if (stripped === m[1]) throw new Error(`负向对照锚点没找到：${p} 里的守卫不见了（模式 crack-c）`)
+          out = out.replace(seg, stripped)
+        }
+        return out
+      }
       if (mode === 'exam-for-everyone') {
         /*
          * 第十三节的负向对照：把考试写判据改成**恒真** —— 等于"谁都能建 / 改别人的考试档案"
@@ -484,6 +512,12 @@ await withLock(async () => {
       ('${SCH.s1}', '${U.phy}',  1, '08:00', '08:40', '高二(1)班 物理', '${C.c1}', 'mine'),
       ('${SCH.s2}', '${U.head}', 1, '08:50', '09:30', '高二(1)班 语文', '${C.c1}', 'class'),
       ('${SCH.s3}', '${U.phy}',  1, '10:50', '11:30', '高二(4)班 物理', '${C.c2}', 'class');
+
+    -- 文件互传（§9）：裂缝 C 的夹具。f1 是老师真传的一份；f2 挂在教室端账号名下
+    -- （真实教室端没有上传入口 —— 它是夹具，用来钉"收紧写不许把读一起挡掉"）。
+    insert into shared_files (id, teacher_id, class_id, name, mime, size, storage_path) values
+      ('${F.f1}', '${U.phy}',  '${C.c1}', '老师传的题图.png', 'image/png', 1024, '${U.phy}/aa-题图.png'),
+      ('${F.f2}', '${U.room}', '${C.c1}', '夹具-教室端名下那一行.png', 'image/png', 2048, '${U.room}/bb-夹具.png');
 
     -- 考试档案（第十三节）：四份，把"读得宽 / 写得窄"的每一面都摆出来
     --   e1 物理老师建的**单班**物理（c1）        → 他自己可写；班主任/年级主任只读；教室端读得到
@@ -1065,6 +1099,68 @@ await withLock(async () => {
       r = await write(db, U.head, upsertSql('schedule_items', M.scheduleToRow(localSchedule({ id: mk('5c', 89), classId: C.c1, scope: 'mine' }), U.head)))
       allowed("对照：班主任写自己名下 scope='mine' 的排课表照旧通", r)
 
+      /*
+       * ---- 🔴 裂缝 C（2026-09-27 已收紧）：教室端**不许**往 `shared_files` 写 ----
+       *
+       * 根因与 A / B 同一个（触发器给每个 auth 用户建了一行 teachers + 策略只认 auth.uid()）：
+       * `shared_files_own`（§9）是 `for all ... using (teacher_id = auth.uid())`，
+       * 而 `Files.tsx` 上传时 `teacher_id` 就是当前登录者 —— 所以教室端也能"上传"。
+       * 收紧在 `schema.sql` **§17.6**：三条逐动作 restrictive（insert / update / delete）
+       * + `not is_classroom_account()`，`shared_files_own` 的**正文一个字没动**。
+       *
+       * ⚠️ **读的那一半不许被误伤**（这一段最要紧的一条）：教室那块屏要读这个表
+       *    （`Classroom.tsx` → `listFiles()`，老师传过去的题图就靠它拉下来）。
+       *    restrictive 的 `using` 对 SELECT 也生效 —— 当初裂缝 A 写成一条 `for all`
+       *    就把教室端"读自己那行 teachers"挡掉了（第三节可见量 teachers 1 → 0）。
+       *    所以下面除了"写被拒"，还有一条**读照旧**的反向对照（用 `f2` 那行夹具量）。
+       */
+      const fileRow = (o) => ({
+        id: o.id,
+        teacher_id: o.teacherId,
+        class_id: o.classId ?? null,
+        name: o.name ?? '题图.png',
+        mime: 'image/png',
+        size: 1234,
+        storage_path: `${o.teacherId}/cc-${o.name ?? '题图.png'}`,
+      })
+
+      r = await write(db, U.room, insertSql('shared_files', fileRow({ id: F.f3, teacherId: U.room, classId: C.c1, name: '教室端自己传的.png' })))
+      denied('🔴 教室端往 shared_files **插**一行（裂缝 C：前端真实上传载荷，teacher_id = 它自己）', r)
+
+      r = await write(db, U.room, { sql: `update shared_files set name = '被教室端改名了' where id = $1 returning id`, values: [F.f2] })
+      denied('🔴 教室端**改** shared_files 里自己名下那一行', r)
+
+      r = await write(db, U.room, { sql: `delete from shared_files where id = $1 returning id`, values: [F.f2] })
+      denied('🔴 教室端**删** shared_files 里自己名下那一行', r)
+
+      // 反向对照一：**真正的教师**三条路（插 / 改 / 删）必须照旧通 —— 收裂缝不许误伤老师
+      // ⚠️ 删的那一条要删**种子里的**那一行：每次 attempt 都在自己的事务里跑完就 rollback，
+      //    所以"上一条刚插进去的行"到下一条已经不存在了（那样量到的是 0 行 = 假失败）。
+      r = await write(db, U.phy, insertSql('shared_files', fileRow({ id: F.f4, teacherId: U.phy, classId: C.c1, name: '老师新传的答案.pdf' })))
+      allowed('对照：真老师照旧能**上传**（插自己名下那一行 shared_files）', r)
+      r = await write(db, U.phy, { sql: `update shared_files set name = '题图（改过名）.png' where id = $1 returning id`, values: [F.f1] })
+      allowed('对照：真老师照旧能**改**自己传的那一行', r)
+      r = await write(db, U.phy, { sql: `delete from shared_files where id = $1 returning id`, values: [F.f1] })
+      allowed('对照：真老师照旧能**删**自己传的那一行', r)
+
+      // 反向对照二：**读**那一半没被误伤（这就是"写成一条 for all"会挡掉的东西）
+      // ⚠️ 这里刻意只断言"**读得到自己那一行**"，**不**钉总行数：今天教室端读不到
+      //    老师上传的行（`shared_files_own` 只给"自己传的"），那是 §9 的老形状、
+      //    本轮没动它（发现记在 `功能设计与不变量.md` §十七·补 的补.4）。
+      //    钉成精确清单的话，将来谁把那条读补宽（让教室端看得见本班的文件）都会撞红
+      //    —— 而那不是"收紧把读弄坏了"，是修另一件事。
+      const roomFiles = await idsAs(db, U.room, `select id from shared_files order by id`)
+      ok(
+        '🔴 裂缝 C 的**读**那一半没被误伤：教室端照旧读得到自己名下那一行 shared_files（restrictive 里没有 SELECT）',
+        roomFiles.includes(F.f2),
+        `读到 ${JSON.stringify(roomFiles)}（期望含 ${F.f2}；今天它读不到老师上传的那行 —— §9 老形状，本轮没动读）`,
+      )
+      eq(
+        '对照：物理老师照旧读得到自己传的文件那一行',
+        await idsAs(db, U.phy, `select id from shared_files order by id`),
+        [F.f1],
+      )
+
       // ---- 静态审计：设计红线在策略清单上也要看得见 ----
       const pol = await db.query(
         `select policyname, cmd, coalesce(qual,'') || ' ' || coalesce(with_check,'') as body
@@ -1133,6 +1229,38 @@ await withLock(async () => {
         '🔴 裂缝 B：schedule_mine_write 的正文里也提到教室端（清单上不能长得像"谁都能写自己的排课表"）',
         sPol.rows.filter((x) => x.policyname === 'schedule_mine_write').every((x) => /classroom_account/.test(x.body)),
         sPol.rows.filter((x) => x.policyname === 'schedule_mine_write').map((x) => shortErr(x.body)).join(' · '),
+      )
+
+      /*
+       * ---- 静态审计：裂缝 C 在**策略清单**上也必须看得出来 ----
+       * ⚠️ 这里刻意**不钉** `shared_files_own` 的正文（它一个字没动，见 §17.6 的理由：
+       *    它一条 `for all` 同时给着 SELECT，改正文会把教室端的读一起改掉）。
+       *    所以"清单上看得出来"这件事由三条**名字里带 not_classroom** 的 restrictive 承担。
+       */
+      const fPol = await db.query(
+        `select policyname, cmd, permissive, coalesce(qual,'') || ' ' || coalesce(with_check,'') as body
+           from pg_policies where schemaname = 'public' and tablename = 'shared_files' order by cmd, policyname`,
+      )
+      eq(
+        '裂缝 C：shared_files 上的策略清单（§9 的 for all + §17.6 三条逐动作 restrictive）',
+        fPol.rows.map((x) => `${x.policyname}:${x.cmd}:${x.permissive}`),
+        [
+          'shared_files_own:ALL:PERMISSIVE',
+          'shared_files_not_classroom_delete:DELETE:RESTRICTIVE',
+          'shared_files_not_classroom_insert:INSERT:RESTRICTIVE',
+          'shared_files_not_classroom_update:UPDATE:RESTRICTIVE',
+        ],
+      )
+      const fGuard = fPol.rows.filter((x) => x.permissive === 'RESTRICTIVE')
+      ok(
+        '🔴 裂缝 C：三条逐动作 restrictive（insert/update/delete）都调教室端判据',
+        fGuard.length === 3 && fGuard.every((x) => /classroom_account/.test(x.body)),
+        fGuard.map((x) => `${x.policyname}:${/classroom_account/.test(x.body) ? '有' : '没有'}`).join(' · ') || '(没有 restrictive 策略)',
+      )
+      eq(
+        '🔴 裂缝 C 的**读**那一半没被误伤：restrictive 里没有 SELECT（写成 for all 会把教室端读文件列表也挡掉）',
+        fGuard.filter((x) => x.cmd === 'SELECT').length,
+        0,
       )
     }
 
@@ -1490,14 +1618,16 @@ await withLock(async () => {
       eq('年级主任读得到本年级的考试（1 班 + 4 班），读不到高三', await idsAs(db, U.grade, `select id from exams order by id`), [EX.e1, EX.e2, EX.e3].sort())
       eq('无身份的新老师读不到别人的考试', await idsAs(db, U.fresh, `select id from exams order by id`), [])
       /*
-       * 🔴 教室端**读得到**本班考试 —— 实测如此，而且 schema.sql §15.3 的注释是**刻意**这么写的
-       *    （"教室端需要展示本次考试逐题正确率，读得到、写不了；真正的红线是绝不给它任何
-       *     成绩的 UPDATE"）。⚠️ 设计文档 §14.7 里那句"它连 exams 的 select 都拿不到"
-       *     **与实码不一致**（实测：教室端能读到本班的考试行）—— 两者要一起改的时候，
-       *     先拍板"教室端到底该不该看见考试"，别只改一边。这里钉的是**今天的实际行为**，
-       *     红线的另一半（写）钉在上面 ⑩⑪。
+       * 🔴 教室端**读得到**本班考试 —— **口径已定**（2026-09-27 用户拍板：以代码为准，可以读）。
+       *    `schema.sql` §15.3 的注释是**刻意**这么写的（"教室端需要展示本次考试逐题正确率，
+       *    读得到、写不了；真正的红线是绝不给它任何成绩的 UPDATE"），
+       *    `功能设计与不变量.md` §14.7 现在写的是**同一句话**（那一节原来有一句
+       *    "教室端连 exams 的 select 都拿不到"，与实码不符，已按拍板改成"能读本班、改不了任何数据"）。
+       *    这里钉的是**实际行为**，三个方向都有：
+       *      ① 读得到本班的（这一条）· ② 读不到别班的（下一条）· ③ 写一律被拒（上面 ⑩⑪）。
+       *    ⚠️ 别再把它当"待拍板"：要收读的口子，得**先**改 §14.7 与 §15.3，两边一起改。
        */
-      eq('教室端读得到**本班**的考试（§15.3 刻意如此；与设计 §14.7 的说法不一致，见注释）', await idsAs(db, U.room, `select id from exams order by id`), [EX.e1, EX.e2, EX.e3].sort())
+      eq('教室端读得到**本班**的考试（用户 2026-09-27 拍板：可以读；§15.3 刻意如此）', await idsAs(db, U.room, `select id from exams order by id`), [EX.e1, EX.e2, EX.e3].sort())
       eq('教室端读不到**别班**的考试（高三那份）', (await idsAs(db, U.room, `select id from exams order by id`)).includes(EX.e4), false)
       eq('教室端读得到本班的分数行（逐题正确率要用）', await countAs(db, U.room, `select count(*)::int as n from exam_scores`), 2)
 

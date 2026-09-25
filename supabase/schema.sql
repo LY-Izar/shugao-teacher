@@ -1571,11 +1571,17 @@ create policy exam_scores_write on exam_scores for all to authenticated
 --     所以 B 老师应当**自己建一份**同 paper_key 的档案 —— 前端的"同场考试"判定会
 --     把两份档案合起来排名（见 §15.5 的核对 SQL）。这样两边的数据各归各，谁也不覆盖谁。
 --
---  ⚠️ 教室端**故意一条策略都没有**：那块屏是给学生看的（设计 §五 红线）。
---     它今天连 exams 的 select 都拿不到（visible_class_ids 里有它，但下面
---     没有针对 classroom 的读策略吗？—— 有的，exams_visible 用的是 visible_class_ids()，
---     教室端在里面）。**这是刻意的**：教室端需要展示"本次考试逐题正确率"，
---     读得到、写不了。真正的红线是"绝不给它任何成绩的 UPDATE"。
+--  ⚠️ 教室端**故意一条写策略都没有**：那块屏是给学生看的（设计 §五 红线）。
+--     读这一侧**刻意留着**：`exams_visible` 用的是 `visible_class_ids()`，教室端在里面
+--     （"教室端只看得见自己那个班"，§10.3），所以它**读得到本班的考试档案与分数行**。
+--     这是**有意为之**，不是漏了收：教室里那块屏将来要展示"本次考试逐题正确率"，
+--     数据层先把这个口子留着（界面还没做，见 14.7 / 15.7 的"没做"清单）。
+--     🔴 红线在**写**那一半：`exams_write` / `exam_scores_write` 逐条要求
+--     `teacher_id = auth.uid()` + `can_edit_exam(...)`，教室端两边都不满足，
+--     所以它**改不了任何考试数据**（读得到、写不了）。
+--     ⚠️ 别"顺手"把它读的那一半也收掉：收了之后教室端的考试展示会**整片变空且不报错**，
+--     而这条口径是 2026-09-27 拍过板的（`功能设计与不变量.md` §14.7 写的是同一句话）——
+--     两边要一起改，改之前先读那一条。
 
 grant select, insert, update, delete on exams       to authenticated;
 grant select, insert, update, delete on exam_scores to authenticated;
@@ -1709,8 +1715,10 @@ revoke all on exams, exam_scores from anon;
 --            写    | 建档人是自己 · 这个班看得见（教室端心跳走同一条）
 --   ---------------|--------------------------------------------------------------
 --   teachers / shared_files：**不在本矩阵里**，§7/§9 的"只能动自己那一行"原样保留
---     ⚠️ 例外一处：`teachers_self` 在 §17.1 被重写成逐动作策略 + "教室端不算教师"
---        （2026-09-25 用户拍板收紧裂缝 A）。`shared_files_own` 仍是 `for all`。
+--     ⚠️ 例外一处：这两张表在 §17 各加了几条"教室端不算教师"的逐动作 restrictive
+--        （2026-09-25 收紧裂缝 A：`teachers`；2026-09-27 收紧裂缝 C：`shared_files`）。
+--        ⚠️ **两张表的原策略正文本身都没动**（`teachers_self` / `shared_files_own`
+--        仍是 `for all`）—— 理由见 §17 开头与 §17.6：加 AND 不放宽任何权限，拆 OR 会漏动作。
 --   teacher_roles / class_subjects / classroom_accounts / subjects / schools / grades：
 --     只读（§10.4 / §12.1），写一律走服务端 `functions/api/*`（service_role），
 --     数据库这一层**不 grant** insert/update/delete —— 免得同一个动作有两个入口
@@ -2119,8 +2127,9 @@ create policy classrooms_delete on classrooms for delete to authenticated
 --    · 读：完全由 §11 / §13.4 的 `*_visible` 负责（一条都没动）
 --    · 写：完全由 16.3 的逐动作策略负责
 --  **保留不动的旧策略**（刻意留下，别"顺手"删）：
---    shared_files_own（只动自己那一行，不在本矩阵里；teachers_self **不在此列**——
---    它在 §17.1 被逐动作重写，把教室端摘出去了）
+--    shared_files_own（只动自己那一行，不在本矩阵里；它**正文没动**，
+--    教室端那一条边界是 §17.6 加的三条 restrictive 表达的）
+--    teachers_self（同上：正文没动，§17.1 用三条逐动作 restrictive 把教室端摘出去）
 --    classes_visible / students_visible / assignments_visible / calls_visible /
 --    schedule_class_visible / classrooms_visible（读，§11 §13）
 --    classrooms_heartbeat / schedule_classroom_write（教室端的两处有限写，§11.1）
@@ -2244,10 +2253,11 @@ order by 4 desc, 1, 3;
 --    → 要等体检连续为 0，而且前端还在按显示名反查字典（§12.4）
 
 -- ============================================================
---  17. 收口 · 教室端的两条裂缝（2026-09-25 用户拍板「收紧」）
+--  17. 收口 · 教室端的**三条**裂缝（2026-09-25 拍板「收紧」A/B；2026-09-27 收紧 C）
 --
---  背景：`app/scripts/rls-checks.mjs`（PGlite 跑真 Postgres + 真策略）实测出两条裂缝，
---  当时**只记在报告里、没有判失败**。用户 2026-09-25 拍板：收紧。它们是：
+--  背景：`app/scripts/rls-checks.mjs`（PGlite 跑真 Postgres + 真策略）实测出这些裂缝，
+--  当时**只记在报告里、没有判失败**。用户 2026-09-25 拍板「收紧」（A / B），
+--  2026-09-27 又拍板收掉最后一条 C。它们是：
 --
 --   裂缝 A：教室端能改 `teachers` 里**自己那一行**。
 --     根因是两件事叠在一起：① `teachers_self`（§7）是 `for all`，条件是 `id = auth.uid()`；
@@ -2263,15 +2273,22 @@ order by 4 desc, 1, 3;
 --     而策略清单是这个项目的安全边界说明书，**它不能是错的**。
 --     已在 §16.3 的 `schedule_mine_write` 里补上 `and not is_classroom_account()`。
 --
+--   裂缝 C（2026-09-27 收紧）：教室端能往 `shared_files` 插 / 改 / 删自己名下的行。
+--     `shared_files_own`（§9）是 `for all ... using (teacher_id = auth.uid())`，
+--     上传时 `teacher_id` 就是当前登录者 —— 所以教室里那个账号也能"上传"。
+--     与 A / B **同一个根**（触发器给了每个 auth 用户一行 teachers + 策略只认 auth.uid()）。
+--     收紧写法见 **§17.6**（同一个理由：加 AND，不拆 OR）。
+--
 --  为什么这一节的主语是"加"而不是"改 §7 的 teachers_self"：
 --    · `teachers_self` 原来是一条 `for all`。`teachers` 是**外键的根**
 --      （classes / assignments / schedule_items / classrooms / calls 全都 references 它），
 --      而前端每一次"我的资料"保存走的都是 **upsert**（`saveTeacher` → `on conflict (id) do update`），
 --      在 PostgreSQL 里那条路**同时要过 INSERT 的 with check**（§16.3 发现二，真 PG 实测过）。
---    · 所以"教室端不许写"这一条**只用一条 restrictive 策略**表达（`for all as restrictive`
---      + `not is_classroom_account()`）：策略之间 permissive 是 OR、最后再与所有 restrictive **AND**，
---      所以它**不会放宽任何权限**，只是把那一个身份从四个写动作里摘出去。
---      §7 的 `teachers_self` 一个字不用动，回退也只是删掉下面这一条。
+--    · 所以"教室端不许写"这一条**只用逐动作 restrictive 策略**表达
+--      （`for insert` / `for update` / `for delete` + `not is_classroom_account()`）：
+--      策略之间 permissive 是 OR、最后再与所有 restrictive **AND**，
+--      所以它**不会放宽任何权限**，只是把那一个身份从写动作里摘出去。
+--      §7 的 `teachers_self` 一个字不用动，回退也只是删掉那几条。
 --      **收紧动作里，"加一条 AND" 比"拆一条 OR"稳得多** —— 拆 `for all` 时漏掉任何一个动作，
 --      症状都是教师"保存失败 = 刷新即丢"，而且**不报错**（§16.3 发现一）。
 --
@@ -2340,54 +2357,94 @@ create policy schedule_classroom_scope_only on schedule_items
   with check (not is_classroom_account() or scope = 'class');
 
 -- -------- 17.3 这一段跑完之后，前端会怎样（"SQL 没跑也不崩"）--------
---  · **没跑这一段**：教室端那两条裂缝还在（与改动前完全一致），教师端行为一个字不变；
---  · **跑了这一段**：教师端与教室端的**读**完全不变（`teachers_self` 一条没删，
---    restrictive 对教师恒真），教室端的两条合法写（心跳 / 粘贴本班班级课表）照旧通过 ——
---    实测见 rls-checks 第七节；
---  · 两处**故意不要**的东西（免得后来的人"顺手补上"）：
---    ① 没有 `teachers` 的 DELETE 策略 → 客户端删不掉 teachers 行。
---       全仓没有任何前端路径会删它（账号由 `functions/api/*` 用 service_role 管，
---       绕过 RLS），而 §16.1 矩阵里 `teacher_roles` / `class_subjects` / `classroom_accounts`
---       同样是"数据库层不给客户端写"。这与"教室端不该有写权限"是同一条纪律。
---    ② 没有动 `shared_files_own`（§9 的 `for all`）。见 17.6 的**已知未收紧项**。
+--  · **没跑这一段**：教室端那三条裂缝还在（与改动前完全一致），教师端行为一个字不变；
+--  · **跑了这一段**：教师端与教室端的**读**完全不变（`teachers_self` / `shared_files_own`
+--    一条没删、一条没改，restrictive 对教师恒真），教室端的两条合法写
+--    （心跳 / 粘贴本班班级课表）照旧通过 —— 实测见 rls-checks 第七节；
+--  · 一处**故意不要**的东西（免得后来的人"顺手补上"）：
+--    没有 `teachers` 的 DELETE 策略 → 客户端删不掉 teachers 行。
+--    全仓没有任何前端路径会删它（账号由 `functions/api/*` 用 service_role 管，
+--    绕过 RLS），而 §16.1 矩阵里 `teacher_roles` / `class_subjects` / `classroom_accounts`
+--    同样是"数据库层不给客户端写"。这与"教室端不该有写权限"是同一条纪律。
 --  · 被拒的写入在前端表现为 `syncError`（乐观更新已经改了本地），
---    所以上线这一段之前，先跑 `npm run rls-checks`（它会逐条打这两条裂缝）。
+--    所以上线这一段之前，先跑 `npm run rls-checks`（它会逐条打这三条裂缝）。
 --
--- -------- 17.4 回退（四个 drop，幂等）--------
+-- -------- 17.4 回退（七个 drop + 一处正文，幂等）--------
 --    drop policy if exists teachers_not_classroom_insert on teachers;
 --    drop policy if exists teachers_not_classroom_update on teachers;
 --    drop policy if exists teachers_not_classroom_delete on teachers;
 --    drop policy if exists schedule_classroom_scope_only on schedule_items;
+--    drop policy if exists shared_files_not_classroom_insert on shared_files;
+--    drop policy if exists shared_files_not_classroom_update on shared_files;
+--    drop policy if exists shared_files_not_classroom_delete on shared_files;
 --    -- `schedule_mine_write` 的正文也要把 `and not is_classroom_account()` 去掉（§16.3）
 --  —— 回退**只会放宽**（AND 的那一半没了），不会让谁看不见东西，也不用重建任何旧策略。
+--     ⚠️ `shared_files_own` 的正文**本来就没动过**，所以裂缝 C 的回退就是删那三条。
 --
 -- -------- 17.5 自检（跑完这一段之后照一眼）--------
---  ① 策略清单：teachers 上多三条 `teachers_not_classroom_*`（permissive = RESTRICTIVE）；
+--  ① 策略清单：teachers 上多三条 `teachers_not_classroom_*`、`shared_files` 上多三条
+--     `shared_files_not_classroom_*`（permissive = RESTRICTIVE）；
 --     schedule_items 上多一条 `schedule_classroom_scope_only`（同）。
 --     ```sql
 --     select tablename, policyname, cmd, permissive
 --       from pg_policies where schemaname = 'public'
---        and tablename in ('teachers', 'schedule_items') order by tablename, cmd, policyname;
+--        and tablename in ('teachers', 'schedule_items', 'shared_files') order by tablename, cmd, policyname;
 --     ```
 --  ② 判据函数：把教室端账号的 uuid 填进去，应当为 true；换成一位真老师应当为 false。
 --     ```sql
 --     -- select public.is_classroom_account();  -- 以登录者身份跑
 --     ```
---  ③ 常驻回归：`cd app && npm run rls-checks` —— 第七节逐条打这两条裂缝，
---     并且静态钉住"teachers / schedule_items 上的写策略里都提到教室端"。
+--  ③ 常驻回归：`cd app && npm run rls-checks` —— 第七节逐条打这三条裂缝，
+--     并且静态钉住"teachers / schedule_items / shared_files 上的写策略里都提到教室端"、
+--     "三条裂缝的 restrictive 里都没有 SELECT"（读那一半不许被误伤）。
+--     反向对照：真老师改自己那行 teachers / 写自己名下 `scope='mine'` 的排课表 /
+--     往 `shared_files` 上传，**都必须照旧通过**。
 --
--- -------- 17.6 🔴 已知未收紧项：`shared_files_own`（**写进文档，别当没看见**）--------
---  PGlite 逐人逐动作跑出来发现：教室端账号在策略上**也**能往 `shared_files` 插一行
---  （§9 的策略是 `for all ... using (teacher_id = auth.uid())`，而 `Files.tsx` 上传时
---  `teacher_id` 就是当前登录者）。它与裂缝 A / B 是**同一个根**（触发器给了 teachers 行 +
---  策略只认 auth.uid()）。
---  为什么本轮**没动**：① 它不在 §16.1 的矩阵里（§9 的老策略），改它属于"再开一条战线"；
---  ② 前端的教室端页面**没有上传入口**（`Classroom.tsx` 只 `listFiles()` 读，不上传），
---  所以实际可达性与裂缝 B 同级（≈0，但"策略清单上不成立"这句话同样适用）。
---  要收紧就是一行：`shared_files_own` 的 `using` / `with check` 各加 `and not is_classroom_account()`
---  （函数已经在 §10.5，位置在建这条策略之前，可以直接引用）。
---  ⚠️ 它**不在** §17.1/17.2 的回归覆盖里（rls-checks 目前没有对 shared_files 打教室端的写操作）——
---     要收紧时记得同时补一条断言，否则"收紧了没人钉住"。
+-- -------- 17.6 裂缝 C：`shared_files` 的写权限里**摘掉教室端**（2026-09-27 收紧）--------
+--  这一节从"已知未收紧项"变成"已收紧"。原来的记录（留档，说明它为什么拖了一轮）：
+--    PGlite 逐人逐动作跑出来发现，教室端账号在策略上**也**能往 `shared_files` 插一行
+--    （§9 的策略是 `for all ... using (teacher_id = auth.uid())`，而 `Files.tsx` 上传时
+--    `teacher_id` 就是当前登录者）。它与裂缝 A / B 是**同一个根**。
+--    上一轮没收的理由是"它不在 §16.1 的矩阵里 + 教室端页面没有上传入口"，用户 2026-09-27 拍板：收。
+--
+--  🔴 **为什么这里是"加三条逐动作 restrictive"，而不是"改 `shared_files_own` 的正文"**：
+--    `shared_files_own` 是**一条 `for all`**（`shared_files` 上只有这一条策略），
+--    它的 `using` **同时**在给 SELECT —— 而教室那块屏**要读**这个表
+--    （`Classroom.tsx` → `listFiles()`，教师端传过去的题图/答案就靠它拉下来）。
+--    所以：
+--      · 改正文（`using (teacher_id = auth.uid() and not is_classroom_account())`）
+--        = 连**读**一起改掉。这正是裂缝 A 当初踩过的坑（restrictive / using 对 SELECT 也生效，
+--        `rls-checks` 第三节"逐人可见量"当场红：teachers 1 → 0）。
+--      · 拆 `for all` 成四条 = 漏一个动作就是"老师传完文件、刷新即丢且不报错"（§16.3 发现一）。
+--    所以：**原策略一个字不动**，只加三条逐动作的 AND（不含 SELECT）。
+--    代价是"这条 `for all` 的条件看着像谁都能写自己那一行"—— 由 §17.5 的策略清单自检
+--    与 `rls-checks` 第七节的静态审计兜住（名字里带 `not_classroom`，清单上看得见）。
+--
+--  ⚠️ 读的那一半**必须原样保留**（`rls-checks` 有一条反向断言专门钉它：
+--     教室端照旧读得到自己名下那一行）。真老师那边一个字都不受影响：
+--     老师不在 `classroom_accounts` 里 → `is_classroom_account()` 恒 false → restrictive 恒真。
+drop policy if exists shared_files_not_classroom_insert on shared_files;
+create policy shared_files_not_classroom_insert on shared_files
+  as restrictive for insert to authenticated
+  with check (not is_classroom_account());
+
+drop policy if exists shared_files_not_classroom_update on shared_files;
+create policy shared_files_not_classroom_update on shared_files
+  as restrictive for update to authenticated
+  using (not is_classroom_account())
+  with check (not is_classroom_account());
+
+drop policy if exists shared_files_not_classroom_delete on shared_files;
+create policy shared_files_not_classroom_delete on shared_files
+  as restrictive for delete to authenticated
+  using (not is_classroom_account());
+
+--  ⚠️ **收紧之后仍然存在的一件事（不是本轮引入的，别当成回归）**：
+--     `shared_files_own` 只给"自己传的那一行"，所以云端模式下
+--     **教室端读不到老师上传的行**（教师 A 也读不到教师 B 的行）——
+--     "教师端 → 教室端的文件互传"这条路在**读**这一侧本来就不成立（§9 的老形状）。
+--     本轮按用户口径只收紧"写"，**没有动读**（动读要另拍板、且要连着客户端一起改）。
+--     发现与影响写在 `功能设计与不变量.md` §十七·补 的补.4。
 
 -- ============================================================
 --  18. 判据函数的 `_for` 变体（2026-09-27 补）：为什么每个判据都要两件套

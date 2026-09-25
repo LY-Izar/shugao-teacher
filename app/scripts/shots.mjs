@@ -196,6 +196,12 @@ const EXPECTED_FILES = [
   '74-simple-grade.png',
   '75-simple-correct.png',
   '76-simple-done.png',
+  // 「当前身份」标签改成**多身份全露**（2026-09-27）之后的布局留档：
+  // 77/78 = 桌面侧栏（3 个身份 / 4 个身份），79 = 手机上设置页身份卡（3 个身份）。
+  // 这三张是**留档**，真正拦人的是「身份标签」那一节的几何断言（溢出 / 竖排姓名）。
+  '77-role-multi-3.png',
+  '78-role-multi-4.png',
+  '79-role-multi-mobile.png',
 ]
 
 /* ---------------- 断言与日志 ---------------- */
@@ -1918,14 +1924,21 @@ await withLock(async () => {
        * 连不教课的账号也被挂上"物理"。学科回答的是"教什么"，身份回答的是"是谁"。
        *
        * 规则：先看有没有**管理身份**（super / admin / grade_head / head_teacher），
-       * 有就显示身份（多身份**取最高一档**，不拼接 —— 这个标签在侧栏里挨着姓名，
-       * 拼成「教导处 · 年级主任 · 班主任」就撑成长串了），没有才显示学科。
+       * 有就显示身份，没有才显示学科。
+       *
+       * 🔴 **2026-09-27 需求变更（用户拍板）：多身份全部露出来**，不再"只取最高一档"。
+       *   上一轮那个取舍（只显示最高一档）是 agent 自己拍的，理由是"标签在侧栏里挨着姓名，
+       *   拼成长串会撑破"——用户否掉了：同时是年级主任和班主任，只写一个等于把另一重藏起来。
+       *   所以下面的期望值从「年级主任」改成「年级主任 · 班主任」这类**拼接**串：
+       *   这是**需求变更导致的期望值变更**，不是为了让红灯变绿。
+       *   由此带来的布局约束（侧栏 194px / 手机上设置页卡片那一行约 216px）在后面
+       *   "真界面"那一半里**逐条量**：标签有没有捅出侧栏、姓名有没有被挤成竖排、整页有没有横向溢出。
        *
        * 分两层钉（缺哪一层都会漏掉一种改法）：
        *   ① **纯函数**：Node 直接 import 仓库里的真 `src/lib/roles.ts`（不是复刻一份逻辑，
        *      与 exam-checks / backup-checks 同一手法）；
        *   ② **真界面**：把 `myRoles` 注入 store 快照，看**侧栏那个标签真的写什么** ——
-       *      否则"组件根本不读 `myRoles`"（这一轮修的就是这个）不会有任何东西变红。
+       *      否则"组件根本不读 `myRoles`"（2026-09-25 修的就是这个）不会有任何东西变红。
        *
        * ⚠️ **正反两面都要**：有身份 → 身份，**没有身份 → 照旧显示学科**。
        *    只钉正向的话，把标签改成写死的身份、或者把学科那一半删掉，照样绿。
@@ -1934,7 +1947,7 @@ await withLock(async () => {
       const SID = '身份标签'
 
       await step(SID, async () => {
-        /* ① 纯函数：显示规则本身（四档身份 / 取最高 / 退回学科 / 认不出不猜） */
+        /* ① 纯函数：显示规则本身（四档身份 / 全露 + 顺序 + 去重 / 退回学科 / 认不出不猜） */
         const R = await import('../src/lib/roles.ts')
         const subj = { subject: '物理', primarySubjectCode: 'physics' }
         const one = (role) => [{ role }]
@@ -1955,16 +1968,40 @@ await withLock(async () => {
           `${SID}：「教导处」这个显示名**复用 lib/roles.ts 里那一个**（没另起一个词）`,
           `roleName('admin')=「${R.roleName('admin')}」，标签=「${R.currentIdentityLabel(one('admin'), subj)}」`,
         )
+        /* 🔴 多身份：**全露**（2026-09-27 用户拍板），顺序按 MANAGING_ROLES 的优先级 */
         check(
-          R.currentIdentityLabel([...one('head_teacher'), ...one('grade_head')], subj) === '年级主任',
-          `${SID}：多身份**取最高那一档**（班主任 + 年级主任 → 年级主任），不拼成长串`,
+          R.currentIdentityLabel([...one('head_teacher'), ...one('grade_head')], subj) === '年级主任 · 班主任',
+          `${SID}：多身份**全露出来**（班主任 + 年级主任 → 「年级主任 · 班主任」）`,
           `读到「${R.currentIdentityLabel([...one('head_teacher'), ...one('grade_head')], subj)}」`,
+          '数组顺序是班主任在前，但显示顺序按身份优先级（super > admin > grade_head > head_teacher）',
+        )
+        check(
+          R.currentIdentityLabel([...one('grade_head'), ...one('head_teacher')], subj) ===
+            R.currentIdentityLabel([...one('head_teacher'), ...one('grade_head')], subj),
+          `${SID}：显示顺序**不取决于数组先后**（两种写法读出同一个串）`,
+          `A=「${R.currentIdentityLabel([...one('grade_head'), ...one('head_teacher')], subj)}」，B=「${R.currentIdentityLabel([...one('head_teacher'), ...one('grade_head')], subj)}」`,
         )
         check(
           R.currentIdentityLabel([...one('head_teacher'), ...one('super'), ...one('admin')], subj) ===
-            '最高管理员',
-          `${SID}：多身份里有最高管理员 → 就是「最高管理员」（顺序不取决于数组先后）`,
+            '最高管理员 · 教导处 · 班主任',
+          `${SID}：三个身份全露、且按优先级排（超管 > 教导处 > 班主任）`,
           `读到「${R.currentIdentityLabel([...one('head_teacher'), ...one('super'), ...one('admin')], subj)}」`,
+        )
+        check(
+          R.currentIdentityLabel(
+            [...one('super'), ...one('admin'), ...one('grade_head'), ...one('head_teacher')],
+            subj,
+          ) === '最高管理员 · 教导处 · 年级主任 · 班主任',
+          `${SID}：四档身份全给 → 四个都写出来（这是宽度上的极值，布局断言盯的就是它）`,
+          `读到「${R.currentIdentityLabel([...one('super'), ...one('admin'), ...one('grade_head'), ...one('head_teacher')], subj)}」`,
+        )
+        check(
+          R.currentIdentityLabel(
+            [...one('head_teacher'), { role: 'head_teacher' }, ...one('grade_head')],
+            subj,
+          ) === '年级主任 · 班主任',
+          `${SID}：同名身份**只写一次**（班主任带两个班 = 两行 head_teacher，不许出现「班主任 · 班主任」）`,
+          `读到「${R.currentIdentityLabel([...one('head_teacher'), { role: 'head_teacher' }, ...one('grade_head')], subj)}」`,
         )
         check(
           R.currentIdentityLabel(one('teacher'), subj) === '物理',
@@ -1985,7 +2022,17 @@ await withLock(async () => {
           R.currentIdentityLabel([{ role: 'dean' }], subj) === 'dean',
           `${SID}：库里出现**认不出的角色代码**时按身份原样显示，**不退回学科**`,
           `读到「${R.currentIdentityLabel([{ role: 'dean' }], subj)}」`,
-          '把身份显示成"物理"正是这一轮要修的那个错，宁可显示一个生代码',
+          '把身份显示成"物理"正是 2026-09-25 要修的那个错，宁可显示一个生代码',
+        )
+        check(
+          R.currentIdentityLabel([{ role: 'dean' }, { role: 'principal' }], subj) === 'dean · principal',
+          `${SID}：认不出的角色代码**也全露**（原样回显、按数组先后，排在认得出的身份后面）`,
+          `读到「${R.currentIdentityLabel([{ role: 'dean' }, { role: 'principal' }], subj)}」`,
+        )
+        check(
+          R.currentIdentityLabel([{ role: 'dean' }, ...one('head_teacher')], subj) === '班主任 · dean',
+          `${SID}：认得出的身份排在前面、认不出的原样跟在后面（优先级表里没有生代码的位置）`,
+          `读到「${R.currentIdentityLabel([{ role: 'dean' }, ...one('head_teacher')], subj)}」`,
         )
         check(
           R.currentIdentityLabel(null, null) === R.currentIdentityLabel([], null),
@@ -2021,9 +2068,17 @@ await withLock(async () => {
       })
 
       /**
-       * 三处「当前身份」标签各读一次（侧栏 / 工作台问候 / 设置页身份卡）。
+       * 三处「当前身份」标签各读一次（侧栏 / 工作台问候 / 设置页身份卡），
+       * 外加**布局几何**（这一轮改成"多身份全露"之后才需要的）。
+       *
        * **只认"真的看得见"的元素**（`getBoundingClientRect` 有宽高）：不然标签被挪进
        * 隐藏容器里时断言会变成"读得到 DOM 就算过"的假绿。
+       *
+       * 布局那三个数（都实测过修之前的坏值，见 §13.10）：
+       *   · `railTagRight` vs `railInnerRight`：标签有没有**捅出侧栏**（4 个身份时曾溢出 41px）；
+       *   · `railRowScrollOver`：那一行的内容宽超出可视宽多少（>0 = 真的挤出去了）；
+       *   · `nameH`：姓名那个 `span` 的高度 —— 标签 `nowrap` 又不肯缩，**能屈能伸的只有姓名**，
+       *     所以姓名会被压成竖排（实测「王老师」变成三行、行高 70px）。单行约 21px，>26 就是被折了。
        */
       const idTags = (p) =>
         p.evaluate(() => {
@@ -2033,14 +2088,37 @@ await withLock(async () => {
             const r = el.getBoundingClientRect()
             return r.width > 0 && r.height > 0 ? norm(el.textContent) : ''
           }
+          const box = (el) => {
+            if (!el) return null
+            const b = el.getBoundingClientRect()
+            return { w: Math.round(b.width), h: Math.round(b.height), right: Math.round(b.right) }
+          }
+          const over = (el) => (el ? el.scrollWidth - el.clientWidth : null)
           const label = [...document.querySelectorAll('div, span')].find(
             (e) => e.children.length === 0 && norm(e.textContent) === '当前身份',
           )
           const h1 = [...document.querySelectorAll('h1')].find((h) => norm(h.textContent).includes('王老师'))
+          const benchTagEl = h1?.parentElement?.querySelector('.tag')
+          const railBlock = label?.closest('.rail-block')
+          const railTagEl = railBlock?.querySelector('.tag')
+          const nameEl = railTagEl?.parentElement?.querySelector('span')
+          const railEl = document.querySelector('.floating-rail')
+          const setTagEl = document.querySelector('.panel .tag-accent')
           return {
-            rail: shown(label?.closest('.rail-block')?.querySelector('.tag')),
-            bench: shown(h1?.parentElement?.querySelector('.tag')),
-            setting: shown(document.querySelector('.panel .tag-accent')),
+            rail: shown(railTagEl),
+            bench: shown(benchTagEl),
+            setting: shown(setTagEl),
+            railTagRight: box(railTagEl)?.right ?? null,
+            // 侧栏内容右缘 = 侧栏右缘 − p-4 的 16 − 1px 边框（`IDENTITY_TAG_STYLE` 的注释里有出处）
+            railInnerRight: railEl ? Math.round(railEl.getBoundingClientRect().right) - 17 : null,
+            railRowScrollOver: over(railTagEl?.parentElement),
+            railTagH: box(railTagEl)?.h ?? null,
+            nameH: box(nameEl)?.h ?? null,
+            benchRowScrollOver: over(benchTagEl?.parentElement),
+            settingRowScrollOver: over(setTagEl?.parentElement),
+            settingTagRight: box(setTagEl)?.right ?? null,
+            settingRowRight: box(setTagEl?.parentElement)?.right ?? null,
+            pageScrollOver: document.documentElement.scrollWidth - document.documentElement.clientWidth,
           }
         })
 
@@ -2054,8 +2132,18 @@ await withLock(async () => {
           { roles: [], want: '物理', why: '一条身份都没有' },
           {
             roles: [{ role: 'head_teacher' }, { role: 'grade_head' }],
-            want: '年级主任',
-            why: '多身份：班主任 + 年级主任',
+            want: '年级主任 · 班主任',
+            why: '多身份：班主任 + 年级主任（两个）',
+          },
+          {
+            roles: [{ role: 'super' }, { role: 'admin' }, { role: 'head_teacher' }],
+            want: '最高管理员 · 教导处 · 班主任',
+            why: '多身份：三个',
+          },
+          {
+            roles: [{ role: 'super' }, { role: 'admin' }, { role: 'grade_head' }, { role: 'head_teacher' }],
+            want: '最高管理员 · 教导处 · 年级主任 · 班主任',
+            why: '多身份：四个（宽度极值）',
           },
         ]
         for (const c of cases) {
@@ -2082,6 +2170,26 @@ await withLock(async () => {
             tags.bench === c.want,
             `${SID}：${c.why} → 工作台问候那一行也是「${c.want}」`,
             `读到「${tags.bench}」`,
+          )
+          /*
+           * 🔴 布局三连（多身份全露之后**必须**有人盯着，否则"标签捅出侧栏"只能靠人眼在图里发现）：
+           *   ① 标签右缘不越过侧栏内容右缘；② 那一行没有横向溢出；③ 姓名没被挤成竖排。
+           * 修之前实测：3 个身份时姓名被压成竖排（行高 70px）、4 个身份时标签溢出侧栏 41px。
+           */
+          check(
+            tags.railRowScrollOver === 0 && tags.railTagRight <= tags.railInnerRight,
+            `${SID}：${c.why} → 侧栏标签没有捅出侧栏（这一行不横向溢出）`,
+            `标签右缘 ${tags.railTagRight} / 侧栏内容右缘 ${tags.railInnerRight}，行内溢出 ${tags.railRowScrollOver}px，标签高 ${tags.railTagH}px`,
+          )
+          check(
+            tags.nameH !== null && tags.nameH <= 26,
+            `${SID}：${c.why} → 姓名没有被挤成竖排（标签不肯缩时，先被压的是姓名）`,
+            `姓名框高 ${tags.nameH}px（单行约 21px，>26 就是折行了）`,
+          )
+          check(
+            tags.benchRowScrollOver === 0 && tags.pageScrollOver === 0,
+            `${SID}：${c.why} → 工作台那一行与整页都没有横向溢出`,
+            `工作台行内溢出 ${tags.benchRowScrollOver}px，整页横向溢出 ${tags.pageScrollOver}px`,
           )
         }
 
@@ -2110,6 +2218,57 @@ await withLock(async () => {
           `${SID}：设置页「关于 · 学段学科」照旧写学科（那一行与身份无关，不许跟着改）`,
           short(body.match(/.{0,20}学段学科.{0,30}/)?.[0] ?? body, 120),
         )
+
+        /*
+         * 🔴 手机上（414px）设置页身份卡那一行 —— 这一轮布局上的**第二个现场**。
+         * 实测修之前：3 个身份时这一行横向溢出 18px、4 个身份溢出 72px，
+         * 溢出的正是右边那个学校标签（被面板裁掉，看不出"少了东西"）。
+         */
+        await idPage.setViewportSize({ width: 414, height: 880 })
+        await idPage.goto(
+          `${BASE}/settings?roles=${encodeURIComponent('[{"role":"super"},{"role":"admin"},{"role":"head_teacher"}]')}`,
+          { waitUntil: 'networkidle' },
+        )
+        for (let i = 0; i < 30; i++) {
+          tags = await idTags(idPage)
+          if (tags.setting) break
+          await idPage.waitForTimeout(100)
+        }
+        check(
+          tags.setting === '最高管理员 · 教导处 · 班主任',
+          `${SID}：手机上设置页身份卡也把三个身份全写出来（同一个函数，没有"手机版取最高"这种事）`,
+          `读到「${tags.setting}」`,
+        )
+        check(
+          tags.settingRowScrollOver === 0 && tags.settingTagRight <= tags.settingRowRight,
+          `${SID}：手机上身份卡那一行没有横向溢出（3 个身份时曾经溢出 18px，挤掉的是右边学校标签）`,
+          `标签右缘 ${tags.settingTagRight} / 那一行右缘 ${tags.settingRowRight}，行内溢出 ${tags.settingRowScrollOver}px`,
+        )
+        check(
+          tags.pageScrollOver === 0,
+          `${SID}：手机上的设置页整页没有横向溢出`,
+          `整页横向溢出 ${tags.pageScrollOver}px`,
+        )
+        await shotRaw(idPage, SID, '79-role-multi-mobile')
+
+        /*
+         * 两张**留档图**：这一轮布局约束的两个现场（3 个身份 / 4 个身份下的侧栏）。
+         * 图只是留档，真正的门是上面那几条几何断言 —— 它们红了才是真的坏了。
+         */
+        await idPage.setViewportSize({ width: 1440, height: 940 })
+        for (const [name, roles] of [
+          ['77-role-multi-3', [{ role: 'super' }, { role: 'admin' }, { role: 'head_teacher' }]],
+          [
+            '78-role-multi-4',
+            [{ role: 'super' }, { role: 'admin' }, { role: 'grade_head' }, { role: 'head_teacher' }],
+          ],
+        ]) {
+          await idPage.goto(`${BASE}/?roles=${encodeURIComponent(JSON.stringify(roles))}`, {
+            waitUntil: 'networkidle',
+          })
+          await idPage.waitForTimeout(400)
+          await shotRaw(idPage, SID, name)
+        }
       })
     } catch (e) {
       console.log(`\n💥 脚本在第「${currentStep}」步异常中断：${e instanceof Error ? e.message : String(e)}`)
