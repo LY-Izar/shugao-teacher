@@ -22,7 +22,6 @@ import {
   IconGauge,
   IconHash,
   IconInfo,
-  IconSend,
   IconTarget,
   IconUser,
   IconUsers,
@@ -168,17 +167,6 @@ for (const n of NAV) {
   }
 }
 
-/**
- * 展开层底部那句说明里的胶囊项（N5）。
- *
- * 原文写死了「工作台 / 作业 / 我的 在底部那颗胶囊里」三项 —— 那是**当时**的事实；
- * 一旦 `PIN_KEYS` 变了、或某一项对某个身份不摆，这句话就会变成假话。
- * 改成按**这个人实际看得见的胶囊项**拼：只写"真的在胶囊里"的那几个。
- */
-function pinnedLabel(pinned: NavItem[]): string {
-  return pinned.map((n) => n.label).join(' / ')
-}
-
 const MORE_HINT: Record<string, string> = {
   '/classes': '花名册 · 拍照录入 · 名单体检',
   '/exams': '导入成绩单 · 手动批阅 · 逐题统计',
@@ -318,14 +306,26 @@ function UnreadDot() {
 }
 
 /* ============================================================
-   移动端导航：悬浮的深色玻璃控件（两件，彼此分开）
+   移动端导航：悬浮的**亮色**液态玻璃控件（两件，彼此分开）
 
    形态（用户给的图 + `功能设计与不变量.md` §十五）：
 
         ┌───────────────────┐        ╭─────╮
-        │  ♥    ▣✎    ⌕     │        │  ✈  │      ← 全圆按钮 = 展开其余入口
-        └───────────────────┘        ╰─────╯
+        │  ♥    ▣✎    ⌕     │        │  ⌃  │      ← 全圆按钮 = 展开其余入口
+        └───────────────────┘        ╰─────╯         （未展开 ⌃ 朝上 / 已展开 ⌄ 朝下）
          12 圆角胶囊 · 三个图标          独立、不连着
+
+   🔴 **底色是亮色**（2026-09-28 用户拍板）：全站 UI 都是亮色，只有这一块原来是深色玻璃，
+      在亮色页面上像"另一个 App 的残留"。材料换成 `index.css` 的 `.glass-light`
+      （半透明浅色 + `blur(22px) saturate(200%)` + **边缘折射**：顶部内亮高光 /
+      底部内一线暗 / 1px 半透明白发丝描边 / 外圈超软大阴影）。参考 VIVO / OPPO 桌面的亮色小组件。
+
+   ⚠️ **换成亮底之后对比度要重新算**（这是这一轮最容易漏的地方，三个都换了）：
+      · 胶囊里的图标：白 → **深色**（当前页 `--color-accentink`、其余 `--color-ink2`）；
+      · 当前页那块高亮：白玻璃 → **更实的白 + 淡蓝描边**（`--color-accentsoft` 那一挂）；
+      · 右侧圆按钮：深底上的暖黄 `***REMOVED***f5c469` → 亮底上**够深的强调色** `--color-accentink`。
+      三个都按"玻璃合成底色 ***REMOVED***F7F8FA / ***REMOVED***F3F5F8（= 画布 `--color-canvas` ***REMOVED***e8ebf2 上叠
+      64% / 48% 白）"算过 WCAG 对比度，具体数值与理由写在 §十五 15.1 的对比度表里。
 
    三条不能破的：
    ① 每个图标 **48×48**（≥44px，手指点的东西不许更小）；
@@ -341,6 +341,15 @@ function UnreadDot() {
  *    `RailItem` 那一侧的 `dot` 一起传进来），但**胶囊里不画那个点**：
  *    胶囊只装三个"每天来回切"的入口，而通知**不在** `PIN_KEYS` 里 ——
  *    所以这里既不需要那个参数、也不该为它加分支（`dot` 只属于左栏与展开层）。
+ *
+ * 🔴 **图标是深色的**（2026-09-28 改亮色玻璃之后）：底从深色换成半透明浅色，
+ *    原来那套"当前页白 / 其余 62% 白"在这块底上等于看不见。
+ *    · 当前页 `--color-accentink`（***REMOVED***0847c4）—— 既是主色、又是本文最深的蓝，压在
+ *      近白的页面上比 `--color-accent`（***REMOVED***0b5cf0）更稳；
+ *    · 其余 `--color-ink2`（***REMOVED***4a5563）—— "未选中"应该是"墨"而不是"灰得看不见"。
+ *    这两个色都按"玻璃合成底色"算过、又在真浏览器里按像素复核过（局部对比度）：
+ *    当前页 **7.48:1**、其余 **7.46 / 7.20:1**；口径与实测剖面见 §十五 15.1 的对比度表。
+ *    ⛔ 别退回白色系（`***REMOVED***fff` / `rgb(255 255 255/.62)`）：那是配深底的。
  */
 function PinTab({ to, label, icon: Icon, end }: NavItem & { dot?: boolean }) {
   return (
@@ -361,7 +370,7 @@ function PinTab({ to, label, icon: Icon, end }: NavItem & { dot?: boolean }) {
           data-active={isActive}
           className="grid h-full w-full place-items-center"
           style={{
-            color: isActive ? '***REMOVED***fff' : 'rgb(255 255 255 / .62)',
+            color: isActive ? 'var(--color-accentink)' : 'var(--color-ink2)',
             transition: 'color .22s cubic-bezier(.22,.8,.24,1)',
           }}
         >
@@ -399,7 +408,8 @@ function MobileNav() {
   const more = moreAt === pathname
 
   /*
-   * 当前页在胶囊里 → 高亮滑到那一格；在「更多入口」里 → 圆按钮加一圈暖黄描边。
+   * 当前页在胶囊里 → 高亮滑到那一格；在「更多入口」里 → 圆按钮加一圈**蓝**描边
+   * （2026-09-28 改亮色玻璃之后：原来那圈暖黄是为深底挑的，见 §十五 15.1 的对比度表）。
    * ⚠️ 这两处都**必须**跟着 `visible` 走（不是 `NAV`）：否则过滤之后
    *    某一格不在了，索引会错位、`moreActive` 会在错误的页面上亮起来。
    */
@@ -546,16 +556,17 @@ function MobileNav() {
           className="mx-auto flex items-center gap-3"
           style={{ width: 'fit-content', maxWidth: 640, padding: '0 16px' }}
         >
-          {/* ① 胶囊：工作台 / 作业 / 我的 —— 半透明深色玻璃、细描边、12 圆角 */}
+          {/* ① 胶囊：工作台 / 作业 / 我的 —— 半透明**亮色**液态玻璃、细描边、12 圆角 */}
           <div
             ref={pillRef}
-            className="glass-dark pointer-events-auto relative flex items-center"
+            className="glass-light pointer-events-auto relative flex items-center"
             style={{
-              /* 58 = 1 边框 + 4 内边距 + 48 图标格 + 4 + 1（box-sizing 是 border-box） */
+              /* 58 = 1 边框 + 4 内边距 + 48 图标格 + 4 + 1（box-sizing 是 border-box）。
+                 ⚠️ 那 1px 边框现在由 `.glass-light` 给（半透明白发丝描边）；**宽度仍然是 1**，
+                    所以这个算式、`clientLeft`、以及 38/39 两张拖拽图量的坐标全都不变。 */
               height: 58,
               padding: 4,
               borderRadius: 12,
-              border: '1px solid rgb(255 255 255 / .18)',
               touchAction: 'pan-y',
             }}
             onPointerDown={onDown}
@@ -569,7 +580,11 @@ function MobileNav() {
               }
             }}
           >
-            {/* 当前页那一格：跟着手指走的一块玻璃 */}
+            {/* 当前页那一格：跟着手指走的一块玻璃。
+                ⚠️ 底下已经是**浅色**玻璃，再用半透明白就"高亮不起来"了（白压白）。
+                   所以这里改成**更实的白 → 淡蓝**渐变 + 一圈淡蓝描边（`--color-accentsoft`
+                   那一挂）—— 既要看得出来"我在这一页"，又不能变成一块突兀的实心块。
+                   上面那个深色图标（`--color-accentink` ***REMOVED***0847c4）压在近白的块上 ≈ **7.6:1**。 */}
             <span
               ref={hiRef}
               aria-hidden="true"
@@ -580,10 +595,9 @@ function MobileNav() {
                 left: dragX ?? hi.left,
                 width: hi.width,
                 borderRadius: 12,
-                background:
-                  'linear-gradient(180deg, rgb(255 255 255 / .24), rgb(255 255 255 / .12))',
-                border: '1px solid rgb(255 255 255 / .22)',
-                boxShadow: 'inset 0 1px 0 rgb(255 255 255 / .3)',
+                background: 'linear-gradient(180deg, ***REMOVED***fff 0%, var(--color-accentsoft) 100%)',
+                border: '1px solid rgb(11 92 240 / .22)',
+                boxShadow: 'inset 0 1px 0 ***REMOVED***fff, 0 1px 2px rgb(14 20 27 / .08), 0 8px 18px -10px rgb(11 92 240 / .45)',
                 opacity: hi.show ? 1 : 0,
                 pointerEvents: 'none',
                 willChange: 'left, width, transform',
@@ -598,35 +612,70 @@ function MobileNav() {
             ))}
           </div>
 
-          {/* ② 圆按钮：展开其余入口。和胶囊**分开**，不连着 */}
+          {/* ② 圆按钮：**展开 / 收起其余入口**。和胶囊**分开**，不连着。
+              🔴 图标是**折角箭头**（`IconChevronRight` 转 90°），**未展开朝上 / 已展开朝下**
+                 （2026-09-28 用户拍板）：原来用的纸飞机（`IconSend`）是照参考图抄的，
+                 语义其实不对 —— 这个按钮的职责是"把下面那一层拉上来 / 放回去"，
+                 不是"发送"。箭头的方向与它下面那张 Sheet 的升/降方向一致，
+                 也是底部抽屉的通用画法（VIVO / OPPO 的系统 UI 同样这么用）。
+                 ⚠️ 一个图标两个状态，状态变化体现在**方向**上，比"换一个完全不同的图标"
+                    更容易读成"同一件事的开关"；桌面那侧没有这个按钮，不用跟着改。
+              🔴 无障碍名**跟着状态变**（视觉与 aria-label 必须一致，§十五 I21 那一挂）：
+                 `展开更多入口` ↔ `收起更多入口`。`shots.mjs` 是按**收起态那个名字**点的。
+              ⚠️ 颜色用 `--color-accentink`（***REMOVED***0847c4）：它压在近白的玻璃上 ≈ **7.3:1**。
+                 原来那个暖黄 `***REMOVED***f5c469` 是"深底上的显眼强调物"，在这套亮色玻璃上只有
+                 ≈ **1.5:1**，而且按钮现在的语义是个功能开关 —— 与全站其它控件同用
+                 accent 一挂才对（为什么不取浅一档的 `--color-accent` 见下方注释）。 */}
           <button
             type="button"
             onClick={() => setMoreAt(more ? null : pathname)}
-            aria-label="展开更多入口"
+            aria-label={more ? '收起更多入口' : '展开更多入口'}
             aria-expanded={more}
             aria-haspopup="dialog"
-            title="更多入口"
-            className="glass-dark pointer-events-auto grid shrink-0 place-items-center"
+            title={more ? '收起更多入口' : '更多入口'}
+            className="glass-light pointer-events-auto grid shrink-0 place-items-center"
             style={{
               /* 与胶囊等高（58），全圆 */
               width: 58,
               height: 58,
               borderRadius: 999,
-              border: '1px solid rgb(255 255 255 / .18)',
-              color: '***REMOVED***f5c469',
-              /* 当前页在展开层里时描一圈同色暖黄，免得"高亮不见了" */
+              color: 'var(--color-accentink)',
+              /* 当前页在展开层里时描一圈同色蓝，免得"高亮不见了" */
               outline:
-                more || moreActive ? '2px solid rgb(245 196 105 / .5)' : '2px solid transparent',
+                more || moreActive ? '2px solid rgb(11 92 240 / .55)' : '2px solid transparent',
               outlineOffset: 3,
               transition: 'outline-color .2s',
             }}
           >
-            <IconSend size={24} fill="currentColor" />
+            {/*
+              为什么取 `--color-accentink`（***REMOVED***0847c4，7.3:1）而不是 `--color-accent`
+              （***REMOVED***0b5cf0，5.2:1）：折角箭头是**细线**（1.6→2.1 描边），线越细越吃对比度，
+              而 7.3:1 是本次实测里最稳的那一档；两者都在 AA 之上，取深的那支。
+            */}
+            <span
+              style={{
+                display: 'grid',
+                placeItems: 'center',
+                /* 未展开 → 朝上（把那一层拉起来）；已展开 → 朝下（放回去） */
+                transform: more ? 'rotate(90deg)' : 'rotate(-90deg)',
+                transition: 'transform .32s cubic-bezier(.34,1.3,.5,1)',
+              }}
+            >
+              <IconChevronRight size={26} strokeWidth={2.1} />
+            </span>
           </button>
         </div>
       </nav>
 
-      {/* 展开：其余入口（班级 / 错题集 …）。一行 52px，够手指点 */}
+      {/*
+        展开：其余入口（班级 / 错题集 …）。一行 52px，够手指点。
+        ⚠️ 这一层（`.sheet`）本来就是**白底亮色**（`index.css` 的 `.sheet`），
+           所以上一轮改亮色玻璃**没有**把它也算进来 —— 先读清再动手，别无脑统一。
+        ⚠️ 底部原来还有一行说明「工作台 / 作业 / 我的 在底部那颗胶囊里；这一层装的是
+           其余入口。」（按实际胶囊项动态拼，`pinnedLabel()`）—— 用户 2026-09-28 拍板
+           **删掉**，那段拼字符串的逻辑也一起删了（它只有这一个用处，留着就是死代码）。
+           `shots.mjs` 的「按身份显示导航」那一节反过来钉住"它不在"。
+      */}
       <Sheet
         open={more}
         onClose={() => setMoreAt(null)}
@@ -704,16 +753,6 @@ function MobileNav() {
             )
           })}
         </div>
-        <p
-          style={{
-            fontSize: 11.5,
-            color: 'var(--color-ink3)',
-            marginTop: 10,
-            lineHeight: 1.7,
-          }}
-        >
-          {pinnedLabel(pinned)} 在底部那颗胶囊里；这一层装的是其余入口。
-        </p>
       </Sheet>
     </>
   )
@@ -1213,7 +1252,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </div>
       </aside>
 
-      {/* 移动端导航 —— 悬浮的深色玻璃胶囊 + 展开按钮（形态见 MobileNav 上方的说明） */}
+      {/* 移动端导航 —— 悬浮的**亮色**液态玻璃胶囊 + 展开按钮（形态见 MobileNav 上方的说明） */}
       <MobileNav />
 
       {/* 切换班级 */}

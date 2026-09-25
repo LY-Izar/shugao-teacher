@@ -1477,7 +1477,7 @@ await withLock(async () => {
       await ctxG7.close()
 
 
-      /* ================= 移动端底部导航：磨砂玻璃 + 液态玻璃胶囊 ================= */
+      /* ============ 移动端底部导航：**亮色**液态玻璃 + 液态玻璃胶囊 ============ */
 
       /*
        * 35/36/37 三张原来**字节完全相同**（188492/188492/188492）——
@@ -1554,8 +1554,47 @@ await withLock(async () => {
        */
       const SNM = '35–37 移动端底部导航 · 展开层'
       await step(SNM, async () => {
+        /*
+         * 🆕 **圆按钮是"展开 / 收起"开关**（2026-09-28 用户拍板：原来那个纸飞机语义不对）。
+         * 换图标本身是外观，**要钉住的是"开着还是关着看得出来"** ——
+         * 这里在点之前/之后各量一次同一个按钮：
+         *   · 无障碍名：`展开更多入口` → `收起更多入口`（视觉与 aria-label 必须一致）；
+         *   · `aria-expanded`：false → true；
+         *   · 里面那个箭头的 `transform`：未展开朝上 / 已展开朝下，两次必须**不一样**。
+         * ⚠️ 名字那一条尤其重要：下面所有"点开更多入口"都是按**收起态那个名字**点的，
+         *    名字不跟着状态变、或变了却和视觉不一致，都是这里要红的。
+         */
+        const toggleState = () =>
+          page.evaluate(() => {
+            const b = document.querySelector(
+              'nav[aria-label="主导航"] button[aria-haspopup="dialog"]',
+            )
+            const arrow = b?.firstElementChild
+            return {
+              label: b?.getAttribute('aria-label') ?? '(没找到按钮)',
+              expanded: b?.getAttribute('aria-expanded') ?? '(没有 aria-expanded)',
+              arrow: arrow ? getComputedStyle(arrow).transform : '(没有箭头)',
+            }
+          })
+        const beforeToggle = await toggleState()
+        check(
+          beforeToggle.expanded === 'false' &&
+            beforeToggle.label === '展开更多入口' &&
+            beforeToggle.arrow !== 'none' &&
+            beforeToggle.arrow !== '(没有箭头)',
+          `${SNM}：收起态时圆按钮是「展开更多入口」+ 箭头有朝向`,
+          `aria-label="${beforeToggle.label}" aria-expanded="${beforeToggle.expanded}" transform=${beforeToggle.arrow}`,
+        )
         await page.getByRole('button', { name: '展开更多入口' }).click()
         await page.waitForTimeout(400)
+        const afterToggle = await toggleState()
+        check(
+          afterToggle.expanded === 'true' &&
+            afterToggle.label === '收起更多入口' &&
+            afterToggle.arrow !== beforeToggle.arrow,
+          `${SNM}：展开之后同一颗按钮**换成了「收起」的形态**（名字 + 箭头都跟着状态走）`,
+          `aria-label="${afterToggle.label}" aria-expanded="${afterToggle.expanded}" transform ${beforeToggle.arrow} → ${afterToggle.arrow}`,
+        )
         const sheet = await page.evaluate(() => {
           const box = document.querySelector('.sheet')
           return {
@@ -1921,9 +1960,17 @@ await withLock(async () => {
           `实际：${sheet.items.join(' / ') || '(空)'}`,
           `期望：${wantSheet.join(' / ')}`,
         )
+        /*
+         * 2026-09-28：用户拍板**删掉**展开层底部那行说明
+         * （原文「工作台 / 作业 / 我的 在底部那颗胶囊里；这一层装的是其余入口。」，
+         * 是按实际胶囊项用 `pinnedLabel()` 动态拼的 —— 那段逻辑也一起删了）。
+         * 所以这条断言**反过来钉**"它不在"：删掉的东西被谁加回来，这里立刻红。
+         * ⚠️ 只查 `sheet.body`（那一层的 innerText），不要把范围放大到整页 ——
+         *    `pinnedLabel` 式的文案在别处本来就可能出现。
+         */
         check(
-          sheet.body.includes('工作台 / 作业 / 我的 在底部那颗胶囊里'),
-          `${SNAV}：展开层底部那句说明是**按实际胶囊项拼的**（N5，不再写死三项）`,
+          !sheet.body.includes('在底部那颗胶囊里'),
+          `${SNAV}：展开层底部那句胶囊说明**已删**（2026-09-28 用户拍板，别再加回来）`,
           short(sheet.body.slice(-90), 120),
         )
         await navPage.getByRole('button', { name: '展开更多入口' }).click()
