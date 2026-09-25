@@ -73,9 +73,20 @@ function sb(env: Env, path: string, init?: RequestInit): Promise<Response> {
 /**
  * 数据库还没跑阶段 1 的建表脚本时，PostgREST 会回 42P01（relation does not exist）。
  * 这种错误对用户来说完全看不懂，单独翻译一句人话。
+ *
+ * 🔴 判据只认"**表/relation** 不在"（`42P01` / `PGRST205` /
+ * 文案里限定过的 `Could not find the table` / `relation … does not exist`），
+ * **不许**用泛化的 `/does not exist/i` 或 `schema cache` —— 那会把
+ * `Could not find the 'x' column of 'y' in the schema cache`（`PGRST204`，说的是"这一列不在"）
+ * 也翻成「表还没建」，等于把人指去跑一段本来已经跑过的 SQL。
+ * ⚠️ 这里探的是**表**（`classroom_accounts?select=id&id=eq.` 只用主键那一列），
+ *    所以不需要 `isMissingColumn` 那条配套判据；`42703` 一律**不是**"表不在"。
+ * 口径与 `lib/adminChart.ts` 的 `MISSING_TABLE_RE` 一致。
  */
 function isMissingTable(status: number, text: string): boolean {
-  return status === 404 || /42P01|does not exist|schema cache/i.test(text)
+  return (
+    status === 404 || /42P01|PGRST205|Could not find the table|relation .+ does not exist/i.test(text)
+  )
 }
 
 const NEED_STAGE1 =

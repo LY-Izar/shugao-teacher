@@ -16,9 +16,11 @@
  * ------------------------------------------------------------
  *   · 纯函数（A1–A7）：角色组合 → 该看见哪些入口。**"该藏的时候藏了、该显示的时候显示了"**
  *     两个方向都钉（§18.3：两个坏法方向相反，各要一条对照）。
- *   · 静态（D1–D7）：路由 ↔ 登记表 ↔ 本文档矩阵三方咬合；入口判据不许各写一套；
+ *   · 静态（D1–D7 / D9 / D10）：路由 ↔ 登记表 ↔ 本文档矩阵三方咬合；入口判据不许各写一套；
  *     谁在读 `myRoles` / `ROLE_NAME` 要有白名单；`PIN_KEYS` 不许脱队；
- *     生产构建里测试钩子不许出现。
+ *     生产构建里测试钩子不许出现；
+ *     🆕 **D10：表存在性探针不许假设任何列存在**（`select('*')`）+
+ *     「表不在」与「列不在」判据分流（这一类 bug 已经咬了两次：`subjects` / `notice_targets`）。
  *   · 编码（D8）：全仓文本文件的无 BOM / 严格 UTF-8 / 中文没被 mojibake，
  *     外加**不可见字符 / 全角标点混进代码** ——
  *     这个项目**反复栽在编码上**（BOM 出过构建失败、上一轮又出双重编码乱码），
@@ -1762,6 +1764,475 @@ function sourceFileHealth(buf) {
   )
 }
 
+/* ============================================================
+   第十三节 · D10：**表存在性探针不许假设任何列存在**（这一类 bug 已经咬了两次）
+   ------------------------------------------------------------
+   两次实例（同一个形状 —— 拿**某一列**当**整张表**的探针，而"每张表都有 id"只是假设）：
+     · ① 超管面板 `adminChart.probeTable()`：探 9 张表用 `select('id')`，
+          而 `subjects` 的主键是 `code`（`schema.sql` §12.1，**没有 id**）
+          → 那一格在任何正确的库上都是红的（已改成 `select('*')`）；
+     · ② 通知数据层 `lib/notices.ts`：探 `notice_targets` 用 `select('id')`，
+          而那张表的列是 `notice_id` / `target_kind` / …（§21.4，**没有 id**）
+          → PostgREST 回 `42703 column notice_targets.id does not exist`
+          → 被泛判据当成"表不在" → 通知页谎报「数据库里还没有通知表」（已改成 `select('*')`）。
+
+   本节守三条（都必须能在当前仓库上**零误报** —— 一个天天误报的检查比没有更糟，§18.6）：
+
+     A · **形状**：探针里 `.select('<具体列>')` 必须是 `'*'`。
+         "探针上下文" = `at` 落在**最近的、名字像探针的函数**里：`probe*` / `ensure*`，
+         或就地问"在不在"的小工具 `has`（`const has = async (table) => …`）。
+         唯一豁免：**这个探针自己就在问"这一列在不在"** —— 它的体里出现 `42703`，
+         或者（**表名写死时**）引用了名字像列判据的东西（`MISSING_COL_RE` / `isMissingColumn`）——
+         那选那一列**正是它的目的**（`lib/files.ts` 的 `probeFileClassCols` 就是这种；
+         它不在本轮允许改的文件里，而且它**不是**这一类 bug）。
+     B · **判据分流**：名字带 `MissingTable` / `MissingRelation` 的判据
+         **不许**把「列不在」（`42703` / `PGRST204`）算进来，也**不许**用没有 `relation`
+         限定的 `does not exist`；且必须认得 `42P01`（否则它可能"什么都不认得"）。
+         「列不在」要**另起一条**判据（`MISSING_COL_RE` / `isMissingColumn`），两条成对。
+     C · **错误文案对照**（最实的一条）：把仓库里**真判据**抠出来（错误码字面量 + 正则字面量）
+         拿去跑**真错误文案**：`42703 column notice_targets.id does not exist`（真库上那句）
+         与 `PGRST204 … column …` 一律**不许**被判成"表不在"；`42P01` / `PGRST205` /
+         无码的 `relation … does not exist` 一律**必须**被判出来。
+
+   ⚠️ **收窄留档**（为什么不做成"全仓所有 `select('<具体列>')` 都查"）：
+      · 正常业务查询本来就常常只要一两列（`select('id,title')`）—— 一刀切必然天天误报，
+        而"一个天天误报的检查比没有更糟"（§18.6）；
+      · 所以形状判据只认"**探针上下文**"里的 select，业务查询一律不管（反向对照②钉住这一点）；
+      · 剩下的已知缺口（**明说，不假装覆盖**）：列探针若把列判据整条抽到别处、体里既没有
+        `42703` 也不引用列判据，判据 A 会把它当"表探针"抓（**假红** —— 报错里写了怎么改）；
+        反过来，"表名写死 + 体里引用了列判据"的探针若仍拿具体列去探**表**，会漏（**假绿**）。
+        两条真实实例的形状（`from(<变量>).select('id')` + 表判据）两边都抓得住 ——
+        这一节的定位是"把已经咬过两次的形状钉死 + 把判据分流钉死"，不是"证明这类写法不存在"。
+   ============================================================ */
+
+section("第十三节 · D10：表存在性探针不许假设列存在（select('*')）+ 42703 不算「表不在」")
+
+{
+  /* ---------------- 小工具（只在本节内用） ---------------- */
+
+  /**
+   * 去掉注释，**保留字节长度与换行**（这样命中处的行号还能对得上原文）。
+   * 为什么必须去注释：本仓库的注释里到处在**讨论**这两件事（"42703 不是表不在"、
+   * "别用 select('id')"），而这里判的是**代码**写了什么。
+   */
+  const stripComments = (s) =>
+    s
+      .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
+      .replace(/(^|[^:])(\/\/[^\n]*)/gm, (m, a, b) => a + ' '.repeat(b.length))
+
+  /** 声明处：`function name(` / `const name = … =>`（含 `async`） */
+  const DECL_RE =
+    /(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(|(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\(?[^=;]{0,90}?=>/g
+
+  /** 从 `{` 起配平切出函数体（与 D3 切 `ENTRIES` 的写法同款） */
+  function braceBody(src, open) {
+    let depth = 0
+    for (let i = open; i < src.length; i++) {
+      if (src[i] === '{') depth++
+      else if (src[i] === '}') {
+        depth--
+        if (depth === 0) return src.slice(open, i + 1)
+      }
+    }
+    return src.slice(open)
+  }
+
+  /**
+   * `at` 落在哪个**探针函数**里？返回 `{ name, body }`（找不到返回 null = 非探针用途）。
+   *
+   * ⚠️ 两个坑（都踩过，写下来）：
+   *   · 要的是"**最近的探针函数**"，不是"最近的声明" —— 探针体里常嵌一层就地问在不在的
+   *     小工具（`const has = async (table) => {…}`）或 IIFE（`await (async () => {…})()`），
+   *     后者**不是**探针，按"最近声明"取会把整个探针站点漏掉；
+   *   · 函数体那个 `{` **不能取"声明后第一个 `{`"** —— 签名里的类型字面量
+   *     （`error: { message?: string } | null`）也是一个 `{`，取错了整条判据就看不见了。
+   *     所以这里逐个 `{` 试，取"配平后**真的包含这一处命中**"的那个。
+   */
+  function enclosingFn(src, at, needle) {
+    const decls = []
+    for (const m of src.matchAll(DECL_RE)) {
+      if (m.index > at) break
+      decls.push(m)
+    }
+    for (let k = decls.length - 1; k >= 0; k--) {
+      const name = decls[k][1] ?? decls[k][2]
+      if (!isProbeName(name)) continue
+      /*
+       * ⚠️ 候选 `{` 只在"**这个声明自己的范围**"里找（到下一个声明为止）——
+       *    否则会一路扫到后面别的函数体上，把一处业务查询错记到某个探针名下。
+       * ⚠️ `needle` 必须传**整段 `.from(…).select(…)`**，不能只截前 12 个字符：
+       *    `.from('class` 既是 `classroom_accounts` 的前缀、也是 `classes` 的前缀 ——
+       *    只比前 12 个字符时，`probeGradeLookup()` 里那句 `from('classes').select('grade_id')`
+       *    会把 `classroomRole()` 里的 `from('classroom_accounts')` 认成自己人（踩过）。
+       */
+      const limit = decls[k + 1] ? Math.min(at, decls[k + 1].index) : at
+      for (let i = decls[k].index; i < limit; i++) {
+        if (src[i] !== '{') continue
+        const body = braceBody(src, i)
+        if (body.includes(needle)) return { name, body }
+      }
+    }
+    return null
+  }
+
+  /** 一个 `function name(…)` 的**函数体**（同上：取"配平后含 `return`"的那个 `{`，避开类型字面量） */
+  function fnBodyAfter(code, from) {
+    for (let i = from; i < code.length; i++) {
+      if (code[i] !== '{') continue
+      const body = braceBody(code, i)
+      if (/\breturn\b/.test(body)) return body
+    }
+    return null
+  }
+
+  const lineOf = (src, at) => src.slice(0, at).split('\n').length
+  const isProbeName = (n) => /^(probe|ensure)/i.test(n) || n === 'has'
+  const isTablePredName = (n) => /missing_?(table|relation)/i.test(n)
+  const isColPredName = (n) => /missing_?col/i.test(n)
+
+  /* ---------------- 判据 A：探针里的 `.select(...)` ---------------- */
+
+  /**
+   * 扫一份源码：返回探针里的 `.select(...)` 站点。
+   *   · `sites`  所有探针站点（自证用：数量太少说明锚点/正则坏了）
+   *   · `hits`   **红**：探针里写了具体列名
+   *   · `exempt` 绿：这个探针的判据里有 `42703`（它在问"这一列在不在"）
+   */
+  function scanProbeSelects(src) {
+    const code = stripComments(src)
+    const sites = []
+    const hits = []
+    const exempt = []
+    for (const m of code.matchAll(/\.from\(([^)]*)\)\s*\.select\(\s*([^)]*?)\s*\)/g)) {
+      const fn = enclosingFn(code, m.index, m[0])
+      if (!fn || !isProbeName(fn.name)) continue // 非探针用途（业务查询）→ 不归这一节管
+      const arg = m[2]
+      const where = `${fn.name}() 第 ${lineOf(code, m.index)} 行 · .from(${m[1]})`
+      sites.push(where)
+      if (arg.includes('*')) continue // `'*'`（或 `'id,*'`）→ 没有假设任何列
+      if (!/^'[^']*'$/.test(arg) && !/^"[^"]*"$/.test(arg)) continue // 变量（`select(column)`）→ 列探针的写法
+      /*
+       * 豁免：这个探针自己就在问"**这一列**在不在"（选那一列正是它的目的），两种写法都认：
+       *   · 体里直接有 `42703`（本仓库那三个列探针都是这么写的）；
+       *   · 体里引用了名字像列判据的东西（`MISSING_COL_RE` / `isMissingColumn`）
+       *     **且表名是写死的**（`from('shared_files')`）—— "表也当变量传"的探针
+       *     一律不认这个豁免（不然一句 `MISSING_COL_RE` 就能把表探针洗白，
+       *     反向对照④就是拿真文件钉这一点的）。
+       */
+      const literalTable = /^['"]/.test(String(m[1]).trim())
+      if (/42703/.test(fn.body) || (literalTable && /missing_?col/i.test(fn.body))) {
+        exempt.push(`${where} · select(${arg})`)
+      } else {
+        hits.push(`${where} · select(${arg}) [若这是"列探针"，请把 42703 判据写进它的体里，或改用变量选列]`)
+      }
+    }
+    return { sites, hits, exempt }
+  }
+
+  /* ---------------- 判据 B：「表不在」判据的形状 ---------------- */
+
+  /**
+   * 一条「表不在」的判据该长什么样 —— 返回"哪里不对"的清单（空 = 合格）。
+   * ⚠️ `does not exist` 的限定词取**最近一个** `relation` / `column` / `table`：
+   *    `/relation .+ does not exist/i` 最近的是 `relation` → 合格；
+   *    裸的 `/does not exist/i` 和 `/column .+ does not exist/i` → 不合格（后者是**列**判据）。
+   */
+  function checkTablePredicate(text) {
+    const bad = []
+    if (/42703/.test(text)) bad.push('认了 42703（那是「列不在」，要另起一条判据）')
+    if (/PGRST204/.test(text)) bad.push('认了 PGRST204（那是「列不在」）')
+    if (!/42P01/.test(text)) bad.push('认不出 42P01（那它可能什么都不认得）')
+    for (const m of text.matchAll(/does not exist/gi)) {
+      const before = text.slice(0, m.index)
+      const qual = [...before.matchAll(/\b(relation|column|table)\b/gi)].pop()?.[1]?.toLowerCase()
+      if (qual !== 'relation') {
+        bad.push(`有一处 does not exist 不是由 relation 限定的（最近的是 ${qual ?? '（没有）'}）`)
+      }
+    }
+    return bad
+  }
+
+  /** 扫一份源码里所有「表不在」/「列不在」的判据（`function name(…){}` 与 `const NAME = …`） */
+  function scanMissingPredicates(src) {
+    const code = stripComments(src)
+    const out = []
+    for (const m of code.matchAll(/(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/g)) {
+      if (!isTablePredName(m[1]) && !isColPredName(m[1])) continue
+      const body = fnBodyAfter(code, m.index + m[0].length)
+      if (!body) continue
+      out.push({
+        name: m[1],
+        text: `${m[0]}…）${body}`,
+        line: lineOf(code, m.index),
+      })
+    }
+    for (const m of code.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^\n]*)/g)) {
+      if (!isTablePredName(m[1]) && !isColPredName(m[1])) continue
+      out.push({ name: m[1], text: `${m[1]} = ${m[2]}`, line: lineOf(code, m.index) })
+    }
+    return out
+  }
+
+  /**
+   * 一条判据"认不认"某个错误 —— 把它源码里的**错误码字面量**与**正则字面量**抠出来模拟一遍。
+   *
+   * ⚠️ 这只能模拟"文案 + 代码"这一层，**看不见控制流**（比如
+   *    `if (isMissingColumn(error)) return false` 这种"先摘掉列不在"的分支）——
+   *    所以下面那组错误文案里**不放** `column "x" of relation "y" does not exist`
+   *    那种 PG 原生写法：它在**正则层面**与 `relation … does not exist` 撞车，
+   *    只能靠代码分流（各家的分流都写在 `isMissingTable` / `has()` 里，本节盯不住控制流）。
+   *    而"表探针用 `select('*')`"这条纪律恰恰保证**表探针收不到任何列错误** ——
+   *    那才是根治；这条对照只是把"认得出/认不出"钉住。
+   */
+  function predicateProbe(text) {
+    const codes = [...text.matchAll(/'([0-9A-Z]{5,8})'/g)].map((m) => m[1])
+    const regexes = []
+    for (const m of text.matchAll(/\/(?![/*])((?:[^/\\\n[]|\\.|\[(?:[^\]\\]|\\.)*\])+)\/([gimsuy]*)/g)) {
+      try {
+        regexes.push(new RegExp(m[1], m[2].replace(/[gy]/g, '')))
+      } catch {
+        /* 抠不出来就跳过 —— 下面"必须认得 42P01/42P01 样本"那条会兜住 */
+      }
+    }
+    return { codes, regexes }
+  }
+  const classify = (p, code, msg) => p.codes.includes(code) || p.regexes.some((re) => re.test(msg))
+
+  /* ---------------- 真文件 ---------------- */
+
+  /* 生产代码两处（`src` 与 `functions`）；`app/scripts` 是验证脚本，里面有**刻意伪造的样本字符串**，不扫 */
+  const D10_ROOTS = ['src', 'functions']
+  const tsFiles = []
+  const walkTs = (dir) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      if (e.name === 'node_modules' || e.name === 'dist' || e.name.startsWith('.')) continue
+      const full = join(dir, e.name)
+      if (e.isDirectory()) walkTs(full)
+      else if (e.name.endsWith('.ts')) tsFiles.push(full)
+    }
+  }
+  for (const r of D10_ROOTS) walkTs(join(APP, r))
+  check(tsFiles.length >= 40, `D10：扫到 ${tsFiles.length} 个 .ts（${D10_ROOTS.join(' · ')}）`, `扫到 ${tsFiles.length} 个`)
+
+  const relOf = (f) => f.slice(APP.length + 1).replace(/\\/g, '/')
+  const shapeHits = []
+  const shapeExempt = []
+  let probeSites = 0
+  const tablePreds = []
+  const colPreds = []
+  const predBad = []
+  for (const f of tsFiles) {
+    const raw = readFileSync(f, 'utf8')
+    const s = scanProbeSelects(raw)
+    probeSites += s.sites.length
+    for (const h of s.hits) shapeHits.push(`${relOf(f)} · ${h}`)
+    for (const h of s.exempt) shapeExempt.push(`${relOf(f)} · ${h}`)
+    for (const p of scanMissingPredicates(raw)) {
+      const where = `${relOf(f)} · ${p.name}`
+      if (isTablePredName(p.name)) {
+        tablePreds.push(where)
+        const bad = checkTablePredicate(p.text)
+        if (bad.length) predBad.push(`${where} 第 ${p.line} 行 —— ${bad.join('；')}`)
+      } else colPreds.push(where)
+    }
+  }
+
+  /* 判据 A：红 + 自证（站点数、豁免清单都要看得见） */
+  check(
+    probeSites >= 6,
+    `D10-A 自证：扫到 ${probeSites} 处"探针里的 select"（少于 6 说明锚点/正则坏了，不是"全绿"）`,
+    `${probeSites} 处`,
+  )
+  check(
+    shapeHits.length === 0,
+    "D10-A：探针里没有一处写具体列名（表存在性必须 select('*')）",
+    shapeHits.length ? shapeHits.join('；') : `0 处红；豁免 ${shapeExempt.length} 处（判据里有 42703 的「列探针」）：${shapeExempt.join(' · ') || '（没有）'}`,
+  )
+
+  /* 判据 B：真判据全部合格 + 清单自证（出现新判据就要人来这儿认领） */
+  check(
+    predBad.length === 0,
+    'D10-B：所有"表不在"判据都没有把 42703 当"表不在"、也没有裸的 does not exist',
+    predBad.length ? predBad.join('；') : `${tablePreds.length} 条全部合格`,
+  )
+  eqSet('D10-B 自证：「表不在」判据清单（多一条就要来这儿说清它为什么该在）', tablePreds, [
+    'src/lib/adminChart.ts · MISSING_TABLE_RE',
+    'src/lib/notices.ts · MISSING_TABLE_RE',
+    'src/data/remote.ts · isMissingTable',
+    'functions/api/teacher-account.ts · isMissingTable',
+    'functions/api/classroom-account.ts · isMissingTable',
+  ])
+  check(
+    colPreds.length >= 3,
+    'D10-B 自证：「列不在」判据是**另起的**（不是揉进"表不在"里）',
+    `${colPreds.length} 条：${colPreds.join(' · ')}`,
+  )
+
+  /*
+   * 🔴 **错误文案对照**（本节最强的一条）：把仓库里**真判据**拿去跑**真错误文案**，
+   * 要求「列不在」一律**不**被判成"表不在"，「表不在」一律**被**判出来。
+   * `notice_targets` 那一句就是用户在真库上看到的那一句（这一类 bug 的第二次实例）。
+   */
+  const ERROR_SAMPLES = [
+    { code: '42703', msg: 'column notice_targets.id does not exist', table: false, col: true },
+    { code: '42703', msg: 'column subjects.id does not exist', table: false, col: true },
+    {
+      code: 'PGRST204',
+      msg: "Could not find the 'primary_subject_code' column of 'teachers' in the schema cache",
+      table: false,
+      col: false,
+    },
+    { code: '42P01', msg: 'relation "public.notices" does not exist', table: true, col: false },
+    {
+      code: 'PGRST205',
+      msg: "Could not find the table 'public.notice_targets' in the schema cache",
+      table: true,
+      col: false,
+    },
+    // 老版 PostgREST 不带 code，只给话 —— 兜底文案那一条分支也得认得出"表不在"
+    { code: '', msg: 'relation "public.exams" does not exist', table: true, col: false },
+  ]
+  const allPreds = tsFiles.flatMap((f) =>
+    scanMissingPredicates(readFileSync(f, 'utf8')).map((p) => ({ ...p, where: `${relOf(f)} · ${p.name}` })),
+  )
+  const byPred = allPreds.map((p) => ({
+    name: p.name,
+    where: p.where,
+    isTable: isTablePredName(p.name),
+    /* 列判据只在"它**真的**声称认得 `42703`/`PGRST204`"时才核（本仓库的列判据都认得） */
+    claimsCol: /42703|PGRST204/.test(p.text),
+    probe: predicateProbe(p.text),
+  }))
+  const mismatches = []
+  for (const p of byPred) {
+    for (const s of ERROR_SAMPLES) {
+      const got = classify(p.probe, s.code, s.msg)
+      if (p.isTable && got !== s.table) {
+        mismatches.push(`${p.where} 对「${s.code || '(无码)'} ${short(s.msg, 42)}」判成 ${got}（期望 ${s.table}）`)
+      }
+      // `s.col` 为假 = "这一条不核"（各家的列判据认得的码不完全一样，见上面两行样本）
+      if (!p.isTable && s.col && p.claimsCol && got !== s.col) {
+        mismatches.push(`${p.where} 对「${s.code} ${short(s.msg, 42)}」判成 ${got}（期望 ${s.col}）`)
+      }
+    }
+  }
+  eq(
+    'D10-B 对照自证：「列不在」判据确实被这条对照核到了（不然上面那条只剩表判据那一半）',
+    byPred.filter((p) => !p.isTable && p.claimsCol).length,
+    colPreds.length,
+    '每一条列判据都要在样本里被核过',
+  )
+  check(
+    mismatches.length === 0,
+    `D10-B 对照：${byPred.length} 条真判据 × ${ERROR_SAMPLES.length} 条真错误文案 —— 「列不在」不判成"表不在"，「表不在」都判得出`,
+    mismatches.length ? mismatches.join('；') : '全部一致',
+  )
+
+  /* ---------------- 🔴 反向对照（必须有，否则这一节就是永远为绿的摆设） ---------------- */
+
+  {
+    /* ① 伪造的"表探针 + select('id')" → 必须红（这就是那两个真实例的形状） */
+    const fakeProbe = [
+      'const sb: any = null',
+      'async function probeNoticeTables() {',
+      '  const has = async (table: string) => {',
+      "    const { error } = await sb.from(table).select('id').limit(1)",
+      '    if (error) return false',
+      '    return true',
+      '  }',
+      "  return has('notice_targets')",
+      '}',
+    ].join('\n')
+    const r1 = scanProbeSelects(fakeProbe)
+    check(
+      r1.hits.length === 1 && r1.exempt.length === 0,
+      "D10-A 反向对照①：伪造的探针 `.from(table).select('id')` 被判红",
+      `红 ${r1.hits.length} 处 / 豁免 ${r1.exempt.length} 处 → ${r1.hits[0] ?? '（没红，说明判据 A 失效）'}`,
+    )
+
+    /* ② 正常的业务查询 `select('id,title')`（**非探针用途**）→ 必须绿（防一刀切） */
+    const fakeBiz = [
+      'async function loadNoticeById(id: string) {',
+      "  const { data } = await sb.from('notices').select('id,title').eq('id', id).maybeSingle()",
+      '  return data',
+      '}',
+    ].join('\n')
+    const r2 = scanProbeSelects(fakeBiz)
+    check(
+      r2.hits.length === 0 && r2.exempt.length === 0 && r2.sites.length === 0,
+      "D10-A 反向对照②：非探针用途的 `select('id,title')` **不**被判红（防一刀切）",
+      `红 ${r2.hits.length} / 豁免 ${r2.exempt.length} / 站点 ${r2.sites.length}（都期望 0）`,
+    )
+
+    /* ③ 正式的"列探针"（判据里有 42703）→ 必须绿（它问的就是那一列） */
+    const fakeCol = [
+      'async function probeFileClassCols() {',
+      "  const { error } = await sb.from('shared_files').select('class_ids').limit(1)",
+      "  if (!error) return true",
+      "  return !(code === '42703' || /does not exist/i.test(msg))",
+      '}',
+    ].join('\n')
+    const r3 = scanProbeSelects(fakeCol)
+    check(
+      r3.hits.length === 0 && r3.exempt.length === 1,
+      "D10-A 反向对照③：列探针 `select('class_ids')`（判据里有 42703）**不**被判红",
+      `红 ${r3.hits.length} / 豁免 ${r3.exempt.length}（期望 0 / 1）→ ${r3.exempt[0] ?? ''}`,
+    )
+
+    /* ④ 端到端：拿**真文件**把那一行换回旧写法 → 必须红（证明上面的绿不是因为什么都没扫到） */
+    const noticeSrc = readApp('src/lib/notices.ts')
+    const poisoned = noticeSrc.replace(".select('*')", ".select('id')")
+    const r4 = scanProbeSelects(poisoned)
+    check(
+      poisoned !== noticeSrc && r4.hits.length === 1,
+      'D10-A 反向对照④：真文件（lib/notices.ts）换回 `select(\'id\')` 后判红',
+      `红 ${r4.hits.length} 处 → ${r4.hits[0] ?? '（没红：真源码那条探针已经不在了？）'}`,
+    )
+    const clean = scanProbeSelects(noticeSrc)
+    check(
+      clean.hits.length === 0,
+      'D10-A 正面对照：真文件（lib/notices.ts）原文 0 处红',
+      `红 ${clean.hits.length} 处 / 站点 ${clean.sites.length} 处`,
+    )
+  }
+
+  {
+    /* ⑤ 判据 B 的反向对照：三种坏写法必须红，一条好写法必须绿 */
+    const badBare = checkTablePredicate("/42P01|PGRST205|does not exist|schema cache/i")
+    check(
+      badBare.length >= 1,
+      'D10-B 反向对照①：裸的 `/does not exist/i`（**历史写法**，就是那次误报的判据）被判红',
+      badBare.join('；') || '（没红，说明判据 B 失效）',
+    )
+    const badCol = checkTablePredicate("code === '42P01' || code === '42703' || code === 'PGRST204'")
+    check(
+      badCol.length >= 2,
+      'D10-B 反向对照②：把 `42703` / `PGRST204` 算进"表不在"被判红',
+      badCol.join('；') || '（没红，说明判据 B 失效）',
+    )
+    const badSilent = checkTablePredicate('/schema cache/i')
+    check(
+      badSilent.length >= 1,
+      'D10-B 反向对照③：认不出 `42P01`（"什么都不认得"）被判红',
+      badSilent.join('；') || '（没红，说明判据 B 失效）',
+    )
+    const okShape = checkTablePredicate('/42P01|PGRST205|Could not find the table|relation .+ does not exist/i')
+    check(
+      okShape.length === 0,
+      'D10-B 正面对照：分流后的写法（`relation` 限定 + 认得 `42P01`）**不**被判红',
+      okShape.join('；') || '0 处问题',
+    )
+    /* ⑥ 防一刀切：**列**判据里带 42703 是它的本职工作，不许被这条判据 B 盯上 */
+    check(
+      scanMissingPredicates('const MISSING_COL_RE = /42703|PGRST204|column .+ does not exist/i').every(
+        (p) => !isTablePredName(p.name),
+      ),
+      'D10-B 反向对照④：「列不在」判据（名字里是 Col）不归判据 B 管（防一刀切）',
+      'MISSING_COL_RE 没被当成"表不在"判据',
+    )
+  }
+}
+
 /* ---------------- 结果 ---------------- */
 
 console.log(`\n================ 结果 ================`)
@@ -1771,6 +2242,6 @@ if (failures.length) {
   console.log('\n  ⛔ 有断言没过（上面每一条都写了实测值）')
   process.exitCode = 1
 } else {
-  console.log('  全部通过 ✅（纯函数 A1–A7 / 静态 D1–D7 / 编码 + 不可见字符 D8）')
+  console.log('  全部通过 ✅（纯函数 A1–A8 / 静态 D1–D7 · D9 · D10 / 编码 + 不可见字符 D8）')
 }
 }, { script: 'nav-checks.mjs' })

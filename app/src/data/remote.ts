@@ -262,16 +262,30 @@ let examTablesProbe: Promise<ExamTablesState> | null = null
  */
 let lastExamTablesProbe: ExamProbeStatus = 'pending'
 
-/** 表不存在的三种表述：PG 原生错误码 / PostgREST 的 schema cache 错误码 / 兜底文案 */
+/**
+ * 表不存在的判据 —— **只认"表/relation 不在"本身**：
+ *  · `42P01`（PG 原生 `undefined_table`，文案 `relation "public.x" does not exist`）；
+ *  · `PGRST205`（PostgREST 在自己的 schema cache 里找不到这张表）；
+ *  · 文案里**限定过**的 `Could not find the table` / `relation … does not exist`。
+ *
+ * 🔴 **不许**写成一条泛化的 `/does not exist/i`，也**不许**把 `42703` / `PGRST204`
+ *    算进"表不在"：「列不在」是**另一条判据**（`isMissingColumn`，本文件下面那个），
+ *    而 `column "x" of relation "y" does not exist` 这种 PG 原生写法在**文案**上
+ *    与 `relation … does not exist` 撞车 —— 所以这里**先**用那条判据把「列不在」摘掉。
+ *    判错的代价：把"这一次缺了一列"说成"库还没跑 schema.sql"（假警报 + 指错动作），
+ *    或者把写路径整条停掉。这正是超管面板 §20.7 那次误报的形状。
+ *    口径与 `lib/adminChart.ts` 的 `MISSING_TABLE_RE` / `lib/notices.ts` 的同名常量一致。
+ */
 function isMissingTable(error: { message?: string; code?: string } | null | undefined): boolean {
   if (!error) return false
+  // 🔴 「列不在」先摘出去（判据分流，见上面那段）
+  if (isMissingColumn(error)) return false
   const code = String(error.code ?? '')
   const msg = String(error.message ?? '')
   return (
     code === '42P01' || // undefined_table
     code === 'PGRST205' || // PostgREST: table not found in schema cache
-    /does not exist/i.test(msg) ||
-    /schema cache/i.test(msg)
+    /Could not find the table|relation .+ does not exist/i.test(msg)
   )
 }
 
@@ -284,10 +298,15 @@ async function probeExamTables(): Promise<ExamTablesState> {
   }
   const has = async (table: string): Promise<boolean | null> => {
     try {
-      const { error } = await sb.from(table).select('id').limit(1)
+      /*
+       * 🔴 `select('*')`，**不是 `select('id')`** —— 表存在性只跟"这张表在不在"有关，
+       *    探针**不许假设任何一列存在**（`select('id')` 偷偷假设了"每张表都有 id"，
+       *    而 `subjects` 就没有；本仓库已经因此误报过两次，见 `notices.ts` 与 §20.7）。
+       */
+      const { error } = await sb.from(table).select('*').limit(1)
       if (!error) return true
       if (isMissingTable(error)) return false
-      return null // 认不出来 → "不知道"
+      return null // 认不出来 → "不知道"（`42703`「列不在」也走这一支，绝不判"表不在"）
     } catch {
       return null
     }
@@ -1128,8 +1147,11 @@ export async function loadClassroomAccount(): Promise<{
  *    而真正的判据在服务端（`schema.sql` §13.2），前端读不到身份不影响任何权限。
  */
 /**
- * 「这一列在不在」—— PostgREST 的判定与 `isMissingTable()` 同一套，
- * 只是这次找的是**列**（42703 / PGRST204）。
+ * 「这一列在不在」—— 与 `isMissingTable()` **成对、但判据分流**：
+ * 这里找的是**列**（`42703` / `PGRST204` / `column … does not exist`），
+ * 那边找的是**表**（`42P01` / `PGRST205` / `relation … does not exist`）。
+ * 🔴 两者**不许**合成一条泛化的 `does not exist` —— 合起来就会把"这一列不在"
+ *    读成"这张表没建"（§20.7 那次误报的形状）。
  *
  * 🔴 只认「列不存在」这一种错误：网络抖动 / 权限问题**一律当作出错**（不是"列不在"）——
  *    否则一次抖动就会被读成"这一列从来不存在"，而那是个**永久**结论。

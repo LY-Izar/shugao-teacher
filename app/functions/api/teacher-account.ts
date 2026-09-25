@@ -187,8 +187,25 @@ async function read(res: Response): Promise<Read> {
   return { ok: res.ok, status: res.status, rows, text }
 }
 
+/**
+ * 「**表**不在」—— 只认"表/relation 不在"本身：`42P01` / `PGRST205` /
+ * 文案里限定过的 `Could not find the table` / `relation … does not exist`。
+ *
+ * 🔴 这里**不许**写成泛化的 `/does not exist/i`（也不许带上 `schema cache`）：
+ *    `Could not find the 'x' column of 'teachers' in the schema cache`（`PGRST204`）之类
+ *    说的都是**"这一列不在"** —— 列缺失有它自己那条判据（`isMissingColumn`，下面那个，
+ *    调用方会**摘掉那一列重试**）。混在一起的话，一次"列缺失"会被报成
+ *    「权限体系的表还没建 / 去跑 schema.sql」（`NEED_STAGE10`），把人指到错误的动作上。
+ *
+ * ⚠️ `column "x" of relation "y" does not exist` 这种 PG 原生写法在**文案**上与
+ *    `relation … does not exist` 撞车 —— 所以这里**先**用 `isMissingColumn()` 把「列不在」摘掉。
+ *    口径与 `lib/adminChart.ts` 的 `MISSING_TABLE_RE` 一致。
+ */
 function isMissingTable(status: number, text: string): boolean {
-  return status === 404 || /42P01|PGRST205|does not exist|schema cache/i.test(text)
+  if (isMissingColumn(status, text)) return false // 「列不在」先摘出去（判据分流，见上）
+  return (
+    status === 404 || /42P01|PGRST205|Could not find the table|relation .+ does not exist/i.test(text)
+  )
 }
 
 /**

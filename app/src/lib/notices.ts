@@ -8,7 +8,7 @@
      `can_publish_notice_to()` / `is_school_admin()`。
    这里只做三件事：带 JWT、把错误翻成人话、**表还没建时不崩**。
 
-   🔴 三条不能破的纪律：
+   🔴 四条不能破的纪律：
      ① **教室端读不到通知**（I47）—— 这不是"界面上不渲染"，是**拿不到**：
         那块屏的 App 分支根本到不了这些页面，而数据库那一边也一条都不给它。
         ⚠️ 所以这里**不要**加任何"教室端过滤"的代码：多一处前端过滤
@@ -18,6 +18,11 @@
      ③ **表没跑过时前端不崩**：线上库还没跑 `schema.sql` 第 21 段时，
         探测到 `missing` 就返回空包 + 一句人话，页面显示空态。
         （照 `ensureExamTables()` / `ensureSubjectCols()` / `ensureSerialCols()` 那套。）
+     ④ **探针不许假设任何一列存在**（这一类 bug 在本仓库咬过**两次**，2026-09-28 是第二次）：
+        探"这张表在不在"就用 `select('*')` —— `notice_targets` **没有 `id`**
+        （§21.4），拿 `select('id')` 去探会得到 `42703`，而那句**不是**"表不在"的证据。
+        同理，「表不在」与「列不在」是**两条判据**，不许合成一条泛化的 `does not exist`
+        （`nav-checks.mjs` 的 **D10** 已经把这两条都钉成静态断言）。
    ============================================================ */
 
 import { getSupabase } from './supabase'
@@ -33,39 +38,55 @@ import {
 
 /* ---------------- 探测：通知那两张表在不在？（schema.sql 第 21 段） ----------------
 
-   与 `ensureExamTables()` **同一套纪律**，判据不同：这次探的是**表 + 一列**
-   （`notices` / `notice_targets` / `teachers.notice_seen_at`）。
-   判据只有「表/列不存在」这一种：网络抖动、权限问题一律当作**在**
+   与 `ensureExamTables()` **同一套纪律**，判据不同：这次探的是**表**。
+   判据只有「表不存在」这一种：网络抖动、权限问题一律当作**在**
    （否则一次抖动就把通知永久停掉，比偶发失败严重得多）。
    ⚠️ "探测本身失败"（断网）**不缓存** —— 缓存住会把临时故障固化成永久状态。
+
+   🔴 **这一类 bug 咬过两次**（第一次是超管面板探 `subjects`）：
+      **拿 `select('id')` 当"这张表在不在"的探针 —— 而 `notice_targets` 没有 `id`**
+      （列是 `notice_id` / `target_kind` / …,schema.sql §21.4）→ PostgREST 回
+      `42703 column notice_targets.id does not exist` → 被泛判据当成"表不在"
+      → 通知页谎报「数据库里还没有通知表」，而两张表明明都在。
+      → **表存在性只问"这张表在不在"，探针不许假设任何一列存在**（`select('*')`）。
    ---------------------------------------------------------------------------- */
 
 type ProbeState = 'present' | 'missing' | 'indeterminate'
 
 let noticeProbe: Promise<ProbeState> | null = null
 
-const isMissingRelation = (error: { code?: string; message?: string } | null | undefined) => {
-  if (!error) return false
-  const code = String(error.code ?? '')
-  const msg = String(error.message ?? '')
-  return (
-    code === '42P01' ||
-    code === '42703' ||
-    code === 'PGRST204' ||
-    code === 'PGRST205' ||
-    /does not exist/i.test(msg) ||
-    /schema cache/i.test(msg)
-  )
-}
+/*
+ * 「**表**不在」的判据 —— 只认这三样：`42P01` / `PGRST205` / 文案里带 `relation … does not exist`
+ * （口径与 `lib/adminChart.ts` §C1 的 `MISSING_TABLE_RE` **逐字一致**，别各写一套）。
+ *
+ * 🔴 这里**绝不能**把 `42703`（`undefined_column`）当成"表不在"，也**绝不能**只写一个
+ *    泛化的 `/does not exist/i` —— `column <表>.<列> does not exist` 里也有这两个词，
+ *    而那说的**只是"这一列不在"**，不是"这张表没建"（那正是上面那次误报的形状）。
+ *    ⚠️ `schema cache` 同理：`Could not find the 'x' column … in the schema cache`
+ *    属于**列**不在，所以这里只认限定过的 `Could not find the table`。
+ *
+ * 🔴 「列不在」是**另一条判据**（下面那条 `MISSING_COL_RE`），探针里**先**问它：
+ *    `42703` / `PGRST204` 都走 `has()` 的 `return null` —— 结论是**灰**（"无法判断"），
+ *    页面**不会**显示"先把 SQL 跑一遍"（那会让人去跑一段本来已经跑过的 SQL）。
+ */
+const MISSING_TABLE_RE = /42P01|PGRST205|Could not find the table|relation .+ does not exist/i
+/** 「**列**不在」：`42703` / `PGRST204` / `column … does not exist`（与上面那条成对，判据分流） */
+const MISSING_COL_RE = /42703|PGRST204|column .+ does not exist/i
 
 async function probeNoticeTables(): Promise<ProbeState> {
   const sb = getSupabase()
   if (!sb) return 'missing'
   const has = async (table: string): Promise<boolean | null> => {
     try {
-      const { error } = await sb.from(table).select('id').limit(1)
+      /* 🔴 `select('*')`，**不是 `select('id')`** —— 表存在性与"有哪几列"无关（见上面那段） */
+      const { error } = await sb.from(table).select('*').limit(1)
       if (!error) return true
-      if (isMissingRelation(error)) return false
+      const code = String((error as { code?: string }).code ?? '')
+      const msg = String(error.message ?? '')
+      // 「列不在」先摘出去：**表探针拿到它只能记灰**，绝不能据此说"表不在"
+      if (MISSING_COL_RE.test(code) || MISSING_COL_RE.test(msg)) return null
+      // 只有「表不在」才是 false；认不出的错一律 null（灰），不缓存
+      if (MISSING_TABLE_RE.test(code) || MISSING_TABLE_RE.test(msg)) return false
       return null
     } catch {
       return null
