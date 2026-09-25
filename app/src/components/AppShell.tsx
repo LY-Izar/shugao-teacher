@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { useStore, useToast } from '../data/store'
-import { WEEKDAY_TEXT } from '../data/types'
+import { WEEKDAY_TEXT, type TeacherRole } from '../data/types'
 import { useClassroomPresence } from '../hooks/useClassroomPresence'
 import { useMood } from '../hooks/useMood'
 import { useScheduleReminder } from '../hooks/useScheduleReminder'
 import { analyzeRoster } from '../lib/roster'
-import { currentIdentityLabel, IDENTITY_TAG_STYLE } from '../lib/roles'
+import { currentIdentityLabel, ENTRIES, entryVisible, IDENTITY_TAG_STYLE } from '../lib/roles'
 import { awayText, toMinutes, weekdayOf } from '../lib/schedule'
 import { connectionMode } from '../lib/supabase'
 import { APP_VERSION_LABEL } from '../lib/version'
@@ -26,16 +26,48 @@ import {
   IconUser,
   IconUsers,
   Logo,
+  type IconProps,
 } from './icons'
 import { Button, Sheet, Tag } from './ui'
 import { cx } from '../lib/cx'
+import type { ComponentType } from 'react'
 
 /**
  * 全部入口。**桌面左栏按这个顺序全摆**（一行文字 + 图标）；
  * 移动端只把其中三个放进悬浮胶囊，其余收进「更多入口」——
  * 哪三个见下面的 `PIN_KEYS`（形态与理由见 `功能设计与不变量.md` §十五）。
+ *
+ * 🔴 **这个数组是"全部入口"，不是"这个人看得见的入口"** ——
+ * `to` 就是 `lib/roles.ts` 的 `ENTRIES` 里的 key（`ENTRY_KEY_OF` 核对过），
+ * 过滤发生在**取数那一层**（`visibleNav()`），不在数组里。
+ * 别把某个角色看不见的项从这里删掉：删了就没有任何一处能说明"它对谁摆"了。
  */
-const NAV = [
+type NavItem = {
+  to: (typeof NAV_KEYS)[number]
+  label: string
+  icon: ComponentType<IconProps>
+  end: boolean
+}
+
+/**
+ * `NAV` 的 key 白名单（= `lib/roles.ts` 里 `ENTRIES` 有的那些）。
+ *
+ * 为什么要单独列一行而不是直接写 `EntryKey`：`NAV` 只装**桌面左栏里摆的**入口
+ * （工作台 / 班级 / 作业 / 考试 / 错题集 / 日程表 / 我的），
+ * 而 `ENTRIES` 里还有 `/accounts`、`/files`、`/calls` 这些"入口不在 NAV 里"的
+ * （它们在「我的」页里，见方案 §2.4）。两者是**包含关系**，不是相等。
+ */
+const NAV_KEYS = [
+  '/',
+  '/classes',
+  '/assignments',
+  '/exams',
+  '/wrong',
+  '/schedule',
+  '/settings',
+] as const
+
+const NAV: NavItem[] = [
   { to: '/', label: '工作台', icon: IconGauge, end: true },
   { to: '/classes', label: '班级', icon: IconUsers, end: false },
   { to: '/assignments', label: '作业', icon: IconClipboard, end: false },
@@ -65,13 +97,71 @@ const NAV = [
 /**
  * 移动端胶囊里的三个（顺序即胶囊里的排列顺序）：工作台 / 作业 / 我的。
  *
- * 判据是**频次**：这三条是每天要来回切的；班级与错题集是"进去待一会儿"的，
+ * 判据是**频次**（`功能设计与不变量.md` §15.2），**不是权限**：
+ * 这三条是每天要来回切的；班级与错题集是"进去待一会儿"的，
  * 收进更多入口。以后往 NAV 里加新入口，默认会落到「更多入口」里 —— 这是**故意**的兜底：
  * 新入口宁可在展开层多一步，也别把胶囊挤成"一排又小又密的按钮"（那正是上一轮改掉的东西）。
+ *
+ * 🔴 按身份过滤（N1）**不改这个数组**：过滤发生在它**之前**（`visibleNav()`）。
+ *    权限不该改频次判断 —— 一个入口对某身份不摆，就不摆；
+ *    摆着的那几个**位置不动**（N2：过滤后胶囊里某一格空着，不补位，
+ *    否则"三个图标的位置"会随身份漂移，而 `shots.mjs` 的 38/39 两张图是按位置拖拽的）。
  */
 const PIN_KEYS = ['/', '/assignments', '/settings']
-const PINNED = NAV.filter((n) => PIN_KEYS.includes(n.to))
-const COLLAPSED = NAV.filter((n) => !PIN_KEYS.includes(n.to))
+
+/**
+ * **按身份过滤后的入口**（唯一的一处：桌面左栏 / 移动端胶囊 / 展开层共用它）。
+ *
+ * ⚠️ 过滤必须在**取数这一层**，且必须在 `PIN_KEYS` 之前（方案 §4.1/§4.3）：
+ *    `activeIdx` / `pinIdx` / `moreActive` **三处都是按索引或按 `pathname.startsWith`
+ *    算的**，过滤之后必须**一起**换成这个数组，否则"当前页高亮"会在某个角色下
+ *    悄悄错位（那正是 `shots.mjs` 里 38/39 两张图在量的东西）。
+ *
+ * ⚠️ 它**只读 `myRoles` 一个参数**（M2）：不读 store、不读 classes ——
+ *    "看得见几个班"是 RLS 的事，读它来算入口就是前端在做权限判断。
+ */
+function visibleNav(myRoles: readonly TeacherRole[] | null | undefined): NavItem[] {
+  return NAV.filter((n) => entryVisible(n.to, myRoles))
+}
+
+/**
+ * 胶囊 / 展开层的两份（过滤在 `PIN_KEYS` **之前**，且只有这一处）。
+ *
+ * ⚠️ 返回的是**两份**而不是"过滤后的 PIN_KEYS"：`PIN_KEYS` 的顺序即胶囊里的排列顺序，
+ *    而展开层要的是 `NAV` 的顺序 —— 两个顺序故意不同，别合并成一个数组。
+ */
+function splitPin(visible: NavItem[]): { pinned: NavItem[]; collapsed: NavItem[] } {
+  const isPin = (to: string) => (PIN_KEYS as readonly string[]).includes(to)
+  return {
+    pinned: visible.filter((n) => isPin(n.to)),
+    collapsed: visible.filter((n) => !isPin(n.to)),
+  }
+}
+
+/**
+ * `NAV` 的每一项都必须在 `ENTRIES` 里有对应规则 —— 没有的话
+ * `ENTRIES[n.to]` 会在 `entryVisible()` 里直接抛异常（整页白屏）。
+ *
+ * ⚠️ 这是一个**模块级自检**，写在源码里而不是只写在脚本里：脚本能在提交前拦住，
+ *    而这里能拦住"脚本没跑到的那条路"（比如有人只跑了 `vite dev`）。
+ *    代价是一次 `Object.keys()`，可以忽略。
+ */
+for (const n of NAV) {
+  if (!Object.prototype.hasOwnProperty.call(ENTRIES, n.to)) {
+    throw new Error(`入口 ${n.to} 没有在 lib/roles.ts 的 ENTRIES 里登记（见按身份显示导航方案 §4.1）`)
+  }
+}
+
+/**
+ * 展开层底部那句说明里的胶囊项（N5）。
+ *
+ * 原文写死了「工作台 / 作业 / 我的 在底部那颗胶囊里」三项 —— 那是**当时**的事实；
+ * 一旦 `PIN_KEYS` 变了、或某一项对某个身份不摆，这句话就会变成假话。
+ * 改成按**这个人实际看得见的胶囊项**拼：只写"真的在胶囊里"的那几个。
+ */
+function pinnedLabel(pinned: NavItem[]): string {
+  return pinned.map((n) => n.label).join(' / ')
+}
 
 const MORE_HINT: Record<string, string> = {
   '/classes': '花名册 · 拍照录入 · 名单体检',
@@ -139,9 +229,9 @@ export function ToastHost() {
 
 /* ---------------- 导航项 ---------------- */
 
-function RailItem({ to, label, icon: Icon, end }: (typeof NAV)[number]) {
+function RailItem({ to, label, icon: Icon, end }: NavItem) {
   return (
-    <NavLink to={to} end={end} className="block">
+    <NavLink to={to} end={end} className="block" aria-label={label} data-nav={to}>
       {({ isActive }) => (
         <span
           data-active={isActive}
@@ -198,7 +288,7 @@ function RailItem({ to, label, icon: Icon, end }: (typeof NAV)[number]) {
    ============================================================ */
 
 /** 胶囊里的一个图标：可点区域 48×48，当前页高亮由父级的滑动胶囊负责。 */
-function PinTab({ to, label, icon: Icon, end }: (typeof NAV)[number]) {
+function PinTab({ to, label, icon: Icon, end }: NavItem) {
   return (
     <NavLink
       to={to}
@@ -236,6 +326,13 @@ function PinTab({ to, label, icon: Icon, end }: (typeof NAV)[number]) {
 function MobileNav() {
   const { pathname } = useLocation()
   const navigate = useNavigate()
+  /*
+   * 🔴 按身份过滤（方案 §4.3）：胶囊 / 展开层都从**这一份**取数。
+   * `PIN_KEYS` 本身不动（N1），过滤在它之前（N2：过滤后某一格空着，不补位）。
+   */
+  const myRoles = useStore((s) => s.myRoles)
+  const visible = visibleNav(myRoles)
+  const { pinned, collapsed } = splitPin(visible)
   /**
    * 「更多入口」的展开态：记的是**打开它的那个路径**，而不是一个布尔。
    * 这样"换了页面就自动收起"是**推导**出来的（路径一变 `more` 立刻为 false），
@@ -244,9 +341,13 @@ function MobileNav() {
   const [moreAt, setMoreAt] = useState<string | null>(null)
   const more = moreAt === pathname
 
-  /* 当前页在胶囊里 → 高亮滑到那一格；在「更多入口」里 → 圆按钮加一圈暖黄描边 */
-  const pinIdx = PINNED.findIndex((n) => (n.end ? pathname === n.to : pathname.startsWith(n.to)))
-  const moreActive = COLLAPSED.some((n) =>
+  /*
+   * 当前页在胶囊里 → 高亮滑到那一格；在「更多入口」里 → 圆按钮加一圈暖黄描边。
+   * ⚠️ 这两处都**必须**跟着 `visible` 走（不是 `NAV`）：否则过滤之后
+   *    某一格不在了，索引会错位、`moreActive` 会在错误的页面上亮起来。
+   */
+  const pinIdx = pinned.findIndex((n) => (n.end ? pathname === n.to : pathname.startsWith(n.to)))
+  const moreActive = collapsed.some((n) =>
     n.end ? pathname === n.to : pathname.startsWith(n.to),
   )
 
@@ -368,7 +469,7 @@ function MobileNav() {
         idx = i
       }
     })
-    const target = PINNED[idx]
+    const target = pinned[idx]
     if (target && target.to !== pathname) navigate(target.to)
   }
 
@@ -435,7 +536,7 @@ function MobileNav() {
                     : 'left .44s cubic-bezier(.34,1.32,.5,1), width .44s cubic-bezier(.34,1.32,.5,1), opacity .2s',
               }}
             />
-            {PINNED.map((n) => (
+            {pinned.map((n) => (
               <PinTab key={n.to} {...n} />
             ))}
           </div>
@@ -483,7 +584,7 @@ function MobileNav() {
           className="overflow-hidden"
           style={{ border: '1px solid var(--color-line)', borderRadius: 4 }}
         >
-          {COLLAPSED.map((n, i) => {
+          {collapsed.map((n, i) => {
             const on = n.end ? pathname === n.to : pathname.startsWith(n.to)
             const Icon = n.icon
             return (
@@ -498,7 +599,7 @@ function MobileNav() {
                 style={{
                   minHeight: 52,
                   borderBottom:
-                    i === COLLAPSED.length - 1 ? undefined : '1px solid var(--color-line)',
+                    i === collapsed.length - 1 ? undefined : '1px solid var(--color-line)',
                   background: on ? 'var(--color-accentsoft)' : 'var(--color-surface)',
                 }}
               >
@@ -553,7 +654,7 @@ function MobileNav() {
             lineHeight: 1.7,
           }}
         >
-          工作台 / 作业 / 我的 在底部那颗胶囊里；这一层装的是其余入口。
+          {pinnedLabel(pinned)} 在底部那颗胶囊里；这一层装的是其余入口。
         </p>
       </Sheet>
     </>
@@ -614,6 +715,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
    * 它**只是显示**：判据一律在数据库（§13.5 I16）。
    */
   const myRoles = useStore((s) => s.myRoles)
+  /*
+   * 🔴 **按身份过滤后的入口** —— 桌面左栏真正渲染的那一份（方案 §4.1）。
+   * 取数只有这一处，`activeIdx` 与渲染都从它来；`NAV`（全部入口）不再直接渲染。
+   * 见 `visibleNav()` 的注释：过滤必须在 PIN_KEYS 之前、三处索引一起换。
+   */
+  const visible = visibleNav(myRoles)
   const classes = useStore((s) => s.classes)
   const currentClassId = useStore((s) => s.currentClassId)
   const setCurrentClass = useStore((s) => s.setCurrentClass)
@@ -642,7 +749,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const lastIdx = useRef(-1)
   const [railInd, setRailInd] = useState({ top: 0, height: 40, show: false })
 
-  const activeIdx = NAV.findIndex((n) => (n.end ? pathname === n.to : pathname.startsWith(n.to)))
+  const activeIdx = visible.findIndex((n) =>
+    n.end ? pathname === n.to : pathname.startsWith(n.to),
+  )
 
   useEffect(() => {
     const measure = () => {
@@ -782,6 +891,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
           <nav
             ref={railNavRef}
+            /* 稳定选择器：回归脚本按它取"桌面左栏里摆着哪几项"（方案 §5.3 的 B1）。
+               ⚠️ 别用样式类名当选择器（§15.5 的教训：`nav.nav-frost` 已经配不上，
+               `boundingBox()` 直接超时）。移动端那颗胶囊用的是 `aria-label="主导航"`。 */
+            aria-label="主导航 · 桌面"
             className="relative mt-3 flex flex-1 flex-col gap-0.5 pt-3"
             style={{ borderTop: '1px solid var(--color-line)' }}
           >
@@ -794,7 +907,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 opacity: railInd.show ? 1 : 0,
               }}
             />
-            {NAV.map((n) => (
+            {visible.map((n) => (
               <RailItem key={n.to} {...n} />
             ))}
           </nav>

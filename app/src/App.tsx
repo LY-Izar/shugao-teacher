@@ -1,10 +1,12 @@
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom'
-import { useEffect, useState } from 'react'
+import { useEffect, useLayoutEffect, useState } from 'react'
 import { AppShell, ToastHost } from './components/AppShell'
 import { useStore } from './data/store'
 import { useAuthBootstrap } from './hooks/useAuthBootstrap'
 import { authExpired, hasAuthStamp, isClassroomDevice, markLogin } from './lib/session'
+import { devInjectedAccountKind, devInjectedRoles } from './lib/roles'
 import { isRemote } from './lib/supabase'
+import type { TeacherRole } from './data/types'
 import Admin from './pages/Admin'
 import AssignmentCall from './pages/AssignmentCall'
 import AssignmentCollect from './pages/AssignmentCollect'
@@ -286,8 +288,52 @@ function BootScreen() {  return (
   )
 }
 
+/**
+ * 🧪 **DEV-only 测试钩子**：把 `?as=` / `?kind=` 注入到 store 的两个槽位。
+ *
+ * 为什么必须有它（`按身份显示导航方案.md` §七 待确认 ③ / §五 R3）：
+ * `shots.mjs` 跑的是**本地演示模式**，而 `myRoles` 与 `accountKind` 都只在**远程模式**
+ * 由 `hydrate()` 灌进去（`store.ts` 的 `remote.loadMyRoles` / `loadClassroomAccount`），
+ * 演示模式恒为 `[]` / `'teacher'` —— 于是两句话**永远断言不了**：
+ *   · 「教导处看得见『教师账号』这一行」（该显示的时候真的显示）；
+ *   · 「教室端账号进不了教师端」（G6，安全边界，今天一条自动断言都没有）。
+ * 负向对照只能证明"藏住的时候会红"，证明不了"该显示的时候真的显示"。
+ *
+ * ⚠️ 它只改这两个**"摆不摆入口"的槽位**，一个数据字段都不碰
+ *    （`classes` / `assignments` / `examScores` 全不动）——
+ *    也就是说它连"多看到一行数据"都做不到：RLS 在服务端，钩子够不着。
+ * ⚠️ 解析在 `lib/roles.ts` 的 `devInjectedRoles()` / `devInjectedAccountKind()` 里，
+ *    两处都写着 `if (!(import.meta.env.DEV && search)) return null` ——
+ *    `vite build` 把 `import.meta.env.DEV` 折成 `false`，整块被摇掉，
+ *    所以**生产构建里 `?as=` / `?kind=` 一眼都看不到**（`nav-checks.mjs` 的 D7 读 dist 核对）。
+ * ⚠️ 时机：在远程模式下 `hydrate()` 是异步的，它 `set({ myRoles, accountKind })`
+ *    会把注入**盖掉** → 所以这里订一个 store 监听，**只要与注入值不一致就再写一次**。
+ *    写成"无条件写"会自激（listener 又触发 listener）；写成只跑一次会在远程模式下失效。
+ */
+function useDevInjection() {
+  const search = typeof location === 'undefined' ? '' : location.search
+  useLayoutEffect(() => {
+    if (!search) return
+    const roles: TeacherRole[] | null = devInjectedRoles(search)
+    const kind = devInjectedAccountKind(search)
+    if (!roles && !kind) return
+    const apply = () => {
+      const s = useStore.getState()
+      const patch: { myRoles?: TeacherRole[]; accountKind?: 'classroom' } = {}
+      if (roles && JSON.stringify(s.myRoles) !== JSON.stringify(roles)) patch.myRoles = roles
+      if (kind && s.accountKind !== kind) patch.accountKind = kind
+      if (Object.keys(patch).length) useStore.setState(patch)
+    }
+    // 先同步打一次（`useLayoutEffect` 在浏览器绘制**之前**跑完，所以演示模式下
+    // 首帧就是对的角色 —— 不会出现"导航先渲染成任课老师、下一帧才变"的抖动）
+    apply()
+    return useStore.subscribe(apply)
+  }, [search])
+}
+
 export default function App() {
   useAuthBootstrap()
+  useDevInjection()
   return (
     <BrowserRouter>
       <ToastHost />

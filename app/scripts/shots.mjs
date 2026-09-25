@@ -220,6 +220,14 @@ const EXPECTED_FILES = [
   //   ⚠️ "拦住"的判据不只是那张卡，还有**屏上没有任何学生数据**（断言里逐项查过）。
   '84-classroom-teacher-blocked.png',
   '85-classroom-teacher-preview-ok.png',
+  // 按身份显示导航（`按身份显示导航方案.md`，本轮）。三张各自钉一件事：
+  //   86 = **教导处**的桌面左栏（看不出差别才对 —— 教导处与任课教师今天入口数相同）
+  //   87 = **超管**的移动端展开层：多出「年级管理」那一项（N3：COLLAPSED 是可见差集，自动的）
+  //   88 = **教导处**的「我的」页：多出「教师账号」那一行（**该显示的时候真的显示**）
+  //   ⚠️ 任课教师那两张不需要新图：02/09 就是（今天全站账号都是任课教师）。
+  '86-nav-role-desktop-admin.png',
+  '87-nav-role-super-sheet.png',
+  '88-nav-role-settings-admin.png',
 ]
 
 /* ---------------- 断言与日志 ---------------- */
@@ -1676,6 +1684,455 @@ await withLock(async () => {
         wait: 800,
         expect: { url: '/assignments' },
       })
+
+      /* ============================================================
+         ===== 按身份显示导航（方案 §五 R2/R3：B1–B7 / C1–C5） =====
+         ------------------------------------------------------------
+         这一节要回答的是**两个方向**（§18.3：两个坏法方向相反，各要一条对照）：
+
+           ① **该藏的时候藏了**：任课教师看不见「教师账号」/「平台运维」/「年级管理」；
+           ② **该显示的时候真的显示**：教导处看得见「教师账号」、超管看得见「平台运维」
+              —— 这才是本轮 `?as=` 钩子存在的全部理由。
+
+         🔴 为什么以前做不到：`shots.mjs` 跑的是**本地演示模式**，而 `myRoles` 只在
+         **远程模式**由 `hydrate()` 从 `loadMyRoles()` 灌进去，本地模式恒为 `[]`
+         —— 所有账号都是"任课教师"。所以这里用 `App.tsx` 的 DEV 钩子 `?as=<代码>`
+         （方案 §七 待确认 ③；生产构建里被摇掉，见 `nav-checks.mjs` 的 D7）。
+
+         ⚠️ 钩子**只在 DEV 生效**，而本脚本跑的是 `vite dev`（5178）→ 钩子有效。
+            如果哪天有人把它做成"生产也生效"，这里会先绿 —— 拦住它的是 D7（读 dist）。
+         ============================================================ */
+
+      const SNAV = '按身份显示导航'
+
+      /**
+       * 这一节整个跑在**自己新建的 context** 里（与超管面板那一节同一个理由）：
+       * 主流程的 `addInitScript` 写死了 `deviceRole='teacher'` 并把导航尺寸那套
+       * 拨表/滚动都带上；这一节要的是 1440px 桌面宽度与干净的 localStorage。
+       */
+      const ctxNav = await browser.newContext({ viewport: { width: 1440, height: 1000 }, locale: 'zh-CN' })
+      await ctxNav.clock.install({ time: new Date('2026-09-19T10:00:00') })
+      const navPage = await ctxNav.newPage()
+      navPage.on('pageerror', (e) => errors.push(`PAGEERROR(${SNAV}) :: ${e.message}`))
+      navPage.on('console', (m) => {
+        if (m.type() === 'error') errors.push(`CONSOLE(${SNAV}) :: ${m.text()}`)
+      })
+      /*
+       * 🧪 **负向对照用的总闸**（与 `nav-checks.mjs` 同一个）：`SHUGAO_NAV_FORCE=all|none`
+       * 会让 `entryVisible()` 在这个浏览器里恒真 / 恒假 —— 用来证明**真界面这一层也会红**。
+       * ⚠️ 只加在导航那一节的 context 上：其它节不受影响，跑完这一节整个 context 就关掉了。
+       * 不设这个环境变量时它 `?? null` → 不注入，行为与以前完全一样。
+       */
+      if (process.env.SHUGAO_NAV_FORCE) {
+        await ctxNav.addInitScript((v) => {
+          window.__NAV_FORCE__ = v
+        }, process.env.SHUGAO_NAV_FORCE)
+        console.log(`  🧪🧪 负向对照模式：浏览器里 entryVisible 恒 ${process.env.SHUGAO_NAV_FORCE === 'all' ? '真' : '假'}（导航那一节**必须**有红）`)
+      }
+
+      /** 进某一页 + 注入身份。`as` 为空 = 不注入（= 演示模式默认的"任课教师"） */
+      const navGoto = async (path, as = '') => {
+        await navPage.goto(`${BASE}${path}`, { waitUntil: 'networkidle' })
+        await navPage.evaluate(
+          ([state, a, role]) => {
+            localStorage.setItem('shugao.teacher.v1', JSON.stringify({ state, version: 1 }))
+            localStorage.setItem('shugao.deviceRole', role)
+            const u = new URL(location.href)
+            if (a) u.searchParams.set('as', a)
+            else u.searchParams.delete('as')
+            location.replace(u.toString())
+          },
+          [TEACHER_STATE.state, as, 'teacher'],
+        )
+        await navPage.waitForLoadState('networkidle')
+        await navPage.waitForTimeout(420)
+      }
+
+      /** 桌面左栏里**实际摆着**哪几项（按语义选择器，不按样式类名 —— §15.5 的教训） */
+      const railLabels = () =>
+        navPage.evaluate(() =>
+          [...document.querySelectorAll('nav[aria-label="主导航 · 桌面"] a[aria-label]')].map((a) =>
+            a.getAttribute('aria-label'),
+          ),
+        )
+
+      /** 移动端展开层里那几项（点开圆按钮之后读 `.sheet`；`收起` 是页脚那个按钮，不算入口） */
+      const sheetLabels = async () => {
+        await navPage.getByRole('button', { name: '展开更多入口' }).click()
+        await navPage.waitForTimeout(360)
+        const out = await navPage.evaluate(() => {
+          const box = document.querySelector('.sheet')
+          return {
+            open: Boolean(box),
+            items: box
+              ? [...box.querySelectorAll('button')]
+                  .map((b) => (b.innerText ?? '').split('\n')[0].trim())
+                  .filter((x) => x && x !== '收起')
+              : [],
+            body: (box?.innerText ?? '').replace(/\s+/g, ' ').trim(),
+          }
+        })
+        await navPage.keyboard.press('Escape')
+        await navPage.waitForTimeout(220)
+        return out
+      }
+
+      /** 「我的」页上那几行入口在不在（按行文案，不看实现） */
+      const settingsRows = async () => {
+        const b = await bodyText(navPage)
+        return {
+          body: b,
+          accounts: b.includes('建号（带学科）'),
+          files: b.includes('教室端文件'),
+          schedule: b.includes('录入上课与日程'),
+          admin: b.includes('只读体检屏'),
+        }
+      }
+
+      const RAIL_TEACHER = ['工作台', '班级', '作业', '考试', '错题集', '日程表', '我的']
+
+      /* ---------- B1：桌面左栏逐角色**集合相等**（多一项也红） ---------- */
+
+      await step(SNAV, async () => {
+        /*
+         * ① 先钉住"演示模式默认就是任课教师"这个前提 —— 否则下面每一条
+         *    "任课教师看不见 X" 都可能是"钩子根本没生效"造成的**假通过**。
+         */
+        await navGoto('/', '')
+        const info = await navPage.evaluate(() => ({
+          rail: [...document.querySelectorAll('nav[aria-label="主导航 · 桌面"] a[aria-label]')].length,
+          hasHook: new URL(location.href).searchParams.has('as'),
+        }))
+        check(!info.hasHook, `${SNAV}：不注入时 URL 上没有 ?as=（前提自证）`, `hasHook=${info.hasHook}`)
+      })
+
+      await step(SNAV, async () => {
+        await navGoto('/', 'teacher')
+        const got = await railLabels()
+        check(
+          JSON.stringify(got) === JSON.stringify(RAIL_TEACHER),
+          `${SNAV}：**任课教师**的桌面左栏 = ${RAIL_TEACHER.join(' / ')}（集合相等，多一项也红）`,
+          `实际 ${got.length} 项：${got.join(' / ') || '(空)'}`,
+        )
+        check(
+          !got.includes('年级管理') && !got.includes('平台运维'),
+          `${SNAV}：任课教师**看不见**「年级管理」「平台运维」`,
+          got.includes('年级管理') || got.includes('平台运维') ? `实际：${got.join(' / ')}` : '两个都不在',
+        )
+      })
+
+      await step(SNAV, async () => {
+        await navGoto('/', 'admin')
+        const got = await railLabels()
+        check(
+          JSON.stringify(got) === JSON.stringify(RAIL_TEACHER),
+          `${SNAV}：**教导处**的左栏与任课教师**逐项相同**（§2.2 的 25/9 与 31/3 说的是入口总数，不是这一栏）`,
+          `实际 ${got.length} 项：${got.join(' / ') || '(空)'}`,
+        )
+        check(
+          !got.includes('平台运维'),
+          `${SNAV}：教导处**看不见**「平台运维」（判据是 isSuperAdmin，不是 canManageTeachers）`,
+          got.includes('平台运维') ? `实际：${got.join(' / ')}` : '不在',
+        )
+        await shot(navPage, SNAV, '86-nav-role-desktop-admin', { full: false })
+      })
+
+      await step(SNAV, async () => {
+        await navGoto('/', 'super')
+        const got = await railLabels()
+        /*
+         * 🔴 **今天超管的左栏与任课教师一模一样，这是对的** —— 必须把"为什么"写下来，
+         *    否则下一个人会以为这一节漏测了：
+         *    ① `NAV`（桌面左栏那 7 项）里的每一条，方案 §2.2 对六档教师身份都是 **V**
+         *       —— 也就是说**今天这一栏的过滤结果对所有教师身份相同**；
+         *    ② 超管多出来的那两项（`/grades` 年级管理、`/admin` 平台运维）是方案里的
+         *       ★ 规划项：路由还没有（`PAGES` 的 `live:false`），`NAV` 里自然也没有。
+         *    所以这一条断言的是"**过滤没有把谁误伤掉**"，而不是"超管比别人多"；
+         *    "超管多出来的那一项在展开层里"由 F1（`/grades` 落地）那一轮的断言覆盖。
+         *    ⚠️ **不要把 `/grades` 提前塞进 `NAV` 来让这条断言好看** —— 那会造出一个
+         *       点进去 404 的入口（D1 也会红：路由与登记表对不上）。
+         */
+        check(
+          JSON.stringify(got) === JSON.stringify(RAIL_TEACHER),
+          `${SNAV}：**超管**的左栏也是这 7 项（NAV 里今天没有"只给超管"的项 —— 见注释，不是漏测）`,
+          `实际 ${got.length} 项：${got.join(' / ') || '(空)'}`,
+        )
+        check(
+          got.includes('工作台') && got.includes('我的'),
+          `${SNAV}：两端的项都在（过滤没有把首尾漏掉）`,
+          `${got[0]} … ${got[got.length - 1]}`,
+        )
+      })
+
+      /* ---------- 高亮不许错位（activeIdx / pinIdx / moreActive 三处） ---------- */
+
+      await step(SNAV, async () => {
+        /*
+         * 🔴 这条是"过滤之后三处索引一起换"的**行为断言**（D6 是它的静态版）：
+         *    超管左栏多了一项，进 `/` 之后**高亮的必须是「工作台」**，不是别人。
+         *    `data-active="true"` 挂在 RailItem 内层那个 span 上（见 AppShell）。
+         */
+        await navGoto('/', 'super')
+        const active = await navPage.evaluate(() =>
+          [...document.querySelectorAll('nav[aria-label="主导航 · 桌面"] span[data-active="true"]')]
+            .map((s) => (s.closest('a')?.getAttribute('aria-label') ?? '').trim())
+            .filter(Boolean),
+        )
+        check(
+          JSON.stringify(active) === JSON.stringify(['工作台']),
+          `${SNAV}：超管在 / 时左栏高亮的是「工作台」（过滤没有让高亮错位）`,
+          `data-active=true 的是 ${JSON.stringify(active)}`,
+        )
+      })
+
+      /* ---------- B2/B3：移动端胶囊 + 展开层 ---------- */
+
+      await step(SNAV, async () => {
+        await navPage.setViewportSize({ width: 414, height: 880 })
+        await navGoto('/', 'super')
+        const pill = await navPage.evaluate(() =>
+          [...document.querySelectorAll('nav[aria-label="主导航"] a[aria-label]')].map((a) =>
+            a.getAttribute('aria-label'),
+          ),
+        )
+        check(
+          JSON.stringify(pill) === JSON.stringify(['工作台', '作业', '我的']),
+          `${SNAV}：移动端胶囊**恒为**「工作台 / 作业 / 我的」（PIN_KEYS 不随身份变 —— N1）`,
+          `实际 ${pill.length} 格：${pill.join(' / ') || '(空)'}`,
+        )
+        const sheet = await sheetLabels()
+        check(sheet.open, `${SNAV}：点圆按钮弹出「更多入口」`, `open=${sheet.open}`)
+        /*
+         * 展开层 = 左栏 − 胶囊那三项（N3）。今天超管与任课教师这一层**内容相同**
+         * （理由见上一条断言的注释：NAV 里没有只给超管的项）。
+         * ⚠️ 比的是**集合相等**：多一项（比如不小心把「呼叫记录」塞进来）也红。
+         */
+        const wantSheet = ['班级', '考试', '错题集', '日程表']
+        check(
+          JSON.stringify(sheet.items) === JSON.stringify(wantSheet),
+          `${SNAV}：**超管**的展开层 = 左栏减去胶囊那三项（N3：COLLAPSED 是可见差集，自动的）`,
+          `实际：${sheet.items.join(' / ') || '(空)'}`,
+          `期望：${wantSheet.join(' / ')}`,
+        )
+        check(
+          sheet.body.includes('工作台 / 作业 / 我的 在底部那颗胶囊里'),
+          `${SNAV}：展开层底部那句说明是**按实际胶囊项拼的**（N5，不再写死三项）`,
+          short(sheet.body.slice(-90), 120),
+        )
+        await navPage.getByRole('button', { name: '展开更多入口' }).click()
+        await navPage.waitForTimeout(320)
+        await navPage.screenshot({ path: join(OUT, '87-nav-role-super-sheet.png') })
+        written.push('87-nav-role-super-sheet.png')
+        console.log('     📷 87-nav-role-super-sheet.png')
+        await navPage.keyboard.press('Escape')
+        await navPage.waitForTimeout(220)
+      })
+
+      await step(SNAV, async () => {
+        await navGoto('/', 'teacher')
+        const sheet = await sheetLabels()
+        check(
+          JSON.stringify(sheet.items) === JSON.stringify(['班级', '考试', '错题集', '日程表']),
+          `${SNAV}：**任课教师**的展开层只有那四项（与超管今天相同，理由见 B1 的注释）`,
+          `实际：${sheet.items.join(' / ') || '(空)'}`,
+        )
+        check(
+          !sheet.body.includes('年级管理') && !sheet.body.includes('平台运维'),
+          `${SNAV}：任课教师的展开层里**没有**「年级管理」「平台运维」`,
+          sheet.body.includes('年级管理') || sheet.body.includes('平台运维') ? short(sheet.body, 140) : '两个都不在',
+        )
+      })
+
+      /* ---------- B4：`我的`页那几行（**该显示的时候真的显示**） ---------- */
+
+      await step(SNAV, async () => {
+        await navPage.setViewportSize({ width: 1440, height: 1000 })
+        await navGoto('/settings', 'teacher')
+        const r = await settingsRows()
+        check(
+          !r.accounts,
+          `${SNAV}：**任课教师**的「我的」页**没有**「教师账号」那一行`,
+          r.accounts ? short(r.body, 140) : '没有那一行',
+        )
+        check(r.files && r.schedule, `${SNAV}：但「教室端文件」「日程表」两行照旧在`, `files=${r.files} schedule=${r.schedule}`)
+      })
+
+      await step(SNAV, async () => {
+        await navGoto('/settings', 'admin')
+        const r = await settingsRows()
+        check(
+          r.files && r.schedule,
+          `${SNAV}：教导处的「我的」页上「教室端文件」「日程表」两行在（读的是同一张表）`,
+          `files=${r.files} schedule=${r.schedule}`,
+        )
+        /*
+         * ⚠️ **「教师账号」这一行在演示模式下显不出来**，而且这是**对的**：
+         *    `Settings.tsx` 的判据是 `isRemote && entryVisible('/accounts', myRoles)`
+         *    —— `isRemote` 那一半不是身份判据，是"这个功能本地根本没有"
+         *    （建号要 `functions/api/teacher-account.ts`）。
+         *    所以这一条断言的是**那半个判据确实还在**，而不是假装它显示出来了；
+         *    "身份那一半"（教导处 true / 任课教师 false）由 `nav-checks.mjs` 的 A1/A6
+         *    在这个钩子上逐格钉住。**这条限制写在本轮报告里。**
+         */
+        check(
+          !r.accounts,
+          `${SNAV}：本地演示模式下「教师账号」不显示（判据含 isRemote —— 见上方注释，不是身份问题）`,
+          r.accounts ? short(r.body, 140) : '没有那一行（符合预期）',
+        )
+        check(
+          new URL(navPage.url()).pathname === '/settings',
+          `${SNAV}：教导处停在 /settings（没被 Guard 送走）`,
+          new URL(navPage.url()).pathname,
+        )
+        await shot(navPage, SNAV, '88-nav-role-settings-admin', { full: true })
+      })
+
+      /* ---------- B5：E 档的验收 —— 手打 URL 能开、不白屏、不跳登录 ---------- */
+
+      await step(SNAV, async () => {
+        /*
+         * E 档的验收（方案 §5.3 B5 / §0.1）：**手打 URL 能开、不白屏、不跳登录页**。
+         * ⚠️ 演示模式下 `/accounts` 上那句文案是「**这一页现在打不开**／登录已过期」
+         *    —— 那是服务端 403 那条路在本地模式下的样子（本地没有
+         *    `functions/api/teacher-account.ts`）。所以这里断言的是
+         *    "**渲染出了一张说人话的面板**"，**不是**某一句特定文案：
+         *    方案 G1 建议把 403 文案换成正常说明（N6），但那要改 `TeacherAccounts.tsx`
+         *    ——**不在本轮的允许改动清单里**，所以本轮只钉现状 + 在报告里留档。
+         */
+        for (const path of ['/accounts', '/files', '/calls']) {
+          await navGoto(path, 'teacher')
+          const info = await pageInfo(navPage)
+          check(
+            new URL(navPage.url()).pathname === path,
+            `${SNAV}：任课教师手打 ${path} **正常打开**（不跳登录页、不白屏）`,
+            `停在 ${info.url}`,
+          )
+          check(info.body.length > 40, `${SNAV}：${path} 真的渲染出了内容`, `${info.body.length} 字符`)
+          check(
+            info.h1.length > 0 || info.body.includes('这一页') || info.body.includes('教室端文件'),
+            `${SNAV}：${path} 上是一张**说人话的面板**（有页面标题或明确说明），不是空白页`,
+            short(info.body, 120),
+          )
+        }
+      })
+
+      /* ---------- C1/C2：教室端账号**进不了教师端**（G6，今天零覆盖的那一条） ---------- */
+
+      await step(SNAV, async () => {
+        /*
+         * 🔴 这一节补的就是方案 §三 G6 那句"**今天一条自动断言都没有**"：
+         *    `accountKind` 只在远程模式由 `remote.loadClassroomAccount()` 决定，
+         *    而本脚本跑演示模式 → 恒为 'teacher'，所以"教室端被 Guard 送回去"这件事
+         *    以前**没有任何自动断言**。现在用同一个 DEV 钩子的 `?kind=classroom` 注入。
+         */
+        for (const path of ['/settings', '/wrong', '/accounts', '/exams', '/']) {
+          await navGoto(`${path}?kind=classroom`, 'teacher')
+          const u = new URL(navPage.url())
+          check(
+            u.pathname === '/classroom',
+            `${SNAV}：教室端账号手打 ${path} → **落在 /classroom**（G6 / C1-C2）`,
+            `停在 ${u.pathname}`,
+          )
+        }
+        const b = await bodyText(navPage)
+        /*
+         * 🔴 "跳过去了"不算数 —— 还要证明**教师端那份数据一个字都没渲染出来**。
+         *
+         * ⚠️ 判据要选对：这台教室端账号**自己那个班**的名字与学生姓名**本来就该在屏上**
+         *    （那正是这块屏的用途，`visible_class_ids()` 里 classroom_accounts 那一支）。
+         *    所以这里查的是**别的班**的名字：泄漏教师端上下文时，屏上会出现它。
+         *    （第一版查了"演示数据的第一个班"，而那个班**就是**教室端自己那个班 —— 假红。）
+         */
+        const own = DEMO_CLASSES[0]
+        const other = DEMO_CLASSES[1]
+        check(
+          b.includes(own.name),
+          `${SNAV}：先自证"这一屏真的渲染了班级内容" —— 本班「${own.name}」在屏上`,
+          b.includes(own.name) ? '在' : short(b, 120),
+          '缺了它的话，下面那条"别班不在"就是恒真的',
+        )
+        /*
+         * ⚠️ **不能查班名**：教室端那一页的**班名选择器**里有「高二(7)班」
+         *    （`Classroom.tsx` 的班级下拉；教室端账号换台机器时用它认班），
+         *    所以"屏上出现别班班名"是**正常**的 —— 第一版就栽在这里（假红）。
+         *    真正要钉的是"**别班的名单数据**没渲染出来"。
+         *
+         * 🔴 判据必须是"**同一段文本里既有别班班名、又有人数**"，而且**长度要短**：
+         *    否则 `body.innerText` 那个大串会同时命中"高二(7)班"（选择器）
+         *    和别处的"45 人"（本班统计），又变成假红（第二版栽在这里）。
+         *    教室端那一页上，任何**关于某个班的人数**都必然与那个班的班名紧邻，
+         *    所以"短文本 + 班名 + 人数"是这件事的正确判据。
+         */
+        const rosterLine = await navPage.evaluate((cls) => {
+          const candidates = [...document.querySelectorAll('option,div,span,li,td,section')]
+            .map((el) => (el.textContent ?? '').replace(/\s+/g, ' ').trim())
+            .filter((t) => t.length > 0 && t.length <= 60)
+          return candidates.find((t) => t.includes(cls) && /(\d+)\s*(人|名)/.test(t)) ?? null
+        }, other.name)
+        check(
+          rosterLine === null,
+          `${SNAV}：而且「${other.name}」**没有任何名单/人数数据**渲染出来（只作为选择器里的一个选项出现）`,
+          rosterLine === null ? '没有"别班 + 人数"的短文本' : `读到「${short(rosterLine, 90)}」`,
+        )
+        const otherNames = new Set(other.students.map((s) => s.name))
+        const leakedNames = [...otherNames].filter((n) => b.includes(n))
+        check(
+          leakedNames.length <= 2,
+          `${SNAV}：另一个班的姓名基本不出现（两个演示班可能有重名，所以阈值是"≤2 个"）`,
+          leakedNames.length ? `出现 ${leakedNames.length} 个：${leakedNames.join('、')}` : '一个都没有',
+        )
+        check(
+          b.includes('这个班的课') || b.includes('正在上课'),
+          `${SNAV}：落在教室端那一屏（不是登录页、也不可能是教师端）`,
+          short(b, 120),
+        )
+      })
+
+      await step(SNAV, async () => {
+        /* 反向对照（§十七·补 补.2 的原话："别把真正的教师一起挡了"） */
+        for (const path of ['/settings', '/wrong', '/']) {
+          await navGoto(path, 'teacher')
+          const u = new URL(navPage.url())
+          check(
+            u.pathname === path,
+            `${SNAV}：**反向对照** —— 真老师手打 ${path} 照常打开（教室端那一支没有误伤教师）`,
+            `停在 ${u.pathname}`,
+          )
+        }
+      })
+
+      /* ---------- C4：设备被标成教室端时的 /settings（G8 的"能解开"那一半） ---------- */
+
+      await step(SNAV, async () => {
+        await navPage.goto(`${BASE}/`, { waitUntil: 'networkidle' })
+        await navPage.evaluate((state) => {
+          localStorage.setItem('shugao.teacher.v1', JSON.stringify({ state, version: 1 }))
+          // 🔴 这一行就是这一段的前提：这台机器"被标成教室端"（与学生改网址那个场景同一个标记）
+          localStorage.setItem('shugao.deviceRole', 'classroom')
+        }, TEACHER_STATE.state)
+        await navPage.goto(`${BASE}/settings`, { waitUntil: 'networkidle' })
+        await navPage.waitForTimeout(420)
+        check(
+          new URL(navPage.url()).pathname === '/login',
+          `${SNAV}：设备被标成教室端时，教师账号打开 /settings → **被送去 /login**（G8 的现状）`,
+          `停在 ${new URL(navPage.url()).pathname}`,
+        )
+        /* 登录一次 → 设备角色改回教师端 → 回到刚才那一页（`Login.tsx` 的 state.from） */
+        await navPage.getByLabel('账号 / 工号').fill('王老师')
+        await navPage.getByLabel('密码').fill('demo')
+        await navPage.getByRole('button', { name: '进入平台' }).click()
+        await navPage.waitForTimeout(900)
+        const after = new URL(navPage.url()).pathname
+        check(
+          after === '/settings',
+          `${SNAV}：**登一次就解得开** —— 落回 /settings（G8 的另一半，别再让人以为被锁死了）`,
+          `停在 ${after}`,
+        )
+        const role = await navPage.evaluate(() => localStorage.getItem('shugao.deviceRole'))
+        check(role === 'teacher', `${SNAV}：而且设备角色已经改回 teacher（不然后面每次都被踢）`, `deviceRole=${role}`)
+      })
+
+      await ctxNav.close()
 
       /* ================= 情绪价值：把时钟拨到不同时段 ================= */
 

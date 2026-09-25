@@ -231,3 +231,245 @@ export const IDENTITY_TAG_STYLE: CSSProperties = {
   lineHeight: 1.6,
   textAlign: 'left',
 }
+
+/* ============================================================
+   🔴 入口表（ENTRIES）—— 「按身份显示导航」的**唯一实现**
+   ------------------------------------------------------------
+   来源：`按身份显示导航方案.md` §四。矩阵（页面 × 角色，34 行 × 6 列）在
+   那份文档的 §2.2，每一格是 V（看得见入口）/ E（藏入口就够）/ B（要挡）。
+
+   ⚠️ **这张表只决定"摆不摆入口"，它不回答"能不能读"，也不回答"能不能做"**：
+
+     入口藏不藏  →  `entryVisible(key, myRoles)`   ← 前端（本文件），改错了最多是少点几下
+     能不能读    →  RLS 策略（`visible_class_ids()` …）← 数据库，前端一个字都插不上手
+     能不能做    →  `/api/*` 拿调用者 JWT 去问 RPC  ← 服务端，前端藏了按钮也拦不住
+
+   **藏入口 ≠ 访问不到**：手打 URL 照样进得去页面，然后被 RLS 筛成空数据。
+   所以「藏入口」只在两种情况下成立：① 那页对这个身份本来就该显示空（或全是自己的）；
+   ② 页面自己还有一道挡（`Guard` 或页面内判据，例如 `App.tsx` 的 `accountKind`）。
+   **它不是安全边界**，真正的边界永远在数据库（§零 与 `§13.5 I16` / `§16.6 I29`）。
+
+   三条写法纪律（`scripts/nav-checks.mjs` 的 D3 逐条机器检查，别绕）：
+     M1  `visibleFor` **只回答"摆不摆"，返回值只能是 `boolean`** ——
+         不许返回 `EntryKey[]`、不许返回"可见的班级名单"。一旦它开始返回数据，
+         就会有人拿它去 `filter()` 数据行。
+     M2  `visibleFor` **只准读 `roles` 一个参数** —— 不许 `useStore`、不许读
+         `classes` / `assignments` / `students`、不许 `await` 任何请求。
+         "看得见几个班"是 RLS 的事，读它来算入口 = 前端开始做权限判断。
+     M3  **数据行一律不过这张表** —— 页面里不许出现 `classes.filter(…role…)`。
+         `classes` 是 RLS 筛过的结果，再筛一次就是 §11.3 明令禁止的那件事。
+   ============================================================ */
+
+/**
+ * 今天的入口清单（`key` 与 `PAGES` 登记表、与方案 §2.2 矩阵**逐行对应**）。
+ *
+ * ⚠️ 这一组 key 里有 4 个是**方案里预备、今天还没有页面**的
+ * （`/grades`、`/grades/promote`、`/settings/terms`、`/admin`）；
+ * `/admin` 的路由其实**已经在了**（超管面板第一期），只是入口在 `Settings.tsx` 里。
+ * 它们现在登记在这里是为了"加页面时不用回头看方案"，
+ * `nav-checks.mjs` 的 D1 用 `PAGES` 的 `live` 字段把"已落地 / 规划中"分开核对。
+ */
+export type EntryKey =
+  | '/'
+  | '/classes'
+  | '/assignments'
+  | '/exams'
+  | '/wrong'
+  | '/schedule'
+  | '/settings'
+  | '/files'
+  | '/calls'
+  | '/accounts'
+  | '/grades'
+  | '/grades/promote'
+  | '/settings/terms'
+  | '/admin'
+
+type EntryRule = {
+  /** 显示名（登记表要能被人读 —— 这是"矩阵能不能对上"的一半） */
+  label: string
+  /**
+   * 判据：**只准调本文件里已有的 `xxx()`，或最朴素的 role 命中**（M1/M2）。
+   * ⛔ 不许读 store、不许读 classes/assignments、不许返回"过滤后的数据"。
+   */
+  visibleFor: (roles?: readonly TeacherRole[] | null) => boolean
+}
+
+/**
+ * 我有没有**年级管理这一层的身份**（最高管理员 / 教导处 / 年级主任）。
+ *
+ * 🔴 它**故意不含 `head_teacher`（班主任）** —— 这是本轮**一处刻意的取舍**，写清楚：
+ *
+ *   · 名字上像"有管理身份的人"，而 `MANAGING_ROLES`（下面那张**标签优先级**表）
+ *     确实含班主任 —— 但那个数组决定的是"标签上按什么顺序写字"，
+ *     `I17` 明令**不许拿它写 if**，所以这里另立一个函数、**另定一组角色**；
+ *   · 班主任**不进**年级管理：方案 §2.3 第 29–31 行原文（引自 `年级管理与选科走班方案.md`
+ *     §4.1 的导航可见性表）是"super / admin 全部；年级主任只有自己那个年级；
+ *     **班主任与任课老师不进**"；矩阵里那三行的班主任格就是 **E**；
+ *   · 矩阵本身也是这么算的：`head_teacher` 与 `teacher` 两列的 V/E/B 小计**必须一样**
+ *     （25/9/0，方案 §2.2 那张"规模感"表），而"班主任多 4 格 V"会让它变成 29 ——
+ *     总分也就会从 145 变成 149。**145 这个自检值只有班主任不进年级管理才成立。**
+ */
+export function hasManagingRole(roles?: readonly TeacherRole[] | null): boolean {
+  return (roles ?? []).some(
+    (r) => r.role === 'super' || r.role === 'admin' || r.role === 'grade_head',
+  )
+}
+
+/**
+ * **唯一的入口表**。加一个入口 = 这里加一行 + `lib/pages.ts` 加一行 +
+ * `按身份显示导航方案.md` §2.2 的矩阵加一行（D1/D2 就是拿这个等式当断言的）。
+ *
+ * 值与方案 §2.2 的矩阵**逐格对应**：
+ *   · 五档教师身份对 `/`、`/classes`、`/assignments`、`/exams`、`/wrong`、
+ *     `/schedule`、`/settings`、`/files`、`/calls` 全是 V（"看得见几个班"由 RLS 决定，
+ *     不在入口层）；教室端到不了它们 —— 那是 `App.tsx` 的 `accountKind` 一支管 32 行，
+ *     不是这里 32 个 false（方案 §2.2 的 U4）。
+ *   · `classroom` **不是** `teacher_roles` 的一档（它是另一张表的一行），
+ *     所以它根本不会出现在 `roles` 里 → 这些项对它是"没有身份" = 不摆。
+ */
+export const ENTRIES: Record<EntryKey, EntryRule> = {
+  '/': { label: '工作台', visibleFor: () => true },
+  '/classes': { label: '班级', visibleFor: () => true },
+  '/assignments': { label: '作业', visibleFor: () => true },
+  '/exams': { label: '考试', visibleFor: () => true },
+  '/wrong': { label: '错题集', visibleFor: () => true },
+  '/schedule': { label: '日程表', visibleFor: () => true },
+  '/settings': { label: '我的', visibleFor: () => true },
+  '/files': { label: '教室端文件', visibleFor: () => true },
+  // §2.3 ***REMOVED***17：能走到呼叫页的人（= 能改这份作业的老师）就有记录可看，
+  // 六个教师身份都是 V；管理身份与任课老师的差别**在数据范围**（RLS），不在入口。
+  '/calls': { label: '呼叫记录', visibleFor: () => true },
+  // 只有最高管理员 / 教导处（`canManageTeachers()`）；服务端那道闸门见 G1。
+  '/accounts': { label: '教师账号', visibleFor: canManageTeachers },
+  // ★ 将来（年级管理与选科走班方案 §4.1）：super/admin 全部、年级主任本年级、班主任与任课老师不进。
+  '/grades': { label: '年级管理', visibleFor: hasManagingRole },
+  // ★ 将来（同方案 §4.2.5）：提档 = `is_school_admin()`（super + 教导处），**年级主任 ❌**。
+  '/grades/promote': { label: '提档与毕业', visibleFor: canManageTeachers },
+  /*
+   * ★ 将来：**super / admin / 年级主任**（`hasManagingRole`）。
+   *
+   * ⚠️ 这一格是本轮唯一一处"矩阵与正文打架"的地方，**按矩阵那一格落的**，理由写全：
+   *   · 矩阵 §2.2 第 33 行那一格是 **V**，而且 §2.2 下面那张"规模感"表的
+   *     `grade_head` 汇总（V29）**只有在这一格是 V 时才成立**（全表 V=145 同理）——
+   *     改成 E 会让全表变成 144/28，与 §2.2 与附录里写死的 145/27 **对不上**；
+   *   · §2.3 第 33 行的正文却写着"年级主任 E"，§七 待确认 ④ 的建议也是 E。
+   *   → 两者矛盾，**采用矩阵的格子（V）+ 145/27 那两个自检值**，
+   *     并在本轮报告里单列出来（这是"别默默选"那条要求的落点）。
+   */
+  '/settings/terms': { label: '学期与学年', visibleFor: hasManagingRole },
+  // ★ 平台运维：**只能是 `isSuperAdmin`**（超管面板方案 §3.5 原文：不能用
+  // `canManageTeachers()`，那会把教导处也放进来）。服务端 `POST /api/admin/*` 是闸门。
+  '/admin': { label: '平台运维', visibleFor: isSuperAdmin },
+}
+
+/**
+ * **唯一的问法**：这个入口对我摆不摆。
+ *
+ * 多身份是常态（一个老师同时是班主任和年级主任），所以表里每个 `visibleFor` 都是
+ * **并集语义**（`.some()`）：看得见的入口 = ⋃(我每一条身份各自看得见的入口)。
+ */
+export const entryVisible = (
+  key: EntryKey,
+  roles?: readonly TeacherRole[] | null,
+): boolean => {
+  /*
+   * 🧪 **负向对照用的总闸**：`globalThis.__NAV_FORCE__` 是 `'all' | 'none' | undefined`。
+   * 它只在**测试进程里**由 Node 设（`shots.mjs` 从环境变量 `SHUGAO_NAV_FORCE` 转发），
+   * 浏览器与生产构建里恒为 `undefined` —— 也就是说**运行时不提供任何改变这条判据的入口**，
+   * 它只是一根"给负向对照用的线头"。
+   *
+   * 为什么必须有它：§18.3 要求"改完断言必须做一次负向对照，而且**两个方向的坏法各要一条**"
+   * （恒真 = 入口全摆等于没做；恒假 = 全藏，连胶囊都空了）。
+   * 没有这根线头的话，只能去**真改源码**再改回来 —— 而"改回来"这一步一旦出错，
+   * 仓库里就留下一条恒真的权限判据（比没有断言糟得多）。
+   * ⚠️ 别把它做成 `import.meta.env` 那一类**构建期**开关：那样生产构建里会留一个
+   *    "摇不掉"的分支（D7 读 dist 时会红）。运行时的 `globalThis` 在浏览器里永远是 undefined。
+   */
+  const force = (globalThis as { __NAV_FORCE__?: 'all' | 'none' }).__NAV_FORCE__
+  if (force === 'all') return true
+  if (force === 'none') return false
+  return ENTRIES[key].visibleFor(roles)
+}
+
+/**
+ * 从一批入口 key 里挑出**对我摆**的那些（顺序原样保留）。
+ *
+ * 这是给 `AppShell` 的 `NAV` / `PIN_KEYS` 用的：过滤**只在这一个函数里**，
+ * 桌面左栏、移动端胶囊、展开层三处都从它的结果取数 —— 三处各写一遍
+ * `filter(…)` 就是"同一件事三个判定入口"（本仓库踩过四次的坑，见 §十）。
+ *
+ * ⚠️ 它同样只读 `roles`（M1/M2）：返回的是 `key` 的子集，**不是数据行**。
+ */
+export function visibleEntryKeys<K extends EntryKey>(
+  keys: readonly K[],
+  roles?: readonly TeacherRole[] | null,
+): K[] {
+  return keys.filter((k) => entryVisible(k, roles))
+}
+
+/* ============================================================
+   🧪 DEV-only 测试钩子：`?as=` 角色注入（**生产构建里被编译掉**）
+   ------------------------------------------------------------
+   为什么必须有它（方案 §5.3）：`shots.mjs` 跑的是**本地演示模式**，而 `myRoles` 只在
+   远程模式由 `hydrate()` 从 `loadMyRoles()` 灌进去，本地模式恒为 `[]`
+   —— 于是"教导处看得见「教师账号」这一行"这句话**永远断言不了**（只能做负向对照，
+   而负向对照只能证明"藏住的时候会红"，证明不了"该显示的时候真的显示"）。
+   方案 §七 待确认 ③ 的建议是加这个钩子 + 一条"生产构建里无效"的断言。
+
+   ⚠️ 三条边界（写死在这里，改的时候别绕）：
+     ① **只在 `import.meta.env.DEV` 生效**：`vite build` 会把 `import.meta.env.DEV`
+        折成字面量 `false`，整个分支被摇掉 —— `nav-checks.mjs` 的 D7 读 dist 产物
+        核对"`as` / `kind` 这两个查询参数**一次都没出现过**"，所以它不会漏进线上；
+     ② **它只改 `myRoles` / `accountKind` 这两个"摆不摆入口"的槽位**，
+        不碰任何数据（`classes` / `assignments` / `scores` 一个字都不动）——
+        也就是说它连"多看到一行数据"都做不到（RLS 在服务端，钩子够不着）；
+     ③ 认不出的角色代码**原样收下**（`roleName()` 的口径：认不出不猜），
+        所以 `?as=nonsense` 也测得到"认不出的身份不会意外拿到管理入口"。
+   ============================================================ */
+
+/** 合法的角色代码（与 `RoleCode` 同一组；`classroom` 刻意**不在**里面 —— 它不是身份，是另一张表的一行） */
+export const TEST_ROLE_CODES: readonly RoleCode[] = [
+  'super',
+  'admin',
+  'grade_head',
+  'head_teacher',
+  'teacher',
+]
+
+/**
+ * 从 `location.search` 里解析出**注入的身份**；没有钩子 / 不是 DEV → `null`。
+ *
+ * `?as=` 用逗号分隔多身份（`?as=teacher,head_teacher`），与"多身份是常态"一致；
+ * 空值（`?as=`）当作"没有这个钩子"，不当作"注入空数组" —— 后者会让
+ * "老师看不见教师账号那一行"这种断言**在忘记写参数时静默通过**（假通过）。
+ */
+export function devInjectedRoles(search: string): TeacherRole[] | null {
+  // 🔴 这一行是"只在 DEV 生效"的全部实现。别把它挪出这个三元表达式：
+  //    生产构建（`vite build`，import.meta.env.DEV === false）会整块摇掉。
+  if (!(import.meta.env.DEV && search)) return null
+  const raw = new URLSearchParams(search).get('as')
+  if (raw === null) return null
+  const codes = raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+  if (!codes.length) return null
+  // ⚠️ 这里**故意**把认不出的代码也原样收下（`as RoleCode` 是个谎，但它正是
+  //    A4 那条断言要测的东西："认不出的角色不会意外获得管理入口"）。
+  //    别改成"先过滤掉不认识的" —— 那会把 `?as=nonsense` 静默变成"没有钩子"。
+  return codes.map((role) => ({ role: role as RoleCode, scopeType: 'school' as const }))
+}
+
+/**
+ * 从 `location.search` 里解析出**注入的账号类型**（`?kind=classroom`）。
+ *
+ * 为什么连它也要注入：`accountKind` 同样只在远程模式由
+ * `remote.loadClassroomAccount()` 决定（`store.ts`），演示模式恒为 `'teacher'`
+ * —— 而"教室端进不了教师端"（方案 G6 / §五 R3 的 C1–C2）**是安全边界**，
+ * 今天一条自动断言都没有。同 `devInjectedRoles()` 的三条边界。
+ */
+export function devInjectedAccountKind(search: string): 'classroom' | null {
+  if (!(import.meta.env.DEV && search)) return null
+  return new URLSearchParams(search).get('kind') === 'classroom' ? 'classroom' : null
+}

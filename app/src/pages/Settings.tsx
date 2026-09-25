@@ -41,11 +41,10 @@ import { REMIND_BEFORE, itemsForDate } from '../lib/schedule'
 // 判定函数（isRestDay / dayKind / holidayOn / nextHoliday）仍在别处使用，没有动。
 import { beijingNow, ymdOf } from '../lib/holiday'
 import {
-  canManageTeachers,
   currentIdentityLabel,
-  IDENTITY_TAG_STYLE,
-  isSuperAdmin,
+  entryVisible,
   roleChips,
+  IDENTITY_TAG_STYLE,
 } from '../lib/roles'
 import {
   SUBJECTS,
@@ -163,7 +162,20 @@ export default function Settings() {
    *    「谁能建号、谁能指派身份」由数据库的函数说了算（见 lib/roles.ts 文件头）。
    */
   const chips = roleChips(myRoles, (id) => classes.find((c) => c.id === id)?.name)
-  const canManage = isRemote && canManageTeachers(myRoles)
+  /*
+   * 🔴 这一页里那几行入口的显隐，**一律读 `lib/roles.ts` 的入口表**（方案 §2.4 / N2）。
+   *
+   * 为什么不能在这里各写一句 `canManageTeachers(myRoles)`：那正是"同一件事两个判定入口"
+   * （本仓库踩过四次的坑，§十）。今天这一页恰好是那 4 个散点之一 ——
+   * 「教师账号」那一行原来就是就地算的，现在收进表里（判据的值一个字没变）。
+   *
+   * ⚠️ `isRemote &&` 那两处**不是身份判据**，是"这个功能在本地演示模式下根本没有"：
+   *    · `/accounts` 要服务端 `functions/api/teacher-account.ts`（本地没有）；
+   *    · `/admin` 要 Supabase 会话（本地没有）。
+   *    它们与身份无关，所以留在表外；身份那一半一律走 `entryVisible()`。
+   */
+  const canManage = isRemote && entryVisible('/accounts', myRoles)
+  const canAdmin = isRemote && entryVisible('/admin', myRoles)
   // 只看教师自己的排课表 —— 班级课表（scope='class'）是教室端给学生看的，混进来数字会对不上
   const todayCount = itemsForDate(schedule.filter((s) => s.scope !== 'class')).length
 
@@ -301,10 +313,11 @@ export default function Settings() {
             {/*
               平台运维（超管面板，`超管运维面板方案.md` 第一期）。
 
-              🔴 判据用 `isSuperAdmin()`，**不是** `canManageTeachers()` ——
+              🔴 判据读表（`entryVisible('/admin', …)`），而表里那一格是
+                 **`isSuperAdmin`，不是 `canManageTeachers`** ——
                  后者含教导处，而这块屏的定位是**平台维护者**（方案 §3.5 / §5.5 T7）。
-                 `lib/roles.ts` 里那个函数一直"没有调用方"，注释写着"留着它是因为
-                 『只有最高管理员』这件事仍然是一个**独立的判据**" —— 这里就是它的调用方。
+                 `nav-checks.mjs` 的 A6 专门钉这一格：`[admin]` 对 `/accounts` 是 true、
+                 对 `/admin` 必须是 false（"最高管理员 ≠ 教导处"在入口层的唯一断言点）。
 
               ⚠️ 这里只是**摆不摆入口**（"少点几下"），**不是安全边界**：
                  真正的闸门在服务端（`/api/admin/config-check` 问数据库的 `is_super_admin()`）。
@@ -312,7 +325,7 @@ export default function Settings() {
                  那时候直接从地址栏敲 `/admin` 照样进得去，而且**它不经过 `Guard`**，
                  被标成教室端的机器也打得开（方案 §七 T6）。
             */}
-            {isSuperAdmin(myRoles) ? (
+            {canAdmin ? (
               <button
                 type="button"
                 className="row"

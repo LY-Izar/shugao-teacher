@@ -9,6 +9,7 @@
     "lint": "oxlint",
     "preview": "vite preview",
     "shots": "node scripts/shots.mjs",
+    "nav-checks": "node scripts/nav-checks.mjs",
     "clock-checks": "node scripts/clock-checks.mjs",
     "exam-checks": "node scripts/exam-checks.mjs",
     "backup-checks": "node scripts/backup-checks.mjs",
