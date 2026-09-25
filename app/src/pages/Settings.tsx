@@ -39,13 +39,12 @@ import { REMIND_BEFORE, itemsForDate } from '../lib/schedule'
 // 只用到时间工具：节假日「数据来源」面板已删（见 功能设计与不变量.md §十七 17.2），
 // 判定函数（isRestDay / dayKind / holidayOn / nextHoliday）仍在别处使用，没有动。
 import { beijingNow, ymdOf } from '../lib/holiday'
-import { canManageTeachers, roleChips } from '../lib/roles'
+import { canManageTeachers, currentIdentityLabel, roleChips } from '../lib/roles'
 import {
   SUBJECTS,
   DEFAULT_SUBJECT_CODE,
   subjectName,
   teacherPrimarySubjectCode,
-  teacherSubjectLabel,
   type SubjectCode,
 } from '../lib/subjects'
 
@@ -200,7 +199,13 @@ export default function Settings() {
             <div className="min-w-0 flex-1">
               <div style={{ fontSize: 17, fontWeight: 660 }}>{teacher?.name ?? '未登录'}</div>
               <div className="mt-1 flex items-center gap-1.5">
-                <Tag tone="accent">{teacherSubjectLabel(teacher)}</Tag>
+                {/*
+                  身份卡上那个标签：**有管理身份显示身份，没有才显示学科**。
+                  完整清单在下面「我的身份」那一行（`roleChips()`）—— 这里只写最高一档，
+                  免得标签被撑成一条长串（见 lib/roles.ts 的 currentIdentityLabel）。
+                  ⛔ 注意别把下面「学段学科」那一行也改了：那一行要的就是学科。
+                */}
+                <Tag tone="accent">{currentIdentityLabel(myRoles, teacher)}</Tag>
                 <Tag tone="idle">{teacher?.school || '未填学校'}</Tag>
               </div>
             </div>

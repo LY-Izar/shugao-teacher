@@ -218,6 +218,9 @@ alter table classrooms     enable row level security;
 alter table calls          enable row level security;
 
 -- 教师：只能读写自己那一行
+--  ⚠️ 这一条会被 §17.1 **重写**成三条逐动作策略（`teachers_self_select` /
+--     `_insert` / `_update`），并加上"教室端不算教师"那一支。这里保留原文是为了
+--     让 §7 这一段单独跑完时，行为与本文件历史版本**一字不差**。
 drop policy if exists teachers_self on teachers;
 create policy teachers_self on teachers
   for all to authenticated
@@ -628,6 +631,38 @@ create policy classroom_accounts_read on classroom_accounts
 
 grant select on schools, grades, teacher_roles, class_subjects, classroom_accounts to authenticated;
 revoke all on schools, grades, teacher_roles, class_subjects, classroom_accounts from anon;
+
+-- -------- 10.5 「我是不是教室端」—— 这条判据的**唯一定义**（2026-09-25 补）--------
+--  "我是不是教室端" = `classroom_accounts` 里有没有 id = 自己 uid 的那一行
+--  （`classroom_accounts.id` 就是那个账号的 auth uid，见 §10.1 的说明）。
+--
+--  为什么要有这个函数（原来这条判据被手写了三遍）：
+--    §10.3 的 visible_class_ids_for、§11.1 的 classrooms_heartbeat 与
+--    schedule_classroom_write，都是同一句 `exists (select 1 from classroom_accounts …)`。
+--    第四个调用方（§17 收紧两条裂缝）出现时，"教室端"这个身份在策略里就该只有一个名字——
+--    否则口径一改（比如将来加"停用账号不算"）就是几处不一致。
+--
+--  🔴 这三条纪律都别改：
+--    ① **`disabled` 不影响身份**：停用撤销的是访问范围（§11.1 的两条写策略各自判 `not disabled`），
+--       不是"它是不是教室端"。这里多一个条件，停用的教室端就会掉回"教师"那一档 —— 正好相反。
+--    ② **真正的老师恒为假**：老师不在 classroom_accounts 里 → 这个函数恒 false →
+--       §17 的收紧对教师**一个字都不影响**（这是"别把真正的教师一起挡了"的落实）。
+--    ③ **它必须在 §17 之前存在**：PostgreSQL 建策略时就会解析函数名，
+--       "函数待会儿再建"在 `create policy` 这一步就报 `function … does not exist`
+--       （真 PG 17 实测过，不是理论）。
+create or replace function public.is_classroom_account()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1 from classroom_accounts ca where ca.id = auth.uid()
+  );
+$$;
+
+grant execute on function is_classroom_account() to authenticated;
 
 -- ⚠️ 教室里那台机器的安全边界靠这一条守：
 --    绝不能给教室端账号任何 assignments 的 UPDATE 策略。
@@ -1416,7 +1451,19 @@ alter table exam_scores enable row level security;
 --    ① 新列：class_subjects.subject_code = 这份档案的学科代码
 --    ② 老列：任课关系那行还没回填 subject_code 时，按**显示名精确比对**
 --    **认不出来 = 不匹配**（不猜）。猜错会让一位老师改不了自己班的成绩，而且不报错。
-create or replace function public.can_edit_exam(
+--  🔴 两件套（2026-09-27 补 `_for` 变体，与 §16.2 全部判据同一套写法，见 §18）：
+--    `can_edit_exam_for(uid, class_ids, code, name)` ← **函数体在这里**：显式传人，
+--       给 SQL 编辑器核对与 `npm run rls-checks` 用 —— 所以它必须 **revoke**（§16.2）。
+--    `can_edit_exam(class_ids, code, name)`          ← 读 `auth.uid()` 的薄包装，
+--       **签名一个字没改**（§15.3 的策略引用着它，改签名要连带改策略）。
+--  ⚠️ 两者顺序不能倒：PostgreSQL 在 `create function` 那一刻就解析 SQL 函数体，
+--     薄包装若引用一个还没建的函数，会当场 `function … does not exist`
+--     （PGlite / 真 PG 17 实测，见 §18.4）—— 所以定义只能在这里，不能挪到 §18。
+--  ⚠️ 多班数组的语义：`any` —— **只要有一个班我教这一科就算能改**（不是"每个班都要我教"）。
+--     为什么：班级考试只有一个班；年级考试是多人协作，别的班的分数由那个班的任课老师自己录
+--     （上面的"为什么任一班就够"）。这条语义钉在 §18.2，回归钉在 rls-checks 第十三节。
+create or replace function public.can_edit_exam_for(
+  p_uid uuid,
   p_class_ids uuid[],
   p_subject_code text,
   p_subject text
@@ -1427,22 +1474,24 @@ stable
 security definer
 set search_path = public
 as $$
-  with me as (select auth.uid() as uid),
-       subj as (
-         select coalesce(
-           nullif(btrim(coalesce(p_subject_code, '')), ''),
-           (select s.code from subjects s where btrim(s.name) = btrim(coalesce(p_subject, '')))
-         ) as code
-       )
+  with subj as (
+    select coalesce(
+      nullif(btrim(coalesce(p_subject_code, '')), ''),
+      (select s.code from subjects s where btrim(s.name) = btrim(coalesce(p_subject, '')))
+    ) as code
+  )
   select
     -- 最高管理员兜底（与 can_grade 的 super/admin 一支同口径：两人一起，见 §13.1）
-    exists (select 1 from teacher_roles r, me
-             where r.teacher_id = me.uid and r.role in ('super', 'admin'))
-    -- 或者：在我教这一科的某个班里
+    --   ⚠️ 这里**不能**改调 is_school_admin_for()：它在 §16.2，比本段晚 ——
+    --      建函数时就解析（同上面的告警），调用会当场报 does not exist。
+    --      口径与那个函数逐字相同（I17 的已知重复处，§18.4 记了一笔）：改动时两处一起改。
+    exists (select 1 from teacher_roles r
+             where r.teacher_id = p_uid and r.role in ('super', 'admin'))
+    -- 或者：在我教这一科的**某个**班里（任一班命中即可 —— 上面的多班语义）
     or exists (
       select 1
-      from class_subjects cs, subj, me
-      where cs.teacher_id = me.uid
+      from class_subjects cs, subj
+      where cs.teacher_id = p_uid
         and cs.class_id = any (coalesce(p_class_ids, '{}'::uuid[]))
         and (
           (subj.code is not null and cs.subject_code = subj.code)
@@ -1451,6 +1500,20 @@ as $$
         )
     );
 $$;
+
+revoke all on function can_edit_exam_for(uuid, uuid[], text, text) from public, anon, authenticated;
+
+create or replace function public.can_edit_exam(
+  p_class_ids uuid[],
+  p_subject_code text,
+  p_subject text
+)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$ select can_edit_exam_for(auth.uid(), p_class_ids, p_subject_code, p_subject) $$;
 
 grant execute on function can_edit_exam(uuid[], text, text) to authenticated;
 
@@ -1534,10 +1597,21 @@ revoke all on exams, exam_scores from anon;
 -- join classes c on c.id = cs.class_id
 -- join teachers t on t.id = cs.teacher_id
 -- order by 1, 4;
---  期望：他自己任教的那几行是 true；别人任教的班（同一个年级）是 false。
---   ⚠️ `can_edit_exam_for` 这个变体**故意不建**（与 visible_class_ids_for 的理由相反：它不需要
---      在 SQL 编辑器里被指定人核对 —— 上面这条已经用 class_subjects 自连接把"谁能改哪一行"
---      摆出来了）。要在编辑器里验判据，把函数体里的 `me` 换成一个常量 uuid 即可。
+--  期望：**`me` 自己任教的那几行是 true**；别人任教的班（同一个年级）是 false。
+--   ✅ `can_edit_exam_for` 这个变体从 2026-09-27 起**已建**（§15.2，紧挨在薄包装之前），
+--      上面这条可以原样粘着跑。此前它不存在，只能用
+--      `is_school_admin_for(...) or teaches_subject_for(...)` 临时等价改写（§18.1 记了这段历史）。
+--   ⚠️ 第一个参数是**数组**（考试可以多班）：`array[c.id]`；别照 §16.6 的标量写法抄成 `c.id`。
+--
+--  🔴 读这条结果时最容易搞错的一点（2026-09-27 用户实测踩到，记下来）：
+--     前四列（`t.name` / `cs.subject` / `cs.subject_code` / 班级）说的是**这一行是谁的**，
+--     最后一列 `他能改` 说的是 **`me`（核对对象）能不能改这一行** —— 这是两件事。
+--     所以 `me` = 示例教师时看到 `demo-teacher / 物理 / 测试专用 = false`，它的意思是
+--     "**示例教师**改不了 demo-teacher 那一行"（正确），**不是**"demo-teacher 改不了自己的班"。
+--     要问后者就得判**每一行自己的老师**（§16.6 ② 的问法：`…_for(t.id, c.id, …)`），
+--     两者在同一批数据上的实测对照记在 rls-checks 第十三节。
+--  ⚠️ 另一个会把这条读成"全 false"的坑：`me` 按姓名查不到人 → CTE 是空集 →
+--     依赖它的判据**全部**为 false（假失败）。所以先跑自检.sql 第 3 段开头那句「人是谁」。
 
 -- -------- 15.5 年级排名怎么算（**没有额外的表，靠这一条查询**）--------
 --  用户口径：「年级考试 → 按学科把整个年级同一场考试的数据读出来，排年级排名和班级排名」。
@@ -1635,6 +1709,8 @@ revoke all on exams, exam_scores from anon;
 --            写    | 建档人是自己 · 这个班看得见（教室端心跳走同一条）
 --   ---------------|--------------------------------------------------------------
 --   teachers / shared_files：**不在本矩阵里**，§7/§9 的"只能动自己那一行"原样保留
+--     ⚠️ 例外一处：`teachers_self` 在 §17.1 被重写成逐动作策略 + "教室端不算教师"
+--        （2026-09-25 用户拍板收紧裂缝 A）。`shared_files_own` 仍是 `for all`。
 --   teacher_roles / class_subjects / classroom_accounts / subjects / schools / grades：
 --     只读（§10.4 / §12.1），写一律走服务端 `functions/api/*`（service_role），
 --     数据库这一层**不 grant** insert/update/delete —— 免得同一个动作有两个入口
@@ -2001,8 +2077,19 @@ create policy schedule_mine_read on schedule_items for select to authenticated
 
 drop policy if exists schedule_mine_write on schedule_items;
 create policy schedule_mine_write on schedule_items for all to authenticated
-  using (teacher_id = auth.uid() and coalesce(scope, 'mine') <> 'class')
-  with check (teacher_id = auth.uid() and coalesce(scope, 'mine') <> 'class');
+  using (
+    teacher_id = auth.uid()
+    and coalesce(scope, 'mine') <> 'class'
+    -- 🔴 教室端账号**不是教师**，不许写"自己的排课表"（§17 裂缝 B）：
+    --    它也是 auth.uid()，少了这一句它就能给自己名下塞 scope='mine' 的行 ——
+    --    "教室端只有两处有限写"这句话在策略清单上就不成立了。
+    and not is_classroom_account()
+  )
+  with check (
+    teacher_id = auth.uid()
+    and coalesce(scope, 'mine') <> 'class'
+    and not is_classroom_account()
+  );
 
 drop policy if exists schedule_class_write on schedule_items;
 create policy schedule_class_write on schedule_items for all to authenticated
@@ -2032,7 +2119,8 @@ create policy classrooms_delete on classrooms for delete to authenticated
 --    · 读：完全由 §11 / §13.4 的 `*_visible` 负责（一条都没动）
 --    · 写：完全由 16.3 的逐动作策略负责
 --  **保留不动的旧策略**（刻意留下，别"顺手"删）：
---    teachers_self · shared_files_own（都只动自己那一行，不在本矩阵里）
+--    shared_files_own（只动自己那一行，不在本矩阵里；teachers_self **不在此列**——
+--    它在 §17.1 被逐动作重写，把教室端摘出去了）
 --    classes_visible / students_visible / assignments_visible / calls_visible /
 --    schedule_class_visible / classrooms_visible（读，§11 §13）
 --    classrooms_heartbeat / schedule_classroom_write（教室端的两处有限写，§11.1）
@@ -2154,3 +2242,253 @@ order by 4 desc, 1, 3;
 --    → 教室端那条线，本轮刻意不动（§13.1 的留档仍然有效）
 --  · 删 `assignments.subject` / `teachers.subject` / `class_subjects.subject` 旧列
 --    → 要等体检连续为 0，而且前端还在按显示名反查字典（§12.4）
+
+-- ============================================================
+--  17. 收口 · 教室端的两条裂缝（2026-09-25 用户拍板「收紧」）
+--
+--  背景：`app/scripts/rls-checks.mjs`（PGlite 跑真 Postgres + 真策略）实测出两条裂缝，
+--  当时**只记在报告里、没有判失败**。用户 2026-09-25 拍板：收紧。它们是：
+--
+--   裂缝 A：教室端能改 `teachers` 里**自己那一行**。
+--     根因是两件事叠在一起：① `teachers_self`（§7）是 `for all`，条件是 `id = auth.uid()`；
+--     ② `handle_new_user` 触发器**给每个 auth 用户都建了一行 teachers** ——
+--     教室端账号也有（`classroom_accounts.id` 指向 auth.users 的同一个 uuid）。
+--     于是它能改自己那行的 name / subject。那块屏是挂在教室里给学生看的，
+--     **不该有任何写权限**（设计 §五 红线）。
+--
+--   裂缝 B：教室端在策略上能写自己名下 `scope='mine'` 的排课表行。
+--     `schedule_mine_write` 只要求 `teacher_id = auth.uid()`，而教室端账号也是 auth.uid()。
+--     前端走不到这条路（`Classroom.tsx` 的粘贴课表恒写 `scope:'class'`），
+--     所以影响面≈0 —— 但"教室端只有两处有限写"这句话在策略清单上不成立，
+--     而策略清单是这个项目的安全边界说明书，**它不能是错的**。
+--     已在 §16.3 的 `schedule_mine_write` 里补上 `and not is_classroom_account()`。
+--
+--  为什么这一节的主语是"加"而不是"改 §7 的 teachers_self"：
+--    · `teachers_self` 原来是一条 `for all`。`teachers` 是**外键的根**
+--      （classes / assignments / schedule_items / classrooms / calls 全都 references 它），
+--      而前端每一次"我的资料"保存走的都是 **upsert**（`saveTeacher` → `on conflict (id) do update`），
+--      在 PostgreSQL 里那条路**同时要过 INSERT 的 with check**（§16.3 发现二，真 PG 实测过）。
+--    · 所以"教室端不许写"这一条**只用一条 restrictive 策略**表达（`for all as restrictive`
+--      + `not is_classroom_account()`）：策略之间 permissive 是 OR、最后再与所有 restrictive **AND**，
+--      所以它**不会放宽任何权限**，只是把那一个身份从四个写动作里摘出去。
+--      §7 的 `teachers_self` 一个字不用动，回退也只是删掉下面这一条。
+--      **收紧动作里，"加一条 AND" 比"拆一条 OR"稳得多** —— 拆 `for all` 时漏掉任何一个动作，
+--      症状都是教师"保存失败 = 刷新即丢"，而且**不报错**（§16.3 发现一）。
+--
+--  判据：`is_classroom_account()`，定义在 **§10.5**（必须在建策略之前存在，
+--    否则 `create policy` 这一步就报 `function … does not exist` —— 真 PG 17 实测）。
+-- ============================================================
+
+-- -------- 17.1 裂缝 A：teachers 的写权限里**摘掉教室端** --------
+--  `for all` = 覆盖 select / insert / update / delete 四个动作，正好把"改自己那一行"
+--  （§7 的 `teachers_self` 给的那条路）整个堵掉；读不受影响（restrictive 只作用于
+--  策略的 `using` 判定，而它这里为真时对读毫无影响 —— 教师的 `teachers_self` 照旧放行）。
+drop policy if exists teachers_not_classroom on teachers;
+create policy teachers_not_classroom on teachers
+  as restrictive for all to authenticated
+  using (not is_classroom_account())
+  with check (not is_classroom_account());
+
+-- -------- 17.1 裂缝 A：teachers 的写权限里**摘掉教室端** --------
+--  🔴 **必须是三条逐动作策略，不能写成一条 `for all`** —— 这是本轮实测踩到的坑：
+--     restrictive 的 `using` 对 **SELECT 也生效**，写成 `for all` 会把教室端**读自己那一行**
+--     一起挡掉（`rls-checks` 第三节「逐人可见量」当场就红了：teachers 1 → 0），
+--     而"读"这一半本轮一个字都不该动。DML 才需要 `with check`，`for delete` 只有 `using`。
+--
+--  ⚠️ `handle_new_user` 触发器不受这里影响：它是 `security definer`，
+--     插入以**函数属主**（表属主默认绕过 RLS）身份执行 —— 下面三条拦不到它。
+--     （"加了守卫之后建号还建不建得出来"是这一段最要紧的副作用，实测见 rls-checks 第二/七节。）
+--
+--  ⚠️ 教师那一侧**一个字都没动**：`teachers_self`（§7 的 `for all`）仍然原样躺在那里，
+--     老师改自己那一行照旧走它；三条 restrictive 对老师恒真（`is_classroom_account()` = false）。
+--     这正是"别把真正的教师一起挡了"的实现方式：判据是**身份**（classroom_accounts 里有没有自己），
+--     不是"像不像老师"。
+--  ⚠️ 第一条 `drop` 是**清理用**的：本段最早写成一条 `for all` 的 `teachers_not_classroom`，
+--     实测发现 restrictive 的 `using` 对 SELECT 也生效（教室端会读不到自己那行）→ 改成下面三条。
+--     留着这一行，任何跑过中途版本的库重跑本段都会被清干净（幂等）。
+drop policy if exists teachers_not_classroom on teachers;
+
+drop policy if exists teachers_not_classroom_insert on teachers;
+create policy teachers_not_classroom_insert on teachers
+  as restrictive for insert to authenticated
+  with check (not is_classroom_account());
+
+drop policy if exists teachers_not_classroom_update on teachers;
+create policy teachers_not_classroom_update on teachers
+  as restrictive for update to authenticated
+  using (not is_classroom_account())
+  with check (not is_classroom_account());
+
+drop policy if exists teachers_not_classroom_delete on teachers;
+create policy teachers_not_classroom_delete on teachers
+  as restrictive for delete to authenticated
+  using (not is_classroom_account());
+
+-- -------- 17.2 裂缝 B：教室端在 schedule_items 上只留 scope='class' 那一支 --------
+--  §16.3 已经把 `not is_classroom_account()` 写进 `schedule_mine_write`（策略正文那处管
+--  "能不能写"）；这里再用一条 restrictive 策略把边界**声明**出来（AND，不放宽任何东西）：
+--  教室端能写的只能是 `scope='class'` 的行（= §11.1 的 `schedule_classroom_write`
+--  与 `classrooms_heartbeat` 那两处有限写），`scope='mine'` 一律拒。
+--
+--  为什么两处都写：只有策略正文那处时，`pg_policies` 里 `schedule_mine_write` 的条件
+--  长得像"谁都能写自己的排课表"，下一个读策略清单的人会把裂缝 B 再犯一遍 ——
+--  而策略清单是这个项目的安全边界说明书。
+drop policy if exists schedule_classroom_scope_only on schedule_items;
+create policy schedule_classroom_scope_only on schedule_items
+  as restrictive for all to authenticated
+  using (not is_classroom_account() or scope = 'class')
+  with check (not is_classroom_account() or scope = 'class');
+
+-- -------- 17.3 这一段跑完之后，前端会怎样（"SQL 没跑也不崩"）--------
+--  · **没跑这一段**：教室端那两条裂缝还在（与改动前完全一致），教师端行为一个字不变；
+--  · **跑了这一段**：教师端与教室端的**读**完全不变（`teachers_self` 一条没删，
+--    restrictive 对教师恒真），教室端的两条合法写（心跳 / 粘贴本班班级课表）照旧通过 ——
+--    实测见 rls-checks 第七节；
+--  · 两处**故意不要**的东西（免得后来的人"顺手补上"）：
+--    ① 没有 `teachers` 的 DELETE 策略 → 客户端删不掉 teachers 行。
+--       全仓没有任何前端路径会删它（账号由 `functions/api/*` 用 service_role 管，
+--       绕过 RLS），而 §16.1 矩阵里 `teacher_roles` / `class_subjects` / `classroom_accounts`
+--       同样是"数据库层不给客户端写"。这与"教室端不该有写权限"是同一条纪律。
+--    ② 没有动 `shared_files_own`（§9 的 `for all`）。见 17.6 的**已知未收紧项**。
+--  · 被拒的写入在前端表现为 `syncError`（乐观更新已经改了本地），
+--    所以上线这一段之前，先跑 `npm run rls-checks`（它会逐条打这两条裂缝）。
+--
+-- -------- 17.4 回退（四个 drop，幂等）--------
+--    drop policy if exists teachers_not_classroom_insert on teachers;
+--    drop policy if exists teachers_not_classroom_update on teachers;
+--    drop policy if exists teachers_not_classroom_delete on teachers;
+--    drop policy if exists schedule_classroom_scope_only on schedule_items;
+--    -- `schedule_mine_write` 的正文也要把 `and not is_classroom_account()` 去掉（§16.3）
+--  —— 回退**只会放宽**（AND 的那一半没了），不会让谁看不见东西，也不用重建任何旧策略。
+--
+-- -------- 17.5 自检（跑完这一段之后照一眼）--------
+--  ① 策略清单：teachers 上多三条 `teachers_not_classroom_*`（permissive = RESTRICTIVE）；
+--     schedule_items 上多一条 `schedule_classroom_scope_only`（同）。
+--     ```sql
+--     select tablename, policyname, cmd, permissive
+--       from pg_policies where schemaname = 'public'
+--        and tablename in ('teachers', 'schedule_items') order by tablename, cmd, policyname;
+--     ```
+--  ② 判据函数：把教室端账号的 uuid 填进去，应当为 true；换成一位真老师应当为 false。
+--     ```sql
+--     -- select public.is_classroom_account();  -- 以登录者身份跑
+--     ```
+--  ③ 常驻回归：`cd app && npm run rls-checks` —— 第七节逐条打这两条裂缝，
+--     并且静态钉住"teachers / schedule_items 上的写策略里都提到教室端"。
+--
+-- -------- 17.6 🔴 已知未收紧项：`shared_files_own`（**写进文档，别当没看见**）--------
+--  PGlite 逐人逐动作跑出来发现：教室端账号在策略上**也**能往 `shared_files` 插一行
+--  （§9 的策略是 `for all ... using (teacher_id = auth.uid())`，而 `Files.tsx` 上传时
+--  `teacher_id` 就是当前登录者）。它与裂缝 A / B 是**同一个根**（触发器给了 teachers 行 +
+--  策略只认 auth.uid()）。
+--  为什么本轮**没动**：① 它不在 §16.1 的矩阵里（§9 的老策略），改它属于"再开一条战线"；
+--  ② 前端的教室端页面**没有上传入口**（`Classroom.tsx` 只 `listFiles()` 读，不上传），
+--  所以实际可达性与裂缝 B 同级（≈0，但"策略清单上不成立"这句话同样适用）。
+--  要收紧就是一行：`shared_files_own` 的 `using` / `with check` 各加 `and not is_classroom_account()`
+--  （函数已经在 §10.5，位置在建这条策略之前，可以直接引用）。
+--  ⚠️ 它**不在** §17.1/17.2 的回归覆盖里（rls-checks 目前没有对 shared_files 打教室端的写操作）——
+--     要收紧时记得同时补一条断言，否则"收紧了没人钉住"。
+
+-- ============================================================
+--  18. 判据函数的 `_for` 变体（2026-09-27 补）：为什么每个判据都要两件套
+--      本节登记的：**`can_edit_exam_for`**（考试档案的写判据）
+-- ============================================================
+--
+--  本节**一行可执行的 SQL 都没有**（除了注释里的核对查询）—— 与 §12.5 / §15.4 / §16.6 同类：
+--  自检段不建对象。它是"登记表 + 一条纪律 + 一段核对 SQL"。
+--
+--  为什么专门写一节：`can_edit_exam_for` 这个变体此前**故意没有建**
+--  （§15.4 的旧注释说"它不需要在编辑器里被指定人核对"），代价是两条：
+--    ① 在 Supabase SQL 编辑器里**验不了考试那条写判据** —— 编辑器里 `auth.uid()` 是 NULL，
+--       `can_edit_exam(...)` 对**任何人**都返回 false（用户实测：示例教师 / demo-teacher / 所有班全 false）。
+--       于是"示例教师能不能建高二(1)班的物理考试"这个最基本的问题，当时**没有答案**；
+--    ② `app/scripts/rls-checks.mjs` 里对考试写判据**一条断言都没有**（没法以指定身份调用）——
+--       而那条判据守着的正是"谁能建 / 改考试档案"。
+--
+-- -------- 18.1 纪律：判据一律**两件套**（裸版 + `_for` 版）--------
+--  · `xxx_for(p_uid, …)`：**函数体在这里**，显式传人 —— 编辑器核对 / 回归脚本用；
+--    **一律 revoke**（接受任意 uid 就等于"以任意人身份问权限"，见 §16.2 开头那段）；
+--  · `xxx(…)`：读 `auth.uid()` 的**薄包装**，正文只有一行 `select xxx_for(auth.uid(), …)`——
+--    策略只准引用它（签名稳定，以后换判据不用动策略）。
+--  🔴 **为什么必须有 `_for` 版（这一条值得当约定记下来：不是"顺手补一个"，是"不补就没法验证"）**：
+--    编辑器里没有登录态（`auth.uid()` = NULL），回归脚本里也没法"以某人的身份问一句"——
+--    裸版在编辑器里只会恒 false（或恒 NULL），看起来像"权限收得很紧"，
+--    实际是**假通过 / 假失败**：判据对不对，一个字都没验。
+--    §12.5 / §13.5 / §16.6 的核对 SQL 全都靠 `_for` 变体，理由同此。
+--  ⚠️ 顺序：`_for` 必须建在**薄包装之前**，两者都必须建在**引用它们的策略之前**——
+--    PostgreSQL 在 `create function` / `create policy` 那一刻就解析名字（§18.4 有实测）。
+--
+-- -------- 18.2 `can_edit_exam_for` 登记（2026-09-27 新增）--------
+--  签名：`public.can_edit_exam_for(p_uid uuid, p_class_ids uuid[], p_subject_code text, p_subject text)`
+--    ⚠️ 第一个业务参数是**数组**（一次考试可以多班），别的判据是标量 `p_class_id` —— 别抄错。
+--  位置：**§15.2**（紧跟薄包装 `can_edit_exam` 之前）—— **不在本节**，理由见 18.4。
+--  用途：① SQL 编辑器里核对"谁能建 / 改哪一份考试档案"；② `rls-checks` 第十三节逐身份断言。
+--  语义（**钉死，改它之前先读这里；回归也钉着它**）：
+--    · 答的是"`p_uid` 能不能建 / 改 `p_class_ids` 这一份考试档案"；
+--    · 多班数组是 **any**：`class_ids = [我教的班, 我不教的班]` → **true**
+--      （只要**有一个**班我教这一科；**不是**"每个班都要我教"）。
+--      为什么：班级考试只有一个班；年级考试是多人协作 —— 别的班的分数由那个班的任课老师自己录
+--      （§15.2 的"为什么'任一班'就够"）。所以这个数组的语义是"**这份档案涉及哪些班**"，
+--      不是"要求我教全部这些班"。
+--    · 空数组 / NULL → 对任课老师 **false**；对 super / admin 仍然 true（兜底那一支不看班）。
+--    · 学科：先看 `subject_code`，认不出再按 `subject` 显示名去 `subjects` 反查；
+--      **认不出来 = 不匹配**（不猜，与 §13.3 同口径）。
+--    · super / admin 兜底**保留**（用户 2026-09-27 拍板；与 §16.2 的 `can_grade_subject_for` 同口径）；
+--      想让超管也不能改：删掉函数体第一支即可，别的不用动。
+--    · **班主任 / 年级主任不在判据里**：他们读得宽（§15.3 的读策略）、**写不了别人的班**（I27 同族）。
+--    · **教室端 false**：那块屏在 `exams` / `exam_scores` 上**一条写策略都没有**（§15.3 末）。
+--      ⚠️ 它与"读"是两件事：§15.3 的读策略用的是 `visible_class_ids()`，教室端**读得到**本班考试
+--      （为将来的"逐题正确率"留的）—— 设计文档 §14.7 里"连 select 都拿不到"那句话与实码不一致，
+--      实测见 rls-checks 第十三节；要改的是文档或那条读策略，**不是**这里的写判据。
+--
+-- -------- 18.3 编辑器核对（把下面整段粘进 SQL 编辑器）--------
+--  ① 判**每一行自己的老师**能不能改这一行（推荐问法：不会把"行主"和"核对对象"看串，
+--     见 §15.4 ② 的那条告警）：
+-- select t.name as 老师, c.name as 班级, coalesce(cs.subject_code, cs.subject) as 学科,
+--        can_edit_exam_for(t.id, array[c.id], cs.subject_code, cs.subject) as 他能改这一行
+--   from class_subjects cs
+--   join classes c on c.id = cs.class_id
+--   join teachers t on t.id = cs.teacher_id
+--  order by 1, 2;
+--  期望：**每一行都是 true** —— 任课关系在，这一科就跑得动判据；
+--        调成别人的 id（第一参数）看它会变成 false，那才是"写不了别人的班"。
+--  ② 问一个具体的人 + 试多班数组的语义（把 uuid 换成真的）：
+-- select can_edit_exam_for('<老师的 uuid>', array['<班1>'::uuid, '<班2>'::uuid], 'physics', '物理');
+--  ③ `_for` 变体**必须都 revoke**（这条期望 **0 行**；机器版在 rls-checks 第十三节）：
+-- select p.proname from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+--  where n.nspname = 'public' and p.proname like '%\_for'
+--    and (has_function_privilege('authenticated', p.oid, 'EXECUTE')
+--      or has_function_privilege('anon', p.oid, 'EXECUTE'));
+--  ④ 顺便看见"裸版在编辑器里为什么恒 false"（**不是权限收紧了**，是 auth.uid() = NULL）：
+-- select can_edit_exam(array[(select id from classes order by created_at limit 1)], 'physics', '物理');
+--
+-- -------- 18.4 为什么定义落在 §15.2，而不是像别的节那样落在文件末尾 --------
+--  实测（PGlite = WebAssembly 版**真 PostgreSQL 17**，一次性探针）：
+--    · `create function … language sql as $$ select 还不存在的函数() $$` → **当场报错**
+--      `function … does not exist`（同理：引用还不存在的表 → `relation … does not exist`）；
+--    · `create policy … using (还不存在的函数())` → **当场报错**（§17 那段注释里的同一条坑）。
+--  所以"函数体搬到本节、§15.2 只留薄包装"这条路**走不通**：schema.sql 会在 §15.2 就断掉。
+--  推论（**改判据时记住**）：
+--    · 本条判据的 super/admin 那一支只能**就地**写 `role in ('super','admin')`，
+--      **不能**改调 §16.2 的 `is_school_admin_for()`（它比 §15 晚）—— 那是 I17 的**已知重复处**：
+--      口径与 §16.2 逐字相同，改动时两处一起改（rls-checks 第十三节钉着两者一致）；
+--    · 将来新增判据，位置要放在**第一个调用方之前**，别只看节号。
+--
+-- -------- 18.5 现在有哪些 `_for` 变体（照这张表点，别漏 revoke）--------
+--  §10.3 `visible_class_ids_for(uuid)`
+--  §13.2 `is_super_admin_for(uuid)` · `can_manage_teachers_for(uuid)`
+--  §13.3 `can_view_all_subjects_for(uuid, uuid)` · `teaches_subject_for(uuid, uuid, text, text)`
+--  §15.2 **`can_edit_exam_for(uuid, uuid[], text, text)`** ← 本节登记的这一个（2026-09-27 补）
+--  §16.2 `is_school_admin_for(uuid)` · `has_role_for(uuid, text)` · `can_manage_class_for(uuid, uuid)`
+--        · `teaches_in_class_for(uuid, uuid)` · `owns_class_for(uuid, uuid)`
+--        · `can_grade_subject_for(uuid, uuid, text, text)`
+--  合计 **12 个**，**每一个后面都紧跟一句 `revoke all on function … from public, anon, authenticated`**。
+--  新增判据时四样一起加：`_for` + 裸版 + revoke + rls-checks 里至少一条断言（否则就是"加了没人钉"）。
+--
+-- -------- 18.6 这一段跑完之后，前端会怎样（"SQL 没跑也不崩"）--------
+--  · **没跑这一段**：前端行为一个字不变（本节不建对象）；
+--  · **跑了这一段**：策略 / 前端 / 教室端全部与改动前逐字相同（`can_edit_exam` 的签名与语义都没变，
+--    只是函数体改成转调 `can_edit_exam_for`）—— 多出来的只是"考试写判据第一次可以被验证"。
+--  · 回退（幂等，两行）：把 §15.2 的薄包装正文换回原来的 `with me as (select auth.uid() as uid) …`，
+--    再 `drop function if exists can_edit_exam_for(uuid, uuid[], text, text);`。
+

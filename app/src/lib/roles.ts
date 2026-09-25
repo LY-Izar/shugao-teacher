@@ -13,7 +13,8 @@
      ② `app/functions/api/teacher-account.ts` —— 用 service_role 建号/指派前，
         拿**调用者自己的 JWT** 走 `POST /rest/v1/rpc/<函数名>` 问数据库，
         **不在 TypeScript 里重写一遍规则**
-     ③ 这里 —— 只回答"界面上该不该摆这个入口"
+     ③ 这里 —— 只回答"界面上该不该摆这个入口"**和"标签上写什么字"**
+        （`roleChips()` / `currentIdentityLabel()`，见文件末尾）
 
    🔴 为什么③不算"第二套判据"：它对数据的可见范围**一无所知**，
       也不可能让谁多看到一行 —— 真正的闸门是①，服务端每次都问。
@@ -21,7 +22,8 @@
       而"显示哪些入口"按设计就是前端的事（`多学科体系方案.md` §3.3.4）。
    ============================================================ */
 
-import type { RoleCode, TeacherRole } from '../data/types'
+import type { RoleCode, Teacher, TeacherRole } from '../data/types'
+import { teacherSubjectLabel } from './subjects'
 
 /** 身份的显示名。加一档身份 = 这里加一行 + schema 的 check 约束加一个值。
  *  `admin` 显示成「教导处」—— 用户口径：「`admin` = 教导处 / 校级行政，
@@ -97,4 +99,68 @@ export function roleChips(
     out.push(base)
   }
   return out
+}
+
+/* ============================================================
+   身份标签显示什么（**只是显示，不是判据**）
+   ------------------------------------------------------------
+   2026-09-25：用户截图里最高管理员的侧栏标签写着「物理」。
+   根因不是标签取错了字段，而是 `teachers.subject` **有列默认值 `'物理'`**
+   （列默认值不改，那是破坏性迁移，见 §12.5）—— 于是**每个账号都有学科**，
+   连不教课的账号也被挂上"物理"。学科回答的是"教什么"，身份回答的是"是谁"，
+   有身份的人应当先答"是谁"。
+   ============================================================ */
+
+/**
+ * 管理身份的显示优先级（**高 → 低**）。
+ *
+ * `teacher`（任课教师）**不在表里**：它是"没有管理身份"的那一档，
+ * 只有它的老师照旧显示学科。
+ *
+ * ⚠️ 这张表只决定**标签上先写哪个字**，与权限无关 ——
+ *    "谁能建号 / 谁能指派身份 / 谁改得了成绩"一律以数据库为准（§13.5 I16、§16）。
+ *    别拿它去写任何 if 判断（那正是 I17 说的"第二处判据"）。
+ */
+const MANAGING_ROLES: readonly RoleCode[] = ['super', 'admin', 'grade_head', 'head_teacher']
+
+/**
+ * 这个人的**管理身份**显示名；没有管理身份返回 `''`。
+ *
+ * 多身份时**取最高那一档**（`super` > `admin` > `grade_head` > `head_teacher`），
+ * **不拼接**：这个标签在侧栏里挨着姓名、在工作台那一行里还有两个同级标签，
+ * 拼成「教导处 · 年级主任 · 班主任」就把它撑成一条长串了。
+ * 要"列全"的地方是「我的 → 我的身份」那一行（`roleChips()`），那里才是清单。
+ *
+ * ⚠️ **认不出的角色代码按身份显示**（`roleName()` 原样回显，优先级排最后）：
+ *    把一个身份显示成学科正是这一轮要修的那个错，宁可显示一个生代码，
+ *    也不要谎报"物理"。`teacher` 那一档不算管理身份。
+ */
+export function managingRoleLabel(roles?: readonly TeacherRole[] | null): string {
+  const list = roles ?? []
+  for (const code of MANAGING_ROLES) {
+    if (list.some((r) => r.role === code)) return roleName(code)
+  }
+  const other = list.find((r) => r.role !== 'teacher' && roleName(r.role))
+  return other ? roleName(other.role) : ''
+}
+
+/**
+ * 🔴 **「当前身份」那个标签显示什么：有管理身份就显示身份，没有才显示学科。**
+ *
+ * 三处「我自己」的标签共用这一处实现（侧栏 `AppShell` / 工作台问候语 / 设置页身份卡）——
+ * 别再各写一句 `managingRoleLabel(myRoles) || teacherSubjectLabel(teacher)`：
+ * 「同一件事只能有一个判定入口」是本仓库踩过四次的坑（§十）。
+ *
+ * ⚠️ **`roles` 只覆盖"我自己"**：`store.myRoles` 来自 `remote.loadMyRoles(我的 uid)`，
+ *    前端**拿不到别人的角色数组**。要显示**别人**（账号表、班级名单那种一行一个人）时
+ *    别调它 —— 传进去的空数组会让那个人显示成学科，等于把"没有身份"这个结论安在别人头上
+ *    （那正是这一轮修的错，只是换了个方向）。`TeacherAccounts` 那几列显示学科是**对的**：
+ *    那一列本来就是"这个账号教什么科"。
+ */
+export function currentIdentityLabel(
+  roles?: readonly TeacherRole[] | null,
+  t?: Pick<Teacher, 'subject' | 'primarySubjectCode'> | null,
+  fallback = '老师',
+): string {
+  return managingRoleLabel(roles) || teacherSubjectLabel(t, fallback)
 }

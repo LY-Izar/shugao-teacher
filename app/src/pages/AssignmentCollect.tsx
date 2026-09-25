@@ -379,7 +379,16 @@ export default function AssignmentCollect() {
     <>
       <PageHead
         title="收作业查缺"
-        sub={`${klass?.name ?? '—'} · ${friendlyDate(assignment.assignDate)} · ${assignment.questionCount} 题`}
+        /*
+         * 标题栏分两种口径：普通模式写「N 题」，极简模式写「只记等级」。
+         * 极简模式没有"题"这个概念（只记 优/良/差），而 `questionCount` 在建档时
+         * 仍被写成 6 —— 写出来就是一个没有意义的数字（老师会去找"第 3 题在哪"）。
+         * 与批改页（`AssignmentGrade`）的标题栏**同一句话**，别各写一套。
+         * ⛔ 普通模式那半照旧。
+         */
+        sub={`${klass?.name ?? '—'} · ${friendlyDate(assignment.assignDate)} · ${
+          assignment.statsMode === 'simple' ? '极简模式 · 只记等级' : `${assignment.questionCount} 题`
+        }`}
         onBack={() => navigate('/assignments')}
       />
 

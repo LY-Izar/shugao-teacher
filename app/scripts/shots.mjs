@@ -558,6 +558,56 @@ await withLock(async () => {
         markers: ['5 份档案 · 2 份待收缴', '按上次新建', '全部班级'],
       })
       await shot(page, '11 作业列表', '11-assignments', { full: true })
+      await step('11 作业列表', async () => {
+        /*
+         * 🔴 **题数只在普通模式显示**（2026-09-25 用户拍板）。
+         *
+         * 极简模式（`statsMode='simple'`）没有"题"这个概念（只记 优/良/差），
+         * 而 `a-demo-5` 的 `questionCount` 就是 6 —— 照普通模式渲染出来就是一个
+         * 没有意义的数字（老师会以为点进去有 6 道题的逐题数据）。
+         *
+         * 期望值全部从**注入的那份快照**算（`DEMO_CLASSES[0]` 与 seed 的 id 一样），
+         * 不拍字面量：字面量会在 seed 改动时变成假通过。**两个方向都钉** ——
+         * 极简那份不许出现「N 题」，普通那份必须照旧出现（否则"为了修极简把普通的也藏了"
+         * 不会有任何东西变红）。
+         */
+        const rowTexts = await page.evaluate(
+          (className) =>
+            [...document.querySelectorAll('button.row')]
+              .map((b) => (b.innerText ?? '').replace(/\s+/g, ' ').trim())
+              .filter((t) => t.includes(className)),
+          DEMO_CLASSES[0].name,
+        )
+        const simpleRow = rowTexts.find((t) => t.includes('课堂练习抽查'))
+        const normalRow = rowTexts.find((t) => t.includes('作业22'))
+        /*
+         * ⚠️ 判据写成 `6 题`（数字 + 空格 + 题），**不能**写成 `/(?:^|[ ·])6 题/`：
+         * 这个页面是 SPA，`pageInfo().body` 是**含 URL 的整页文本** —— 极简档案的
+         * 行点进去的地址里有 `…-a578-34d1e093bb7c` 这种片段，换行 + 空白归一化之后
+         * 会拼出 `…6 题…` 的形状（临时探针实测踩到过），那是脚本自己造的假红。
+         * 而且页面上真有一行普通档案天生写着「作业21 … **6 题**」——
+         * 所以这个不变量只能**逐行**钉，不能拿整页文案去钉。
+         */
+        const noQ = (t) => !/6 题(?![份个])/.test(String(t ?? ''))
+        check(
+          Boolean(simpleRow) && noQ(simpleRow),
+          '11 作业列表：极简那份档案**不显示题数**（它没有"题"这个概念）',
+          simpleRow ? `那一行：${short(simpleRow, 110)}` : `没找到它的行（本班 ${rowTexts.length} 行）`,
+          '建档时那个「6 题」是隐藏输入框留下的默认值，不能显示给老师',
+        )
+        check(
+          Boolean(normalRow) && /8 题/.test(normalRow),
+          '11 作业列表：普通那份档案的题数**照旧显示**（不是到处都不显示）',
+          normalRow ? `那一行：${short(normalRow, 110)}` : '没找到作业22 那一行',
+          '普通模式的题数是有意义的（逐题数据真的存在）',
+        )
+        check(
+          /6 题(?![份个])/.test(rowTexts.find((t) => t.includes('作业21')) ?? ''),
+          '11 作业列表：对照组 —— 普通档案「作业21」那行**照旧**写着 6 题',
+          short(rowTexts.find((t) => t.includes('作业21')), 110),
+          '它和极简那份的 questionCount 都是 6，差别只在 statsMode',
+        )
+      })
 
       await goto(page, '12 新建作业档案', '/assignments/new', {
         markers: ['新建作业档案', '第 4 步 · 布置班级', '第 1 步 · 导入练习册电子稿（推荐）'],
@@ -572,6 +622,26 @@ await withLock(async () => {
         markers: ['收作业查缺', '拍一摞作业的侧面', '登记表 · 默认全班已交，只标例外'],
       })
       await shot(page, '13–15 收作业查缺', '13-collect-idle', { full: true })
+      await step('13–15 收作业查缺', async () => {
+        /*
+         * 收缴页标题栏同样分两种口径（普通模式 `N 题` / 极简模式 `极简模式 · 只记等级`）。
+         * 这张图是 `a-demo-2`（普通模式，8 题）—— 钉住**普通那一半照旧**：
+         * `PageHead` 的 `sub` 渲染在 `<h1>` 的兄弟节点里，所以从整页文案里找
+         * 「高二(3)班 · … · 8 题」这一串（不是只看标题）。
+         * 极简那一半在临时探针里验过；这里同时确认屏幕上看不到「6 题」。
+         */
+        const body = await bodyText(page)
+        check(
+          /8 题/.test(body),
+          '13–15 收作业查缺：普通模式的标题栏写着「8 题」（题数照旧显示）',
+          short(body.match(/.{0,44}8 题.{0,10}/)?.[0] ?? body, 120),
+        )
+        check(
+          !/6 题(?![份个])/.test(body),
+          '13–15 收作业查缺：屏上不出现极简档案那个没有意义的「6 题」',
+          short(body.match(/.{0,40}6 题(?![份个]).{0,10}/)?.[0] ?? body, 120),
+        )
+      })
 
       await step('13–15 收作业查缺', async () => {
         await page.getByRole('button', { name: /演示（模拟结果）/ }).click()
@@ -757,6 +827,46 @@ await withLock(async () => {
         markers: ['批改录入', '极简模式 · 只记等级', '已评', '42/45'],
         absent: ['默认全对 · 只点错的', '完整度', '6 题', '全对'],
       })
+
+      /*
+       * 收缴页（`/collect`）的标题栏是**另一张闸**：极简档案也不能写「N 题」。
+       * 这一屏原来只覆盖普通模式（`a-demo-2`，8 题），所以极简那一半在这里补上。
+       * 不额外截图（`EXPECTED_FILES` 不因它变动），只走一遍真实页面 + 断言。
+       *
+       * ⚠️ 位置讲究：这一步必须**排在批改页那一步之后**。
+       *    第一版把它插在 `goto(grade)` 与批改页断言之间，批改页那一步就抓到了
+       *    "还在上一屏"的一帧（两次运行一次红一次绿 —— 典型的顺序型 flaky）。
+       *    另外 `PageHead` 的 `sub` 要等 profile 就绪才渲染，所以这里**轮询等它出现**
+       *    再断言，而不是拍一个固定时长（`waitForTimeout` 在慢机器上就是随机红）。
+       */
+      await goto(page, S5S, '/assignments/a-demo-5/collect', {
+        markers: ['收作业查缺'],
+      })
+      await step(S5S, async () => {
+        let body = ''
+        for (let i = 0; i < 24; i++) {
+          body = await bodyText(page)
+          if (body.includes('极简模式 · 只记等级')) break
+          await page.waitForTimeout(150)
+        }
+        check(
+          /极简模式 · 只记等级/.test(body),
+          `${S5S}：收缴页的标题栏写「极简模式 · 只记等级」（不是「6 题」）`,
+          short(body.match(/.{0,60}极简模式.{0,20}/)?.[0] ?? body, 130),
+        )
+        check(
+          !/6 题(?![份个])/.test(body),
+          `${S5S}：收缴页上找不到极简档案那个没有意义的「6 题」`,
+          short(body.match(/.{0,40}6 题(?![份个]).{0,10}/)?.[0] ?? body, 130),
+        )
+      })
+      /*
+       * 回到批改页（下一步要接着往下走批改链路）。
+       * ⚠️ 走一次干净导航而不是"依赖上一步留下的状态"：这一步之前刚去过收缴页。
+       */
+      await goto(page, S5S, SGR, {
+        markers: ['批改录入', '极简模式 · 只记等级', '已评 42/45'],
+      })
       await step(S5S, async () => {
         /*
          * 已批改那张表在最后一张卡片网格里（`div.grid.grid-cols-3` × n，
@@ -764,6 +874,12 @@ await withLock(async () => {
          * 这是**产品的真实交互**：点一下撤回重批，不是打开面板。
          * 先量它的角标：极简模式写的是等级，普通模式写的是「错N / 全对」。
          */
+        // 等这一屏真的渲染出来（已评 42/45 是这份档案的概览口径）——
+        // 轮询而不是固定等待：慢机器上"拍一个时长"就是随机红。
+        for (let i = 0; i < 24; i++) {
+          if ((await bodyText(page)).includes('已评 42/45')) break
+          await page.waitForTimeout(150)
+        }
         const grid = page.locator('div.grid.grid-cols-3')
         const nGrids = await grid.count()
         const first = grid.last().locator('button').first()
@@ -1280,6 +1396,22 @@ await withLock(async () => {
           '早上 6:30–9:00 第一次打开，欢迎弹窗真的弹出来了',
           info.modalOpen ? `开着 .modal（含「今天要批的作业」：${info.body.includes('今天要批的作业')}）` : short(info.body, 120),
         )
+        /*
+         * 欢迎弹窗「今天要批的作业」那一行也是题数的一个显示点（极简档案**不写题数**）。
+         * 演示数据里这份待办是 `a-demo-4`（普通模式，7 题），所以断言它**照旧**写题数；
+         * 同时确认整屏没有「6 题」那种只有极简档案才会写出来的写法
+         * （两条都会在"顺手把题数到处都藏了"时变红）。
+         */
+        check(
+          /7 题/.test(info.modalText),
+          `${S42}：欢迎弹窗「今天要批的作业」照旧显示普通档案的题数（7 题）`,
+          info.modalOpen ? `弹窗文案：${short(info.modalText, 130)}` : short(info.body, 120),
+        )
+        check(
+          !/6 题(?![份个])/.test(info.modalText),
+          `${S42}：欢迎弹窗里不出现极简档案那个没有意义的「6 题」`,
+          info.modalOpen ? short(info.modalText, 130) : short(info.body, 120),
+        )
         await page.waitForTimeout(900)
       })
       await shotRaw(page, S42, '42-morning-welcome')
@@ -1290,6 +1422,26 @@ await withLock(async () => {
         full: true,
         wait: 500,
         expect: { url: '/', markers: ['今日待办'] },
+      })
+      await step(S42, async () => {
+        /*
+         * 工作台「今日待办」那一行也是题数的一个显示点：
+         * 普通模式写「N 题待批改」，极简模式**不写题数**（改写成「应交 N 人」）。
+         * 这一屏的待办只有 `a-demo-4`（普通模式，seed 的 7 题）——
+         * 所以这条钉的是**普通那一半照旧**（极简那一半在临时探针里验过，
+         * 演示种子里没有"待批改"状态的极简档案）。
+         */
+        const body = await bodyText(page)
+        check(
+          /7 题待批改/.test(body),
+          `${S42}：工作台待办那行写着「7 题待批改」（普通档案的题数照旧显示）`,
+          short(body.match(/.{0,40}7 题待批改.{0,10}/)?.[0] ?? body, 120),
+        )
+        check(
+          !/6 题(?![份个])/.test(body),
+          `${S42}：工作台整页找不到极简档案那个没有意义的「6 题」`,
+          short(body.match(/.{0,40}6 题(?![份个]).{0,10}/)?.[0] ?? body, 120),
+        )
       })
       await step(S42, async () => {
         const info = await pageInfo(page)
@@ -1756,6 +1908,209 @@ await withLock(async () => {
         await expectPage(wide, SDE, { url: '/assignments', markers: ['5 份档案'] })
       })
       await shotRaw(wide, SDE, '16-desktop-assignments', { full: true })
+
+      /* ============ 当前身份标签：有管理身份显示身份，没有才显示学科 ============ */
+
+      /*
+       * 🔴 2026-09-25 用户截图报的错：**最高管理员的侧栏标签写着「物理」**。
+       * 根因不是标签取错了字段，而是 `teachers.subject` **有列默认值 `'物理'`**
+       * （列默认值不改，那是破坏性迁移，见 §12.5）—— 于是每个账号都有学科，
+       * 连不教课的账号也被挂上"物理"。学科回答的是"教什么"，身份回答的是"是谁"。
+       *
+       * 规则：先看有没有**管理身份**（super / admin / grade_head / head_teacher），
+       * 有就显示身份（多身份**取最高一档**，不拼接 —— 这个标签在侧栏里挨着姓名，
+       * 拼成「教导处 · 年级主任 · 班主任」就撑成长串了），没有才显示学科。
+       *
+       * 分两层钉（缺哪一层都会漏掉一种改法）：
+       *   ① **纯函数**：Node 直接 import 仓库里的真 `src/lib/roles.ts`（不是复刻一份逻辑，
+       *      与 exam-checks / backup-checks 同一手法）；
+       *   ② **真界面**：把 `myRoles` 注入 store 快照，看**侧栏那个标签真的写什么** ——
+       *      否则"组件根本不读 `myRoles`"（这一轮修的就是这个）不会有任何东西变红。
+       *
+       * ⚠️ **正反两面都要**：有身份 → 身份，**没有身份 → 照旧显示学科**。
+       *    只钉正向的话，把标签改成写死的身份、或者把学科那一半删掉，照样绿。
+       */
+
+      const SID = '身份标签'
+
+      await step(SID, async () => {
+        /* ① 纯函数：显示规则本身（四档身份 / 取最高 / 退回学科 / 认不出不猜） */
+        const R = await import('../src/lib/roles.ts')
+        const subj = { subject: '物理', primarySubjectCode: 'physics' }
+        const one = (role) => [{ role }]
+        for (const [role, want] of [
+          ['super', '最高管理员'],
+          ['admin', '教导处'],
+          ['grade_head', '年级主任'],
+          ['head_teacher', '班主任'],
+        ]) {
+          check(
+            R.currentIdentityLabel(one(role), subj) === want,
+            `${SID}：${role} → 「${want}」（有管理身份就显示身份，不显示学科）`,
+            `读到「${R.currentIdentityLabel(one(role), subj)}」`,
+          )
+        }
+        check(
+          R.currentIdentityLabel(one('admin'), subj) === R.roleName('admin'),
+          `${SID}：「教导处」这个显示名**复用 lib/roles.ts 里那一个**（没另起一个词）`,
+          `roleName('admin')=「${R.roleName('admin')}」，标签=「${R.currentIdentityLabel(one('admin'), subj)}」`,
+        )
+        check(
+          R.currentIdentityLabel([...one('head_teacher'), ...one('grade_head')], subj) === '年级主任',
+          `${SID}：多身份**取最高那一档**（班主任 + 年级主任 → 年级主任），不拼成长串`,
+          `读到「${R.currentIdentityLabel([...one('head_teacher'), ...one('grade_head')], subj)}」`,
+        )
+        check(
+          R.currentIdentityLabel([...one('head_teacher'), ...one('super'), ...one('admin')], subj) ===
+            '最高管理员',
+          `${SID}：多身份里有最高管理员 → 就是「最高管理员」（顺序不取决于数组先后）`,
+          `读到「${R.currentIdentityLabel([...one('head_teacher'), ...one('super'), ...one('admin')], subj)}」`,
+        )
+        check(
+          R.currentIdentityLabel(one('teacher'), subj) === '物理',
+          `${SID}：只有「任课教师」这一档**不算管理身份** → 照旧显示学科`,
+          `读到「${R.currentIdentityLabel(one('teacher'), subj)}」`,
+        )
+        check(
+          R.currentIdentityLabel([], subj) === '物理' && R.managingRoleLabel([]) === '',
+          `${SID}：一条身份都没有 → 照旧显示学科（teachers.subject 那个默认值仍然只当学科用）`,
+          `标签=「${R.currentIdentityLabel([], subj)}」，managingRoleLabel=「${R.managingRoleLabel([])}」`,
+        )
+        check(
+          R.currentIdentityLabel([], { subject: '物理竞赛' }) === '物理竞赛',
+          `${SID}：没有身份时老师**自己写的显示名照旧**（「物理竞赛」不许被抹成「物理」）`,
+          `读到「${R.currentIdentityLabel([], { subject: '物理竞赛' })}」`,
+        )
+        check(
+          R.currentIdentityLabel([{ role: 'dean' }], subj) === 'dean',
+          `${SID}：库里出现**认不出的角色代码**时按身份原样显示，**不退回学科**`,
+          `读到「${R.currentIdentityLabel([{ role: 'dean' }], subj)}」`,
+          '把身份显示成"物理"正是这一轮要修的那个错，宁可显示一个生代码',
+        )
+        check(
+          R.currentIdentityLabel(null, null) === R.currentIdentityLabel([], null),
+          `${SID}：连老师都还没有（未登录）时不崩，且与"没有身份"走同一条路`,
+          `读到「${R.currentIdentityLabel(null, null)}」`,
+          '`teachers` 还没到时 subject 是空的 → 落回字典兜底（学科那一半的老行为）',
+        )
+      })
+
+      /*
+       * ② 真界面。注入方式说明：
+       *   `myRoles` **不在** persist 的 `partialize` 里（它跟着会话走，不落盘），
+       *   而这个脚本的 `addInitScript` 又是**每次导航前重写整份快照** ——
+       *   所以用一个只在这个脚本里用的 `?roles=`（产品代码读都不读它）把这一轮要注入的
+       *   身份带进去，再由 initScript 拼进快照。
+       *   能生效是因为 persist 的 merge 是"**快照浅合并到初始状态**"：快照里带上 `myRoles`
+       *   就会被采用 —— 与 §九 那条"注入的 teacher/classes 覆盖初始状态"是同一个机制。
+       *   独立 context：主流程那个 `ctx` 的 initScript 写死了不带身份的快照。
+       */
+      const ctxId = await browser.newContext({ viewport: { width: 1440, height: 940 }, locale: 'zh-CN' })
+      await ctxId.clock.install({ time: new Date('2026-09-19T10:00:00') })
+      await ctxId.addInitScript((base) => {
+        const raw = new URLSearchParams(location.search).get('roles')
+        const state = raw ? { ...base, myRoles: JSON.parse(raw) } : base
+        window.localStorage.setItem('shugao.teacher.v1', JSON.stringify({ state, version: 1 }))
+        window.localStorage.setItem('shugao.deviceRole', 'teacher')
+      }, TEACHER_STATE.state)
+
+      const idPage = await ctxId.newPage()
+      idPage.on('pageerror', (e) => errors.push(`PAGEERROR(身份标签) :: ${e.message}`))
+      idPage.on('console', (m) => {
+        if (m.type() === 'error') errors.push(`CONSOLE(身份标签) :: ${m.text()}`)
+      })
+
+      /**
+       * 三处「当前身份」标签各读一次（侧栏 / 工作台问候 / 设置页身份卡）。
+       * **只认"真的看得见"的元素**（`getBoundingClientRect` 有宽高）：不然标签被挪进
+       * 隐藏容器里时断言会变成"读得到 DOM 就算过"的假绿。
+       */
+      const idTags = (p) =>
+        p.evaluate(() => {
+          const norm = (s) => String(s ?? '').replace(/\s+/g, ' ').trim()
+          const shown = (el) => {
+            if (!el) return ''
+            const r = el.getBoundingClientRect()
+            return r.width > 0 && r.height > 0 ? norm(el.textContent) : ''
+          }
+          const label = [...document.querySelectorAll('div, span')].find(
+            (e) => e.children.length === 0 && norm(e.textContent) === '当前身份',
+          )
+          const h1 = [...document.querySelectorAll('h1')].find((h) => norm(h.textContent).includes('王老师'))
+          return {
+            rail: shown(label?.closest('.rail-block')?.querySelector('.tag')),
+            bench: shown(h1?.parentElement?.querySelector('.tag')),
+            setting: shown(document.querySelector('.panel .tag-accent')),
+          }
+        })
+
+      await step(SID, async () => {
+        const cases = [
+          { roles: [{ role: 'super' }], want: '最高管理员', why: '最高管理员' },
+          { roles: [{ role: 'admin' }], want: '教导处', why: '教导处（校级行政）' },
+          { roles: [{ role: 'grade_head' }], want: '年级主任', why: '年级主任' },
+          { roles: [{ role: 'head_teacher' }], want: '班主任', why: '班主任' },
+          { roles: [{ role: 'teacher' }], want: '物理', why: '只有任课教师这一档' },
+          { roles: [], want: '物理', why: '一条身份都没有' },
+          {
+            roles: [{ role: 'head_teacher' }, { role: 'grade_head' }],
+            want: '年级主任',
+            why: '多身份：班主任 + 年级主任',
+          },
+        ]
+        for (const c of cases) {
+          const q = encodeURIComponent(JSON.stringify(c.roles))
+          await idPage.goto(`${BASE}/?roles=${q}`, { waitUntil: 'networkidle' })
+          let tags = { rail: '', bench: '', setting: '' }
+          // 轮询等标签渲染出来，而不是拍一个固定时长（慢机器上那就是随机红）
+          for (let i = 0; i < 30; i++) {
+            tags = await idTags(idPage)
+            if (tags.rail) break
+            await idPage.waitForTimeout(100)
+          }
+          check(
+            tags.rail === c.want,
+            `${SID}：${c.why} → 侧栏标签写「${c.want}」`,
+            `读到「${tags.rail}」`,
+          )
+          /*
+           * 工作台那一处**也读**：三处标签是三段独立代码（侧栏 / 工作台 / 设置页），
+           * 只钉一处的话"改了一处漏了另两处"照样绿。这里顺带钉住
+           * 「管理员不再显示物理」与「没身份的老师照旧显示物理」这一对正反例。
+           */
+          check(
+            tags.bench === c.want,
+            `${SID}：${c.why} → 工作台问候那一行也是「${c.want}」`,
+            `读到「${tags.bench}」`,
+          )
+        }
+
+        /* 设置页身份卡是第三处（走一次真导航，别依赖上一步留下的状态） */
+        await idPage.goto(`${BASE}/settings?roles=${encodeURIComponent('[{"role":"super"}]')}`, {
+          waitUntil: 'networkidle',
+        })
+        let tags = { rail: '', bench: '', setting: '' }
+        for (let i = 0; i < 30; i++) {
+          tags = await idTags(idPage)
+          if (tags.setting) break
+          await idPage.waitForTimeout(100)
+        }
+        check(
+          tags.setting === '最高管理员',
+          `${SID}：设置页身份卡那个标签也写「最高管理员」（三处同一处实现）`,
+          `读到「${tags.setting}」`,
+        )
+        /*
+         * 反向对照：同一页「关于」里那行**「学段学科」仍然是学科**（那一行要的就是学科）。
+         * 少了这一条，把整页的"学科"都换成身份也能绿。
+         */
+        const body = await bodyText(idPage)
+        check(
+          body.includes('学段学科') && body.includes('高中 · 物理'),
+          `${SID}：设置页「关于 · 学段学科」照旧写学科（那一行与身份无关，不许跟着改）`,
+          short(body.match(/.{0,20}学段学科.{0,30}/)?.[0] ?? body, 120),
+        )
+      })
     } catch (e) {
       console.log(`\n💥 脚本在第「${currentStep}」步异常中断：${e instanceof Error ? e.message : String(e)}`)
       if (crumbs.length) {

@@ -127,9 +127,17 @@ export function MorningWelcome({
                   <span style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
                     {className(a.classId)}
                   </span>
-                  <span className="num" style={{ fontSize: 11.5, color: 'var(--color-ink4)' }}>
-                    {a.questionCount} 题
-                  </span>
+                  {/*
+                    极简模式（`statsMode='simple'`）**不显示题数** —— 它没有"题"这个概念
+                    （只记 优/良/差），而 `questionCount` 在建档时仍被写成 6：写出来会让老师
+                    以为点进去有 6 道题的逐题数据。这一行已经有标题 + 班名，整块不渲染即可。
+                    ⛔ 普通模式那份照旧显示题数（见 `功能设计与不变量.md` §四 4.1）。
+                  */}
+                  {a.statsMode === 'simple' ? null : (
+                    <span className="num" style={{ fontSize: 11.5, color: 'var(--color-ink4)' }}>
+                      {a.questionCount} 题
+                    </span>
+                  )}
                 </div>
               ))
             )}

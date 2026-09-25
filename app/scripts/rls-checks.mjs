@@ -34,6 +34,9 @@
  *   $env:RLS_NEGATIVE='classroom-write'    ; node scripts/rls-checks.mjs   ***REMOVED*** 给教室端开一个 assignments 的 INSERT
  *   $env:RLS_NEGATIVE='head-teacher-write' ; node scripts/rls-checks.mjs   ***REMOVED*** 让班主任也能改成绩
  *   $env:RLS_NEGATIVE='classes-insert'     ; node scripts/rls-checks.mjs   ***REMOVED*** 拿掉 classes_insert 里的 owns_class(id)
+ *   $env:RLS_NEGATIVE='crack-a'            ; node scripts/rls-checks.mjs   ***REMOVED*** 把「教室端不许改自己那行 teachers」改回去
+ *   $env:RLS_NEGATIVE='crack-b'            ; node scripts/rls-checks.mjs   ***REMOVED*** 把「教室端不许写 scope=mine 排课表」改回去
+ *   $env:RLS_NEGATIVE='exam-for-everyone'  ; node scripts/rls-checks.mjs   ***REMOVED*** 让考试写判据对**所有人**为真（谁都能改别人的考试档案）
  *   （改的全是**内存里的 SQL 文本**，仓库文件一个字节都不动。）
  */
 
@@ -77,7 +80,6 @@ await withLock(async () => {
 
     let pass = 0
     const failures = []
-    const notes = []
 
     function ok(name, cond, extra = '') {
       if (cond) {
@@ -98,11 +100,12 @@ await withLock(async () => {
     function section(t) {
       console.log(`\n${t}`)
     }
-    /** 记录型发现：不影响通过 / 失败，但会汇总到报告里（口径裂缝、设计如此但反直觉的地方） */
-    function note(t) {
-      notes.push(t)
-      console.log(`  ⚠️  记录：${t}`)
-    }
+    /*
+     * ⚠️ 这里原来有一个 `note()`（记录型发现：不影响通过/失败）。
+     * 2026-09-25 两条裂缝收紧之后它的**最后一个调用方没了** —— 那两条"记录"变成了硬断言。
+     * 留着它反而是个陷阱：下一个发现裂缝的人会顺手 `note()` 一下，然后看着绿灯收工，
+     * 而裂缝真回来时脚本照样退 0。**要记就断言，要断言就让它能红。**
+     */
 
     /** 意外中断只留一行人话：PGlite 的原生报错会把整份 SQL 回显出来，太吵 */
     process.on('unhandledRejection', (e) => {
@@ -137,6 +140,9 @@ await withLock(async () => {
     const SCH = { s1: mk('5c', 1), s2: mk('5c', 2), s3: mk('5c', 3) }
     const CS = { x1: mk('c5', 1), x2: mk('c5', 2), x3: mk('c5', 3) }
     const ROLE = { r1: mk('40', 1), r2: mk('40', 2), r3: mk('40', 3), r4: mk('40', 4) }
+    /** 考试档案 / 分数行（第十三节用来打 `can_edit_exam_for` 与 exams 的写策略） */
+    const EX = { e1: mk('e1', 1), e2: mk('e1', 2), e3: mk('e1', 3), e4: mk('e1', 4) }
+    const EXS = { s1: mk('e2', 1), s2: mk('e2', 2) }
     /** 教室端账号行的 id **就是**它的 auth uid（`classroom_accounts.id references auth.users`） */
     const ACCT = { a1: U.room }
 
@@ -275,9 +281,17 @@ await withLock(async () => {
      * 负向对照：把一条策略**故意改坏**。
      * 改的全是**内存里的 SQL 文本**，`supabase/schema.sql` 一个字节都不动。
      * 锚点找不到就抛错（说明策略被重写了，这条负向对照要跟着更新 —— 不能静默变成"其实没改坏"）。
+     *
+     * ⚠️ `mode === 'direct-revert'` 是**手工负向对照**用的（把 §17 的收紧改回去），
+     *    它形如 `direct-revert:crack-a` / `direct-revert:crack-b`，可以叠在 `RLS_NEGATIVE` 上：
+     *    此时 A 库（= 删旧策略之前的那份）**只受 direct-revert 影响、不受 RLS_NEGATIVE 注入影响** ——
+     *    否则"把收紧改回去"这件事会同时落到 A 库上，把 tenth section 的"两边可见量相等"搅浑。
      */
-    function applyNegative(text, mode) {
+    function applyNegative(text, mode, { abOnly = false } = {}) {
       if (!mode) return text
+      // A 库（砍掉第 16 段的那份）**永不注入**：它的职责是"删旧策略之前的样子"，
+      // 混进任何注入都会让第十节的对照失去意义。
+      if (abOnly && !mode.startsWith('direct-revert:')) return text
 
       if (mode === 'classroom-write') {
         // 红线：教室里那台机器拿到了 assignments 的写权限（学生碰得到它）
@@ -306,11 +320,76 @@ await withLock(async () => {
         if (!re.test(text)) throw new Error('负向对照锚点没找到：classes_insert 里的 owns_class(id) 那一支变了')
         return text.replace(re, 'or false                      -- 负向对照：拿掉 owns_class')
       }
+      /*
+       * 手工负向对照（`RLS_NEGATIVE=direct-revert:crack-a` 这种）：把 §17 的收紧改回去。
+       * 与下面的 `crack-a` 模式**同一套锚点**，只是名字不同、好认。
+       */
+      if (mode.startsWith('direct-revert:')) {
+        return applyNegative(text, mode.slice('direct-revert:'.length), { abOnly })
+      }
+      if (mode === 'crack-a') {
+        /*
+         * 裂缝 A 的负向对照：把 teachers 上那三条 restrictive 策略里的守卫拿掉
+         * （`not is_classroom_account()` → `true`）= 策略恒真 = **不存在**，
+         * 正是"收紧之前"的样子。其余 SQL 一个字不动。
+         *
+         * ⚠️ 只在 teachers 那三条里改（用策略名切片定位），别全局 replace ——
+         * 那会把裂缝 B 的守卫也一起改掉，两条断言一起红，看不出是哪一条在起作用。
+         */
+        let out = text
+        for (const p of ['teachers_not_classroom_insert', 'teachers_not_classroom_update', 'teachers_not_classroom_delete']) {
+          const seg = new RegExp(`(create policy ${p}[\\s\\S]*?;\\n)`)
+          const m = out.match(seg)
+          if (!m) throw new Error(`负向对照锚点没找到：${p} 这条策略不见了（模式 crack-a）`)
+          const stripped = m[1].replace(/not is_classroom_account\(\)/g, 'true')
+          if (stripped === m[1]) throw new Error(`负向对照锚点没找到：${p} 里的守卫不见了（模式 crack-a）`)
+          out = out.replace(seg, stripped)
+        }
+        return out
+      }
+      if (mode === 'crack-b') {
+        /*
+         * 裂缝 B 的负向对照：`schedule_mine_write` 正文里的守卫删掉，
+         * 那条 restrictive 策略改成恒真（= 不存在）。等价于"把这次收紧改回去"。
+         */
+        let out = text
+        const re1 = /(create policy schedule_mine_write[\s\S]*?;\n)/
+        const m1 = out.match(re1)
+        if (!m1) throw new Error('负向对照锚点没找到：schedule_mine_write 的形状变了（模式 crack-b）')
+        const s1 = m1[1].replace(/and not is_classroom_account\(\)/g, '')
+        if (s1 === m1[1]) throw new Error('负向对照锚点没找到：schedule_mine_write 里的守卫不见了（模式 crack-b）')
+        out = out.replace(re1, s1)
+        const re2 = /(create policy schedule_classroom_scope_only[\s\S]*?;\n)/
+        const m2 = out.match(re2)
+        if (!m2) throw new Error('负向对照锚点没找到：schedule_classroom_scope_only 不见了（模式 crack-b）')
+        out = out.replace(re2, m2[1].replace(/not is_classroom_account\(\) or scope = 'class'/g, 'true'))
+        return out
+      }
+      if (mode === 'exam-for-everyone') {
+        /*
+         * 第十三节的负向对照：把考试写判据改成**恒真** —— 等于"谁都能建 / 改别人的考试档案"
+         * （考试那一行判据就是"谁能建 / 改考试档案"，它是这一段唯一守门的东西）。
+         * 只换函数体的 select 一句，签名与其它 SQL 一个字不动。
+         */
+        const re = /(create or replace function public\.can_edit_exam_for\([\s\S]*?\nas \$\$)([\s\S]*?)(\$\$;)/
+        const m = text.match(re)
+        if (!m) throw new Error('负向对照锚点没找到：can_edit_exam_for 的形状变了（模式 exam-for-everyone）')
+        return text.replace(re, `$1\n  select true\n$3`)
+      }
       throw new Error(`不认识的 RLS_NEGATIVE=${mode}`)
     }
 
     const NEGATIVE = process.env.RLS_NEGATIVE ?? ''
+    /*
+     * 🔴 A/B 切分必须在注入之前：
+     *   · **B 库**（全文）拿注入后的 SQL —— `RLS_NEGATIVE` 与手工的 `direct-revert:*` 都作用在它身上；
+     *   · **A 库**（= 砍掉第 16 段 = 删旧策略之前）拿**未注入**的 SQL。
+     *   否则"把收紧改回去"会同时落到 A 库上，第十节"删旧策略前后可见量相等"那条
+     *   会跟着一起红/绿，读的人分不清是哪个原因（本轮手工负向对照实测踩过）。
+     */
+    const SCHEMA_RAW_SPLIT = splitBeforeStage5(RAW_SCHEMA)
     const SCHEMA_FULL = applyNegative(RAW_SCHEMA, NEGATIVE)
+    const SCHEMA_BEFORE_STAGE5 = applyNegative(SCHEMA_RAW_SPLIT, NEGATIVE, { abOnly: true })
 
     /** 建一个库：替身 → create publication → schema.sql 原文 → 固定数据 */
     async function makeDb(schemaText) {
@@ -405,6 +484,21 @@ await withLock(async () => {
       ('${SCH.s1}', '${U.phy}',  1, '08:00', '08:40', '高二(1)班 物理', '${C.c1}', 'mine'),
       ('${SCH.s2}', '${U.head}', 1, '08:50', '09:30', '高二(1)班 语文', '${C.c1}', 'class'),
       ('${SCH.s3}', '${U.phy}',  1, '10:50', '11:30', '高二(4)班 物理', '${C.c2}', 'class');
+
+    -- 考试档案（第十三节）：四份，把"读得宽 / 写得窄"的每一面都摆出来
+    --   e1 物理老师建的**单班**物理（c1）        → 他自己可写；班主任/年级主任只读；教室端读得到
+    --   e2 物理老师建的**多班**物理（c1 + c2）   → 钉"多班数组"这条语义（两班他都教）
+    --   e3 语文老师建的单班语文（c1）            → 物理老师**写不了**（不是他建的、也不是他那一科）
+    --   e4 教导处建的高三化学（c3）              → 教室端**看不见**（不是他的班）
+    insert into exams (id, teacher_id, title, paper_key, subject, subject_code, scope, grade, source, mode, exam_date, question_count, class_ids, absent_nos) values
+      ('${EX.e1}', '${U.phy}',   '高二(1)班物理练习8', '物理练习8', '物理', 'physics',  'class', '高二', 'manual', 'scores', '2026-09-20', 15, array['${C.c1}']::uuid[], '{}'),
+      ('${EX.e2}', '${U.phy}',   '高二物理练习8',     '物理练习8', '物理', 'physics',  'grade', '高二', 'manual', 'scores', '2026-09-20', 15, array['${C.c1}','${C.c2}']::uuid[], '{}'),
+      ('${EX.e3}', '${U.chn}',   '高二(1)班语文练习8', '语文练习8', '语文', 'chinese',  'class', '高二', 'manual', 'scores', '2026-09-21', 10, array['${C.c1}']::uuid[], '{}'),
+      ('${EX.e4}', '${U.admin}', '高三(1)班化学练习8', '化学练习8', '化学', 'chemistry','class', '高三', 'manual', 'scores', '2026-09-22', 10, array['${C.c3}']::uuid[], '{}');
+
+    insert into exam_scores (id, exam_id, class_id, student_no, name, graded, total) values
+      ('${EXS.s1}', '${EX.e1}', '${C.c1}', '1', '甲', true, 88),
+      ('${EXS.s2}', '${EX.e1}', '${C.c1}', '2', '乙', false, null);
     `
     }
 
@@ -519,6 +613,30 @@ await withLock(async () => {
     })
 
     /**
+     * 考试档案的落库载荷 —— 形状来自 `remote.ts` 的 `examToRow`（Node 原生 import 真文件，
+     * 不是手抄列名）。第十三节的写断言全走它，所以"前端改了列名"这里会一起红。
+     */
+    const localExam = (o) => ({
+      id: o.id,
+      title: o.title ?? '高二物理练习9',
+      paperKey: o.paperKey ?? '物理练习9',
+      subject: o.subject ?? '物理',
+      subjectCode: o.subjectCode ?? 'physics',
+      scope: o.scope ?? 'class',
+      grade: '高二',
+      source: 'manual',
+      mode: 'scores',
+      examDate: '2026-09-27',
+      questionCount: 15,
+      questions: {},
+      classIds: o.classIds ?? [],
+      absentNos: [],
+      status: 'grading',
+      gradedAt: null,
+      note: '',
+    })
+
+    /**
      * 作业档案的落库载荷 —— 与 `remote.ts` 的 `assignmentWriteRow` 同一条口径：
      * 认得出学科就把 `subject_code` 带上（这里库是全文 schema，那一列在）。
      */
@@ -528,7 +646,9 @@ await withLock(async () => {
     const CAST = {
       missing_nos: '::text[]', late_nos: '::text[]', confirmed_nos: '::text[]', focus_nos: '::text[]',
       correction_nos: '::text[]', corrected_nos: '::text[]', student_nos: '::text[]', sent_at: '::timestamptz[]',
+      class_ids: '::uuid[]', absent_nos: '::text[]',
       wrong: '::jsonb', sub_questions: '::jsonb', question_meta: '::jsonb', grades: '::jsonb', states: '::jsonb',
+      questions: '::jsonb', scores: '::jsonb', answers: '::jsonb',
     }
 
     function placeholders(row) {
@@ -595,7 +715,7 @@ await withLock(async () => {
     }
 
     const B = await makeDb(SCHEMA_FULL)
-    const A = await makeDb(splitBeforeStage5(SCHEMA_FULL))
+    const A = await makeDb(SCHEMA_BEFORE_STAGE5)
     const db = B.db
 
     /* ============================================================
@@ -869,21 +989,35 @@ await withLock(async () => {
       ]
       for (const [name, q] of writeOps) denied(`教室端 ${name}`, await write(db, U.room, q))
 
-      // §16.1 明说 teachers / shared_files **不在矩阵里**（"只能动自己那一行"原样保留），
-      // 而触发器给每个 auth 用户都建了一行 teachers —— 教室端账号也一样。
-      // 所以"教室端只读"这句话在 teachers 上有**一个例外**，这里把它照实记下来。
+      /*
+       * ---- 🔴 裂缝 A（2026-09-25 已收紧）：教室端**不许**改 teachers 里自己那一行 ----
+       *
+       * 根因是两件事叠在一起：① `teachers_self`（§7）是 `for all`、条件是 `id = auth.uid()`；
+       * ② `handle_new_user` 触发器**给每个 auth 用户都建了一行 teachers** —— 教室端账号也有。
+       * 收紧在 `schema.sql` §17.1（`teachers_self` 重写成 select/insert/update 三条，
+       * 写的那两条带 `and not is_classroom_account()`）。
+       *
+       * ⚠️ 这两条原来只是 `note()`（记录、不判失败）——**这就是"红不了"的那种断言**：
+       *    裂缝真的回来时，报告里多一行字，退出码照样 0。现在它们必须让脚本变红。
+       */
       const selfRow = await write(db, U.room, { sql: `update teachers set name = '教室端把自己这行改名了' where id = $1 returning id`, values: [U.room] })
-      if (selfRow.outcome === 'ok') {
-        note(
-          '教室端账号能改 **teachers 里自己那一行**（teachers_self 是 for all，触发器又给它建了一行）——' +
-            `§16.4 ③ 说的「11 条写操作全拒」里"改教师行"这一条只对**别人的行**成立（实测 ${selfRow.outcome}）。` +
-            '影响面很小（它只能改自己那行的 name/subject），但那块屏因此不是严格意义的"零写权限"',
-        )
-      } else {
-        note(`教室端改自己那行 teachers 也被拒了（${selfRow.outcome}）—— 比 §16.4 报告的更严`)
-      }
+      denied('🔴 教室端改 **teachers 里自己那一行**（裂缝 A：那块屏是给学生看的，零写权限）', selfRow)
+
+      const selfUpsert = await write(db, U.room, upsertSql('teachers', { id: U.room, name: '教室端自己改名（upsert）', subject: '物理' }))
+      denied('🔴 教室端用**前端真实载荷**（upsert teachers 自己那行）改自己 —— upsert 这条路也堵上了', selfUpsert)
+
       const otherRow = await write(db, U.room, { sql: `update teachers set name = '被改了' where id = $1 returning id`, values: [U.chn] })
-      ok('教室端改不了**别人**那一行 teachers（安全上要紧的是这一半）', otherRow.outcome !== 'ok', otherRow.detail)
+      denied('教室端改不了**别人**那一行 teachers（安全上要紧的是这一半）', otherRow)
+
+      // 反向对照：**真正的教师**必须照旧能改自己那一行（别为了收裂缝 A 把老师一起挡了）。
+      // 这就是 `is_classroom_account()` 里"教室端有没有自己那一行"这个判据的意义：
+      // 老师不在 classroom_accounts 里 → 恒为假 → 一个字都不受影响。
+      const teacherSelf = await write(db, U.phy, upsertSql('teachers', { id: U.phy, name: '物理老师改了名字', subject: '物理' }))
+      allowed('对照：真老师照旧能改自己那一行 teachers（收紧没有误伤教师）', teacherSelf)
+      const teacherSelfUpdate = await write(db, U.phy, { sql: `update teachers set name = '物理老师又改了一次' where id = $1 returning id`, values: [U.phy] })
+      allowed('对照：真老师走 UPDATE 那条路也照旧通', teacherSelfUpdate)
+      const headSelf = await write(db, U.head, upsertSql('teachers', { id: U.head, name: '班主任改了名字', subject: '英语' }))
+      allowed('对照：班主任（有身份的人）也照旧能改自己那一行', headSelf)
 
       // ---- 两条有限写：必须仍然有效 ----
       // 真实路径：Classroom.tsx 心跳 → store.setClassroomOnline → saveClassroom(c, 当前登录者的 id)
@@ -908,19 +1042,28 @@ await withLock(async () => {
       r = await write(db, U.room, upsertSql('schedule_items', M.scheduleToRow(localSchedule({ id: mk('5c', 95), classId: C.c2 }), U.room)))
       denied('教室端粘贴**别班**课表', r)
 
-      // 「两处有限写」在数据库层的**字面口径**其实更宽一点：`schedule_mine_write` 的条件是
-      // `teacher_id = auth.uid() and scope <> 'class'` —— 教室端账号也是 auth.uid()，
-      // 所以它能给自己写一行 scope='mine' 的排课表。前端不会走这条路
-      // （Classroom.tsx 的粘贴课表恒写 scope:'class'），影响面 ≈ 0，
-      // 但"两处有限写"这句话在策略清单上不成立，照实记下来。
+      /*
+       * ---- 🔴 裂缝 B（2026-09-25 已收紧）：教室端**不许**写自己名下 scope='mine' 的行 ----
+       *
+       * `schedule_mine_write`（§16.3）只要求 `teacher_id = auth.uid()`，而教室端账号也是
+       * auth.uid() → 它能在策略上给自己塞一行 `scope='mine'` 的排课表。前端走不到这条路
+       * （`Classroom.tsx` 的粘贴课表恒写 `scope:'class'`），所以影响面≈0 ——
+       * 但"教室端只有两处有限写"这句话在策略清单上不成立，而策略清单是这项目的安全边界说明书。
+       * 收紧：§16.3 的策略正文加了 `and not is_classroom_account()`，§17.2 另有
+       * 一条 restrictive 策略把边界声明出来（AND，不放宽任何东西）。
+       */
       r = await write(db, U.room, upsertSql('schedule_items', M.scheduleToRow(localSchedule({ id: mk('5c', 96), classId: C.c1, scope: 'mine' }), U.room)))
-      note(
-        `教室端写**自己名下** scope='mine' 的排课表行：实测 ${r.outcome}` +
-          '（schedule_mine_write 只要求 teacher_id = auth.uid()；Classroom.tsx 的粘贴课表恒写 scope:class，' +
-          '所以前端走不到这条路 —— 但"教室端只有两处有限写"在策略清单上不成立）',
-      )
+      denied("🔴 教室端写**自己名下** scope='mine' 的排课表行", r)
+
       r = await write(db, U.room, upsertSql('schedule_items', M.scheduleToRow(localSchedule({ id: mk('5c', 98), classId: C.c1, scope: 'mine' }), U.head)))
       denied('教室端写 scope=mine 但**建档人是别人**的课表行', r)
+
+      // 反向对照：**真正的教师**写自己的排课表必须照旧通（§五 已经在下面验过一次，
+      // 这里再在"裂缝 B 的现场"钉一次：同一个 scope='mine' 的载荷，换个身份就通）。
+      r = await write(db, U.phy, upsertSql('schedule_items', M.scheduleToRow(localSchedule({ id: mk('5c', 99), classId: C.c1, scope: 'mine' }), U.phy)))
+      allowed("对照：真老师写**自己名下** scope='mine' 的排课表照旧通", r)
+      r = await write(db, U.head, upsertSql('schedule_items', M.scheduleToRow(localSchedule({ id: mk('5c', 89), classId: C.c1, scope: 'mine' }), U.head)))
+      allowed("对照：班主任写自己名下 scope='mine' 的排课表照旧通", r)
 
       // ---- 静态审计：设计红线在策略清单上也要看得见 ----
       const pol = await db.query(
@@ -932,6 +1075,64 @@ await withLock(async () => {
         '🔴 assignments 的任何一条策略里**都不出现** classroom_accounts（教室端绝无写权限）',
         pol.rows.every((x) => !/classroom_accounts/.test(x.body)),
         pol.rows.filter((x) => /classroom_accounts/.test(x.body)).map((x) => x.policyname).join(','),
+      )
+
+      /*
+       * ---- 静态审计：两条裂缝在**策略清单**上必须看得出来 ----
+       * 上面那些是"真打一遍"；这两条钉的是"下一个读策略清单的人不会再犯一遍"。
+       * 判据不收窄成某个函数名（`is_classroom_account` 改名不该让这里变红），
+       * 只要求"教室里那块屏"这个身份在策略正文里被提到。
+       */
+      const tPol = await db.query(
+        `select policyname, cmd, permissive, coalesce(qual,'') || ' ' || coalesce(with_check,'') as body
+           from pg_policies where schemaname = 'public' and tablename = 'teachers' order by cmd, policyname`,
+      )
+      eq(
+        '裂缝 A：teachers 上的策略清单（§7 的 for all + §17.1 三条逐动作 restrictive）',
+        tPol.rows.map((x) => `${x.policyname}:${x.cmd}:${x.permissive}`),
+        [
+          'teachers_self:ALL:PERMISSIVE',
+          'teachers_not_classroom_delete:DELETE:RESTRICTIVE',
+          'teachers_not_classroom_insert:INSERT:RESTRICTIVE',
+          'teachers_not_classroom_update:UPDATE:RESTRICTIVE',
+        ],
+      )
+      /*
+       * 🔴 这一条是"清单上看得出来"，所以判据是**函数名里那个词**（classroom_account），
+       * 而不是 `classroom_accounts` —— `is_classroom_account()` 的**函数体**在渲染出来的
+       * 策略正文里是看不到的（只有调用），拿表名去 grep 会恒假（本轮踩过一次）。
+       */
+      const tGuard = tPol.rows.filter((x) => x.permissive === 'RESTRICTIVE')
+      ok(
+        '🔴 裂缝 A：teachers 上有三条逐动作 restrictive 策略（insert/update/delete），且都调教室端判据',
+        tGuard.length === 3 && tGuard.every((x) => /classroom_account/.test(x.body)),
+        tGuard.map((x) => `${x.policyname}:${/classroom_account/.test(x.body) ? '有' : '没有'}`).join(' · ') || '(没有 restrictive 策略)',
+      )
+      eq(
+        '🔴 裂缝 A 的**读**那一半没被误伤：restrictive 里没有 SELECT（写成 for all 会把教室端读自己那行也挡掉）',
+        tGuard.filter((x) => x.cmd === 'SELECT').length,
+        0,
+      )
+      const sPol = await db.query(
+        `select policyname, cmd, permissive, coalesce(qual,'') || ' ' || coalesce(with_check,'') as body
+           from pg_policies where schemaname = 'public' and tablename = 'schedule_items' order by policyname`,
+      )
+      eq(
+        '裂缝 B：schedule_items 上的策略清单（读两路 + 写三路 + 一条教室端边界）',
+        sPol.rows.map((x) => `${x.policyname}:${x.cmd}${x.permissive === 'RESTRICTIVE' ? ':RESTRICTIVE' : ''}`),
+        [
+          'schedule_class_visible:SELECT',
+          'schedule_class_write:ALL',
+          'schedule_classroom_scope_only:ALL:RESTRICTIVE',
+          'schedule_classroom_write:ALL',
+          'schedule_mine_read:SELECT',
+          'schedule_mine_write:ALL',
+        ],
+      )
+      ok(
+        '🔴 裂缝 B：schedule_mine_write 的正文里也提到教室端（清单上不能长得像"谁都能写自己的排课表"）',
+        sPol.rows.filter((x) => x.policyname === 'schedule_mine_write').every((x) => /classroom_account/.test(x.body)),
+        sPol.rows.filter((x) => x.policyname === 'schedule_mine_write').map((x) => shortErr(x.body)).join(' · '),
       )
     }
 
@@ -1057,7 +1258,11 @@ await withLock(async () => {
         eq(`${table}：四个动作逐条成策略（没有 for all）`, [...new Set(rows.map((r) => r.cmd))].sort(), ['DELETE', 'INSERT', 'SELECT', 'UPDATE'])
       }
       const sch = await per('schedule_items')
-      eq('schedule_items：读两路（自己的 + 班级的）+ 写三路（自己 / 班级 / 教室端）', sch.map((r) => r.policyname).sort(), ['schedule_class_visible', 'schedule_class_write', 'schedule_classroom_write', 'schedule_mine_read', 'schedule_mine_write'])
+      eq(
+        'schedule_items：读两路（自己的 + 班级的）+ 写三路（自己 / 班级 / 教室端）+ §17.2 的教室端边界',
+        sch.map((r) => r.policyname).sort(),
+        ['schedule_class_visible', 'schedule_class_write', 'schedule_classroom_scope_only', 'schedule_classroom_write', 'schedule_mine_read', 'schedule_mine_write'],
+      )
 
       const upd = await db.query(`select count(*)::int as n from pg_policies where schemaname='public' and cmd='UPDATE' and with_check is null`)
       eq('I28：所有 UPDATE 策略都写了 with check（using 与 with check 同款）', Number(upd.rows[0].n), 0)
@@ -1094,6 +1299,233 @@ await withLock(async () => {
     }
 
     /* ============================================================
+       十三、考试档案的写判据（`can_edit_exam_for`，schema.sql §15.2 / §18）
+       ------------------------------------------------------------
+       为什么单开一节：在这一节之前，**考试那条写判据一条断言都没有**。
+       原因是它没有 `_for` 变体 —— 裸版 `can_edit_exam(...)` 读 `auth.uid()`，
+       而"以某个人的身份问一句"这件事在没有登录态的地方（SQL 编辑器 / 本脚本的
+       直接调用）都做不到：编辑器里 `auth.uid()` 是 NULL，判据对**任何人**都返回 false，
+       看起来像"权限收得很紧"，其实是**什么都没验**（schema.sql §18.1 把这条写成了约定）。
+       2026-09-27 补上 `can_edit_exam_for(uid, class_ids[], code, name)` 之后才有这一节。
+       负向对照：`RLS_NEGATIVE=exam-for-everyone`（把判据改成恒真）必须让本节变红。
+       ============================================================ */
+
+    section('十三、考试档案的写判据（谁能建 / 改 exams，§15.2 / §18）')
+    {
+      const canEdit = (uid, classIds, code, name) =>
+        db
+          .query(`select can_edit_exam_for($1, $2::uuid[], $3, $4) as v`, [uid, classIds, code, name])
+          .then((r) => Boolean(r.rows[0].v))
+      /** 裸版（读 auth.uid()）：只能"以某人的身份"问 —— 这正是编辑器里做不到的那件事 */
+      const canEditAs = (uid, classIds, code, name) =>
+        asUser(db, uid, async () => Boolean((await db.query(`select can_edit_exam($1::uuid[], $2, $3) as v`, [classIds, code, name])).rows[0].v))
+
+      // ---- ① 学科教师：自己教的班 + 自己那一科 ----
+      eq('can_edit_exam_for：物理老师 + 1 班 + 物理 → true', await canEdit(U.phy, [C.c1], 'physics', '物理'), true)
+      eq('can_edit_exam_for：物理老师 + **同一个班**但别科（1 班语文）→ false', await canEdit(U.phy, [C.c1], 'chinese', '语文'), false)
+      eq('can_edit_exam_for：物理老师 + **别班**（高三 1 班）→ false', await canEdit(U.phy, [C.c3], 'physics', '物理'), false)
+      eq('can_edit_exam_for：物理老师 + 4 班（他教的第二个班）→ true', await canEdit(U.phy, [C.c2], 'physics', '物理'), true)
+      eq(
+        'can_edit_exam_for：语文老师反过来（1 班语文 true / 1 班物理 false）',
+        [await canEdit(U.chn, [C.c1], 'chinese', '语文'), await canEdit(U.chn, [C.c1], 'physics', '物理')],
+        [true, false],
+      )
+
+      // ---- ② 兜底：super / admin（用户 2026-09-27 拍板保留）----
+      eq(
+        'can_edit_exam_for：超管 / 教导处 → true（兜底，两个人都保留）',
+        [await canEdit(U.super, [C.c3], 'physics', '物理'), await canEdit(U.admin, [C.c3], 'chinese', '语文')],
+        [true, true],
+      )
+
+      // ---- ③ 班主任 / 年级主任：读得宽、**写不了别人的班**（I27 同族）----
+      eq('can_edit_exam_for：班主任 + 本班物理 → false（他不教这一科，只读）', await canEdit(U.head, [C.c1], 'physics', '物理'), false)
+      eq('can_edit_exam_for：年级主任 + 本年级物理 → false（只读）', await canEdit(U.grade, [C.c1], 'physics', '物理'), false)
+
+      // ---- ④ 教室端 / 无身份 ----
+      eq('🔴 can_edit_exam_for：教室端 → false（那块屏在 exams 上一条写策略都没有）', await canEdit(U.room, [C.c1], 'physics', '物理'), false)
+      eq('can_edit_exam_for：无身份的新老师 → false', await canEdit(U.fresh, [C.c4], 'physics', '物理'), false)
+
+      // ---- ⑤ 兼容期口径（与 §13.3 的 teaches_subject_for 同一套：认不出来不猜）----
+      eq('兼容期：code 认不出时按显示名反查字典（null, 物理）→ true', await canEdit(U.phy, [C.c1], null, '物理'), true)
+      eq('兼容期：字典外的写法（null, 高中物理）→ false（不猜）', await canEdit(U.phy, [C.c1], null, '高中物理'), false)
+
+      /*
+       * ---- ⑥ 🔴 多班数组的语义：**any**（钉死，改它的人必须先看见这条）----
+       *
+       * `can_edit_exam_for(uid, [我教的班, 我不教的班], 我教的科, 科名)` = **true**。
+       * 也就是说数组的语义是"**这份档案涉及哪些班**"，不是"要求我教全部这些班"。
+       * 依据（schema.sql §15.2 的"为什么任一班就够"）：班级考试只有一个班；
+       * 年级考试是多人协作 —— 别的班的分数由那个班的任课老师自己录。
+       * 真值来自函数体里的 `cs.class_id = any (p_class_ids)` + EXISTS（存在一行即真）。
+       */
+      eq(
+        '🔴 多班数组 = any：[我教的班, 我不教的班] → true（不是"每班都要我教"）',
+        await canEdit(U.phy, [C.c1, C.c3], 'physics', '物理'),
+        true,
+      )
+      eq(
+        '多班数组：**全是不教的班** → false（any 不等于恒真）',
+        await canEdit(U.phy, [C.c3, C.c4], 'physics', '物理'),
+        false,
+      )
+      eq(
+        '多班数组：空数组 / NULL → 任课老师 false；super 仍然 true（兜底那一支不看班）',
+        [
+          await canEdit(U.phy, [], 'physics', '物理'),
+          await canEdit(U.phy, null, 'physics', '物理'),
+          await canEdit(U.super, [], 'physics', '物理'),
+        ],
+        [false, false, true],
+      )
+
+      // ---- ⑦ 裸版 = 薄包装：必须与 `_for` 判据逐字等价（签名没改，正文改成转调）----
+      eq(
+        '薄包装等价：物理老师走 can_edit_exam()（读 auth.uid()）与 _for(他自己) 同结论',
+        [await canEditAs(U.phy, [C.c1], 'physics', '物理'), await canEditAs(U.phy, [C.c3], 'physics', '物理')],
+        [true, false],
+      )
+      eq('薄包装等价：超管兜底那一支在裸版上也成立', await canEditAs(U.super, [C.c3], 'chinese', '语文'), true)
+      eq('薄包装等价：教室端走裸版 → false', await canEditAs(U.room, [C.c1], 'physics', '物理'), false)
+
+      /*
+       * ---- ⑧ 🔴 没有登录态时裸版对**所有人**都是 false ----
+       * 这一条不是在测权限，是在**钉住"为什么必须有 `_for` 变体"**：
+       * 用户实测过 —— 在 Supabase SQL 编辑器里跑 `can_edit_exam(...)`，
+       * 示例教师 / demo-teacher / 所有班**全是 false**，于是"示例教师能不能建高二(1)班的物理考试"
+       * 这个问题当时没有答案。这里以脚本身份（无会话、auth.uid() = NULL）复现同一件事。
+       */
+      const editorNull = await db.query(`select can_edit_exam(array[$1]::uuid[], 'physics', '物理') as v`, [C.c1])
+      eq(
+        '🔴 没有登录态（auth.uid() = NULL）时 can_edit_exam() 恒 false —— 所以必须有 _for 变体（§18.1）',
+        Boolean(editorNull.rows[0].v),
+        false,
+      )
+      const stillTrue = await canEdit(U.phy, [C.c1], 'physics', '物理')
+      eq('🔴 同一件事用 _for 变体问得出来（这正是补它的理由）', stillTrue, true)
+
+      // ---- ⑨ `_for` 变体必须**全部 revoke**（§16.2 的纪律，机器审计）----
+      const forFns = await db.query(`
+        select p.proname from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+         where n.nspname = 'public' and p.proname like '%\\_for'
+           and (has_function_privilege('authenticated', p.oid, 'EXECUTE')
+             or has_function_privilege('anon', p.oid, 'EXECUTE'))
+         order by 1`)
+      eq('🔴 §18.5：所有 `*_for` 判据对 authenticated / anon 都 revoke 了（一个都不能执行）', forFns.rows.map((r) => r.proname), [])
+      const forCount = await db.query(`select count(*)::int as n from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' and p.proname like '%\\_for'`)
+      eq('`_for` 变体一共 12 个（id 变体也算判据的两件套 —— 新增判据别只写裸版）', Number(forCount.rows[0].n), 12)
+      const hasBare = await db.query(`select has_function_privilege('authenticated', 'public.can_edit_exam(uuid[], text, text)', 'EXECUTE') as v`)
+      eq('裸版 can_edit_exam 对 authenticated **有** EXECUTE（策略要调它）', Boolean(hasBare.rows[0].v), true)
+      const hasFor = await db.query(`select has_function_privilege('authenticated', 'public.can_edit_exam_for(uuid, uuid[], text, text)', 'EXECUTE') as v`)
+      eq('而 `can_edit_exam_for` **没有**（接受任意 uid = 以任意人身份问权限）', Boolean(hasFor.rows[0].v), false)
+
+      // ---- ⑩ 真打一遍 exams 的写策略（载荷形状来自 remote.ts 的 examToRow）----
+      let r = await write(db, U.phy, insertSql('exams', M.examToRow(localExam({ id: mk('e1', 90), classIds: [C.c1] }), U.phy)))
+      allowed('物理老师建本班本科的考试档案', r)
+
+      r = await write(db, U.phy, insertSql('exams', M.examToRow(localExam({ id: mk('e1', 91), classIds: [C.c1], subject: '语文', subjectCode: 'chinese' }), U.phy)))
+      denied('物理老师建**同一个班的别科**考试档案（1 班语文）', r)
+
+      r = await write(db, U.phy, insertSql('exams', M.examToRow(localExam({ id: mk('e1', 92), classIds: [C.c3] }), U.phy)))
+      denied('物理老师建**别班**的考试档案（高三 1 班物理）', r)
+
+      r = await write(db, U.phy, insertSql('exams', M.examToRow(localExam({ id: mk('e1', 93), classIds: [C.c1, C.c3] }), U.phy)))
+      allowed('🔴 物理老师建**多班**考试档案（1 班 + 高三 1 班）→ 过：多班数组是 any（与 §6 同一条语义，落到了策略上）', r)
+
+      r = await write(db, U.phy, insertSql('exams', M.examToRow(localExam({ id: mk('e1', 94), classIds: [C.c1] }), U.head)))
+      denied('拿**别人**的 teacher_id 建考试档案（with check 里 teacher_id = auth.uid()）', r)
+
+      r = await write(db, U.phy, upsertSql('exams', M.examToRow(localExam({ id: EX.e1, classIds: [C.c1], title: '改过的标题' }), U.phy)))
+      allowed('物理老师改**自己建的**考试档案（改标题/换班都走这条路）', r)
+
+      r = await write(db, U.phy, { sql: `update exams set title = '被别人改了' where id = $1 returning id`, values: [EX.e3] })
+      denied('🔴 物理老师改**别人建的**考试档案（语文老师那份，I25 "看得见 ≠ 改得动"）', r)
+
+      r = await write(db, U.head, { sql: `update exams set title = '班主任改了' where id = $1 returning id`, values: [EX.e1] })
+      denied('🔴 班主任改本班物理考试档案（只读 —— 与 can_grade_subject 同口径）', r)
+
+      r = await write(db, U.grade, { sql: `update exams set title = '年级主任改了' where id = $1 returning id`, values: [EX.e1] })
+      denied('🔴 年级主任改本年级物理考试档案（只读）', r)
+
+      r = await write(db, U.head, insertSql('exams', M.examToRow(localExam({ id: mk('e1', 95), classIds: [C.c1] }), U.head)))
+      denied('班主任建本班考试档案（他也不教这一科 —— 口径 A 的直接推论）', r)
+
+      // ---- ⑪ 真打一遍 exam_scores 的写策略（写自己那份考试的分）----
+      const scoreRow = (o) => M.examScoreToRow({
+        id: o.id,
+        examId: o.examId,
+        classId: o.classId,
+        studentNo: o.studentNo ?? '3',
+        name: o.name ?? '丙',
+        scores: {},
+        answers: {},
+        graded: false,
+        absent: false,
+        total: null,
+        objective: null,
+        subjective: null,
+        classRank: null,
+        gradeRank: null,
+      })
+      r = await write(db, U.phy, insertSql('exam_scores', scoreRow({ id: mk('e2', 90), examId: EX.e1, classId: C.c1 })))
+      allowed('物理老师往**自己建的**考试里录分', r)
+
+      r = await write(db, U.chn, insertSql('exam_scores', scoreRow({ id: mk('e2', 91), examId: EX.e1, classId: C.c1 })))
+      denied('🔴 语文老师往**别人建的**考试里插分（§15.3 的写策略再查一次 exams.teacher_id）', r)
+
+      r = await write(db, U.head, insertSql('exam_scores', scoreRow({ id: mk('e2', 92), examId: EX.e1, classId: C.c1 })))
+      denied('班主任往本班考试里插分（只读）', r)
+
+      r = await write(db, U.room, insertSql('exam_scores', scoreRow({ id: mk('e2', 93), examId: EX.e1, classId: C.c1 })))
+      denied('🔴 教室端往考试里插分（红线：绝不给那块屏任何成绩的 UPDATE / INSERT）', r)
+
+      r = await write(db, U.room, upsertSql('exams', M.examToRow(localExam({ id: EX.e1, classIds: [C.c1] }), U.room)))
+      denied('🔴 教室端 upsert 考试档案（前端真实保存路径也被拒）', r)
+
+      r = await write(db, U.room, { sql: `delete from exams where id = $1 returning id`, values: [EX.e1] })
+      denied('🔴 教室端删考试档案', r)
+
+      // ---- ⑫ 读：读得宽（与写无关的那一半，别顺手收紧）----
+      eq('班主任**读得到**本班考试（读得宽：不看学科）', await idsAs(db, U.head, `select id from exams order by id`), [EX.e1, EX.e2, EX.e3].sort())
+      eq('年级主任读得到本年级的考试（1 班 + 4 班），读不到高三', await idsAs(db, U.grade, `select id from exams order by id`), [EX.e1, EX.e2, EX.e3].sort())
+      eq('无身份的新老师读不到别人的考试', await idsAs(db, U.fresh, `select id from exams order by id`), [])
+      /*
+       * 🔴 教室端**读得到**本班考试 —— 实测如此，而且 schema.sql §15.3 的注释是**刻意**这么写的
+       *    （"教室端需要展示本次考试逐题正确率，读得到、写不了；真正的红线是绝不给它任何
+       *     成绩的 UPDATE"）。⚠️ 设计文档 §14.7 里那句"它连 exams 的 select 都拿不到"
+       *     **与实码不一致**（实测：教室端能读到本班的考试行）—— 两者要一起改的时候，
+       *     先拍板"教室端到底该不该看见考试"，别只改一边。这里钉的是**今天的实际行为**，
+       *     红线的另一半（写）钉在上面 ⑩⑪。
+       */
+      eq('教室端读得到**本班**的考试（§15.3 刻意如此；与设计 §14.7 的说法不一致，见注释）', await idsAs(db, U.room, `select id from exams order by id`), [EX.e1, EX.e2, EX.e3].sort())
+      eq('教室端读不到**别班**的考试（高三那份）', (await idsAs(db, U.room, `select id from exams order by id`)).includes(EX.e4), false)
+      eq('教室端读得到本班的分数行（逐题正确率要用）', await countAs(db, U.room, `select count(*)::int as n from exam_scores`), 2)
+
+      // ---- ⑬ 策略清单静态审计：exams / exam_scores 上有什么 ----
+      const exPol = await db.query(
+        `select tablename, policyname, cmd, coalesce(qual,'') || ' ' || coalesce(with_check,'') as body
+           from pg_policies where schemaname = 'public' and tablename in ('exams','exam_scores')
+          order by tablename, policyname`,
+      )
+      eq(
+        'exams / exam_scores 各两条策略（visible=SELECT / write=ALL），没有第三条',
+        exPol.rows.map((x) => `${x.tablename}:${x.policyname}:${x.cmd}`),
+        ['exam_scores:exam_scores_visible:SELECT', 'exam_scores:exam_scores_write:ALL', 'exams:exams_visible:SELECT', 'exams:exams_write:ALL'],
+      )
+      ok(
+        '🔴 两条写策略的正文里都提到判据（`can_edit_exam`）与建档人（`teacher_id`/`uid()`）',
+        exPol.rows.filter((x) => x.cmd === 'ALL').length === 2 &&
+          exPol.rows.filter((x) => x.cmd === 'ALL').every((x) => /can_edit_exam/.test(x.body) && /teacher_id|uid\(\)/.test(x.body)),
+        exPol.rows.filter((x) => x.cmd === 'ALL').map((x) => `${x.policyname}:${/can_edit_exam/.test(x.body) ? '有判据' : '没判据'}`).join(' · '),
+      )
+      ok(
+        '🔴 exams / exam_scores 的任何一条策略里都**不出现** classroom_accounts（教室端绝无写权限）',
+        exPol.rows.every((x) => !/classroom_accounts/.test(x.body)),
+        exPol.rows.filter((x) => /classroom_accounts/.test(x.body)).map((x) => x.policyname).join(','),
+      )
+    }
+
+    /* ============================================================
        收尾
        ============================================================ */
 
@@ -1101,10 +1533,6 @@ await withLock(async () => {
     await A.db.close()
 
     console.log(`\n${'='.repeat(64)}`)
-    if (notes.length) {
-      console.log(`\n⚠️  记录到 ${notes.length} 条（不影响通过/失败，但要写进报告）：`)
-      for (const n of notes) console.log(`   · ${n}`)
-    }
     if (NEGATIVE) {
       console.log(`\n🔴 负向对照 RLS_NEGATIVE=${NEGATIVE}：`)
       if (failures.length) {

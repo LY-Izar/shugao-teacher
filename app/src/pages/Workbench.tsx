@@ -24,7 +24,7 @@ import { awayText, weekdayOf } from '../lib/schedule'
 import { collectStats } from '../lib/assignments'
 import { friendlyDate } from '../lib/date'
 import { analyzeRoster } from '../lib/roster'
-import { teacherSubjectLabel } from '../lib/subjects'
+import { currentIdentityLabel } from '../lib/roles'
 
 const todoPath = (a: { id: string; status: string }) =>
   a.status === 'collected' ? `/assignments/${a.id}/grade` : `/assignments/${a.id}/collect`
@@ -35,6 +35,8 @@ function greeting() {
 
 export default function Workbench() {
   const teacher = useStore((s) => s.teacher)
+  /* 「当前身份」标签：有管理身份显示身份，没有才显示学科（与侧栏同一处实现，见 lib/roles.ts） */
+  const myRoles = useStore((s) => s.myRoles)
   const classes = useStore((s) => s.classes)
   const assignments = useStore((s) => s.assignments)
   const isDemo = useStore((s) => s.isDemo)
@@ -129,7 +131,8 @@ export default function Workbench() {
           {greeting()}，{teacher?.name ?? '老师'}
         </h1>
         <div className="mt-2 flex flex-wrap items-center gap-2">
-          <Tag tone="accent">{teacherSubjectLabel(teacher)}</Tag>
+          {/* 同上：有管理身份显示身份，没有才显示学科 */}
+          <Tag tone="accent">{currentIdentityLabel(myRoles, teacher)}</Tag>
           <Tag tone="idle">高二 · 2025-2026</Tag>
           {streakDays > 1 ? <Tag tone="ok">连续使用 {streakDays} 天</Tag> : null}
         </div>
@@ -244,9 +247,22 @@ export default function Workbench() {
                       <span>{friendlyDate(a.assignDate)}</span>
                       <span>
                         {a.status === 'collected' ? (
-                          <>
-                            <span className="num">{a.questionCount}</span> 题待批改
-                          </>
+                          /*
+                           * 极简模式**不显示题数**：它没有"题"这个概念（只记 优/良/差），
+                           * 而 `questionCount` 在建档时仍被写成 6 —— 那个数字会让老师以为
+                           * 点进去有 6 道题的逐题数据。改成这个数字**真正有意义**的口径：
+                           * 应交多少人（与「待收缴」那一行同一句话）。
+                           * ⛔ 普通模式那行「N 题待批改」照旧，别顺手也去掉。
+                           */
+                          a.statsMode === 'simple' ? (
+                            <>
+                              应交 <b className="num">{stats.total}</b> 人
+                            </>
+                          ) : (
+                            <>
+                              <span className="num">{a.questionCount}</span> 题待批改
+                            </>
+                          )
                         ) : (
                           <>
                             应交 <b className="num">{stats.total}</b> 人

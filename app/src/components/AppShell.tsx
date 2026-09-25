@@ -6,8 +6,8 @@ import { useClassroomPresence } from '../hooks/useClassroomPresence'
 import { useMood } from '../hooks/useMood'
 import { useScheduleReminder } from '../hooks/useScheduleReminder'
 import { analyzeRoster } from '../lib/roster'
+import { currentIdentityLabel } from '../lib/roles'
 import { awayText, toMinutes, weekdayOf } from '../lib/schedule'
-import { teacherSubjectLabel } from '../lib/subjects'
 import { connectionMode } from '../lib/supabase'
 import { APP_VERSION_LABEL } from '../lib/version'
 import { DoneCelebration, MorningWelcome } from './MoodModals'
@@ -608,6 +608,12 @@ function ClockPanel() {
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const teacher = useStore((s) => s.teacher)
+  /*
+   * 「当前身份」那个标签：**有管理身份先显示身份，没有才显示学科**。
+   * `myRoles` 只覆盖"我自己" —— 而这个标签显示的正是当前登录者，够用（见 lib/roles.ts）。
+   * 它**只是显示**：判据一律在数据库（§13.5 I16）。
+   */
+  const myRoles = useStore((s) => s.myRoles)
   const classes = useStore((s) => s.classes)
   const currentClassId = useStore((s) => s.currentClassId)
   const setCurrentClass = useStore((s) => s.setCurrentClass)
@@ -735,7 +741,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </div>
             <div className="mt-1 flex items-center gap-2">
               <span style={{ fontSize: 15, fontWeight: 620 }}>{teacher?.name ?? '未登录'}</span>
-              <span className="tag tag-accent">{teacherSubjectLabel(teacher)}</span>
+              {/*
+                学科是"教什么"，身份是"是谁" —— 有管理身份的人先答"是谁"。
+                ⛔ 别退回 `teacherSubjectLabel(teacher)`：`teachers.subject` 有列默认值
+                「物理」，每个账号都有值，管理员会被挂上"物理"（2026-09-25 用户截图）。
+              */}
+              <span className="tag tag-accent">{currentIdentityLabel(myRoles, teacher)}</span>
             </div>
             <div
               className="mt-2.5"

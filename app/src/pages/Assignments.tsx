@@ -488,10 +488,21 @@ export default function Assignments() {
                         <IconList size={13} />
                         {subjectLabelOf(a)}
                       </span>
-                      <span className="flex items-center gap-1.5">
-                        <IconGrid size={13} />
-                        <span className="num">{a.questionCount}</span> 题
-                      </span>
+                      {/*
+                        「N 题」**只在普通模式**出现。
+                        极简模式（`statsMode='simple'`）没有"题"这个概念（只记 优/良/差），
+                        而 `questionCount` 在建档时仍被写成 6（新建页把题量输入框藏了但 state 还在）
+                        —— 照普通模式渲染出来就是一个**没有意义的数字**：老师会以为
+                        点进去有 6 道题的逐题数据，点进去发现没有。整块 chip 都不渲染，
+                        而不是显示成"6 题"再想办法解释。⛔ 别顺手把普通模式那行也去掉：
+                        普通档案的题数是有意义的（见 `功能设计与不变量.md` §四 4.1）。
+                      */}
+                      {a.statsMode === 'simple' ? null : (
+                        <span className="flex items-center gap-1.5">
+                          <IconGrid size={13} />
+                          <span className="num">{a.questionCount}</span> 题
+                        </span>
+                      )}
                       <span className="flex items-center gap-1.5">
                         <IconHash size={13} />
                         {stats.registered ? (
