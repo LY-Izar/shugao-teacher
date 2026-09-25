@@ -16,11 +16,11 @@
  * ============================================================
  * 🔴 权限判据：只有 `is_super_admin()`，**不是** `can_manage_teachers()`
  * ============================================================
- * `can_manage_teachers()` = 最高管理员 + **教导处**（`schema.sql` §13.2）。
+ * `can_manage_teachers()` = 最高管理员 + **教务处**（`schema.sql` §13.2）。
  * 而这块屏是**平台维护者**的视角（面板方案 §5.5 的拍板）：
  *   「谁能打开：**只有 `super`** —— 判据 `is_super_admin()`（⚠️ **不是** `can_manage_teachers()`，
- *     那个含教导处）」
- * 教导处要看学校数据状态，走他们自己的 `/grades` / `/classes`。
+ *     那个含教务处）」
+ * 教务处要看学校数据状态，走他们自己的 `/grades` / `/classes`。
  *
  * **判据落在哪里**：就在这个 Function 里，而且**不是**在 TypeScript 里重写一遍规则
  * （那正是 `teacher-account.ts:9-16` 明确反对的写法，`classroom-account.ts` 的
@@ -494,7 +494,7 @@ export async function onRequestPost(context: { request: Request; env: Env }): Pr
    * ---- 2. 他是不是**最高管理员**？----
    *
    * 🔴 这里刻意用 `is_super_admin` 而**不是** `can_manage_teachers`：
-   *    后者含教导处（`schema.sql` §13.2），而这块屏的定位是平台维护者
+   *    后者含教务处（`schema.sql` §13.2），而这块屏的定位是平台维护者
    *    （面板方案 §5.5 的拍板，T7）。判据在数据库，不在这里重写规则。
    */
   const isSuper = await rpcBool(env, me.token, 'is_super_admin')
@@ -505,7 +505,7 @@ export async function onRequestPost(context: { request: Request; env: Env }): Pr
         status: 'forbidden',
         message:
           '只有最高管理员能打开平台运维面板。你的账号在 teacher_roles 里没有 super 行 —— ' +
-          '教导处 / 年级主任 / 班主任都不在这一档（见 schema.sql §10.6 的身份指派模板）。',
+          '教务处 / 年级主任 / 班主任都不在这一档（见 schema.sql §10.6 的身份指派模板）。',
       },
       403,
     )

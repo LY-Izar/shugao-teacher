@@ -734,7 +734,7 @@ const hhmm = (t: string) => (t ?? '').slice(0, 5)
      · **认不出就不带**（年级表里没有同名行）—— 留空与今天的行为一样，不倒退。
      · **同名多条也不带**（`grades` 的唯一键是 `school_id + name`，跨学校可以重名）——
        `grade_id` 决定"哪个年级主任管得着这个班"，**猜错就是权限事故**，
-       所以宁可留空让教导处去指派。 */
+       所以宁可留空让教务处去指派。 */
 
 type GradeLookup = {
   /** `classes.grade_id` 这一列在不在 */
@@ -1127,21 +1127,55 @@ export async function loadClassroomAccount(): Promise<{
  *    所以它自带兜底：任何失败都返回 `[]`，界面上就是"没指派身份"，
  *    而真正的判据在服务端（`schema.sql` §13.2），前端读不到身份不影响任何权限。
  */
+/**
+ * 「这一列在不在」—— PostgREST 的判定与 `isMissingTable()` 同一套，
+ * 只是这次找的是**列**（42703 / PGRST204）。
+ *
+ * 🔴 只认「列不存在」这一种错误：网络抖动 / 权限问题**一律当作出错**（不是"列不在"）——
+ *    否则一次抖动就会被读成"这一列从来不存在"，而那是个**永久**结论。
+ */
+function isMissingColumn(error: { message?: string; code?: string } | null | undefined): boolean {
+  if (!error) return false
+  const code = String(error.code ?? '')
+  const msg = String(error.message ?? '')
+  return code === '42703' || code === 'PGRST204' || /column .*does not exist/i.test(msg)
+}
+
 export async function loadMyRoles(userId: string): Promise<TeacherRole[]> {
   const sb = getSupabase()
   if (!sb) return []
   try {
-    const { data, error } = await sb
+    /*
+     * 🆕 `subject_code` 那一列可能还不存在（第 10.1.1 段没跑）——
+     * 与 `ensureSubjectCols()` 同一套判据：**只认「列不存在」，摘掉它重读**。
+     * 不这么做的话，旧库上"我的身份"会整条读不到（= 所有管理入口一起消失，**而且不报错**）。
+     */
+    const base = 'role, scope_type, scope_id'
+    /*
+     * ⚠️ `let res: { data: unknown; error: ... }` 而不是让它从第一次赋值推断类型 ——
+     *    两次 select 的**列不同**，推断出来的类型会互相打架（而它们本来就都是 any[]）。
+     */
+    let res: { data: unknown; error: { message?: string; code?: string } | null } = await sb
       .from('teacher_roles')
-      .select('role, scope_type, scope_id')
+      .select(`${base}, subject_code`)
       .eq('teacher_id', userId)
-    if (error) return []
-    return ((data ?? []) as { role?: string; scope_type?: string; scope_id?: string }[])
+    if (res.error && isMissingColumn(res.error)) {
+      res = await sb.from('teacher_roles').select(base).eq('teacher_id', userId)
+    }
+    if (res.error) return []
+    const data = (res.data ?? []) as {
+      role?: string
+      scope_type?: string
+      scope_id?: string
+      subject_code?: string | null
+    }[]
+    return data
       .filter((r) => typeof r.role === 'string' && r.role !== '')
       .map((r) => ({
         role: r.role as TeacherRole['role'],
         scopeType: (r.scope_type ?? undefined) as TeacherRole['scopeType'],
         scopeId: r.scope_id ?? undefined,
+        subjectCode: r.subject_code ?? undefined,
       }))
   } catch {
     return []

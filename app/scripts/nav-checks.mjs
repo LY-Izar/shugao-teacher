@@ -99,17 +99,51 @@ if (process.env.SHUGAO_NAV_FORCE) {
   console.log(`\n🧪🧪 负向对照模式：entryVisible 恒 ${process.env.SHUGAO_NAV_FORCE === 'all' ? '真' : '假'}（下面**必须**有红）\n`)
 }
 const roles = await import('../src/lib/roles.ts')
-const { PAGES, PLANNED_PAGE_COUNT, MATRIX_SHAPE } = await import('../src/lib/pages.ts')
+const { PAGES, PLANNED_PAGE_COUNT, MATRIX_SHAPE, MATRIX_SHAPE_13 } = await import('../src/lib/pages.ts')
 
 /** 矩阵里的 6 列（顺序 = 方案 §2.2 表头里的顺序，不许改） */
 const ROLES6 = [
   { key: 'super', label: 'super 最高管理员', roles: [{ role: 'super' }] },
-  { key: 'admin', label: 'admin 教导处', roles: [{ role: 'admin' }] },
+  { key: 'admin', label: 'admin 教务处', roles: [{ role: 'admin' }] },
   { key: 'grade_head', label: 'grade_head 年级主任', roles: [{ role: 'grade_head' }] },
   { key: 'head_teacher', label: 'head_teacher 班主任', roles: [{ role: 'head_teacher' }] },
   { key: 'teacher', label: 'teacher 任课教师', roles: [{ role: 'teacher' }] },
   { key: 'classroom', label: 'classroom 教室端', roles: [] },
 ]
+
+/**
+ * 🆕 2026-09-28「管理架构与角色权限」这一轮新增的 **7 列**
+ * （顺序 = `管理架构与角色权限方案.md` §4.2 表头的顺序：校 副 助 办 德 教组 备组）。
+ *
+ * ⚠️ **这 7 列不出现在 `EXPECTED`（那张 6 × 14 的表）里** —— 那一张表是
+ * "6 档教师身份 × 14 个入口"的口径，加列会让 A1 的 84 格变成 182 格、
+ * 而 `MATRIX_SHAPE`（34 / 145 / 27 / 32）**一个字都不许动**。
+ * 新列的断言在 A8 与 D9 两节（各自对**新的一组分母**负责）。
+ */
+const ROLES7 = [
+  { key: 'principal', label: 'principal 校长', roles: [{ role: 'principal' }] },
+  { key: 'vice_principal', label: 'vice_principal 副校长', roles: [{ role: 'vice_principal' }] },
+  { key: 'principal_assistant', label: 'principal_assistant 校长助理', roles: [{ role: 'principal_assistant' }] },
+  { key: 'office_head', label: 'office_head 办公室主任', roles: [{ role: 'office_head' }] },
+  { key: 'moral_edu_head', label: 'moral_edu_head 德育处主任', roles: [{ role: 'moral_edu_head' }] },
+  { key: 'subject_lead', label: 'subject_lead 教研组长', roles: [{ role: 'subject_lead' }] },
+  { key: 'lesson_prep_lead', label: 'lesson_prep_lead 备课组长', roles: [{ role: 'lesson_prep_lead' }] },
+]
+
+/** 13 列的**列序**（= 方案 §4.2 的表头顺序：超 教 校 副 助 办 德 级 教组 备组 班 任 室） */
+const COLORDER13 = [
+  'super', 'admin', 'principal', 'vice_principal', 'principal_assistant', 'office_head',
+  'moral_edu_head', 'grade_head', 'subject_lead', 'lesson_prep_lead', 'head_teacher', 'teacher',
+  'classroom',
+]
+/** 13 列（按上面的顺序取到那 13 个身份；表头缩写也要按这个顺序核，见 D9） */
+const COLS13 = COLORDER13.map((k) => {
+  const found = [...ROLES6, ...ROLES7].find((r) => r.key === k)
+  if (!found) throw new Error(`13 列里有一个找不到的角色 key：${k}`)
+  return found
+})
+/** 方案 §4.2 表头的**缩写**（与上面逐列一一对应）—— D9 拿它核"列序没被改过" */
+const HEAD13 = ['超', '教', '校', '副', '助', '办', '德', '级', '教组', '备组', '班', '任', '室']
 
 /* ============================================================
    🔒 整个脚本的工作都在这把锁里面（与另外六个验证脚本共用一把）
@@ -180,12 +214,18 @@ for (const entry of Object.keys(EXPECTED)) {
    *      C1/C2（真界面、`?kind=classroom`）与 `admin-checks.mjs` 第十节（判据形状）钉住；
    *   ② 入口表这一侧只保证：**它不会让教室端多拿到管理入口**
    *      （而这正是"教室端没有 teacher_roles 行"的直接后果）。
+   *
+   * 🆕 2026-09-28：加了通知两行（`/notices` 是 `() => true`）之后，教室端在
+   *    "全员都摆"的那些项上同样是 true —— 所以判据从 `EXPECTED[entry].teacher`
+   *    改成 **"`roles.entryVisible(entry, [{role:'teacher'}])` 说摆不摆"**
+   *    （教师身份是"最低那一档"，全员项对它为真、管理项对它为假；语义与原来逐字相同，
+   *     只是不再依赖"教师那一格必须写在 `EXPECTED` 里"）。
    */
   const classroomVis = roles.entryVisible(entry, [])
   eq(
     `A1：教室端（roles=[]）对 ${entry} —— 没有 teacher_roles 行，管理入口一个都拿不到`,
     classroomVis,
-    EXPECTED[entry].teacher && !roles.hasManagingRole([]),
+    roles.entryVisible(entry, [{ role: 'teacher' }]) && !roles.hasManagingRole([]),
   )
 }
 check(
@@ -193,6 +233,100 @@ check(
   'A1 的格数 = 6 × 14 = 84（教室端那一列断言的是"这条边界在哪"，见上方注释）',
   `${Object.keys(EXPECTED).length} × ${ROLES6.length} = ${Object.keys(EXPECTED).length * ROLES6.length}`,
 )
+
+/* ============================================================
+   第一节之二 · A8：通知那两行（**本轮新增的第 15 / 16 个入口**）
+   ------------------------------------------------------------
+   它们**不在** `EXPECTED` 里 —— 那一张表是"6 × 14 = 84 格"的口径，
+   而 `MATRIX_SHAPE`（34 / 145 / 27 / 32）一个字都不许动（见 A8 上面那段）。
+   所以新两行单独在这里钉：逐身份断言"摆不摆"，外加 6 列的小计 V8 / E2 / B2
+   （方案 §四.0 的 ①′：`153 / 29 / 34`）。
+   ============================================================ */
+
+section('第一节之二 · A8：通知两行（/notices · /notices/new）—— 表格里是 V，域外两行是 B')
+
+const NOTICE_ROWS = ['/notices', '/notices/new']
+
+/** 方案 §4.2 第 18 / 19 行那 26 格（6 列 × 2 行，教室端由 App 那一支管所以这里只核 5 档教师身份） */
+const NOTICE_EXPECTED = {
+  //             super  admin  grade  head   teacher
+  '/notices': { super: true, admin: true, grade_head: true, head_teacher: true, teacher: true },
+  // 班主任与任课教师是 **E**（不是 B）：进来会看到"你没有发通知的权限"，不构成信息泄露
+  '/notices/new': { super: true, admin: true, grade_head: true, head_teacher: false, teacher: false },
+}
+
+for (const entry of NOTICE_ROWS) {
+  check(
+    entry in roles.ENTRIES,
+    `A8：入口 ${entry} 在 ENTRIES 里`,
+    entry in roles.ENTRIES ? `label = ${roles.ENTRIES[entry].label}` : '找不到这个 key',
+  )
+  for (const r of ROLES6.filter((x) => x.key !== 'classroom')) {
+    eq(`A8：${r.label} 对 ${entry}`, roles.entryVisible(entry, r.roles), NOTICE_EXPECTED[entry][r.key])
+  }
+}
+{
+  /* 6 列的小计：`V8 / E2 / B2` —— 教室端两行**都是 B**（方案 §四.0 那个"关节"） */
+  let v = 0
+  let e = 0
+  for (const entry of NOTICE_ROWS) {
+    for (const r of ROLES6.filter((x) => x.key !== 'classroom')) {
+      if (roles.entryVisible(entry, r.roles)) v++
+      else e++
+    }
+  }
+  eq('A8：通知两行在 6 列上的 V 格数', v, 8)
+  eq('A8：通知两行在 6 列上的 E 格数', e, 2)
+  eq('A8：通知两行在 6 列上 = 12 格（6 列 × 2 行）', v + e + 2, 12, '教室端那 2 格是 B')
+  eq(
+    'A8：教室端对通知两行 = "全员项的可见性"（真 B 在 App.tsx 与数据库两处，不在这张表）',
+    NOTICE_ROWS.map((k) => roles.entryVisible(k, [])).join(','),
+    NOTICE_ROWS.map((k) => roles.entryVisible(k, [{ role: 'teacher' }])).join(','),
+    '入口表眼里它是"没有身份"，与"全员项"同款 —— 那两处 B 才是安全边界（I47）',
+  )
+}
+{
+  /* ①′ 的 6 列小计：34 行原样 + 通知两行 → 153 / 29 / 34（方案 §四.0） */
+  eq('A8 对账：145 + 8 = 153（①′ 的 V）', MATRIX_SHAPE.v + 8, 153)
+  eq('A8 对账：27 + 2 = 29（①′ 的 E）', MATRIX_SHAPE.e + 2, 29)
+  eq('A8 对账：32 + 2 = 34（①′ 的 B —— 教室端那两格）', MATRIX_SHAPE.b + 2, 34)
+}
+{
+  /*
+   * 🔴 **本轮这两档身份在入口层唯一的区别**（方案 §4.5 末尾那条专门断言）：
+   *    组长**看得见「发通知」**，任课教师看不见 ——
+   *    而他们在原来那 14 个入口上**逐格相同**（25/9/0）。
+   * ⚠️ 组长两档**权限逐格相同、只是职责/头衔不同**（用户拍板）：所以这两列
+   *    在本脚本里必须**永远一起断言**，分开写就是给"它们其实不一样"留后门。
+   */
+  for (const key of ['subject_lead', 'lesson_prep_lead']) {
+    const asLead = [{ role: key, scopeType: 'subject', subjectCode: 'physics' }]
+    eq(`A8：${key} 看得见 /notices/new（他是**发通知的人**）`, roles.entryVisible('/notices/new', asLead), true)
+    eq(`A8：${key} 看得见 /notices（收件箱对谁都有意义）`, roles.entryVisible('/notices', asLead), true)
+    eq(`A8：${key} 看不见 /accounts（他不是管账号的人）`, roles.entryVisible('/accounts', asLead), false)
+    eq(`A8：${key} 看不见 /admin（平台运维只有超管）`, roles.entryVisible('/admin', asLead), false)
+  }
+  eq(
+    'A8：任课教师**看不见** /notices/new（他没有"需要通知一批老师"的职务）',
+    roles.entryVisible('/notices/new', [{ role: 'teacher' }]),
+    false,
+  )
+  eq(
+    'A8：班主任也看不见 /notices/new（他的班级事务走**呼叫**，不是通知）',
+    roles.entryVisible('/notices/new', [{ role: 'head_teacher' }]),
+    false,
+  )
+  /* 正面：两档组长在这 14 个老入口上**逐格相同**（这一条钉"逐格相同是刻意的"） */
+  const leadKeys = (k) =>
+    Object.keys(roles.ENTRIES)
+      .filter((e) => roles.entryVisible(e, [{ role: k }]))
+      .sort()
+  eqSet(
+    'A8：教研组长 与 备课组长 的入口集合**逐项相同**（权限逐格相同是刻意的）',
+    leadKeys('subject_lead'),
+    leadKeys('lesson_prep_lead'),
+  )
+}
 
 /* ============================================================
    第二节 · A2：多身份是**并集**（顺序无关）
@@ -250,7 +384,12 @@ for (const [label, rs] of [
   ['[]（还没拿到身份）', []],
   ['null（没有登录态）', null],
   ['undefined', undefined],
-  ["[{role:'principal'}]（字典里没有的值）", [{ role: 'principal' }]],
+  /*
+   * ⚠️ 这一格原来用的是 `principal` —— 2026-09-28 那一轮它**变成了一个真身份**
+   *    （校长），不再"认不出"。所以换成一个**真的认不出**的代码。
+   *    这条断言检验的是"认不出的身份与空身份同样处理"，不是某一个具体代码。
+   */
+  ["[{role:'wizard'}]（字典里没有的值）", [{ role: 'wizard' }]],
 ]) {
   let threw = null
   let vis = null
@@ -397,6 +536,24 @@ section('第六节 · DEV 钩子：?as= 与 ?kind= 的解析规则')
 
 section('第七节 · D1：App.tsx 的 path="…" ↔ lib/pages.ts 的 PAGES（集合相等）')
 
+/**
+ * `按身份显示导航方案.md` §2.2 矩阵里的那 **34 条路径**（**写死的清单**）。
+ *
+ * 为什么写死而不是读文档：D1 要能独立于 D2 的解析器工作 ——
+ * D2 的锚点一旦坏了，D2 自己会红，但 D1 不该跟着一起瞎。
+ * ⚠️ 这 34 条**一条都不许改**（`MATRIX_SHAPE` 那个口径的实体）。
+ */
+const MATRIX_PATHS = [
+  '/login', '/classroom', '/', '/classes', '/classes/:id',
+  '/classes/:id/import/photo', '/classes/:id/import/paste',
+  '/assignments', '/assignments/new', '/assignments/:id/collect', '/assignments/:id/grade',
+  '/assignments/:id/correct', '/assignments/:id/import', '/assignments/:id/grade/done',
+  '/assignments/:id/stats', '/assignments/:id/call', '/calls', '/exams', '/exams/new',
+  '/exams/:id/grade', '/exams/:id/stats', '/schedule', '/files', '/wrong', '/wrong/:classId',
+  '/settings', '/accounts', '/grades', '/grades/:id', '/grades/:id/setup',
+  '/grades/:id/promote', '/settings/terms', '/admin', '/admin/probes',
+]
+
 const appSrc = readApp('src/App.tsx')
 const routes = [...appSrc.matchAll(/path="([^"]+)"/g)].map((m) => m[1])
 const realRoutes = routes.filter((p) => p !== '*')
@@ -438,10 +595,23 @@ const realRoutes = routes.filter((p) => p !== '*')
     realRoutes.length,
     PAGES.length - planned.length,
   )
-  check(
-    PAGES.length === MATRIX_SHAPE.rows,
-    `D1：PAGES 总条数 == 矩阵行数（${MATRIX_SHAPE.rows}）`,
-    `PAGES = ${PAGES.length}`,
+  /*
+   * 🆕 2026-09-28：这一条原来比的是 `PAGES.length === MATRIX_SHAPE.rows`。
+   * 加了通知两行之后两个数**不再相等**（PAGES 36 / 矩阵 34），所以拆成两句 ——
+   * ⚠️ **不是把断言删掉**，而是让它比原来更紧：
+   *   ① `PAGES` 里必须**真的有那 34 行矩阵行**（按路径 join 核，不信条数）；
+   *   ② 多出来的必须**恰好是通知那两行**。
+   * 于是"偷偷加一条路由没登记"和"矩阵少了一行"两种坏法**都还抓得住**。
+   */
+  eq(
+    'D1：PAGES 里在矩阵里的行数 == 矩阵行数（34）',
+    PAGES.filter((p) => MATRIX_PATHS.includes(p.path)).length,
+    MATRIX_SHAPE.rows,
+  )
+  eqSet(
+    'D1：PAGES 里**不在** `按身份显示导航方案.md` §2.2 矩阵里的路径 —— 恰好是通知那两行',
+    PAGES.map((p) => p.path).filter((p) => !MATRIX_PATHS.includes(p)),
+    ['/notices', '/notices/new'],
   )
 }
 
@@ -524,7 +694,11 @@ function parseMatrix() {
     eq('D2 自证：E 格数', mx.sum.e, MATRIX_SHAPE.e)
     eq('D2 自证：B 格数', mx.sum.b, MATRIX_SHAPE.b)
     eq('D2 自证：V+E+B == 行数 × 6', mx.sum.v + mx.sum.e + mx.sum.b, MATRIX_SHAPE.rows * 6)
-    eqSet('D2：矩阵路径 ↔ PAGES（多一条少一条都红）', mx.paths, PAGES.map((p) => p.path))
+    eqSet(
+      'D2：矩阵路径 ↔ PAGES 里那 34 条（通知两行不在 §2.2 的矩阵里，见 D9）',
+      mx.paths,
+      PAGES.map((p) => p.path).filter((p) => MATRIX_PATHS.includes(p)),
+    )
     /* 逐角色的小计也核（方案 §2.2 里那张"每个角色 V/E/B"的表） */
     const ROLE_SUM = [
       { v: 33, e: 1, b: 0 },
@@ -544,24 +718,29 @@ function parseMatrix() {
         `期望 V${w.v} / E${w.e} / B${w.b}`,
       )
     })
-    /*
-     * ⚠️ **矩阵里的格子值 vs `ENTRIES` 真算出来的值** —— 这是把"文档说的"与"代码做的"
-     * 接起来的那一根线。两个数组**不能按下标配对**（PAGES 是按"归属"分组的，
-     * 方案 §2.2 是按路由族排的；`/files` 在 PAGES 里排在 `/accounts` 前面，矩阵里是 ***REMOVED***23 vs ***REMOVED***27）
-     * → **按路径 join**（`pathEntry` 那张表），不是 `PAGES[i]`。
-     *
-     * 🔴 判据必须是 **`roles.entryVisible(key, r.roles)`（真跑一遍表）**，
-     *    **不是**本文件上面那张 `EXPECTED`（那是 A1 的期望表）。
-     *    第一版写成了后者 —— 于是"有人把 `/accounts` 的判据改成 `isSuperAdmin`"
-     *    这种真实的取舍错误**这一条抓不到**（A1 会红，但文档与代码的咬合悄悄断了）。
-     *    负向对照 N-c 就是拿这个抓出来的。
-     *
-     * 只比**教师身份那五列**：
-     *   · 教室端那一列是 `App.tsx` 的 `accountKind` 一支在管（见 A1 的注释），
-     *     入口表按 M2 看不见 `accountKind`，拿它比会得到 32 条假的"不一致"；
-     *   · 剩下的不一致**就是真问题**，会立刻红（本轮它抓到过真实矛盾：
-     *     `/settings/terms` 那一行与方案 §七 待确认 ④ 的结论相反，见报告）。
-     */
+  /*
+   * ⚠️ 矩阵里的格子值 vs `ENTRIES` 真算出来的值 —— 这是把"文档说的"与"代码做的"
+   * 接起来的那一根线。两个数组**不能按下标配对**（PAGES 是按"归属"分组的，
+   * 方案 §2.2 是按路由族排的；`/files` 在 PAGES 里排在 `/accounts` 前面，矩阵里是 ***REMOVED***23 vs ***REMOVED***27）
+   * → **按路径 join**（`pathEntry` 那张表），不是 `PAGES[i]`。
+   *
+   * ⚠️ **只比那 34 行**（`MATRIX_PATHS`）：`PAGES` 现在还多了通知那两行，
+   *    而**那两行不在 §2.2 的矩阵里**（它们是 `管理架构与角色权限方案.md` §4.2 的第 18 / 19 行）。
+   *    上一版这里是按 `mx.paths[i]` 与 `PAGES.map(...)` 直接 `eqSet` 的，所以加了两行就红了 ——
+   *    那正是它该有的样子（"每加一条路由都要登记"的机器版），这里把**范围**说清楚。
+   *
+   * 🔴 判据必须是 **`roles.entryVisible(key, r.roles)`（真跑一遍表）**，
+   *    **不是**本文件上面那张 `EXPECTED`（那是 A1 的期望表）。
+   *    第一版写成了后者 —— 于是"有人把 `/accounts` 的判据改成 `isSuperAdmin`"
+   *    这种真实的取舍错误**这一条抓不到**（A1 会红，但文档与代码的咬合悄悄断了）。
+   *    负向对照 N-c 就是拿这个抓出来的。
+   *
+   * 只比**教师身份那五列**：
+   *   · 教室端那一列是 `App.tsx` 的 `accountKind` 一支在管（见 A1 的注释），
+   *     入口表按 M2 看不见 `accountKind`，拿它比会得到 32 条假的"不一致"；
+   *   · 剩下的不一致**就是真问题**，会立刻红（本轮它抓到过真实矛盾：
+   *     `/settings/terms` 那一行与方案 §七 待确认 ④ 的结论相反，见报告）。
+   */
     const pathEntry = new Map(PAGES.map((p) => [p.path, p.entry]))
     for (let i = 0; i < mx.paths.length; i++) {
       const path = mx.paths[i]
@@ -585,6 +764,250 @@ function parseMatrix() {
         )
       })
     }
+  }
+}
+
+/* ============================================================
+   🆕 第八节之二 · D9：`管理架构与角色权限方案.md` §4.2 的 **13 列矩阵**
+   ------------------------------------------------------------
+   这是本轮新增的**第二组分母**（方案 §四.0 的 ②）：**36 行 × 13 列 = 468 格**
+   （其中 30 格是办公室主任那一列的 `—` 不适用）。
+
+   🔴 它与 D2 **不是同一张表**，所以**分开解析、分开断言**：
+      · D2 读 `按身份显示导航方案.md` §2.2（**34 × 6 = 204**）→ `MATRIX_SHAPE`
+      · D9 读 `管理架构与角色权限方案.md` §4.2（**36 × 13 = 468**）→ `MATRIX_SHAPE_13`
+      **两个口径不许互相推导**（列数不同，"相减"出来的数没有意义 —— 方案 §4.0 原文）。
+
+   🔴 **D9 的核心一条**：把矩阵里**每一格**与 `ENTRIES` **真算出来**的值对上。
+      这正是"文档说的"与"代码做的"之间那根线（D2 里同样有一根）——
+      没有它，13 列那 468 格就只是文档里的一堆字母。
+   ============================================================ */
+
+section('第八节之二 · D9：管理架构方案 §4.2 的 13 列矩阵（36 行 / V344 / E60 / B34 / —30）')
+
+/**
+ * 解析 `管理架构与角色权限方案.md` §4.2 的矩阵。
+ *
+ * 锚点纪律与 D2 逐字相同（**先切后取**，别用贪婪正则）：
+ * 从 `***REMOVED******REMOVED******REMOVED*** 4.2 ` 切到下一个 `***REMOVED******REMOVED******REMOVED***` 为止，再在这一段里找表行。
+ */
+function parseMatrix13() {
+  const doc = readRepo('管理架构与角色权限方案.md')
+  const at = doc.indexOf('***REMOVED******REMOVED******REMOVED*** 4.2 ')
+  if (at < 0) throw new Error('找不到 `***REMOVED******REMOVED******REMOVED*** 4.2 `（锚点变了）')
+  const rest = doc.slice(at + 4)
+  const end = rest.indexOf('***REMOVED******REMOVED******REMOVED***')
+  if (end < 0) throw new Error('`***REMOVED******REMOVED******REMOVED*** 4.2` 之后找不到下一个 `***REMOVED******REMOVED******REMOVED***`（锚点咬到文件末尾了）')
+  const sec = rest.slice(0, end)
+  const lines = sec.split('\n').filter((l) => l.startsWith('|'))
+  if (lines.length < 36) throw new Error(`§4.2 里只解析到 ${lines.length} 行表行 —— 锚点多半错了`)
+
+  /** 表头那一行：`| ***REMOVED*** | 入口 | 路由 | 超 | 教 | … |` —— 拿它核列序（缩写） */
+  const headerLine = lines.find((l) => l.includes('| 入口 |'))
+  const headerCells = headerLine
+    ? headerLine.split('|').slice(1).map((c) => c.trim()).filter((c, i, a) => !(i === a.length - 1 && c === ''))
+    : []
+  const heads = headerCells.slice(3) // 去掉 `***REMOVED***` / `入口` / `路由` 三格
+
+  const paths = []
+  const cells = []
+  const perCol = Array.from({ length: 13 }, () => ({ v: 0, e: 0, b: 0, x: 0 }))
+  const unknown = []
+  for (const line of lines) {
+    const raw = line
+      .split('|')
+      .slice(1)
+      .map((c) => c.trim())
+      .filter((c, i, arr) => !(i === arr.length - 1 && c === ''))
+    // 13 列 + 3 格（***REMOVED*** / 入口 / 路由）= 16 格；表头与 `| --- |` 分隔行靠"第三格是 `/` 开头的路径"排掉
+    if (raw.length !== 16) continue
+    const m = raw[2].match(/`(\/[^`]*)`/)
+    /*
+     * 🔴 判据是"**反引号里是一条路径**"：`/` 后面必须跟字母、数字或 `*`，
+     *    或者整格就是一个 `/`（首页那一行）。
+     *    光写"以 `/` 开头"**不够** —— `| --- | --- | --- |` 那一行的第三个单元格是 `---`，
+     *    而表头行里也有别的内容；不收紧的话会多算 2 行，而**那 2 行的 26 格
+     *    会把整张表的小计全部带偏**（本轮实测：收紧前 office_head 那列被算成 V19/—16）。
+     */
+    if (!m || !/^(\/[A-Za-z0-9*]|\/$)/.test(m[1])) continue
+    paths.push(m[1])
+    /*
+     * 格子取值：`V` / `E` / `B` / `—`（不适用）。
+     * ⚠️ 文档里带装饰写法（`**V**` / `V【新】` / `V★待拍板` / `—\*`）——
+     *    统一按"去掉 `*` 后取第一个字符"来读，读不出 V/E/B/— 就记进 `unknown`
+     *    （**不许静默通过**：那是"锚点解析错了"的唯一信号）。
+     */
+    const thirteen = raw.slice(3).map((c) => c.replace(/\*/g, '').trim())
+    if (thirteen.length !== 13) unknown.push(`${m[1]}:${thirteen.length}格`)
+    thirteen.forEach((t, i) => {
+      if (!perCol[i]) return
+      const ch = t.charAt(0)
+      if (ch === 'V') perCol[i].v++
+      else if (ch === 'E') perCol[i].e++
+      else if (ch === 'B') perCol[i].b++
+      else if (t.startsWith('—')) perCol[i].x++
+      else unknown.push(`${m[1]}***REMOVED***${i + 1}:${JSON.stringify(t)}`)
+    })
+    cells.push(thirteen.map((t) => t.charAt(0)))
+  }
+  const sum = perCol.reduce(
+    (a, c) => ({ v: a.v + c.v, e: a.e + c.e, b: a.b + c.b, x: a.x + c.x }),
+    { v: 0, e: 0, b: 0, x: 0 },
+  )
+  return { paths, cells, perCol, sum, heads, unknown }
+}
+
+{
+  let mx = null
+  let boom = null
+  try {
+    mx = parseMatrix13()
+  } catch (e) {
+    boom = e instanceof Error ? e.message : String(e)
+  }
+  check(boom === null, 'D9：§4.2 的 13 列矩阵解析得出来（锚点自证）', boom ?? '解析成功')
+  if (mx) {
+    check(mx.unknown.length === 0, 'D9：每一格的取值只能是 V / E / B / —（解析完自证）', mx.unknown.join('、') || '没有认不出的格')
+    /* 列序自证：表头的 13 个缩写必须与 `COLS13` 一一对应（改了列序 = 13 列全配错人） */
+    eqSet('D9：§4.2 表头的 13 个缩写 == 方案的口径（超教校副助办德级教组备组班任室）', mx.heads, HEAD13)
+    /* 形状自证：36 / 344 / 60 / 34 / 30 */
+    eq('D9 自证：矩阵行数', mx.paths.length, MATRIX_SHAPE_13.rows)
+    eq('D9 自证：V 格数', mx.sum.v, MATRIX_SHAPE_13.v)
+    eq('D9 自证：E 格数', mx.sum.e, MATRIX_SHAPE_13.e)
+    eq('D9 自证：B 格数', mx.sum.b, MATRIX_SHAPE_13.b)
+    eq('D9 自证：`—` 不适用格数（办公室主任那一列）', mx.sum.x, MATRIX_SHAPE_13.excluded)
+    eq(
+      'D9 自证：V+E+B+— == 行数 × 13',
+      mx.sum.v + mx.sum.e + mx.sum.b + mx.sum.x,
+      MATRIX_SHAPE_13.rows * 13,
+    )
+    /* 逐列小计（方案 §4.1 那张表）—— 下标与 `MATRIX_SHAPE_13.columns` 一一对应 */
+    COLS13.forEach((r, i) => {
+      const g = mx.perCol[i]
+      const w = MATRIX_SHAPE_13.perColumn[i]
+      check(
+        g.v === w.v && g.e === w.e && g.b === w.b && g.x === w.x,
+        `D9：${r.label} 那一列的小计`,
+        `V${g.v} / E${g.e} / B${g.b} / —${g.x}`,
+        `期望 V${w.v} / E${w.e} / B${w.b} / —${w.x}`,
+      )
+    })
+    /*
+     * 36 行 = 原来那 34 行 + 通知那两行。
+     * ⚠️ 这一条是"**不推翻那 204 格**"的机器版：前 34 条路径必须与 D1 的写死清单
+     *    **逐项相等**（顺序可以不同，集合必须相等）。
+     */
+    eqSet('D9：13 列矩阵的行 ↔ §2.2 的 34 条路径 + 通知两行', mx.paths, [
+      ...MATRIX_PATHS,
+      '/notices',
+      '/notices/new',
+    ])
+    eqSet('D9：13 列矩阵的路径 ↔ PAGES 的路径（每加一条路由都要登记）', mx.paths, PAGES.map((p) => p.path))
+
+    /*
+     * 🔴 **逐格核对**：矩阵里写的字母 == `ENTRIES` 真算出来的值。
+     *   · `V` ← `entryVisible(key, roles)` 为真
+     *   · `E` ← 该页对这个身份**存在但入口不摆**（入口 key 非空而判据为假）
+     *   · `B` / `—` ← 两者都**不是入口表能表达的**（`B` 是 `App.tsx` 的教室端那一支；
+     *     `—` 是"这一页对这个身份根本不存在"）→ 它们**只对教室端与办公室主任成立**，
+     *     而这两位在入口表里都是"没有可摆的入口"，所以这里只核 V / E 两态。
+     *
+     * 🔴 两个记号的分工（这一条**踩过一次**，写下来）：
+     *    · `if (!key) continue` 是**错的** —— `PAGES` 里 **20 条是"页内页"**（`entry: null`），
+     *      它们**没有入口 key 可判**，但**不等于这一行不用核**：它们的 13 格里
+     *      绝大多数写着 `E`（对某个身份这一页不存在入口），而那一格恰恰要核。
+     *      第一版就是这么写的 —— 结果只比了 208/468 格，**而数字对账那几条还是绿的**
+     *      （因为聚合数字是解析器算的，与这个循环无关）。
+     *      → 所以现在的写法是：**先判记号（B / — 直接过），再取 key；没有 key 就按
+     *         "这一页没有入口"核对那一格只能是 `E`**。
+     *    · `B` / `—` 只允许出现在教室端 / 办公室主任那两列 —— 别的身份用了就是写错了。
+     *
+     * ⚠️ `PENDING_CELLS`：**已知的、有意的口径冲突**，只允许写在这里并逐条注明理由。
+     *    这一格不是"实现写错了"、也不是"文档写错了"，而是**两份文档自己就没说拢**
+     *    （方案 §四.3 第 34 行原文："⚠️ **两处口径不一致**（矩阵 V vs 正文 E）"）。
+     *    落地按**现行实现**（V）落，冲突原样报出来等拍板 —— 见方案 §七 Q6。
+     *    ⛔ 别把新出现的"不一致"往这张表里塞：它的唯一用途是**记录已经写在文档里的**那一处。
+     */
+    const PENDING_CELLS = new Map([
+      [
+        '/settings/terms|grade_head',
+        '方案 §四.3 第 34 行自己记着"矩阵 E vs 正文 V"两处口径不一致（§七 Q6 待拍板）；落地按现行实现 V',
+      ],
+    ])
+    const pathEntry = new Map(PAGES.map((p) => [p.path, p.entry]))
+    let compared = 0
+    let pending = 0
+    for (let i = 0; i < mx.paths.length; i++) {
+      const path = mx.paths[i]
+      const inPages = pathEntry.has(path)
+      const key = pathEntry.get(path) ?? null
+      check(
+        inPages,
+        `D9：矩阵里的 ${path} 在 PAGES 里登记过`,
+        inPages ? `入口 key = ${key ?? '(页内页，没有入口)'}` : 'PAGES 里没有这条',
+      )
+      if (!inPages) continue
+      COLS13.forEach((r, j) => {
+        compared++
+        const cell = mx.cells[i][j]
+        /* `B` / `—` 不在入口表的表达范围内（见上）—— 只对"教室端 + 办公室主任"允许 */
+        if (cell === 'B' || cell === '—') {
+          check(
+            r.key === 'classroom' || r.key === 'office_head',
+            `D9：矩阵 ${path} × ${r.label} 用了 ${cell} —— 只有教室端 / 办公室主任能用这两个记号`,
+            `矩阵写 ${cell}`,
+            '别的身份只用 V / E（B 是安全判断、— 是功能判断，两者都靠页面/数据库，不靠入口表）',
+          )
+          return
+        }
+        /*
+         * **页内页（`entry: null`）与独立页在入口层"说不了话"，所以只对账、不逐格断言。**
+         *
+         * 为什么它们**不能**按 `entryVisible` 核：
+         *   · **独立页**（`/login`、`/classroom`）：根本不在 `AppShell` 里 ——
+         *     `/login` 对所有身份都是 `V`（`Guard` 的出口），`/classroom` 只有教室端是 `V`
+         *     （其余是 `E`：教师账号进去是"预览"）。这两句都由 `App.tsx` 的路由结构决定，
+         *     `ENTRIES` 里没有它们的位置。
+         *   · **页内页**（`/classes/:id`、`/assignments/new` …）：`PAGES` 里 `entry: null`
+         *     （"只能从父页点进来"），所以"这个身份有没有这个入口"**在入口层无从表达** ——
+         *     矩阵里那些格说的是"**进不进得去这一页**"（`V`）或"**藏入口就够**"（`E`），
+         *     而进不进得去由**页面自己的守卫与 RLS** 决定。
+         *   ⚠️ 我第一版给页内页写了一条"必须是 `E`"的断言 —— **那是错的**：
+         *     矩阵里 `/login` 对 12 个身份是 `V`、`/classroom` 对教室端是 `V`，
+         *     它们**本来就是 `V`**（那两页确实谁都能打开）。**照抄矩阵、按同一套规则计数**，
+         *     不额外发明一条规则。
+         *
+         * 所以这里的处置与上面的 `B` / `—` 相同：**记账**（进 `compared`），不逐格判。
+         */
+        if (key === null) return
+        const computed = roles.entryVisible(key, r.roles)
+        const want = computed ? 'V' : 'E'
+        if (PENDING_CELLS.has(`${path}|${r.key}`)) {
+          compared--
+          pending++
+          check(
+            cell !== want,
+            `D9：${path} × ${r.label} 那一格**确实还挂着**口径冲突（冲突解决了就该把 PENDING_CELLS 里那条删掉）`,
+            `矩阵写 ${cell} / ENTRIES 说 ${want}`,
+            PENDING_CELLS.get(`${path}|${r.key}`),
+          )
+          return
+        }
+        check(
+          cell === want,
+          `D9：矩阵 ${path} × ${r.label} 的格子 == ENTRIES **真算出来**的值`,
+          `矩阵写 ${cell}`,
+          `ENTRIES 说 ${want}（${key} → ${r.key}）`,
+        )
+      })
+    }
+    /* 自证：逐格比对的格数 + 挂账的格数 == 行数 × 13（少一格都说明解析漏了行） */
+    eq(
+      'D9 自证：逐格比对 + 挂账的格数 == 行数 × 13（不是"比了几格就算几格"）',
+      compared + pending,
+      MATRIX_SHAPE_13.rows * 13,
+      `其中 ${compared} 格真比过、${pending} 格挂着已知冲突、${mx.sum.b + mx.sum.x} 格是 B / —（由页面与数据库负责）`,
+    )
   }
 }
 
@@ -625,10 +1048,22 @@ section('第九节 · D3/D4/D5：判据白名单 · myRoles 读取点白名单 �
      * 白名单：只准 `() => true`（全员）或**本文件导出的判据函数名**。
      * ⛔ 不许就地写 `(roles) => roles.some(…)`：那正是"每个入口一套判据"的开始。
      * 判据：每个 `visibleFor:` 后面的值**含 `=>` 的就是就地写的**。
+     *
+     * 🆕 2026-09-28：`(roles) => hasManagingRole(roles) || seesTeachingData(roles)` 这一处
+     *    **是刻意保留的内联写法**，理由写在这里（不是"忘了提取成函数"）：
+     *    `/grades` 那一格要表达的是"**在原来那个判据之上追加一支**"——
+     *    它必须让"改动只发生在这一行"这件事**在源码里一眼看得见**。
+     *    抽成一个 `canSeeGrades()` 反而会把"原有 34 行一格没改"这条纪律藏进另一个文件。
+     *    ⚠️ 它仍然合 M1/M2（只读 `roles` 一个参数、只返回 boolean），且**两个函数都在
+     *    lib/roles.ts 里**（不是就地写 `roles.some(...)`）。
      */
-    const ALLOWED = ['isSuperAdmin', 'canManageTeachers', 'canAssignRoles', 'hasManagingRole']
+    const ALLOWED = ['isSuperAdmin', 'canManageTeachers', 'canAssignRoles', 'hasManagingRole', 'canPublishNotice', 'seesTeachingData']
     const inline = rules.filter((b) => b.includes('=>'))
-    eqSet('D3：就地写的判据只能是 `() => true`，别的内联箭头函数一律红', inline, ['() => true'])
+    eqSet(
+      'D3：就地写的判据只有两处 —— `() => true`（全员）与 `/grades` 那一行的"追加一支"',
+      inline,
+      ['() => true', '(roles) => hasManagingRole(roles) || seesTeachingData(roles)'],
+    )
     const badNames = rules.filter((b) => !b.includes('=>') && !ALLOWED.includes(b))
     eqSet('D3：判据函数引用的名字全在白名单里', badNames, [])
     eq(
@@ -672,16 +1107,20 @@ section('第九节 · D3/D4/D5：判据白名单 · myRoles 读取点白名单 �
    *      · `src/lib/roles.ts`       入口表与判据的**定义处**
    *    加一个就要在这里加一行并写理由。
    */
-  const ROLE_READERS = new Map([
-    ['src/pages/Settings.tsx', '身份卡 + 我的身份（显示）+ 三行入口读 entryVisible'],
-    ['src/pages/TeacherAccounts.tsx', '身份区按钮显隐（canAssignRoles）+ 身份名文案'],
-    ['src/components/AppShell.tsx', '当前身份标签（显示）+ NAV 过滤（**唯一一处真·入口判据**）'],
-    ['src/pages/Workbench.tsx', '问候语里的身份标签（显示）'],
-    ['src/pages/Admin.tsx', '面板内的东西显隐（isSuperAdmin）+ 只读体检屏（上一轮新落）'],
-    ['src/App.tsx', 'DEV 钩子：把 ?as= 注进 myRoles（**只测试用，生产构建里被摇掉**，D7 钉住）'],
-    ['src/data/store.ts', '`myRoles` 这个槽位的**定义处**（state + hydrate/signOut 写入，不是读取处）'],
-    ['src/lib/roles.ts', '入口表与判据的定义处（不是读取处）'],
-  ])
+    const ROLE_READERS = new Map([
+      ['src/pages/Settings.tsx', '身份卡 + 我的身份（显示）+ 三行入口读 entryVisible'],
+      ['src/pages/TeacherAccounts.tsx', '身份区按钮显隐（canAssignRoles）+ 身份名文案'],
+      ['src/components/AppShell.tsx', '当前身份标签（显示）+ NAV 过滤（**唯一一处真·入口判据**）+ 🆕通知未读红点'],
+      ['src/pages/Workbench.tsx', '问候语里的身份标签（显示）+ 🆕「最新通知」那一块的入口显隐'],
+      ['src/pages/Admin.tsx', '面板内的东西显隐（isSuperAdmin）+ 只读体检屏（上一轮新落）'],
+      ['src/pages/Notices.tsx', '🆕「发通知」按钮的显隐（canPublishNotice）—— 只决定摆不摆，服务端仍会 403'],
+      ['src/pages/NoticeNew.tsx', '🆕 发通知页：不能发的人进来看到一句说明（不是判据）+ 职位显示名'],
+      ['src/App.tsx', 'DEV 钩子：把 ?as= 注进 myRoles（**只测试用，生产构建里被摇掉**，D7 钉住）'],
+      ['src/data/store.ts', '`myRoles` 这个槽位的**定义处**（state + hydrate/signOut 写入，不是读取处）'],
+      ['src/data/types.ts', '🆕 `RoleCode` 这个**类型的定义处**（注释里引用了 `ROLE_NAME` 这个名字，不读它的值）'],
+      ['src/lib/notices.ts', '🆕 通知的**数据层**里那条显示用的小工具（`noticeScopeText`，把范围翻成一句话）'],
+      ['src/lib/roles.ts', '入口表与判据的定义处（不是读取处）'],
+    ])
   const hits = []
   const walk = (dir) => {
     for (const e of readdirSync(dir, { withFileTypes: true })) {
@@ -721,6 +1160,8 @@ section('第九节 · D3/D4/D5：判据白名单 · myRoles 读取点白名单 �
     ['src/pages/Settings.tsx', 'filter 的是 schedule 里 scope!==class 的那一份（与角色无关）'],
     ['src/pages/TeacherAccounts.tsx', 'filter 的是任课关系多选（与角色无关）'],
     ['src/pages/Workbench.tsx', 'filter 的是今日待办（与角色无关）'],
+    ['src/pages/Notices.tsx', '🆕 filter 的是通知列表的**排序前拷贝**（与角色无关，未读那一段也是服务端给的）'],
+    ['src/pages/NoticeNew.tsx', '🆕 filter 的是"我能发的范围选项"（**选项，不是数据行** —— 清单由数据库给）'],
   ])
   const SUSPECT = []
   const walk = (dir) => {
@@ -788,7 +1229,7 @@ section('第十节 · D6：PIN_KEYS ⊆ NAV（移动端胶囊的兜底）')
   const navKeys = [...shell.matchAll(/^\s*\{ to: '([^']+)'/gm)].map((m) => m[1])
   const pinLine = shell.match(/const PIN_KEYS = \[([^\]]+)\]/)
   const pinKeys = pinLine ? [...pinLine[1].matchAll(/'([^']+)'/g)].map((m) => m[1]) : []
-  eq('D6：NAV 有 7 项', navKeys.length, 7)
+  eq('D6：NAV 有 8 项（🆕 2026-09-28 加了「通知」）', navKeys.length, 8)
   eq('D6：PIN_KEYS 有 3 项', pinKeys.length, 3)
   eqSet('D6：PIN_KEYS ⊆ NAV', pinKeys.filter((k) => !navKeys.includes(k)), [])
   eqSet('D6：NAV 的每一项都在 ENTRIES 里', navKeys.filter((k) => !(k in roles.ENTRIES)), [])

@@ -27,6 +27,8 @@ import ImportPaste from './pages/ImportPaste'
 import ImportPhoto from './pages/ImportPhoto'
 import Login from './pages/Login'
 import NotFound from './pages/NotFound'
+import NoticeNew from './pages/NoticeNew'
+import Notices from './pages/Notices'
 import WrongBook from './pages/WrongBook'
 import WrongBookClass from './pages/WrongBookClass'
 import AssignmentCorrect from './pages/AssignmentCorrect'
@@ -580,6 +582,34 @@ export default function App() {
           element={
             <Guard>
               <TeacherAccounts />
+            </Guard>
+          }
+        />
+        {/*
+          🆕 通知（`管理架构与角色权限方案.md` §九.7）。两条路由：
+            · `/notices`     —— 老师的收件箱（**所有老师**都有；教室端到不了这里）
+            · `/notices/new` —— 发通知（只有能发的那八档看得见入口，服务端仍会 403 兜底）
+          ⚠️ 刻意**不套任何额外守卫**：手打 URL 进得来，然后
+            · `/notices` 由**数据库 RLS** 筛（范围外的通知读不到 —— I46/I47）；
+            · `/notices/new` 在服务端拿调用者 JWT 问 `can_publish_notice_to()`（I46）。
+          "藏入口"不是安全边界，这里也不假装它是。
+          🔴 教室端**读不到通知**：那是 `Guard` 上面那句 `accountKind === 'classroom'`
+            一条管全部（与它那 34 个 B 同款），加上数据库读策略里**根本没有教室端的分支**（I47）。
+            两处是同一条边界，不是两道 —— 别在这里再写第三道。
+        */}
+        <Route
+          path="/notices"
+          element={
+            <Guard>
+              <Notices />
+            </Guard>
+          }
+        />
+        <Route
+          path="/notices/new"
+          element={
+            <Guard>
+              <NoticeNew />
             </Guard>
           }
         />

@@ -301,6 +301,16 @@ export function dirtyGroups(r: ContradictionReport): ContradictionGroup[] {
      · 表存在性：`select('id').limit(1)` → 看错误码（`42P01` / `PGRST205` / `schema cache`）
      · 列存在性：`select('<列>').limit(1)` → 看 `42703` / `does not exist`
      · 策略 / 函数存在性：anon key **查不到 `pg_policies`** → 标"无法判断"
+
+   🔴 **一处刻意的偏离**（2026-09-28 收尾轮，留档在 `功能设计与不变量.md` §20.7）：
+      表存在性探针**不用 `select('id')`，改用 `select('*')`**。
+      方案那行"照抄 `remote.ts` 的手法"里藏着一个假设 ——**每张表都有 `id` 列** ——
+      而 `subjects` 没有（主键是 `code`，`schema.sql` §12.1）。
+      后果是一次**会误导人的误报**：线上库明明跑完了 §12，面板却报
+      「§12 未跑 → 列不存在 → 写路径摘掉那一列」，证据是
+      `42703 column subjects.id does not exist` —— 那是"列不在"，被泛判据
+      `/does not exist/i` 当成了"表不在"。
+      → 表存在性只问"这张表在不在"，**不许假设任何一列存在**。
    ============================================================ */
 
 export type DriftState = 'present' | 'missing' | 'indeterminate'
@@ -330,21 +340,60 @@ export type DriftSection = {
 
 const OK = '读到了（无错误）'
 
-const MISSING_TABLE_RE = /42P01|PGRST205|does not exist|schema cache/i
-const MISSING_COL_RE = /42703|does not exist/i
+/**
+ * 「**表**不存在」的判据 —— 只认这三样：
+ *   · `42P01`（Postgres `undefined_table`，文案是 `relation "public.x" does not exist`）；
+ *   · `PGRST205`（PostgREST 在自己的 schema cache 里找不到这张表）；
+ *   · 两句兜底文案（老版本 PostgREST 不带码，只给话）。
+ *
+ * 🔴 **这里绝不能只写一个泛化的 `/does not exist/i`** —— 那正是 §20.7 那次误报：
+ *    「列不存在」的文案（`column subjects.id does not exist`，码 `42703`）里也有
+ *    "does not exist"，于是**表在、只是没有探针点的那一列**会被判成"表不在"，
+ *    整段报红"未跑"。判据必须问的是"**relation / 表** 在不在"，
+ *    而 `column … does not exist` 属于下面那条 `MISSING_COL_RE`。
+ */
+const MISSING_TABLE_RE = /42P01|PGRST205|Could not find the table|relation .+ does not exist/i
+/** 「**列**不存在」：`42703`（`undefined_column`）/ `column <表>.<列> does not exist` */
+const MISSING_COL_RE = /42703|column .+ does not exist/i
 
-/** 表在不在 —— 与 `remote.isMissingTable` 同一套判据（这里独立一份，因为那个没导出） */
+/**
+ * 表在不在。
+ *
+ * ⚠️ **判据比 `remote.isMissingTable()` 更严，是有意的**（`adminChart` 这里独立一份，
+ *    因为那个没导出）：`remote` 那一份是给**写路径**用的，判错的代价是"把写入永久停掉"，
+ *    所以它宁可把认不出的错都当成"表在"；而面板判错的代价是**一次假红警报**
+ *    （§20.7 那次就是它），所以它只认"表/relation 不存在"本身，
+ *    `42703 column … does not exist` 一律不进"表不在"。
+ */
 async function probeTable(table: string): Promise<DriftCell> {
   const sb = getSupabase()
   const what = `\`${table}\` 表`
   if (!sb) return { what, state: 'indeterminate', evidence: '本地模式：没有云端连接' }
   try {
-    const { error } = await sb.from(table).select('id').limit(1)
+    /*
+     * 🔴 `select('*')`，**不是 `select('id')`** —— 表存在性只跟"这张表在不在"有关。
+     *    `select('id')` 偷偷假设了"每张表都有 `id` 列"，而 `subjects` 没有
+     *    （主键是 `code`，`schema.sql` §12.1）→ `42703 column subjects.id does not exist`
+     *    → 一次"§12 明明跑过了却报未跑"的误报（§20.7）。
+     */
+    const { error } = await sb.from(table).select('*').limit(1)
     if (!error) return { what, state: 'present', evidence: OK }
     const code = String((error as { code?: string }).code ?? '')
     const msg = String(error.message ?? '')
     if (MISSING_TABLE_RE.test(code) || MISSING_TABLE_RE.test(msg)) {
       return { what, state: 'missing', evidence: `${code || '?'} ${msg}`.trim() }
+    }
+    /*
+     * 「列不存在」**不是**"表不在"的证据 → 只能记"无法判断"（灰），**绝不许红**。
+     * `select('*')` 之后这一支只可能出现在"有人把探针改回拿某一列探表"的时候，
+     * 留着它是为了让那个写法的症状是**灰**而不是**假红**。
+     */
+    if (MISSING_COL_RE.test(code) || MISSING_COL_RE.test(msg)) {
+      return {
+        what,
+        state: 'indeterminate',
+        evidence: `${code || '?'} ${msg}（这一列不在，但**不能**据此说这张表不在）`.trim(),
+      }
     }
     return { what, state: 'indeterminate', evidence: `${code || '?'} ${msg}`.trim() }
   } catch (e) {
@@ -364,6 +413,18 @@ async function probeColumn(table: string, column: string): Promise<DriftCell> {
     const msg = String(error.message ?? '')
     if (MISSING_COL_RE.test(code) || MISSING_COL_RE.test(msg)) {
       return { what, state: 'missing', evidence: `${code || '?'} ${msg}`.trim() }
+    }
+    /*
+     * 表不在 ⇒ 这一列当然也不在（同一件事，仍然是"这一段没跑"）。
+     * 少了这一支的话，`PGRST205`（表不在 schema cache 里）会被记成"无法判断" ——
+     * 那是把**确实没跑**说成"不知道"，同样是一种失真。
+     */
+    if (MISSING_TABLE_RE.test(code) || MISSING_TABLE_RE.test(msg)) {
+      return {
+        what,
+        state: 'missing',
+        evidence: `${code || '?'} ${msg}（表不在，这一列当然也不在）`.trim(),
+      }
     }
     return { what, state: 'indeterminate', evidence: `${code || '?'} ${msg}`.trim() }
   } catch (e) {
@@ -649,6 +710,25 @@ export function driftSummary(sections: readonly DriftSection[]): {
    ============================================================ */
 
 export type Tone = 'ok' | 'warn' | 'bad' | 'unknown'
+
+/**
+ * C1 的三态 → 颜色。**全仓只有这一处实现**（卡片角标 + 每一段前面的点都调它）。
+ *
+ * 🔴 不变量（`功能设计与不变量.md` §20.4 I45，2026-09-28 那次误报钉下来的）：
+ *    **"没结论"（`indeterminate`）只能是灰，绝不能是红**；
+ *    **红（`bad`）只在"确实没跑"（`missing`）时出现**。
+ *
+ *    为什么要把这条做成一个**具名函数**而不是写在渲染里：
+ *      §20.7 那次误报的现场是"卡片红着脸说 §12 未跑" —— 判据在探测那一侧写错了
+ *      （`select('id')` 探表 + `does not exist` 泛匹配），看上去却像是**渲染**把灰画成了红。
+ *      渲染与判据分开以后，"灰是不是被画成红"这件事就有了一个可以被断言钉住的点：
+ *      `admin-checks.mjs` 第七节·补 直接断言 `driftTone('indeterminate') !== driftTone('missing')`。
+ */
+export function driftTone(state: DriftState): Tone {
+  if (state === 'present') return 'ok'
+  if (state === 'missing') return 'bad'
+  return 'unknown'
+}
 
 /** 一块 L1 卡的颜色汇总：红 > 黄 > 灰 > 绿 */
 export function worstTone(tones: readonly Tone[]): Tone {

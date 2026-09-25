@@ -7,13 +7,23 @@
  *
  * 🔴 安全边界：service_role **绕过 RLS**，所以这个 Function 必须自己校验调用者权限。
  *    但"自己校验"不等于"在 TypeScript 里再写一遍规则" —— 判据只有一处：
- *    数据库里 `schema.sql` §13.2 的两个函数
- *      `can_manage_teachers()`  最高管理员 + 教导处：建号 / 任课关系 / 重置密码
- *                               / **指派身份**（用户 2026-09-27 口径：「班主任，年级主任的
- *                               身份也要由行政管理（教导处）给」——09-26 曾做成"只有超管"，已改）
- *      `is_super_admin()`       **只有**最高管理员：本段之后暂时没有调用方，
- *                               留着给"交接超管身份"这类只有超管能做的事
+ *    数据库里 `schema.sql` §13.2 的函数
+ *      `can_create_teacher_accounts()`  **建号 / 任课关系 / 重置密码**
+ *          最高管理员 + 教务处 + 🆕办公室主任
+ *      `can_assign_roles()`             **指派身份**
+ *          最高管理员 + 教务处（🔴 **不含办公室主任** —— 见下）
+ *      `is_super_admin()`               **只有**最高管理员：留给"交接超管身份"这类事
  *    这里拿**调用者自己的 JWT** 走 `POST /rest/v1/rpc/<函数名>` 去问（auth.uid() 就是调用者）。
+ *
+ *  🔴 **2026-09-28：拆成两个函数（建号 ≠ 指派身份）** —— `管理架构与角色权限方案.md` §三.4 的 N-1。
+ *     新架构里唯一变宽的写权限是「办公室主任建号」，而 `can_manage_teachers()` 原本
+ *     **同时**管建号 / 任课关系 / **指派身份**三件事：
+ *       直接给它加 `office_head` → **办公室主任就能给自己发一条 `super`**。
+ *     所以先拆，再放行。拆完之后：
+ *       · `create` / `assign`（任课关系）/ `reset`  → 问 `can_create_teacher_accounts`
+ *       · `role`（指派身份）                        → 问 `can_assign_roles`
+ *     ⚠️ **两处 RPC 名字必须与 schema 里的函数逐字一致**：拼错了会拿到 'missing'
+ *        → 503「数据库还没跑第 13 段」，而真正的原因是这个 Function 写错了名字。
  *
  * 部署：<项目根>/functions/api/teacher-account.ts，推 GitHub 后 Cloudflare 自动带上。
  * 环境变量（与 classroom-account 共用同一套）：
@@ -30,7 +40,24 @@ type Env = {
   SUPABASE_SERVICE_ROLE_KEY?: string
 }
 
-type RoleCode = 'super' | 'admin' | 'grade_head' | 'head_teacher'
+/**
+ * 身份代码 —— 与 `teacher_roles.role` 的 check 约束**逐字相同**（`schema.sql` §10.1.1）。
+ * ⚠️ `classroom`（教室端）**不在里面**：它不是 `teacher_roles` 的一档，
+ *    而是 `classroom_accounts` 里的一行（见 §10.1）。
+ */
+type RoleCode =
+  | 'super'
+  | 'admin'
+  | 'principal'
+  | 'vice_principal'
+  | 'principal_assistant'
+  | 'office_head'
+  | 'moral_edu_head'
+  | 'grade_head'
+  | 'head_teacher'
+  | 'subject_lead'
+  | 'lesson_prep_lead'
+  | 'teacher'
 
 type Body = {
   action?: 'list' | 'create' | 'reset' | 'assign' | 'role'
@@ -52,14 +79,55 @@ type Body = {
   role?: string
   scopeType?: string
   scopeId?: string
+  /** role：组长两档要的学科代码（`subject_lead` / `lesson_prep_lead` 必填） */
+  roleSubjectCode?: string
 }
 
 /** 去掉容易看错、也难念给同事听的字符：I l O 0 1 */
 const PW_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789'
 
-/** 能指派进 teacher_roles 的身份。`teacher`（任课教师）**不在里面**：
- *  任课教师不是一个"头衔"，而是 `class_subjects` 里的任课关系（见 schema.sql §10.6）。 */
-const ASSIGNABLE: RoleCode[] = ['super', 'admin', 'grade_head', 'head_teacher']
+/**
+ * 能指派进 `teacher_roles` 的身份（14 档里除任课教师之外的全部）。
+ * `teacher`（任课教师）**不在里面**：任课教师不是一个"头衔"，
+ * 而是 `class_subjects` 里的任课关系（见 schema.sql §10.6）。
+ * ⚠️ 这份清单是**形状**（哪些值塞得进那一列），**不是权限** ——
+ *    谁能指派由 `can_assign_roles()` 判（办公室主任不在里面）。
+ */
+const ASSIGNABLE: RoleCode[] = [
+  'super',
+  'admin',
+  'principal',
+  'vice_principal',
+  'principal_assistant',
+  'office_head',
+  'moral_edu_head',
+  'grade_head',
+  'head_teacher',
+  'subject_lead',
+  'lesson_prep_lead',
+]
+
+/**
+ * 每一档身份的**管辖范围形状** —— 一个字段只能有一种语义（这里是"这一档要不要范围"）。
+ *   `none`            scope_type = null、scope_id = null
+ *   `grade`           scope_type='grade'、scope_id = 年级 id
+ *   `class`           scope_type='class'、scope_id = 班级 id
+ *   `subject`         scope_type='subject'、subject_code = 学科代码、scope_id = null
+ *   `grade_subject`   scope_type='grade_subject'、scope_id = 年级 id、subject_code = 学科代码
+ */
+const SCOPE_OF: Record<string, 'none' | 'grade' | 'class' | 'subject' | 'grade_subject'> = {
+  super: 'none',
+  admin: 'none',
+  principal: 'none',
+  vice_principal: 'none',
+  principal_assistant: 'none',
+  office_head: 'none',
+  moral_edu_head: 'none',
+  grade_head: 'grade',
+  head_teacher: 'class',
+  subject_lead: 'subject',
+  lesson_prep_lead: 'grade_subject',
+}
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -214,6 +282,8 @@ type RoleRow = {
   role: string
   scope_type: string | null
   scope_id: string | null
+  /** 🆕 组长两档的学科代码（第 10.1.1 段之后才有这一列；读不到就当空串） */
+  subject_code?: string | null
 }
 type SubjectJoin = {
   teacher_id: string
@@ -243,7 +313,12 @@ async function loadDirectory(env: Env) {
   const [c, g, r, cs, ca] = await Promise.all([
     read(await sb(env, '/rest/v1/classes?select=id,name,grade_id&order=created_at')),
     read(await sb(env, '/rest/v1/grades?select=id,name&order=name')),
-    read(await sb(env, '/rest/v1/teacher_roles?select=teacher_id,role,scope_type,scope_id')),
+    /*
+     * 🆕 `subject_code` 那一列可能还不存在（第 10.1.1 段没跑）——
+     * 与 `primary_subject_code` 同一套判据：**只认「列不存在」，摘掉它重读**，
+     * 其余错误照常（沿用下面的空数组兜底）。
+     */
+    read(await sb(env, '/rest/v1/teacher_roles?select=teacher_id,role,scope_type,scope_id,subject_code')),
     read(await sb(env, '/rest/v1/class_subjects?select=teacher_id,class_id,subject,subject_code')),
     read(await sb(env, '/rest/v1/classroom_accounts?select=id')),
   ])
@@ -255,9 +330,14 @@ async function loadDirectory(env: Env) {
     const retry = await read(await sb(env, '/rest/v1/class_subjects?select=teacher_id,class_id,subject'))
     subjectJoins = (retry.ok ? retry.rows : []) as unknown as SubjectJoin[]
   }
+  let roleRows = r.rows as unknown as RoleRow[]
+  if (!r.ok && isMissingColumn(r.status, r.text)) {
+    const retry = await read(await sb(env, '/rest/v1/teacher_roles?select=teacher_id,role,scope_type,scope_id'))
+    roleRows = (retry.ok ? retry.rows : []) as unknown as RoleRow[]
+  }
   const classes = (c.ok ? c.rows : []) as unknown as ClassRow[]
   const grades = (g.ok ? g.rows : []) as unknown as GradeRow[]
-  const roles = (r.ok ? r.rows : []) as unknown as RoleRow[]
+  const roles = roleRows
   const roomIds = new Set((ca.ok ? ca.rows : []).map((x) => String(x.id)))
 
   const classNames = new Map(classes.map((x) => [x.id, x.name]))
@@ -278,10 +358,15 @@ async function loadDirectory(env: Env) {
           role: x.role,
           scopeType: x.scope_type ?? '',
           scopeId: x.scope_id ?? '',
+          /*
+           * 🆕 学科代码要**原样带回去**：界面上"取消这个身份"按它拼删除条件，
+           * 少了它那一行就删不掉（看起来取消成功了、其实还在）。
+           */
+          subjectCode: x.subject_code ?? '',
           scopeLabel:
             x.scope_type === 'class'
               ? (classNames.get(String(x.scope_id)) ?? '')
-              : x.scope_type === 'grade'
+              : x.scope_type === 'grade' || x.scope_type === 'grade_subject'
                 ? (gradeNames.get(String(x.scope_id)) ?? '')
                 : '',
         })),
@@ -340,25 +425,35 @@ export async function onRequestPost(context: {
   if (!me) return json({ status: 'error', message: '登录已过期，请重新登录后再试' }, 401)
 
   // ---- 2. 他有没有这个权限？（判据在数据库，不在这里重写规则）----
-  const mayManage = await rpcBool(env, me.token, 'can_manage_teachers')
-  if (mayManage === 'missing') return json({ status: 'error', message: NEED_STAGE13 }, 503)
-  if (!mayManage) {
+  /*
+   * 🔴 **两处 RPC、两种语义**（2026-09-28 拆函数）：
+   *    · "建号 / 任课关系 / 重置密码" → `can_create_teacher_accounts`（含办公室主任）
+   *    · "指派身份"                   → `can_assign_roles`（**不含**办公室主任）
+   * 把两者合成一次判断 = 把"建号"与"决定谁当班主任"合成一件事 ——
+   * 而后者正是用户说的"人员招聘 ≠ 决定谁当班主任"。
+   */
+  const mayCreate = await rpcBool(env, me.token, 'can_create_teacher_accounts')
+  if (mayCreate === 'missing') return json({ status: 'error', message: NEED_STAGE13 }, 503)
+  if (!mayCreate) {
     return json(
       {
         status: 'error',
         message:
-          '只有最高管理员和教导处能管理教师账号。你的账号在 teacher_roles 里没有 super / admin 行 —— 见 schema.sql §10.6 的角色指派模板。',
+          '只有最高管理员、教务处和办公室主任能建教师账号。你的账号在 teacher_roles 里没有 super / admin / office_head 行 —— 见 schema.sql §10.6 的角色指派模板。',
       },
       403,
     )
   }
+
   /*
-   * 指派身份（班主任 / 年级主任 / 教导处 / 最高管理员）与建号**同一档权限**：
-   * 教导处 + 最高管理员。用户 2026-09-27 原话：
-   * 「班主任，年级主任的身份也要由行政管理（教导处）给」。
-   * 所以这里**不再**单独问 is_super_admin()（09-26 那一轮曾要求只有超管，与口径不符）。
-   * ⚠️ 判据仍然是数据库（上面那句 can_manage_teachers 的 RPC），不是在 TypeScript 里判断。
+   * 指派身份比建号**窄一档**：教务处 + 最高管理员（用户 2026-09-27 原话：
+   * 「班主任，年级主任的身份也要由行政管理（教务处）给」）。
+   * 🔴 办公室主任**不在**这里 —— 他建号，但不决定谁当班主任 / 年级主任 / 组长。
+   * ⚠️ 这一句**只在 `role` 动作里才真正判**（放在这里是为了让"读一次"变成"读两处"之前
+   *    就先把它算出来；算出来不影响 create / assign / reset 的放行）。
    */
+  const mayAssign = await rpcBool(env, me.token, 'can_assign_roles')
+  if (mayAssign === 'missing') return json({ status: 'error', message: NEED_STAGE13 }, 503)
 
   /* ---------------- list ---------------- */
   if (action === 'list') {
@@ -662,39 +757,95 @@ export async function onRequestPost(context: {
 
   /* ---------------- role：指派身份（**教导处 + 最高管理员**） ---------------- */
   if (action === 'role') {
-    // 权限在上面统一问过 `can_manage_teachers()`（super + admin）—— 这里不再单独把关，
-    // 但"别把自己最后一条 super 摘掉"那条护栏还在（下面），它防的是把所有人锁在门外。
+    /*
+     * 🔴 **指派身份 = 比建号更窄的一档**（2026-09-28 拆函数，方案 §三.4 的 N-1）。
+     *    办公室主任能建号（`mayCreate` 为真），但**不能**走到这里 ——
+     *    否则他就能给自己发一条 `super`。
+     */
+    if (!mayAssign) {
+      return json(
+        {
+          status: 'error',
+          message:
+            '只有最高管理员和教务处能指派身份。办公室主任可以建账号，但不能决定谁当班主任 / 年级主任 / 组长 —— 这是两件事。',
+        },
+        403,
+      )
+    }
     const teacherId = String(body.teacherId ?? '').trim()
     const role = String(body.role ?? '').trim() as RoleCode
-    const scopeType = String(body.scopeType ?? '').trim()
     const scopeId = String(body.scopeId ?? '').trim()
+    const roleSubjectCode = String(body.roleSubjectCode ?? '').trim()
     const on = body.on !== false
 
     if (!UUID_RE.test(teacherId)) return json({ status: 'error', message: '没有指定老师' }, 400)
     if (!ASSIGNABLE.includes(role)) return json({ status: 'error', message: '这个身份不能指派' }, 400)
 
-    // 管辖范围必须和身份对得上（不然权限判据永远匹配不到，看起来"指派成功了"其实没生效）
+    /*
+     * 管辖范围必须和身份对得上（不然权限判据永远匹配不到，看起来"指派成功了"其实没生效）。
+     * 🆕 2026-09-28：从"两档逐档写 if"改成**一张形状表**（`SCOPE_OF`）——
+     *    14 档里现在有五种形状（none / grade / class / subject / grade_subject），
+     *    再逐档写 if 就是"同一件事五个判定入口"。
+     */
+    const shape = SCOPE_OF[role]
     let scope: string | null = null
-    if (role === 'grade_head' || role === 'head_teacher') {
-      const want = role === 'grade_head' ? 'grade' : 'class'
-      if (scopeType !== want || !UUID_RE.test(scopeId)) {
+    let subjectCode: string | null = null
+
+    if (shape === 'grade' || shape === 'grade_subject') {
+      if (!UUID_RE.test(scopeId)) {
         return json(
           {
             status: 'error',
-            message: role === 'grade_head' ? '年级主任要指定一个年级' : '班主任要指定一个班级',
+            message:
+              shape === 'grade_subject'
+                ? '备课组长要指定一个年级（外加一个学科）'
+                : '年级主任要指定一个年级',
           },
           400,
         )
       }
-      const table = want === 'grade' ? 'grades' : 'classes'
-      const check = await read(await sb(env, `/rest/v1/${table}?select=id&id=eq.${scopeId}`))
+      const check = await read(await sb(env, `/rest/v1/grades?select=id&id=eq.${scopeId}`))
       if (!check.ok || check.rows.length === 0) {
-        return json(
-          { status: 'error', message: `找不到这个${want === 'grade' ? '年级' : '班级'}` },
-          404,
-        )
+        return json({ status: 'error', message: '找不到这个年级' }, 404)
       }
       scope = scopeId
+    } else if (shape === 'class') {
+      if (!UUID_RE.test(scopeId)) {
+        return json({ status: 'error', message: '班主任要指定一个班级' }, 400)
+      }
+      const check = await read(await sb(env, `/rest/v1/classes?select=id&id=eq.${scopeId}`))
+      if (!check.ok || check.rows.length === 0) {
+        return json({ status: 'error', message: '找不到这个班级' }, 404)
+      }
+      scope = scopeId
+    }
+
+    if (shape === 'subject' || shape === 'grade_subject') {
+      /*
+       * 🔴 组长两档**必须带学科代码**：少了它，组长在平台里等于一位普通任课老师
+       *    （判据永远匹配不到），而界面上看起来"指派成功了"。
+       * ⚠️ 学科代码要**在字典里真的存在** —— 不猜、也不替他挑一科。
+       */
+      if (!isCode(roleSubjectCode)) {
+        return json(
+          {
+            status: 'error',
+            message: role === 'subject_lead' ? '教研组长要指定一个学科' : '备课组长要指定一个学科',
+          },
+          400,
+        )
+      }
+      const dict = await subjectRow(env, roleSubjectCode)
+      if (dict === 'reject') {
+        return json(
+          {
+            status: 'error',
+            message: `数据库的学科字典（subjects 表）里没有「${roleSubjectCode}」这一科。先跑 schema.sql 第 12 段。`,
+          },
+          400,
+        )
+      }
+      subjectCode = roleSubjectCode
     }
 
     // 别把自己唯一那条 super 摘掉 —— 摘了就没人能再指派身份了（把自己锁在门外）
@@ -715,14 +866,21 @@ export async function onRequestPost(context: {
     }
 
     if (!on) {
-      // 删的键要和插的键一致：super/admin 的 scope 是 null，grade_head/head_teacher 是具体 id。
-      // 键不一致就删不掉（看起来"取消成功了"，其实那行还在）—— 所以这里显式拼两套。
-      const filter = scope
-        ? `teacher_id=eq.${teacherId}&role=eq.${role}` +
-          `&scope_type=eq.${role === 'grade_head' ? 'grade' : 'class'}&scope_id=eq.${scope}`
-        : `teacher_id=eq.${teacherId}&role=eq.${role}&scope_type=is.null&scope_id=is.null`
+      /*
+       * 删的键要和插的键**逐字一致**，否则删不掉 ——
+       * 而"看起来取消成功了、其实那行还在"是一处真实的权限残留（这个坑踩过一次）。
+       * 所以这里按 `SCOPE_OF` 拼四种键，**不再**手写 `role === 'grade_head' ? … : …`。
+       */
+      const parts = [`teacher_id=eq.${teacherId}`, `role=eq.${role}`]
+      if (shape === 'none') {
+        parts.push('scope_type=is.null', 'scope_id=is.null', 'subject_code=is.null')
+      } else {
+        parts.push(`scope_type=eq.${shape}`)
+        parts.push(scope ? `scope_id=eq.${scope}` : 'scope_id=is.null')
+        parts.push(subjectCode ? `subject_code=eq.${subjectCode}` : 'subject_code=is.null')
+      }
       const res = await read(
-        await sb(env, `/rest/v1/teacher_roles?${filter}`, {
+        await sb(env, `/rest/v1/teacher_roles?${parts.join('&')}`, {
           method: 'DELETE',
           headers: { Prefer: 'return=minimal' },
         }),
@@ -740,18 +898,29 @@ export async function onRequestPost(context: {
       return json({ status: 'ok' })
     }
 
-    const res = await read(
-      await sb(env, '/rest/v1/teacher_roles', {
+    /*
+     * 写入。⚠️ `subject_code` 那一列可能还不存在（第 10.1.1 段没跑）——
+     * 与 `ensureSubjectCols()` 同一套判据：只认「列不存在」，**摘掉那一列重试**，
+     * 其余错误照报。不这么做的话，组长那两档在旧库上会整条失败。
+     */
+    const post = (row: Record<string, unknown>) =>
+      sb(env, '/rest/v1/teacher_roles', {
         method: 'POST',
         headers: { Prefer: 'return=minimal' },
-        body: JSON.stringify({
-          teacher_id: teacherId,
-          role,
-          scope_type: scope ? (role === 'grade_head' ? 'grade' : 'class') : null,
-          scope_id: scope,
-        }),
-      }),
-    )
+        body: JSON.stringify(row),
+      })
+    const payload: Record<string, unknown> = {
+      teacher_id: teacherId,
+      role,
+      scope_type: shape === 'none' ? null : shape,
+      scope_id: scope,
+    }
+    let missedSubjectCol = false
+    let res = await read(await post({ ...payload, subject_code: subjectCode }))
+    if (!res.ok && isMissingColumn(res.status, res.text)) {
+      missedSubjectCol = true
+      res = await read(await post(payload))
+    }
     if (!res.ok) {
       if (/23505|duplicate key|conflict/i.test(res.text)) return json({ status: 'ok' })
       return json(
@@ -763,7 +932,15 @@ export async function onRequestPost(context: {
         502,
       )
     }
-    return json({ status: 'ok' })
+    return json({
+      status: 'ok',
+      warnings: missedSubjectCol
+        ? [
+            '数据库还没跑第 10.1.1 段（teacher_roles 没有 subject_code 这一列），' +
+              '所以组长两档的学科没记下来 —— 他登录后看不到本学科的数据。跑过 schema.sql 之后重新指派一次即可。',
+          ]
+        : undefined,
+    })
   }
 
   return json({ status: 'error', message: '不认识这个操作' }, 400)

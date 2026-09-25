@@ -34,6 +34,47 @@ import { SUBJECTS, asSubjectCode, subjectName } from '../lib/subjects'
  *    数据库的 `can_manage_teachers()` / `is_super_admin()`）。
  *    所以就算有人把这一页的入口撬开，他也什么都做不成。
  */
+/**
+ * 每一档身份的**范围形状** + 界面上的那句说明（下拉里的一条 = 一行）。
+ *
+ * 🆕 2026-09-28：14 档身份里有**五种**形状（`none` / `grade` / `class` / `subject` /
+ * `grade_subject`）。它必须与服务端的 `SCOPE_OF`（`functions/api/teacher-account.ts`）
+ * **逐档相同**：服务端按同一张表拼过滤条件，两边不一致就会出现
+ * "指派成功了、判据却匹配不到"（而这一页**看不出**任何异常）。
+ * ⚠️ 以服务端为准：这里是把那张表照着写一份给界面用。
+ *
+ * ⚠️ **`teacher`（任课教师）刻意不在这一组里**：它不是一个"头衔"，
+ *    而是 `class_subjects` 里的任课关系（见 `schema.sql` §10.6）——
+ *    上面那一块"任课关系"就是它。
+ */
+const ROLE_ITEMS: { code: string; note: string }[] = [
+  { code: 'grade_head', note: '看本年级所有学科' },
+  { code: 'head_teacher', note: '看本班所有学科' },
+  { code: 'subject_lead', note: '只读本学科跨年级的数据 + 发本学科通知' },
+  { code: 'lesson_prep_lead', note: '只读本年级本学科的数据 + 发本年级本学科通知' },
+  { code: 'office_head', note: '只能建号 + 发全校通知（看不到任何教学数据）' },
+  { code: 'moral_edu_head', note: '看全校教学数据（只读）+ 发全校通知' },
+  { code: 'principal', note: '全校只读 + 发全校通知' },
+  { code: 'vice_principal', note: '与校长逐格相同' },
+  { code: 'principal_assistant', note: '与校长逐格相同' },
+  { code: 'admin', note: '教务处：建号 / 指派身份 / 看全校 / 改成绩兜底' },
+  { code: 'super', note: '全部权限（平台维护者）' },
+]
+
+const ROLE_SCOPE: Record<string, 'none' | 'grade' | 'class' | 'subject' | 'grade_subject'> = {
+  super: 'none',
+  admin: 'none',
+  principal: 'none',
+  vice_principal: 'none',
+  principal_assistant: 'none',
+  office_head: 'none',
+  moral_edu_head: 'none',
+  grade_head: 'grade',
+  head_teacher: 'class',
+  subject_lead: 'subject',
+  lesson_prep_lead: 'grade_subject',
+}
+
 export default function TeacherAccounts() {
   const navigate = useNavigate()
   const push = useToast((s) => s.push)
@@ -512,8 +553,11 @@ function TeacherSheet({
     await onChanged(teacher.id)
   }
 
-  const roleNeedsScope = roleKind === 'grade_head' || roleKind === 'head_teacher'
-  const scopeOptions = roleKind === 'grade_head' ? dir.grades : roleKind === 'head_teacher' ? dir.classes : []
+  const shape = roleKind ? (ROLE_SCOPE[roleKind] ?? 'none') : 'none'
+  const needsScope = shape === 'grade' || shape === 'class'
+  const needsSubject = shape === 'subject' || shape === 'grade_subject'
+  const scopeOptions = shape === 'grade' || shape === 'grade_subject' ? dir.grades : shape === 'class' ? dir.classes : []
+  const scopeReady = (!needsScope || !!scopeId) && (!needsSubject || !!newCode)
 
   return (
     <Sheet open={!!teacher} onClose={onClose} title={teacher.name}>
@@ -632,16 +676,18 @@ function TeacherSheet({
               <select className="input" value={roleKind} onChange={(e) => {
                 setRoleKind(e.target.value)
                 setScopeId('')
+                setNewCode('')
               }}>
                 <option value="">加一个身份…</option>
-                <option value="grade_head">{roleName('grade_head')}（看本年级所有学科）</option>
-                <option value="head_teacher">{roleName('head_teacher')}（看本班所有学科）</option>
-                <option value="admin">{roleName('admin')}（能建号、能指派身份，看全校）</option>
-                <option value="super">{roleName('super')}（全部权限）</option>
+                {ROLE_ITEMS.map((r) => (
+                  <option key={r.code} value={r.code}>
+                    {roleName(r.code)}（{r.note}）
+                  </option>
+                ))}
               </select>
-              {roleNeedsScope ? (
+              {needsScope ? (
                 <select className="input" value={scopeId} onChange={(e) => setScopeId(e.target.value)}>
-                  <option value="">{roleKind === 'grade_head' ? '选年级…' : '选班级…'}</option>
+                  <option value="">{shape === 'class' ? '选班级…' : '选年级…'}</option>
                   {scopeOptions.map((o) => (
                     <option key={o.id} value={o.id}>
                       {o.name}
@@ -649,17 +695,32 @@ function TeacherSheet({
                   ))}
                 </select>
               ) : null}
+              {/*
+                🔴 组长两档**必须带学科**：少了它，判据永远匹配不到 ——
+                   界面上看起来"指派成功了"，而他登录后等于一位普通任课老师。
+                   所以这里不是可选项（服务端也会 400 拒掉）。
+              */}
+              {needsSubject ? (
+                <select className="input" value={newCode} onChange={(e) => setNewCode(e.target.value)}>
+                  <option value="">选学科…</option>
+                  {SUBJECTS.map((s) => (
+                    <option key={s.code} value={s.code}>
+                      {s.name}
+                    </option>
+                  ))}
+                </select>
+              ) : null}
               <Button
                 block
-                disabled={busy || !roleKind || (roleNeedsScope && !scopeId)}
+                disabled={busy || !roleKind || !scopeReady}
                 icon={<IconPlus size={15} />}
                 onClick={() =>
                   void run(async () => {
                     const r = await setRole({
                       teacherId: teacher.id,
                       role: roleKind,
-                      scopeType: roleKind === 'grade_head' ? 'grade' : roleKind === 'head_teacher' ? 'class' : '',
-                      scopeId: roleNeedsScope ? scopeId : '',
+                      scopeId: needsScope ? scopeId : '',
+                      roleSubjectCode: needsSubject ? newCode : '',
                       on: true,
                     })
                     return r.ok ? { ok: true } : { ok: false, message: r.message, detail: r.detail }
@@ -678,11 +739,17 @@ function TeacherSheet({
                     disabled={busy}
                     onClick={() =>
                       void run(async () => {
+                        /*
+                         * 删的键必须和插的键**逐字一致**（服务端按 SCOPE_OF 拼），
+                         * 所以这里把**这一行自己**的形状原样传回去（含学科代码）——
+                         * 少传一个字段就会出现"看起来取消成功了、其实那行还在"。
+                         */
                         const res = await setRole({
                           teacherId: teacher.id,
                           role: r.role,
                           scopeType: r.scopeType,
                           scopeId: r.scopeId,
+                          roleSubjectCode: r.subjectCode ?? '',
                           on: false,
                         })
                         return res.ok ? { ok: true } : { ok: false, message: res.message, detail: res.detail }
@@ -715,8 +782,9 @@ function TeacherSheet({
           </>
         ) : (
           <p style={{ fontSize: 12.5, color: 'var(--color-ink3)', lineHeight: 1.7 }}>
-            指派身份（班主任 / 年级主任 / 教导处 / 最高管理员）<b>教导处与最高管理员都能做</b>。
-            你现在没有这两档身份里的任何一个 —— 这一页只能看。
+            <b>指派身份是教务处与最高管理员的事</b> —— 你现在没有这两档身份里的任何一个，
+            所以这一页只能看。⚠️ 办公室主任能建账号，但**不指派身份**：
+            "招聘"与"决定谁当班主任"是两件事。
           </p>
         )}
       </div>

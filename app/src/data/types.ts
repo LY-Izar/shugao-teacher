@@ -2,7 +2,7 @@ export type StudentStatus = 'active' | 'left'
 
 export type Student = {
   id: string
-  /** 班内学号，唯一。**它仍然可改**（班主任 / 年级主任 / 教导处三档） */
+  /** 班内学号，唯一。**它仍然可改**（班主任 / 年级主任 / 教务处三档） */
   studentNo: string
   /**
    * **序列号**（Q6）：`入校年份 4 位 + 该届内 3 位`（如 `2025001`），**全校唯一、生成后永久不可改**。
@@ -58,23 +58,60 @@ export type Teacher = {
 /* ---------------- 身份（角色） ---------------- */
 
 /**
- * 身份代码。**判据在数据库**（`teacher_roles.role` 的 check 约束 + `schema.sql` §13.2 / §16.2 的
- * `is_super_admin()` / `can_manage_teachers()` / `is_school_admin()`），这里只是它的前端镜像 ——
- * 前端拿它决定「显示哪些入口 / 标签」，**不用来决定"能不能写"**（见 §11.3 的纪律）。
+ * 身份代码。**判据在数据库**（`teacher_roles.role` 的 check 约束 + `schema.sql` §13.2 / §16.2 /
+ * §21 的那些函数），这里只是它的前端镜像 —— 前端拿它决定「显示哪些入口 / 标签」，
+ * **不用来决定"能不能写"**（见 §11.3 的纪律）。
  *
- * 两个容易混的身份，别再当成一个：
- *  · `super` 最高管理员（平台维护者）
- *  · `admin` 教导处 / 校级行政（用户 2026-09-27 口径：显示成「教导处」；
- *    能建号、能看全校、**也能指派身份**。代码 `admin` 不改名 —— 那是破坏性迁移）
+ * 2026-09-28「管理架构与角色权限」这一轮从 5 个值扩到 **12 个值**（= 用户说的 14 档身份，
+ * 其中 `principal`/`vice_principal`/`principal_assistant` 三档在数据库里逐格相同，
+ * 而 `classroom`（教室端）**不是**这一档 —— 它是 `classroom_accounts` 里的一行）。
+ *
+ * 三个容易混的身份，别再当成一个：
+ *  · `super`            最高管理员（**平台**维护者，不是学校里的岗位）
+ *  · `admin`            **教务处**（代号保留、显示名改。能建号、能指派身份、能看全校、能改成绩兜底）
+ *  · `principal` 等三档  校长 / 副校长 / 校长助理：**全校只读** + 发全校通知，**不建号、不改成绩**
+ *
+ * 🔴 加一档身份 = **这里加一个值** + `lib/roles.ts` 的 `ROLE_NAME` 加一行 +
+ *    `schema.sql` 的 check 约束加一个值（三处必须一起动，`roles.ts:29` 的原话）。
+ *    ⚠️ 新代号**不进任何判据函数**是**对**的中间态：拿了这个身份什么都多看不到，
+ *    与"没有这一档"等价（权限只做加法）。
  */
-export type RoleCode = 'super' | 'grade_head' | 'head_teacher' | 'admin' | 'teacher'
+export type RoleCode =
+  | 'super'
+  | 'admin'
+  | 'principal'
+  | 'vice_principal'
+  | 'principal_assistant'
+  | 'office_head'
+  | 'moral_edu_head'
+  | 'grade_head'
+  | 'head_teacher'
+  | 'subject_lead'
+  | 'lesson_prep_lead'
+  | 'teacher'
 
-/** `teacher_roles` 的一行：一个人可以有多条（多身份是常态，不是异常） */
+/**
+ * `teacher_roles` 的一行：一个人可以有多条（多身份是常态，不是异常）。
+ *
+ * `scopeType` 的五个值各有确定含义（`schema.sql` §10.1.1 的 check 约束）：
+ *   `'school'`        全校或空（super / admin / 校级三档 / 办公室主任 / 德育处主任）
+ *   `'grade'`         本年级（年级主任）—— `scopeId` = 年级 id
+ *   `'class'`         本班（班主任）—— `scopeId` = 班级 id
+ *   `'subject'`       本校一个学科、**跨年级**（教研组长）—— `subjectCode` = 学科代码
+ *   `'grade_subject'` 本年级的一个学科（备课组长）—— `scopeId` = 年级 id + `subjectCode`
+ * ⚠️ `'department'` **刻意不存在**：平台里没有一条数据是按部门分的（见 `schema.sql` §10.1.1）。
+ */
 export type TeacherRole = {
   role: RoleCode
-  /** 管辖范围：`grade_head` → 年级，`head_teacher` → 班级，`super`/`admin` → 学校或空 */
-  scopeType?: 'school' | 'grade' | 'class'
+  /** 管辖范围（见上） */
+  scopeType?: 'school' | 'grade' | 'class' | 'subject' | 'grade_subject'
   scopeId?: string
+  /**
+   * 学科代码（`lib/subjects.ts` 的 `SubjectCode`）。
+   * **只有组长两档才有**（`subject_lead` / `lesson_prep_lead`）——
+   * 少了它，组长在平台里等于一位普通任课老师（判据永远匹配不到）。
+   */
+  subjectCode?: string
 }
 
 /** 导入校对表的行 —— 校验标记决定用户是否需要人工确认 */
@@ -293,6 +330,100 @@ export const CALL_STATE_TEXT: Record<CallState, string> = {
   called: '已叫',
   arrived: '已到',
   corrected: '已订正',
+}
+
+/* ---------------- 🆕 通知（2026-09-28） ---------------- */
+
+/**
+ * 通知的**发布范围**（`notices.scope_kind` 的 check 约束，逐字相同）。
+ *
+ * 🔴 **呼叫 ≠ 通知**（`管理架构与角色权限方案.md` §0.1）：
+ *    · 呼叫是**老师对学生**说话 → `calls` 表 → 教室那块大屏；
+ *    · 通知是**学校对老师**说话 → `notices` 表 → 教师的平台界面。
+ *    两者**没有一行可以共用**：`notices` 里不许出现 `student_nos` / `class_id` /
+ *    `assignment_id`（I45），`calls` 的读策略一个字都不改。
+ *
+ * 取值含义：
+ *   `school`        全校所有老师
+ *   `grade`         本年级的老师（在该年级的班上有任教关系 + 该年级的班主任 / 年级主任 / 备课组长）
+ *   `subject`       本学科的老师（跨年级）
+ *   `grade_subject` 本年级 + 本学科的老师
+ *   `role`          **某个职位**（🔴 只能发给自己级别以下的档位 —— 见下）
+ *   `custom`        手勾的一批老师
+ *
+ * ⚠️ `role` 那一条有一处**我替用户定的保守默认**（报告里标为假设）：
+ *    「发给职位」只允许发给自己级别以下的档位 —— 否则任何人都能给超管发通知，
+ *    而"我给校长发了条通知"在语义上就不成立。判据在数据库（`teacher_rank()`）。
+ */
+export type NoticeScopeKind =
+  | 'school'
+  | 'grade'
+  | 'subject'
+  | 'grade_subject'
+  | 'role'
+  | 'custom'
+
+/** 收件范围的一行（`notice_targets`）——**一行一个维度值**，按 `kind` 只有一列非空 */
+export type NoticeTarget = {
+  kind: NoticeScopeKind
+  gradeId?: string | null
+  subjectCode?: string | null
+  targetRole?: string | null
+  teacherId?: string | null
+}
+
+/** 一条通知（服务端 `/api/notice` 的 `list` 返回的形状） */
+export type Notice = {
+  id: string
+  title: string
+  body: string
+  scopeKind: NoticeScopeKind
+  senderId: string
+  createdAt: number
+  expiresAt: number | null
+  pinned: boolean
+  revokedAt: number | null
+  expired: boolean
+  /** 是不是我自己发的（自己发的永远看得见 —— I25 的同一条纪律） */
+  mine: boolean
+  /** 未读 = `createdAt > 我的 notice_seen_at`（I49：**只有这一个时间戳**） */
+  unread: boolean
+  targets: NoticeTarget[]
+}
+
+/**
+ * 「我能发给谁」的一个选项（数据库的 `my_notice_scopes()` 算出来的）。
+ *
+ * ⚠️ 它**不是判据的第二处**：它只决定界面上**摆不摆那个选项**，
+ *    真正的闸门是服务端那一次 `can_publish_notice_to()` RPC（I46）。
+ *    前端藏掉"全校"那个选项**不是**安全边界 —— 手打接口就绕过去了。
+ */
+export type NoticeScopeOption = {
+  scopeKind: NoticeScopeKind
+  gradeId: string | null
+  gradeName: string | null
+  subjectCode: string | null
+  roleCode: string | null
+}
+
+/** 通知的读+写入口（`lib/notices.ts`）。表还没建时一律返回"没做成"，前端不崩。 */
+export type NoticeBundle = {
+  /** 表在不在（探测结论，与 `ensureExamTables()` 同一套纪律） */
+  state: 'present' | 'missing' | 'unknown'
+  canPublish: boolean
+  scopes: NoticeScopeOption[]
+  notices: Notice[]
+  unread: number
+  seenAt: number | null
+}
+
+export const EMPTY_NOTICE_BUNDLE: NoticeBundle = {
+  state: 'missing',
+  canPublish: false,
+  scopes: [],
+  notices: [],
+  unread: 0,
+  seenAt: null,
 }
 
 /* ---------------- 教师自定义课表 ---------------- */

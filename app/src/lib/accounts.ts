@@ -3,7 +3,10 @@
    ------------------------------------------------------------
    服务端（`functions/api/teacher-account.ts`）才是闸门：
    它用 service_role 建号，并且**拿你的 JWT 去问数据库**
-   （`schema.sql` §13.2 的 `can_manage_teachers()` / `is_super_admin()`）。
+   （`schema.sql` §13.2 的 `can_create_teacher_accounts()` / `can_assign_roles()` /
+   `is_super_admin()`）。
+   🔴 2026-09-28 起那两个判据**不再同集合**：建号含办公室主任、指派身份不含 ——
+      这正是"拆 `can_manage_teachers`"那一轮的目的（见 `管理架构与角色权限方案.md` §三.4）。
    这里只做三件事：补邮箱后缀、带 JWT、把错误翻成人话。
    ============================================================ */
 
@@ -42,6 +45,11 @@ export type DirRole = {
   role: string
   scopeType: string
   scopeId: string
+  /**
+   * 🆕 组长两档的学科代码（`teacher_roles.subject_code`）。
+   * 少了它，界面上"取消这个身份"就删不掉那一行（键对不上）。
+   */
+  subjectCode: string
   scopeLabel: string
 }
 export type DirSubject = {
@@ -157,10 +165,24 @@ export const assignSubject = (input: {
   on: boolean
 }) => call<{ subjectCodeSaved?: boolean }>({ action: 'assign', ...input })
 
+/**
+ * 指派 / 取消身份。
+ *
+ * 🆕 2026-09-28：14 档身份里有**五种**范围形状，所以参数比原来多一个：
+ *   · `scopeType` / `scopeId` —— 年级（`grade`）或班级（`class`），组长两档用 `subject` / `grade_subject`
+ *   · `roleSubjectCode`      —— **组长两档必填**（少了它判据永远匹配不到，指派等于白做）
+ *   · 取消（`on: false`）时**要把这一行自己的形状原样传回来**（含学科代码）：
+ *     服务端按同一张形状表拼删除条件，少一个字段就会"看起来取消成功了、其实那行还在"。
+ *
+ * 🔴 服务端那道闸门与建号**不是**同一档：建号是
+ *    `can_create_teacher_accounts()`（含办公室主任），指派身份是 `can_assign_roles()`
+ *    （**不含**办公室主任）。
+ */
 export const setRole = (input: {
   teacherId: string
   role: string
   scopeType?: string
   scopeId?: string
+  roleSubjectCode?: string
   on: boolean
 }) => call<Record<string, never>>({ action: 'role', ...input })

@@ -315,9 +315,9 @@ export default function Settings() {
 
               🔴 判据读表（`entryVisible('/admin', …)`），而表里那一格是
                  **`isSuperAdmin`，不是 `canManageTeachers`** ——
-                 后者含教导处，而这块屏的定位是**平台维护者**（方案 §3.5 / §5.5 T7）。
+                 后者含教务处，而这块屏的定位是**平台维护者**（方案 §3.5 / §5.5 T7）。
                  `nav-checks.mjs` 的 A6 专门钉这一格：`[admin]` 对 `/accounts` 是 true、
-                 对 `/admin` 必须是 false（"最高管理员 ≠ 教导处"在入口层的唯一断言点）。
+                 对 `/admin` 必须是 false（"最高管理员 ≠ 教务处"在入口层的唯一断言点）。
 
               ⚠️ 这里只是**摆不摆入口**（"少点几下"），**不是安全边界**：
                  真正的闸门在服务端（`/api/admin/config-check` 问数据库的 `is_super_admin()`）。

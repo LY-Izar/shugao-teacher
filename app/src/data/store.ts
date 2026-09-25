@@ -15,6 +15,7 @@ import {
   DEFAULT_SUBJECT_CODE,
 } from '../lib/subjects'
 import * as remote from './remote'
+import * as noticeApi from '../lib/notices'
 import { makeClassrooms, makeDemoAssignments, makeDemoClasses, makeDemoExams, makeDemoSchedule, makeTemplates } from './seed'
 import type { Exam, ExamScore } from './examTypes'
 import type {
@@ -25,6 +26,8 @@ import type {
   ClassroomClient,
   ImportRow,
   Klass,
+  Notice,
+  NoticeScopeOption,
   QuestionMeta,
   ScheduleItem,
   Student,
@@ -127,6 +130,28 @@ type State = {
    * 探测一次、本页缓存（见 `remote.ensureExamTables`）。
    */
   examTables: 'unknown' | 'present' | 'missing'
+
+  /* ---- 🆕 通知（2026-09-28，见 功能设计与不变量.md I45–I50）---- */
+  /**
+   * `notices` / `notice_targets` 两张表在不在线上库里。
+   *
+   * `'missing'` = 还没跑 `schema.sql` 第 21 段。这时：
+   *   · 读：通知页显示"还没有通知"（**不白屏**）
+   *   · 写：**拒绝并说明**（服务端也会拒）
+   * 探测一次、本页缓存（见 `lib/notices.ts` 的 `ensureNoticeTables`）。
+   */
+  noticesState: 'unknown' | 'present' | 'missing'
+  /**
+   * 我看得到的通知。**这是数据库 RLS 筛过的结果** ——
+   * 前端**不再筛一遍**（M3 / §11.3）：教室端读不到、范围外的人读不到，都是数据库在拦。
+   */
+  notices: Notice[]
+  /** 我能不能发通知（**摆不摆那个入口**；能不能发给某个范围由服务端判） */
+  noticesCanPublish: boolean
+  /** 「我能发给谁」的选项清单 —— 由数据库 `my_notice_scopes()` 算出来（不是前端拼的） */
+  noticesScopes: NoticeScopeOption[]
+  /** 我上次把通知看到哪儿的时刻（`teachers.notice_seen_at`，一行一个老师 —— I49） */
+  noticesSeenAt: number | null
   /** 是否仍是初始演示数据（未做任何真实改动） */
   isDemo: boolean
   lastSeenAt: number
@@ -165,6 +190,21 @@ type State = {
    * 别人改了身份不影响我这次会话里已经拿到的 myRoles。
    */
   refreshMyRoles: () => Promise<void>
+
+  /* ---- 🆕 通知（2026-09-28）---- */
+  /**
+   * 读通知 + "我能发哪些范围"。
+   * ⚠️ **教室端根本到不了这条路**（`App.tsx` 的 `accountKind` 一支 + 数据库不给它任何行）。
+   */
+  hydrateNotices: () => Promise<void>
+  /** 把"我上次看到哪儿"推到最新（未读归 0）。**不记录"谁读过哪一条"**（I49） */
+  markNoticesSeen: () => Promise<void>
+  publishNotice: (input: noticeApi.PublishInput) => Promise<{ ok: true } | { ok: false; message: string }>
+  revokeNotice: (noticeId: string) => Promise<{ ok: true } | { ok: false; message: string }>
+  pinNotice: (
+    noticeId: string,
+    pinned: boolean,
+  ) => Promise<{ ok: true } | { ok: false; message: string }>
 
   signIn: (name: string) => void
   signOut: () => void
@@ -472,6 +512,11 @@ export const useStore = create<State>()(
       exams: [],
       examScores: [],
       examTables: 'unknown',
+      noticesState: 'unknown',
+      notices: [],
+      noticesCanPublish: false,
+      noticesScopes: [],
+      noticesSeenAt: null,
 
       /* ---------------- 后端 ---------------- */
 
@@ -518,6 +563,14 @@ export const useStore = create<State>()(
           myRoles: snap.roles,
           lastSeenAt: Date.now(),
         })
+        /*
+         * 🆕 通知**单独读**（与考试同一套理由，见上面那段）：
+         * 线上库还没跑 `schema.sql` 第 21 段时它返回空包，页面上是"还没有通知"，
+         * 而**整个应用照常可用**。
+         * ⚠️ 刻意**不**并进上面那个 `set({...})`：那样"通知读不到"就会和
+         *    "快照读到了"混在同一帧里，读的人分不出是哪一个成功。
+         */
+        await get().hydrateNotices()
       },
 
       clearSyncError: () => set({ syncError: null }),
@@ -526,6 +579,104 @@ export const useStore = create<State>()(
         const id = get().userId
         if (!id) return
         set({ myRoles: await remote.loadMyRoles(id) })
+      },
+
+      /* ---- 🆕 通知（2026-09-28，见 功能设计与不变量.md I45–I50） ---- */
+
+      hydrateNotices: async () => {
+        /*
+         * 本地演示模式：**没有服务端**，所以给两条夹具通知。
+         * ⚠️ 这不是"假权限" —— `canPublish` / `scopes` 在演示模式下恒为空，
+         *    所以 `?as=` 注入的身份在演示里**看不见**「发通知」那个入口
+         *    （那一条由 `nav-checks.mjs` 的纯函数断言钉，不靠界面）。
+         *    夹具只让"通知页长什么样"这件事在截图里看得见。
+         */
+        if (!isRemote) {
+          const now = Date.now()
+          set({
+            noticesState: 'present',
+            notices: [
+              {
+                id: 'demo-n1',
+                title: '全体教师会（周三 16:30 · 报告厅）',
+                body: '本周三下午 16:30 在报告厅开全体教师会，请各位老师提前安排好课务。会后各教研组留下开短会。',
+                scopeKind: 'school',
+                senderId: 't-1',
+                createdAt: now - 3600_000,
+                expiresAt: null,
+                pinned: true,
+                revokedAt: null,
+                expired: false,
+                mine: false,
+                unread: true,
+                targets: [{ kind: 'school' }],
+              },
+              {
+                id: 'demo-n2',
+                title: '高二物理集体备课改到周五',
+                body: '本周集体备课时间调整到周五第 8 节，地点在物理实验室（一）。请带上本周的练习册统计。',
+                scopeKind: 'grade_subject',
+                senderId: 't-1',
+                createdAt: now - 7200_000,
+                expiresAt: null,
+                pinned: false,
+                revokedAt: null,
+                expired: false,
+                mine: false,
+                unread: true,
+                targets: [{ kind: 'grade_subject', gradeId: null, subjectCode: 'physics' }],
+              },
+            ],
+            noticesCanPublish: false,
+            noticesScopes: [],
+            noticesSeenAt: null,
+          })
+          return
+        }
+        const bundle = await noticeApi.loadNotices()
+        set({
+          noticesState: bundle.state,
+          notices: bundle.notices,
+          noticesCanPublish: bundle.canPublish,
+          noticesScopes: bundle.scopes,
+          noticesSeenAt: bundle.seenAt,
+        })
+      },
+
+      markNoticesSeen: async () => {
+        if (!isRemote) {
+          // 演示模式：只在内存里把未读抹掉（没有数据库可写）
+          set((s) => ({
+            notices: s.notices.map((n) => ({ ...n, unread: false })),
+            noticesSeenAt: Date.now(),
+          }))
+          return
+        }
+        const at = Date.now()
+        if (await noticeApi.markNoticesSeen(at)) {
+          set((s) => ({
+            notices: s.notices.map((n) => ({ ...n, unread: false })),
+            noticesSeenAt: at,
+          }))
+        }
+      },
+
+      publishNotice: async (input) => {
+        const res = await noticeApi.publishNotice(input)
+        if (res.ok) await get().hydrateNotices()
+        return res.ok ? { ok: true as const } : { ok: false as const, message: res.message }
+      },
+
+      revokeNotice: async (noticeId) => {
+        const res = await noticeApi.revokeNotice(noticeId)
+        if (res.ok) await get().hydrateNotices()
+        return res.ok ? { ok: true as const } : { ok: false as const, message: res.message }
+      },
+
+      pinNotice: async (noticeId, pinned) => {
+        const res = await noticeApi.pinNotice(noticeId, pinned)
+        if (res.ok) await get().hydrateNotices()
+        return res.ok ? { ok: true as const } : { ok: false as const, message: res.message }
       },
 
       signIn: (name) =>
@@ -556,6 +707,12 @@ export const useStore = create<State>()(
           exams: [],
           examScores: [],
           examTables: 'unknown',
+          // 通知也跟着会话走：换账号后不能还留着上一个人看得到的通知
+          noticesState: 'unknown',
+          notices: [],
+          noticesCanPublish: false,
+          noticesScopes: [],
+          noticesSeenAt: null,
           hydrated: !isRemote,
           // 身份跟着会话走，别把上一个账号的类型留在内存里
           accountKind: 'teacher',
@@ -1329,6 +1486,11 @@ export const useStore = create<State>()(
           exams: [],
           examScores: [],
           examTables: 'unknown',
+          noticesState: 'unknown',
+          notices: [],
+          noticesCanPublish: false,
+          noticesScopes: [],
+          noticesSeenAt: null,
           isDemo: false,
           streakDays: 1,
           hydrated: !isRemote,

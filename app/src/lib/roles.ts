@@ -27,13 +27,28 @@ import type { RoleCode, Teacher, TeacherRole } from '../data/types'
 import { teacherSubjectLabel } from './subjects'
 
 /** 身份的显示名。加一档身份 = 这里加一行 + schema 的 check 约束加一个值。
- *  `admin` 显示成「教导处」—— 用户口径：「`admin` = 教导处 / 校级行政，
- *  不是"行政老师"这个新角色」（2026-09-27）。角色代码**不改**（改代码是破坏性迁移）。 */
+ *
+ *  🔴 2026-09-28「管理架构与角色权限」这一轮：**14 档身份**（`管理架构与角色权限方案.md` §一）。
+ *  三条要读懂的：
+ *   · `admin` 的显示名从「教导处」改成「**教务处**」（用户这次的架构里叫教务处）。
+ *     **代号一个字节都没改**（改代码是破坏性迁移），库里 `admin` 有 0 行 → 纯文案、零数据迁移。
+ *   · 校级三档（校长 / 副校长 / 校长助理）**在数据库里逐格相同**（方案 §三.2）：
+ *     三个显示名、一条判据。要分开就得先有"分管范围"这个字段 —— 今天没有。
+ *   · 组长两档（教研组长 / 备课组长）**权限逐格相同、只是职责/头衔不同**（用户拍板）：
+ *     建两档是为了标签写对，不是为了权限不同。
+ */
 export const ROLE_NAME: Record<RoleCode, string> = {
   super: '最高管理员',
-  admin: '教导处',
+  admin: '教务处',
+  principal: '校长',
+  vice_principal: '副校长',
+  principal_assistant: '校长助理',
+  office_head: '办公室主任',
+  moral_edu_head: '德育处主任',
   grade_head: '年级主任',
   head_teacher: '班主任',
+  subject_lead: '教研组长',
+  lesson_prep_lead: '备课组长',
   teacher: '任课教师',
 }
 
@@ -47,33 +62,109 @@ export function roleName(role?: string | null): string {
 /**
  * 我是不是最高管理员（界面用；闸门见文件头①）。
  *
- * ⚠️ 当前**没有调用方**：指派身份已经改成 `canAssignRoles()`（教导处 + 最高管理员）。
- * 留着它是因为"只有最高管理员"这件事仍然是一个**独立的判据**
- * （`schema.sql` §16.8：留给交接超管身份这类只有超管能做的事）——
- * 别拿 `canManageTeachers()` 去替代它，那正是把两种身份混成一种。
+ * 它仍然是一个**独立的判据**（`schema.sql` §16.8：留给交接超管身份这类只有超管能做的事，
+ * 以及 §20 的超管运维面板 `/admin`）—— 别拿 `canManageTeachers()` 去替代它，
+ * 那正是把两种身份混成一种。
  */
 export function isSuperAdmin(roles?: readonly TeacherRole[] | null): boolean {
   return (roles ?? []).some((r) => r.role === 'super')
 }
 
-/** 我能不能建教师账号 / 维护任课关系 / 重置密码（界面用；闸门见文件头①） */
+/**
+ * 我能不能**建教师账号 / 维护任课关系 / 重置密码**（界面用；闸门见文件头①）。
+ *
+ * 🔴 2026-09-28 拆函数（方案 §三.4 的 N-1）：服务端那一侧现在是**两个**判据
+ *    （`can_create_teacher_accounts()` / `can_assign_roles()`），前端这两个函数与它们
+ *    **一一对应**，别合并：
+ *      · 建号 → 最高管理员 + 教务处 + 🆕**办公室主任**
+ *      · 指派身份 → 最高管理员 + 教务处（**不含办公室主任**）
+ *    合并的那一刻，办公室主任就能在界面上看到"加一个身份"的按钮 ——
+ *    而服务端会 403（按钮点了被拒，正是"编出来的按钮"）。
+ *
+ * ⚠️ 它含 `office_head` 是**刻意的**，且**不改那 6 列在原来那 34 行上的任何一格**：
+ *    那 6 列里没有 `office_head`，所以对它求值只会是 false（见方案 §4.5 的 `/accounts` 那一行）。
+ */
 export function canManageTeachers(roles?: readonly TeacherRole[] | null): boolean {
+  return (roles ?? []).some(
+    (r) => r.role === 'super' || r.role === 'admin' || r.role === 'office_head',
+  )
+}
+
+/**
+ * 我能不能**指派身份**（班主任 / 年级主任 / 组长 / 校级三档 …）。
+ *
+ * 用户 2026-09-27 口径：**教务处 + 最高管理员**都能指派 ——
+ * 原话是「班主任，年级主任的身份也要由行政管理（教务处）给」。
+ *
+ * 🔴 它**比 `canManageTeachers()` 窄**（少一档办公室主任），这就是拆函数的意义：
+ *    **建号 ≠ 指派身份**。两者今天**不再同集合** —— 这正是"拆开"的验收点
+ *    （`nav-checks.mjs` 有一条专门的断言钉它）。
+ */
+export function canAssignRoles(roles?: readonly TeacherRole[] | null): boolean {
   return (roles ?? []).some((r) => r.role === 'super' || r.role === 'admin')
 }
 
 /**
- * 我能不能**指派身份**（班主任 / 年级主任 / 教导处 / 最高管理员）。
+ * 我是不是**校级领导**（校长 / 副校长 / 校长助理）。
  *
- * 用户 2026-09-27 口径：**教导处 + 最高管理员**都能指派 ——
- * 原话是「班主任，年级主任的身份也要由行政管理（教导处）给」。
- * （09-26 那一轮曾经做成"只有最高管理员"，与这条口径不符，已改。）
- *
- * 它与 `canManageTeachers()` 今天**恰好同集合**，但仍然写成两个函数：
- * 这是两处判据、两种语义（能建号 ≠ 能指派身份），将来任一边收紧时，
- * 改的是一个函数而不是散落各处的 `role === 'super' || role === 'admin'`（I17）。
+ * 三档**在数据库里逐格相同**（全校只读 + 发全校通知）—— 方案 §三.2 明说了这个取舍：
+ * 平台里没有"分管哪条线"这个数据结构，所以也判不了。
+ * ⚠️ 它只回答"摆不摆入口"（M1/M2），**不回答"能看几个班"** —— 那是 RLS 的事。
  */
-export function canAssignRoles(roles?: readonly TeacherRole[] | null): boolean {
-  return (roles ?? []).some((r) => r.role === 'super' || r.role === 'admin')
+export function isSchoolLeader(roles?: readonly TeacherRole[] | null): boolean {
+  return (roles ?? []).some(
+    (r) =>
+      r.role === 'principal' || r.role === 'vice_principal' || r.role === 'principal_assistant',
+  )
+}
+
+/**
+ * 我**看不看得见教学数据**（班级 / 名单 / 作业 / 成绩 / 错题 / 考试）。
+ *
+ * = 超管 · 教务处 · 校级三档 · 德育处主任。
+ * 🔴 **德育处是"只读"**：看得见、一处也改不了（写的那几个判据里没有它）。
+ * 🔴 **办公室主任不在这里** —— 他今天只做两件事：**建号 + 发全校通知**，
+ *    看不到任何教学数据（方案 §一.2 第 6 行）。
+ */
+export function seesTeachingData(roles?: readonly TeacherRole[] | null): boolean {
+  return (roles ?? []).some((r) => SEES_TEACHING_DATA.has(r.role))
+}
+
+/** `seesTeachingData()` 的那一组（写成常量是为了让类型检查器帮我们盯住拼错的角色代码） */
+const SEES_TEACHING_DATA: ReadonlySet<RoleCode> = new Set<RoleCode>([
+  'super',
+  'admin',
+  'moral_edu_head',
+  'principal',
+  'vice_principal',
+  'principal_assistant',
+])
+
+/**
+ * 我能不能**发通知**（能打开"发通知"这个动作）。
+ *
+ * 🔴 八档：超管 · 教务处 · 校级三档 · 办公室主任 · 德育处主任 · 年级主任 · 两个组长。
+ * **班主任与任课教师不发**：他们的"班级事务"走**呼叫**（给学生的大屏），不是通知 ——
+ * 通知的真实语义是"**学校对老师说话**"（方案 §0.1）。
+ * ⚠️ "能发"与"**能发给谁**"是**两件事**：年级主任与组长只能发给自己那个范围
+ *    （本年级 / 本学科），而这一条**只在服务端/数据库判**（I46）——
+ *    前端看不见那个范围，也不可能靠这里绕过去。
+ */
+export function canPublishNotice(roles?: readonly TeacherRole[] | null): boolean {
+  return (roles ?? []).some((r) =>
+    [
+      'super',
+      'admin',
+      'principal',
+      'vice_principal',
+      'principal_assistant',
+      'office_head',
+      'moral_edu_head',
+      'grade_head',
+      'subject_lead',
+      'lesson_prep_lead',
+    ].includes(r.role),
+  )
 }
 
 /**
@@ -118,11 +209,30 @@ export function roleChips(
  * `teacher`（任课教师）**不在表里**：它是"没有管理身份"的那一档，
  * 只有它的老师照旧显示学科。
  *
+ * 🆕 2026-09-28：14 档身份里除 `teacher` 之外全在表里 —— 包括**组长两档**。
+ * 理由（方案 §5.6 的建议，本轮采纳）：**组长是身份，不是学科** ——
+ * 「教研组长」比「物理」更能回答"这个人是谁"。
+ * ⚠️ 布局约束随之而来（`功能设计与不变量.md` §13.10）：标签宽 194px，
+ *    多一档会折行 —— 折行是**允许**的（容器 `flex-wrap` + 分隔符处断行），
+ *    但"一个人挂了 5 档身份"那种账号会占三行。这是显示取舍，不影响任何判据。
+ *
  * ⚠️ 这张表只决定**标签上按什么顺序写**，与权限无关 ——
  *    "谁能建号 / 谁能指派身份 / 谁改得了成绩"一律以数据库为准（§13.5 I16、§16）。
  *    别拿它去写任何 if 判断（那正是 I17 说的"第二处判据"）。
  */
-const MANAGING_ROLES: readonly RoleCode[] = ['super', 'admin', 'grade_head', 'head_teacher']
+const MANAGING_ROLES: readonly RoleCode[] = [
+  'super',
+  'admin',
+  'principal',
+  'vice_principal',
+  'principal_assistant',
+  'office_head',
+  'moral_edu_head',
+  'grade_head',
+  'subject_lead',
+  'lesson_prep_lead',
+  'head_teacher',
+]
 
 /**
  * 多个身份之间的分隔符：` · `（与 `roleChips()` 里「班主任 · 高二(4)班」同一个符号）。
@@ -284,6 +394,12 @@ export type EntryKey =
   | '/grades/promote'
   | '/settings/terms'
   | '/admin'
+  /* 🆕 2026-09-28 通知两行（`管理架构与角色权限方案.md` §四.2 的第 18 / 19 行）。
+     它们是**新加的两行**，不是"改了某一行" —— 所以原来那 14 个 key 的值一个都没变。
+     ⚠️ 组长两档因此在入口层**比任课教师多一个入口**（`/notices/new`）：
+     这是那 34 行之外的新事实，矩阵里体现为 `27/9/0` vs `26/10/0`。 */
+  | '/notices'
+  | '/notices/new'
 
 type EntryRule = {
   /** 显示名（登记表要能被人读 —— 这是"矩阵能不能对上"的一半） */
@@ -296,11 +412,11 @@ type EntryRule = {
 }
 
 /**
- * 我有没有**年级管理这一层的身份**（最高管理员 / 教导处 / 年级主任）。
+ * 我有没有**年级管理这一层的身份**（最高管理员 / 教务处 / 年级主任）。
  *
  * 🔴 它**故意不含 `head_teacher`（班主任）** —— 这是本轮**一处刻意的取舍**，写清楚：
  *
- *   · 名字上像"有管理身份的人"，而 `MANAGING_ROLES`（下面那张**标签优先级**表）
+ *   · 名字上像"有管理身份的人"，而 `MANAGING_ROLES`（上面那张**标签优先级**表）
  *     确实含班主任 —— 但那个数组决定的是"标签上按什么顺序写字"，
  *     `I17` 明令**不许拿它写 if**，所以这里另立一个函数、**另定一组角色**；
  *   · 班主任**不进**年级管理：方案 §2.3 第 29–31 行原文（引自 `年级管理与选科走班方案.md`
@@ -309,6 +425,11 @@ type EntryRule = {
  *   · 矩阵本身也是这么算的：`head_teacher` 与 `teacher` 两列的 V/E/B 小计**必须一样**
  *     （25/9/0，方案 §2.2 那张"规模感"表），而"班主任多 4 格 V"会让它变成 29 ——
  *     总分也就会从 145 变成 149。**145 这个自检值只有班主任不进年级管理才成立。**
+ *
+ * ⚠️ 2026-09-28 这一轮它**一个字没改**（仍是 super / admin / grade_head）——
+ *    新加的那几档走的是**另一个**函数（`seesTeachingData()`），
+ *    在 `ENTRIES` 里以 `or` 的形式追加。这么写是为了让"那 34 行的 6 列一个格都不改"
+ *    这句话**在代码里看得出来**（改这一个函数的成员 = 同时动 `/grades` 与 `/settings/terms`）。
  */
 export function hasManagingRole(roles?: readonly TeacherRole[] | null): boolean {
   return (roles ?? []).some(
@@ -340,11 +461,21 @@ export const ENTRIES: Record<EntryKey, EntryRule> = {
   // §2.3 ***REMOVED***17：能走到呼叫页的人（= 能改这份作业的老师）就有记录可看，
   // 六个教师身份都是 V；管理身份与任课老师的差别**在数据范围**（RLS），不在入口。
   '/calls': { label: '呼叫记录', visibleFor: () => true },
-  // 只有最高管理员 / 教导处（`canManageTeachers()`）；服务端那道闸门见 G1。
+  /*
+   * 只有**能建教师账号**的几档（`canManageTeachers()`：最高管理员 / 教务处 / 🆕办公室主任）。
+   * 🔴 2026-09-28 起它指向 `canManageTeachers` 而**不再**是"能指派身份"那一档 ——
+   *    办公室主任建号要看得见这一页，而**指派身份仍归教务处 + 超管**（服务端 403）。
+   *    ⚠️ 这一处换的是**函数**、不是值：在那 6 列（没有 office_head）上逐格不变（方案 §4.5）。
+   */
   '/accounts': { label: '教师账号', visibleFor: canManageTeachers },
-  // ★ 将来（年级管理与选科走班方案 §4.1）：super/admin 全部、年级主任本年级、班主任与任课老师不进。
-  '/grades': { label: '年级管理', visibleFor: hasManagingRole },
-  // ★ 将来（同方案 §4.2.5）：提档 = `is_school_admin()`（super + 教导处），**年级主任 ❌**。
+  // ★ 将来（年级管理与选课走班方案 §4.1）：super/admin 全部、年级主任本年级、班主任与任课老师不进。
+  //  🆕 追加 `seesTeachingData`：德育处主任与校级三档**看得见**年级/班级名册（只读）——
+  //     德育处按"读得一样宽"给 V（他要看名册才能管班主任，方案 §4.2 第 30–32 行）。
+  '/grades': {
+    label: '年级管理',
+    visibleFor: (roles) => hasManagingRole(roles) || seesTeachingData(roles),
+  },
+  // ★ 将来（同方案 §4.2.5）：提档 = `is_school_admin()`（super + 教务处），**年级主任 ❌**。
   '/grades/promote': { label: '提档与毕业', visibleFor: canManageTeachers },
   /*
    * ★ 将来：**super / admin / 年级主任**（`hasManagingRole`）。
@@ -359,8 +490,28 @@ export const ENTRIES: Record<EntryKey, EntryRule> = {
    */
   '/settings/terms': { label: '学期与学年', visibleFor: hasManagingRole },
   // ★ 平台运维：**只能是 `isSuperAdmin`**（超管面板方案 §3.5 原文：不能用
-  // `canManageTeachers()`，那会把教导处也放进来）。服务端 `POST /api/admin/*` 是闸门。
+  // `canManageTeachers()`，那会把教务处也放进来）。服务端 `POST /api/admin/*` 是闸门。
   '/admin': { label: '平台运维', visibleFor: isSuperAdmin },
+  /* ---------------- 🆕 通知两行（2026-09-28）---------------- */
+  /*
+   * 看通知 = **所有老师**（含班主任与任课教师）—— 收件箱对谁都有意义，
+   * 而"看通知"与"发通知"是**两件事**（方案 §三 第 39 行）。
+   * 🔴 **用 `() => true` 而不是 `canPublishNotice`**：用后者会把班主任和任课老师
+   *    挡在自己的收件箱外面 —— 他们收得到通知，却打不开那一页。
+   * ⚠️ 教室端是 **B**（它到不了任何教师端页面，`App.tsx:65` 一句一条管全部）——
+   *    那不是这里写 32 个 false 能做到的（M2 只准读 roles 一个参数，见 A1 的注释）。
+   */
+  '/notices': { label: '通知', visibleFor: () => true },
+  /*
+   * 发通知 = 能发的**八档**（方案 §三 第 33 行）：
+   *   超管 · 教务处 · 校级三档 · 办公室主任 · 德育处主任 · 年级主任 · 教研组长 · 备课组长。
+   * ⚠️ **班主任与任课教师是 E 而不是 B**（方案 §4.2 第 19 行）：他们进来会看到
+   *    "你没有发通知的权限"这样一句说明（服务端 403），**不构成任何信息泄露**。
+   *    这里给 `V` 会摆出一个"点了被拒"的按钮，而"发通知"是**新功能**，从一开始就该是对的。
+   * 🔴 **能发给谁**完全不在这里 —— 判据只在服务端/数据库（I46）：年级主任与组长
+   *    只能发给自己那个范围，前端藏掉"全校"那个选项**不是**安全边界。
+   */
+  '/notices/new': { label: '发通知', visibleFor: canPublishNotice },
 }
 
 /**
@@ -428,11 +579,21 @@ export function visibleEntryKeys<K extends EntryKey>(
         所以 `?as=nonsense` 也测得到"认不出的身份不会意外拿到管理入口"。
    ============================================================ */
 
-/** 合法的角色代码（与 `RoleCode` 同一组；`classroom` 刻意**不在**里面 —— 它不是身份，是另一张表的一行） */
+/** 合法的角色代码（与 `RoleCode` 同一组；`classroom` 刻意**不在**里面 —— 它不是身份，是另一张表的一行）
+ *  ⚠️ 这一组同时是 `?as=` 注入的**白名单来源**（`nav-checks.mjs` 的 A7 拿它逐个试），
+ *    所以 14 档身份一个都不能漏 —— 漏了就等于"这一档在 DEV 钩子里注入不了"。
+ */
 export const TEST_ROLE_CODES: readonly RoleCode[] = [
   'super',
   'admin',
+  'principal',
+  'vice_principal',
+  'principal_assistant',
+  'office_head',
+  'moral_edu_head',
   'grade_head',
+  'subject_lead',
+  'lesson_prep_lead',
   'head_teacher',
   'teacher',
 ]

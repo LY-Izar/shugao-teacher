@@ -1789,7 +1789,13 @@ await withLock(async () => {
         }
       }
 
-      const RAIL_TEACHER = ['工作台', '班级', '作业', '考试', '错题集', '日程表', '我的']
+      /*
+       * 🆕 2026-09-28：加了「通知」那一项（`管理架构与角色权限方案.md` §四.2 第 18 行：
+       * **所有老师都是 V**）。所以这份清单从 7 项变成 **8 项**。
+       * ⚠️ 它**对每一个教师身份都摆**（含班主任与任课教师）—— 收件箱对谁都有意义，
+       *    而"看通知"与"发通知"是两件事（后者只有那八档，见 `ENTRIES['/notices/new']`）。
+       */
+      const RAIL_TEACHER = ['工作台', '班级', '作业', '考试', '错题集', '日程表', '通知', '我的']
 
       /* ---------- B1：桌面左栏逐角色**集合相等**（多一项也红） ---------- */
 
@@ -1843,7 +1849,8 @@ await withLock(async () => {
         /*
          * 🔴 **今天超管的左栏与任课教师一模一样，这是对的** —— 必须把"为什么"写下来，
          *    否则下一个人会以为这一节漏测了：
-         *    ① `NAV`（桌面左栏那 7 项）里的每一条，方案 §2.2 对六档教师身份都是 **V**
+         *    ① `NAV`（桌面左栏那 **8** 项，2026-09-28 加了「通知」）里的每一条，
+         *       方案 §2.2 / §四.2 对**所有教师身份**都是 **V**
          *       —— 也就是说**今天这一栏的过滤结果对所有教师身份相同**；
          *    ② 超管多出来的那两项（`/grades` 年级管理、`/admin` 平台运维）是方案里的
          *       ★ 规划项：路由还没有（`PAGES` 的 `live:false`），`NAV` 里自然也没有。
@@ -1854,7 +1861,7 @@ await withLock(async () => {
          */
         check(
           JSON.stringify(got) === JSON.stringify(RAIL_TEACHER),
-          `${SNAV}：**超管**的左栏也是这 7 项（NAV 里今天没有"只给超管"的项 —— 见注释，不是漏测）`,
+          `${SNAV}：**超管**的左栏也是这 8 项（NAV 里今天没有"只给超管"的项 —— 见注释，不是漏测）`,
           `实际 ${got.length} 项：${got.join(' / ') || '(空)'}`,
         )
         check(
@@ -1907,7 +1914,7 @@ await withLock(async () => {
          * （理由见上一条断言的注释：NAV 里没有只给超管的项）。
          * ⚠️ 比的是**集合相等**：多一项（比如不小心把「呼叫记录」塞进来）也红。
          */
-        const wantSheet = ['班级', '考试', '错题集', '日程表']
+        const wantSheet = ['班级', '考试', '错题集', '日程表', '通知']
         check(
           JSON.stringify(sheet.items) === JSON.stringify(wantSheet),
           `${SNAV}：**超管**的展开层 = 左栏减去胶囊那三项（N3：COLLAPSED 是可见差集，自动的）`,
@@ -1932,8 +1939,8 @@ await withLock(async () => {
         await navGoto('/', 'teacher')
         const sheet = await sheetLabels()
         check(
-          JSON.stringify(sheet.items) === JSON.stringify(['班级', '考试', '错题集', '日程表']),
-          `${SNAV}：**任课教师**的展开层只有那四项（与超管今天相同，理由见 B1 的注释）`,
+          JSON.stringify(sheet.items) === JSON.stringify(['班级', '考试', '错题集', '日程表', '通知']),
+          `${SNAV}：**任课教师**的展开层只有那五项（与超管今天相同，理由见 B1 的注释）`,
           `实际：${sheet.items.join(' / ') || '(空)'}`,
         )
         check(
@@ -2708,7 +2715,7 @@ await withLock(async () => {
         const one = (role) => [{ role }]
         for (const [role, want] of [
           ['super', '最高管理员'],
-          ['admin', '教导处'],
+          ['admin', '教务处'],
           ['grade_head', '年级主任'],
           ['head_teacher', '班主任'],
         ]) {
@@ -2720,7 +2727,7 @@ await withLock(async () => {
         }
         check(
           R.currentIdentityLabel(one('admin'), subj) === R.roleName('admin'),
-          `${SID}：「教导处」这个显示名**复用 lib/roles.ts 里那一个**（没另起一个词）`,
+          `${SID}：「教务处」这个显示名**复用 lib/roles.ts 里那一个**（没另起一个词）`,
           `roleName('admin')=「${R.roleName('admin')}」，标签=「${R.currentIdentityLabel(one('admin'), subj)}」`,
         )
         /* 🔴 多身份：**全露**（2026-09-27 用户拍板），顺序按 MANAGING_ROLES 的优先级 */
@@ -2738,15 +2745,15 @@ await withLock(async () => {
         )
         check(
           R.currentIdentityLabel([...one('head_teacher'), ...one('super'), ...one('admin')], subj) ===
-            '最高管理员 · 教导处 · 班主任',
-          `${SID}：三个身份全露、且按优先级排（超管 > 教导处 > 班主任）`,
+            '最高管理员 · 教务处 · 班主任',
+          `${SID}：三个身份全露、且按优先级排（超管 > 教务处 > 班主任）`,
           `读到「${R.currentIdentityLabel([...one('head_teacher'), ...one('super'), ...one('admin')], subj)}」`,
         )
         check(
           R.currentIdentityLabel(
             [...one('super'), ...one('admin'), ...one('grade_head'), ...one('head_teacher')],
             subj,
-          ) === '最高管理员 · 教导处 · 年级主任 · 班主任',
+          ) === '最高管理员 · 教务处 · 年级主任 · 班主任',
           `${SID}：四档身份全给 → 四个都写出来（这是宽度上的极值，布局断言盯的就是它）`,
           `读到「${R.currentIdentityLabel([...one('super'), ...one('admin'), ...one('grade_head'), ...one('head_teacher')], subj)}」`,
         )
@@ -2780,9 +2787,10 @@ await withLock(async () => {
           '把身份显示成"物理"正是 2026-09-25 要修的那个错，宁可显示一个生代码',
         )
         check(
-          R.currentIdentityLabel([{ role: 'dean' }, { role: 'principal' }], subj) === 'dean · principal',
+          R.currentIdentityLabel([{ role: 'dean' }, { role: 'wizard' }], subj) === 'dean · wizard',
           `${SID}：认不出的角色代码**也全露**（原样回显、按数组先后，排在认得出的身份后面）`,
-          `读到「${R.currentIdentityLabel([{ role: 'dean' }, { role: 'principal' }], subj)}」`,
+          `读到「${R.currentIdentityLabel([{ role: 'dean' }, { role: 'wizard' }], subj)}」`,
+          '⚠️ 原先这一格用的是 principal —— 2026-09-28 它变成了真身份（校长），所以换成一个真的认不出的代码',
         )
         check(
           R.currentIdentityLabel([{ role: 'dean' }, ...one('head_teacher')], subj) === '班主任 · dean',
@@ -2880,7 +2888,7 @@ await withLock(async () => {
       await step(SID, async () => {
         const cases = [
           { roles: [{ role: 'super' }], want: '最高管理员', why: '最高管理员' },
-          { roles: [{ role: 'admin' }], want: '教导处', why: '教导处（校级行政）' },
+          { roles: [{ role: 'admin' }], want: '教务处', why: '教务处（原「教导处」，2026-09-28 改名）' },
           { roles: [{ role: 'grade_head' }], want: '年级主任', why: '年级主任' },
           { roles: [{ role: 'head_teacher' }], want: '班主任', why: '班主任' },
           { roles: [{ role: 'teacher' }], want: '物理', why: '只有任课教师这一档' },
@@ -2892,13 +2900,38 @@ await withLock(async () => {
           },
           {
             roles: [{ role: 'super' }, { role: 'admin' }, { role: 'head_teacher' }],
-            want: '最高管理员 · 教导处 · 班主任',
+            want: '最高管理员 · 教务处 · 班主任',
             why: '多身份：三个',
           },
           {
             roles: [{ role: 'super' }, { role: 'admin' }, { role: 'grade_head' }, { role: 'head_teacher' }],
-            want: '最高管理员 · 教导处 · 年级主任 · 班主任',
+            want: '最高管理员 · 教务处 · 年级主任 · 班主任',
             why: '多身份：四个（宽度极值）',
+          },
+          /*
+           * 🆕 2026-09-28：**组长两档也要显示成身份**（不是学科）。
+           * 理由（方案 §5.6 的建议，本轮采纳）：组长是**身份**，不是学科 ——
+           * 「教研组长」比「物理」更能回答"这个人是谁"。
+           * ⚠️ 它同时是一条**布局**断言的前哨：多一档身份会让标签更长（见 §13.10 的宽度表）。
+           */
+          {
+            roles: [{ role: 'subject_lead', subjectCode: 'physics' }],
+            want: '教研组长',
+            why: '🆕 教研组长（组长是身份，不是学科）',
+          },
+          {
+            roles: [{ role: 'lesson_prep_lead', subjectCode: 'physics' }],
+            want: '备课组长',
+            why: '🆕 备课组长',
+          },
+          {
+            roles: [
+              { role: 'moral_edu_head' },
+              { role: 'office_head' },
+              { role: 'head_teacher' },
+            ],
+            want: '办公室主任 · 德育处主任 · 班主任',
+            why: '🆕 职能部门两档 + 班主任（优先级：办公室主任 > 德育处主任 > 班主任）',
           },
         ]
         for (const c of cases) {
@@ -2990,7 +3023,7 @@ await withLock(async () => {
           await idPage.waitForTimeout(100)
         }
         check(
-          tags.setting === '最高管理员 · 教导处 · 班主任',
+          tags.setting === '最高管理员 · 教务处 · 班主任',
           `${SID}：手机上设置页身份卡也把三个身份全写出来（同一个函数，没有"手机版取最高"这种事）`,
           `读到「${tags.setting}」`,
         )

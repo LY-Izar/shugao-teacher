@@ -138,6 +138,28 @@ await withLock(async () => {
   const missingCols = new Set()
   /** 表里有没有行（判"这一段跑过没有"的正面证据：`subjects` 字典该有 15 行） */
   const tableRows = new Map([['subjects', [{ code: 'physics', name: '物理' }]]])
+  /**
+   * 🔴 假库的**列模型**（补的是一次真实误报，留档在 `功能设计与不变量.md` §20.7）。
+   *
+   * 老假库对任何 `select=` 一律回 `[]`（"默认什么都在"）——
+   * 于是「**拿某一列当整张表的存在性探针**」（`select('id')`）这种写法
+   * 在假库里**永远是绿的**，而真库上：
+   * `subjects` 的主键是 `code`（`schema.sql` §12.1），**它根本没有 `id` 列**，
+   * 真 PostgREST 会回 `42703 column subjects.id does not exist`。
+   * 假库比真库宽松 = **假绿** —— 那次「§12 明明跑过了却报未跑」就是这么藏住的。
+   *
+   * 所以这里把真库的列清单建出来：**表在 → 不认识的列一律 42703**（真 PostgREST 的形状）。
+   * 其余被 C1 探到的表都有 `id`（`schema.sql` 逐张核过），
+   * 它们缺列的情形仍由 `missingCols` 显式造。
+   */
+  const REAL_COLS = new Map([
+    ['subjects', ['code', 'name', 'short', 'can_stream', 'sort', 'created_at']],
+  ])
+  /**
+   * 这些表**一律回 500 + 一个认不出来的错误码** —— 用来造"探测本身没结论"。
+   * 真环境里对应的是网关 502 / PostgREST 回了别的码：**没结论，不是"没跑"**。
+   */
+  const flakyTables = new Set()
 
   const server = createServer((req, res) => {
     const url = new URL(req.url ?? '/', `http://127.0.0.1:${PORT}`)
@@ -181,9 +203,21 @@ await withLock(async () => {
         })
       }
       const cols = url.searchParams.get('select') ?? '*'
+      if (flakyTables.has(table)) {
+        // 认不出来的错误（既不是 42P01 / PGRST205，也不是 42703）→ **没有结论**
+        return send(500, { code: 'XX000', message: 'internal error' })
+      }
       if (cols !== '*') {
+        const known = REAL_COLS.get(table)
         for (const c of cols.split(',')) {
           const col = c.trim()
+          if (col && known && !known.includes(col)) {
+            // 真 PostgREST：表在、这一列不在 → 42703 `column <表>.<列> does not exist`
+            return send(400, {
+              code: '42703',
+              message: `column ${table}.${col} does not exist`,
+            })
+          }
           if (col && missingCols.has(`${table}.${col}`)) {
             return send(400, {
               code: '42703',
@@ -619,7 +653,7 @@ await withLock(async () => {
       JSON.stringify(seen.map((s) => s.path)),
     )
     ok(
-      '① 而且**没有**问 can_manage_teachers（那个含教导处，方案 §5.5 明确不用）',
+      '① 而且**没有**问 can_manage_teachers（那个含教务处，方案 §5.5 明确不用）',
       !seen.some((s) => s.path === '/rest/v1/rpc/can_manage_teachers'),
     )
     ok(
@@ -629,7 +663,7 @@ await withLock(async () => {
     )
   }
 
-  /* ② 非 super（教导处）→ 403，而且话要说明白 */
+  /* ② 非 super（教务处）→ 403，而且话要说明白 */
   superValue = 'false'
   {
     const r = await post({ action: 'all' }, AUTH)
@@ -637,8 +671,8 @@ await withLock(async () => {
     eq('② 非 super → **403**', r.status, 403)
     eq('② status=forbidden', body.status, 'forbidden')
     ok(
-      '② 话里点明"只有最高管理员"，并说清教导处不在这一档',
-      body.message.includes('最高管理员') && body.message.includes('教导处'),
+      '② 话里点明"只有最高管理员"，并说清教务处不在这一档',
+      body.message.includes('最高管理员') && body.message.includes('教务处'),
       body.message,
     )
   }
@@ -1039,6 +1073,101 @@ await withLock(async () => {
   }
 
   /* ============================================================
+     第七节·补 · 🔴 一次真实误报的复现：**"表在、只是没有那一列" ≠ "这一段没跑"**
+     ------------------------------------------------------------
+     现场（超管在真环境上看到的）：
+       §12 明明跑过了（`subjects` 15 行、`assignments.subject_code` 回填对账 9/9/0、
+       RPC 全正常），面板却红着脸写
+       「**§12 未跑** → 列不存在 → 写路径"摘掉那一列"」。
+
+     根因（两处，都在这条链上）：
+       ① `probeTable()` 的探针写的是 `select('id')` ——
+          而 `subjects` 的主键是 `code`（`schema.sql` §12.1），**它没有 `id` 列**；
+          真 PostgREST 回 `42703 column subjects.id does not exist`，
+          而表存在性的判据里带了泛化的 `/does not exist/i` → **被当成"表不在"** → 红。
+       ② `agoText(now - drift.at)` 把"现在 − 时刻"当成了时刻喂进去 ——
+          两者常常是同一个毫秒，差 = 0 → `!at` → 恒显示「探测于 **未知**」。
+          那句"未知"会把人骗去查"是不是那次探测没拿到结论"，而真正红的是 ①。
+
+     反向对照（**必须有，否则这一节就是"永远为绿"的摆设**）：
+       · `subjects` **真的不在** → §12 必须仍然红；
+       · 探测本身没结论（认不出来的错）→ §12 必须灰、卡片必须灰。
+     ============================================================ */
+
+  {
+    missingTables.clear()
+    missingCols.clear()
+    flakyTables.clear()
+
+    const r = await C.probeSchemaDrift()
+    const by = new Map(r.sections.map((s) => [s.stage, s]))
+    eq(
+      '补① `subjects` 在、只是没有 `id` 列 → §12 必须是"已跑"（**不是"未跑"**）',
+      by.get('§12').state,
+      'present',
+    )
+    ok(
+      '补① 而且三格证据都是"读到了"（不是给个红点就完事）',
+      by.get('§12').cells.every((c) => c.state === 'present'),
+      JSON.stringify(by.get('§12').cells),
+    )
+    const sumFix = C.driftSummary(r.sections)
+    ok(
+      '补① 卡片不许因此变红（那句话里不许出现"未跑"）',
+      sumFix.state !== 'missing' && !sumFix.text.includes('未跑'),
+      `${sumFix.state} / ${sumFix.text}`,
+    )
+    /*
+     * 结构性钉子（比行为断言更狠）：**表存在性探测不许假设任何一列存在**。
+     * 行为那条要靠"假库恰好建模了那张表"才抓得住；这一条把写法本身钉死 ——
+     * 只要有人把 `select('id')` 写回去，两条一起红。
+     */
+    const tableProbes = seen.filter((s) =>
+      /^\/rest\/v1\/(schools|grades|teacher_roles|class_subjects|classroom_accounts|schedule_items|calls|classrooms|shared_files|exams|exam_scores|subjects)$/.test(
+        s.path,
+      ),
+    )
+    const probedPaths = [...new Set(tableProbes.map((s) => s.path))]
+    ok(
+      '补② 表存在性探测发出去的是 `select=*`（**不许拿某一列当整张表的探针**）',
+      probedPaths.length === 9 &&
+        probedPaths.every((p) => tableProbes.some((s) => s.path === p && s.search.includes('select=*'))),
+      JSON.stringify([...new Set(tableProbes.map((s) => `${s.path}${s.search}`))].slice(0, 10)),
+    )
+
+    /* 反向对照 A：表**真的不在**时，必须仍然红 —— 证明上面那两条不是"恒绿" */
+    missingTables.add('subjects')
+    const rA = await C.probeSchemaDrift()
+    const byA = new Map(rA.sections.map((s) => [s.stage, s]))
+    eq(
+      '补③ 反向对照：`subjects` **真的不在**（PGRST205）时 §12 必须仍然"未跑"',
+      byA.get('§12').state,
+      'missing',
+    )
+    eq('补③ 而卡片这时才该红', C.driftSummary(rA.sections).state, 'missing')
+    missingTables.delete('subjects')
+
+    /* 反向对照 B：探测本身没结论（认不出来的错）→ 灰，**绝不是红** */
+    flakyTables.add('subjects')
+    const rB = await C.probeSchemaDrift()
+    const byB = new Map(rB.sections.map((s) => [s.stage, s]))
+    eq(
+      '补④ 反向对照：探测本身没结论（500 + 认不出的码）→ §12 是"无法判断"',
+      byB.get('§12').state,
+      'indeterminate',
+    )
+    const sumB = C.driftSummary(rB.sections)
+    eq('补④ 卡片这时是灰的（**不是红**）', sumB.state, 'indeterminate')
+    eq('补④ 而且着色判据给的就是灰', C.driftTone(sumB.state), 'unknown')
+    ok(
+      '补④ "没结论"那一格带着原始证据（不能只说一句"无法判断"）',
+      byB.get('§12').cells.some((c) => c.state === 'indeterminate' && c.evidence.includes('XX000')),
+      JSON.stringify(byB.get('§12').cells),
+    )
+    flakyTables.clear()
+  }
+
+  /* ============================================================
      第八节 · 颜色合成与时间/字节的显示口径
      ============================================================ */
 
@@ -1049,7 +1178,50 @@ await withLock(async () => {
   eq('灰压过绿（"无法判断"不能归到绿）', C.worstTone(['ok', 'unknown']), 'unknown')
   eq('全绿才是绿', C.worstTone(['ok', 'ok']), 'ok')
 
-  eq('刚刚', C.agoText(0), '未知')
+  /*
+   * 🔴 三态 → 颜色：**"没结论"只能是灰，绝不能是红**（本轮那次误报钉下来的不变量）。
+   *    这条判据**只有一处实现**（`adminChart.driftTone()`），面板渲染直接调它 ——
+   *    所以这里断言的正是屏上那两处颜色：C1 卡的角标 + 每一段前面的点。
+   */
+  eq('三态着色：已跑 → 绿', C.driftTone('present'), 'ok')
+  eq('三态着色：未跑 → 红（**红只在"确实没跑"时出现**）', C.driftTone('missing'), 'bad')
+  eq('三态着色：无法判断 → 灰', C.driftTone('indeterminate'), 'unknown')
+  ok(
+    '"没结论"与"未跑"必须是两种颜色（把灰渲染成红 = 同一类误报的第二种形状）',
+    C.driftTone('indeterminate') !== C.driftTone('missing'),
+  )
+
+  /*
+   * `agoText(at, now)`：第一个参数是**时刻**，第二个是"现在"。
+   * ⚠️ 面板上曾经写成 `agoText(now - drift.at)`（把"现在 − 时刻"当成时刻喂进去）——
+   *    `drift.at` 与 `now` 常常是同一个毫秒，差 = 0 → `!at` → **恒显示"探测于 未知"**；
+   *    差几毫秒则显示成"20000 多天前"。那句"未知"把人骗去查"探测是不是没结论"。
+   */
+  eq(
+    '第二个参数是"现在"（传了它就必须按它算）',
+    C.agoText(1_700_000_000_000, 1_700_000_000_000 + 90_000),
+    '2 分钟前',
+  )
+  eq('时刻 0 → 如实说"未知"（不是"刚刚"）—— 这正是 `agoText(now - 时刻)` 的坑', C.agoText(0), '未知')
+  {
+    /* 静态钉子：`agoText(now - X)` 里的 X 只许是**时长**（`*agoMs`），不许是**时刻** */
+    const strip = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+    const re = /agoText\(\s*now\s*-\s*\(?\s*([A-Za-z_$][\w$.]*)/g
+    const badAgo = [...strip(readFileSync(resolvePath(APP, 'src/pages/Admin.tsx'), 'utf8')).matchAll(re)]
+      .map((m) => m[1])
+      .filter((x) => !/agoMs$/.test(x))
+    ok(
+      '不许把**时刻**当**时长**喂给 `agoText(now - …)`（"探测于 未知"的根因）',
+      badAgo.length === 0,
+      JSON.stringify(badAgo),
+    )
+    const goodHits = [...'const a = agoText(now - lastRun.agoMs)'.matchAll(re)]
+    ok(
+      '反向对照：上面那条正则抓得住 `agoText(now - X)` 的形状（不是空转）',
+      goodHits.length === 1 && goodHits[0][1] === 'lastRun.agoMs',
+      JSON.stringify(goodHits.map((m) => m[1])),
+    )
+  }
   eq('30 秒前 → 刚刚', C.agoText(Date.now() - 30_000), '刚刚')
   eq('3 小时前', C.agoText(Date.now() - 3 * 3_600_000), '3 小时前')
   eq('2 天前', C.agoText(Date.now() - 2 * 86_400_000), '2 天前')

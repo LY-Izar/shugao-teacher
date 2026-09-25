@@ -252,7 +252,7 @@ export default function Files() {
             ) : (
               <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 10, lineHeight: 1.7 }}>
                 你名下还没有班级 —— 传上去只有你自己看得见（教室端看不到）。
-                先建一个班、或让教导处把你的任课关系录进去。
+                先建一个班、或让教务处把你的任课关系录进去。
               </p>
             )}
 

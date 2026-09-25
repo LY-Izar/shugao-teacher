@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { Page } from '../components/AppShell'
 import {
   IconAlert,
+  IconBell,
   IconCamera,
   IconCheck,
   IconChevronRight,
@@ -25,6 +26,7 @@ import { collectStats } from '../lib/assignments'
 import { friendlyDate } from '../lib/date'
 import { analyzeRoster } from '../lib/roster'
 import { currentIdentityLabel, IDENTITY_TAG_STYLE } from '../lib/roles'
+import { noticeScopeText } from '../lib/notices'
 
 const todoPath = (a: { id: string; status: string }) =>
   a.status === 'collected' ? `/assignments/${a.id}/grade` : `/assignments/${a.id}/collect`
@@ -132,7 +134,7 @@ export default function Workbench() {
         </h1>
         <div className="mt-2 flex flex-wrap items-center gap-2">
           {/*
-            同上：有管理身份显示身份（**多个身份全露**，如「教导处 · 年级主任」），没有才显示学科。
+            同上：有管理身份显示身份（**多个身份全露**，如「教务处 · 年级主任」），没有才显示学科。
             这一行本来就是 `flex-wrap`，多身份时后面的标签整块落到下一行 —— 实测 3 / 4 个身份都不溢出。
           */}
           <span className="tag tag-accent" style={IDENTITY_TAG_STYLE}>
@@ -286,6 +288,9 @@ export default function Workbench() {
           )}
         </Panel>
       </div>
+
+      {/* 🆕 最新通知（2026-09-28）—— ①「工作台上一块常驻」那一处（方案 §九.7） */}
+      <NoticeBlock />
 
       {/* 今天的日程（假期不显示 —— 那天本来就没有课） */}
       {todayItems.length > 0 && moodState.mood !== 'holiday' ? (
@@ -541,5 +546,134 @@ export default function Workbench() {
         </div>
       </Sheet>
     </Page>
+  )
+}
+
+/**
+ * 🆕 「最新通知」这一块（2026-09-28，`管理架构与角色权限方案.md` §九.7 的 ①）。
+ *
+ * 🔴 **它是"被动展示"**：不打断、不弹、老师扫一眼就知道有没有事。
+ *    三条纪律（破坏任何一条就等于把通知做成了别的东西）：
+ *
+ *  ① **绝不进早间欢迎弹窗**（I48）。那个位置已经被"今天要批的作业"占了，
+ *     而且弹窗**关掉就今天不再弹** —— 一个可以被撤回的东西不该放在
+ *     "关掉就不再显示"的位置上。所以这一块是**页面里的一块**，不是浮层。
+ *  ② **红点不显示条数**（未读不是一个待办计数）。标题上只写"有新通知"。
+ *  ③ **一行都不筛**：`notices` 是数据库 RLS 筛过的结果（M3 / §11.3）。
+ *     教室端既到不了这个页面、也读不到任何一行（I47）—— 两处是同一条边界。
+ *
+ * ⚠️ 数据还没读回来时（`noticesState === 'unknown'`）**整块不渲染** ——
+ *    宁可没有这一块，也不要先画一个"还没有通知"再去改口。
+ */
+function NoticeBlock() {
+  const notices = useStore((s) => s.notices)
+  const state = useStore((s) => s.noticesState)
+  const navigate = useNavigate()
+  if (state === 'unknown') return null
+
+  const rows = [...notices]
+    .filter((n) => n.revokedAt === null && !n.expired)
+    .sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.createdAt - a.createdAt)
+    .slice(0, 3)
+  const hasUnread = rows.some((n) => n.unread)
+
+  return (
+    <div className="mb-4">
+      <Sect>
+        最新通知{hasUnread ? <span aria-label="有新通知"> · 有新通知</span> : null}
+      </Sect>
+      <Panel className="overflow-hidden">
+        {rows.length === 0 ? (
+          <button
+            type="button"
+            className="row"
+            style={{ padding: 13 }}
+            onClick={() => navigate('/notices')}
+          >
+            <span
+              className="grid place-items-center shrink-0"
+              style={{
+                width: 34,
+                height: 34,
+                border: '1px solid var(--color-line2)',
+                borderRadius: 4,
+                background: 'var(--color-surface2)',
+                color: 'var(--color-ink3)',
+              }}
+            >
+              <IconBell size={17} />
+            </span>
+            <span className="min-w-0 flex-1" style={{ fontSize: 13, color: 'var(--color-ink2)' }}>
+              还没有通知。学校有事务要通知老师时，会出现在这里 ——
+              它<b>不弹窗</b>，也不进早上的欢迎弹窗。
+            </span>
+          </button>
+        ) : (
+          <div className="stagger">
+            {rows.map((n) => (
+              <button
+                key={n.id}
+                type="button"
+                className="row"
+                style={{ padding: 13 }}
+                onClick={() => navigate('/notices')}
+              >
+                <span
+                  className="relative grid place-items-center shrink-0"
+                  style={{
+                    width: 34,
+                    height: 34,
+                    border: '1px solid var(--color-line2)',
+                    borderRadius: 4,
+                    background: 'var(--color-surface2)',
+                    color: n.unread ? 'var(--color-accent)' : 'var(--color-ink2)',
+                  }}
+                >
+                  <IconBell size={17} />
+                  {n.unread ? (
+                    <i
+                      data-unread-dot
+                      style={{
+                        position: 'absolute',
+                        top: 4,
+                        right: 4,
+                        width: 6,
+                        height: 6,
+                        borderRadius: 99,
+                        background: 'var(--color-accent)',
+                      }}
+                    />
+                  ) : null}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate" style={{ fontSize: 14, fontWeight: 620 }}>
+                    {n.title}
+                  </span>
+                  <span
+                    className="mt-0.5 flex items-center gap-3"
+                    style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}
+                  >
+                    <span>{noticeScopeText(n)}</span>
+                    <span>{friendlyDate(new Date(n.createdAt).toISOString().slice(0, 10))}</span>
+                  </span>
+                </span>
+                {n.pinned ? <Tag tone="accent">置顶</Tag> : null}
+                <IconChevronRight size={16} />
+              </button>
+            ))}
+          </div>
+        )}
+      </Panel>
+      {rows.length > 0 ? (
+        <button
+          type="button"
+          className="mt-1.5 px-1"
+          style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}
+          onClick={() => navigate('/notices')}
+        >
+          看全部通知 →
+        </button>
+      ) : null}
+    </div>
   )
 }

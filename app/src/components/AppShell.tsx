@@ -13,6 +13,7 @@ import { APP_VERSION_LABEL } from '../lib/version'
 import { DoneCelebration, MorningWelcome } from './MoodModals'
 import {
   IconAlert,
+  IconBell,
   IconCalendar,
   IconChart,
   IconCheck,
@@ -53,9 +54,14 @@ type NavItem = {
  * `NAV` 的 key 白名单（= `lib/roles.ts` 里 `ENTRIES` 有的那些）。
  *
  * 为什么要单独列一行而不是直接写 `EntryKey`：`NAV` 只装**桌面左栏里摆的**入口
- * （工作台 / 班级 / 作业 / 考试 / 错题集 / 日程表 / 我的），
- * 而 `ENTRIES` 里还有 `/accounts`、`/files`、`/calls` 这些"入口不在 NAV 里"的
- * （它们在「我的」页里，见方案 §2.4）。两者是**包含关系**，不是相等。
+ * （工作台 / 班级 / 作业 / 考试 / 错题集 / 日程表 / 通知 / 我的），
+ * 而 `ENTRIES` 里还有 `/accounts`、`/files`、`/calls`、`/notices/new`
+ * 这些"入口不在 NAV 里"的（它们在「我的」页或通知页里，见方案 §2.4）。
+ * 两者是**包含关系**，不是相等。
+ *
+ * 🆕 2026-09-28 加 `/notices`（方案 §四.2 第 18 行：**所有老师都是 V**）——
+ *    这是 `NAV` 从 7 项变成 8 项的那一次；`PIN_KEYS` **一个字没动**
+ *    （胶囊里那三个仍是"每天来回切"的那三个，见下）。
  */
 const NAV_KEYS = [
   '/',
@@ -64,6 +70,7 @@ const NAV_KEYS = [
   '/exams',
   '/wrong',
   '/schedule',
+  '/notices',
   '/settings',
 ] as const
 
@@ -91,6 +98,15 @@ const NAV: NavItem[] = [
    *    （`schedule_items.scope` 的 check 只有 `'mine'` / `'class'`）。
    */
   { to: '/schedule', label: '日程表', icon: IconCalendar, end: false },
+  /*
+   * 🆕 通知（2026-09-28）。放在日程表与「我的」之间：它是"学校对老师说话"，
+   * 频次高于「我的」、低于那三个每天来回切的 —— 所以它**不进 `PIN_KEYS`**
+   * （新入口宁可在展开层多一步，也别把胶囊挤成一排又小又密的按钮）。
+   * ⚠️ `end: true` 是**故意**的：`/notices/new` 是"进去写一条、写完就走"的动作页，
+   *    它**不该**让左栏的「通知」一直高亮着（`end:false` 会让 `/notices/new`
+   *    也把「通知」点亮）。同一条判断在移动端展开层里由 `n.end` 复用。
+   */
+  { to: '/notices', label: '通知', icon: IconBell, end: true },
   { to: '/settings', label: '我的', icon: IconUser, end: false },
 ]
 
@@ -229,7 +245,7 @@ export function ToastHost() {
 
 /* ---------------- 导航项 ---------------- */
 
-function RailItem({ to, label, icon: Icon, end }: NavItem) {
+function RailItem({ to, label, icon: Icon, end, dot }: NavItem & { dot?: boolean }) {
   return (
     <NavLink to={to} end={end} className="block" aria-label={label} data-nav={to}>
       {({ isActive }) => (
@@ -258,15 +274,46 @@ function RailItem({ to, label, icon: Icon, end }: NavItem) {
             />
           ) : null}
           <span
-            className={isActive ? 'tab-icon-on' : undefined}
+            className={cx('relative', isActive && 'tab-icon-on')}
             style={{ display: 'grid', placeItems: 'center' }}
           >
             <Icon size={18} />
+            {dot ? <UnreadDot /> : null}
           </span>
           {label}
         </span>
       )}
     </NavLink>
+  )
+}
+
+/**
+ * 🆕 **未读小红点**（2026-09-28 通知）。
+ *
+ * 🔴 **它不显示条数** —— 那是刻意的（`管理架构与角色权限方案.md` §九.7 的"未读红点的实现口径"）：
+ *    "3"这个数字会让人以为是**待办**（三件事要做），而通知不是待办。
+ *    只显示"有新通知"这一点。
+ * 🔴 未读的判据**只有一处**：`createdAt > 我上次看到哪儿`（`teachers.notice_seen_at`）。
+ *    这里读的就是那个值，不在界面层另算一遍（I49）。
+ * ⚠️ 它挂在**图标**的右上角，不挂在文字后面 —— 桌面左栏与移动端胶囊共用同一处实现，
+ *    免得两处各写一个（"同一件事两个判定入口"是本仓库踩过四次的坑）。
+ */
+function UnreadDot() {
+  return (
+    <i
+      data-unread-dot
+      aria-label="有新通知"
+      style={{
+        position: 'absolute',
+        top: -1,
+        right: -2,
+        width: 7,
+        height: 7,
+        borderRadius: 99,
+        background: 'var(--color-accent)',
+        boxShadow: '0 0 0 1.5px var(--color-surface)',
+      }}
+    />
   )
 }
 
@@ -287,8 +334,15 @@ function RailItem({ to, label, icon: Icon, end }: NavItem) {
       只有胶囊与圆按钮本身可点 —— 中间那段空隙要能点穿到页面上去。
    ============================================================ */
 
-/** 胶囊里的一个图标：可点区域 48×48，当前页高亮由父级的滑动胶囊负责。 */
-function PinTab({ to, label, icon: Icon, end }: NavItem) {
+/**
+ * 胶囊里的一个图标：可点区域 48×48，当前页高亮由父级的滑动胶囊负责。
+ *
+ * ⚠️ 类型上带着可选的 `dot`（`pinned.map((n) => <PinTab key={n.to} {...n} />)` 会把
+ *    `RailItem` 那一侧的 `dot` 一起传进来），但**胶囊里不画那个点**：
+ *    胶囊只装三个"每天来回切"的入口，而通知**不在** `PIN_KEYS` 里 ——
+ *    所以这里既不需要那个参数、也不该为它加分支（`dot` 只属于左栏与展开层）。
+ */
+function PinTab({ to, label, icon: Icon, end }: NavItem & { dot?: boolean }) {
   return (
     <NavLink
       to={to}
@@ -322,7 +376,6 @@ function PinTab({ to, label, icon: Icon, end }: NavItem) {
     </NavLink>
   )
 }
-
 function MobileNav() {
   const { pathname } = useLocation()
   const navigate = useNavigate()
@@ -333,6 +386,10 @@ function MobileNav() {
   const myRoles = useStore((s) => s.myRoles)
   const visible = visibleNav(myRoles)
   const { pinned, collapsed } = splitPin(visible)
+  /* 🆕 新通知的小红点（展开层里那一行用）—— 与桌面左栏**同一处判据**（服务端的 unread） */
+  const hasUnreadNotice = useStore((s) =>
+    s.notices.some((n) => n.unread && !n.revokedAt && !n.expired),
+  )
   /**
    * 「更多入口」的展开态：记的是**打开它的那个路径**，而不是一个布尔。
    * 这样"换了页面就自动收起"是**推导**出来的（路径一变 `more` 立刻为 false），
@@ -604,7 +661,7 @@ function MobileNav() {
                 }}
               >
                 <span
-                  className="grid shrink-0 place-items-center"
+                  className="relative grid shrink-0 place-items-center"
                   style={{
                     width: 34,
                     height: 34,
@@ -615,6 +672,7 @@ function MobileNav() {
                   }}
                 >
                   <Icon size={18} />
+                  {n.to === '/notices' && hasUnreadNotice ? <UnreadDot /> : null}
                 </span>
                 <span className="min-w-0 flex-1">
                   <span
@@ -721,6 +779,18 @@ export function AppShell({ children }: { children: React.ReactNode }) {
    * 见 `visibleNav()` 的注释：过滤必须在 PIN_KEYS 之前、三处索引一起换。
    */
   const visible = visibleNav(myRoles)
+  /**
+   * 🆕 有没有**新通知**（导航上的那个小红点）。
+   *
+   * ⚠️ 三条口径都写在这里，因为它是全站唯一一处算它的地方：
+   *   · **只有"有/没有"，没有条数**（数字会让人以为是待办，见 `UnreadDot()`）；
+   *   · 判据就是服务端给的 `unread`（= `createdAt > 我的 notice_seen_at`，I49），
+   *     这里**不重算** —— 重算就是"同一件事两个判定入口"；
+   *   · **撤下 / 过期的那些不算新**（它们还在列表里，但不再是"新通知"）。
+   */
+  const hasUnreadNotice = useStore((s) =>
+    s.notices.some((n) => n.unread && !n.revokedAt && !n.expired),
+  )
   const classes = useStore((s) => s.classes)
   const currentClassId = useStore((s) => s.currentClassId)
   const setCurrentClass = useStore((s) => s.setCurrentClass)
@@ -908,7 +978,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               }}
             />
             {visible.map((n) => (
-              <RailItem key={n.to} {...n} />
+              <RailItem key={n.to} {...n} dot={n.to === '/notices' && hasUnreadNotice} />
             ))}
           </nav>
 

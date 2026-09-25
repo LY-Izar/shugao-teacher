@@ -18,6 +18,7 @@ import {
   scanAssignmentContradictions,
   dirtyGroups,
   driftSummary,
+  driftTone,
   worstTone,
   R2_KEYS,
   NO_PROBE_REASON,
@@ -352,7 +353,7 @@ function PanelLogin({ reason }: { reason: string }) {
           </form>
           <div className="mt-3" style={{ fontSize: 12, color: 'var(--color-ink3)', lineHeight: 1.7 }}>
             只有<b>最高管理员</b>（`teacher_roles` 里的 `super` 行）能打开这块屏。
-            教导处、年级主任、班主任都不在这一档 —— 要看学校业务数据请走各自的页面。
+            教务处、年级主任、班主任都不在这一档 —— 要看学校业务数据请走各自的页面。
             <br />
             <button
               type="button"
@@ -612,13 +613,14 @@ export default function Admin() {
     versionDrift ? 'warn' : 'ok',
   ])
   const toneConfig: Tone = worstTone([serviceKey.tone, r2.tone])
-  const toneSchema: Tone = driftInfo
-    ? driftInfo.state === 'missing'
-      ? 'bad'
-      : driftInfo.state === 'indeterminate'
-        ? 'unknown'
-        : 'ok'
-    : 'unknown'
+  /*
+   * 🔴 C1 的三态 → 颜色**只走 `driftTone()` 这一处**（`lib/adminChart.ts`）。
+   *    以前这里内联了一串三元，虽然当时的映射是对的，但它把"灰 ≠ 红"这条不变量
+   *    拆成了"渲染里的一份 + 判据里的另一份" —— 而 §20.7 那次误报的现场恰恰就是
+   *    "卡片红着脸说 §12 未跑"，只看屏上根本分不清是判据错了还是颜色画错了。
+   *    合成一个具名函数之后，`admin-checks` 第七节·补 断言的就是屏上用的那一份。
+   */
+  const toneSchema: Tone = driftInfo ? driftTone(driftInfo.state) : 'unknown'
   const toneData: Tone = !hydrated ? 'unknown' : contradictions.badCount > 0 ? 'bad' : 'ok'
   const toneBackup: Tone = backup.tone
 
@@ -640,7 +642,7 @@ export default function Admin() {
    */
   const lockedDevice = deviceRole() === 'classroom'
   const lockedReason =
-    `这台设备被标记为教室端${deviceRoleAt() ? '（标记于 ' + agoText(now - (deviceRoleAt() ?? 0)) + '）' : ''}，` +
+    `这台设备被标记为教室端${deviceRoleAt() ? '（标记于 ' + agoText(deviceRoleAt(), now) + '）' : ''}，` +
     '所以教师端的每个页面（包括「我的」）都会把你送去登录页。' +
     '这个面板是独立入口、**不经过那道守卫** —— 你在这里看得到全部体检结果。'
 
@@ -1066,12 +1068,17 @@ export default function Admin() {
           </HintOnly>
         </Card>
 
-        {/* ④ 数据库结构（C1 + C2） */}
+        {/* ④ 数据库结构（C1 + C2）
+            ⚠️ `agoText(at, now)`：第一个参数是**时刻**，第二个才是"现在"。
+            曾经写成 `agoText(now - drift.at)` —— 而 `drift.at` 与 `now` 常常是同一个毫秒
+            （`probeSchemaDrift()` 里 `at: Date.now()` 与 `stamp()` 只隔一个微任务），
+            差 = 0 → `!at` → **恒显示「探测于 未知」**；差几毫秒则显示成"20000 多天前"。
+            那句"未知"会把人骗去查"那次探测是不是没拿到结论"（§20.7 的误报留档）。 */}
         <Card
           tone={toneSchema}
           title="④ 数据库结构漂移（C1）"
           headline={driftInfo ? driftInfo.text : '正在探测…'}
-          note={drift ? `探测于 ${agoText(now - drift.at)}（刷新即重探）` : undefined}
+          note={drift ? `探测于 ${agoText(drift.at, now)}（刷新即重探）` : undefined}
           openLabel="看 §10–§19 总表"
         >
           <div
@@ -1086,9 +1093,7 @@ export default function Admin() {
             <div key={s.stage} style={{ borderTop: '1px solid var(--color-line)' }}>
               <div className="flex items-start gap-2.5 px-3.5 py-2">
                 <span style={{ paddingTop: 5 }}>
-                  <Dot
-                    tone={s.state === 'present' ? 'ok' : s.state === 'missing' ? 'bad' : 'unknown'}
-                  />
+                  <Dot tone={driftTone(s.state)} />
                 </span>
                 <div className="min-w-0 flex-1">
                   <div style={{ fontSize: 13, fontWeight: 620 }}>
@@ -1183,7 +1188,7 @@ export default function Admin() {
                   </span>{' '}
                   <code style={{ fontSize: 11.5 }}>{p.target}</code>{' '}
                   <span style={{ color: 'var(--color-ink4)', fontSize: 11.5 }}>
-                    {p.at ? agoText(now - p.at) : '本次会话还没探过'}
+                    {p.at ? agoText(p.at, now) : '本次会话还没探过'}
                   </span>
                 </span>
               }
@@ -1357,7 +1362,7 @@ export default function Admin() {
             style={{ fontSize: 12, color: 'var(--color-ink3)', lineHeight: 1.8 }}
           >
             当前这台机器：身份标记 <code>{deviceRole()}</code>
-            {deviceRoleAt() ? `（标记于 ${agoText(now - (deviceRoleAt() ?? 0))}）` : ''} ·
+            {deviceRoleAt() ? `（标记于 ${agoText(deviceRoleAt(), now)}）` : ''} ·
             登录有效期还剩 <code>{authDaysLeft()}</code> 天 · 会话{' '}
             <code>{isRemote ? '云端' : '本地'}</code> · 我的身份{' '}
             <code>
