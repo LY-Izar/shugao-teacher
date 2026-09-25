@@ -19,9 +19,10 @@
  *   · 静态（D1–D7）：路由 ↔ 登记表 ↔ 本文档矩阵三方咬合；入口判据不许各写一套；
  *     谁在读 `myRoles` / `ROLE_NAME` 要有白名单；`PIN_KEYS` 不许脱队；
  *     生产构建里测试钩子不许出现。
- *   · 编码（D8）：全仓文本文件的无 BOM / 严格 UTF-8 / 中文没被 mojibake ——
+ *   · 编码（D8）：全仓文本文件的无 BOM / 严格 UTF-8 / 中文没被 mojibake，
+ *     外加**不可见字符 / 全角标点混进代码** ——
  *     这个项目**反复栽在编码上**（BOM 出过构建失败、上一轮又出双重编码乱码），
- *     而全仓扫一遍成本极低。带反向对照（伪造的坏字节流必须被判坏）。
+ *     而全仓扫一遍成本极低。带反向对照（伪造的坏字节流 / 坏字符必须被判坏）。
  * ============================================================
  */
 import { readFileSync, readdirSync, existsSync } from 'node:fs'
@@ -1300,14 +1301,17 @@ section('第十一节 · D7：dist 产物里没有 `?as=` / `?kind=` 的痕迹�
 
 /* ============================================================
    第十二节 · D8：全仓文本文件的编码体检（无 BOM / 严格 UTF-8 / 有汉字则无 U+FFFD）
+                                                 + 不可见字符 / 全角标点混进代码
    ------------------------------------------------------------
    为什么从 9 个文件扩到全仓：这个项目**反复栽在编码上** ——
    `Admin.tsx` 那一轮用 PowerShell 文本 cmdlet 回写，整份文件变成双重编码乱码 + BOM
    （症状是 `tsc` 报一屏语法错，见 §20.6）；本轮又出过一次双重编码。
    而"扫一遍全仓"的成本是**一秒内**，比再踩一次便宜得多。
+   第二层（不可见字符 / 全角标点）的判据、覆盖范围、跳过了哪些文件类型及原因，
+   全部写在下面那段块注释里 —— 先读那段再改判据。
    ============================================================ */
 
-section('第十二节 · D8：全仓编码体检（BOM / 严格 UTF-8 / 中文没被 mojibake）')
+section('第十二节 · D8：全仓编码体检（BOM / 严格 UTF-8 / 中文没被 mojibake / 不可见字符 / 全角标点）')
 
 /** 文件是**严格 UTF-8** 吗？逐字节解一遍，遇到非法序列就报错（静默替换不报） */
 function isStrictUtf8(buf) {
@@ -1406,6 +1410,356 @@ function sourceFileHealth(buf) {
   /* 正面：正常的 UTF-8 中文不许被判坏（否则"全红"也是坏断言） */
   const good = Buffer.from('正常的中文注释 ✅', 'utf8')
   check(!sourceFileHealth(good).bad, 'D8 正面对照：正常的 UTF-8 中文**不**被判坏', `bad=${sourceFileHealth(good).bad}`)
+
+  /* ============================================================
+     D8 第二层：不可见字符 / 全角标点（"看十遍也看不出来"的那一类）
+     ------------------------------------------------------------
+     上一层的 BOM / mojibake 是"整份文件坏掉"；这一层管的是**单字符**级的坏法 ——
+     一个 NBSP 混进代码、一个全角括号冒充半角。它们的共同点是：**报错会指向别处**，
+     而人眼在等宽字体里几乎分不出来（这个项目已经在全角标点上吃过一次警告）。
+     扫描成本一样是一秒内，所以并进 D8。
+
+     ★ 分两类，判据不同：
+     ① 类①「哪里都不合法」（连注释里也不该有）：NBSP / 零宽 / word joiner /
+        BOM-零宽不换行 / 行、段分隔符 / 软连字符 / 全角空格 ——
+        它们唯一的作用就是"让人看不出来"，没有任何一种写法**需要**它们。→ 出现即红。
+        报出：文件、行号、列号、**字符名**、那一行的原文（不可见字符转义成 `<U+XXXX>` 再打印，
+        否则连报错信息本身都是看不见的）。
+     ② 类②「只在代码位置才不合法」：全角括号 / 冒号 / 逗号 / 分号 / 全角单双引号。
+        这个仓库**大量中文注释**，注释里用中文标点本来就对 → 注释里合法，**代码位置**才红。
+
+     ⚠️ 类② 怎么判断"这是不是代码位置"：不用"行首是不是 `//`"的一行判断 ——
+     那样 JSX 文本、跨行块注释、字符串里的中文文案全都会被误判。这里做的是**逐字符标注**：
+     按该语言的注释语法（TS/JS：`//` 行注释与 `/*` … `*\/` 块注释；SQL：`--` 与块注释；
+     CSS：块注释；`.gitignore`：行首 `***REMOVED***`。⚠️ `*\/` 里那个反斜杠是故意的 ——
+     在块注释里直接写"星号斜杠"会**提前结束这条注释**，这个坑本轮踩过一次）
+     加上字符串 / 模板字面量 / 正则字面量，把整份文件标成
+     注释 / 文本 / **裸代码** 三种，只有裸代码里的全角标点才红。效果：
+       · 注释里的中文标点 → 绿
+       · 中文文案字符串（`'科目（必填）'`）→ 绿（它跟注释一样是"给人看的文本"）
+       · `foo（1）` / `import { a，b }` 这种"全角冒充半角" → 红
+     ⚠️ 不确定的一律**宁可漏报也不要误报**：模板字面量里的 `${}` 表达式、正则里的 `[...]`、
+     跨行未闭合的引号，统统按"文本"放过 —— 它们里面就算有全角标点，也未必构成语法错误，
+     而误报会让这条检查天天喊狼来了，比没有检查更糟（§18.6）。
+
+     ⚠️ 以下类型**跳过类②、只查类①**，每个都有具体原因（不是偷懒）：
+       · `.md`       整篇就是给人看的散文，正文里的中文标点本来就该是全角。
+       · `.json`     没有注释语法；值是题库/模板里的中文数据，`"（1）"` 是数据不是代码。
+       · `.yml`/`.yaml`  例：`- name: 环境自检（只报 secret 存在性）` —— 值几乎全是中文说明，
+                     按行首 `***REMOVED***` 判断不出"这个全角标点在键里还是值里"，判红必误报。
+       · `.tsx`      JSX 文本节点（`<b>三条出路：</b>`）与代码在词法上**长得一样**（都是裸文本），
+                     行级启发式分不开；本仓库 JSX 里 400+ 行中文文案 → 判红就是天天误报。
+       · `.html`     同 markdown（整篇是标记 + 文案）。
+     类② 实际覆盖：`.ts` `.js` `.mjs` `.cjs` `.sql` `.css` `.gitignore`。
+     ============================================================ */
+
+  /** 类①：任何地方都不合法的不可见字符（写成转义，免得本文件自己带上不可见字符） */
+  const INVISIBLE_ANYWHERE = new Map([
+    ['\u00A0', 'U+00A0 NBSP 不换行空格'],
+    ['\u200B', 'U+200B ZWSP 零宽空格'],
+    ['\u200C', 'U+200C ZWNJ 零宽不连字'],
+    ['\u200D', 'U+200D ZWJ 零宽连字'],
+    ['\u2060', 'U+2060 word joiner'],
+    ['\uFEFF', 'U+FEFF BOM / 零宽不换行空格'],
+    ['\u2028', 'U+2028 行分隔符 LS'],
+    ['\u2029', 'U+2029 段分隔符 PS'],
+    ['\u00AD', 'U+00AD 软连字符 SHY'],
+    ['\u3000', 'U+3000 全角空格'],
+  ])
+
+  /**
+   * U+3000 的**唯一**豁免：紧跟在全角左括号 `（` 之前时，算"排版留白"，不判红。
+   * 为什么要有这条：本仓库有 5 处 `${extra ? `U+3000（${extra}）` : ''}`
+   * （clock-checks.mjs / shots.mjs / 本文件），是在**控制台输出里**用全角空格把实测值
+   * 和后面那对全角括号隔开 —— 有意的排版留白，人眼看得见，不是"藏起来的坏字符"。
+   * 而这 5 处所在的文件**不在本次改动范围**，判红会让每天的 nav-checks 当场变噪音。
+   * 为什么这个豁免不会漏掉坏法：同样的位置若真出现在**代码**里，类② 会照样把那个 `（` 判红
+   * （两层是叠加的）。⚠️ 豁免只认"U+3000 后面紧跟 `（`"这一种形状，孤零零的 U+3000
+   * 照旧判红 —— 有反向对照④钉住这一点。
+   */
+  const LAYOUT_SPACER_NEXT = '\uFF08' // 全角左括号
+
+  /** 类②：只在"代码位置"才不合法的歧义字符 */
+  const AMBIGUOUS_IN_CODE = new Map([
+    ['\uFF08', 'U+FF08 全角左括号'],
+    ['\uFF09', 'U+FF09 全角右括号'],
+    ['\uFF1A', 'U+FF1A 全角冒号'],
+    ['\uFF0C', 'U+FF0C 全角逗号'],
+    ['\uFF1B', 'U+FF1B 全角分号'],
+    ['\u201C', 'U+201C 全角左双引号'],
+    ['\u201D', 'U+201D 全角右双引号'],
+    ['\u2018', 'U+2018 全角左单引号'],
+    ['\u2019', 'U+2019 全角右单引号'],
+  ])
+
+  /** 注释语法表：**不认识的扩展名 = 不查类②**（宁可漏报） */
+  const COMMENT_SYNTAX = new Map([
+    ['.ts', { line: '//', block: true, hash: false }],
+    ['.js', { line: '//', block: true, hash: false }],
+    ['.mjs', { line: '//', block: true, hash: false }],
+    ['.cjs', { line: '//', block: true, hash: false }],
+    ['.sql', { line: '--', block: true, hash: false }],
+    ['.css', { line: null, block: true, hash: false }],
+    ['.gitignore', { line: null, block: false, hash: true }],
+  ])
+  const CLASS2_EXT = new Set(COMMENT_SYNTAX.keys())
+
+  /** 正则字面量只能靠"上一个有意义的字符"猜（JS 本身的经典歧义）——猜错宁可当代码 */
+  const REGEX_AFTER = '(,=:[!&|?{};+-*%~^<>'
+  const REGEX_KEYWORDS = new Set([
+    'return', 'typeof', 'case', 'in', 'of', 'do', 'else', 'yield', 'await',
+    'instanceof', 'new', 'delete', 'void', 'throw', 'default',
+  ])
+
+  /**
+   * 逐字符标注：'c' 裸代码 / 'm' 注释 / 's' 字符串（含模板、正则）。
+   * 模板字面量用栈处理：`` ` `` 开，内部只有 `${` 是代码，`${}` 里再出现 `` ` `` 是**嵌套模板**
+   * （本仓库的 `${extra ? `（${extra}）` : ''}` 就是这种），不算"模板结束"。
+   */
+  function codeMask(text, syn) {
+    const N = text.length
+    const mask = new Array(N).fill('c')
+    const stack = []
+    let i = 0
+    let prevChar = ''
+    let word = ''
+    const startsRegex = () => prevChar === '' || REGEX_AFTER.includes(prevChar) || REGEX_KEYWORDS.has(word)
+    while (i < N) {
+      const c = text[i]
+      const two = text.slice(i, i + 2)
+      const top = stack[stack.length - 1]
+      if (top && top.t === 'tpl') {
+        mask[i] = 's'
+        if (c === '\\') { if (i + 1 < N) mask[i + 1] = 's'; i += 2; continue }
+        if (c === '`') { stack.pop(); i++; prevChar = '`'; word = ''; continue }
+        if (two === '${') { mask[i + 1] = 'c'; i += 2; stack.push({ t: 'expr', depth: 0 }); prevChar = '{'; word = ''; continue }
+        i++
+        continue
+      }
+      if (top && top.t === 'expr') {
+        if (c === '{') { top.depth++; i++; prevChar = '{'; word = ''; continue }
+        if (c === '}') {
+          if (top.depth === 0) { stack.pop(); mask[i] = 's'; i++; prevChar = '}'; word = ''; continue }
+          top.depth--; i++; prevChar = '}'; word = ''; continue
+        }
+      }
+      /*
+       * 换行要把"上一个有意义的字符"清掉：否则上一行行尾的字符会漏到下一行，
+       * 让"这一行以 `***REMOVED***` 开头吗"（本仓库只有 `.gitignore` 走这条规则）永远判错 ——
+       * 这个 bug 真的发生过一次：`.gitignore` 里 12 处 `***REMOVED***` 注释被当成代码判红。
+       */
+      if (c === '\n') { prevChar = ''; word = ''; i++; continue }
+      if (syn.block && two === '/*') {
+        const end = text.indexOf('*/', i + 2)
+        const stop = end < 0 ? N : end + 2
+        for (let k = i; k < stop; k++) mask[k] = 'm'
+        i = stop
+        word = ''
+        continue
+      }
+      if (syn.line && two === syn.line) {
+        while (i < N && text[i] !== '\n') { mask[i] = 'm'; i++ }
+        word = ''
+        continue
+      }
+      // `***REMOVED***` 只有"这一行第一个非空白字符"才算注释（不是行内注释）—— 宁可漏报
+      if (syn.hash && c === '***REMOVED***' && prevChar === '') {
+        while (i < N && text[i] !== '\n') { mask[i] = 'm'; i++ }
+        continue
+      }
+      if (c === '"' || c === "'") {
+        let j = i + 1
+        let closed = false
+        while (j < N) {
+          if (text[j] === '\\') { j += 2; continue }
+          if (text[j] === '\n') break
+          if (text[j] === c) { closed = true; break }
+          j++
+        }
+        // 引号没在本行闭合 → 大概不是字符串（宁可当代码），不标注
+        if (closed) { for (let k = i; k <= j; k++) mask[k] = 's'; i = j + 1; prevChar = c; word = ''; continue }
+      }
+      if (c === '`') { mask[i] = 's'; stack.push({ t: 'tpl' }); i++; continue }
+      if (c === '/' && startsRegex()) {
+        let j = i + 1
+        let inClass = false
+        let closed = false
+        while (j < N) {
+          const d = text[j]
+          if (d === '\\') { j += 2; continue }
+          if (d === '\n') break
+          if (d === '[') inClass = true
+          else if (d === ']') inClass = false
+          else if (d === '/' && !inClass) { closed = true; break }
+          j++
+        }
+        if (closed) { for (let k = i; k <= j; k++) mask[k] = 's'; i = j + 1; prevChar = '/'; word = ''; continue }
+      }
+      if (!/\s/.test(c)) {
+        prevChar = c
+        word = /[A-Za-z_$0-9]/.test(c) ? word + c : ''
+      }
+      i++
+    }
+    return mask
+  }
+
+  /** 把不可见字符转义成看得见的 `<U+XXXX>`（否则"报出原文"这件事本身就是不可见的） */
+  function escapeInvisible(line) {
+    let out = ''
+    for (const ch of line) {
+      if (INVISIBLE_ANYWHERE.has(ch)) out += `<${INVISIBLE_ANYWHERE.get(ch).split(' ')[0]}>`
+      else if (ch === '\t') out += '\\t'
+      else out += ch
+    }
+    return out
+  }
+
+  /** 命中处前后开个窗口（行很长时不至于把命中点截掉），再转义显示 */
+  function showLine(line, at) {
+    const from = Math.max(0, at - 36)
+    const to = Math.min(line.length, at + 72)
+    return `${from > 0 ? '…' : ''}${escapeInvisible(line.slice(from, to))}${to < line.length ? '…' : ''}`
+  }
+
+  /**
+   * 扫一段文本。`ext` 决定注释语法；不认识的扩展名只查类①（mask=null）。
+   * 返回：类①命中 / 类②命中 / 被当成"文本"放过的全角标点数（自证不是什么都没扫到）。
+   */
+  function scanInvisible(text, ext) {
+    const normalized = text.replace(/\r\n/g, '\n')
+    const syn = COMMENT_SYNTAX.get(ext)
+    const mask = syn && CLASS2_EXT.has(ext) ? codeMask(normalized, syn) : null
+    const lines = normalized.split('\n')
+    const invisible = []
+    const ambiguous = []
+    const spacers = []
+    let ambiguousInText = 0
+    let base = 0
+    for (let li = 0; li < lines.length; li++) {
+      const line = lines[li]
+      for (let k = 0; k < line.length; k++) {
+        const ch = line[k]
+        if (INVISIBLE_ANYWHERE.has(ch)) {
+          const hit = { line: li + 1, col: k + 1, name: INVISIBLE_ANYWHERE.get(ch), shown: showLine(line, k) }
+          if (ch === '\u3000' && line[k + 1] === LAYOUT_SPACER_NEXT) spacers.push(hit)
+          else invisible.push(hit)
+        } else if (AMBIGUOUS_IN_CODE.has(ch)) {
+          if (mask && mask[base + k] === 'c') {
+            ambiguous.push({ line: li + 1, col: k + 1, name: AMBIGUOUS_IN_CODE.get(ch), shown: showLine(line, k) })
+          } else if (mask) ambiguousInText++
+        }
+      }
+      base += line.length + 1
+    }
+    return { invisible, ambiguous, spacers, ambiguousInText }
+  }
+
+  const fmt = (rel, hits) => {
+    const CAP = 6
+    const shown = hits.slice(0, CAP).map((h) => `${rel}:${h.line}:${h.col} ${h.name} → ${h.shown}`)
+    if (hits.length > CAP) shown.push(`（这一个文件还有 ${hits.length - CAP} 处）`)
+    return shown.join('；')
+  }
+
+  /* ---------------- 真文件：类① ---------------- */
+  const invisibleHits = []
+  const spacerHits = []
+  const ambiguousHits = []
+  let ambiguousInText = 0
+  let class2Files = 0
+  for (const f of files) {
+    const rel = f.slice(REPO.length + 1).replace(/\\/g, '/')
+    /*
+     * ⚠️ `extname('.gitignore')` 是**空串**（点文件没有扩展名）——
+     * 所以这里显式补一下，否则注释语法表里的 `.gitignore` 永远不会命中，
+     * 而输出里却写着"覆盖 .gitignore"（一查一漏，比不查更坏）。
+     */
+    const ext = extname(f) || (f.endsWith('.gitignore') ? '.gitignore' : '')
+    const r = scanInvisible(readFileSync(f, 'utf8'), ext)
+    if (CLASS2_EXT.has(ext)) class2Files++
+    ambiguousInText += r.ambiguousInText
+    if (r.invisible.length) invisibleHits.push(fmt(rel, r.invisible))
+    for (const h of r.spacers) spacerHits.push(`${rel}:${h.line}`)
+    if (r.ambiguous.length) ambiguousHits.push(fmt(rel, r.ambiguous))
+  }
+  check(
+    invisibleHits.length === 0,
+    `D8·不可见①：${files.length} 个文件里没有"哪里都不合法"的不可见字符（NBSP/零宽/word joiner/软连字符/行段分隔符/全角空格）`,
+    invisibleHits.length ? invisibleHits.join('；') : `0 处；另有 ${spacerHits.length} 处已声明的排版留白（U+3000 紧跟全角左括号，见代码注释）${spacerHits.length ? ` → ${spacerHits.join(' · ')}` : ''}`,
+  )
+  check(
+    ambiguousHits.length === 0,
+    `D8·不可见②：类②覆盖的 ${class2Files} 个文件（${[...CLASS2_EXT].join('/')}）里，全角标点没有混进**代码位置**`,
+    ambiguousHits.length ? ambiguousHits.join('；') : `0 处；跳过类②的类型：.md/.json/.yml/.yaml/.tsx/.html（原因见本节抬头注释）`,
+  )
+  /* 自证：类② 若是"什么都没扫到"，上面那条就是永远为绿的摆设 —— 证明它确实看到了大量
+     注释/字符串里的全角标点并**有意识**地放过了它们（这个仓库中文注释很多，量必然不小）。 */
+  check(
+    ambiguousInText > 1000,
+    'D8·不可见②自证：确实在注释/字符串里看到并放过了大量全角标点（不是"什么都没扫到"）',
+    `${ambiguousInText} 处全角标点落在注释/字符串里（合法，已排除）`,
+  )
+
+  /* 🔴 反向对照（**必须有**，否则这一层就是永远为绿的摆设）：拿伪造样本证明它会红，
+     再拿注释样本证明它**不**会一刀切。 */
+  const f1 = scanInvisible('const a = 1\u00A0// 行尾一个不换行空格\n', '.ts')
+  check(
+    f1.invisible.length === 1 && f1.invisible[0].line === 1,
+    'D8·不可见 反向对照①：伪造的 U+00A0（哪怕在注释行里）被判红',
+    `命中 ${f1.invisible.length} 处 → ${f1.invisible.map((h) => `${h.line}:${h.col} ${h.name} → ${h.shown}`).join('；') || '（没红，说明类①失效）'}`,
+  )
+  const f2 = scanInvisible('const n = foo\uFF081\uFF09\uFF0Cok\n', '.ts')
+  check(
+    f2.ambiguous.length >= 3,
+    'D8·不可见 反向对照②：伪造的**代码行**里的全角括号/逗号被判红',
+    `命中 ${f2.ambiguous.length} 处 → ${f2.ambiguous.map((h) => `${h.col} ${h.name}`).join('；') || '（没红，说明类②失效）'}`,
+  )
+  const f3 = scanInvisible('// 说明\uFF08这里在注释里，合法\uFF09\n', '.ts')
+  check(
+    f3.ambiguous.length === 0 && f3.invisible.length === 0,
+    'D8·不可见 反向对照③：伪造的**注释行**里的全角括号**不**被判红（防"一刀切"把正常中文注释判坏）',
+    `命中 ${f3.ambiguous.length + f3.invisible.length} 处（期望 0）`,
+  )
+  const f4 = scanInvisible('const a =\u3000 1\n', '.ts')
+  check(
+    f4.invisible.length === 1 && f4.spacers.length === 0,
+    'D8·不可见 反向对照④：孤零零的 U+3000 照样判红（证明"排版留白"豁免很窄，不是把全角空格放行）',
+    `命中 ${f4.invisible.length} 处 · 算作留白的 ${f4.spacers.length} 处（期望 1 / 0）`,
+  )
+  const f5 = scanInvisible('const a = 1 // 正常注释\n', '.ts')
+  check(
+    f5.invisible.length === 0 && f5.ambiguous.length === 0,
+    'D8·不可见 正面对照：干净的代码行**不**被判红',
+    `命中 ${f5.invisible.length + f5.ambiguous.length} 处（期望 0）`,
+  )
+  /*
+   * 反向对照⑤：**报错信息本身**也要有反向对照 —— 上面那几条只在"能红"时才有意义，
+   * 而"红了以后的报告长什么样"是另一段代码（fmt）。真要出事时才发现报告函数崩了，
+   * 就等于没有报告。所以这里把 fmt 的输出也钉一遍：文件、行号、列号、字符名、
+   * 以及**转义后的那一行原文**（不转义的话，打印出来还是看不见）。
+   */
+  const f1report = fmt('app/scripts/伪造样本.ts', f1.invisible)
+  const needFields = ['app/scripts/伪造样本.ts:1:12', 'U+00A0 NBSP 不换行空格', '<U+00A0>', 'const a = 1']
+  check(
+    needFields.every((s) => f1report.includes(s)),
+    'D8·不可见 反向对照⑤：红的时候报的信息够定位（文件:行:列 + 字符名 + 转义后的那行原文）',
+    f1report,
+  )
+  /*
+   * 反向对照⑥：上面几条用的是**伪造的小字符串**；这条拿一个**真文件**做端到端对照 ——
+   * 原文必须 0 命中，往它末尾注入一行"全角冒充半角"后必须红。
+   * 为什么值得多这一条：只有它同时证明了"这一节的绿不是解析器把整份文件都吞了"。
+   */
+  const realFile = files.find((g) => extname(g) === '.ts')
+  const realScan = (extra) => (realFile ? scanInvisible(readFileSync(realFile, 'utf8') + extra, '.ts') : null)
+  const realClean = realScan('')
+  const realPoisoned = realScan('\nconst 注入 = foo\uFF081\uFF09\n')
+  check(
+    !!realClean && realClean.ambiguous.length === 0 && !!realPoisoned && realPoisoned.ambiguous.length >= 2,
+    `D8·不可见 反向对照⑥：真文件端到端对照（${realFile ? realFile.slice(REPO.length + 1).replace(/\\/g, '/') : '没找到 .ts 文件'}）—— 原文 0 命中，注入一行"全角冒充半角"后判红`,
+    realClean && realPoisoned ? `原文 ${realClean.ambiguous.length} 处 · 注入后 ${realPoisoned.ambiguous.length} 处` : '没扫到',
+  )
 }
 
 /* ---------------- 结果 ---------------- */
@@ -1417,6 +1771,6 @@ if (failures.length) {
   console.log('\n  ⛔ 有断言没过（上面每一条都写了实测值）')
   process.exitCode = 1
 } else {
-  console.log('  全部通过 ✅（纯函数 A1–A7 / 静态 D1–D7 / 编码 D8）')
+  console.log('  全部通过 ✅（纯函数 A1–A7 / 静态 D1–D7 / 编码 + 不可见字符 D8）')
 }
 }, { script: 'nav-checks.mjs' })
