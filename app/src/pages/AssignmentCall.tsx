@@ -272,11 +272,11 @@ export default function AssignmentCall() {
               className="mt-2 flex items-start gap-2 p-2.5"
               style={{
                 background: 'var(--color-warnsoft)',
-                border: '1px solid ***REMOVED***ecd9ae',
+                border: '1px solid #ecd9ae',
                 borderRadius: 4,
                 fontSize: 12.5,
                 lineHeight: 1.7,
-                color: '***REMOVED***8a5a12',
+                color: '#8a5a12',
               }}
             >
               <IconAlert size={15} />
@@ -407,7 +407,7 @@ export default function AssignmentCall() {
                           padding: '0 3px',
                           borderRadius: 99,
                           background: 'var(--color-bad)',
-                          color: '***REMOVED***fff',
+                          color: '#fff',
                           fontSize: 9.5,
                           lineHeight: '15px',
                           fontWeight: 700,
@@ -722,7 +722,7 @@ export default function AssignmentCall() {
         <div
           className="relative overflow-hidden"
           style={{
-            background: 'linear-gradient(180deg, ***REMOVED***10151c, ***REMOVED***161d26)',
+            background: 'linear-gradient(180deg, #10151c, #161d26)',
             borderRadius: 6,
             padding: '22px 16px',
             minHeight: 190,
@@ -739,7 +739,7 @@ export default function AssignmentCall() {
                 width: 6,
                 height: 6,
                 borderRadius: 99,
-                background: '***REMOVED***4ade9a',
+                background: '#4ade9a',
                 display: 'inline-block',
               }}
             />
@@ -748,7 +748,7 @@ export default function AssignmentCall() {
 
           <div
             style={{
-              color: '***REMOVED***fff',
+              color: '#fff',
               fontSize: 20,
               fontWeight: 650,
               lineHeight: 1.7,
@@ -773,7 +773,7 @@ export default function AssignmentCall() {
               borderRadius: 4,
               border: '1px solid rgb(255 255 255 / .18)',
               fontSize: 11,
-              color: '***REMOVED***fff',
+              color: '#fff',
             }}
           >
             {simple ? (

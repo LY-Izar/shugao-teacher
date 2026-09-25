@@ -147,11 +147,11 @@ export default function ClassDetail() {
             </span>
             <div className="flex-1" style={{ fontSize: 12.5, lineHeight: 1.6 }}>
               {problems === 0 ? (
-                <span style={{ color: '***REMOVED***0b6b4a' }}>
+                <span style={{ color: '#0b6b4a' }}>
                   名单体检通过：学号 1–{health.maxNo} 连续无缺号，无重号重名。
                 </span>
               ) : (
-                <span style={{ color: '***REMOVED***8a5a12' }}>
+                <span style={{ color: '#8a5a12' }}>
                   {health.gaps.length ? `缺号 ${health.gaps.join('、')}； ` : ''}
                   {health.dupNos.length ? `学号重复 ${health.dupNos.join('、')}； ` : ''}
                   {health.dupNames.length ? `重名 ${health.dupNames.join('、')}； ` : ''}

@@ -6,7 +6,7 @@
  * （日志全绿、R2 上有对象，但那份对象是全校学生的姓名/学号/成绩的明文，
  *  而所有人都以为它是加密的）。这种失败"看起来一切正常"，靠读代码看不出来。
  *
- * 🔴 本脚本**不重写**那段逻辑：它按 `***REMOVED*** ⇣⇣ 加密块开始` / `***REMOVED*** ⇡⇡ 加密块结束`
+ * 🔴 本脚本**不重写**那段逻辑：它按 `# ⇣⇣ 加密块开始` / `# ⇡⇡ 加密块结束`
  *    两个标记，把 `.github/workflows/backup.yml` 里那段 shell **原样抠出来**，
  *    拼成临时脚本、交给 **Git Bash** 跑。改工作流 = 改被测对象，不需要同步两份。
  *
@@ -320,7 +320,7 @@ for (const g of GUARDS) {
   if (!span) continue
   // 整段 `if … fi` 换成一句合法语句：**不能**切出孤立的 if/fi，
   // 否则 bash 直接 `syntax error`，那个退出码跟"守卫"没有关系（证明不了任何事）
-  stripped = `${stripped.slice(0, span[0])}\n: ***REMOVED*** 对照版：已把「${g.label}」拿掉${stripped.slice(span[1])}`
+  stripped = `${stripped.slice(0, span[0])}\n: # 对照版：已把「${g.label}」拿掉${stripped.slice(span[1])}`
   removed.push(g.label)
 }
 ok('对照版确实把那道闸拿掉了', removed.length === 1)

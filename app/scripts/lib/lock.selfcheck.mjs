@@ -1,7 +1,7 @@
 /**
  * 锁模块的**自检**（不依赖 dev server / 浏览器，十几秒跑完）。
  *
- *     node scripts/lib/lock.selfcheck.mjs        ***REMOVED*** 从 app/ 或仓库根都能跑
+ *     node scripts/lib/lock.selfcheck.mjs        # 从 app/ 或仓库根都能跑
  *
  * 为什么要有它：这个模块的职责是"让两个脚本别同时跑"，而它本身**没有断言就没人能验**。
  * 它验 6 件事：

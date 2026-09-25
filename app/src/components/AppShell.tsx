@@ -192,7 +192,7 @@ export function ToastHost() {
           className="glass-dark anim-toast pointer-events-auto flex items-center gap-2.5 px-3.5 py-2.5 text-left"
           style={{
             maxWidth: 420,
-            color: '***REMOVED***fff',
+            color: '#fff',
             border: '1px solid rgb(255 255 255 / .14)',
             borderRadius: 6,
             overflow: 'hidden',
@@ -202,12 +202,12 @@ export function ToastHost() {
             style={{
               color:
                 t.tone === 'ok'
-                  ? '***REMOVED***4ade9a'
+                  ? '#4ade9a'
                   : t.tone === 'bad'
-                    ? '***REMOVED***ff8a94'
+                    ? '#ff8a94'
                     : t.tone === 'warn'
-                      ? '***REMOVED***f5c469'
-                      : '***REMOVED***8fd3ff',
+                      ? '#f5c469'
+                      : '#8fd3ff',
               display: 'grid',
               placeItems: 'center',
             }}
@@ -334,7 +334,7 @@ function UnreadDot() {
         且**沿图标形状描一圈很淡的浅色**（`ICON_HALO`）—— 玻璃透出深色内容时靠它保住辨识度；
       · 当前页那块高亮：白玻璃 → **近白 + 淡蓝描边**（`--color-accentsoft` 那一挂；
         第二轮又把它从"全不透明"降到半透明，免得它成了整条控件里最实的东西）；
-      · 右侧圆按钮：深底上的暖黄 `***REMOVED***f5c469` → 亮底上**够深的强调色** `--color-accentink`。
+      · 右侧圆按钮：深底上的暖黄 `#f5c469` → 亮底上**够深的强调色** `--color-accentink`。
       三个都按"玻璃合成底色"算过 WCAG 对比度，**又在真浏览器里按像素复核过
       （浅底 / 深底两组）**，具体数值与口径写在 §十五 15.1 的对比度表里。
 
@@ -350,8 +350,8 @@ function UnreadDot() {
  *
  * 理由（真浏览器实测，§十五 15.1 的对比度表里有数）：
  *   这一轮把白底从 64%/48% 压到 20%/30%（用户「透明一点」+ 参考图"白色只在边缘"），
- *   玻璃**透过深色内容**时不再是近白 —— 深色图标（`--color-ink2` ***REMOVED***4a5563 /
- *   `--color-accentink` ***REMOVED***0847c4）压在那块底上只剩 **1.27:1**（深底实测），等于消失。
+ *   玻璃**透过深色内容**时不再是近白 —— 深色图标（`--color-ink2` #4a5563 /
+ *   `--color-accentink` #0847c4）压在那块底上只剩 **1.27:1**（深底实测），等于消失。
  *
  * 为什么不给玻璃加"整体暗化"（那也能救对比度）：用户这一轮买的就是**透明**，
  *   加一层暗化等于把透出来的壁纸又抹掉一半，方向相反。
@@ -371,12 +371,12 @@ const ICON_HALO = 'drop-shadow(0 0 0.6px rgb(255 255 255 / .9)) drop-shadow(0 0 
  *
  * 🔴 **图标是深色的**（2026-09-28 改亮色玻璃之后）：底从深色换成半透明浅色，
  *    原来那套"当前页白 / 其余 62% 白"在这块底上等于看不见。
- *    · 当前页 `--color-accentink`（***REMOVED***0847c4）—— 既是主色、又是本文最深的蓝，压在
- *      近白的页面上比 `--color-accent`（***REMOVED***0b5cf0）更稳；
- *    · 其余 `--color-ink2`（***REMOVED***4a5563）—— "未选中"应该是"墨"而不是"灰得看不见"。
+ *    · 当前页 `--color-accentink`（#0847c4）—— 既是主色、又是本文最深的蓝，压在
+ *      近白的页面上比 `--color-accent`（#0b5cf0）更稳；
+ *    · 其余 `--color-ink2`（#4a5563）—— "未选中"应该是"墨"而不是"灰得看不见"。
  *    这两个色都按"玻璃合成底色"算过、又在真浏览器里按像素复核过（局部对比度），
  *    数值见 §十五 15.1 的对比度表（**浅底 / 深底两组**）。
- *    ⛔ 别退回白色系（`***REMOVED***fff` / `rgb(255 255 255/.62)`）：那是配深底的。
+ *    ⛔ 别退回白色系（`#fff` / `rgb(255 255 255/.62)`）：那是配深底的。
  */
 function PinTab({ to, label, icon: Icon, end }: NavItem & { dot?: boolean }) {
   return (
@@ -647,11 +647,11 @@ function MobileNav() {
                 ⚠️ 底下已经是**很透**的玻璃，再用半透明白就"高亮不起来"了（白压白）。
                    所以这里用一档**近白 → 淡蓝**渐变 + 一圈淡蓝描边（`--color-accentsoft`
                    那一挂）—— 既要看得出来"我在这一页"，又不能变成一块突兀的实心块。
-                🔴 2026-09-28 第二轮**把它也降了一档**（`***REMOVED***fff/.9` + `accentsoft/.88`，
-                   原来是不透明的 `***REMOVED***fff → accentsoft`）：玻璃变透明之后，那块**全白**的
+                🔴 2026-09-28 第二轮**把它也降了一档**（`#fff/.9` + `accentsoft/.88`，
+                   原来是不透明的 `#fff → accentsoft`）：玻璃变透明之后，那块**全白**的
                    高亮成了整条控件里最实的东西 —— 用户要的是"透明"，而"当前页"仍然靠
                    **一圈淡蓝描边 + 色块**就能读出来（不必靠不透明）。实测（浅底）：
-                   块上的 `--color-accentink` ***REMOVED***0847c4 = **7.5:1**，整格逐像素 **7.4:1**；
+                   块上的 `--color-accentink` #0847c4 = **7.5:1**，整格逐像素 **7.4:1**；
                    "看得见我在这一页"这一条另由 `shots.mjs` 的 35/36/37 三张图
                    （高亮位置真的会动）+ 下面的 `data-active` 断言钉住，没有丢。 */}
             <span
@@ -699,8 +699,8 @@ function MobileNav() {
                  ⚠️ 本组件里那个"已展开 → 箭头朝下"的 `rotate(90deg)` **留着**：
                     它是**收起动画那 0.26s** 里唯一能读到的方向信号（Sheet 往下走、导航淡回来），
                     而且一次点击就能把状态读出来 —— 别以为"反正看不见"就把它删了。
-              ⚠️ 颜色用 `--color-accentink`（***REMOVED***0847c4）：它压在近白的玻璃上 ≈ **7.3:1**。
-                 原来那个暖黄 `***REMOVED***f5c469` 是"深底上的显眼强调物"，在这套亮色玻璃上只有
+              ⚠️ 颜色用 `--color-accentink`（#0847c4）：它压在近白的玻璃上 ≈ **7.3:1**。
+                 原来那个暖黄 `#f5c469` 是"深底上的显眼强调物"，在这套亮色玻璃上只有
                  ≈ **1.5:1**，而且按钮现在的语义是个功能开关 —— 与全站其它控件同用
                  accent 一挂才对（为什么不取浅一档的 `--color-accent` 见下方注释）。 */}
           <button
@@ -728,8 +728,8 @@ function MobileNav() {
             }}
           >
             {/*
-              为什么取 `--color-accentink`（***REMOVED***0847c4，7.3:1）而不是 `--color-accent`
-              （***REMOVED***0b5cf0，5.2:1）：折角箭头是**细线**（1.6→2.1 描边），线越细越吃对比度，
+              为什么取 `--color-accentink`（#0847c4，7.3:1）而不是 `--color-accent`
+              （#0b5cf0，5.2:1）：折角箭头是**细线**（1.6→2.1 描边），线越细越吃对比度，
               而 7.3:1 是本次实测里最稳的那一档；两者都在 AA 之上，取深的那支。
             */}
             <span
@@ -1217,7 +1217,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               className="anim-in mb-3 flex w-full items-start gap-2.5 p-3 text-left"
               style={{
                 background: 'var(--color-warnsoft)',
-                border: '1px solid ***REMOVED***ecd9ae',
+                border: '1px solid #ecd9ae',
                 borderRadius: 6,
               }}
             >
@@ -1225,14 +1225,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 <IconAlert size={16} />
               </span>
               <span style={{ flex: 1 }}>
-                <span style={{ display: 'block', fontSize: 13, fontWeight: 620, color: '***REMOVED***8a5a12' }}>
+                <span style={{ display: 'block', fontSize: 13, fontWeight: 620, color: '#8a5a12' }}>
                   数据没能存到服务器
                 </span>
-                <span style={{ display: 'block', fontSize: 11.5, color: '***REMOVED***96702f', marginTop: 2 }}>
+                <span style={{ display: 'block', fontSize: 11.5, color: '#96702f', marginTop: 2 }}>
                   {syncError} · 本地已保留
                 </span>
               </span>
-              <span style={{ fontSize: 11.5, color: '***REMOVED***96702f', flexShrink: 0 }}>知道了</span>
+              <span style={{ fontSize: 11.5, color: '#96702f', flexShrink: 0 }}>知道了</span>
             </button>
           ) : null}
           {children}

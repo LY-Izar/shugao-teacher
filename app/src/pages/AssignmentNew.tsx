@@ -499,7 +499,7 @@ export default function AssignmentNew() {
                             borderRadius: 3,
                             border: `1px solid ${on ? 'var(--color-accent)' : 'var(--color-line2)'}`,
                             background: on ? 'var(--color-accent)' : 'transparent',
-                            color: '***REMOVED***fff',
+                            color: '#fff',
                           }}
                         >
                           {on ? <IconCheck size={11} strokeWidth={3} /> : null}

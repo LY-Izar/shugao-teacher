@@ -27,21 +27,21 @@
  *
  * 用法：
  *   cd app
- *   node scripts/rls-checks.mjs          ***REMOVED*** 全过 → 退出码 0；红一条 → 退出码 1
+ *   node scripts/rls-checks.mjs          # 全过 → 退出码 0；红一条 → 退出码 1
  *   npm run rls-checks
  *
  * 负向对照（证明它不是"永远绿的摆设"）——故意把一条策略改坏，脚本**必须变红**：
- *   $env:RLS_NEGATIVE='classroom-write'    ; node scripts/rls-checks.mjs   ***REMOVED*** 给教室端开一个 assignments 的 INSERT
- *   $env:RLS_NEGATIVE='head-teacher-write' ; node scripts/rls-checks.mjs   ***REMOVED*** 让班主任也能改成绩
- *   $env:RLS_NEGATIVE='classes-insert'     ; node scripts/rls-checks.mjs   ***REMOVED*** 拿掉 classes_insert 里的 owns_class(id)
- *   $env:RLS_NEGATIVE='crack-a'            ; node scripts/rls-checks.mjs   ***REMOVED*** 把「教室端不许改自己那行 teachers」改回去
- *   $env:RLS_NEGATIVE='crack-b'            ; node scripts/rls-checks.mjs   ***REMOVED*** 把「教室端不许写 scope=mine 排课表」改回去
- *   $env:RLS_NEGATIVE='crack-c'            ; node scripts/rls-checks.mjs   ***REMOVED*** 把「教室端不许写 shared_files」改回去
- *   $env:RLS_NEGATIVE='exam-for-everyone'  ; node scripts/rls-checks.mjs   ***REMOVED*** 让考试写判据对**所有人**为真（谁都能改别人的考试档案）
- *   $env:RLS_NEGATIVE='file-read-wider'    ; node scripts/rls-checks.mjs   ***REMOVED*** 文件的班级归属读策略改成恒真（谁都能读所有文件）
- *   $env:RLS_NEGATIVE='file-read-closed'   ; node scripts/rls-checks.mjs   ***REMOVED*** 读策略改成恒假（教室端的文件列表又变成空的）
- *   $env:RLS_NEGATIVE='file-object-wider'  ; node scripts/rls-checks.mjs   ***REMOVED*** 存储对象的读策略改成恒真（桶里任何文件都能签直链）
- *   $env:RLS_NEGATIVE='department-open'    ; node scripts/rls-checks.mjs   ***REMOVED*** 🆕 部门那一支两半判据拿掉（空部门也能发 + 年级主任也能发）
+ *   $env:RLS_NEGATIVE='classroom-write'    ; node scripts/rls-checks.mjs   # 给教室端开一个 assignments 的 INSERT
+ *   $env:RLS_NEGATIVE='head-teacher-write' ; node scripts/rls-checks.mjs   # 让班主任也能改成绩
+ *   $env:RLS_NEGATIVE='classes-insert'     ; node scripts/rls-checks.mjs   # 拿掉 classes_insert 里的 owns_class(id)
+ *   $env:RLS_NEGATIVE='crack-a'            ; node scripts/rls-checks.mjs   # 把「教室端不许改自己那行 teachers」改回去
+ *   $env:RLS_NEGATIVE='crack-b'            ; node scripts/rls-checks.mjs   # 把「教室端不许写 scope=mine 排课表」改回去
+ *   $env:RLS_NEGATIVE='crack-c'            ; node scripts/rls-checks.mjs   # 把「教室端不许写 shared_files」改回去
+ *   $env:RLS_NEGATIVE='exam-for-everyone'  ; node scripts/rls-checks.mjs   # 让考试写判据对**所有人**为真（谁都能改别人的考试档案）
+ *   $env:RLS_NEGATIVE='file-read-wider'    ; node scripts/rls-checks.mjs   # 文件的班级归属读策略改成恒真（谁都能读所有文件）
+ *   $env:RLS_NEGATIVE='file-read-closed'   ; node scripts/rls-checks.mjs   # 读策略改成恒假（教室端的文件列表又变成空的）
+ *   $env:RLS_NEGATIVE='file-object-wider'  ; node scripts/rls-checks.mjs   # 存储对象的读策略改成恒真（桶里任何文件都能签直链）
+ *   $env:RLS_NEGATIVE='department-open'    ; node scripts/rls-checks.mjs   # 🆕 部门那一支两半判据拿掉（空部门也能发 + 年级主任也能发）
  *   （改的全是**内存里的 SQL 文本**，仓库文件一个字节都不动。）
  */
 

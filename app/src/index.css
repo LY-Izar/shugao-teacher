@@ -8,38 +8,38 @@
 
 @theme {
   /* 面 */
-  --color-canvas: ***REMOVED***e8ebf2;
-  --color-surface: ***REMOVED***ffffff;
-  --color-surface2: ***REMOVED***f7f9fb;
-  --color-surface3: ***REMOVED***eff2f6;
+  --color-canvas: #e8ebf2;
+  --color-surface: #ffffff;
+  --color-surface2: #f7f9fb;
+  --color-surface3: #eff2f6;
 
   /* 线（发丝线是这套设计的主要分隔手段） */
-  --color-line: ***REMOVED***e2e6ec;
-  --color-line2: ***REMOVED***cfd6e0;
-  --color-line3: ***REMOVED***b6bfcc;
+  --color-line: #e2e6ec;
+  --color-line2: #cfd6e0;
+  --color-line3: #b6bfcc;
 
   /* 墨 */
-  --color-ink: ***REMOVED***0e141b;
-  --color-ink2: ***REMOVED***4a5563;
-  --color-ink3: ***REMOVED***7d8794;
-  --color-ink4: ***REMOVED***a3acb8;
+  --color-ink: #0e141b;
+  --color-ink2: #4a5563;
+  --color-ink3: #7d8794;
+  --color-ink4: #a3acb8;
 
   /* 主色：克制的电蓝；辅色：青，仅用于科技感点缀 */
-  --color-accent: ***REMOVED***0b5cf0;
-  --color-accentink: ***REMOVED***0847c4;
-  --color-accentsoft: ***REMOVED***e9f0fe;
-  --color-cyan: ***REMOVED***00b0c6;
-  --color-cyansoft: ***REMOVED***e2f6f9;
+  --color-accent: #0b5cf0;
+  --color-accentink: #0847c4;
+  --color-accentsoft: #e9f0fe;
+  --color-cyan: #00b0c6;
+  --color-cyansoft: #e2f6f9;
 
   /* 语义 */
-  --color-ok: ***REMOVED***0f8a5f;
-  --color-oksoft: ***REMOVED***e6f5ee;
-  --color-warn: ***REMOVED***b0741a;
-  --color-warnsoft: ***REMOVED***fbf2e2;
-  --color-bad: ***REMOVED***d42b39;
-  --color-badsoft: ***REMOVED***fdeced;
-  --color-idle: ***REMOVED***8a94a3;
-  --color-idlesoft: ***REMOVED***eff1f4;
+  --color-ok: #0f8a5f;
+  --color-oksoft: #e6f5ee;
+  --color-warn: #b0741a;
+  --color-warnsoft: #fbf2e2;
+  --color-bad: #d42b39;
+  --color-badsoft: #fdeced;
+  --color-idle: #8a94a3;
+  --color-idlesoft: #eff1f4;
 
   /* 小圆角是刻意的：2 / 4 / 6，只有浮层用 10 */
   --radius-xs: 2px;
@@ -68,14 +68,14 @@
 
 html,
 body,
-***REMOVED***root {
+#root {
   height: 100%;
 }
 
 body {
   margin: 0;
-  background-color: ***REMOVED***e8ebf2;
-  color: ***REMOVED***0e141b;
+  background-color: #e8ebf2;
+  color: #0e141b;
   font-family: var(--font-sans);
   font-size: 15px;
   line-height: 1.55;
@@ -95,7 +95,7 @@ body::before {
     linear-gradient(to right, rgb(14 20 27 / 0.04) 1px, transparent 1px),
     linear-gradient(to bottom, rgb(14 20 27 / 0.04) 1px, transparent 1px);
   background-size: 26px 26px;
-  mask-image: radial-gradient(ellipse 120% 80% at 50% 0%, ***REMOVED***000 20%, transparent 75%);
+  mask-image: radial-gradient(ellipse 120% 80% at 50% 0%, #000 20%, transparent 75%);
 }
 
 /* 数字一律使用等宽数位（tabular-nums），避免跳动 —— 数据类界面必备。
@@ -108,12 +108,12 @@ body::before {
 }
 
 ::selection {
-  background: ***REMOVED***0b5cf0;
-  color: ***REMOVED***fff;
+  background: #0b5cf0;
+  color: #fff;
 }
 
 :focus-visible {
-  outline: 2px solid ***REMOVED***0b5cf0;
+  outline: 2px solid #0b5cf0;
   outline-offset: 1px;
 }
 
@@ -122,7 +122,7 @@ body::before {
   height: 8px;
 }
 ::-webkit-scrollbar-thumb {
-  background: ***REMOVED***cfd6e0;
+  background: #cfd6e0;
   border-radius: 99px;
 }
 ::-webkit-scrollbar-track {
@@ -136,8 +136,8 @@ body::before {
 @layer components {
   /* --- 面板：用发丝线和小圆角，不用大圆角卡片 --- */
   .panel {
-    background: ***REMOVED***fff;
-    border: 1px solid ***REMOVED***e2e6ec;
+    background: #fff;
+    border: 1px solid #e2e6ec;
     border-radius: 6px;
   }
 
@@ -147,8 +147,8 @@ body::before {
     align-items: center;
     gap: 10px;
     padding: 11px 14px;
-    border-bottom: 1px solid ***REMOVED***e2e6ec;
-    background: ***REMOVED***f7f9fb;
+    border-bottom: 1px solid #e2e6ec;
+    background: #f7f9fb;
     border-radius: 6px 6px 0 0;
     position: relative;
   }
@@ -159,7 +159,7 @@ body::before {
     top: 11px;
     bottom: 11px;
     width: 2px;
-    background: ***REMOVED***0b5cf0;
+    background: #0b5cf0;
     border-radius: 0 2px 2px 0;
   }
   .panel-head h2 {
@@ -179,19 +179,19 @@ body::before {
     content: '';
     width: 14px;
     height: 1px;
-    background: ***REMOVED***7d8794;
+    background: #7d8794;
   }
   .sect > span {
     font-size: 11px;
     font-weight: 600;
     letter-spacing: 0.14em;
-    color: ***REMOVED***7d8794;
+    color: #7d8794;
     text-transform: uppercase;
   }
   .sect > i {
     flex: 1;
     height: 1px;
-    background: ***REMOVED***e2e6ec;
+    background: #e2e6ec;
   }
 
   /* --- 按钮 --- */
@@ -203,10 +203,10 @@ body::before {
     gap: 7px;
     height: 42px;
     padding: 0 16px;
-    border: 1px solid ***REMOVED***cfd6e0;
+    border: 1px solid #cfd6e0;
     border-radius: 4px;
-    background: ***REMOVED***fff;
-    color: ***REMOVED***0e141b;
+    background: #fff;
+    color: #0e141b;
     font-size: 14px;
     font-weight: 550;
     font-family: inherit;
@@ -222,8 +222,8 @@ body::before {
       color 0.16s cubic-bezier(0.22, 0.8, 0.24, 1);
   }
   .btn:hover {
-    background: ***REMOVED***f7f9fb;
-    border-color: ***REMOVED***b6bfcc;
+    background: #f7f9fb;
+    border-color: #b6bfcc;
   }
   .btn:active {
     transform: scale(0.985);
@@ -235,22 +235,22 @@ body::before {
   }
 
   .btn-primary {
-    background: ***REMOVED***0b5cf0;
-    border-color: ***REMOVED***0b5cf0;
-    color: ***REMOVED***fff;
+    background: #0b5cf0;
+    border-color: #0b5cf0;
+    color: #fff;
   }
   .btn-primary:hover {
-    background: ***REMOVED***0847c4;
-    border-color: ***REMOVED***0847c4;
+    background: #0847c4;
+    border-color: #0847c4;
   }
 
   .btn-ghost {
     border-color: transparent;
     background: transparent;
-    color: ***REMOVED***4a5563;
+    color: #4a5563;
   }
   .btn-ghost:hover {
-    background: ***REMOVED***eff2f6;
+    background: #eff2f6;
     border-color: transparent;
   }
 
@@ -261,12 +261,12 @@ body::before {
   }
 
   .btn-danger {
-    color: ***REMOVED***d42b39;
-    border-color: ***REMOVED***f0c2c6;
+    color: #d42b39;
+    border-color: #f0c2c6;
   }
   .btn-danger:hover {
-    background: ***REMOVED***fdeced;
-    border-color: ***REMOVED***e39aa1;
+    background: #fdeced;
+    border-color: #e39aa1;
   }
 
   /* 点击波纹 —— 交互感的主要来源之一 */
@@ -292,22 +292,22 @@ body::before {
     width: 100%;
     height: 42px;
     padding: 0 12px;
-    border: 1px solid ***REMOVED***cfd6e0;
+    border: 1px solid #cfd6e0;
     border-radius: 4px;
-    background: ***REMOVED***fff;
+    background: #fff;
     font-size: 15px;
     font-family: inherit;
-    color: ***REMOVED***0e141b;
+    color: #0e141b;
     transition:
       border-color 0.16s cubic-bezier(0.22, 0.8, 0.24, 1),
       box-shadow 0.16s cubic-bezier(0.22, 0.8, 0.24, 1);
   }
   .input::placeholder {
-    color: ***REMOVED***a3acb8;
+    color: #a3acb8;
   }
   .input:focus {
     outline: none;
-    border-color: ***REMOVED***0b5cf0;
+    border-color: #0b5cf0;
     box-shadow: 0 0 0 3px rgb(11 92 240 / 0.14);
   }
 
@@ -322,7 +322,7 @@ body::before {
     display: block;
     font-size: 12px;
     font-weight: 600;
-    color: ***REMOVED***4a5563;
+    color: #4a5563;
     margin-bottom: 6px;
     letter-spacing: 0.02em;
   }
@@ -342,31 +342,31 @@ body::before {
     white-space: nowrap;
   }
   .tag-idle {
-    background: ***REMOVED***eff1f4;
-    color: ***REMOVED***7d8794;
-    border-color: ***REMOVED***e2e6ec;
+    background: #eff1f4;
+    color: #7d8794;
+    border-color: #e2e6ec;
   }
   .tag-accent {
-    background: ***REMOVED***e9f0fe;
-    color: ***REMOVED***0847c4;
+    background: #e9f0fe;
+    color: #0847c4;
   }
   .tag-ok {
-    background: ***REMOVED***e6f5ee;
-    color: ***REMOVED***0f8a5f;
+    background: #e6f5ee;
+    color: #0f8a5f;
   }
   .tag-warn {
-    background: ***REMOVED***fbf2e2;
-    color: ***REMOVED***b0741a;
+    background: #fbf2e2;
+    color: #b0741a;
   }
   .tag-bad {
-    background: ***REMOVED***fdeced;
-    color: ***REMOVED***d42b39;
+    background: #fdeced;
+    color: #d42b39;
   }
 
   /* --- 数据格：仪表盘的基本单元 --- */
   .stat {
     padding: 12px 14px;
-    border-right: 1px solid ***REMOVED***e2e6ec;
+    border-right: 1px solid #e2e6ec;
   }
   .stat:last-child {
     border-right: 0;
@@ -375,7 +375,7 @@ body::before {
     font-size: 11px;
     font-weight: 600;
     letter-spacing: 0.1em;
-    color: ***REMOVED***7d8794;
+    color: #7d8794;
     text-transform: uppercase;
   }
   .stat-v {
@@ -392,21 +392,21 @@ body::before {
   /* --- 进度条：细线风格 --- */
   .track {
     height: 3px;
-    background: ***REMOVED***eff2f6;
+    background: #eff2f6;
     border-radius: 99px;
     overflow: hidden;
   }
   .track > i {
     display: block;
     height: 100%;
-    background: ***REMOVED***0b5cf0;
+    background: #0b5cf0;
     border-radius: 99px;
     transition: width 0.5s cubic-bezier(0.22, 0.8, 0.24, 1);
   }
 
   /* --- 骨架屏 --- */
   .skeleton {
-    background: linear-gradient(90deg, ***REMOVED***eff2f6 25%, ***REMOVED***f8fafc 37%, ***REMOVED***eff2f6 63%);
+    background: linear-gradient(90deg, #eff2f6 25%, #f8fafc 37%, #eff2f6 63%);
     background-size: 400% 100%;
     animation: shimmer 1.3s ease-in-out infinite;
     border-radius: 2px;
@@ -418,8 +418,8 @@ body::before {
     align-items: center;
     gap: 12px;
     padding: 12px 14px;
-    border-bottom: 1px solid ***REMOVED***e2e6ec;
-    background: ***REMOVED***fff;
+    border-bottom: 1px solid #e2e6ec;
+    background: #fff;
     transition: background-color 0.14s cubic-bezier(0.22, 0.8, 0.24, 1);
     cursor: pointer;
     text-align: left;
@@ -430,10 +430,10 @@ body::before {
     border-bottom: 0;
   }
   .row:hover {
-    background: ***REMOVED***f7f9fb;
+    background: #f7f9fb;
   }
   .row:active {
-    background: ***REMOVED***eff2f6;
+    background: #eff2f6;
   }
 
   /* --- 空态 --- */
@@ -444,7 +444,7 @@ body::before {
     gap: 10px;
     padding: 38px 20px;
     text-align: center;
-    color: ***REMOVED***7d8794;
+    color: #7d8794;
   }
 
   /* --- 浮层 --- */
@@ -465,9 +465,9 @@ body::before {
     width: 100%;
     max-width: 640px;
     transform: translateX(-50%);
-    background: ***REMOVED***fff;
+    background: #fff;
     border-radius: 10px 10px 0 0;
-    border-top: 1px solid ***REMOVED***cfd6e0;
+    border-top: 1px solid #cfd6e0;
     box-shadow: 0 -12px 40px rgb(14 20 27 / 0.14);
     animation: sheet-up 0.26s cubic-bezier(0.22, 0.8, 0.24, 1);
     max-height: 88vh;
@@ -507,8 +507,8 @@ body::before {
     max-width: 404px;
     max-height: 86vh;
     overflow-y: auto;
-    background: ***REMOVED***fff;
-    border: 1px solid ***REMOVED***cfd6e0;
+    background: #fff;
+    border: 1px solid #cfd6e0;
     border-radius: 10px;
     box-shadow: 0 28px 70px -22px rgb(14 20 27 / 0.38);
     animation: modal-in 0.36s cubic-bezier(0.34, 1.24, 0.5, 1) both;
@@ -518,7 +518,7 @@ body::before {
   .seg {
     display: inline-flex;
     padding: 2px;
-    background: ***REMOVED***eff2f6;
+    background: #eff2f6;
     border-radius: 4px;
     gap: 2px;
   }
@@ -531,15 +531,15 @@ body::before {
     font-size: 13px;
     font-weight: 550;
     font-family: inherit;
-    color: ***REMOVED***7d8794;
+    color: #7d8794;
     cursor: pointer;
     transition:
       background-color 0.16s cubic-bezier(0.22, 0.8, 0.24, 1),
       color 0.16s cubic-bezier(0.22, 0.8, 0.24, 1);
   }
   .seg > button[data-on='true'] {
-    background: ***REMOVED***fff;
-    color: ***REMOVED***0e141b;
+    background: #fff;
+    color: #0e141b;
     box-shadow: 0 1px 2px rgb(14 20 27 / 0.07);
   }
 
@@ -558,28 +558,28 @@ body::before {
     font-weight: 600;
     letter-spacing: 0.1em;
     text-transform: uppercase;
-    color: ***REMOVED***7d8794;
+    color: #7d8794;
     padding: 9px 12px;
     /* 半透明 + 模糊：名单滚动时行会从表头下面穿过去 */
     background: linear-gradient(180deg, rgb(247 249 251 / 0.94), rgb(247 249 251 / 0.86));
     -webkit-backdrop-filter: blur(10px) saturate(150%);
     backdrop-filter: blur(10px) saturate(150%);
-    border-bottom: 1px solid ***REMOVED***e2e6ec;
+    border-bottom: 1px solid #e2e6ec;
     white-space: nowrap;
   }
   .tbl td {
     padding: 9px 12px;
-    border-bottom: 1px solid ***REMOVED***e2e6ec;
+    border-bottom: 1px solid #e2e6ec;
     vertical-align: middle;
   }
   .tbl tbody tr {
     transition: background-color 0.14s cubic-bezier(0.22, 0.8, 0.24, 1);
   }
   .tbl tbody tr:hover {
-    background: ***REMOVED***f7f9fb;
+    background: #f7f9fb;
   }
   .tbl tbody tr[data-flag='true'] {
-    background: ***REMOVED***fbf2e2;
+    background: #fbf2e2;
   }
 }
 
@@ -949,7 +949,7 @@ body::before {
     border-radius: 8px;
     /* 四层叠加：内侧镜面高光 → 贴边细影 → 中程投影 → 远场柔影 */
     box-shadow:
-      inset 0 1px 0 ***REMOVED***fff,
+      inset 0 1px 0 #fff,
       0 1px 2px rgb(14 20 27 / 0.05),
       0 12px 26px -12px rgb(14 20 27 / 0.22),
       0 34px 64px -30px rgb(14 20 27 / 0.34);
@@ -1012,7 +1012,7 @@ body::before {
     background: linear-gradient(180deg, rgb(233 240 254 / 0.98), rgb(233 240 254 / 0.76));
     border: 1px solid rgb(255 255 255 / 0.95);
     box-shadow:
-      inset 0 1px 0 ***REMOVED***fff,
+      inset 0 1px 0 #fff,
       inset 0 -7px 13px -9px rgb(11 92 240 / 0.32),
       0 1px 3px rgb(14 20 27 / 0.05),
       0 8px 18px -10px rgb(14 20 27 / 0.2);
@@ -1038,7 +1038,7 @@ body::before {
   left: 0;
   right: 0;
   height: 2px;
-  background: linear-gradient(90deg, transparent, ***REMOVED***00b0c6, transparent);
+  background: linear-gradient(90deg, transparent, #00b0c6, transparent);
   box-shadow: 0 0 12px 1px rgb(0 176 198 / 0.6);
   animation: scan 2.1s cubic-bezier(0.22, 0.8, 0.24, 1) infinite;
 }

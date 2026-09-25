@@ -224,7 +224,7 @@ function QRowEditor({
                   fontWeight: 700,
                   border: `1px solid ${on ? 'var(--color-accent)' : 'var(--color-line2)'}`,
                   background: on ? 'var(--color-accent)' : 'var(--color-surface)',
-                  color: on ? '***REMOVED***fff' : 'var(--color-ink2)',
+                  color: on ? '#fff' : 'var(--color-ink2)',
                   position: 'relative',
                 }}
               >
@@ -238,7 +238,7 @@ function QRowEditor({
                       width: 4,
                       height: 4,
                       borderRadius: 9,
-                      background: on ? '***REMOVED***fff' : 'var(--color-ok)',
+                      background: on ? '#fff' : 'var(--color-ok)',
                     }}
                   />
                 ) : null}
@@ -287,7 +287,7 @@ function QRowEditor({
                   fontWeight: 700,
                   border: `1px solid ${on ? 'var(--color-accent)' : 'var(--color-line2)'}`,
                   background: on ? 'var(--color-accent)' : 'var(--color-surface)',
-                  color: on ? '***REMOVED***fff' : 'var(--color-ink2)',
+                  color: on ? '#fff' : 'var(--color-ink2)',
                 }}
               >
                 {v}

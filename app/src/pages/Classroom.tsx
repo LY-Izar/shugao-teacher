@@ -1069,14 +1069,14 @@ export default function Classroom() {
               className="mb-4 flex items-start gap-2.5 p-3.5"
               style={{
                 background: 'var(--color-warnsoft)',
-                border: '1px solid ***REMOVED***ecd9ae',
+                border: '1px solid #ecd9ae',
                 borderRadius: 6,
               }}
             >
               <span style={{ color: 'var(--color-warn)', marginTop: 1 }}>
                 <IconAlert size={17} />
               </span>
-              <div style={{ fontSize: 13, color: '***REMOVED***8a5a12', lineHeight: 1.7 }}>
+              <div style={{ fontSize: 13, color: '#8a5a12', lineHeight: 1.7 }}>
                 当前浏览器不支持<b>强制置顶小窗</b>（需要 Edge / Chrome 116 及以上）。
                 讲评时请用手机或平板看题号与正确率。
               </div>
@@ -1086,14 +1086,14 @@ export default function Classroom() {
               className="mb-4 flex flex-wrap items-center gap-3 p-3.5"
               style={{
                 background: 'var(--color-accentsoft)',
-                border: '1px solid ***REMOVED***c3d6fb',
+                border: '1px solid #c3d6fb',
                 borderRadius: 6,
               }}
             >
               <span style={{ color: 'var(--color-accent)' }}>
                 <IconInfo size={17} />
               </span>
-              <div className="flex-1" style={{ fontSize: 13, color: '***REMOVED***0d3f9e', lineHeight: 1.7 }}>
+              <div className="flex-1" style={{ fontSize: 13, color: '#0d3f9e', lineHeight: 1.7 }}>
                 点一次「启动置顶小窗」：小窗会浮在全屏的新教育平台之上，显示当前题号与正确率。
                 <b>同时这一步也解开了浏览器的声音限制</b>，呼叫播报才能出声。
               </div>
@@ -1222,10 +1222,10 @@ export default function Classroom() {
                     className="mb-2 flex flex-wrap items-center gap-1.5 p-2"
                     style={{
                       background: 'var(--color-warnsoft)',
-                      border: '1px solid ***REMOVED***ecd9ae',
+                      border: '1px solid #ecd9ae',
                       borderRadius: 4,
                       fontSize: 11.5,
-                      color: '***REMOVED***8a5a12',
+                      color: '#8a5a12',
                     }}
                   >
                     <span>今天是调休上班日，按</span>
@@ -1244,7 +1244,7 @@ export default function Classroom() {
                               ? 'var(--color-warn)'
                               : 'rgb(255 255 255 / .6)',
                           color:
-                            useWeekday === w && weekOverride !== null ? '***REMOVED***fff' : 'inherit',
+                            useWeekday === w && weekOverride !== null ? '#fff' : 'inherit',
                         }}
                       >
                         {WEEKDAY_TEXT[w - 1]}
@@ -1268,10 +1268,10 @@ export default function Classroom() {
                     className="mb-2 p-2"
                     style={{
                       background: 'var(--color-badsoft)',
-                      border: '1px solid ***REMOVED***f0c9c9',
+                      border: '1px solid #f0c9c9',
                       borderRadius: 4,
                       fontSize: 11.5,
-                      color: '***REMOVED***8f2b2b',
+                      color: '#8f2b2b',
                       lineHeight: 1.6,
                     }}
                   >
@@ -1459,14 +1459,14 @@ export default function Classroom() {
               {exam ? (
                 <div
                   className="fixed inset-0 z-[90] flex flex-col items-center justify-center"
-                  style={{ background: '***REMOVED***000' }}
+                  style={{ background: '#000' }}
                 >
                   <div
                     className="num"
                     style={{
                       fontSize: 'clamp(72px, 17vw, 190px)',
                       fontWeight: 200,
-                      color: '***REMOVED***fff',
+                      color: '#fff',
                       lineHeight: 1,
                       letterSpacing: '.02em',
                     }}
@@ -1836,9 +1836,9 @@ export default function Classroom() {
                         className="px-3 py-2.5"
                         style={{
                           fontSize: 12,
-                          color: '***REMOVED***8f2b2b',
+                          color: '#8f2b2b',
                           background: 'var(--color-badsoft)',
-                          borderBottom: '1px solid ***REMOVED***f0c9c9',
+                          borderBottom: '1px solid #f0c9c9',
                           lineHeight: 1.7,
                         }}
                       >
@@ -2006,12 +2006,12 @@ export default function Classroom() {
                   padding: '12px 16px',
                   textAlign: 'center',
                   font: '13px/1.7 system-ui, -apple-system, "Microsoft YaHei", sans-serif',
-                  color: 'var(--color-ink2, ***REMOVED***333)',
-                  background: 'var(--color-surface, ***REMOVED***fff)',
+                  color: 'var(--color-ink2, #333)',
+                  background: 'var(--color-surface, #fff)',
                 }}
               >
                 <div style={{ fontWeight: 600, marginBottom: 6 }}>还没有可讲评的作业</div>
-                <div style={{ fontSize: 12, color: 'var(--color-ink3, ***REMOVED***777)' }}>
+                <div style={{ fontSize: 12, color: 'var(--color-ink3, #777)' }}>
                   {klass?.name ?? ''} 还没有批改完的作业。
                 </div>
               </div>
@@ -2037,7 +2037,7 @@ export default function Classroom() {
                 width: 9,
                 height: 9,
                 borderRadius: 99,
-                background: '***REMOVED***4ade9a',
+                background: '#4ade9a',
                 display: 'inline-block',
               }}
             />
@@ -2045,7 +2045,7 @@ export default function Classroom() {
           </div>
           <div
             style={{
-              color: '***REMOVED***fff',
+              color: '#fff',
               fontSize: 46,
               fontWeight: 700,
               lineHeight: 1.5,
@@ -2166,7 +2166,7 @@ function SyncBanner() {
       className="anim-in mb-4 flex w-full items-start gap-2.5 p-3.5 text-left"
       style={{
         background: 'var(--color-warnsoft)',
-        border: '1px solid ***REMOVED***ecd9ae',
+        border: '1px solid #ecd9ae',
         borderRadius: 6,
       }}
     >
@@ -2174,14 +2174,14 @@ function SyncBanner() {
         <IconAlert size={17} />
       </span>
       <span style={{ flex: 1 }}>
-        <span style={{ display: 'block', fontSize: 13.5, fontWeight: 620, color: '***REMOVED***8a5a12' }}>
+        <span style={{ display: 'block', fontSize: 13.5, fontWeight: 620, color: '#8a5a12' }}>
           数据没能存到服务器
         </span>
-        <span style={{ display: 'block', fontSize: 12, color: '***REMOVED***96702f', marginTop: 3, lineHeight: 1.7 }}>
+        <span style={{ display: 'block', fontSize: 12, color: '#96702f', marginTop: 3, lineHeight: 1.7 }}>
           {syncError} · 本地已保留，网络好了再操作一次
         </span>
       </span>
-      <span style={{ fontSize: 11.5, color: '***REMOVED***96702f', flexShrink: 0 }}>知道了</span>
+      <span style={{ fontSize: 11.5, color: '#96702f', flexShrink: 0 }}>知道了</span>
     </button>
   )
 }

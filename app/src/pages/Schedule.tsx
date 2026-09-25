@@ -135,7 +135,7 @@ export default function Schedule() {
             className="anim-in mb-3 flex flex-wrap items-center gap-3 p-3.5"
             style={{
               background: perm === 'unsupported' ? 'var(--color-warnsoft)' : 'var(--color-accentsoft)',
-              border: `1px solid ${perm === 'unsupported' ? '***REMOVED***ecd9ae' : '***REMOVED***c3d6fb'}`,
+              border: `1px solid ${perm === 'unsupported' ? '#ecd9ae' : '#c3d6fb'}`,
               borderRadius: 6,
             }}
           >
@@ -143,14 +143,14 @@ export default function Schedule() {
               {perm === 'unsupported' ? <IconAlert size={17} /> : <IconBell size={17} />}
             </span>
             <div className="flex-1" style={{ fontSize: 12.5, lineHeight: 1.7 }}>
-              <div style={{ fontWeight: 620, color: perm === 'unsupported' ? '***REMOVED***8a5a12' : '***REMOVED***0d3f9e' }}>
+              <div style={{ fontWeight: 620, color: perm === 'unsupported' ? '#8a5a12' : '#0d3f9e' }}>
                 {perm === 'unsupported'
                   ? '这个浏览器不支持系统通知'
                   : perm === 'denied'
                     ? '系统通知被拒绝了'
                     : `开启通知，上课前 ${REMIND_BEFORE} 分钟提醒你`}
               </div>
-              <div style={{ color: perm === 'unsupported' ? '***REMOVED***96702f' : '***REMOVED***2a5bb8', marginTop: 2 }}>
+              <div style={{ color: perm === 'unsupported' ? '#96702f' : '#2a5bb8', marginTop: 2 }}>
                 {perm === 'unsupported'
                   ? '会改用页内提醒（需要平台开着）。把网站装到手机桌面后再授权，通常就能收到。'
                   : perm === 'denied'
@@ -178,12 +178,12 @@ export default function Schedule() {
         ) : (
           <div
             className="anim-in mb-3 flex items-center gap-2.5 p-3"
-            style={{ background: 'var(--color-oksoft)', border: '1px solid ***REMOVED***b9e2cf', borderRadius: 6 }}
+            style={{ background: 'var(--color-oksoft)', border: '1px solid #b9e2cf', borderRadius: 6 }}
           >
             <span style={{ color: 'var(--color-ok)' }}>
               <IconCheck size={16} />
             </span>
-            <span style={{ fontSize: 12.5, color: '***REMOVED***0b6b4a' }}>
+            <span style={{ fontSize: 12.5, color: '#0b6b4a' }}>
               通知已开启 · 上课前 {REMIND_BEFORE} 分钟提醒
             </span>
           </div>

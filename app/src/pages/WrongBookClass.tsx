@@ -403,7 +403,7 @@ export default function WrongBookClass() {
                           objectFit: 'contain',
                           border: '1px solid var(--color-line2)',
                           borderRadius: 3,
-                          background: '***REMOVED***fff',
+                          background: '#fff',
                           flexShrink: 0,
                         }}
                       />

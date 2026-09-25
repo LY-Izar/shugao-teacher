@@ -700,14 +700,14 @@ export default function Settings() {
               className="mt-2 flex items-start gap-2.5 p-3"
               style={{
                 background: 'var(--color-warnsoft)',
-                border: '1px solid ***REMOVED***ecd9ae',
+                border: '1px solid #ecd9ae',
                 borderRadius: 6,
               }}
             >
               <span style={{ color: 'var(--color-warn)', marginTop: 1 }}>
                 <IconAlert size={16} />
               </span>
-              <div style={{ fontSize: 12.5, color: '***REMOVED***8a5a12', lineHeight: 1.65 }}>
+              <div style={{ fontSize: 12.5, color: '#8a5a12', lineHeight: 1.65 }}>
                 这台设备现在是<b>教室端</b>：在这台机器上进教师端会先被拦去登录页。
                 输一次教师密码即可自动改回教师端，或者直接点下面的按钮。
               </div>

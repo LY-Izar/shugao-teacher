@@ -725,7 +725,7 @@ await withLock(async () => {
         check('改完之后名单里出现 99 号', /\b99\b/.test(after), short(after, 90))
         check(
           '🔴 改完之后**序列号没变**（被改的只是班内学号）',
-          after.includes(who.serial ?? '***REMOVED******REMOVED******REMOVED***'),
+          after.includes(who.serial ?? '###'),
           short(after, 90),
         )
       })

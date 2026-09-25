@@ -137,11 +137,11 @@ export default function Login() {
                 className="p-2.5"
                 style={{
                   background: 'var(--color-warnsoft)',
-                  border: '1px solid ***REMOVED***ecd9ae',
+                  border: '1px solid #ecd9ae',
                   borderRadius: 4,
                   fontSize: 12.5,
                   lineHeight: 1.7,
-                  color: '***REMOVED***8a5a12',
+                  color: '#8a5a12',
                 }}
               >
                 距上次在这台设备上登录已超过 <b>7 天</b>，请重新输入一次密码。
@@ -183,7 +183,7 @@ export default function Login() {
                       width: 7,
                       height: 7,
                       borderRadius: 99,
-                      background: '***REMOVED***fff',
+                      background: '#fff',
                       display: 'inline-block',
                     }}
                   />

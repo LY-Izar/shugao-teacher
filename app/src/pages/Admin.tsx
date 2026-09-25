@@ -326,8 +326,8 @@ function PrivacyLine() {
       className="mx-3.5 mb-2 flex items-center gap-2 px-2.5 py-1.5"
       style={{
         background: 'var(--color-warnsoft)',
-        border: '1px solid ***REMOVED***ecd9ae',
-        color: '***REMOVED***8a5a12',
+        border: '1px solid #ecd9ae',
+        color: '#8a5a12',
         borderRadius: 4,
         fontSize: 12,
       }}
@@ -404,11 +404,11 @@ function PanelLogin({ reason }: { reason: string }) {
             className="mb-4 p-2.5"
             style={{
               background: 'var(--color-warnsoft)',
-              border: '1px solid ***REMOVED***ecd9ae',
+              border: '1px solid #ecd9ae',
               borderRadius: 4,
               fontSize: 12.5,
               lineHeight: 1.7,
-              color: '***REMOVED***8a5a12',
+              color: '#8a5a12',
             }}
           >
             {reason}
@@ -961,7 +961,7 @@ export default function Admin() {
                     ? 'var(--color-idlesoft)'
                     : 'transparent',
               borderTop: '1px solid var(--color-line)',
-              color: maintLive.enabled ? '***REMOVED***8a5a12' : 'var(--color-ink3)',
+              color: maintLive.enabled ? '#8a5a12' : 'var(--color-ink3)',
               fontSize: 12.5,
               lineHeight: 1.7,
             }}
@@ -991,8 +991,8 @@ export default function Admin() {
               className="flex items-start gap-2 px-3.5 py-2.5"
               style={{
                 background: 'var(--color-badsoft)',
-                borderTop: '1px solid ***REMOVED***f3c9cd',
-                color: '***REMOVED***8f1c26',
+                borderTop: '1px solid #f3c9cd',
+                color: '#8f1c26',
                 fontSize: 13,
                 lineHeight: 1.75,
               }}
@@ -1012,8 +1012,8 @@ export default function Admin() {
               className="flex items-start gap-2 px-3.5 py-2.5"
               style={{
                 background: 'var(--color-warnsoft)',
-                borderTop: '1px solid ***REMOVED***ecd9ae',
-                color: '***REMOVED***8a5a12',
+                borderTop: '1px solid #ecd9ae',
+                color: '#8a5a12',
                 fontSize: 12.5,
                 lineHeight: 1.75,
               }}
@@ -1033,8 +1033,8 @@ export default function Admin() {
               className="px-3.5 py-2.5"
               style={{
                 background: 'var(--color-badsoft)',
-                borderTop: '1px solid ***REMOVED***f3c9cd',
-                color: '***REMOVED***8f1c26',
+                borderTop: '1px solid #f3c9cd',
+                color: '#8f1c26',
                 fontSize: 12.5,
                 lineHeight: 1.7,
               }}
@@ -2177,8 +2177,8 @@ function AnnounceCard() {
             data-admin-ann-privacy
             style={{
               background: 'var(--color-warnsoft)',
-              border: '1px solid ***REMOVED***ecd9ae',
-              color: '***REMOVED***8a5a12',
+              border: '1px solid #ecd9ae',
+              color: '#8a5a12',
               borderRadius: 4,
               fontSize: 12,
               lineHeight: 1.7,
@@ -3484,8 +3484,8 @@ function FeedbackCard({
           data-fb-mail-warn
           style={{
             background: 'var(--color-badsoft)',
-            border: '1px solid ***REMOVED***f3c9cd',
-            color: '***REMOVED***8f1c26',
+            border: '1px solid #f3c9cd',
+            color: '#8f1c26',
             borderRadius: 4,
             fontSize: 12.5,
             lineHeight: 1.8,

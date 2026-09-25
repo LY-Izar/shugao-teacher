@@ -267,10 +267,10 @@ export default function Files() {
             className="mb-3 flex items-start gap-2 p-3"
             style={{
               background: 'var(--color-badsoft)',
-              border: '1px solid ***REMOVED***f0c9c9',
+              border: '1px solid #f0c9c9',
               borderRadius: 6,
               fontSize: 12,
-              color: '***REMOVED***8f2b2b',
+              color: '#8f2b2b',
               lineHeight: 1.6,
             }}
           >

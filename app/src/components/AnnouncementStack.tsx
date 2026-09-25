@@ -62,9 +62,9 @@ import type { Announcement, AnnouncementLevel } from '../data/types'
 /** 等级 → 底色（**只影响外观**；弹不弹由 `popup` 决定，见 `lib/announcements.ts`） */
 const LEVEL_STYLE: Record<AnnouncementLevel, { bg: string; fg: string; bd: string }> = {
   /* 紧急：实心红 + 白字（全站最重的一档；借用项目的 bad 色，不新造颜色） */
-  urgent: { bg: 'var(--color-bad)', fg: '***REMOVED***fff', bd: '***REMOVED***a81f2b' },
+  urgent: { bg: 'var(--color-bad)', fg: '#fff', bd: '#a81f2b' },
   /* 重要：暖黄（与工作台那条"数据没存上"的卡同一挂 —— 项目里"要注意"就是这一挂） */
-  important: { bg: 'var(--color-warnsoft)', fg: '***REMOVED***8a5a12', bd: '***REMOVED***ecd9ae' },
+  important: { bg: 'var(--color-warnsoft)', fg: '#8a5a12', bd: '#ecd9ae' },
   /* 普通：浅灰（滚动条那一档，最安静） */
   normal: { bg: 'var(--color-surface2)', fg: 'var(--color-ink2)', bd: 'var(--color-line)' },
 }

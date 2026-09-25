@@ -264,9 +264,9 @@ export function MoodBanner({
       className="anim-in mb-4 flex items-start gap-3 p-3.5"
       style={{
         background: festive
-          ? 'linear-gradient(140deg, ***REMOVED***fdf2e6, rgb(255 255 255 / 0))'
+          ? 'linear-gradient(140deg, #fdf2e6, rgb(255 255 255 / 0))'
           : 'linear-gradient(140deg, var(--color-accentsoft), rgb(255 255 255 / 0))',
-        border: `1px solid ${festive ? '***REMOVED***ecd9ae' : '***REMOVED***c3d6fb'}`,
+        border: `1px solid ${festive ? '#ecd9ae' : '#c3d6fb'}`,
         borderRadius: 6,
       }}
     >
@@ -288,7 +288,7 @@ export function MoodBanner({
           style={{
             fontSize: 14,
             fontWeight: 650,
-            color: festive ? '***REMOVED***8a5a12' : 'var(--color-accentink)',
+            color: festive ? '#8a5a12' : 'var(--color-accentink)',
           }}
         >
           {title}
@@ -296,7 +296,7 @@ export function MoodBanner({
         <div
           style={{
             fontSize: 12,
-            color: festive ? '***REMOVED***96702f' : '***REMOVED***2a5bb8',
+            color: festive ? '#96702f' : '#2a5bb8',
             marginTop: 2,
             lineHeight: 1.6,
           }}

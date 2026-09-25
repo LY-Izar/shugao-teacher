@@ -1,4 +1,4 @@
-***REMOVED*** 树高教师平台 · 教师端
+# 树高教师平台 · 教师端
 
 面向高中**各科**教师的作业全链路工具（学科维度见 `../多学科体系方案.md` 阶段 1）。**首期 S1–S5 全部完成**：班级花名册 · 作业档案与收缴 · 快速批改录入 · 逐题统计与改错呼叫 · 教室端。
 
@@ -6,12 +6,12 @@
 
 ---
 
-***REMOVED******REMOVED*** 运行
+## 运行
 
 ```bash
 cd app
 npm install
-npm run dev          ***REMOVED*** http://localhost:5178
+npm run dev          # http://localhost:5178
 ```
 
 手机访问：终端会打印一个 `Network:` 地址（形如 `http://192.168.x.x:5178`），
@@ -20,18 +20,18 @@ npm run dev          ***REMOVED*** http://localhost:5178
 其他命令：
 
 ```bash
-npm run build        ***REMOVED*** 类型检查 + 生产构建
-npm run shots        ***REMOVED*** 无头浏览器截图，输出到 .shots/<runId>/（浏览器路径见下）
-npm run clock-checks ***REMOVED*** 假时钟验教室端「看时间脸色」的行为
-npm run rls-checks   ***REMOVED*** PGlite 跑真 schema.sql，逐人逐动作验 RLS
-npm run exam-checks  ***REMOVED*** 考试链路的落库形状（假 PostgREST + 真 remote.ts）
-npm run backup-checks***REMOVED*** 备份 v2/v1 兼容 + 学科列在所有写入路径上的纪律
-npm run fetch:holidays   ***REMOVED*** 从中国政府网重新抓取放假安排
+npm run build        # 类型检查 + 生产构建
+npm run shots        # 无头浏览器截图，输出到 .shots/<runId>/（浏览器路径见下）
+npm run clock-checks # 假时钟验教室端「看时间脸色」的行为
+npm run rls-checks   # PGlite 跑真 schema.sql，逐人逐动作验 RLS
+npm run exam-checks  # 考试链路的落库形状（假 PostgREST + 真 remote.ts）
+npm run backup-checks# 备份 v2/v1 兼容 + 学科列在所有写入路径上的纪律
+npm run fetch:holidays   # 从中国政府网重新抓取放假安排
 ```
 
 ---
 
-***REMOVED******REMOVED*** 🔐 云端环境变量（**邮件收件人由部署环境决定**）
+## 🔐 云端环境变量（**邮件收件人由部署环境决定**）
 
 配在 **Cloudflare Pages → Settings → Variables and secrets**，**一律不进仓库**：
 
@@ -55,9 +55,9 @@ npm run fetch:holidays   ***REMOVED*** 从中国政府网重新抓取放假安�
 
 ---
 
-***REMOVED******REMOVED*** 🔴 跑验证脚本前必须知道（**每一条都是实测踩过的**）
+## 🔴 跑验证脚本前必须知道（**每一条都是实测踩过的**）
 
-***REMOVED******REMOVED******REMOVED*** 0. 五个脚本共用一把锁 —— 同一时刻只能跑一个
+### 0. 五个脚本共用一把锁 —— 同一时刻只能跑一个
 
 锁是**仓库里的一个模块**：`scripts/lib/lock.mjs`（`%TEMP%\shugao-verify.lock`）。
 五个脚本的**全部工作**都包在 `withLock()` 里，等不到锁会**打印持有者并退出（退出码 3）**，
@@ -74,7 +74,7 @@ npm run fetch:holidays   ***REMOVED*** 从中国政府网重新抓取放假安�
 > `.shots/` 里同时躺着 4 个批次（旧图冒充这一轮）、以及两个 `shots` 并发写同一目录、
 > 两条序列交错。现在约定在代码里，**别再各写一份**。
 
-***REMOVED******REMOVED******REMOVED*** 1. **跑验证脚本期间不要改源码**
+### 1. **跑验证脚本期间不要改源码**
 
 vite 是**轮询监听 + HMR**（`usePolling`，400ms）。跑到一半你保存一个文件，
 页面会热替换/整页刷新 —— 脚本正在数的元素、正在量的时长会随机变化，
@@ -83,10 +83,10 @@ vite 是**轮询监听 + HMR**（`usePolling`，400ms）。跑到一半你保存
 
 改完源码 → 等 HMR 安静下来 → **再**跑脚本。
 
-***REMOVED******REMOVED******REMOVED*** 2. dev server 必须先起在 **5178**
+### 2. dev server 必须先起在 **5178**
 
 ```bash
-cd app && npm run dev     ***REMOVED*** 必须是 http://localhost:5178
+cd app && npm run dev     # 必须是 http://localhost:5178
 ```
 
 `vite.config.ts` 里已经开了 **`strictPort: true`**：5178 被占（另一个 checkout、
@@ -96,7 +96,7 @@ cd app && npm run dev     ***REMOVED*** 必须是 http://localhost:5178
 
 `shots.mjs` / `clock-checks.mjs` 的目标地址可以用 `SHUGAO_BASE` 或 `--base=` 覆盖（默认 5178）。
 
-***REMOVED******REMOVED******REMOVED*** 3. 本机时区必须是 **+08:00**
+### 3. 本机时区必须是 **+08:00**
 
 `clock-checks.mjs` 开头会检查 `Intl.DateTimeFormat().resolvedOptions().timeZone`，
 不是 `China Standard Time` / `Asia/Shanghai` / `+08:00` 就**直接退出**。
@@ -105,14 +105,14 @@ cd app && npm run dev     ***REMOVED*** 必须是 http://localhost:5178
 `new Date()`，没走 §一 约定的 `beijingNow()` —— **已知欠账**，本机时区对时两者等价，
 一旦换台时区不对的机器，那块屏就会按当地时间切换。
 
-***REMOVED******REMOVED******REMOVED*** 4. 两个浏览器脚本（shots / clock-checks）**永远只跑本地演示模式**
+### 4. 两个浏览器脚本（shots / clock-checks）**永远只跑本地演示模式**
 
 dev 下没有 Supabase 环境变量 → store 走本地演示数据。所以它们**覆盖不到云端路径、
 权限、RLS，覆盖率为 0** —— 那是 `rls-checks.mjs`（真 Postgres + 真策略）的活，
 **别去 shots 里补**。`exam-checks` / `backup-checks` 走的是"假 PostgREST + 真 `remote.ts`"，
 测的是**载荷形状**，也不是真权限。
 
-***REMOVED******REMOVED******REMOVED*** 5. 五个脚本各守什么 + 怎么跑
+### 5. 五个脚本各守什么 + 怎么跑
 
 | 脚本 | 断言 | 守什么 | 前置 |
 | --- | --- | --- | --- |
@@ -130,7 +130,7 @@ dev 下没有 Supabase 环境变量 → store 走本地演示数据。所以它�
 > （前面几步批过的档案会"退回去"）。写断言时按"这一屏重新加载后的真实状态"算期望值 ——
 > 详细说明见 `功能设计与不变量.md` §十八·补 2 的 补.4。
 
-***REMOVED******REMOVED******REMOVED*** 6. 登录态 **7 天有效期**（断言里涉及"设备角色 / 登录态"时注意）
+### 6. 登录态 **7 天有效期**（断言里涉及"设备角色 / 登录态"时注意）
 
 `src/lib/session.ts` 的 `AUTH_DAYS = 7`，`authExpired()` 比的是
 `Date.now() - 上次输密码的时间`。所以**假时钟拨表不能跨过这个窗口**：
@@ -141,7 +141,7 @@ dev 下没有 Supabase 环境变量 → store 走本地演示数据。所以它�
 > 教师账号打开 `/classroom` 是**预览**，产品不会把设备标成 classroom
 > （`Classroom.tsx`: 只有 `accountKind === 'classroom'` 才标）。
 
-***REMOVED******REMOVED******REMOVED*** 7. 浏览器路径是可配置的（`scripts/lib/edge-path.mjs`）
+### 7. 浏览器路径是可配置的（`scripts/lib/edge-path.mjs`）
 
 两个浏览器脚本**共用一处解析**，回退顺序：
 
@@ -153,12 +153,12 @@ dev 下没有 Supabase 环境变量 → store 走本地演示数据。所以它�
    **仍然起不来就报一句人话**（告诉你怎么设 `SHUGAO_EDGE`），不是丢一段英文栈
 
 ```powershell
-$env:SHUGAO_EDGE = 'D:\Edge\Application\msedge.exe'   ***REMOVED*** 装在不常见的位置时
+$env:SHUGAO_EDGE = 'D:\Edge\Application\msedge.exe'   # 装在不常见的位置时
 ```
 
 ---
 
-***REMOVED******REMOVED*** 🔐 备份加密与恢复（**2026-09-25 加，出事时按这一节做**）
+## 🔐 备份加密与恢复（**2026-09-25 加，出事时按这一节做**）
 
 数据库备份里有**全校学生的姓名 / 学号 / 成绩**，所以从 2026-09-25 起，
 `.github/workflows/backup.yml` 导出的备份**一律加密后才允许离开机器**。
@@ -171,16 +171,16 @@ $env:SHUGAO_EDGE = 'D:\Edge\Application\msedge.exe'   ***REMOVED*** 装在不常
 | 留在哪 | Cloudflare R2 的 `db-backups/`（保留最新 30 份）；没配 R2 时作为 Actions Artifact 留 30 天 |
 | 为什么用 openssl 而不是别的 | ubuntu-latest 自带、**零依赖**（`age` / `gpg` 都要额外装包）；解密一行命令、任何机器的 openssl 都能开 —— **关键时刻打不开的备份等于没有备份** |
 
-***REMOVED******REMOVED******REMOVED*** ▶ 解密：**一行命令**（复制粘贴就能用）
+### ▶ 解密：**一行命令**（复制粘贴就能用）
 
 ```bash
-***REMOVED*** ① 解出 .sql.gz（把 <口令> 换成 BACKUP_ENCRYPTION_PASSPHRASE 的值）
+# ① 解出 .sql.gz（把 <口令> 换成 BACKUP_ENCRYPTION_PASSPHRASE 的值）
 openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -md sha256 -in backup-20260925-1830.sql.gz.enc -out backup.sql.gz -pass pass:'<口令>'
 
-***REMOVED*** ② 还原成一个 .sql
+# ② 还原成一个 .sql
 gunzip backup.sql.gz
 
-***REMOVED*** ③ 找个 Postgres 导进去（Supabase 的 SQL Editor 里贴也行）
+# ③ 找个 Postgres 导进去（Supabase 的 SQL Editor 里贴也行）
 psql "<一个空库的连接串>" -f backup.sql
 ```
 
@@ -200,7 +200,7 @@ psql "<一个空库的连接串>" -f backup.sql
 > ⚠️ 两种写法都**不能**在口令后面多一个换行 —— 工作流用的是 `printf '%s'`（不带 `\n`），
 > 多那一个字节，密钥就不一样了。
 
-***REMOVED******REMOVED******REMOVED*** 🔑 口令纪律（**比算法重要**）
+### 🔑 口令纪律（**比算法重要**）
 
 1. **口令存在密码管理器里**（1Password / Bitwarden / 微信收藏加密笔记 / 纸质保险柜都行）。
    **绝不要写进仓库、不要写进代码注释、不要贴进聊天记录** —— 这个仓库（以及它的 Actions 日志）
@@ -212,7 +212,7 @@ psql "<一个空库的连接串>" -f backup.sql
    或者等旧备份都过期（30 份 / 约一个月）再改。
 4. 口令**首尾的空白会被自动 trim**（和别的 secret 一样）；值里带空格没问题，带首尾空白才会被削。
 
-***REMOVED******REMOVED******REMOVED*** 🚫 口令缺失时会发生什么（这一条是**故意**的）
+### 🚫 口令缺失时会发生什么（这一条是**故意**的）
 
 **工作流会报错退出，当晚一份备份都不生成。** 这是有意设计的：
 
@@ -226,7 +226,7 @@ psql "<一个空库的连接串>" -f backup.sql
 > 实测脚本：`node scripts/lib/backup-enc-selfcheck.mjs`（27 条断言，真跑 Git Bash + 真 openssl）。
 > 它把 `backup.yml` 里那段 shell **原样抠出来**跑 —— 所以改工作流不需要同步第二份代码。
 
-***REMOVED******REMOVED******REMOVED*** 🗂 新旧备份共存（2026-09-25 之前传上去的都是**明文**）
+### 🗂 新旧备份共存（2026-09-25 之前传上去的都是**明文**）
 
 | 名字 | 是什么 | 怎么处理 |
 | --- | --- | --- |
@@ -239,7 +239,7 @@ psql "<一个空库的连接串>" -f backup.sql
 
 ---
 
-***REMOVED******REMOVED*** 设计语言
+## 设计语言
 
 刻意避开「大圆角卡片 + 柔和投影 + 渐变紫 + 填充图标」那套通用观感。
 
@@ -253,7 +253,7 @@ psql "<一个空库的连接串>" -f backup.sql
 | 图标 | **全部自绘**线条 SVG：24×24 网格、1.6 描边、圆头圆角、无填充 |
 | 数字 | 等宽数位（`tabular-nums`）保证不跳动；**不用等宽字族**，避免 Consolas 的斜杠零把学号 `10` 显示成 `1Ø` |
 | 背景 | 极淡的方格网，顶部径向遮罩淡出，提供科技感但不抢内容 |
-| 主色 | 电蓝 `***REMOVED***0B5CF0`；青色 `***REMOVED***00B0C6` 仅用于扫描/在线等点缀 |
+| 主色 | 电蓝 `#0B5CF0`；青色 `#00B0C6` 仅用于扫描/在线等点缀 |
 | 动效 | 路由切换页面过渡、底部导航**液态胶囊滑动 + 拉伸回弹**、按钮真实坐标波纹、扫描线、步骤勾选、线条自绘、时钟跳秒；全部尊重 `prefers-reduced-motion` |
 | 液态玻璃 | 只用在**浮在内容之上**的元素：移动顶栏、底部导航、Toast、取景框提示条、名单表头（行会从下面穿过去）。内容卡片一律实心 —— 玻璃用多了会糊，正文也会失焦 |
 | 磨砂 | 移动端底栏是**磨砂玻璃**而不是单纯模糊：`blur(26px) saturate(190%)` 之上再叠一层 3px 间隔的极细白色噪点（`::before`，排在子元素之前所以不会盖住图标），模糊才有质地 |
@@ -264,7 +264,7 @@ psql "<一个空库的连接串>" -f backup.sql
 
 ---
 
-***REMOVED******REMOVED*** 目录
+## 目录
 
 ```
 src/
@@ -301,9 +301,9 @@ src/
 
 ---
 
-***REMOVED******REMOVED*** 已实现
+## 已实现
 
-***REMOVED******REMOVED******REMOVED*** S1 · 班级与花名册
+### S1 · 班级与花名册
 
 - 账号登录与教师身份（学科 · 学校）
 - 班级创建、编辑、删除；当前班级上下文切换
@@ -313,7 +313,7 @@ src/
 - **名单体检**：缺号、重号、重名、非数字学号 —— 序列连续性检查
 - 数据导出（JSON）与清空
 
-***REMOVED******REMOVED******REMOVED*** S2 · 作业档案与收缴
+### S2 · 作业档案与收缴
 
 - **练习册模板**：作业21 = 1–6 题、作业22 = 1–8 题…… 建过一次永久复用。
   **题号结构来自模板，不依赖任何图像识别** —— AI 从必经环节降级为加分项
@@ -327,7 +327,7 @@ src/
 > 设计上的一条硬规则：**识别只是加速器，永远不会卡住流程**。
 > 无论识别成功与否，手工登记通道始终可用。
 
-***REMOVED******REMOVED******REMOVED*** S3 · 快速批改录入
+### S3 · 快速批改录入
 
 - **默认全对，只点错的** —— 一次作业 45 人里错 11 个就只点 11 下
 - **题号就地展开**：点学号后，题号面板**直接在该学生正下方展开**，手指不用离开这一片区域。
@@ -342,7 +342,7 @@ src/
 - **完成批改**：用时 / 人数 / 错题数 / 错误率的克制反馈，并直接给出讲评重点与分档建议
   （错误率 30–70% 优先精讲；<10% 建议个别辅导，不占课堂时间）
 
-***REMOVED******REMOVED******REMOVED*** S4 · 逐题统计与改错呼叫
+### S4 · 逐题统计与改错呼叫
 
 **作业情况页**
 - 收缴概览 + 批改完整度提示（不完整时明确说"错误率可能偏低"）
@@ -366,7 +366,7 @@ src/
 - **状态追踪**：已叫 → 已到 → 已订正，点一下推进；支持"再播一遍"
 - 呼叫记录页跨作业汇总，**不做被叫次数排行**（一旦可比就会变成压力工具）
 
-***REMOVED******REMOVED******REMOVED*** S5 · 教室端（`/classroom`）
+### S5 · 教室端（`/classroom`）
 
 **一个重要的更正**：早期方案里我写过"浏览器做不到强制置顶，所以教室端必须做成 exe"。
 **这个结论是错的** —— Document Picture-in-Picture API（Edge / Chrome 116+）可以开出一个
@@ -392,7 +392,7 @@ src/
 **跨设备通信**：当前用 `BroadcastChannel` 实现，**同一个浏览器开两个标签页即可完整演示**
 （教师端 + 教室端）。接 Supabase 时只需换掉 `src/lib/realtime.ts` 一个文件，调用方一行都不用改。
 
-***REMOVED******REMOVED******REMOVED*** 日程表与上课提醒（「我的 → 日程表」）
+### 日程表与上课提醒（「我的 → 日程表」）
 
 - 教师自己录入每周日程：星期、起止时间、标题、班级、地点、上课/其他
 - 上课前 10 分钟提醒：走系统通知（`Notification`），同一天同一条只提醒一次
@@ -405,7 +405,7 @@ src/
 > 两套都叫"课表"时分不清谁是谁（见 `功能设计与不变量.md` §八）。
 > 移动端的「更多入口」展开层里也能直接进这一页。
 
-***REMOVED******REMOVED******REMOVED*** 情绪价值
+### 情绪价值
 
 - **早上 6:30–9:00 第一次打开**：欢迎弹窗 —— 一句祝福（**100 句按天轮换**，
   同一天固定、相邻两天必不同）+ 今天要批的作业 + 今天的日程
@@ -420,21 +420,21 @@ src/
 >
 > 也刻意没做积分、等级、连续签到排行榜：那套游戏化会把专业感冲掉。
 
-***REMOVED******REMOVED******REMOVED*** 其他
+### 其他
 
 - **作业列表筛选**：班级 / 时间（今天 · 最近 7 天 · 最近 30 天）/ 状态，默认按时间从新到旧
 - **底栏胶囊可拖动**：按住拖动时胶囊实时跟手，松手落到手指所在的 tab
 - **左侧导航同一颗胶囊**：方向改成纵向滑动 + `scaleY` 拉伸回弹，与移动端手感一致
 - **右侧栏不做悬浮**：平铺在画布上，避免中间那一列被两侧的悬浮层夹住
 
-***REMOVED******REMOVED******REMOVED*** 法定假期与调休
+### 法定假期与调休
 
 **数据来自官方**：`src/data/holidays.ts` 由 `scripts/fetch-holidays.mjs` 从中国政府网抓取
 《国务院办公厅关于XXXX年部分节假日安排的通知》原文并解析生成，**不手工维护**。
 
 ```bash
-npm run fetch:holidays            ***REMOVED*** 重新抓取 NOTICES 里列出的年份
-npm run fetch:holidays 2027 <url> ***REMOVED*** 国务院发布次年安排后追加
+npm run fetch:holidays            # 重新抓取 NOTICES 里列出的年份
+npm run fetch:holidays 2027 <url> # 国务院发布次年安排后追加
 ```
 
 当前覆盖 **2026 年**（国办发明电〔2025〕7号）：7 个节日 + 6 个调休上班日。
@@ -455,7 +455,7 @@ npm run fetch:holidays 2027 <url> ***REMOVED*** 国务院发布次年安排后�
 **顺带修掉的一个问题**：假期当天原本还会播报上课提醒 —— 法定假期不上课，
 提醒和学习日程都按 `dayKind` 屏蔽掉了（调休上班日不受影响）。
 
-***REMOVED******REMOVED******REMOVED*** 交互与实现上的几个坑（都已修）1. **单击立即生效，双击时再回退** —— 而不是等 260 ms 判双击。
+### 交互与实现上的几个坑（都已修）1. **单击立即生效，双击时再回退** —— 而不是等 260 ms 判双击。
    高频录入里每一次点击的延迟都会被放大，宁可让双击时闪一下。
 2. **浮层一律走 Portal** —— 页面过渡动画会给 `<main>` 创建层叠上下文，
    浮层的 z-index 会被关在里面、被底部导航盖住导致按钮点不到。
@@ -463,7 +463,7 @@ npm run fetch:holidays 2027 <url> ***REMOVED*** 国务院发布次年安排后�
    把后一个直接挤出屏幕（"完成"按钮消失）。防换行用 `white-space: nowrap` 就够了。
 4. **`useEffect` 不能放在提前 return 之后** —— 否则 Hook 调用顺序在不同渲染路径下不一致。
 
-***REMOVED******REMOVED******REMOVED*** 数据层现状
+### 数据层现状
 
 数据存在浏览器 `localStorage`（key `shugao.teacher.v1`），首次打开会自带
 两个演示班级与三份演示作业档案（姓名为程序拼装生成，不对应任何真实个人）。
@@ -478,7 +478,7 @@ npm run fetch:holidays 2027 <url> ***REMOVED*** 国务院发布次年安排后�
 
 ---
 
-***REMOVED******REMOVED*** 下一步
+## 下一步
 
 首期 S1–S5 已全部完成。往下可以做的：
 
@@ -489,7 +489,7 @@ npm run fetch:holidays 2027 <url> ***REMOVED*** 国务院发布次年安排后�
 | 知识点层 | 拍照识别题目 + AI 匹配教科版物理知识树，给统计补上「哪个板块没掌握」 |
 | 教室端增强 | 教师端一键把当前题号推到小窗（现在是本地点按切换） |
 
-***REMOVED******REMOVED*** 开发环境注意事项
+## 开发环境注意事项
 
 - `vite.config.ts` 里开了 **`server.watch.usePolling`**。Windows 下编辑器的原子写入
   （先建临时目录再改名替换）会让原生文件监听抛 `EBUSY` 并**静默失效**，

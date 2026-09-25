@@ -312,7 +312,7 @@ export function normalizePaperName(raw?: string | null): string {
     '',
   )
   s = s.replace(/[（(][^）)]*[）)]/g, '')
-  s = s.replace(/[，。、,.;；:：!！?？"'“”‘’《》<>[\]【】{}·—～~\\/|+*&^%$***REMOVED***@`]/g, '')
+  s = s.replace(/[，。、,.;；:：!！?？"'“”‘’《》<>[\]【】{}·—～~\\/|+*&^%$#@`]/g, '')
   s = s.replace(/[-_]/g, '')
   s = s.toLocaleLowerCase('zh-Hans-CN')
   return s

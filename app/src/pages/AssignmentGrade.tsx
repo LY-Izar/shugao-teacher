@@ -186,7 +186,7 @@ function QButton({
                   border: 0,
                   borderRight: '1px solid var(--color-line)',
                   background: on ? 'var(--color-bad)' : 'transparent',
-                  color: on ? '***REMOVED***fff' : 'var(--color-ink3)',
+                  color: on ? '#fff' : 'var(--color-ink3)',
                   cursor: 'pointer',
                 }}
                 aria-label={`第 ${seq} 题第 ${sub} 小题`}
@@ -789,7 +789,7 @@ function GradeSession({
 
   const unconfirmed = students.length - confirmed.length
 
-  /* ***REMOVED***11 已批改的从原表挪走：原表只留没批的，越批越短，一眼看到还剩谁
+  /* #11 已批改的从原表挪走：原表只留没批的，越批越短，一眼看到还剩谁
      （不用 useMemo —— 它在早退分支之后，用了会违反 hooks 规则；数组很小，直接算）
 
      注意：`confirmed` 在"点开学生"时就记上了（相当于"已批阅"），
@@ -972,7 +972,7 @@ function GradeSession({
                             padding: '0 3px',
                             borderRadius: 99,
                             background: 'var(--color-bad)',
-                            color: '***REMOVED***fff',
+                            color: '#fff',
                             fontSize: 9.5,
                             lineHeight: '15px',
                             fontWeight: 700,
@@ -1094,7 +1094,7 @@ function GradeSession({
                                 padding: '0 3px',
                                 borderRadius: 99,
                                 background: tone,
-                                color: '***REMOVED***fff',
+                                color: '#fff',
                                 fontSize: 10,
                                 lineHeight: '16px',
                                 fontWeight: 700,
@@ -1127,7 +1127,7 @@ function GradeSession({
                               padding: '0 3px',
                               borderRadius: 99,
                               background: 'var(--color-bad)',
-                              color: '***REMOVED***fff',
+                              color: '#fff',
                               fontSize: 10,
                               lineHeight: '16px',
                               fontWeight: 700,
@@ -1369,7 +1369,7 @@ function GradeSession({
             </div>
           ) : null}
 
-          {/* ***REMOVED***11 已批改的挪到下面单独一张表，上面只留没批的 */}
+          {/* #11 已批改的挪到下面单独一张表，上面只留没批的 */}
           {doneList.length ? (
             <div className="mb-3">
               <Sect>已批改 {doneList.length} 人 · 点一下撤回重批</Sect>

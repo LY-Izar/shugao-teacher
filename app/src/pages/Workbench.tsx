@@ -149,7 +149,7 @@ export default function Workbench() {
           className="anim-in mb-4 flex items-start gap-3 p-3"
           style={{
             background: 'var(--color-warnsoft)',
-            border: '1px solid ***REMOVED***ecd9ae',
+            border: '1px solid #ecd9ae',
             borderRadius: 6,
           }}
         >
@@ -157,10 +157,10 @@ export default function Workbench() {
             <IconAlert size={17} />
           </span>
           <div className="flex-1">
-            <div style={{ fontSize: 13, fontWeight: 620, color: '***REMOVED***8a5a12' }}>
+            <div style={{ fontSize: 13, fontWeight: 620, color: '#8a5a12' }}>
               当前是演示数据（2 个虚拟班级 + 3 份作业档案）
             </div>
-            <div style={{ fontSize: 12, color: '***REMOVED***96702f', marginTop: 2, lineHeight: 1.5 }}>
+            <div style={{ fontSize: 12, color: '#96702f', marginTop: 2, lineHeight: 1.5 }}>
               姓名均为程序拼装生成，不对应任何真实个人。开始录入真实班级后会自动切换。
             </div>
           </div>

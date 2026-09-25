@@ -1,37 +1,37 @@
 name: 数据库备份
 
-***REMOVED*** Supabase 免费版**没有自动备份**。
-***REMOVED*** 作业数据、成绩、错题记录一旦误删或被错误脚本清空，不可恢复 —— 这对学校是事故级风险。
-***REMOVED*** 这个任务每晚把整个数据库 dump 出来，压缩、**AES-256 加密**，传到 Cloudflare R2，保留最近 30 份。
-***REMOVED***
-***REMOVED*** 🔴 加密（2026-09-25 加）：dump 里是全校学生的姓名 / 学号 / 成绩，所以上传的必须是密文。
-***REMOVED***    产物名 `backup-<stamp>.sql.gz.enc`；**解密命令与口令纪律**见仓库
-***REMOVED***    `app/README.md` 的「备份加密与恢复」一节（也有 `部署与打包指南.md` §4.6）。
-***REMOVED***    ⚠️ 口令（secret `BACKUP_ENCRYPTION_PASSPHRASE`）**丢了 = 所有备份永久打不开**，
-***REMOVED***       请存进密码管理器；**绝不要**把它写进仓库。
-***REMOVED***    ⚠️ 口令缺失时本工作流**故意报错退出、一个字节都不传** ——
-***REMOVED***       宁可今晚没有备份，也不能"以为加密了、其实传的是明文"。
-***REMOVED***
-***REMOVED*** ── 诊断增强：上次红灯复盘 ────────────────────────────────────────────
-***REMOVED*** 上次失败只是因为 SUPABASE_DB_URL 没配，但它只说了「缺失」，不打印它到底拿到了什么。
-***REMOVED*** 而且旧写法 `pg_dump "$URL" ... | gzip -9 > f.gz` 有个真会丢备份的坑：
-***REMOVED*** 管道里 `$?` 拿到的是 gzip 的退出码，pg_dump 挂了会被吞掉，
-***REMOVED*** 留下一个「合法但空」的 .gz，工作流还显示绿灯。现在先落 .sql、查退出码、再压缩。
-***REMOVED*** 现在的失败一定是四类里的一类，日志直接点名：
-***REMOVED***   ① 连不上数据库（DNS / TCP / 超时）  ② 密码或用户名不对
-***REMOVED***   ③ pg_dump 与服务器版本不兼容        ④ R2 上传失败（含配置不全）
-***REMOVED*** 🔴 连接方式不动：用 Direct connection（5432）那条串，实测能跑通。
+# Supabase 免费版**没有自动备份**。
+# 作业数据、成绩、错题记录一旦误删或被错误脚本清空，不可恢复 —— 这对学校是事故级风险。
+# 这个任务每晚把整个数据库 dump 出来，压缩、**AES-256 加密**，传到 Cloudflare R2，保留最近 30 份。
+#
+# 🔴 加密（2026-09-25 加）：dump 里是全校学生的姓名 / 学号 / 成绩，所以上传的必须是密文。
+#    产物名 `backup-<stamp>.sql.gz.enc`；**解密命令与口令纪律**见仓库
+#    `app/README.md` 的「备份加密与恢复」一节（也有 `部署与打包指南.md` §4.6）。
+#    ⚠️ 口令（secret `BACKUP_ENCRYPTION_PASSPHRASE`）**丢了 = 所有备份永久打不开**，
+#       请存进密码管理器；**绝不要**把它写进仓库。
+#    ⚠️ 口令缺失时本工作流**故意报错退出、一个字节都不传** ——
+#       宁可今晚没有备份，也不能"以为加密了、其实传的是明文"。
+#
+# ── 诊断增强：上次红灯复盘 ────────────────────────────────────────────
+# 上次失败只是因为 SUPABASE_DB_URL 没配，但它只说了「缺失」，不打印它到底拿到了什么。
+# 而且旧写法 `pg_dump "$URL" ... | gzip -9 > f.gz` 有个真会丢备份的坑：
+# 管道里 `$?` 拿到的是 gzip 的退出码，pg_dump 挂了会被吞掉，
+# 留下一个「合法但空」的 .gz，工作流还显示绿灯。现在先落 .sql、查退出码、再压缩。
+# 现在的失败一定是四类里的一类，日志直接点名：
+#   ① 连不上数据库（DNS / TCP / 超时）  ② 密码或用户名不对
+#   ③ pg_dump 与服务器版本不兼容        ④ R2 上传失败（含配置不全）
+# 🔴 连接方式不动：用 Direct connection（5432）那条串，实测能跑通。
 
 on:
   schedule:
-    - cron: '30 18 * * *' ***REMOVED*** 每天 18:30 UTC（北京时间次日 02:30，避开白天）
+    - cron: '30 18 * * *' # 每天 18:30 UTC（北京时间次日 02:30，避开白天）
   workflow_dispatch:
 
 jobs:
   backup:
     runs-on: ubuntu-latest
     steps:
-      ***REMOVED*** ── 第 1 步：先看 secret 在不在（缺 secret 是最常见的失败原因）──────
+      # ── 第 1 步：先看 secret 在不在（缺 secret 是最常见的失败原因）──────
       - name: 环境自检（只报 secret 存在性，绝不打印值）
         env:
           DB_URL_RAW: ${{ secrets.SUPABASE_DB_URL }}
@@ -41,22 +41,22 @@ jobs:
           R2_BUCKET_RAW: ${{ secrets.R2_BUCKET }}
           BACKUP_PASS_RAW: ${{ secrets.BACKUP_ENCRYPTION_PASSPHRASE }}
         run: |
-          ***REMOVED*** 每个 run: 都是独立 shell，所以这个 trim 小函数在需要的步骤里各留一份
-          ***REMOVED*** （故意的，别抽成共享文件：单看一步就能读明白）。
+          # 每个 run: 都是独立 shell，所以这个 trim 小函数在需要的步骤里各留一份
+          # （故意的，别抽成共享文件：单看一步就能读明白）。
           trim() {
             local s="$1"
             s="${s//$'\r'/}"
-            s="${s***REMOVED***"${s%%[![:space:]]*}"}"
-            s="${s%"${s***REMOVED******REMOVED****[![:space:]]}"}"
+            s="${s#"${s%%[![:space:]]*}"}"
+            s="${s%"${s##*[![:space:]]}"}"
             printf '%s' "$s"
           }
 
-          ***REMOVED*** 只输出「有 / 无」（+ 个别非机密项的长度 + 有没有首尾空白）。
-          ***REMOVED*** 🔴 绝不要在这里加 `echo "$2"`：SUPABASE_DB_URL 里是数据库密码，
-          ***REMOVED***    这个仓库的 Actions 日志是公开可读的。掩码后的形态在下一步打印。
-          ***REMOVED***    （顺带一提：secret 值若带尾随换行，GitHub 的自动掩码会因为它已不是
-          ***REMOVED***      「原样字符串」而失效 —— 所以更要靠这里只打存在性，而不是指望自动掩码。）
-          ***REMOVED*** $3 = yes 时额外打印长度（只给非机密 / 半公开的项用）
+          # 只输出「有 / 无」（+ 个别非机密项的长度 + 有没有首尾空白）。
+          # 🔴 绝不要在这里加 `echo "$2"`：SUPABASE_DB_URL 里是数据库密码，
+          #    这个仓库的 Actions 日志是公开可读的。掩码后的形态在下一步打印。
+          #    （顺带一提：secret 值若带尾随换行，GitHub 的自动掩码会因为它已不是
+          #      「原样字符串」而失效 —— 所以更要靠这里只打存在性，而不是指望自动掩码。）
+          # $3 = yes 时额外打印长度（只给非机密 / 半公开的项用）
           report() {
             local t
             t="$(trim "$2")"
@@ -65,26 +65,26 @@ jobs:
               return 0
             fi
             if [ "$3" = "yes" ]; then
-              echo "  ✅ $1：已配置（原始 ${***REMOVED***2} 字符 → trim 后 ${***REMOVED***t} 字符）"
+              echo "  ✅ $1：已配置（原始 ${#2} 字符 → trim 后 ${#t} 字符）"
             else
               echo "  ✅ $1：已配置（trim 后非空）"
             fi
-            if [ "${***REMOVED***2}" != "${***REMOVED***t}" ]; then
+            if [ "${#2}" != "${#t}" ]; then
               echo "     ⚠️ 首尾有空白/换行，本次已自动 trim —— 建议去 Settings → Secrets 重新粘贴一次"
             fi
             return 0
           }
 
           echo "── Secrets 存在性（只报有无，绝不打印值）──"
-          ***REMOVED*** SUPABASE_DB_URL 的长度有用（能看出是不是粘漏了），密码本身不会因为长度泄露。
+          # SUPABASE_DB_URL 的长度有用（能看出是不是粘漏了），密码本身不会因为长度泄露。
           report SUPABASE_DB_URL "$DB_URL_RAW" yes
           report R2_ENDPOINT "$R2_ENDPOINT_RAW" yes
           report R2_BUCKET "$R2_BUCKET_RAW" yes
-          ***REMOVED*** 两个 key 连长度都不打：它们不是诊断缺口，没必要多给一点信息。
+          # 两个 key 连长度都不打：它们不是诊断缺口，没必要多给一点信息。
           report R2_ACCESS_KEY_ID "$R2_ACCESS_KEY_ID_RAW" no
           report R2_SECRET_ACCESS_KEY "$R2_SECRET_ACCESS_KEY_RAW" no
-          ***REMOVED*** 🔴 备份加密口令：**连长度都不打**。长度会缩小暴力破解的搜索空间，
-          ***REMOVED***    而这个口令是"所有备份的唯一钥匙"（详见 README「备份加密」一节）。
+          # 🔴 备份加密口令：**连长度都不打**。长度会缩小暴力破解的搜索空间，
+          #    而这个口令是"所有备份的唯一钥匙"（详见 README「备份加密」一节）。
           report BACKUP_ENCRYPTION_PASSPHRASE "$BACKUP_PASS_RAW" no
 
           if [ -z "$(trim "$DB_URL_RAW")" ]; then
@@ -92,13 +92,13 @@ jobs:
             exit 1
           fi
 
-          ***REMOVED*** 🔴🔴 这一条是**整个工作流最要紧的一道闸**（2026-09-25 加）：
-          ***REMOVED***   备份里有全校学生姓名 / 学号 / 成绩。**口令不在就宁可整晚不备份**，
-          ***REMOVED***   绝不能"悄悄降级成明文传上 R2" —— 那是最危险的失败模式：
-          ***REMOVED***   日志全绿、对象也在，但 R2 上躺着一份明文的全校成绩单，
-          ***REMOVED***   而所有人都以为它是加密的（比"没有备份"更糟：没有人会去修它）。
-          ***REMOVED***   ⚠️ 口令丢了 = 所有备份永久打不开（openssl 没有后门），
-          ***REMOVED***   所以这里只报存在性、绝不回值，口令请自己存进密码管理器。
+          # 🔴🔴 这一条是**整个工作流最要紧的一道闸**（2026-09-25 加）：
+          #   备份里有全校学生姓名 / 学号 / 成绩。**口令不在就宁可整晚不备份**，
+          #   绝不能"悄悄降级成明文传上 R2" —— 那是最危险的失败模式：
+          #   日志全绿、对象也在，但 R2 上躺着一份明文的全校成绩单，
+          #   而所有人都以为它是加密的（比"没有备份"更糟：没有人会去修它）。
+          #   ⚠️ 口令丢了 = 所有备份永久打不开（openssl 没有后门），
+          #   所以这里只报存在性、绝不回值，口令请自己存进密码管理器。
           if [ -z "$(trim "$BACKUP_PASS_RAW")" ]; then
             echo "::error::缺少 BACKUP_ENCRYPTION_PASSPHRASE —— 拒绝以**明文**上传备份，本次不生成任何备份文件。到仓库 Settings → Secrets and variables → Actions 添加上它（怎么配与口令纪律见 README「备份加密」一节）"
             exit 1
@@ -107,43 +107,43 @@ jobs:
       - name: 安装 postgres 客户端
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
-          ***REMOVED*** 装上的是哪个版本必须打出来：pg_dump 主版本低于服务器主版本时会
-          ***REMOVED*** 直接拒绝导出（server version mismatch），那时第一个要看的就是这两行。
+          # 装上的是哪个版本必须打出来：pg_dump 主版本低于服务器主版本时会
+          # 直接拒绝导出（server version mismatch），那时第一个要看的就是这两行。
           pg_dump --version
           psql --version
 
-      ***REMOVED*** ── 第 3 步：先单独连一次，把「连不上 / 密码错」和「pg_dump 自己的毛病」分开 ──
+      # ── 第 3 步：先单独连一次，把「连不上 / 密码错」和「pg_dump 自己的毛病」分开 ──
       - name: 数据库预检 + pg_dump + 加密（失败时按类型给诊断）
         env:
           DB_URL_RAW: ${{ secrets.SUPABASE_DB_URL }}
           BACKUP_PASS_RAW: ${{ secrets.BACKUP_ENCRYPTION_PASSPHRASE }}
         run: |
-          ***REMOVED*** 这一步的纪律：连接串只在「喂给 psql / pg_dump」时出现，
-          ***REMOVED*** 任何要进日志的地方都必须先过 mask_db_url / redact。
-          ***REMOVED*** 网络被阻断时别一直挂着（默认可能等很久）。
+          # 这一步的纪律：连接串只在「喂给 psql / pg_dump」时出现，
+          # 任何要进日志的地方都必须先过 mask_db_url / redact。
+          # 网络被阻断时别一直挂着（默认可能等很久）。
           export PGCONNECT_TIMEOUT=15
 
           trim() {
             local s="$1"
             s="${s//$'\r'/}"
-            s="${s***REMOVED***"${s%%[![:space:]]*}"}"
-            s="${s%"${s***REMOVED******REMOVED****[![:space:]]}"}"
+            s="${s#"${s%%[![:space:]]*}"}"
+            s="${s%"${s##*[![:space:]]}"}"
             printf '%s' "$s"
           }
 
-          ***REMOVED*** 🔴🔴 掩码函数：这是本仓库唯一被允许「碰」SUPABASE_DB_URL 全文的地方。
-          ***REMOVED***      postgresql://user:PASSWORD@host:5432/postgres?sslmode=require
-          ***REMOVED***   →  postgresql://user:***@host:5432/postgres
-          ***REMOVED***      密码整段丢掉、查询串整段丢掉，只留 scheme / user / host / port / dbname。
-          ***REMOVED*** 🔴🔴 绝对不要把它改成 `echo "$SUPABASE_DB_URL"`、`env`、`set -x`，
-          ***REMOVED***      或 `pg_dump --verbose`（某些版本会把连接串回显出来）——
-          ***REMOVED***      Actions 日志公开可读，那等于把数据库密码贴到网上。
-          ***REMOVED***      解析不出来时宁可一个字都不打（见最后的兜底分支）。
+          # 🔴🔴 掩码函数：这是本仓库唯一被允许「碰」SUPABASE_DB_URL 全文的地方。
+          #      postgresql://user:PASSWORD@host:5432/postgres?sslmode=require
+          #   →  postgresql://user:***@host:5432/postgres
+          #      密码整段丢掉、查询串整段丢掉，只留 scheme / user / host / port / dbname。
+          # 🔴🔴 绝对不要把它改成 `echo "$SUPABASE_DB_URL"`、`env`、`set -x`，
+          #      或 `pg_dump --verbose`（某些版本会把连接串回显出来）——
+          #      Actions 日志公开可读，那等于把数据库密码贴到网上。
+          #      解析不出来时宁可一个字都不打（见最后的兜底分支）。
           mask_db_url() {
             local u="$1" scheme user host port dbname
-            ***REMOVED*** 带密码的形状。密码用贪婪 `.*` 匹配到「最后一个 @」，
-            ***REMOVED*** 这样密码里就算有 @ 也不会把后半截当成主机名漏出去；
-            ***REMOVED*** 万一把查询串也吞进去，那也只是掩得更多，不会漏。
+            # 带密码的形状。密码用贪婪 `.*` 匹配到「最后一个 @」，
+            # 这样密码里就算有 @ 也不会把后半截当成主机名漏出去；
+            # 万一把查询串也吞进去，那也只是掩得更多，不会漏。
             if [[ "$u" =~ ^([A-Za-z][A-Za-z0-9+.-]*)://([^:@/]+):(.*)@([^:/@?]+)(:([0-9]+))?/([^?]*) ]]; then
               scheme="${BASH_REMATCH[1]}"
               user="${BASH_REMATCH[2]}"
@@ -153,7 +153,7 @@ jobs:
               printf '%s://%s:***@%s:%s/%s' "$scheme" "$user" "$host" "$port" "$dbname"
               return 0
             fi
-            ***REMOVED*** 不带密码的形状：postgresql://user@host:5432/db
+            # 不带密码的形状：postgresql://user@host:5432/db
             if [[ "$u" =~ ^([A-Za-z][A-Za-z0-9+.-]*)://([^:@/]+)@([^:/@?]+)(:([0-9]+))?/([^?]*) ]]; then
               scheme="${BASH_REMATCH[1]}"
               user="${BASH_REMATCH[2]}"
@@ -163,22 +163,22 @@ jobs:
               printf '%s://%s:***@%s:%s/%s' "$scheme" "$user" "$host" "$port" "$dbname"
               return 0
             fi
-            ***REMOVED*** 形状不认识（比如粘成了 key=value 的 DSN）：一个字都不打，只报长度。
-            printf '<连接串形状不认识，已整体隐藏>（长度 %s）' "${***REMOVED***u}"
+            # 形状不认识（比如粘成了 key=value 的 DSN）：一个字都不打，只报长度。
+            printf '<连接串形状不认识，已整体隐藏>（长度 %s）' "${#u}"
           }
 
-          ***REMOVED*** 打印任何来自 psql / pg_dump 的输出之前先过一遍：
-          ***REMOVED*** 万一它们把连接串回显出来了，密码也会被换成 ***。
+          # 打印任何来自 psql / pg_dump 的输出之前先过一遍：
+          # 万一它们把连接串回显出来了，密码也会被换成 ***。
           redact() {
-            sed -E 's***REMOVED***([A-Za-z][A-Za-z0-9+.-]*://[^:@/[:space:]]+):[^@[:space:]]*@***REMOVED***\1:***@***REMOVED***g'
+            sed -E 's#([A-Za-z][A-Za-z0-9+.-]*://[^:@/[:space:]]+):[^@[:space:]]*@#\1:***@#g'
           }
 
-          ***REMOVED*** psql / pg_dump 的报错原文 → 人话分类（原文另外单独打，且先过 redact）。
+          # psql / pg_dump 的报错原文 → 人话分类（原文另外单独打，且先过 redact）。
           diagnose_pg_error() {
             local err
             err="$(cat)"
             local hit=0
-            ***REMOVED*** hit 在外层是 local，内层函数故意不加 local —— 这样能改到外层那份。
+            # hit 在外层是 local，内层函数故意不加 local —— 这样能改到外层那份。
             hit_if() {
               if grep -qiE "$1" <<<"$err"; then
                 echo "  ▶ 类型：$2"
@@ -215,10 +215,10 @@ jobs:
           fi
 
           echo "── 1) 连接串体检（只看形状，不看密码）──"
-          ***REMOVED*** 掩码后形如 postgresql://postgres.xxx:***@db.xxx.supabase.co:5432/postgres
+          # 掩码后形如 postgresql://postgres.xxx:***@db.xxx.supabase.co:5432/postgres
           printf '  掩码后 = [%s]\n' "$(mask_db_url "$DB_URL")"
-          echo "  长度：原始 ${***REMOVED***DB_URL_RAW} 字符 → trim 后 ${***REMOVED***DB_URL} 字符"
-          if [ "${***REMOVED***DB_URL_RAW}" != "${***REMOVED***DB_URL}" ]; then
+          echo "  长度：原始 ${#DB_URL_RAW} 字符 → trim 后 ${#DB_URL} 字符"
+          if [ "${#DB_URL_RAW}" != "${#DB_URL}" ]; then
             echo "::warning::SUPABASE_DB_URL 首尾有空白/换行，本次已自动 trim；建议去 Settings → Secrets 重新粘贴一次"
           fi
 
@@ -255,9 +255,9 @@ jobs:
           stamp=$(date -u +%Y%m%d-%H%M)
           raw="backup-$stamp.sql"
           out="$raw.gz"
-          ***REMOVED*** 只导 public schema 的数据与结构，够用于恢复。
-          ***REMOVED*** 先落 .sql 再压缩：不再用管道，否则管道里 `$?` 是 gzip 的退出码，
-          ***REMOVED*** pg_dump 失败会被吞掉，留下一个「合法但空」的 .gz 还显示绿灯。
+          # 只导 public schema 的数据与结构，够用于恢复。
+          # 先落 .sql 再压缩：不再用管道，否则管道里 `$?` 是 gzip 的退出码，
+          # pg_dump 失败会被吞掉，留下一个「合法但空」的 .gz 还显示绿灯。
           dump_rc=0
           pg_dump "$DB_URL" --schema=public --no-owner --no-privileges > "$raw" 2>/tmp/dump.err || dump_rc=$?
           if [ "$dump_rc" -ne 0 ]; then
@@ -272,7 +272,7 @@ jobs:
           bytes=$(wc -c < "$raw" | tr -d '[:space:]')
           tables=$(grep -c '^CREATE TABLE' "$raw" || true)
           echo "  dump 大小：$bytes 字节；CREATE TABLE 条数：$tables"
-          ***REMOVED*** 空的 / 半截的 dump 比没有 dump 更危险（会让人以为有备份）。
+          # 空的 / 半截的 dump 比没有 dump 更危险（会让人以为有备份）。
           if [ "$bytes" -lt 1024 ]; then
             echo "::error::dump 只有 $bytes 字节，明显不正常。前 15 行："
             head -n 15 "$raw" | sed 's/^/    /'
@@ -286,36 +286,36 @@ jobs:
           gzip -9 "$raw"
           echo "  压缩后：$(ls -lh "$out" | awk '{print $5}')（明文字节 $(wc -c < "$out" | tr -d '[:space:]')）"
 
-          ***REMOVED*** ── 加密（2026-09-25 加）──────────────────────────────────────────
-          ***REMOVED*** 🔴 为什么必须有这一步：dump 里是**全校学生的姓名 / 学号 / 成绩**。
-          ***REMOVED***    加密前它在 R2 上（以及 Artifact 里）是**明文**的：拿到那个对象的人
-          ***REMOVED***    不需要任何口令就能读。这一层是这份数据的唯一保护。
-          ***REMOVED***
-          ***REMOVED*** 选型说明（为什么是 openssl enc 而不是别的）：
-          ***REMOVED***   · ubuntu-latest 自带 openssl 3.x，**零依赖**（`age` / `gpg` 都要额外装包）；
-          ***REMOVED***   · 对称口令 → 没有密钥文件要保管，运维成本最低（用户就一个人维护这套系统）；
-          ***REMOVED***   · 解密只要一行命令、任何装了 openssl 的机器都行（Windows 的 Git Bash 也自带）——
-          ***REMOVED***     "关键时刻打不开的备份等于没有备份"，这一条比算法先进更重要。
-          ***REMOVED***
-          ***REMOVED*** 参数（**解密时必须一模一样**，只有 -pass 换成你的口令）：
-          ***REMOVED***   -aes-256-cbc  对称算法
-          ***REMOVED***   -pbkdf2       口令派生用 PBKDF2（不加的话是 openssl 那套过时的 EVP_BytesToKey）
-          ***REMOVED***   -iter 600000  迭代次数：拉高暴力破解成本。多花几秒，换"口令别太弱也还扛得住"
-          ***REMOVED***   -md sha256    PBKDF2 的摘要算法（openssl 3 已经是默认，显式写出来免得换机器时变）
-          ***REMOVED***   -salt（默认开）**绝不要加 -nosalt**：固定盐 = 同一份 dump 每次密文都一样，
-          ***REMOVED***                 等于告诉拿到对象的人"这两天的备份内容没变"，也方便字典攻击。
-          ***REMOVED***
-          ***REMOVED*** ⚠️ 口令从环境变量喂给 openssl，**用管道 `printf` 而不是 `<<<`**：
-          ***REMOVED***    here-string 会**多送一个换行**，那一个字节就会让解密的密钥对不上
-          ***REMOVED***    （而且报错是"bad decrypt"，看着像口令记错了，极难查）。
-          ***REMOVED***    同理 `printf '%s'` 不带 \n —— 两端必须**逐字节**一致。
-          ***REMOVED*** ⇣⇣ 加密块开始（上下两行标记是给 scripts/lib/backup-enc-selfcheck.mjs 抠代码用的，别删）
+          # ── 加密（2026-09-25 加）──────────────────────────────────────────
+          # 🔴 为什么必须有这一步：dump 里是**全校学生的姓名 / 学号 / 成绩**。
+          #    加密前它在 R2 上（以及 Artifact 里）是**明文**的：拿到那个对象的人
+          #    不需要任何口令就能读。这一层是这份数据的唯一保护。
+          #
+          # 选型说明（为什么是 openssl enc 而不是别的）：
+          #   · ubuntu-latest 自带 openssl 3.x，**零依赖**（`age` / `gpg` 都要额外装包）；
+          #   · 对称口令 → 没有密钥文件要保管，运维成本最低（用户就一个人维护这套系统）；
+          #   · 解密只要一行命令、任何装了 openssl 的机器都行（Windows 的 Git Bash 也自带）——
+          #     "关键时刻打不开的备份等于没有备份"，这一条比算法先进更重要。
+          #
+          # 参数（**解密时必须一模一样**，只有 -pass 换成你的口令）：
+          #   -aes-256-cbc  对称算法
+          #   -pbkdf2       口令派生用 PBKDF2（不加的话是 openssl 那套过时的 EVP_BytesToKey）
+          #   -iter 600000  迭代次数：拉高暴力破解成本。多花几秒，换"口令别太弱也还扛得住"
+          #   -md sha256    PBKDF2 的摘要算法（openssl 3 已经是默认，显式写出来免得换机器时变）
+          #   -salt（默认开）**绝不要加 -nosalt**：固定盐 = 同一份 dump 每次密文都一样，
+          #                 等于告诉拿到对象的人"这两天的备份内容没变"，也方便字典攻击。
+          #
+          # ⚠️ 口令从环境变量喂给 openssl，**用管道 `printf` 而不是 `<<<`**：
+          #    here-string 会**多送一个换行**，那一个字节就会让解密的密钥对不上
+          #    （而且报错是"bad decrypt"，看着像口令记错了，极难查）。
+          #    同理 `printf '%s'` 不带 \n —— 两端必须**逐字节**一致。
+          # ⇣⇣ 加密块开始（上下两行标记是给 scripts/lib/backup-enc-selfcheck.mjs 抠代码用的，别删）
           BACKUP_PASS="$(trim "$BACKUP_PASS_RAW")"
           if [ -z "$BACKUP_PASS" ]; then
-            ***REMOVED*** 第 1 步已经拦过一次；这里再拦一次是**故意的**：
-            ***REMOVED*** 这一步才是真正写文件的地方，"绝不静默降级成明文"这条不变量
-            ***REMOVED*** 必须钉在**产生文件的那一处**，而不是只钉在入口（§2.3 的教训：
-            ***REMOVED*** 同一个不变量要在所有写入路径上守）。
+            # 第 1 步已经拦过一次；这里再拦一次是**故意的**：
+            # 这一步才是真正写文件的地方，"绝不静默降级成明文"这条不变量
+            # 必须钉在**产生文件的那一处**，而不是只钉在入口（§2.3 的教训：
+            # 同一个不变量要在所有写入路径上守）。
             echo "::error::BACKUP_ENCRYPTION_PASSPHRASE 为空 —— 拒绝生成明文备份，这一步到此为止（没有 .enc 文件产生）"
             rm -f "$out"
             exit 1
@@ -334,8 +334,8 @@ jobs:
             exit 1
           fi
 
-          ***REMOVED*** 加密的产物必须**真的不是明文**：先看 openssl 的魔数（`Salted__`），
-          ***REMOVED*** 再确认 gzip 魔数（1f 8b）已经不在里面。两条都过才允许往下走。
+          # 加密的产物必须**真的不是明文**：先看 openssl 的魔数（`Salted__`），
+          # 再确认 gzip 魔数（1f 8b）已经不在里面。两条都过才允许往下走。
           if ! head -c 8 "$enc" | grep -q 'Salted__'; then
             echo "::error::加密产物的头部不是 openssl 的 Salted__ 魔数 —— 这一步没有真的加密，按失败处理"
             rm -f "$out" "$enc"
@@ -347,7 +347,7 @@ jobs:
             exit 1
           fi
           echo "  源文件确实是 gzip（魔数 1f 8b）；密文头部是 Salted__ —— 明文没有直接落到 .enc 里"
-          ***REMOVED*** 密文比明文短 = 不可能（CBC + PKCS***REMOVED***7 只会更长），说明写坏了
+          # 密文比明文短 = 不可能（CBC + PKCS#7 只会更长），说明写坏了
           plain_bytes=$(wc -c < "$out" | tr -d '[:space:]')
           enc_bytes=$(wc -c < "$enc" | tr -d '[:space:]')
           if [ "$enc_bytes" -le "$plain_bytes" ]; then
@@ -355,32 +355,32 @@ jobs:
             rm -f "$out" "$enc"
             exit 1
           fi
-          ***REMOVED*** 明文一定删掉：R2 上传、Artifact 兜底、清理三处都只认 `backup-*.sql.gz.enc`
+          # 明文一定删掉：R2 上传、Artifact 兜底、清理三处都只认 `backup-*.sql.gz.enc`
           rm -f "$out"
           echo "  ✅ 已加密：$enc（$enc_bytes 字节）。明文 .gz 已删除，本步之后工作区里没有明文备份"
           ls -lh "$enc"
           echo "FILE=$enc" >> "$GITHUB_ENV"
-          ***REMOVED*** ⇡⇡ 加密块结束
+          # ⇡⇡ 加密块结束
 
-      ***REMOVED*** ── 第 4 步：上传 R2。未配置 R2 时保留原来的 Artifact 降级路径 ──────
+      # ── 第 4 步：上传 R2。未配置 R2 时保留原来的 Artifact 降级路径 ──────
       - name: 上传到 Cloudflare R2（失败时按类型给诊断）
         env:
           AWS_ACCESS_KEY_ID_RAW: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY_RAW: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ENDPOINT_RAW: ${{ secrets.R2_ENDPOINT }} ***REMOVED*** https://<account_id>.r2.cloudflarestorage.com
+          R2_ENDPOINT_RAW: ${{ secrets.R2_ENDPOINT }} # https://<account_id>.r2.cloudflarestorage.com
           R2_BUCKET_RAW: ${{ secrets.R2_BUCKET }}
         run: |
           trim() {
             local s="$1"
             s="${s//$'\r'/}"
-            s="${s***REMOVED***"${s%%[![:space:]]*}"}"
-            s="${s%"${s***REMOVED******REMOVED****[![:space:]]}"}"
+            s="${s#"${s%%[![:space:]]*}"}"
+            s="${s%"${s##*[![:space:]]}"}"
             printf '%s' "$s"
           }
 
-          ***REMOVED*** 把两个 key 的字面值从任何要打印的文本里抹掉。
-          ***REMOVED*** 用 bash 字面替换（不是正则），所以 key 里有什么字符都安全。
-          ***REMOVED*** 🔴 两个 key 绝不 echo；AWS_SECRET_ACCESS_KEY 尤其不能进日志。
+          # 把两个 key 的字面值从任何要打印的文本里抹掉。
+          # 用 bash 字面替换（不是正则），所以 key 里有什么字符都安全。
+          # 🔴 两个 key 绝不 echo；AWS_SECRET_ACCESS_KEY 尤其不能进日志。
           scrub() {
             local line
             while IFS= read -r line; do
@@ -395,7 +395,7 @@ jobs:
             return 0
           }
 
-          ***REMOVED*** aws 的报错原文 → 人话分类。
+          # aws 的报错原文 → 人话分类。
           r2_hint() {
             local err
             err="$(cat)"
@@ -432,15 +432,15 @@ jobs:
           export AWS_ACCESS_KEY_ID="$(trim "$AWS_ACCESS_KEY_ID_RAW")"
           export AWS_SECRET_ACCESS_KEY="$(trim "$AWS_SECRET_ACCESS_KEY_RAW")"
 
-          ***REMOVED*** 未配置 R2 → 保留原来的降级路径：交给下面的 Artifact 兜底
+          # 未配置 R2 → 保留原来的降级路径：交给下面的 Artifact 兜底
           if [ -z "$R2_ENDPOINT" ] || [ -z "$R2_BUCKET" ]; then
             echo "::warning::未配置 R2（R2_ENDPOINT / R2_BUCKET trim 后为空），改为把备份作为 Artifact 保留"
             exit 0
           fi
 
-          ***REMOVED*** 半配置状态：bucket 配了、钥匙没配 —— 上传必然失败，直接点名，
-          ***REMOVED*** 别让 aws 抛一句看不懂的 Unable to locate credentials。
-          ***REMOVED*** （备份文件已经生成；下面的 Artifact 兜底是 if: always()，照样会保存它。）
+          # 半配置状态：bucket 配了、钥匙没配 —— 上传必然失败，直接点名，
+          # 别让 aws 抛一句看不懂的 Unable to locate credentials。
+          # （备份文件已经生成；下面的 Artifact 兜底是 if: always()，照样会保存它。）
           if [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ]; then
             echo "::error::R2_ENDPOINT / R2_BUCKET 配了，但 R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY 缺失或 trim 后为空 —— 上传必然失败。修法二选一：① 补上这两个 secret；② 把 R2_ENDPOINT 也清空，正式走 Artifact 方案"
             exit 1
@@ -466,7 +466,7 @@ jobs:
             exit 1
           fi
 
-          ***REMOVED*** 传完回读一次：aws 说成功、对象其实不在，这种情况不罕见。
+          # 传完回读一次：aws 说成功、对象其实不在，这种情况不罕见。
           verify_rc=0
           aws s3 ls "s3://$R2_BUCKET/db-backups/$FILE" --endpoint-url "$R2_ENDPOINT" 2>/tmp/r2verify.err || verify_rc=$?
           if [ "$verify_rc" -ne 0 ]; then
@@ -476,11 +476,11 @@ jobs:
             echo "上传并回读确认：$FILE"
           fi
 
-      ***REMOVED*** 兜底：作为 Artifact 保留 30 天
-      ***REMOVED*** if: always() 是故意的：R2 传失败、甚至 pg_dump 失败时这一步也要跑，
-      ***REMOVED*** 能捞一份就捞一份（没有产物时 upload-artifact 只会给个 warning，不会掩盖真正的错误）。
-      ***REMOVED*** 🔴 通配符**只认加密后的 `.sql.gz.enc`**：明文那份在加密成功后已经被删掉，
-      ***REMOVED***    这里再收窄一道，等于"这个仓库里没有任何一条路能把明文备份传出去"。
+      # 兜底：作为 Artifact 保留 30 天
+      # if: always() 是故意的：R2 传失败、甚至 pg_dump 失败时这一步也要跑，
+      # 能捞一份就捞一份（没有产物时 upload-artifact 只会给个 warning，不会掩盖真正的错误）。
+      # 🔴 通配符**只认加密后的 `.sql.gz.enc`**：明文那份在加密成功后已经被删掉，
+      #    这里再收窄一道，等于"这个仓库里没有任何一条路能把明文备份传出去"。
       - name: 兜底：作为 Artifact 保留 30 天
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
@@ -490,8 +490,8 @@ jobs:
           retention-days: 30
 
       - name: 清理 R2 上超过 30 份的旧备份
-        ***REMOVED*** 加了 success()：只有前面每一步都成功，才允许去动 R2 上的老备份。
-        ***REMOVED*** 备份本身没成功的时候，绝不能删老备份。
+        # 加了 success()：只有前面每一步都成功，才允许去动 R2 上的老备份。
+        # 备份本身没成功的时候，绝不能删老备份。
         if: ${{ env.R2_BUCKET != '' && success() }}
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -499,12 +499,12 @@ jobs:
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
-          ***REMOVED*** 同一个 trim（每步一个独立 shell，所以这里再留一份）
+          # 同一个 trim（每步一个独立 shell，所以这里再留一份）
           trim() {
             local s="$1"
             s="${s//$'\r'/}"
-            s="${s***REMOVED***"${s%%[![:space:]]*}"}"
-            s="${s%"${s***REMOVED******REMOVED****[![:space:]]}"}"
+            s="${s#"${s%%[![:space:]]*}"}"
+            s="${s%"${s##*[![:space:]]}"}"
             printf '%s' "$s"
           }
           R2_ENDPOINT="$(trim "$R2_ENDPOINT")"
@@ -516,20 +516,20 @@ jobs:
             echo "未配置 R2，跳过清理"
             exit 0
           fi
-          ***REMOVED*** 列出全部备份（按文件名倒序），删掉第 31 份之后的。
-          ***REMOVED*** 先单独拿退出码：旧写法从管道里读，`aws s3 ls` 失败会被 sort 的 0 盖掉，
-          ***REMOVED*** 结果「列举失败」看起来像「清理完成」。
-          ***REMOVED***
-          ***REMOVED*** ── 新旧两种备份的共存纪律（2026-09-25 加）────────────────────────
-          ***REMOVED*** 加密之前传上去的是 `backup-<stamp>.sql.gz`（**明文**），
-          ***REMOVED*** 加密之后是 `backup-<stamp>.sql.gz.enc`。两件事都按这里办：
-          ***REMOVED***   ① **保留名额合在一起算**（都按名字排序，共留最新 30 份）——
-          ***REMOVED***      不分开算，免得"30 份明文 + 30 份密文"把 R2 占成两倍；
-          ***REMOVED***   ② **顺手把明文那批清掉，但只在它已经被同一时刻的密文取代时**：
-          ***REMOVED***      这一轮 R2 上出现 `X.sql.gz.enc`，说明 ①`X` 是同一份 dump 的密文、
-          ***REMOVED***      ②工作流已经跑在加密版本上了。那种情况下明文副本没有任何理由留着
-          ***REMOVED***      （留着就是"全校成绩单明文躺在云上"）。**只删同一时刻的那一个**，
-          ***REMOVED***      不碰比它更老、还没有对应密文的明文 —— 那可能是唯一的备份。
+          # 列出全部备份（按文件名倒序），删掉第 31 份之后的。
+          # 先单独拿退出码：旧写法从管道里读，`aws s3 ls` 失败会被 sort 的 0 盖掉，
+          # 结果「列举失败」看起来像「清理完成」。
+          #
+          # ── 新旧两种备份的共存纪律（2026-09-25 加）────────────────────────
+          # 加密之前传上去的是 `backup-<stamp>.sql.gz`（**明文**），
+          # 加密之后是 `backup-<stamp>.sql.gz.enc`。两件事都按这里办：
+          #   ① **保留名额合在一起算**（都按名字排序，共留最新 30 份）——
+          #      不分开算，免得"30 份明文 + 30 份密文"把 R2 占成两倍；
+          #   ② **顺手把明文那批清掉，但只在它已经被同一时刻的密文取代时**：
+          #      这一轮 R2 上出现 `X.sql.gz.enc`，说明 ①`X` 是同一份 dump 的密文、
+          #      ②工作流已经跑在加密版本上了。那种情况下明文副本没有任何理由留着
+          #      （留着就是"全校成绩单明文躺在云上"）。**只删同一时刻的那一个**，
+          #      不碰比它更老、还没有对应密文的明文 —— 那可能是唯一的备份。
           raw_list="$(mktemp)"
           list="$(mktemp)"
           ls_rc=0
@@ -545,7 +545,7 @@ jobs:
           plain_total=$((total - enc_total))
           echo "R2 上现有 $total 份备份（加密 $enc_total 份 · 明文 $plain_total 份）；第 31 份之后（更老的）会被删掉"
 
-          ***REMOVED*** ① 已经被同一时刻的密文取代的明文副本 —— 删掉
+          # ① 已经被同一时刻的密文取代的明文副本 —— 删掉
           grep '\.sql\.gz$' "$list" > "$list.plain" || true
           while read -r p; do
             [ -n "$p" ] || continue

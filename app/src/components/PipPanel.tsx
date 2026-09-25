@@ -19,8 +19,8 @@ type Palette = {
 }
 
 const PIP: Palette = {
-  bg: 'linear-gradient(180deg, ***REMOVED***10151c, ***REMOVED***171e28)',
-  fg: '***REMOVED***fff',
+  bg: 'linear-gradient(180deg, #10151c, #171e28)',
+  fg: '#fff',
   dim: 'rgb(255 255 255 / .6)',
   line: 'rgb(255 255 255 / .16)',
   btnBg: 'transparent',

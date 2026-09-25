@@ -177,7 +177,7 @@ const EXPECTED = {
   '/settings': { super: true, admin: true, grade_head: true, head_teacher: true, teacher: true, classroom: false },
   '/files': { super: true, admin: true, grade_head: true, head_teacher: true, teacher: true, classroom: false },
   '/calls': { super: true, admin: true, grade_head: true, head_teacher: true, teacher: true, classroom: false },
-  // 只有 super / admin（`canManageTeachers()`）—— §2.3 ***REMOVED***27
+  // 只有 super / admin（`canManageTeachers()`）—— §2.3 #27
   '/accounts': { super: true, admin: true, grade_head: false, head_teacher: false, teacher: false, classroom: false },
   // ★ 年级管理：super/admin 全部；年级主任 V（列表由 RLS 筛）；班主任与任课老师 E
   '/grades': { super: true, admin: true, grade_head: true, head_teacher: false, teacher: false, classroom: false },
@@ -1104,16 +1104,16 @@ section('第八节 · D2：方案 §2.2 矩阵（第二个单元格）↔ PAGES 
 
 function parseMatrix() {
   const doc = readRepo('按身份显示导航方案.md')
-  const at = doc.indexOf('***REMOVED******REMOVED******REMOVED*** 2.2')
-  if (at < 0) throw new Error('找不到 `***REMOVED******REMOVED******REMOVED*** 2.2`（锚点变了）')
+  const at = doc.indexOf('### 2.2')
+  if (at < 0) throw new Error('找不到 `### 2.2`（锚点变了）')
   /*
    * 🔴 锚点必须**先切后取**（§18.3 那个"锚点跨过中间全部内容、把 schema 咬掉一大块
-   * 而 `if (!m) throw` 抓不到"的坑）：从 `***REMOVED******REMOVED******REMOVED*** 2.2` 切到**下一个 `***REMOVED******REMOVED******REMOVED***`** 为止，
+   * 而 `if (!m) throw` 抓不到"的坑）：从 `### 2.2` 切到**下一个 `###`** 为止，
    * 再在**这一段里**找表行。别用贪婪的 `[\s\S]*?`。
    */
   const rest = doc.slice(at + 4)
-  const end = rest.indexOf('***REMOVED******REMOVED******REMOVED***')
-  if (end < 0) throw new Error('`***REMOVED******REMOVED******REMOVED*** 2.2` 之后找不到下一个 `***REMOVED******REMOVED******REMOVED***`（锚点咬到文件末尾了）')
+  const end = rest.indexOf('###')
+  if (end < 0) throw new Error('`### 2.2` 之后找不到下一个 `###`（锚点咬到文件末尾了）')
   const sec = rest.slice(0, end)
   const lines = sec.split('\n').filter((l) => l.startsWith('|'))
   if (lines.length < 30) throw new Error(`§2.2 里只解析到 ${lines.length} 行表行 —— 锚点多半错了`)
@@ -1125,7 +1125,7 @@ function parseMatrix() {
     /*
      * 单元格：`| a | b | c |…|` 拆开之后**首尾都是空串**（首尾各一个 `|`），
      * 去掉末尾那一个空串之后剩 10 格：
-     *   [0] 序号 `***REMOVED***` · [1] 路由 · [2] 入口在哪 · [3] 路由(有/★新) · [4..9] 六个身份
+     *   [0] 序号 `#` · [1] 路由 · [2] 入口在哪 · [3] 路由(有/★新) · [4..9] 六个身份
      * ⚠️ 前 4 格里**只有 [1] 是路径** —— 方案 §2.1 特意为 D2 留的口径（"只认第二个单元格"）。
      */
     const raw = line
@@ -1202,7 +1202,7 @@ function parseMatrix() {
   /*
    * ⚠️ 矩阵里的格子值 vs `ENTRIES` 真算出来的值 —— 这是把"文档说的"与"代码做的"
    * 接起来的那一根线。两个数组**不能按下标配对**（PAGES 是按"归属"分组的，
-   * 方案 §2.2 是按路由族排的；`/files` 在 PAGES 里排在 `/accounts` 前面，矩阵里是 ***REMOVED***23 vs ***REMOVED***27）
+   * 方案 §2.2 是按路由族排的；`/files` 在 PAGES 里排在 `/accounts` 前面，矩阵里是 #23 vs #27）
    * → **按路径 join**（`pathEntry` 那张表），不是 `PAGES[i]`。
    *
    * ⚠️ **只比那 34 行**（`MATRIX_PATHS`）：`PAGES` 现在还多了通知那两行，
@@ -1270,25 +1270,25 @@ section('第八节之二 · D9：管理架构方案 §4.2 的 13 列矩阵（36 
  * 解析 `管理架构与角色权限方案.md` §4.2 的矩阵。
  *
  * 锚点纪律与 D2 逐字相同（**先切后取**，别用贪婪正则）：
- * 从 `***REMOVED******REMOVED******REMOVED*** 4.2 ` 切到下一个 `***REMOVED******REMOVED******REMOVED***` 为止，再在这一段里找表行。
+ * 从 `### 4.2 ` 切到下一个 `###` 为止，再在这一段里找表行。
  */
 function parseMatrix13() {
   const doc = readRepo('管理架构与角色权限方案.md')
-  const at = doc.indexOf('***REMOVED******REMOVED******REMOVED*** 4.2 ')
-  if (at < 0) throw new Error('找不到 `***REMOVED******REMOVED******REMOVED*** 4.2 `（锚点变了）')
+  const at = doc.indexOf('### 4.2 ')
+  if (at < 0) throw new Error('找不到 `### 4.2 `（锚点变了）')
   const rest = doc.slice(at + 4)
-  const end = rest.indexOf('***REMOVED******REMOVED******REMOVED***')
-  if (end < 0) throw new Error('`***REMOVED******REMOVED******REMOVED*** 4.2` 之后找不到下一个 `***REMOVED******REMOVED******REMOVED***`（锚点咬到文件末尾了）')
+  const end = rest.indexOf('###')
+  if (end < 0) throw new Error('`### 4.2` 之后找不到下一个 `###`（锚点咬到文件末尾了）')
   const sec = rest.slice(0, end)
   const lines = sec.split('\n').filter((l) => l.startsWith('|'))
   if (lines.length < 36) throw new Error(`§4.2 里只解析到 ${lines.length} 行表行 —— 锚点多半错了`)
 
-  /** 表头那一行：`| ***REMOVED*** | 入口 | 路由 | 超 | 教 | … |` —— 拿它核列序（缩写） */
+  /** 表头那一行：`| # | 入口 | 路由 | 超 | 教 | … |` —— 拿它核列序（缩写） */
   const headerLine = lines.find((l) => l.includes('| 入口 |'))
   const headerCells = headerLine
     ? headerLine.split('|').slice(1).map((c) => c.trim()).filter((c, i, a) => !(i === a.length - 1 && c === ''))
     : []
-  const heads = headerCells.slice(3) // 去掉 `***REMOVED***` / `入口` / `路由` 三格
+  const heads = headerCells.slice(3) // 去掉 `#` / `入口` / `路由` 三格
 
   const paths = []
   const cells = []
@@ -1300,7 +1300,7 @@ function parseMatrix13() {
       .slice(1)
       .map((c) => c.trim())
       .filter((c, i, arr) => !(i === arr.length - 1 && c === ''))
-    // 13 列 + 3 格（***REMOVED*** / 入口 / 路由）= 16 格；表头与 `| --- |` 分隔行靠"第三格是 `/` 开头的路径"排掉
+    // 13 列 + 3 格（# / 入口 / 路由）= 16 格；表头与 `| --- |` 分隔行靠"第三格是 `/` 开头的路径"排掉
     if (raw.length !== 16) continue
     const m = raw[2].match(/`(\/[^`]*)`/)
     /*
@@ -1327,7 +1327,7 @@ function parseMatrix13() {
       else if (ch === 'E') perCol[i].e++
       else if (ch === 'B') perCol[i].b++
       else if (t.startsWith('—')) perCol[i].x++
-      else unknown.push(`${m[1]}***REMOVED***${i + 1}:${JSON.stringify(t)}`)
+      else unknown.push(`${m[1]}#${i + 1}:${JSON.stringify(t)}`)
     })
     cells.push(thirteen.map((t) => t.charAt(0)))
   }
@@ -1917,7 +1917,7 @@ function sourceFileHealth(buf) {
      ⚠️ 类② 怎么判断"这是不是代码位置"：不用"行首是不是 `//`"的一行判断 ——
      那样 JSX 文本、跨行块注释、字符串里的中文文案全都会被误判。这里做的是**逐字符标注**：
      按该语言的注释语法（TS/JS：`//` 行注释与 `/*` … `*\/` 块注释；SQL：`--` 与块注释；
-     CSS：块注释；`.gitignore`：行首 `***REMOVED***`。⚠️ `*\/` 里那个反斜杠是故意的 ——
+     CSS：块注释；`.gitignore`：行首 `#`。⚠️ `*\/` 里那个反斜杠是故意的 ——
      在块注释里直接写"星号斜杠"会**提前结束这条注释**，这个坑本轮踩过一次）
      加上字符串 / 模板字面量 / 正则字面量，把整份文件标成
      注释 / 文本 / **裸代码** 三种，只有裸代码里的全角标点才红。效果：
@@ -1932,7 +1932,7 @@ function sourceFileHealth(buf) {
        · `.md`       整篇就是给人看的散文，正文里的中文标点本来就该是全角。
        · `.json`     没有注释语法；值是题库/模板里的中文数据，`"（1）"` 是数据不是代码。
        · `.yml`/`.yaml`  例：`- name: 环境自检（只报 secret 存在性）` —— 值几乎全是中文说明，
-                     按行首 `***REMOVED***` 判断不出"这个全角标点在键里还是值里"，判红必误报。
+                     按行首 `#` 判断不出"这个全角标点在键里还是值里"，判红必误报。
        · `.tsx`      JSX 文本节点（`<b>三条出路：</b>`）与代码在词法上**长得一样**（都是裸文本），
                      行级启发式分不开；本仓库 JSX 里 400+ 行中文文案 → 判红就是天天误报。
        · `.html`     同 markdown（整篇是标记 + 文案）。
@@ -2031,8 +2031,8 @@ function sourceFileHealth(buf) {
       }
       /*
        * 换行要把"上一个有意义的字符"清掉：否则上一行行尾的字符会漏到下一行，
-       * 让"这一行以 `***REMOVED***` 开头吗"（本仓库只有 `.gitignore` 走这条规则）永远判错 ——
-       * 这个 bug 真的发生过一次：`.gitignore` 里 12 处 `***REMOVED***` 注释被当成代码判红。
+       * 让"这一行以 `#` 开头吗"（本仓库只有 `.gitignore` 走这条规则）永远判错 ——
+       * 这个 bug 真的发生过一次：`.gitignore` 里 12 处 `#` 注释被当成代码判红。
        */
       if (c === '\n') { prevChar = ''; word = ''; i++; continue }
       if (syn.block && two === '/*') {
@@ -2048,8 +2048,8 @@ function sourceFileHealth(buf) {
         word = ''
         continue
       }
-      // `***REMOVED***` 只有"这一行第一个非空白字符"才算注释（不是行内注释）—— 宁可漏报
-      if (syn.hash && c === '***REMOVED***' && prevChar === '') {
+      // `#` 只有"这一行第一个非空白字符"才算注释（不是行内注释）—— 宁可漏报
+      if (syn.hash && c === '#' && prevChar === '') {
         while (i < N && text[i] !== '\n') { mask[i] = 'm'; i++ }
         continue
       }

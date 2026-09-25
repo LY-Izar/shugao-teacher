@@ -37,7 +37,7 @@ function unescapeXml(s: string): string {
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
     .replace(/&apos;/g, "'")
-    .replace(/&***REMOVED***(\d+);/g, (_, d) => String.fromCodePoint(Number(d)))
+    .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(Number(d)))
     .replace(/&amp;/g, '&')
 }
 

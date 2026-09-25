@@ -2,7 +2,7 @@
  * 版本号只在这里改一处。
  * 之前左栏写 v0.6.0、登录页写 v0.2.0，两处互相矛盾 —— 就是因为各写各的。
  *
- * ***REMOVED******REMOVED*** 两个值，两种语义（别合并）
+ * ## 两个值，两种语义（别合并）
  *
  * | 导出 | 谁写 | 用途 |
  * | --- | --- | --- |
@@ -13,7 +13,7 @@
  * "线上是不是我这一版"根本答不出来 —— 上一次最后是靠**手工比对线上 JS 的文件哈希**
  * 才确认的。哈希本来就在产物 URL 里，顺手取出来显示即可，不需要任何构建配置。
  *
- * ***REMOVED******REMOVED*** 发版三步（顺手做，一次一分钟）
+ * ## 发版三步（顺手做，一次一分钟）
  * 1. 改本文件的 `APP_VERSION`（语义化：修 bug 加末位、加功能加中位、不兼容改首位）
  * 2. 同步 `app/package.json` 的 `version`
  * 3. 在「我的 → 更新日志」（`pages/Settings.tsx`）顶部加一段
@@ -33,7 +33,7 @@ export const APP_VERSION = '0.9.1'
  */
 function readBuildHash(): string | null {
   try {
-    const m = /\/assets\/[^/]*?-([A-Za-z0-9_-]{6,})\.[cm]?js(?:[?***REMOVED***]|$)/.exec(import.meta.url)
+    const m = /\/assets\/[^/]*?-([A-Za-z0-9_-]{6,})\.[cm]?js(?:[?#]|$)/.exec(import.meta.url)
     return m ? m[1] : null
   } catch {
     return null

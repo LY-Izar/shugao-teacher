@@ -250,10 +250,10 @@ export function ScheduleBatch({
           className="mb-3 flex items-start gap-2 p-2.5"
           style={{
             background: 'var(--color-badsoft)',
-            border: '1px solid ***REMOVED***f0c9c9',
+            border: '1px solid #f0c9c9',
             borderRadius: 4,
             fontSize: 11.5,
-            color: '***REMOVED***8f2b2b',
+            color: '#8f2b2b',
             lineHeight: 1.6,
           }}
         >
@@ -269,10 +269,10 @@ export function ScheduleBatch({
           className="mb-3 flex items-start gap-2 p-2.5"
           style={{
             background: 'var(--color-warnsoft)',
-            border: '1px solid ***REMOVED***ecd9ae',
+            border: '1px solid #ecd9ae',
             borderRadius: 4,
             fontSize: 11.5,
-            color: '***REMOVED***8a5a12',
+            color: '#8a5a12',
             lineHeight: 1.6,
           }}
         >

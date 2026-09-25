@@ -115,10 +115,10 @@ export function WordImport({
               className="mb-2.5 flex items-start gap-2 p-2.5"
               style={{
                 background: 'var(--color-warnsoft)',
-                border: '1px solid ***REMOVED***ecd9ae',
+                border: '1px solid #ecd9ae',
                 borderRadius: 4,
                 fontSize: 11.5,
-                color: '***REMOVED***8a5a12',
+                color: '#8a5a12',
                 lineHeight: 1.6,
               }}
             >
@@ -160,7 +160,7 @@ export function WordImport({
                           objectFit: 'contain',
                           border: '1px solid var(--color-line2)',
                           borderRadius: 3,
-                          background: '***REMOVED***fff',
+                          background: '#fff',
                         }}
                       />
                       {q.imgs.length > 1 ? (
@@ -174,7 +174,7 @@ export function WordImport({
                             padding: '0 3px',
                             borderRadius: 3,
                             background: 'var(--color-accent)',
-                            color: '***REMOVED***fff',
+                            color: '#fff',
                           }}
                         >
                           {q.imgs.length}
@@ -187,7 +187,7 @@ export function WordImport({
                       style={{
                         width: 34,
                         height: 34,
-                        border: '1px solid ***REMOVED***f0c9c9',
+                        border: '1px solid #f0c9c9',
                         borderRadius: 3,
                         background: 'var(--color-badsoft)',
                         color: 'var(--color-bad)',
@@ -281,10 +281,10 @@ export function WordImport({
           className="mt-2.5 flex items-start gap-2 p-2.5"
           style={{
             background: 'var(--color-badsoft)',
-            border: '1px solid ***REMOVED***f0c9c9',
+            border: '1px solid #f0c9c9',
             borderRadius: 4,
             fontSize: 11.5,
-            color: '***REMOVED***8f2b2b',
+            color: '#8f2b2b',
             lineHeight: 1.6,
           }}
         >

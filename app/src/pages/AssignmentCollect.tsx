@@ -49,7 +49,7 @@ function MockStack({ highlight }: { highlight?: string }) {
   return (
     <div
       className="absolute inset-0 flex flex-col justify-center gap-[2px] px-3"
-      style={{ background: '***REMOVED***fff', paddingBottom: 36, paddingTop: 12 }}
+      style={{ background: '#fff', paddingBottom: 36, paddingTop: 12 }}
     >
       {Array.from({ length: rows }).map((_, i) => {
         // 确定性横向抖动：还原真实书写位置不一致的情况
@@ -63,9 +63,9 @@ function MockStack({ highlight }: { highlight?: string }) {
             className="flex items-center"
             style={{
               height: 13,
-              background: i % 2 === 0 ? '***REMOVED***fbfcfd' : '***REMOVED***f4f6f9',
-              borderTop: '1px solid ***REMOVED***e2e6ec',
-              borderBottom: '1px solid ***REMOVED***eef1f5',
+              background: i % 2 === 0 ? '#fbfcfd' : '#f4f6f9',
+              borderTop: '1px solid #e2e6ec',
+              borderBottom: '1px solid #eef1f5',
             }}
           >
             <span style={{ width: `${8 + jitter * 2}%` }} />
@@ -488,7 +488,7 @@ export default function AssignmentCollect() {
                     right: 0,
                     bottom: 0,
                     padding: '7px 10px',
-                    color: '***REMOVED***fff',
+                    color: '#fff',
                     fontSize: 11.5,
                     display: 'flex',
                     alignItems: 'center',
@@ -604,10 +604,10 @@ export default function AssignmentCollect() {
                       className="mt-2.5 flex items-start gap-2 p-2.5"
                       style={{
                         background: 'var(--color-warnsoft)',
-                        border: '1px solid ***REMOVED***ecd9ae',
+                        border: '1px solid #ecd9ae',
                         borderRadius: 4,
                         fontSize: 11.5,
-                        color: '***REMOVED***8a5a12',
+                        color: '#8a5a12',
                         lineHeight: 1.6,
                       }}
                     >
@@ -632,10 +632,10 @@ export default function AssignmentCollect() {
                           ocrErr.msg.includes('没有班级') || ocrErr.msg.includes('没配置')
                             ? 'var(--color-warnsoft)'
                             : 'var(--color-badsoft)',
-                        border: '1px solid ***REMOVED***f0c9c9',
+                        border: '1px solid #f0c9c9',
                         borderRadius: 4,
                         fontSize: 11.5,
-                        color: '***REMOVED***8f2b2b',
+                        color: '#8f2b2b',
                         lineHeight: 1.6,
                       }}
                     >
@@ -788,14 +788,14 @@ export default function AssignmentCollect() {
                 className="mb-2 flex items-start gap-2.5 p-3"
                 style={{
                   background: 'var(--color-warnsoft)',
-                  border: '1px solid ***REMOVED***ecd9ae',
+                  border: '1px solid #ecd9ae',
                   borderRadius: 6,
                 }}
               >
                 <span style={{ color: 'var(--color-warn)', marginTop: 1 }}>
                   <IconAlert size={16} />
                 </span>
-                <div style={{ fontSize: 12.5, color: '***REMOVED***8a5a12', lineHeight: 1.65 }}>
+                <div style={{ fontSize: 12.5, color: '#8a5a12', lineHeight: 1.65 }}>
                   {scan.likelyMisread.length ? (
                     <div>
                       很可能是
@@ -824,14 +824,14 @@ export default function AssignmentCollect() {
                 className="mb-2 flex items-center gap-2.5 p-3"
                 style={{
                   background: 'var(--color-oksoft)',
-                  border: '1px solid ***REMOVED***b9e2cf',
+                  border: '1px solid #b9e2cf',
                   borderRadius: 6,
                 }}
               >
                 <span style={{ color: 'var(--color-ok)' }}>
                   <IconCheck size={16} />
                 </span>
-                <span style={{ fontSize: 12.5, color: '***REMOVED***0b6b4a' }}>
+                <span style={{ fontSize: 12.5, color: '#0b6b4a' }}>
                   序列校验通过：识别到 <b className="num">{detectedCount}</b> 个学号，号码连续无重复。
                 </span>
               </div>
@@ -842,14 +842,14 @@ export default function AssignmentCollect() {
                 className="mb-3 flex items-start gap-2.5 p-3"
                 style={{
                   background: 'var(--color-badsoft)',
-                  border: '1px solid ***REMOVED***f0c9c9',
+                  border: '1px solid #f0c9c9',
                   borderRadius: 6,
                 }}
               >
                 <span style={{ color: 'var(--color-bad)', marginTop: 1, flexShrink: 0 }}>
                   <IconAlert size={18} />
                 </span>
-                <div style={{ fontSize: 12.5, color: '***REMOVED***8f2b2b', lineHeight: 1.7 }}>
+                <div style={{ fontSize: 12.5, color: '#8f2b2b', lineHeight: 1.7 }}>
                   <b>这张照片没认全，先别用它登记。</b>
                   <br />
                   应交 <b className="num">{allNos.length}</b> 人，只认出{' '}
@@ -863,7 +863,7 @@ export default function AssignmentCollect() {
                 <button
                   type="button"
                   className="shrink-0"
-                  style={{ fontSize: 12, color: '***REMOVED***8f2b2b', textDecoration: 'underline' }}
+                  style={{ fontSize: 12, color: '#8f2b2b', textDecoration: 'underline' }}
                   onClick={() => {
                     setStage('idle')
                     setScan(null)
@@ -880,14 +880,14 @@ export default function AssignmentCollect() {
                 className="mb-3 flex items-start gap-2.5 p-3"
                 style={{
                   background: 'var(--color-warnsoft)',
-                  border: '1px solid ***REMOVED***ecd9ae',
+                  border: '1px solid #ecd9ae',
                   borderRadius: 6,
                 }}
               >
                 <span style={{ color: 'var(--color-warn)', marginTop: 1, flexShrink: 0 }}>
                   <IconAlert size={16} />
                 </span>
-                <div style={{ fontSize: 12.5, color: '***REMOVED***8a5a12', lineHeight: 1.65 }}>
+                <div style={{ fontSize: 12.5, color: '#8a5a12', lineHeight: 1.65 }}>
                   {lowConf.size > 0 ? (
                     <>
                       有 <b className="num">{lowConf.size}</b> 个号识别得不够确定
@@ -1190,7 +1190,7 @@ export default function AssignmentCollect() {
                 aspectRatio: '16 / 10',
                 borderRadius: 6,
                 border: '1px solid var(--color-line2)',
-                background: '***REMOVED***fff',
+                background: '#fff',
               }}
             >
               {photo ? (

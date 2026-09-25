@@ -3,8 +3,8 @@
  * 解析出放假区间与调休上班日，生成 src/data/holidays.ts。
  *
  * 用法：
- *   node scripts/fetch-holidays.mjs             ***REMOVED*** 抓取下面 NOTICES 里列出的全部年份
- *   node scripts/fetch-holidays.mjs 2027 <url>  ***REMOVED*** 追加/更新某一年
+ *   node scripts/fetch-holidays.mjs             # 抓取下面 NOTICES 里列出的全部年份
+ *   node scripts/fetch-holidays.mjs 2027 <url>  # 追加/更新某一年
  *
  * 国务院每年 11 月左右发布次年安排。发布后把新的通知地址加进 NOTICES 再跑一次即可。
  */
