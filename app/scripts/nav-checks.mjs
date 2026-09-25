@@ -2,7 +2,7 @@
  * 按身份显示导航 · 静态审计 + 纯函数断言（`按身份显示导航方案.md` §五 R1/R4）
  * 用法：npm run nav-checks（纯 Node，不连浏览器；但 D7 要读 `npm run build` 的产物）
  *
- * 为什么单开一个脚本、不塞进 `shots.mjs`：`shots.mjs` 是**真浏览器 + 拨表 + 95 张图**
+ * 为什么单开一个脚本、不塞进 `shots.mjs`：`shots.mjs` 是**真浏览器 + 拨表 + 101 张图**
  * 的重家伙，而这里 A1–A7 是纯函数、D1–D8 是读文件，**一秒内跑完、失败信息干净**。
  * `clock-checks.mjs` 已经是"专门一层"的先例（`功能设计与不变量.md` §18.1）。
  *
@@ -14,8 +14,10 @@
  * ============================================================
  * 这一层守什么（三层里的第一层）
  * ------------------------------------------------------------
- *   · 纯函数（A1–A7）：角色组合 → 该看见哪些入口。**"该藏的时候藏了、该显示的时候显示了"**
+ *   · 纯函数（A1–A8）：角色组合 → 该看见哪些入口。**"该藏的时候藏了、该显示的时候显示了"**
  *     两个方向都钉（§18.3：两个坏法方向相反，各要一条对照）。
+ *     🆕 **A10（2026-09-28 公告轮）：全站公告的纯逻辑** —— 排序 / 生效区间 /
+ *     顶部摆哪几条 / 弹窗弹几次。那几件事**没有别的机器能验**（不是布局、不是权限、不是类型）。
  *   · 静态（D1–D7 / D9 / D10）：路由 ↔ 登记表 ↔ 本文档矩阵三方咬合；入口判据不许各写一套；
  *     谁在读 `myRoles` / `ROLE_NAME` 要有白名单；`PIN_KEYS` 不许脱队；
  *     生产构建里测试钩子不许出现；
@@ -332,6 +334,473 @@ for (const entry of NOTICE_ROWS) {
 }
 
 /* ============================================================
+   第一节之三 · A9：通知的**三份清单同值**（2026-09-28 第二轮 · 部门维度）
+   ------------------------------------------------------------
+   为什么必须有这一节（用户原话："这个是上一轮踩过的坑，别重蹈"）：
+   通知那三组取值在**数据库**与**服务端**各有一份，而服务端那份是**形状校验**
+   （不在里面**直接 400，在 RPC 之前**）。只改一处 = 数据库说 true、真实调用仍然 400 ——
+   而且**一条报错都没有**（服务端在问数据库之前就把它拒了）。
+
+     · `SCOPE_KINDS`   ↔ `notices.scope_kind` 的 check（§21.3.1 的 `_v2`）
+     · `SENDABLE_ROLES`↔ `notice_sendable_roles()`（§21.2，🆕 本轮 7 → **8**，加回 `admin`）
+     · `DEPARTMENTS`   ↔ `notice_departments()`（§21.2.2）+ 界面 `lib/departments.ts`
+
+   ⚠️ 这里是**静态源码审计**（读文本、对值），与 `rls-checks` 那一侧互补：
+   那边在真 PGlite 里量"数据库自己那两处（函数 vs check 约束）是否同值"，
+   这边量"数据库 vs 服务端 vs 界面"这三份是否同值。两处都要有，少一处就有一半的路无人看守。
+   ============================================================ */
+
+section('第一节之三 · A9：通知的三份清单同值（收件范围 · 可发职位 · 部门）')
+
+{
+  const schemaSql = readRepo('supabase/schema.sql')
+  const noticeTs = readApp('functions/api/notice.ts')
+  const accountTs = readApp('functions/api/teacher-account.ts')
+  const deptTs = readApp('src/lib/departments.ts')
+
+  /** 一段文本里所有单引号字面量（去重 + 排序）——三组清单都靠它取 */
+  const quoted = (s) =>
+    [...new Set([...String(s).matchAll(/'([^']*)'/g)].map((m) => m[1]))].sort()
+
+  /** 取 `create or replace function public.<name>(…)` 到 `$$;` 之间的函数体 */
+  const fnBody = (text, name) => {
+    const re = new RegExp(
+      `create or replace function public\\.${name}\\([\\s\\S]*?\\nas \\$\\$([\\s\\S]*?)\\$\\$;`,
+    )
+    const m = text.match(re)
+    if (!m) throw new Error(`A9 锚点没找到：schema.sql 里 ${name}() 的形状变了`)
+    return m[1]
+  }
+
+  /** 取 `add constraint <conname> … in ( … )` 里的值（§21.3.1 那两条换版约束） */
+  const constraintValues = (text, conname) => {
+    const re = new RegExp(`add constraint ${conname}\\b[\\s\\S]{0,400}?in \\(([^)]*)\\)`)
+    const m = text.match(re)
+    if (!m) throw new Error(`A9 锚点没找到：schema.sql 里约束 ${conname} 不见了`)
+    return quoted(m[1])
+  }
+
+  /** 取 TS 里 `const NAME = [ … ] as const` 的数组 */
+  const tsArray = (text, name) => {
+    const re = new RegExp(`const ${name} = \\[([\\s\\S]*?)\\] as const`)
+    const m = text.match(re)
+    if (!m) throw new Error(`A9 锚点没找到：${name} 的数组字面量不见了`)
+    return quoted(m[1])
+  }
+
+  /* ---- ① 收件范围（scope_kind）：数据库 check ↔ 服务端 SCOPE_KINDS ---- */
+  const scopeKindsDb = constraintValues(schemaSql, 'notices_scope_kind_check_v2')
+  const scopeKindsTs = tsArray(noticeTs, 'SCOPE_KINDS')
+  eqSet('A9：收件范围（`notices.scope_kind`）↔ 服务端 `SCOPE_KINDS` 逐字同值', scopeKindsTs, scopeKindsDb)
+  eq(
+    'A9：收件范围是**七种**（六种 + 🆕部门）',
+    scopeKindsDb.length,
+    7,
+    scopeKindsDb.join('、'),
+  )
+  check(
+    scopeKindsDb.includes('department'),
+    'A9：七种里有 `department`（本轮新增的那一维）',
+    scopeKindsDb.join('、'),
+  )
+
+  /* ---- ② 可发职位（notice_sendable_roles）：数据库函数 ↔ 服务端 SENDABLE_ROLES ---- */
+  const rolesDb = quoted(fnBody(schemaSql, 'notice_sendable_roles'))
+  const rolesTs = tsArray(noticeTs, 'SENDABLE_ROLES')
+  eqSet(
+    '🔴 A9：可发职位（`notice_sendable_roles()`）↔ 服务端 `SENDABLE_ROLES` 逐字同值（上一轮就栽在这里）',
+    rolesTs,
+    rolesDb,
+  )
+  eq(
+    '🆕 A9：清单是**八档**（七档 + 本轮加回的 `admin`）',
+    rolesDb.length,
+    8,
+    rolesDb.join('、'),
+  )
+  check(
+    rolesDb.includes('admin'),
+    '🔴 A9：`admin`（教务处主任）**在**清单里',
+    rolesDb.join('、'),
+  )
+  eqSet(
+    '🔴 A9：校级三档**仍然不在**清单里（"超管要给校长递话走全校"那条口径一个字没动）',
+    rolesDb.filter((r) => ['principal', 'vice_principal', 'principal_assistant'].includes(r)),
+    [],
+  )
+
+  /* ---- ③ 部门（notice_departments）：数据库 ↔ 服务端两处 ↔ 界面 ---- */
+  const deptsDb = quoted(fnBody(schemaSql, 'notice_departments'))
+  const deptsNoticeTs = tsArray(noticeTs, 'DEPARTMENTS')
+  const deptsAccountTs = tsArray(accountTs, 'DEPARTMENTS')
+  const deptsUi = [...new Set([...deptTs.matchAll(/code: '([a-z_]+)'/g)].map((m) => m[1]))].sort()
+  eq(
+    'A9：部门是**四个**（办公室 / 教务处 / 总务处 / 德育处）',
+    deptsDb.length,
+    4,
+    deptsDb.join('、'),
+  )
+  eqSet('🆕 A9：`notice_departments()` ↔ 服务端 `notice.ts` 的 `DEPARTMENTS`', deptsNoticeTs, deptsDb)
+  eqSet(
+    '🆕 A9：`notice_departments()` ↔ 服务端 `teacher-account.ts` 的 `DEPARTMENTS`',
+    deptsAccountTs,
+    deptsDb,
+  )
+  eqSet('🆕 A9：`notice_departments()` ↔ 界面 `lib/departments.ts` 的四个代码', deptsUi, deptsDb)
+  /*
+   * ⚠️ 锚点**不要**写成 `add constraint …`：`teacher_departments.department` 那条 check 是
+   *    **建表时内联**写的（`department text not null constraint … check (…)`），
+   *    没有 `add constraint` 三个字（本轮实测：写成 add 就找不到锚点）。
+   */
+  const deptCheck = schemaSql.match(
+    /constraint teacher_departments_department_check[\s\S]{0,400}?in \(([^)]*)\)/,
+  )
+  if (!deptCheck) throw new Error('A9 锚点没找到：teacher_departments 那个部门 check 不见了')
+  eqSet(
+    '🆕 A9：`teacher_departments.department` 列上的 check 也是同一组（SQL 侧两处同值）',
+    quoted(deptCheck[1]),
+    deptsDb,
+  )
+
+  /* ---- ④ 收件范围 vs 写入分支：每一种 target_kind 服务端都要真的写一行 ---- */
+  const kindsDb = constraintValues(schemaSql, 'notice_targets_target_kind_check_v2')
+  const pushKinds = [...new Set([...noticeTs.matchAll(/push\('([a-z_]+)'/g)].map((m) => m[1]))].sort()
+  eqSet(
+    '🔴 A9：`notice_targets.target_kind` 的每一种值，服务端都有一条 `push(…)` 写它（多一种 / 少一种都红）',
+    pushKinds,
+    kindsDb,
+  )
+  check(
+    kindsDb.includes('department'),
+    'A9：`target_kind` 那一组里有 `department`（收件行按部门写）',
+    kindsDb.join('、'),
+  )
+}
+
+/* ============================================================
+   第一节之四 · 🆕 A10：**全站公告**的纯逻辑（2026-09-28 公告轮）
+   ------------------------------------------------------------
+   为什么这些断言必须在这里：`lib/announcements.ts` 里那几个纯函数回答的是
+   **产品语义**，而它**没有别的机器能验** ——
+     · 不是布局（`shots` 量不到"哪一条该在前面"）；
+     · 不是权限（`rls-checks` 管的是"拿得到拿不到"，而这里管的是"摆哪一条"）；
+     · 不是类型（`tsc` 只看形状）。
+   所以"排序 / 生效区间 / 顶端摆几条 / 弹几次"这四件事**只能**钉在纯函数上。
+
+   🔴 **公告 ≠ 通知**：本节的断言与 A8/A9（通知）**一个字都不共享** ——
+      两个数据模型、两张表、两个接口。⛔ 别把它们合并成"反正都是给老师看的消息"。
+   ============================================================ */
+
+section('第一节之四 · A10：全站公告（排序 · 生效区间 · 横幅摆几条 · 弹窗弹几次）')
+
+{
+  const ann = await import('../src/lib/announcements.ts')
+
+  /** 造一条公告（默认：普通 / 不弹 / 不置顶 / 不过期） */
+  const A = (patch) => ({
+    id: 'a',
+    title: 'T',
+    body: 'B',
+    level: 'normal',
+    popup: 'never',
+    pin: false,
+    activeFrom: null,
+    activeTo: null,
+    createdBy: null,
+    updatedBy: null,
+    createdAt: 1000,
+    updatedAt: 1000,
+    revokedAt: null,
+    emailSent: false,
+    emailSentTs: null,
+    emailCount: 0,
+    emailFail: 0,
+    ...patch,
+  })
+  const ids = (list) => list.map((x) => x.id).join(',')
+  /**
+   * ⚠️ `eq()` 是**严格相等**（`got === want`）—— 数组永远比不过。
+   * 所以这里的多值断言一律先摊成字符串再比（`vals()`），
+   * **不要**用 `eqSet`：它会把 `[true, true]` 去重成 `[true]`，那就不是那条断言了。
+   */
+  const vals = (list) => list.map((x) => String(x)).join(' / ')
+  const eqVals = (label, got, want) => eq(label, vals(got), vals(want))
+
+  /* ---- ① 唯一的那个顺序：置顶 → 等级 → 时间 ---- */
+  {
+    const list = [
+      A({ id: 'normal-new', createdAt: 900 }),
+      A({ id: 'important-old', level: 'important', createdAt: 100 }),
+      A({ id: 'pinned-old', pin: true, createdAt: 10 }),
+      A({ id: 'urgent-new', level: 'urgent', createdAt: 900 }),
+      A({ id: 'important-new', level: 'important', createdAt: 950 }),
+    ]
+    eq(
+      'A10：顺序 = 置顶 → 等级（紧急>重要>普通）→ 时间倒序（**只有这一个顺序**，列表/横幅/弹窗共用）',
+      ids(ann.sortAnnouncements(list)),
+      'pinned-old,urgent-new,important-new,important-old,normal-new',
+    )
+    /* 反向对照：把置顶那条的 pin 拿掉，它**必须**掉到等级那一档里去（证明上面那条不是恒真） */
+    const noPin = list.map((x) => (x.id === 'pinned-old' ? { ...x, pin: false } : x))
+    eq(
+      'A10 反向对照：去掉 `pin` 之后它不再排第一（那条断言不是恒真）',
+      ids(ann.sortAnnouncements(noPin)).startsWith('urgent-new'),
+      true,
+    )
+  }
+
+  /* ---- ② 生效区间：**闭区间，两端都含**；撤下与过期都只是"不再出现" ---- */
+  {
+    const now = 1000
+    eq('A10：两端为空 = 生效（-∞ ~ +∞）', ann.isActiveAt(A({}), now), true)
+    eq(
+      'A10：还没到 `active_from` → 不生效（未生效的那条不该出现）',
+      ann.isActiveAt(A({ activeFrom: 1001 }), now),
+      false,
+    )
+    eq('A10：刚过 `active_to` → 不生效（过期自动消失）', ann.isActiveAt(A({ activeTo: 999 }), now), false)
+    eqVals(
+      'A10：**闭区间**——正好等于 `active_from` / `active_to` 的那一刻都算生效',
+      [ann.isActiveAt(A({ activeFrom: 1000 }), now), ann.isActiveAt(A({ activeTo: 1000 }), now)],
+      [true, true],
+    )
+    eq(
+      'A10：撤下（`revokedAt` 非空）→ 不生效，**哪怕还在生效区间内**',
+      ann.isActiveAt(A({ revokedAt: 900 }), now),
+      false,
+    )
+    /*
+     * 负向对照：未生效 / 已撤下的都不能出现在 `activeAnnouncements` 里 ——
+     * 写成独立一条是为了让"过滤"与"判据"两处都被钉住（不是只钉判据）。
+     */
+    eq(
+      'A10 反向对照：`activeAnnouncements` 把未生效 / 已撤下的都滤掉',
+      ids(
+        ann.activeAnnouncements(
+          [A({ id: 'k' }), A({ id: 'x', activeFrom: 1001 }), A({ id: 'y', revokedAt: 1 })],
+          now,
+        ),
+      ),
+      'k',
+    )
+  }
+
+  /* ---- ③ 顶部摆几条：独立横幅（紧急/置顶）+ 一条滚动条 ---- */
+  {
+    const now = 1000
+    const list = [
+      A({ id: 'p1', pin: true, level: 'normal' }),
+      A({ id: 'u1', level: 'urgent' }),
+      A({ id: 'n1' }),
+      A({ id: 'i1', level: 'important' }),
+      A({ id: 'p2', pin: true, level: 'important' }),
+    ]
+    const plan = ann.planAnnouncementBar(list, {
+      nowMs: now,
+      hiddenDay: null,
+      today: '2026-09-19',
+      maxBars: ann.BAR_MAX_DESKTOP,
+    })
+    eq(
+      'A10：独立横幅 = 置顶或紧急的那几条（按同一个顺序），最多 `maxBars` 条',
+      ids(plan.bars),
+      /* p2 是 important 置顶、p1 是 normal 置顶 —— 两条都置顶时由**等级**决定先后 */
+      'p2,p1',
+    )
+    eq('A10：滚动条 = 其余的生效公告（被 `maxBars` 挤出来的也在这里）', ids(plan.marquee), 'u1,i1,n1')
+    eqVals(
+      'A10：桌面 2 条 / 窄屏 1 条（常量本身也钉住 —— 它决定顶部吃掉多少行高）',
+      [ann.BAR_MAX_DESKTOP, ann.BAR_MAX_MOBILE],
+      [2, 1],
+    )
+
+    const narrow = ann.planAnnouncementBar(list, {
+      nowMs: now,
+      hiddenDay: null,
+      today: '2026-09-19',
+      maxBars: ann.BAR_MAX_MOBILE,
+    })
+    eqVals(
+      'A10：窄屏只留 1 条独立横幅，**不丢内容**（其余全在滚动条里）',
+      [ids(narrow.bars), new Set([...narrow.bars, ...narrow.marquee]).size],
+      ['p2', 5],
+    )
+
+    /*
+     * 「今天关过」：滚动条整条不摆，但**置顶 / 紧急无视隐藏标志**
+     * （照参照项目：一个"我一定要让你看到"的东西不该被一次误点永久关掉）。
+     */
+    const hidden = ann.planAnnouncementBar(list, {
+      nowMs: now,
+      hiddenDay: '2026-09-19',
+      today: '2026-09-19',
+      maxBars: ann.BAR_MAX_DESKTOP,
+    })
+    eq('A10：今天按过「×」→ 滚动条不摆', hidden.marquee.length, 0)
+    eq('A10：🔴 但**置顶 / 紧急照样在**（无视"今天关过"）', ids(hidden.bars), 'p2,p1')
+    eq(
+      'A10：隐藏标志只对**今天**有效（昨天关过 ≠ 今天关过）',
+      ann.planAnnouncementBar(list, {
+        nowMs: now,
+        hiddenDay: '2026-09-18',
+        today: '2026-09-19',
+        maxBars: 2,
+      }).marquee.length,
+      3,
+    )
+
+    const closed = ann.planAnnouncementBar(list, {
+      nowMs: now,
+      hiddenDay: null,
+      today: '2026-09-19',
+      closedIds: ['p1', 'n1'],
+      maxBars: 2,
+    })
+    eqVals(
+      'A10：逐条「×」= 本次会话不再显示这一条（独立横幅与滚动条都算）',
+      [ids(closed.bars), ids(closed.marquee)],
+      /* p1 关掉之后**紧急的那条补位**进了独立横幅（`maxBars` 空出一格）—— 这是对的，不是丢内容 */
+      ['p2,u1', 'i1'],
+    )
+
+    const prev = A({ id: 'pv', title: '预览', revokedAt: 5, activeFrom: 999999 })
+    const withPrev = ann.planAnnouncementBar(list, {
+      nowMs: now,
+      hiddenDay: '2026-09-19',
+      today: '2026-09-19',
+      maxBars: 3,
+      preview: prev,
+    })
+    check(
+      withPrev.bars.some((x) => x.id === 'pv' && x.preview === true),
+      'A10：🔴 预览那一条**无视生效区间 / 撤下 / "今天关过"**（超管点的是"我要看它长什么样"）',
+      ids(withPrev.bars),
+    )
+  }
+
+  /* ---- ④ 弹窗：`popup` 是"弹几次"的唯一字段（含紧急那一个例外） ---- */
+  {
+    const sn = (patch) => ({ seen: [], sessSeen: [], ...patch })
+    const cases = [
+      ['always：每次都弹（seen/session 都记过也照弹）', A({ id: 'x', popup: 'always' }), sn({ seen: ['x'], sessSeen: ['x'] }), true],
+      ['once：本机没记过 → 弹', A({ id: 'x', popup: 'once' }), sn({}), true],
+      ['once：本机记过 → 不弹', A({ id: 'x', popup: 'once' }), sn({ seen: ['x'] }), false],
+      ['session：本次会话记过 → 不弹', A({ id: 'x', popup: 'session' }), sn({ sessSeen: ['x'] }), false],
+      ['session：只有本机永久记录（上一次会话）→ **照弹**', A({ id: 'x', popup: 'session' }), sn({ seen: ['x'] }), true],
+      ['never：不弹', A({ id: 'x', popup: 'never' }), sn({}), false],
+      [
+        '🔴 never + urgent：**仍然弹**（紧急公告"登录时强提醒"就落在这一个例外上）',
+        A({ id: 'x', popup: 'never', level: 'urgent' }),
+        sn({}),
+        true,
+      ],
+      [
+        '🔴 never + urgent：本次会话已经弹过 → 不再弹（它是 session 语义，不是 always）',
+        A({ id: 'x', popup: 'never', level: 'urgent' }),
+        sn({ sessSeen: ['x'] }),
+        false,
+      ],
+      [
+        'never + important：**没有例外**（等级不改变 `never` 的语义）',
+        A({ id: 'x', popup: 'never', level: 'important' }),
+        sn({}),
+        false,
+      ],
+    ]
+    for (const [label, item, s, want] of cases) {
+      eq(`A10：${label}`, ann.shouldPopup(item, s), want)
+    }
+    eqVals(
+      'A10：**弹出时**记 sessionStorage 的是 `session` 与"紧急的 never"',
+      [
+        ann.marksSessionOnShow(A({ popup: 'session' })),
+        ann.marksSessionOnShow(A({ popup: 'never', level: 'urgent' })),
+        ann.marksSessionOnShow(A({ popup: 'once' })),
+      ],
+      [true, true, false],
+    )
+    eqVals(
+      'A10：**关掉时**才记 localStorage 的只有 `once`（`always` 一个都不记）',
+      [
+        ann.marksSeenOnClose(A({ popup: 'once' })),
+        ann.marksSeenOnClose(A({ popup: 'always' })),
+        ann.marksSeenOnClose(A({ popup: 'session' })),
+      ],
+      [true, false, false],
+    )
+
+    eq(
+      'A10：弹窗队列 = 生效 + 该弹的那些，**按同一个顺序**（一次只弹第一个）',
+      ids(
+        ann.announcementPopupQueue(
+          [A({ id: 'b', popup: 'once', createdAt: 1 }), A({ id: 'a', popup: 'once', createdAt: 9 })],
+          { nowMs: 1000, seen: { seen: [], sessSeen: [] } },
+        ),
+      ),
+      'a,b',
+    )
+    eq(
+      '🔴 A10：早间欢迎 / 当天完成弹窗开着时（`suppressed`）→ 队列为空（**公告弹窗礼让**）',
+      ann.announcementPopupQueue([A({ id: 'a', popup: 'always' })], {
+        nowMs: 1000,
+        seen: { seen: [], sessSeen: [] },
+        suppressed: true,
+      }).length,
+      0,
+    )
+    eq(
+      'A10：礼让**不消耗** seen —— 换个时机它还在队列里（"这一次没弹" ≠ "用户看过了"）',
+      ids(
+        ann.announcementPopupQueue([A({ id: 'a', popup: 'once' })], {
+          nowMs: 1000,
+          seen: { seen: [], sessSeen: [] },
+        }),
+      ),
+      'a',
+    )
+  }
+
+  /* ---- ⑤ 编辑时的隐私提醒 + 时间口径 ---- */
+  {
+    eq(
+      'A10：一句正常的运维公告**不该**被提醒（"今晚 23:00–23:30 维护"里有数字，但它不是个人数据）',
+      ann.announcementPrivacyHint('系统维护：今晚 23:00–23:30', '平台升级数据库，期间可能有一两次保存失败。'),
+      null,
+    )
+    check(
+      ann.announcementPrivacyHint('月考成绩', '高二(1)班张三这次考了 85 分，请各位老师注意。') !== null,
+      'A10：出现成绩 / 姓名 → 给一条**软提醒**（不拦提交，理由见 `announcementPrivacyHint()`）',
+      short(String(ann.announcementPrivacyHint('月考成绩', '张三 85 分')), 40),
+    )
+    /*
+     * 🔴 这一条是**实测补上的**：第一版判据只认"分数 / 成绩"这两个**词**，
+     *    而 `shots` 94 用的那句"张三这次考了 **85 分**"一个词都不沾 —— 当场红了。
+     *    → 判据里加了 `\d+\s*分(?!钟)`。下面两条一对：该响的响、**不该响的不响**。
+     */
+    check(
+      ann.announcementPrivacyHint('平台升级', '张三这次考了 85 分。') !== null,
+      'A10：光有"数字 + 分"（没有"成绩"这两个字）也要认出来 —— `shots` 94 就是栽在这一句上',
+      short(String(ann.announcementPrivacyHint('平台升级', '考了 85 分')), 40),
+    )
+    eq(
+      'A10 反向对照：「大约 30 分钟」**不**算成绩（`(?!钟)` 那半个判据；软提醒也不该乱响）',
+      ann.announcementPrivacyHint('系统维护', '今晚 23:00 开始，预计 30 分钟。'),
+      null,
+    )
+    check(
+      ann.announcementPrivacyHint('关于学生', '请各位老师关注一下同学们的状态。') !== null,
+      'A10：出现"学生 / 同学"这类词也给提醒（换个说法就够）',
+      'ok',
+    )
+    eq(
+      'A10：时间口径一律 `beijingNow()` —— "今天"按北京时间算（这个值 `planAnnouncementBar` 用它比"今天关过"）',
+      ann.todayKey(new Date('2026-09-19T20:30:00+08:00')),
+      '2026-09-19',
+    )
+  }
+}
+
+/* ============================================================
    第二节 · A2：多身份是**并集**（顺序无关）
    ============================================================ */
 
@@ -483,6 +952,14 @@ section('第六节 · DEV 钩子：?as= 与 ?kind= 的解析规则')
   eq("A7：?kind=classroom → 'classroom'", roles.devInjectedAccountKind('?kind=classroom'), 'classroom')
   eq("A7：?kind=teacher → null（只认 classroom 这一个值）", roles.devInjectedAccountKind('?kind=teacher'), null)
   eq('A7：没有 ?kind= → null', roles.devInjectedAccountKind('?as=admin'), null)
+  /*
+   * 🆕 2026-09-28 公告轮：第三个 DEV 钩子 `?sync=` —— 它是"**公告条要给报错横幅让位**"
+   * 那条断言唯一的前提（本地演示模式下一次云端写都不会发生，报错横幅本来永远不出现）。
+   * ⚠️ 与另外两个钩子逐字同款：只在 DEV 生效、只写一个槽位、空值当"没有钩子"。
+   */
+  eq('A7：?sync=… → 原样给出那段文案', roles.devInjectedSyncError('?sync=保存失败：x'), '保存失败：x')
+  eq('A7：?sync=（空值）→ null，**不是**注入空串', roles.devInjectedSyncError('?sync='), null)
+  eq('A7：没有 ?sync= → null', roles.devInjectedSyncError('?as=admin'), null)
   /* 认不出的角色代码**原样收下**（A4 靠它测"前缀撞不上"） */
   const r3 = roles.devInjectedRoles('?as=admin2')
   check(Array.isArray(r3) && r3[0].role === 'admin2', "A7：认不出的代码原样收下（roleName 的纪律：认出不猜）", JSON.stringify(r3))
@@ -531,6 +1008,7 @@ section('第六节 · DEV 钩子：?as= 与 ?kind= 的解析规则')
   )
   delete globalThis.__VITE_ENV__.DEV
   eq('A7：DEV 为假时 ?as=admin → null（钩子整体失效）', roles.devInjectedRoles('?as=admin'), null)
+  eq('A7：DEV 为假时 ?sync=… → null（新增的那个钩子同样失效）', roles.devInjectedSyncError('?sync=x'), null)
 }
 
 /* ============================================================
@@ -1287,8 +1765,11 @@ section('第十一节 · D7：dist 产物里没有 `?as=` / `?kind=` 的痕迹�
     for (const [needle, why] of [
       ["get('as')", '`?as=` 的读取'],
       ["get('kind')", '`?kind=` 的读取'],
+      /* 🆕 2026-09-28 公告轮：第三个钩子 `?sync=`（公告条与报错横幅的层叠断言靠它） */
+      ["get('sync')", '`?sync=` 的读取'],
       ['devInjectedRoles', '钩子函数名'],
       ['devInjectedAccountKind', '钩子函数名'],
+      ['devInjectedSyncError', '钩子函数名'],
     ]) {
       eq(`D7：产物里没有 ${why}`, all.includes(needle), false)
     }
@@ -2058,6 +2539,9 @@ section("第十三节 · D10：表存在性探针不许假设列存在（select(
   eqSet('D10-B 自证：「表不在」判据清单（多一条就要来这儿说清它为什么该在）', tablePreds, [
     'src/lib/adminChart.ts · MISSING_TABLE_RE',
     'src/lib/notices.ts · MISSING_TABLE_RE',
+    /* 🆕 2026-09-28 公告轮：公告那张表（`schema.sql` §22）也要一个"表不在"的判据 ——
+       `ensureAnnouncementTable()` 靠它区分"表没跑"与"网络抖了"（后者一律当作有）。 */
+    'src/lib/announcements.ts · MISSING_TABLE_RE',
     'src/data/remote.ts · isMissingTable',
     'functions/api/teacher-account.ts · isMissingTable',
     'functions/api/classroom-account.ts · isMissingTable',
@@ -2242,6 +2726,6 @@ if (failures.length) {
   console.log('\n  ⛔ 有断言没过（上面每一条都写了实测值）')
   process.exitCode = 1
 } else {
-  console.log('  全部通过 ✅（纯函数 A1–A8 / 静态 D1–D7 · D9 · D10 / 编码 + 不可见字符 D8）')
+  console.log('  全部通过 ✅（纯函数 A1–A10 / 静态 D1–D7 · D9 · D10 / 编码 + 不可见字符 D8）')
 }
 }, { script: 'nav-checks.mjs' })

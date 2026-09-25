@@ -634,3 +634,26 @@ export function devInjectedAccountKind(search: string): 'classroom' | null {
   if (!(import.meta.env.DEV && search)) return null
   return new URLSearchParams(search).get('kind') === 'classroom' ? 'classroom' : null
 }
+
+/**
+ * 🧪 DEV-only 测试钩子：`?sync=…` 往 store 里塞一条 `syncError`（**生产构建里被编译掉**）。
+ *
+ * 为什么必须有它（2026-09-28 公告轮）：`SyncErrorBanner`（`App.tsx`，`z-[70]`）
+ * **只在"往云端写失败"时才出现**，而 `shots.mjs` 跑的是**本地演示模式** ——
+ * 那里一次云端写都不会发生，于是"公告条要给报错横幅让位"这句话**永远断言不了**：
+ * 只能断言"没有报错时它贴在最上面"，那证明不了"同时出现时谁在上"。
+ * 而这一条恰恰是用户点名要**实测**的那件事（参考项目为它写了 128 行的层叠代码）。
+ *
+ * ⚠️ 三条边界与 `devInjectedRoles()` **逐字相同**：
+ *   ① 只在 `import.meta.env.DEV` 生效（`nav-checks.mjs` 的 D7 读 dist 核对
+ *      `sync` 这个查询参数与函数名一次都没出现）；
+ *   ② 它只写 `syncError` 那**一个字符串槽位**，不碰任何数据
+ *      （`classes` / `assignments` / `scores` 一个字都不动）；
+ *   ③ 空值（`?sync=`）当作"没有这个钩子" —— 否则"没有报错横幅"这种断言
+ *      会在忘记写参数时**静默通过**（假通过）。
+ */
+export function devInjectedSyncError(search: string): string | null {
+  if (!(import.meta.env.DEV && search)) return null
+  const raw = new URLSearchParams(search).get('sync')
+  return raw ? raw : null
+}

@@ -41,6 +41,7 @@
  *   $env:RLS_NEGATIVE='file-read-wider'    ; node scripts/rls-checks.mjs   ***REMOVED*** 文件的班级归属读策略改成恒真（谁都能读所有文件）
  *   $env:RLS_NEGATIVE='file-read-closed'   ; node scripts/rls-checks.mjs   ***REMOVED*** 读策略改成恒假（教室端的文件列表又变成空的）
  *   $env:RLS_NEGATIVE='file-object-wider'  ; node scripts/rls-checks.mjs   ***REMOVED*** 存储对象的读策略改成恒真（桶里任何文件都能签直链）
+ *   $env:RLS_NEGATIVE='department-open'    ; node scripts/rls-checks.mjs   ***REMOVED*** 🆕 部门那一支两半判据拿掉（空部门也能发 + 年级主任也能发）
  *   （改的全是**内存里的 SQL 文本**，仓库文件一个字节都不动。）
  */
 
@@ -162,7 +163,13 @@ await withLock(async () => {
     /** 教室端账号行的 id **就是**它的 auth uid（`classroom_accounts.id references auth.users`） */
     const ACCT = { a1: U.room }
     /** 🆕 2026-09-28 通知的四条夹具（见 `noticeSeedSql()`） */
-    const NOTICE = { n1: mk('90', 1), n2: mk('90', 2), n3: mk('90', 3), n4: mk('90', 4) }
+    const NOTICE = { n1: mk('90', 1), n2: mk('90', 2), n3: mk('90', 3), n4: mk('90', 4), n5: mk('90', 5) }
+    /**
+     * 🆕 2026-09-28「公告轮」的六条夹具（见 `announcementSeedSql()`）——
+     * **公告 ≠ 通知**：这张表里**没有收件范围、没有收件人**，所以夹具摆的不是"谁收得到"，
+     * 而是"**生效区间 + 撤下**这两种状态各自挡不挡得住"。
+     */
+    const ANN = { a1: mk('92', 1), a2: mk('92', 2), a3: mk('92', 3), a4: mk('92', 4), a5: mk('92', 5), a6: mk('92', 6) }
     /**
      * `shared_files` 的夹具（裂缝 C 2026-09-27；班级归属 2026-09-28 / schema.sql §19）：
      *   f1 = 物理老师传给 1 班的文件（真实形状）；
@@ -459,6 +466,24 @@ await withLock(async () => {
         if (!m) throw new Error(`负向对照锚点没找到：shared_files_class_read 的形状变了（模式 ${mode}）`)
         return text.replace(re, `$1${mode === 'file-read-wider' ? 'true' : 'false'}$2`)
       }
+      if (mode === 'department-open') {
+        /*
+         * 🆕 部门那一支的负向对照（**放宽**方向）：把两半判据一起拿掉 ——
+         *   · `notice_department_has_members(p_department)` → true：**空部门也能发**
+         *     （"发给一个谁都不在的部门"这一类通知就发得出去）；
+         *   · `notice_can_publish_school_level(p_uid)` → true：**年级主任 / 组长也能给部门发**
+         *     （"下级通知上级平台不承载"那条口径被推翻）。
+         * 期望：二·之五 里"空部门 = 拒绝"与"年级主任 / 组长 ❌"那两条**必须变红**。
+         * ⚠️ 锚点只落在**部门那一支**（`and public.notice_department_has_members(…)` 那一句）——
+         *    全局 replace 会把 `school` 那一支的判据一起改掉，两条断言一起红就看不出是谁的问题。
+         */
+        const re =
+          /and public\.notice_department_has_members\(p_department\)\s*\n\s*and public\.notice_can_publish_school_level\(p_uid\)/
+        if (!re.test(text)) {
+          throw new Error('负向对照锚点没找到：部门那一支的两半判据变了（模式 department-open）')
+        }
+        return text.replace(re, 'and true\n        and true')
+      }
       if (mode === 'file-object-wider') {
         /*
          * 第十二节的负向对照（**存储对象**那一侧的读策略，§19.4.3）：
@@ -538,6 +563,8 @@ await withLock(async () => {
       if (withFileFixtures) await db.exec(newRoleSeedSql())
       /* 🆕 通知夹具也只在 B 库（同一个理由：§21 的表在 A 库里不存在） */
       if (withFileFixtures) await db.exec(noticeSeedSql())
+      /* 🆕 公告夹具同理（§22 那张表在 A 库里不存在） */
+      if (withFileFixtures) await db.exec(announcementSeedSql())
       return { db, realtime }
     }
 
@@ -707,12 +734,21 @@ await withLock(async () => {
     }
 
     /* ============================================================
-       🆕 通知夹具（2026-09-28）—— 四条，把"谁能读到哪条"的每一面都摆出来
+       🆕 通知夹具（2026-09-28）—— 五条，把"谁能读到哪条"的每一面都摆出来
        ------------------------------------------------------------
          n1 教务处发的**全校**通知        → 所有教师都读得到；**教室端读不到**（I47 的核心）
          n2 年级主任发给**本年级**的       → 该年级有任教关系的老师 + 班主任 / 年级主任 / 备课组长
          n3 教研组长发给**本学科**的       → 本校这一科有任教关系的老师 + 该学科组长
          n4 校长发的**已撤下**的全校通知   → **谁都读不到**（撤下 ≠ 删除，但它从可见集里消失）
+         n5 🆕 教务处发的**发给教务处**的  → 归在 `teacher_departments` 里那几个人（多对多那一维）
+
+       🆕 **部门归属夹具**（`teacher_departments`，同一段里灌）：
+         office    ：办公室主任（ohead）
+         academic  ：教务处主任（admin）**+ 物理老师（phy，兼教务处干事）** ← 多对多 / 兼岗的活样本
+         moral_edu ：德育处主任（moral）
+         logistics ：**一个人都没有** ← 专门用来钉"空部门 = 拒绝"（与"空职位"同一个洞）
+       而 prin / vprin / grade / head / chn / slead / llead / fresh **一个部门都不属于** ——
+       "不属于任何部门"是**正常状态**（纯任课老师），不是数据缺失。
        ============================================================ */
     function noticeSeedSql() {
       const school = '(select id from schools order by created_at limit 1)'
@@ -722,21 +758,66 @@ await withLock(async () => {
       ('${NOTICE.n1}', ${school}, '${U.admin}', '全体教师会', '周三 16:30 报告厅', 'school',         now() - interval '3 hours'),
       ('${NOTICE.n2}', ${school}, '${U.grade}', '高二年级会', '周五第 8 节',       'grade',          now() - interval '2 hours'),
       ('${NOTICE.n3}', ${school}, '${U.slead}', '物理教研活动', '下周二下午',      'subject',        now() - interval '1 hours'),
-      ('${NOTICE.n4}', ${school}, '${U.prin}',  '已撤下的通知', '这条不该被任何人看到', 'school',    now() - interval '30 minutes');
+      ('${NOTICE.n4}', ${school}, '${U.prin}',  '已撤下的通知', '这条不该被任何人看到', 'school',    now() - interval '30 minutes'),
+      ('${NOTICE.n5}', ${school}, '${U.admin}', '教务处内部安排', '周五下午教务例会', 'department', now() - interval '20 minutes');
 
     update notices set revoked_at = now() where id = '${NOTICE.n4}';
 
-    insert into notice_targets (notice_id, target_kind, grade_id, subject_code, target_role, teacher_id) values
-      ('${NOTICE.n1}', 'school',         null,            null,      null, null),
-      ('${NOTICE.n2}', 'grade',          ${grade('高二')}, null,      null, null),
-      ('${NOTICE.n3}', 'subject',        null,            'physics', null, null),
-      ('${NOTICE.n4}', 'school',         null,            null,      null, null);
+    insert into notice_targets (notice_id, target_kind, grade_id, subject_code, target_role, teacher_id, target_department) values
+      ('${NOTICE.n1}', 'school',         null,            null,      null, null, null),
+      ('${NOTICE.n2}', 'grade',          ${grade('高二')}, null,      null, null, null),
+      ('${NOTICE.n3}', 'subject',        null,            'physics', null, null, null),
+      ('${NOTICE.n4}', 'school',         null,            null,      null, null, null),
+      ('${NOTICE.n5}', 'department',     null,            null,      null, null, 'academic');
+
+    -- 🆕 部门归属（老师 ↔ 职能部门，多对多且可空）
+    insert into teacher_departments (teacher_id, department) values
+      ('${U.ohead}', 'office'),
+      ('${U.admin}', 'academic'),
+      ('${U.phy}',   'academic'),
+      ('${U.moral}', 'moral_edu');
     `
     }
 
     /* ============================================================
-       以某个身份跑 SQL
+       🆕 全站公告夹具（2026-09-28 公告轮 · `schema.sql` §22）
        ------------------------------------------------------------
+       🔴 **公告 ≠ 通知**：`announcements` 里**没有收件范围 / 收件人**（那是通知的字段），
+          所以这六条摆的不是"谁收得到"，而是**可见性的四种状态**：
+            a1 普通 · 生效中（两端都空 = 立即生效 / 不过期）      → 所有老师都看得到
+            a2 重要 + 置顶 · 生效中                                → 同上（置顶只影响"排在哪"）
+            a3 紧急 · 生效中                                       → 同上（等级只影响"多显眼"）
+            a4 **已撤下**（`revoked_at` 非空）                      → **谁都读不到**（撤下 ≠ 删行）
+            a5 **未生效**（`active_from` 在未来）                   → 谁都读不到（还没到点）
+            a6 **已过期**（`active_to` 在过去）                     → 谁都读不到（过期自动消失）
+
+       ⚠️ 与通知夹具同一个开关：**只有 B 库**灌它（A 库是"§16 之前"那一份，§22 那张表不存在）。
+       ============================================================ */
+    function announcementSeedSql() {
+      const school = '(select id from schools order by created_at limit 1)'
+      return `
+    insert into announcements (id, school_id, title, body, level, popup, pin,
+                               active_from, active_to, created_by, updated_by, created_at) values
+      ('${ANN.a1}', ${school}, '系统维护：今晚 23:00–23:30', '平台升级数据库，期间可能有一两次保存失败。',
+       'normal',    'never',   false, null,                        null,                      '${U.super}', '${U.super}', now() - interval '3 hours'),
+      ('${ANN.a2}', ${school}, '新功能上线：按学科看统计',       '在「考试 → 统计」那一页右上角。',
+       'important', 'once',    true,  now() - interval '2 hours',  null,                      '${U.super}', '${U.super}', now() - interval '2 hours'),
+      ('${ANN.a3}', ${school}, '紧急：请立刻改密码',             '检测到一次异常登录，请今天就换掉密码。',
+       'urgent',    'never',   false, null,                        null,                      '${U.super}', '${U.super}', now() - interval '1 hours'),
+      ('${ANN.a4}', ${school}, '已撤下的公告',                   '这条不该被任何人看到。',
+       'normal',    'never',   false, null,                        null,                      '${U.super}', '${U.super}', now() - interval '40 minutes'),
+      ('${ANN.a5}', ${school}, '还没生效的公告',                 '明天的活动预告。',
+       'normal',    'never',   false, now() + interval '1 day',    null,                      '${U.super}', '${U.super}', now() - interval '30 minutes'),
+      ('${ANN.a6}', ${school}, '已经过期的公告',                 '上个月的事。',
+       'normal',    'never',   false, now() - interval '10 days',  now() - interval '9 days', '${U.super}', '${U.super}', now() - interval '20 minutes');
+
+    -- 撤下走的是 update（**不是 delete**）：行还在，只是从"看得见"里消失
+    update announcements set revoked_at = now() where id = '${ANN.a4}';
+    `
+    }
+
+    /* ============================================================
+       以某个身份跑 SQL       ------------------------------------------------------------
        `set local role authenticated` + 会话变量里的假 uid；
        **整段包在事务里、结束一律 rollback** —— 写操作测试不会污染后面的可见量断言。
        ============================================================ */
@@ -1282,52 +1363,65 @@ await withLock(async () => {
          · **通知 ≠ 呼叫**：`notices` 里没有 `student_nos` / `class_id` / `assignment_id`（I45）。
        ============================================================ */
 
+    /*
+     * 🔴 判据一律走 **`_for` 变体**（I33 的两件套），而且**以属主身份**调它 ——
+     *    因为 `_for` 那一半是**故意 revoke 掉**的（`revoke all … from public, anon, authenticated`）：
+     *    它接受任意 uid，等于"以任意人身份问一句能不能发通知"，绝不能给登录用户调。
+     *    这正是 I33 那套两件套的用法：`_for` 给**核对**用（SQL 编辑器 / 本脚本 = 属主），
+     *    裸版给**运行**用。第一版这里写成 `asUser(...)` 调 `_for` →
+     *    当场 `permission denied for function can_publish_notice_to_for`（**这正是它该有的样子**）。
+     *    → "已 revoke"这件事本身由 §18.5 那一条机器审计（所有 `*_for` 都 revoke）**断言**，
+     *      不是靠注释保证的 —— 所以本段**不要**再定义 `asUser + db.query` 那种助手：
+     *      段落里只要有一条用它，整条脚本就会在那句上中断（汇总都打不出来）。
+     *
+     * ⚠️ 这两个助手定义在**这一段的外面**（二·之四 与 二·之五 两个块都要用它们）——
+     *    部门那一节是独立的 `{ }`，定义在里面就够不着（本轮实测：
+     *    `ReferenceError: can is not defined`）。
+     */
+    const can = async (uid, scope, gradeExpr, code, role, ids, department) => {
+      /*
+       * ⚠️ 这里走 `db.exec`（**简单查询协议**）而不是 `db.query`（扩展协议）——
+       *    两者在 PGlite 里的权限检查行为不一样：同一句 `select can_publish_notice_to_for(…)`
+       *    用 `query` 会报 `permission denied`，用 `exec` 则正常（实测）。
+       *    原因不重要，重要的是**判据本身是对的**：下面"两件套"那一组用真·教师身份
+       *    （`asUser` + 包装版）证明了同一件事 —— 包装版给出的结论与这里逐条一致。
+       *
+       * 🆕 2026-09-28 第二轮：判据多了**第七个参数** `p_department`（部门维度）——
+       *    这里跟着长一位（**不传就是 null**）。函数签名一改，这一行的实参个数
+       *    自己也变成一条断言：参数个数对不上会当场 `function … does not exist`。
+       */
+      const r = await db.exec(
+        `select can_publish_notice_to_for('${uid}', '${scope}', ${gradeExpr || 'null'}, ` +
+          `${code ? `'${code}'` : 'null'}, ${role ? `'${role}'` : 'null'}, ` +
+          `${ids ? `array['${ids}']::uuid[]` : 'null'}, ` +
+          `${department ? `'${department}'` : 'null'}) as v`,
+      )
+      return r[0].rows[0].v === true
+    }
+    /* 薄包装版（服务端真正调的那一个）—— 它**是** grant 给 authenticated 的，所以走 asUser。
+     * ⚠️ 用 `db.exec`（简单协议）而不是 `db.query` —— 见上面那段注释。 */
+    const canWrapped = async (uid, scope, gradeExpr, code, role, ids, department) => {
+      const r = await asUser(db, uid, () =>
+        db.exec(
+          `select can_publish_notice_to('${scope}', ${gradeExpr || 'null'}, ` +
+            `${code ? `'${code}'` : 'null'}, ${role ? `'${role}'` : 'null'}, ` +
+            `${ids ? `array['${ids}']::uuid[]` : 'null'}, ` +
+            `${department ? `'${department}'` : 'null'}) as v`,
+        ),
+      )
+      return r[0].rows[0].v === true
+    }
+    /*
+     * ⚠️ 年级参数要传**原始 SQL 表达式**（`(select id from grades where name = '高二')`），
+     *    **不能**再套一层引号 —— 第一版写成 `'${gradeId}'` 会拼出
+     *    `'…name = '高二')'` 这种引号打架的 SQL，**当场 42601**。
+     *    这里没有用参数化查询是因为 `can_publish_notice_to` 的入参是"范围值"，
+     *    而范围值在真实调用里就是常量（服务端 JS 拼的 JSON），夹具直接内联更贴近实况。
+     */
+    const gradeId = (n) => `(select id from grades where name = '${n}')`
+
     section('二·之四 🆕 通知：发（能发给谁）· 收（谁能读到）· 教室端一条都读不到')
     {
-      /*
-       * 🔴 判据一律走 **`_for` 变体**（I33 的两件套），而且**以属主身份**调它 ——
-       *    因为 `_for` 那一半是**故意 revoke 掉**的（`revoke all … from public, anon, authenticated`）：
-       *    它接受任意 uid，等于"以任意人身份问一句能不能发通知"，绝不能给登录用户调。
-       *    这正是 I33 那套两件套的用法：`_for` 给**核对**用（SQL 编辑器 / 本脚本 = 属主），
-       *    裸版给**运行**用。第一版这里写成 `asUser(...)` 调 `_for` →
-       *    当场 `permission denied for function can_publish_notice_to_for`（**这正是它该有的样子**）。
-       *    → "已 revoke"这件事本身由 §18.5 那一条机器审计（所有 `*_for` 都 revoke）**断言**，
-       *      不是靠注释保证的 —— 所以本段**不要**再定义 `asUser + db.query` 那种助手：
-       *      段落里只要有一条用它，整条脚本就会在那句上中断（汇总都打不出来）。
-       */
-      const can = async (uid, scope, gradeExpr, code, role, ids) => {
-        /*
-         * ⚠️ 这里走 `db.exec`（**简单查询协议**）而不是 `db.query`（扩展协议）——
-         *    两者在 PGlite 里的权限检查行为不一样：同一句 `select can_publish_notice_to_for(…)`
-         *    用 `query` 会报 `permission denied`，用 `exec` 则正常（实测）。
-         *    原因不重要，重要的是**判据本身是对的**：下面"两件套"那一组用真·教师身份
-         *    （`asUser` + 包装版）证明了同一件事 —— 包装版给出的结论与这里逐条一致。
-         */
-        const r = await db.exec(
-          `select can_publish_notice_to_for('${uid}', '${scope}', ${gradeExpr || 'null'}, ` +
-            `${code ? `'${code}'` : 'null'}, ${role ? `'${role}'` : 'null'}, ${ids ? `array['${ids}']::uuid[]` : 'null'}) as v`,
-        )
-        return r[0].rows[0].v === true
-      }
-      /* 薄包装版（服务端真正调的那一个）—— 它**是** grant 给 authenticated 的，所以走 asUser。
-       * ⚠️ 用 `db.exec`（简单协议）而不是 `db.query` —— 见上面那段注释。 */
-      const canWrapped = async (uid, scope, gradeExpr, code, role, ids) => {
-        const r = await asUser(db, uid, () =>
-          db.exec(
-            `select can_publish_notice_to('${scope}', ${gradeExpr || 'null'}, ` +
-              `${code ? `'${code}'` : 'null'}, ${role ? `'${role}'` : 'null'}, ${ids ? `array['${ids}']::uuid[]` : 'null'}) as v`,
-          ),
-        )
-        return r[0].rows[0].v === true
-      }
-      /*
-       * ⚠️ 年级参数要传**原始 SQL 表达式**（`(select id from grades where name = '高二')`），
-       *    **不能**再套一层引号 —— 第一版写成 `'${gradeId}'` 会拼出
-       *    `'…name = '高二')'` 这种引号打架的 SQL，**当场 42601**。
-       *    这里没有用参数化查询是因为 `can_publish_notice_to` 的入参是"范围值"，
-       *    而范围值在真实调用里就是常量（服务端 JS 拼的 JSON），夹具直接内联更贴近实况。
-       */
-      const gradeId = (n) => `(select id from grades where name = '${n}')`
 
       /* ---- ① 级别表（§21.1）—— 它是"发职位只能发给自己级别以下"那条假设的实现 ---- */
       {
@@ -1458,33 +1552,39 @@ await withLock(async () => {
         '`admin` 只放行 `notice_sendable_roles()` 里那七档；校级三档**不在其中**',
       )
       eq(
-        '🔴 发职位：**`admin` 那一档谁也发不到**（它 90，比校级还高 —— **刻意不在清单里**，§21.2）',
+        '🔴 发职位：**`admin` 那一档只有超管发得到**（🆕 本轮把它加回了清单，§21.2）',
         [
           await can(U.super, ROLE, null, null, 'admin'),
           await can(U.prin, ROLE, null, null, 'admin'),
           await can(U.grade, ROLE, null, null, 'admin'),
+          await can(U.admin, ROLE, null, null, 'admin'),
         ],
-        [false, false, false],
-        '校级领导要给教务处递话走现实里的路（打电话 / 当面说），平台不承载"下级通知上级"',
+        [true, false, false, false],
+        '拿 admin 的人级别恒 ≥ 90（teacher_rank 取 max），而判据是"我比他**严格**高" → 只有超管(100)；' +
+          '教务处主任自己 90>90 不成立 —— 所以这一档**没有**新增"下级通知上级"的路径',
       )
       eq(
-        '发职位：超管能发给**任何**在清单里的档位（清单 = 七档，见下一组断言）',
+        '发职位：超管能发给**任何**在清单里的档位（清单 = 八档，见下一组断言）',
         [
           await can(U.super, ROLE, null, null, 'office_head'),
           await can(U.super, ROLE, null, null, 'moral_edu_head'),
           await can(U.super, ROLE, null, null, 'lesson_prep_lead'),
+          await can(U.super, ROLE, null, null, 'admin'),
         ],
-        [true, true, true],
+        [true, true, true, true],
         /*
-         * 🔴 这里**不能**放 `principal`（第一版就是那么写的，于是它成了本轮唯一的红灯）：
-         *    校级三档**不在** `notice_sendable_roles()` 那七档里 —— `notice_role_is_sendable('principal')`
-         *    其实是 **false**（实测：`sendable=false · has_members=true · min_rank=80 · 超管级别=100`），
+         * 🔴 这里**不能**放 `principal`：校级三档**不在** `notice_sendable_roles()` 里 ——
+         *    `notice_role_is_sendable('principal')` 其实是 **false**
+         *    （实测：`sendable=false · has_members=true · min_rank=80 · 超管级别=100`），
          *    所以"发某个职位"这一档**谁也发不到校级及以上**（**含超管**）。
-         *    ⚠️ 这不是漏了：同一份清单在**服务端**是 `notice.ts` 的形状校验（不在清单里直接 400），
-         *    在**界面**上是 `my_notice_scopes()` 摆出来的选项 —— 三处必须是同一组。
-         *    超管要给校长 / 教务处递话走**「全校」**那一档（第 33 行那条断言里他是 true）。
+         *    ⚠️ 这不是漏了：要给校长递话走**「全校」**那一档。
+         *    🆕 本轮加回 `admin` 之后**那条口径一个字没变**：校级三档仍只有「全校」一条路，
+         *    而 `admin` 只有超管发得到（上面那一组）。
+         *    ⚠️ 同一份清单在**服务端**是 `notice.ts` 的形状校验（不在清单里直接 400），
+         *    在**界面**上是 `my_notice_scopes()` 摆出来的选项 —— 三处必须是同一组，
+         *    `nav-checks` 的 A9 拿源码文本逐字比对。
          */
-        '超管在"发职位"上**一档都不缺**：清单里七档他都发得到（100 > 70/70/40 且清单里有它们）',
+        '超管在"发职位"上**一档都不缺**：清单里八档他都发得到（100 > 90/70/70/40 且清单里有它们）',
       )
       eq(
         '🔴 发职位：**空职位 = 拒绝**（`principal_assistant` 那一档本轮没人拿）—— "发给一个不存在的职位"不许静默放行',
@@ -1508,13 +1608,14 @@ await withLock(async () => {
         const r = (
           await db.query(
             `select (select array_agg(x order by x) from notice_sendable_roles() as t(x))::text as list,` +
-              ` notice_role_is_sendable('office_head') as a, notice_role_is_sendable('admin') as b`,
+              ` notice_role_is_sendable('office_head') as a, notice_role_is_sendable('admin') as b,` +
+              ` notice_role_is_sendable('principal') as c`,
           )
         ).rows[0]
         eq(
-          '🔴 判据链：`notice_sendable_roles()` 读得出**七档**，且 `admin` **刻意不在里面**',
-          [String(r.list).replace(/[{}]/g, '').split(',').length, r.a, r.b],
-          [7, true, false],
+          '🔴 判据链：`notice_sendable_roles()` 读得出**八档**，含 `admin`（🆕 本轮加回）、不含校级三档',
+          [String(r.list).replace(/[{}]/g, '').split(',').length, r.a, r.b, r.c],
+          [8, true, true, false],
           String(r.list),
         )
       }
@@ -1568,11 +1669,14 @@ await withLock(async () => {
            */
           for (const [k, sql] of [
             ['sendable_roles', `select count(*)::int as n from notice_sendable_roles()`],
+            ['departments', `select count(*)::int as n from notice_departments()`],
             ['role_has_members', `select notice_role_has_members('principal') as v`],
             ['role_min_rank', `select notice_role_min_rank('principal')::int as v`],
             ['teacher_rank', `select teacher_rank('${U.prin}')::int as v`],
-            ['wrapped_school', `select can_publish_notice_to('school', null, null, null, null) as v`],
-            ['wrapped_role', `select can_publish_notice_to('role', null, null, 'principal', null) as v`],
+            ['wrapped_school', `select can_publish_notice_to('school', null, null, null, null, null) as v`],
+            ['wrapped_role', `select can_publish_notice_to('role', null, null, 'principal', null, null) as v`],
+            ['wrapped_role_admin', `select can_publish_notice_to('role', null, null, 'admin', null, null) as v`],
+            ['wrapped_dept', `select can_publish_notice_to('department', null, null, null, null, 'academic') as v`],
           ]) {
             await db.exec('savepoint sp_probe')
             try {
@@ -1607,14 +1711,16 @@ await withLock(async () => {
        *    少了这一条，包装版里"参数传错一位"这种错就永远抓不到。
        */
       eq(
-        '🔴 两件套：包装版 `can_publish_notice_to` 与 `_for` 变体结论一致（抽四条，含三条 false 分支）',
+        '🔴 两件套：包装版 `can_publish_notice_to` 与 `_for` 变体结论一致（抽五条，含三条 false 分支）',
         [
           await canWrapped(U.admin, 'school'),
           await canWrapped(U.grade, 'school'),
           await canWrapped(U.grade, 'role', null, null, 'principal'),
           await canWrapped(U.admin, 'subject', null, 'physics'),
+          /* 🆕 部门那一支也走一遍两件套（它是本轮唯一新增的 scope_kind） */
+          await canWrapped(U.admin, 'department', null, null, null, null, 'academic'),
         ],
-        [true, false, false, true],
+        [true, false, false, true, true],
       )
       /*
        * 🔬 诊断③：包装版在**真·发职位**那一条上到底怎么走的
@@ -1627,8 +1733,8 @@ await withLock(async () => {
             public.notice_role_has_members('principal')                          as has_members,
             public.notice_role_min_rank('principal')::int                        as min_rank,
             public.teacher_rank('${U.admin}')::int                               as admin_rank,
-            public.can_publish_notice_to_for('${U.admin}', 'role', null, null, 'principal', null)  as via_for,
-            public.can_publish_notice_to_for('${U.admin}', 'role', null, null, 'moral_edu_head', null) as via_for_moral
+            public.can_publish_notice_to_for('${U.admin}', 'role', null, null, 'principal', null, null)  as via_for,
+            public.can_publish_notice_to_for('${U.admin}', 'role', null, null, 'moral_edu_head', null, null) as via_for_moral
         `)
         ).rows[0]
         console.log(`  ℹ️ 诊断③：${JSON.stringify(rows)}`)
@@ -1669,6 +1775,18 @@ await withLock(async () => {
         const n3 = await ids(NOTICE.n3)
         const wantN3 = [U.phy, U.slead, U.llead].sort()
         eq('本学科通知的收件人 = 本校这一科有任教关系的 + 该学科组长（跨年级）', n3, wantN3)
+        /*
+         * 🆕 部门那一支（n5 = 教务处发的"发给教务处"）。
+         *    口径：**归属 `academic` 的那几个人** —— 与"职位"那一支的区别是
+         *    那条关系是**多对多且可空**的（phy 既是一位任课老师、又在教务处）。
+         */
+        const n5 = await ids(NOTICE.n5)
+        eq(
+          '🆕 部门通知的收件人 = 归属那个部门的老师（多对多，可兼任）',
+          n5,
+          [U.admin, U.phy].sort(),
+          `academic 部门里是 教务处主任 + 物理老师（兼干事）；其余人一个部门都不属于`,
+        )
       }
 
       /* ---- ⑥ 🔴 读策略：教室端一条都读不到（I47） ---- */
@@ -1687,18 +1805,18 @@ await withLock(async () => {
         )
         /* 正向对照：同一条 SQL，教师读得到 n1 —— 证明上面那个 0 不是"SQL 写错了" */
         eq(
-          '正向对照：同一个查询，物理老师读得到 n1 / n2 / n3',
+          '正向对照：同一个查询，物理老师读得到 n1 / n2 / n3 / 🆕n5（他在教务处）',
           (await readNotices(U.phy)).sort(),
-          [NOTICE.n1, NOTICE.n2, NOTICE.n3].sort(),
+          [NOTICE.n1, NOTICE.n2, NOTICE.n3, NOTICE.n5].sort(),
         )
         eq(
           '🔴 已撤下的通知（n4）**谁都读不到** —— 包括发件人自己以外的所有人',
           (await readNotices(U.grade)).includes(NOTICE.n4),
           false,
         )
-        /* 语文老师在高二有任教关系 → 读得到 n2；但他不在 n3 的收件人里（不是物理） */
+        /* 语文老师在高二有任教关系 → 读得到 n2；但他不在 n3 的收件人里（不是物理），也不在教务处 */
         eq(
-          '语文老师：读得到全校 n1 与本年级 n2，**读不到**物理那一科 n3',
+          '语文老师：读得到全校 n1 与本年级 n2，**读不到**物理那一科 n3、也**读不到**教务处 n5',
           (await readNotices(U.chn)).sort(),
           [NOTICE.n1, NOTICE.n2].sort(),
         )
@@ -1710,7 +1828,7 @@ await withLock(async () => {
         )
         /* 办公室主任：看得到全校通知（他是收件人），但**看不到任何教学数据** —— 两者不是一回事 */
         eq(
-          '办公室主任：读得到全校 n1（他是收件人），但 n2/n3 都读不到',
+          '办公室主任：读得到全校 n1（他是收件人），但 n2/n3/🆕n5 都读不到（他在办公室，不在教务处）',
           (await readNotices(U.ohead)).sort(),
           [NOTICE.n1],
         )
@@ -1774,6 +1892,501 @@ await withLock(async () => {
             'notices:notices_visible:SELECT',
           ],
         )
+      }
+    }
+
+    /* ============================================================
+       二·之五 🆕 2026-09-28 第二轮：**部门维度**（收件范围第七种）
+       ------------------------------------------------------------
+       用户原话：「通知这里，应该还可以给各个职能部门发通知呀」。
+       四件事在这一节里钉住：
+         ① **清单同值**：SQL 那两处（`notice_departments()` vs 列上的 check）**逐字相同**；
+            另两处（服务端 `notice.ts` 的 `DEPARTMENTS`、界面 `lib/departments.ts`）由
+            `nav-checks` 的 A9 拿源码文本比对（静态），这里管 SQL 自己这一半。
+         ② **能不能发**：校级单位那一档（与 `school` 同一组人）+ 空部门拒绝 + 认不出的部门拒绝；
+            **年级主任 / 组长不许给部门发**（"下级通知上级"那条口径的另一张脸）。
+         ③ **谁能收到**：`teacher_departments` 里那几个人（上一节 n5 已经量过一遍）。
+         ④ **归属的读写宽度**：authenticated **只读得到自己那一行**、**一条写权限都没有**
+            （写只走服务端 —— 与 `teacher_roles` 同一套）。
+       ============================================================ */
+
+    section('二·之五 🆕 部门维度：清单同值 · 能发给谁 · 谁能收到 · 归属的读写宽度')
+    {
+      /* ---- ① 清单同值：函数 vs 列上的 check（SQL 侧的两处） ---- */
+      {
+        const r = (
+          await db.query(
+            `select (select array_agg(x order by x) from notice_departments() as t(x))::text as dept_list,
+                    (select pg_get_constraintdef(oid) from pg_constraint
+                      where conrelid = 'teacher_departments'::regclass
+                        and conname = 'teacher_departments_department_check') as col_check,
+                    (select pg_get_constraintdef(oid) from pg_constraint
+                      where conrelid = 'notice_targets'::regclass
+                        and conname = 'notice_targets_department_check') as target_check,
+                    (select pg_get_constraintdef(oid) from pg_constraint
+                      where conrelid = 'notices'::regclass
+                        and conname = 'notices_scope_kind_check_v2') as scope_check,
+                    (select pg_get_constraintdef(oid) from pg_constraint
+                      where conrelid = 'notice_targets'::regclass
+                        and conname = 'notice_targets_target_kind_check_v2') as kind_check`,
+          )
+        ).rows[0]
+        /*
+         * ⚠️ 取值用 `listOf()` 而不是"正则抓单引号"：
+         *    `array_agg(...)::text` 在 PG 里是 `{academic,logistics,...}` —— **元素不带引号**
+         *    （只有需要转义的元素才带），而 `pg_get_constraintdef` 给的是 `check (... in ('a','b'))`
+         *    —— 两种形状都要能读，所以先看是不是 `{…}`。
+         */
+        const listOf = (s) => {
+          const t = String(s ?? '').trim()
+          if (/^\{[\s\S]*\}$/.test(t)) {
+            return t
+              .slice(1, -1)
+              .split(',')
+              .map((x) => x.trim().replace(/^"|"$/g, ''))
+              .filter(Boolean)
+              .sort()
+          }
+          return [...new Set([...t.matchAll(/'([^']*)'/g)].map((m) => m[1]))].sort()
+        }
+        const want = ['academic', 'logistics', 'moral_edu', 'office']
+        eq(
+          '🆕 `notice_departments()` = 四个部门（SQL 侧的唯一定义）',
+          listOf(r.dept_list),
+          want,
+          String(r.dept_list),
+        )
+        eq(
+          '🔴 四值清单在 SQL 里的**两处逐字相同**（函数 vs `teacher_departments` 列上的 check）',
+          listOf(r.col_check),
+          listOf(r.dept_list),
+          String(r.col_check),
+        )
+        eq(
+          '🔴 同上：`notice_targets.target_department` 自己那条 check 也是同一组',
+          listOf(r.target_check),
+          listOf(r.dept_list),
+          String(r.target_check),
+        )
+        /* 两条 check 的**换版**（六值 → 七值）确实生效，而且新名字是 _v2 */
+        ok(
+          '🔴 `notices.scope_kind` 的 check 已换成**七值**（含 department）—— 名字是 _v2（§21.3.1）',
+          listOf(r.scope_check).includes('department') && listOf(r.scope_check).length === 7,
+          String(r.scope_check),
+        )
+        ok(
+          '🔴 `notice_targets.target_kind` 的 check 同样是七值（含 department，但有 teacher 没有 custom）',
+          listOf(r.kind_check).includes('department') &&
+            listOf(r.kind_check).includes('teacher') &&
+            !listOf(r.kind_check).includes('custom') &&
+            listOf(r.kind_check).length === 7,
+          String(r.kind_check),
+        )
+        /* 旧名字必须**已经不在了**（否则就是"同一件事两个约束"） */
+        const old = (
+          await db.query(
+            `select count(*)::int as n from pg_constraint
+              where conrelid in ('notices'::regclass, 'notice_targets'::regclass)
+                and conname in ('notices_scope_kind_check', 'notice_targets_target_kind_check')`,
+          )
+        ).rows[0]
+        eq('🔴 旧的两条 check（六值版）已被删掉（不留"两个约束"的中间态）', Number(old.n), 0)
+      }
+
+      /* ---- ② 能发给谁：校级那一档 + 空部门 + 认不出的部门 ---- */
+      {
+        const D = 'department'
+        eq(
+          '🆕 发部门：超管 / 教务处 / 校长 / 办公室主任 / 德育处主任 ✅（与"发全校"同一组人）',
+          [
+            await can(U.super, D, null, null, null, null, 'academic'),
+            await can(U.admin, D, null, null, null, null, 'academic'),
+            await can(U.prin, D, null, null, null, null, 'office'),
+            await can(U.ohead, D, null, null, null, null, 'moral_edu'),
+            await can(U.moral, D, null, null, null, null, 'academic'),
+          ],
+          [true, true, true, true, true],
+        )
+        eq(
+          '🔴 发部门：**年级主任 ❌ · 教研组长 ❌ · 备课组长 ❌ · 班主任 ❌ · 任课教师 ❌ · 教室端 ❌**' +
+            '（与"不能发全校"同一条边界：教务处 / 办公室的人就在这些部门里）',
+          [
+            await can(U.grade, D, null, null, null, null, 'academic'),
+            await can(U.slead, D, null, null, null, null, 'academic'),
+            await can(U.llead, D, null, null, null, null, 'academic'),
+            await can(U.head, D, null, null, null, null, 'academic'),
+            await can(U.phy, D, null, null, null, null, 'office'),
+            await can(U.room, D, null, null, null, null, 'office'),
+          ],
+          [false, false, false, false, false, false],
+          '⚠️ 注意最后一条：物理老师**在**教务处（他是那一支的收件人），但他**发不了** ' +
+            '—— "收得到"与"发得出"是两件事',
+        )
+        eq(
+          '🔴 发部门：**空部门 = 拒绝**（`logistics` 一个人都没有）—— 与"空职位"同一个洞',
+          [
+            await can(U.super, D, null, null, null, null, 'logistics'),
+            await can(U.admin, D, null, null, null, null, 'logistics'),
+          ],
+          [false, false],
+          '少了 `notice_department_has_members` 那一半，就会发出"一条谁都收不到的通知"',
+        )
+        eq(
+          '🔴 发部门：**认不出的部门 = 拒绝**（不猜、也不静默放行）',
+          [
+            await can(U.super, D, null, null, null, null, 'engineering'),
+            await can(U.super, D, null, null, null, null, ''),
+            await can(U.super, D, null, null, null, null, null),
+          ],
+          [false, false, false],
+        )
+        /* 两件套：包装版必须同结论 */
+        eq(
+          '🆕 两件套：包装版 `can_publish_notice_to` 在部门这一支上同结论（true / false 各一条）',
+          [
+            await canWrapped(U.admin, D, null, null, null, null, 'academic'),
+            await canWrapped(U.grade, D, null, null, null, null, 'academic'),
+          ],
+          [true, false],
+        )
+      }
+
+      /* ---- ③ 归属表的读写宽度：只读自己那一行、一条写权限都没有 ---- */
+      {
+        const mine = await idsAs(
+          db,
+          U.phy,
+          'select department as id from teacher_departments order by department',
+        )
+        eq(
+          '🆕 `teacher_departments`：老师**只读得到自己那一行**（多对多，他自己在教务处）',
+          mine,
+          ['academic'],
+        )
+        eq(
+          '🔴 教室端读 `teacher_departments` → **0 行**（它一行都没有；与通知同一条边界）',
+          await idsAs(db, U.room, 'select department as id from teacher_departments order by department'),
+          [],
+        )
+        eq(
+          '对照：超管（不是成员）也**只读得到自己那一行** → 0 行（读策略是 `teacher_id = auth.uid()`）',
+          await idsAs(db, U.super, 'select department as id from teacher_departments order by department'),
+          [],
+        )
+        /* 写：authenticated 连 grant 都没有 —— 写只走服务端（service_role） */
+        const ins = await attempt(
+          db,
+          U.admin,
+          `insert into teacher_departments (teacher_id, department) values ('${U.head}', 'academic')`,
+        )
+        denied('🔴 教务处（人）**直接往 `teacher_departments` 插一行 → 被拒**（写只走服务端）', ins)
+        const del = await attempt(
+          db,
+          U.phy,
+          `delete from teacher_departments where teacher_id = '${U.phy}'`,
+        )
+        denied('🔴 本人也**删不掉自己那一行**（读得到 ≠ 改得动）', del)
+        const upd = await attempt(
+          db,
+          U.super,
+          `update teacher_departments set department = 'office' where teacher_id = '${U.admin}'`,
+        )
+        denied('🔴 连超管（人）也改不动 —— 那张表上一条写策略都没有', upd)
+      }
+    }
+
+    /* ============================================================
+       二·之六 🆕 2026-09-28 公告轮：**全站公告**（§22）—— 「谁能发 · 谁能读到 · 一条都写不动」
+       ------------------------------------------------------------
+       🔴🔴 **公告 ≠ 通知** —— 这一节与二·之四 / 二·之五（通知）**一个字都不共享**：
+         · 通知（`notices`）＝ 教务通知：**有收件范围**、有收件人；
+         · 公告（`announcements`）＝ **全站公告**：**没有范围、没有收件人**，
+           只有"生效区间 + 撤下"这两把闸。
+       本节的四件事：
+         ① **谁能发**：**只有超管**（用户口径"公告是关于平台本身的"；
+            ⚠️ 这是执行方按用户口径**推定**的，报告里单列）—— 逐身份问一遍，
+            并且**两件套**（`_for` 已 revoke、裸版 grant 给 authenticated）。
+         ② **谁能读到**：所有老师都读得到那三条生效中的；**教室端 0 行**；
+            已撤下 / 未生效 / 已过期的那三条**谁都读不到**（**连超管也读不到** ——
+            面板要看它们走的是服务端 service_role，见 `/api/announcement` 的 `admin-list`）。
+         ③ **一条都写不动**：`announcements` 上只有一条 SELECT 策略、没有写策略，
+            authenticated 连 INSERT/UPDATE/DELETE 的 grant 都没有。
+         ④ **"一个字段一种语义"落到约束上**：`level` / `popup` 的 check 只认那几组值，
+            生效区间两端都写时**必须"结束晚于开始"**（否则那条公告永远不会出现）。
+       ============================================================ */
+
+    section('二·之六 🆕 全站公告（§22）：只有超管能发 · 生效区间挡得住 · 教室端读不到 · 一条都写不动')
+    {
+      const canAnn = (uid) =>
+        db.exec(`select can_publish_announcement_for('${uid}') as v`).then((r) => r[0].rows[0].v === true)
+      const readAnn = (uid) => idsAs(db, uid, 'select id from announcements order by id')
+
+      /* ---- ① 谁能发：**只有超管** ---- */
+      eq(
+        '🔴 发公告：**只有超管**（用户口径"公告是关于平台本身的"）',
+        await canAnn(U.super),
+        true,
+      )
+      eq(
+        '🔴 发公告：教务处 / 校长 / 副校长 / 办公室主任 / 德育处主任 **全都不能发**' +
+          '（公告不是"学校对老师说话"，所以 §21 那套判据一个字都不相关）',
+        [
+          await canAnn(U.admin),
+          await canAnn(U.prin),
+          await canAnn(U.vprin),
+          await canAnn(U.ohead),
+          await canAnn(U.moral),
+        ],
+        [false, false, false, false, false],
+      )
+      eq(
+        '🔴 发公告：年级主任 / 教研组长 / 备课组长 / 班主任 / 任课教师 / 无身份新老师 / 教室端 **全都不能发**',
+        [
+          await canAnn(U.grade),
+          await canAnn(U.slead),
+          await canAnn(U.llead),
+          await canAnn(U.head),
+          await canAnn(U.phy),
+          await canAnn(U.fresh),
+          await canAnn(U.room),
+        ],
+        [false, false, false, false, false, false, false],
+      )
+      /*
+       * 两件套（I33）：`_for` 接受任意 uid = "以任意人身份问一句能不能发公告" → 必须 revoke；
+       * 裸版才 grant 给 authenticated（服务端 `POST /api/announcement` 拿调用者的 JWT 调它）。
+       * ⚠️ "所有 `*_for` 都 revoke 了"那条机器审计在第十三节 ⑨（它自动扫全库，不用在这里点名）。
+       */
+      eq(
+        '🔴 两件套（I33）：`can_publish_announcement()` 裸版对 authenticated **有** EXECUTE（服务端要调它）',
+        Boolean(
+          (
+            await db.query(
+              `select has_function_privilege('authenticated', 'public.can_publish_announcement()', 'EXECUTE') as v`,
+            )
+          ).rows[0].v,
+        ),
+        true,
+      )
+      eq(
+        '🔴 两件套（I33）：`can_publish_announcement_for(uuid)` 对 authenticated **已 revoke**',
+        Boolean(
+          (
+            await db.query(
+              `select has_function_privilege('authenticated', 'public.can_publish_announcement_for(uuid)', 'EXECUTE') as v`,
+            )
+          ).rows[0].v,
+        ),
+        false,
+      )
+      /* 两件套第二半：同一件事，裸版（以超管身份）与 `_for` 变体**必须同结论** */
+      {
+        const wrapped = await asUser(db, U.super, () =>
+          db.exec('select can_publish_announcement() as v'),
+        )
+        eq(
+          '🆕 两件套：包装版与 `_for` 变体同结论（超管 true）',
+          wrapped[0].rows[0].v === true,
+          true,
+        )
+        const wrappedAdmin = await asUser(db, U.admin, () =>
+          db.exec('select can_publish_announcement() as v'),
+        )
+        eq(
+          '🆕 两件套：包装版与 `_for` 变体同结论（教务处 false —— 这条是负向的那一半）',
+          wrappedAdmin[0].rows[0].v === true,
+          false,
+        )
+      }
+
+      /* ---- ② 谁能读到：生效中的三条人人有份；另外三条谁都读不到；教室端 0 行 ---- */
+      const LIVE = [ANN.a1, ANN.a2, ANN.a3].sort()
+      eq(
+        '公告没有收件范围 —— 物理老师读得到**全部三条生效中**的（普通 / 重要 / 紧急一视同仁）',
+        (await readAnn(U.phy)).sort(),
+        LIVE,
+      )
+      eq(
+        '办公室主任也读得到（公告是全站的，不像教学数据那样按身份收窄）',
+        (await readAnn(U.ohead)).sort(),
+        LIVE,
+      )
+      eq(
+        '无身份的新老师照样读得到（**公告不挑人** —— 这正是它与通知最直观的差别）',
+        (await readAnn(U.fresh)).sort(),
+        LIVE,
+      )
+      eq(
+        '🔴 **教室端读公告 → 0 行**（那块屏是给学生看的；与通知同一条边界，理由也同一个）',
+        await readAnn(U.room),
+        [],
+      )
+      eq(
+        '🔴 已撤下 / 未生效 / 已过期的那三条 → **老师一条都读不到**（撤下与过期只是"不再出现"，行还在）',
+        (await readAnn(U.phy)).filter((id) => [ANN.a4, ANN.a5, ANN.a6].includes(id)),
+        [],
+      )
+      eq(
+        '🔴 而且**连超管也读不到那三条**（RLS 对谁都一样）—— 面板要看它们走的是服务端 service_role',
+        (await readAnn(U.super)).filter((id) => [ANN.a4, ANN.a5, ANN.a6].includes(id)),
+        [],
+      )
+      eq(
+        '正向对照：同一个查询，超管读得到那三条**生效中**的（证明上面那个空不是 SQL 写错了）',
+        (await readAnn(U.super)).sort(),
+        LIVE,
+      )
+      /* 行还在：撤下 ≠ 删行（用属主身份问，因为 RLS 对谁都把它筛掉了） */
+      eq(
+        '🔴 撤下**不删行**：那三行在表里**还在**（"这条公告曾经存在过吗"要能回答）',
+        (
+          await db.query(`select count(*)::int as n from announcements where id in ($1,$2,$3)`, [
+            ANN.a4,
+            ANN.a5,
+            ANN.a6,
+          ])
+        ).rows[0].n,
+        3,
+      )
+
+      /* ---- ③ 一条都写不动 ---- */
+      {
+        const pol = await db.query(
+          `select policyname, cmd from pg_policies where schemaname='public' and tablename='announcements' order by cmd, policyname`,
+        )
+        eq(
+          '🔴 `announcements` 上**只有一条 select 策略**（写入只走服务端 service_role）',
+          pol.rows.map((r) => `${r.policyname}:${r.cmd}`),
+          ['announcements_visible:SELECT'],
+        )
+        const grants = await db.query(`
+          select privilege_type from information_schema.role_table_grants
+           where grantee = 'authenticated' and table_schema = 'public' and table_name = 'announcements'
+             and privilege_type <> 'SELECT' order by privilege_type`)
+        eq('而且连 INSERT/UPDATE/DELETE 的 grant 都没有（客户端连门都摸不到）', grants.rows, [])
+        const anonSel = await db.query(`
+          select privilege_type from information_schema.role_table_grants
+           where grantee = 'anon' and table_schema = 'public' and table_name = 'announcements'`)
+        eq('🆕 anon 一个权限都没有（未登录的人读不到公告 —— 与通知同款）', anonSel.rows, [])
+
+        const ins = await attempt(
+          db,
+          U.super,
+          `insert into announcements (title, body, level, popup, created_by) values ('x','y','normal','never','${U.super}')`,
+        )
+        denied('🔴 连超管（人）**直接 INSERT 一条公告 → 被拒**（写只走服务端，判据在服务端问数据库）', ins)
+        const upd2 = await attempt(
+          db,
+          U.super,
+          `update announcements set title = '被改了' where id = '${ANN.a1}'`,
+        )
+        denied('🔴 改一条公告 → 被拒（同一条：没有写策略）', upd2)
+        const del = await attempt(db, U.super, `delete from announcements where id = '${ANN.a1}'`)
+        denied('🔴 删一条公告 → 被拒（**撤下不删行**：删是另一件事，平台不提供）', del)
+      }
+
+      /* ---- ④ 约束：`level` / `popup` 的取值被钉死 + 生效区间必须自洽 ---- */
+      {
+        const cols = (
+          await db.query(`
+          select column_name from information_schema.columns
+           where table_schema = 'public' and table_name = 'announcements' order by column_name`)
+        ).rows.map((r) => r.column_name)
+        /*
+         * 🔴 **公告 ≠ 通知**（这一条是"两个实体各自独立"的机器版）：
+         *    · 公告表里**不许有** `scope_kind` / `sender_id` / `target_*` 这一类**收件范围**字段
+         *      （那是通知的字段 —— 公告是全站一条、没有收件人）；
+         *    · 通知表里**不许有** `level` / `popup` / `active_from` 这一类**公告**字段
+         *      （教务通知不弹窗、不分等级）。
+         * 两个方向都断言 —— 只钉一边的话"顺手给通知加个 level"照样溜过去。
+         */
+        eq(
+          '🔴 公告表里**没有**收件范围那一套字段（`scope_kind` / `sender_id` / `target_*`）—— 它不是通知',
+          cols.filter((c) => /^(scope_kind|sender_id|target_|grade_id|subject_code)$/.test(c)),
+          [],
+        )
+        const noticeCols = (
+          await db.query(`
+          select column_name from information_schema.columns
+           where table_schema = 'public' and table_name = 'notices' order by column_name`)
+        ).rows.map((r) => r.column_name)
+        eq(
+          '🔴 反向：通知表里**没有**公告那一套字段（`level` / `popup` / `active_from` / `active_to`）',
+          noticeCols.filter((c) => ['level', 'popup', 'active_from', 'active_to'].includes(c)),
+          [],
+        )
+        ok(
+          '对照：公告表该有的列一个都不少（含邮件那四列 —— 本轮**只建不写**，见 §22.1 注释）',
+          [
+            'id',
+            'title',
+            'body',
+            'level',
+            'popup',
+            'pin',
+            'active_from',
+            'active_to',
+            'created_by',
+            'updated_by',
+            'created_at',
+            'updated_at',
+            'revoked_at',
+            'email_sent',
+            'email_sent_ts',
+            'email_count',
+            'email_fail',
+          ].every((c) => cols.includes(c)),
+          cols.join('、'),
+        )
+
+        /* 两条 check：认得出那三组值 / 四组值，认不出的一律拒（**只有数据库说了算**） */
+        /*
+         * 🔴 这三条**必须以属主身份**跑（`db.query` + 期待报错），**不能**用 `attempt(asUser)`
+         *    那个助手 —— 后者跑在 `authenticated` 上，而这张表对 authenticated
+         *    **连 INSERT 的 grant 都没有**：于是"插不进去"是真的，但原因是**表权限**，
+         *    不是我们要钉的那条 check —— 约束就算被删掉，那三条照样绿（实测踩到过这个形状）。
+         *    → 判据是"**报错文案里点出那条约束**"，不是"操作被拒"。
+         */
+        const ownerRejects = async (name, sql, want) => {
+          try {
+            await db.query(sql)
+            ok(`${name} → 被拒`, false, '居然插进去了（约束没生效）')
+          } catch (e) {
+            const m = shortErr(e)
+            ok(`${name} → 被拒（约束名：${want}）`, new RegExp(want, 'i').test(m), m)
+          }
+        }
+        await ownerRejects(
+          '🔴 `level` 的 check 钉住了取值：认不出的等级插不进去（属主身份也插不进去）',
+          `insert into announcements (title, body, level, popup) values ('x','y','超级紧急','never')`,
+          'announcements_level_check',
+        )
+        await ownerRejects(
+          '🔴 `popup` 的 check 钉住了取值：认不出的弹窗方式插不进去',
+          `insert into announcements (title, body, level, popup) values ('x','y','normal','sometimes')`,
+          'announcements_popup_check',
+        )
+
+        /* → 反向对照：把合法值插进去**必须成功**（不然上面那两条只是"表全都写不进去"） */
+        const okRange = await db.query(
+          `insert into announcements (title, body, level, popup, pin) values ('合法','正文','urgent','session',true) returning id`,
+        )
+        eq('反向对照：合法取值插得进去（`urgent` + `session` + 置顶）', okRange.rows.length, 1)
+        await db.query(`delete from announcements where id = $1`, [okRange.rows[0].id])
+
+        /* 生效区间：两端都写时必须"结束晚于开始"（否则那条公告永远不会出现） */
+        await ownerRejects(
+          '🔴 生效区间：`active_to` 早于 `active_from` → 拒（那条公告"永远不会出现"，是个谜）',
+          `insert into announcements (title, body, level, popup, active_from, active_to)
+             values ('x','y','normal','never', now(), now() - interval '1 hour')`,
+          'announcements_active_range_check',
+        )
+        /* 反向对照：只写一端（另一端 = ±∞）必须放行 */
+        const okOpen = await db.query(
+          `insert into announcements (title, body, level, popup, active_from) values ('x','y','normal','never', now()) returning id`,
+        )
+        eq('反向对照：只写一端（另一端 = ±∞）→ 通过（"空 = 立即生效 / 不过期"这条语义）', okOpen.rows.length, 1)
+        await db.query(`delete from announcements where id = $1`, [okOpen.rows[0].id])
       }
     }
 
@@ -2357,15 +2970,26 @@ await withLock(async () => {
 
       const readonly = await db.query(
         `select tablename, cmd from pg_policies where schemaname='public'
-           and tablename in ('teacher_roles','class_subjects','classroom_accounts','subjects','schools','grades')
+           and tablename in ('teacher_roles','class_subjects','classroom_accounts','subjects','schools','grades','announcements')
            and cmd <> 'SELECT' order by tablename`,
       )
-      eq('身份 / 任课关系 / 教室端账号 / 字典：数据库层**一条写策略都没有**（写只走服务端）', readonly.rows, [])
+      eq('身份 / 任课关系 / 教室端账号 / 字典 / 🆕公告：数据库层**一条写策略都没有**（写只走服务端）', readonly.rows, [])
+
+      /* 🆕 `teacher_departments`（部门归属）走的是**同一个形状**：一条 select 策略 + 零条写策略 */
+      const deptPol = await db.query(
+        `select cmd, policyname from pg_policies where schemaname='public' and tablename='teacher_departments'
+          order by cmd, policyname`,
+      )
+      eq(
+        '🆕 `teacher_departments`：只有一条 select 策略（`teacher_id = auth.uid()`），没有写策略',
+        deptPol.rows.map((r) => `${r.policyname}:${r.cmd}`),
+        ['teacher_departments_read:SELECT'],
+      )
 
       const grants = await db.query(`
         select table_name, privilege_type from information_schema.role_table_grants
          where grantee = 'authenticated' and table_schema = 'public'
-           and table_name in ('teacher_roles','class_subjects','classroom_accounts')
+           and table_name in ('teacher_roles','class_subjects','classroom_accounts','teacher_departments')
            and privilege_type <> 'SELECT' order by table_name, privilege_type`)
       eq('而且这几张表连 INSERT/UPDATE/DELETE 的 grant 都没有（客户端连门都摸不到）', grants.rows, [])
     }
@@ -2569,14 +3193,24 @@ await withLock(async () => {
              or has_function_privilege('anon', p.oid, 'EXECUTE'))
          order by 1`)
       eq('🔴 §18.5：所有 `*_for` 判据对 authenticated / anon 都 revoke 了（一个都不能执行）', forFns.rows.map((r) => r.proname), [])
-      const forCount = await db.query(`select count(*)::int as n from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' and p.proname like '%\\_for'`)
-      eq(
-        '`_for` 变体一共 21 个（13 + 管理架构轮新增的 8 个：`can_create_teacher_accounts_for` · ' +
-          '`can_assign_roles_for` · `subject_lead_class_ids_for` · `subject_lead_subject_codes_for` · ' +
-          '`can_publish_notice_to_for` · `notice_recipient_ids_for` · `is_notice_recipient_for` · `my_notice_scopes_for`）' +
+      const forCount = await db.query(
+        `select p.proname from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+          where n.nspname = 'public' and p.proname like '%\\_for' order by 1`,
+      )
+      /*
+       * ⚠️ 用 `ok(...)` 而不是 `eq(...)`：`eq` 只接三个参数，报错只给"实际 22"这一个数字 ——
+       *    看不出多的是哪一个（本轮实测吃过一次）。`ok` 的第三个参数会把**全部名字**打出来。
+       *
+       * 🆕 21 → **22**：`can_publish_announcement_for` 是**同日「公告轮」（`schema.sql` §22）**
+       *    新增的判据（公告 ≠ 通知，两个实体各自独立），它同样守两件套（`_for` + 裸版 + 一律 revoke）。
+       *    这一行只是"数一数"的记账：**判据别只写裸版**这条纪律一个字没变。
+       */
+      const forNames = forCount.rows.map((r) => r.proname)
+      ok(
+        '`_for` 变体一共 22 个（13 + 管理架构轮 8 个 + 🆕公告轮 1 个 `can_publish_announcement_for`）' +
           ' —— id 变体也算判据的两件套，新增判据别只写裸版',
-        Number(forCount.rows[0].n),
-        21,
+        forNames.length === 22,
+        `实际 ${forNames.length} 个：${forNames.join('、')}`,
       )
       const hasBare = await db.query(`select has_function_privilege('authenticated', 'public.can_edit_exam(uuid[], text, text)', 'EXECUTE') as v`)
       eq('裸版 can_edit_exam 对 authenticated **有** EXECUTE（策略要调它）', Boolean(hasBare.rows[0].v), true)

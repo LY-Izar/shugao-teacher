@@ -4,11 +4,20 @@
  * 🔴 **安全边界**：service_role **绕过 RLS**，所以这个 Function 必须自己校验调用者权限。
  *    但"自己校验"不等于"在 TypeScript 里再写一遍规则" —— 判据只有一处：
  *    数据库里 `schema.sql` §21 的那几个函数
- *      `can_publish_notice_to(scope_kind, grade_id, subject_code, target_role, teacher_ids)`
+ *      `can_publish_notice_to(scope_kind, grade_id, subject_code, target_role, teacher_ids, department)`
  *        **本能力的全部安全性都在它身上**（方案 §九.8 的 P-2）。
+ *        🆕 2026-09-28 第二轮：参数多了 `department`（第七种收件维度 = 职能部门）。
  *      `my_notice_scopes()`          我能发哪些范围（前端拿它摆选项 —— 它**不是**第二处判据）
  *      `teacher_rank(uid)`           级别表（"发职位只能发给自己级别以下"就落在这里）
  *    这里拿**调用者自己的 JWT** 走 `POST /rest/v1/rpc/<函数名>` 去问（auth.uid() 就是调用者）。
+ *
+ * 🔴 **三份清单必须同值**（少一处 = 同一件事两个口径）：
+ *      · `SCOPE_KINDS`（下面）↔ `notices.scope_kind` 的 check（schema §21.3.1）
+ *      · `SENDABLE_ROLES`     ↔ `notice_sendable_roles()`（schema §21.2）
+ *      · `DEPARTMENTS`        ↔ `notice_departments()`（schema §21.2.2）
+ *    ⚠️ 这三组都是**形状校验**（不在清单里直接 400，**在 RPC 之前**），
+ *       所以只改数据库不改这里 = 数据库说 true、真实调用仍然 400（上一轮踩过的坑）。
+ *       `app/scripts/nav-checks.mjs` 的 **A9** 拿源码文本逐字比对这几份。
  *
  * 🔴 **为什么读通知不需要这个 Function**：读走的是**真 RLS**（`notices_visible` 策略，
  *    见 schema §21.7）。也就是说，本文件里**没有**一处"前端说要看哪条就给他哪条"的代码 ——
@@ -33,12 +42,30 @@ type Env = {
   SUPABASE_SERVICE_ROLE_KEY?: string
 }
 
-/** 与 `notices.scope_kind` 的 check 约束**逐字相同**（多一个值就是两处不一致） */
-const SCOPE_KINDS = ['school', 'grade', 'subject', 'grade_subject', 'role', 'custom'] as const
+/** 与 `notices.scope_kind` 的 check 约束**逐字相同**（多一个值就是两处不一致）
+ *  🆕 2026-09-28 第二轮：加了 `'department'`（第七种）。 */
+const SCOPE_KINDS = [
+  'school',
+  'grade',
+  'subject',
+  'grade_subject',
+  'role',
+  'custom',
+  'department',
+] as const
 type ScopeKind = (typeof SCOPE_KINDS)[number]
 
-/** 只能发给这些职位（与 `notice_sendable_roles()` 同一组；数据库那边仍会再判一次） */
+/**
+ * 能发给这些职位（与 `notice_sendable_roles()` 同一组；数据库那边仍会再判一次）。
+ *
+ * 🆕 2026-09-28 第二轮：**八档** —— 把 `admin`（教务处主任）加回来了（用户拍板）。
+ *   ⚠️ 加它**不破坏**"超管要给校长递话走「全校」"那条口径：校级三档仍在清单外，
+ *   而 `admin` 只可能被**超管**发到（`teacher_rank` 取 max → 拿 admin 的人级别恒 ≥ 90，
+ *   判据是"我比他**严格**高"，所以 90 > 90 不成立）—— 这一档**不会**产生"下级通知上级"。
+ *   详见 `supabase/schema.sql` §21.2 那段判断。
+ */
 const SENDABLE_ROLES = [
+  'admin',
   'office_head',
   'moral_edu_head',
   'grade_head',
@@ -47,6 +74,12 @@ const SENDABLE_ROLES = [
   'head_teacher',
   'teacher',
 ] as const
+
+/**
+ * 职能部门清单（与数据库 `notice_departments()` 同一组，四个值）。
+ * 顺序 = 收件范围选项在界面上的顺序（`my_notice_scopes()` 按这个顺序往外列）。
+ */
+const DEPARTMENTS = ['office', 'academic', 'logistics', 'moral_edu'] as const
 
 type Body = {
   action?: 'list' | 'create' | 'revoke' | 'pin' | 'seen'
@@ -57,6 +90,8 @@ type Body = {
   gradeId?: string
   subjectCode?: string
   targetRole?: string
+  /** 🆕 收件范围 = 某个职能部门时，这里放部门代码（`DEPARTMENTS` 里那四个之一） */
+  department?: string
   teacherIds?: string[]
   /** create：有效期（天，0 / 空 = 不过期） */
   expiresInDays?: number
@@ -336,6 +371,9 @@ export async function onRequestPost(context: {
             gradeId: (t.grade_id as string | null) ?? null,
             subjectCode: (t.subject_code as string | null) ?? null,
             targetRole: (t.target_role as string | null) ?? null,
+            /* 🆕 老库上这一列还不存在（第 21.3.1 段没跑）→ `select=*` 里没有它 →
+               这里是 undefined → 归一成 null，前端不会崩（也**不能**因此 500）。 */
+            department: (t.target_department as string | null) ?? null,
             teacherId: (t.teacher_id as string | null) ?? null,
           })),
       }
@@ -351,6 +389,8 @@ export async function onRequestPost(context: {
         gradeName: (s.grade_name as string | null) ?? null,
         subjectCode: (s.subject_code as string | null) ?? null,
         roleCode: (s.role_code as string | null) ?? null,
+        /* 🆕 部门那一维的取值（老库 / 老缓存里没有这一列 → null） */
+        departmentCode: (s.department_code as string | null) ?? null,
       })),
       seenAt: seenAt ? Date.parse(seenAt) : null,
       notices: list,
@@ -403,6 +443,7 @@ export async function onRequestPost(context: {
     const gradeId = String(body.gradeId ?? '').trim()
     const subjectCode = String(body.subjectCode ?? '').trim()
     const targetRole = String(body.targetRole ?? '').trim()
+    const department = String(body.department ?? '').trim()
     const teacherIds = (body.teacherIds ?? [])
       .map((v) => String(v).trim())
       .filter((v) => UUID_RE.test(v))
@@ -416,6 +457,10 @@ export async function onRequestPost(context: {
     }
     if (scopeKind === 'role' && !(SENDABLE_ROLES as readonly string[]).includes(targetRole)) {
       return json({ status: 'error', message: '这个职位不在可发布的清单里' }, 400)
+    }
+    /* 🆕 部门那一支：代码必须是那四个之一（与 `notice_departments()` 同一组） */
+    if (scopeKind === 'department' && !(DEPARTMENTS as readonly string[]).includes(department)) {
+      return json({ status: 'error', message: '这个部门不在可发布的清单里' }, 400)
     }
     if (scopeKind === 'custom' && teacherIds.length === 0) {
       return json({ status: 'error', message: '还没有勾选任何老师' }, 400)
@@ -432,6 +477,7 @@ export async function onRequestPost(context: {
       p_subject_code: CODE_RE.test(subjectCode) ? subjectCode : null,
       p_target_role: targetRole || null,
       p_teacher_ids: teacherIds.length ? teacherIds : null,
+      p_department: department || null,
     })
     if (allowed === 'missing') return json({ status: 'error', message: NEED_STAGE21 }, 503)
     if (!allowed) {
@@ -496,6 +542,9 @@ export async function onRequestPost(context: {
     else if (scopeKind === 'grade_subject')
       push('grade_subject', { grade_id: gradeId, subject_code: subjectCode })
     else if (scopeKind === 'role') push('role', { target_role: targetRole })
+    /* 🆕 部门：写进**它自己那一列** `target_department`，**不复用** `target_role` ——
+     *    一个字段只能有一种语义（`schema.sql` §21.3 那段写清了为什么）。 */
+    else if (scopeKind === 'department') push('department', { target_department: department })
     else if (scopeKind === 'custom') {
       // 去重：同一个人勾两次只写一行
       for (const id of [...new Set(teacherIds)]) push('teacher', { teacher_id: id })

@@ -11,6 +11,7 @@ import { awayText, toMinutes, weekdayOf } from '../lib/schedule'
 import { connectionMode } from '../lib/supabase'
 import { APP_VERSION_LABEL } from '../lib/version'
 import { DoneCelebration, MorningWelcome } from './MoodModals'
+import { AnnouncementStack } from './AnnouncementStack'
 import {
   IconAlert,
   IconBell,
@@ -316,16 +317,24 @@ function UnreadDot() {
          12 圆角胶囊 · 三个图标          独立、不连着
 
    🔴 **底色是亮色**（2026-09-28 用户拍板）：全站 UI 都是亮色，只有这一块原来是深色玻璃，
-      在亮色页面上像"另一个 App 的残留"。材料换成 `index.css` 的 `.glass-light`
-      （半透明浅色 + `blur(22px) saturate(200%)` + **边缘折射**：顶部内亮高光 /
-      底部内一线暗 / 1px 半透明白发丝描边 / 外圈超软大阴影）。参考 VIVO / OPPO 桌面的亮色小组件。
+      在亮色页面上像"另一个 App 的残留"。材料换成 `index.css` 的 `.glass-light`。
+      ⚠️ 2026-09-28 **第二轮**又调过一次（用户「要这种按钮的质感，透明一点」+ 参考图）：
+      白底 64%/48% → **20%/30%**、`blur` 22 → 28px、`saturate` 200% → **150%**，
+      **边缘成了主角**（外圈亮描边 + 内圈更淡的一圈 = 玻璃厚度）。参数与实测见 §十五 15.1。
 
-   ⚠️ **换成亮底之后对比度要重新算**（这是这一轮最容易漏的地方，三个都换了）：
-      · 胶囊里的图标：白 → **深色**（当前页 `--color-accentink`、其余 `--color-ink2`）；
-      · 当前页那块高亮：白玻璃 → **更实的白 + 淡蓝描边**（`--color-accentsoft` 那一挂）；
+   🔴 **展开时整栏淡出**（2026-09-28 第二轮用户拍板：「点开后导航栏浮在上面会不会太奇怪了 /
+      展开后整个导航栏淡出吧」）：`opacity: 0` + 两个子控件的 `pointer-events` 一起去掉，
+      过渡 260ms 与 Sheet 的升降动画对齐。**上一轮"把 `<nav>` 抬到 z-52"的做法已回退**
+      （现在恒 `z-40`）—— 详见 `<nav>` 上那段注释与 §十五 15.3。
+
+   ⚠️ **换成亮底 / 再变透明之后，对比度都要重算**（这是这一轮最容易漏的地方）：
+      · 胶囊里的图标：白 → **深色**（当前页 `--color-accentink`、其余 `--color-ink2`），
+        且**沿图标形状描一圈很淡的浅色**（`ICON_HALO`）—— 玻璃透出深色内容时靠它保住辨识度；
+      · 当前页那块高亮：白玻璃 → **近白 + 淡蓝描边**（`--color-accentsoft` 那一挂；
+        第二轮又把它从"全不透明"降到半透明，免得它成了整条控件里最实的东西）；
       · 右侧圆按钮：深底上的暖黄 `***REMOVED***f5c469` → 亮底上**够深的强调色** `--color-accentink`。
-      三个都按"玻璃合成底色 ***REMOVED***F7F8FA / ***REMOVED***F3F5F8（= 画布 `--color-canvas` ***REMOVED***e8ebf2 上叠
-      64% / 48% 白）"算过 WCAG 对比度，具体数值与理由写在 §十五 15.1 的对比度表里。
+      三个都按"玻璃合成底色"算过 WCAG 对比度，**又在真浏览器里按像素复核过
+      （浅底 / 深底两组）**，具体数值与口径写在 §十五 15.1 的对比度表里。
 
    三条不能破的：
    ① 每个图标 **48×48**（≥44px，手指点的东西不许更小）；
@@ -334,6 +343,22 @@ function UnreadDot() {
       只有胶囊与圆按钮本身可点 —— 中间那段空隙要能点穿到页面上去。
    ============================================================ */
 
+/**
+ * 🔴 **图标的那圈浅色描边（halo）**—— 2026-09-28 第二轮"玻璃再透明一档"之后加的，别删。
+ *
+ * 理由（真浏览器实测，§十五 15.1 的对比度表里有数）：
+ *   这一轮把白底从 64%/48% 压到 20%/30%（用户「透明一点」+ 参考图"白色只在边缘"），
+ *   玻璃**透过深色内容**时不再是近白 —— 深色图标（`--color-ink2` ***REMOVED***4a5563 /
+ *   `--color-accentink` ***REMOVED***0847c4）压在那块底上只剩 **1.27:1**（深底实测），等于消失。
+ *
+ * 为什么不给玻璃加"整体暗化"（那也能救对比度）：用户这一轮买的就是**透明**，
+ *   加一层暗化等于把透出来的壁纸又抹掉一半，方向相反。
+ *   而参考图里玻璃本身**几乎没有本体色**，靠的就是边缘 —— 所以把"边缘"这个概念
+ *   从控件边缘延伸到**图标边缘**：沿图标形状（`drop-shadow` 跟 alpha 走，
+ *   不是矩形）描一圈很淡的浅色，深色图标在深底上就有了"玻璃里的白边"。
+ * ⚠️ 两处（胶囊图标 / 圆按钮箭头）用的是**同一串值**，改一处就得改另一处。
+ */
+const ICON_HALO = 'drop-shadow(0 0 0.6px rgb(255 255 255 / .9)) drop-shadow(0 0 1.4px rgb(255 255 255 / .45))'
 /**
  * 胶囊里的一个图标：可点区域 48×48，当前页高亮由父级的滑动胶囊负责。
  *
@@ -347,8 +372,8 @@ function UnreadDot() {
  *    · 当前页 `--color-accentink`（***REMOVED***0847c4）—— 既是主色、又是本文最深的蓝，压在
  *      近白的页面上比 `--color-accent`（***REMOVED***0b5cf0）更稳；
  *    · 其余 `--color-ink2`（***REMOVED***4a5563）—— "未选中"应该是"墨"而不是"灰得看不见"。
- *    这两个色都按"玻璃合成底色"算过、又在真浏览器里按像素复核过（局部对比度）：
- *    当前页 **7.48:1**、其余 **7.46 / 7.20:1**；口径与实测剖面见 §十五 15.1 的对比度表。
+ *    这两个色都按"玻璃合成底色"算过、又在真浏览器里按像素复核过（局部对比度），
+ *    数值见 §十五 15.1 的对比度表（**浅底 / 深底两组**）。
  *    ⛔ 别退回白色系（`***REMOVED***fff` / `rgb(255 255 255/.62)`）：那是配深底的。
  */
 function PinTab({ to, label, icon: Icon, end }: NavItem & { dot?: boolean }) {
@@ -376,7 +401,7 @@ function PinTab({ to, label, icon: Icon, end }: NavItem & { dot?: boolean }) {
         >
           <span
             className={isActive ? 'tab-icon-on' : undefined}
-            style={{ display: 'grid', placeItems: 'center' }}
+            style={{ display: 'grid', placeItems: 'center', filter: ICON_HALO }}
           >
             <Icon size={22} strokeWidth={isActive ? 1.9 : 1.6} />
           </span>
@@ -545,24 +570,40 @@ function MobileNav() {
       <nav
         aria-label="主导航"
         /*
-         * 🔴 **层叠**（2026-09-28 用户拍板 A：把这一对控件抬到 Sheet 之上）：
-         *   · 收起态 `z-40` —— 和从前一样，被 `pb-24` 让出来的那条空白区里悬浮；
-         *   · 展开态 `z-52` —— 展开层 Sheet 是 `z-51`（`.sheet`，走 Portal 挂在 body 上），
-         *     不抬的话"朝下的收起箭头"在 Sheet 升起（0.26s）之后就被盖住，用户只在
-         *     收起动画里一闪而过（§十五 15.3 原本那条"已知限制"）。
+         * 🔴 **层叠 · 2026-09-28 第二轮（用户拍板改做法：展开时整栏淡出）**
          *
-         * ⚠️ **为什么是"整个 <nav> 抬"而不是"只抬圆按钮"**：
-         *   ① 胶囊与圆按钮是**一对视觉单元**（参考图里就是并排的），只抬一个看着像断了一半；
-         *   ② 更要紧的是**语义**：不抬胶囊的话，胶囊会被**遮罩**.scrim（z-50）盖住 ——
-         *      而 `.scrim` 是"可点 = 关闭"的一整片，**点胶囊等于点遮罩**，
-         *      那就变成"在遮罩上点了个图标、导航没反应、Sheet 却关了"。
-         *      两个一起抬，点击语义才干净（实测见 §十五 15.3）。
-         * ⚠️ 代价：Sheet 底部那 58px 会压在导航下面 → 由 `.sheet-foot-safe`
-         *    （index.css，加在 `Sheet` 的页脚上）给页脚留出等效的安全区，
-         *    否则底部那个「收起」按钮会被这两颗控件压住（§十五 15.3）。
+         * 上一轮的做法是"把整个 `<nav>` 抬到 Sheet 之上（展开态 `z-[52]`）"，
+         * 好让"朝下的收起箭头"看得见。用户看过之后说：
+         *   「但是点开后导航栏浮在上面会不会太奇怪了 / 展开后整个导航栏淡出吧」
+         * —— 于是**抬层叠这件事被整个推翻**：展开时这一栏自己消失，
+         *    就不存在"要不要浮在上面"的问题，也不会有"看不见却还能点到"的误触。
+         *
+         * 现在：
+         *   · `<nav>` **恒为 `z-40`**（和最早一样，收起态压在内容之上、在 `.scrim`(z-50)
+         *     与 `.sheet`(z-51) 之下 —— 展开时被 Sheet 盖住也无所谓，因为它正在淡出）；
+         *   · 展开态加 `opacity-0`；而带子本身 `pointer-events-none` **恒定保留**（I22 那条：
+         *     这条带子从来就只有胶囊与圆按钮可点）。
+         *     注意"看不见"与"点不到"是两件事：**只把它变透明的话它仍然能点到** ——
+         *     那正是"看不见却会误触"。所以展开态**两件事一起做**：
+         *     ① 整栏 `opacity-0`（视觉上彻底消失）；
+         *     ② 那两个子控件（胶囊 / 圆按钮）各自的 `pointer-events-auto` **也一起去掉**
+         *        （`pointerEvents: more ? 'none' : 'auto'`）—— 只把父级设成 `none`
+         *        是**不够**的，子级自己写了 `auto`，照样能在透明状态下被点到（实测这条坑）。
+         *   · 过渡 `260ms` 与 `.sheet` 的升/降动画（`@keyframes sheet-up` 0.26s，
+         *     同一条 `cubic-bezier(.22,.8,.24,1)`）**对齐** —— 别各弹各的。
+         *     收起时 Sheet 往下走、导航同步淡回来，不会"先看不见再跳出来"。
+         *
+         * ⚠️ 因为不再抬层叠，AppShell 根节点那个 `z-index` 也**照旧不能有**
+         *    （上一轮为抬层叠摘掉过 `z-[1]`；摘掉本身对淡出无害，但"根节点带 z-index"
+         *    这件事仍然会把整棵子树关进层叠上下文 —— 页面里那些浮层的层叠口径见 §十五 15.3）。
          * ⚠️ **尺寸一个字没动**：底距、58、48、52 全照旧（I21）。
          */
-        className={cx('pointer-events-none fixed inset-x-0 lg:hidden', more ? 'z-[52]' : 'z-40')}
+        aria-hidden={more || undefined}
+        className={cx(
+          'pointer-events-none fixed inset-x-0 lg:hidden z-40',
+          'transition-opacity duration-[260ms] ease-[cubic-bezier(.22,.8,.24,1)]',
+          more ? 'opacity-0' : 'opacity-100',
+        )}
         style={{ bottom: 'calc(env(safe-area-inset-bottom, 0px) + 18px)' }}
       >
         {/*
@@ -586,6 +627,8 @@ function MobileNav() {
               padding: 4,
               borderRadius: 12,
               touchAction: 'pan-y',
+              /* 展开态整栏在淡出：这时候**不能还能点**（见 `<nav>` 上那段层叠注释） */
+              pointerEvents: more ? 'none' : 'auto',
             }}
             onPointerDown={onDown}
             onPointerMove={onMove}
@@ -599,10 +642,16 @@ function MobileNav() {
             }}
           >
             {/* 当前页那一格：跟着手指走的一块玻璃。
-                ⚠️ 底下已经是**浅色**玻璃，再用半透明白就"高亮不起来"了（白压白）。
-                   所以这里改成**更实的白 → 淡蓝**渐变 + 一圈淡蓝描边（`--color-accentsoft`
+                ⚠️ 底下已经是**很透**的玻璃，再用半透明白就"高亮不起来"了（白压白）。
+                   所以这里用一档**近白 → 淡蓝**渐变 + 一圈淡蓝描边（`--color-accentsoft`
                    那一挂）—— 既要看得出来"我在这一页"，又不能变成一块突兀的实心块。
-                   上面那个深色图标（`--color-accentink` ***REMOVED***0847c4）压在近白的块上 ≈ **7.6:1**。 */}
+                🔴 2026-09-28 第二轮**把它也降了一档**（`***REMOVED***fff/.9` + `accentsoft/.88`，
+                   原来是不透明的 `***REMOVED***fff → accentsoft`）：玻璃变透明之后，那块**全白**的
+                   高亮成了整条控件里最实的东西 —— 用户要的是"透明"，而"当前页"仍然靠
+                   **一圈淡蓝描边 + 色块**就能读出来（不必靠不透明）。实测（浅底）：
+                   块上的 `--color-accentink` ***REMOVED***0847c4 = **7.5:1**，整格逐像素 **7.4:1**；
+                   "看得见我在这一页"这一条另由 `shots.mjs` 的 35/36/37 三张图
+                   （高亮位置真的会动）+ 下面的 `data-active` 断言钉住，没有丢。 */}
             <span
               ref={hiRef}
               aria-hidden="true"
@@ -613,9 +662,10 @@ function MobileNav() {
                 left: dragX ?? hi.left,
                 width: hi.width,
                 borderRadius: 12,
-                background: 'linear-gradient(180deg, ***REMOVED***fff 0%, var(--color-accentsoft) 100%)',
-                border: '1px solid rgb(11 92 240 / .22)',
-                boxShadow: 'inset 0 1px 0 ***REMOVED***fff, 0 1px 2px rgb(14 20 27 / .08), 0 8px 18px -10px rgb(11 92 240 / .45)',
+                background:
+                  'linear-gradient(180deg, rgb(255 255 255 / .9) 0%, rgb(233 240 254 / .88) 100%)',
+                border: '1px solid rgb(11 92 240 / .3)',
+                boxShadow: 'inset 0 1px 0 rgb(255 255 255 / .95), 0 1px 2px rgb(14 20 27 / .08), 0 8px 18px -10px rgb(11 92 240 / .45)',
                 opacity: hi.show ? 1 : 0,
                 pointerEvents: 'none',
                 willChange: 'left, width, transform',
@@ -638,13 +688,15 @@ function MobileNav() {
                  也是底部抽屉的通用画法（VIVO / OPPO 的系统 UI 同样这么用）。
                  ⚠️ 一个图标两个状态，状态变化体现在**方向**上，比"换一个完全不同的图标"
                     更容易读成"同一件事的开关"；桌面那侧没有这个按钮，不用跟着改。
-              🔴 无障碍名**跟着状态变**（视觉与 aria-label 必须一致，§十五 I21 那一挂）：
+              🔴 **无障碍名跟着状态变**（视觉与 aria-label 必须一致，§十五 I21 那一挂）：
                  `展开更多入口` ↔ `收起更多入口`。`shots.mjs` 是按**收起态那个名字**点的。
-              🔴 **展开态它必须真的看得见**（2026-09-28）：`<nav>` 展开时整个抬到 `z-52`
-                 （在 Sheet 的 `z-51` 之上），所以"朝下"那个形态是用户**真能看到、真能点到**
-                 的，不再是只在收起动画里闪一下。`shots.mjs` 用
-                 `document.elementFromPoint(按钮中心)` 钉住这一点 —— 只量 `transform`
-                 验不出"到底看不看得见"（详见 §十五 15.3）。
+              🔴 **2026-09-28 第二轮：展开态它随整栏一起淡出**（用户：「展开后整个导航栏淡出吧」）。
+                 所以"展开态这颗按钮看不看得见"这件事**不再是**要钉的东西 —— 反过来，
+                 展开态它**必须看不见、也点不到**（`pointer-events` 一起去掉），
+                 `shots.mjs` 现在钉的是这一条（见 §十五 15.3 与 15.5）。
+                 ⚠️ 本组件里那个"已展开 → 箭头朝下"的 `rotate(90deg)` **留着**：
+                    它是**收起动画那 0.26s** 里唯一能读到的方向信号（Sheet 往下走、导航淡回来），
+                    而且一次点击就能把状态读出来 —— 别以为"反正看不见"就把它删了。
               ⚠️ 颜色用 `--color-accentink`（***REMOVED***0847c4）：它压在近白的玻璃上 ≈ **7.3:1**。
                  原来那个暖黄 `***REMOVED***f5c469` 是"深底上的显眼强调物"，在这套亮色玻璃上只有
                  ≈ **1.5:1**，而且按钮现在的语义是个功能开关 —— 与全站其它控件同用
@@ -663,6 +715,9 @@ function MobileNav() {
               height: 58,
               borderRadius: 999,
               color: 'var(--color-accentink)',
+              /* 展开态整栏在淡出：**必须连它自己那层 `pointer-events-auto` 一起去掉** ——
+                 只把 `<nav>` 设成 none 是没用的，这一层写着 auto，透明了照样能点到（实测）。 */
+              pointerEvents: more ? 'none' : 'auto',
               /* 当前页在展开层里时描一圈同色蓝，免得"高亮不见了" */
               outline:
                 more || moreActive ? '2px solid rgb(11 92 240 / .55)' : '2px solid transparent',
@@ -679,6 +734,8 @@ function MobileNav() {
               style={{
                 display: 'grid',
                 placeItems: 'center',
+                /* 与胶囊图标同一串 halo（见 ICON_HALO 的注释）：箭头是细线，最吃对比度 */
+                filter: ICON_HALO,
                 /* 未展开 → 朝上（把那一层拉起来）；已展开 → 朝下（放回去） */
                 transform: more ? 'rotate(90deg)' : 'rotate(-90deg)',
                 transition: 'transform .32s cubic-bezier(.34,1.3,.5,1)',
@@ -960,12 +1017,31 @@ export function AppShell({ children }: { children: React.ReactNode }) {
      *    实测移动端顶栏（`z-30`）在 Sheet 开着时命中的仍然是 `.scrim`。
      * ⚠️ `relative` 留着（页面里那些 `absolute` 的东西要按它定位）。
      */
-    <div className="relative mx-auto flex min-h-full w-full" style={{ maxWidth: 1220 }}>
+    <div
+      className="relative mx-auto flex min-h-full w-full"
+      /*
+       * 🆕 顶部让位（2026-09-28 公告轮）：公告条 + 同步出错横幅都是**固定**的，
+       * 所以内容必须自己往下让出那一段（高度由 `AnnouncementStack` 实测后写进
+       * `document.documentElement` 的 `--top-stack-h`）。
+       * 🔴 用 `paddingTop` 而不是"给子元素各加一个 margin"：这里只有一处，
+       *    而 `min-h-full` 会在**减掉 padding 之后**再算（border-box），
+       *    于是整屏页照样居中、长内容照样能长出去。
+       */
+      style={{ maxWidth: 1220, paddingTop: 'var(--top-stack-h, 0px)' }}
+    >
       {/* 桌面左栏 —— 悬浮在画布之上的一层 */}
       <aside className="hidden shrink-0 lg:block" style={{ width: 266, paddingLeft: 14 }}>
         <div
           className="floating-rail sticky flex flex-col p-4"
-          style={{ top: 14, height: 'calc(100vh - 28px)' }}
+          /*
+           * 🔴 顶栏与公告条（`--top-stack-h`，见 `AnnouncementStack.tsx` 的层叠规则）
+           *    要**一起**让位：让位量由那一个 CSS 变量给出，桌面左栏 / 右栏 / 移动端顶栏
+           *    与 `ui.tsx` 的 `PageHead` **共用它**（各自写一个数 = 同一件事四个口径）。
+           */
+          style={{
+            top: 'calc(var(--top-stack-h, 0px) + 14px)',
+            height: 'calc(100vh - 28px - var(--top-stack-h, 0px))',
+          }}
         >
           <div className="mb-4 flex items-center gap-2.5 px-1">
             <span
@@ -1097,8 +1173,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <div className="flex min-w-0 flex-1 flex-col">
         {/* 移动端顶栏 —— 液态玻璃 */}
         <header
-          className="glass sticky top-0 z-30 flex items-center gap-2 px-4 lg:hidden"
-          style={{ height: 50, borderBottom: '1px solid var(--color-line)' }}
+          className="glass sticky z-30 flex items-center gap-2 px-4 lg:hidden"
+          /* 🔴 `top` 走 `--top-stack-h`（公告条 + 报错横幅），见 `AnnouncementStack.tsx` 文件头 */
+          style={{ height: 50, top: 'var(--top-stack-h, 0px)', borderBottom: '1px solid var(--color-line)' }}
         >
           <span className="flex items-center gap-2">
             <span style={{ color: 'var(--color-accent)', display: 'grid', placeItems: 'center' }}>
@@ -1164,7 +1241,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <aside className="hidden shrink-0 xl:block" style={{ width: 260 }}>
         <div
           className="sticky flex flex-col gap-3 overflow-y-auto py-4 pl-1 pr-4"
-          style={{ top: 0, height: '100vh' }}
+          /* 🔴 同样给顶部的公告条 + 报错横幅让位（见 `AnnouncementStack.tsx` 文件头） */
+          style={{ top: 'var(--top-stack-h, 0px)', height: 'calc(100vh - var(--top-stack-h, 0px))' }}
         >
           <ClockPanel />
 
@@ -1388,6 +1466,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         onClose={mood.closeDone}
         countdown={mood.soonCountdown}
       />
+
+      {/*
+        🆕 全站公告的顶部横幅 + 弹窗（2026-09-28 公告轮）。
+        🔴 **它与早间欢迎弹窗的排队规则就写在这一行上**：公告弹窗**礼让**那两个时刻的弹窗
+           （`suppressPopup`）。礼让时它**不记任何 seen** —— "这一次没弹"不等于"用户看过了"。
+           规则、层叠（与 `SyncErrorBanner` 的 z-70 怎么排）与实测见
+           `AnnouncementStack.tsx` 的文件头 + `功能设计与不变量.md` §二十四。
+        ⚠️ 它**只抑制弹窗，不抑制横幅**：早上进来那两条横幅照常在。
+      */}
+      <AnnouncementStack suppressPopup={mood.welcomeOpen || mood.doneOpen} />
     </div>
   )
 }

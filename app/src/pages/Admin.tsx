@@ -29,11 +29,24 @@ import {
 } from '../lib/adminChart'
 import { Button } from '../components/ui'
 import {
+  LEVEL_TEXT,
+  POPUP_TEXT,
+  adminListAnnouncements,
+  announcementPrivacyHint,
+  createAnnouncement,
+  isActiveAt,
+  revokeAnnouncement,
+  updateAnnouncement,
+  type AnnouncementInput,
+} from '../lib/announcements'
+import type { Announcement, AnnouncementLevel, AnnouncementPopup } from '../data/types'
+import {
   IconAlert,
   IconCheck,
   IconEye,
   IconEyeOff,
   IconInfo,
+  IconMegaphone,
   IconRefresh,
   IconWifi,
 } from '../components/icons'
@@ -1334,6 +1347,9 @@ export default function Admin() {
           )}
         </Card>
 
+        {/* ⑥ 🆕 全站公告（2026-09-28 公告轮）—— **关于平台本身**的信息 */}
+        <AnnounceCard />
+
         {/* 入口与边界说明 */}
         <Card
           tone="unknown"
@@ -1422,4 +1438,408 @@ function Shell({ children }: { children: React.ReactNode }) {
       {children}
     </div>
   )
+}
+
+/* ============================================================
+   ⑥ 全站公告（2026-09-28 公告轮）—— 超管的发公告入口
+   ------------------------------------------------------------
+   🔴🔴 **这一块与「通知」不是一件事**（本仓库最容易搞混的一处）：
+
+     | | 通知（`/notices/new`） | 公告（本卡） |
+     |---|---|---|
+     | 谁发的 | 各职能部门（教务处 / 办公室 / 德育处 / 年级主任 / 组长） | **只有超管** |
+     | 说什么 | **学校对老师**的事（开会、调课、备课） | **关于平台本身**（维护、新功能、提醒） |
+     | 收件范围 | 七种维度（全校 / 年级 / 学科 / …） | **没有**，全站一条 |
+     | 形态 | `/notices` 收件箱 + 未读红点 | **顶部横幅 + 可选弹窗** |
+     | 表 / 接口 | `notices` / `/api/notice` | `announcements` / `/api/announcement` |
+
+   ⚠️ 入口为什么落在这里（而不是 `/settings` 里再开一行）：公告是"**平台自身**的状态"，
+      与这块屏的定位逐字一致（"面板只回答『平台自己好不好』"）；
+      而 `/settings → 通知` 那一行已经是**教务通知**的落点，两条并排摆最容易被人当成一件事。
+      **因此本轮没有新增任何路由 / 入口 key**（`PAGES` / `ENTRIES` / 那两张角色矩阵一个字没动）。
+   ⚠️ 判据仍然只在服务端（`/api/announcement` → `can_publish_announcement()`）：
+      这块卡摆不摆按钮**不是**安全边界（手打接口照样被 403）。
+   ============================================================ */
+function AnnounceCard() {
+  const preview = useStore((s) => s.annPreview)
+  const setPreview = useStore((s) => s.previewAnnouncement)
+  const hydrateAnnouncements = useStore((s) => s.hydrateAnnouncements)
+
+  const [rows, setRows] = useState<Announcement[]>([])
+  const [loadErr, setLoadErr] = useState('')
+  const [msg, setMsg] = useState('')
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [confirmId, setConfirmId] = useState('')
+  const [editingId, setEditingId] = useState('')
+  /*
+   * 「现在」是**一次取数的产物**（照这块屏上 `now` 的口径）：渲染必须是纯的，
+   * 所以在渲染里读 `Date.now()` 会被 `react(purity)` 标成警告，而本仓库要求 lint 0 warning。
+   * 它只用来判"这条现在生效吗"（未生效 / 生效中 / 已过期），每次重新取清单时跟着刷。
+   */
+  const [nowMs, setNowMs] = useState(() => Date.now())
+
+  const [title, setTitle] = useState('')
+  const [text, setText] = useState('')
+  const [level, setLevel] = useState<AnnouncementLevel>('normal')
+  const [popup, setPopup] = useState<AnnouncementPopup>('never')
+  const [pin, setPin] = useState(false)
+  const [from, setFrom] = useState('')
+  const [to, setTo] = useState('')
+
+  /**
+   * 清单。🔴 两种来源**都是真的**：
+   *   · 云端：`/api/announcement` 的 `admin-list`（service_role，**含已撤下 / 已过期**——
+   *     "这条公告曾经存在过吗"要能回答）；
+   *   · 本地模式（没有服务端）：直接拿教师端 store 里那两条**演示夹具** ——
+   *     这样"预览"这个按钮在没有后端的机器上照样能用（那正是它存在的意义）。
+   * ⚠️ 这个函数**不 setState**（纯取数）—— 于是"在 effect 里同步 setState"那条 lint 警告
+   *    就不存在了（与这块屏上 `fetchServer` 那一段同款：数据都在异步回来之后才进 state）。
+   */
+  const loadRows = useCallback(async (): Promise<{ rows: Announcement[]; err: string }> => {
+    if (!isRemote) return { rows: useStore.getState().announcements, err: '' }
+    const res = await adminListAnnouncements()
+    return res.ok ? { rows: res.announcements, err: '' } : { rows: [], err: res.message }
+  }, [])
+
+  const reload = useCallback(async () => {
+    const r = await loadRows()
+    setRows(r.rows)
+    setLoadErr(r.err)
+    setNowMs(Date.now())
+  }, [loadRows])
+
+  useEffect(() => {
+    let alive = true
+    void loadRows().then((r) => {
+      if (!alive) return
+      setRows(r.rows)
+      setLoadErr(r.err)
+      setNowMs(Date.now())
+    })
+    return () => {
+      alive = false
+    }
+  }, [loadRows])
+
+  const resetForm = () => {
+    setEditingId('')
+    setTitle('')
+    setText('')
+    setLevel('normal')
+    setPopup('never')
+    setPin(false)
+    setFrom('')
+    setTo('')
+  }
+
+  const startEdit = (a: Announcement) => {
+    setEditingId(a.id)
+    setTitle(a.title)
+    setText(a.body)
+    setLevel(a.level)
+    setPopup(a.popup)
+    setPin(a.pin)
+    setFrom(a.activeFrom ? toLocalInput(a.activeFrom) : '')
+    setTo(a.activeTo ? toLocalInput(a.activeTo) : '')
+    setMsg('')
+    setErr('')
+  }
+
+  /** 提交：新建 / 更新**走同一个不变量**（同一个服务端动作组、同一个判据） */
+  const submit = async () => {
+    if (busy) return
+    setBusy(true)
+    setErr('')
+    setMsg('')
+    const input: AnnouncementInput = {
+      title,
+      body: text,
+      level,
+      popup,
+      pin,
+      activeFrom: from ? new Date(from).toISOString() : '',
+      activeTo: to ? new Date(to).toISOString() : '',
+    }
+    const res = editingId
+      ? await updateAnnouncement(editingId, input)
+      : await createAnnouncement(input)
+    setBusy(false)
+    if (!res.ok) {
+      setErr(res.message)
+      return
+    }
+    setMsg(editingId ? '已更新（教师端下一次刷新就能看到）' : '已发布 —— 教师端顶部横幅会自己出现')
+    resetForm()
+    await reload()
+    /* 让教师端那一条横幅立刻跟着变（不然超管会以为没发出去） */
+    await hydrateAnnouncements()
+  }
+
+  const doRevoke = async (id: string) => {
+    if (busy) return
+    setBusy(true)
+    setErr('')
+    const res = await revokeAnnouncement(id)
+    setBusy(false)
+    setConfirmId('')
+    if (!res.ok) {
+      setErr(res.message)
+      return
+    }
+    setMsg('已撤下 —— **行还在**（"这条公告曾经存在过吗"要能回答）')
+    await reload()
+    await hydrateAnnouncements()
+  }
+
+  const hint = announcementPrivacyHint(title, text)
+  const activeCount = rows.filter((a) => isActiveAt(a, nowMs)).length
+
+  return (
+    <Card
+      tone="unknown"
+      title="⑥ 全站公告（关于平台本身）"
+      headline={
+        loadErr
+          ? `读不到公告清单：${loadErr}`
+          : rows.length
+            ? `共 ${rows.length} 条公告 · 当前生效 ${activeCount} 条`
+            : '还没有公告 —— 下面可以发第一条（例如"系统今晚维护"）'
+      }
+      note="🔴 与「通知」不是一件事：公告是**平台对全站**说的话，没有收件范围；学校对老师的事走「通知」"
+      openLabel="管理公告"
+    >
+      <div
+        className="px-3.5 py-2"
+        style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.8 }}
+      >
+        · **等级**只说"多显眼"：普通（滚动条）/ 重要（排序靠前 + 加粗）/ 紧急（最重的红底）。<br />
+        · **弹窗**只说"弹几次"：不弹 / 每人一次 / 每会话一次 / 每次都弹。
+        ⚠️ 唯一一处交集：`不弹 + 紧急` 仍然按"每会话一次"弹（紧急公告就是要在登录时被看到）。<br />
+        · **生效区间**：两端都可以留空（空 = 立即生效 / 永不过期）；**撤下不删行**。<br />
+        · **预览**会把这一条推到教师端的真实长相里（横幅 + 弹窗各一次），
+        {isRemote ? '点完去工作台看' : '本地模式下用演示数据预览'}。
+      </div>
+
+      {rows.length ? (
+        <div style={{ borderTop: '1px solid var(--color-line)' }}>
+          {rows.map((a) => {
+            const live = isActiveAt(a, nowMs)
+            const state = a.revokedAt
+              ? '已撤下'
+              : live
+                ? '生效中'
+                : a.activeFrom !== null && nowMs < a.activeFrom
+                  ? '未生效'
+                  : '已过期'
+            return (
+              <div
+                key={a.id}
+                data-ann-row={a.id}
+                className="px-3.5 py-2.5"
+                style={{ borderTop: '1px solid var(--color-line)' }}
+              >
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span
+                    className={
+                      a.level === 'urgent'
+                        ? 'tag tag-bad'
+                        : a.level === 'important'
+                          ? 'tag tag-warn'
+                          : 'tag tag-idle'
+                    }
+                  >
+                    {LEVEL_TEXT[a.level]}
+                  </span>
+                  {a.pin ? <span className="tag tag-accent">置顶</span> : null}
+                  <span className="tag tag-idle">弹窗：{POPUP_TEXT[a.popup]}</span>
+                  <span className={state === '生效中' ? 'tag tag-ok' : 'tag tag-idle'}>{state}</span>
+                  {preview?.id === a.id ? <span className="tag tag-accent">预览中</span> : null}
+                </div>
+                <div style={{ fontSize: 13.5, fontWeight: 620, marginTop: 4 }}>{a.title}</div>
+                <div style={{ fontSize: 12, color: 'var(--color-ink2)', lineHeight: 1.7 }}>{a.body}</div>
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    icon={<IconEye size={14} />}
+                    data-admin-ann-preview={a.id}
+                    onClick={() => {
+                      setPreview(a)
+                      setMsg('预览已备好 —— 去工作台（或任意教师端页面）就会看到那条横幅与弹窗各一次')
+                    }}
+                  >
+                    预览
+                  </Button>
+                  {!a.revokedAt ? (
+                    <>
+                      <Button size="sm" variant="ghost" onClick={() => startEdit(a)}>
+                        编辑
+                      </Button>
+                      {confirmId === a.id ? (
+                        <Button
+                          size="sm"
+                          variant="danger"
+                          disabled={busy}
+                          data-admin-ann-revoke-confirm={a.id}
+                          onClick={() => void doRevoke(a.id)}
+                        >
+                          确认撤下
+                        </Button>
+                      ) : (
+                        <Button size="sm" variant="ghost" onClick={() => setConfirmId(a.id)}>
+                          撤下
+                        </Button>
+                      )}
+                    </>
+                  ) : (
+                    <span style={{ fontSize: 11.5, color: 'var(--color-ink4)' }}>
+                      {a.revokedAt ? `撤下于 ${new Date(a.revokedAt).toLocaleString('zh-CN')}` : ''}
+                    </span>
+                  )}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      ) : null}
+
+      <SubHead>{editingId ? '编辑这条公告' : '发一条新公告'}</SubHead>
+      <div className="px-3.5 pb-3" data-admin-ann-form>
+        <input
+          className="input"
+          style={{ height: 34, fontSize: 13 }}
+          placeholder="标题，例如：系统维护：今晚 23:00–23:30"
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+        />
+        <textarea
+          className="input mt-2"
+          style={{ minHeight: 76, fontSize: 13, lineHeight: 1.7 }}
+          placeholder="正文（纯文本）。⚠️ 这是全站都看得到的，不要写学生姓名 / 学号 / 成绩。"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+        />
+        {hint ? (
+          <div
+            className="mt-2 flex items-start gap-2 p-2.5"
+            data-admin-ann-privacy
+            style={{
+              background: 'var(--color-warnsoft)',
+              border: '1px solid ***REMOVED***ecd9ae',
+              color: '***REMOVED***8a5a12',
+              borderRadius: 4,
+              fontSize: 12,
+              lineHeight: 1.7,
+            }}
+          >
+            <IconInfo size={14} />
+            <span>{hint}</span>
+          </div>
+        ) : null}
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <select
+            className="input"
+            style={{ height: 34, fontSize: 13, width: 128 }}
+            aria-label="等级"
+            value={level}
+            onChange={(e) => setLevel(e.target.value as AnnouncementLevel)}
+          >
+            <option value="normal">普通（滚动条）</option>
+            <option value="important">重要（加粗靠前）</option>
+            <option value="urgent">紧急（强提醒）</option>
+          </select>
+          <select
+            className="input"
+            style={{ height: 34, fontSize: 13, width: 168 }}
+            aria-label="弹窗"
+            value={popup}
+            onChange={(e) => setPopup(e.target.value as AnnouncementPopup)}
+          >
+            <option value="never">不弹窗</option>
+            <option value="once">每人弹一次</option>
+            <option value="session">每会话一次</option>
+            <option value="always">每次都弹（慎用）</option>
+          </select>
+          <label className="flex items-center gap-1.5" style={{ fontSize: 12.5 }}>
+            <input type="checkbox" checked={pin} onChange={(e) => setPin(e.target.checked)} />
+            置顶
+          </label>
+        </div>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <label className="flex items-center gap-1.5" style={{ fontSize: 12 }}>
+            生效起
+            <input
+              type="datetime-local"
+              className="input"
+              style={{ height: 32, fontSize: 12.5, width: 190 }}
+              value={from}
+              onChange={(e) => setFrom(e.target.value)}
+            />
+          </label>
+          <label className="flex items-center gap-1.5" style={{ fontSize: 12 }}>
+            生效止
+            <input
+              type="datetime-local"
+              className="input"
+              style={{ height: 32, fontSize: 12.5, width: 190 }}
+              value={to}
+              onChange={(e) => setTo(e.target.value)}
+            />
+          </label>
+          <span style={{ fontSize: 11.5, color: 'var(--color-ink4)' }}>
+            两端留空 = 立即生效 / 永不过期
+          </span>
+        </div>
+        <div className="mt-2.5 flex flex-wrap items-center gap-2">
+          <Button
+            size="sm"
+            variant="primary"
+            icon={<IconMegaphone size={15} />}
+            disabled={busy || !isRemote}
+            data-admin-ann-submit
+            onClick={() => void submit()}
+          >
+            {editingId ? '保存修改' : '发布公告'}
+          </Button>
+          {editingId ? (
+            <Button size="sm" variant="ghost" onClick={resetForm}>
+              取消编辑
+            </Button>
+          ) : null}
+          {!isRemote ? (
+            <span style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
+              本地模式没有服务端（`/api/announcement`），**发布按钮停用** ——
+              上面那两条是演示数据，「预览」照常可用。
+            </span>
+          ) : null}
+        </div>
+        {msg ? (
+          <div
+            className="mt-2 flex items-center gap-1.5"
+            style={{ fontSize: 12.5, color: 'var(--color-ok)' }}
+          >
+            <IconCheck size={14} />
+            {msg}
+          </div>
+        ) : null}
+        {err ? (
+          <div
+            className="mt-2 flex items-center gap-1.5"
+            style={{ fontSize: 12.5, color: 'var(--color-bad)' }}
+          >
+            <IconAlert size={14} />
+            {err}
+          </div>
+        ) : null}
+      </div>
+    </Card>
+  )
+}
+
+/** 毫秒时间戳 → `datetime-local` 输入框要的 `YYYY-MM-DDTHH:MM`（**本地时区**） */
+function toLocalInput(ms: number): string {
+  const d = new Date(ms)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`
 }

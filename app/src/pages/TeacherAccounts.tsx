@@ -9,18 +9,20 @@ import {
   createTeacher,
   listTeachers,
   resetTeacherPassword,
+  setDepartment,
   setRole,
   type CreatedAccount,
   type Directory,
   type DirTeacher,
 } from '../lib/accounts'
-import { canAssignRoles, roleName } from '../lib/roles'
+import { DEPARTMENTS, departmentName } from '../lib/departments'
+import { canAssignRoles, canManageTeachers, roleName } from '../lib/roles'
 import { SUBJECTS, asSubjectCode, subjectName } from '../lib/subjects'
 
 /**
- * 教师账号（建号 · 主学科 · 任课关系 · 身份）。
+ * 教师账号（建号 · 主学科 · 任课关系 · 身份 · 🆕部门）。
  *
- * 三件事在这一页上合起来才有用：
+ * 四件事在这一页上合起来才有用：
  *   ① **建号时就带上学科** —— 落进 `teachers.primary_subject_code`，
  *      新老师第一次登录时新建作业的学科 chip 就是预选好的那一科，不是物理。
  *   ② **任课关系**（谁教哪个班哪一科）—— 它决定这位老师登录后
@@ -28,10 +30,16 @@ import { SUBJECTS, asSubjectCode, subjectName } from '../lib/subjects'
  *   ③ **身份** —— 班主任 / 年级主任看一个班（年级）的**所有学科**；
  *      最高管理员和教导处都能管账号、**都能指派身份**
  *      （用户 2026-09-27：「班主任，年级主任的身份也要由行政管理（教导处）给」）。
+ *   ④ 🆕 **部门**（2026-09-28 第二轮）—— 他属于哪个**职能部门**
+ *      （办公室 / 教务处 / 总务处 / 德育处）。它决定**通知能不能发到他**：
+ *      教务处发一条"发给教务处"的通知，这个部门里的人就收得到。
+ *      ⚠️ 两点与身份不同：**一个人可以属于多个部门**、**也可以一个都不属于**（纯任课老师）；
+ *      而且它**不是身份**（教务处的干事属于教务处，但没有 `admin` 的全部权限）。
+ *      维护判据与"建号"同一档（超管 / 教务处 / 办公室主任），详情见服务端那两句注释。
  *
  * 🔴 这一页的按钮显隐只是"少点几下"，**不是判据**：
  *    真正的闸门在服务端（`functions/api/teacher-account.ts` 拿你的 JWT 去问
- *    数据库的 `can_manage_teachers()` / `is_super_admin()`）。
+ *    数据库的 `can_create_teacher_accounts()` / `can_assign_roles()` / `is_super_admin()`）。
  *    所以就算有人把这一页的入口撬开，他也什么都做不成。
  */
 /**
@@ -82,6 +90,8 @@ export default function TeacherAccounts() {
   const userId = useStore((s) => s.userId)
   const refreshMyRoles = useStore((s) => s.refreshMyRoles)
   const canAssign = canAssignRoles(myRoles)
+  /** 🆕 谁能维护部门归属：与"建号"同一档（超管 / 教务处 / 办公室主任）—— 见文件头 ④ */
+  const canSetDept = canManageTeachers(myRoles)
 
   const [dir, setDir] = useState<Directory | null>(null)
   const [err, setErr] = useState<string | null>(null)
@@ -238,6 +248,13 @@ export default function TeacherAccounts() {
                           ) : (
                             <span style={{ color: 'var(--color-warn)' }}>· 还没有任课关系</span>
                           )}
+                          {/* 🆕 部门：0 个也写出来（"不属于任何部门"是**正常状态**，不是缺失） */}
+                          <span>
+                            ·{' '}
+                            {(t.departments ?? []).length
+                              ? (t.departments ?? []).map((d) => departmentName(d)).join(' / ')
+                              : '不属于任何部门'}
+                          </span>
                         </span>
                       </span>
                     </button>
@@ -245,6 +262,9 @@ export default function TeacherAccounts() {
                 )}
               </Panel>
             </div>
+
+            {/* 🆕 部门归属 · 批量（开学时一次分几十位老师 —— 用户的口径是"不要手工点几百下"） */}
+            <DepartmentBatch dir={dir} canManage={canSetDept} onDone={load} />
           </>
         ) : null}
       </Page>
@@ -308,18 +328,176 @@ export default function TeacherAccounts() {
         ) : null}
       </Sheet>
 
-      {/* ---------------- 单个老师：任课关系 + 身份 ---------------- */}
+      {/* ---------------- 单个老师：任课关系 + 身份 + 🆕部门 ---------------- */}
       {/* key 跟着人选变：换个人就重新挂载，输入框/新密码不会串到别人身上 */}
       <TeacherSheet
         key={target?.id ?? 'none'}
         teacher={target}
         dir={dir}
         canAssign={canAssign}
+        canSetDept={canSetDept}
         isMe={target?.id === userId}
         onClose={() => setTarget(null)}
         onChanged={afterChange}
       />
     </>
+  )
+}
+
+/* ============================================================
+   🆕 部门归属 · 批量（2026-09-28 第二轮）
+   ------------------------------------------------------------
+   用户口径：开学时要能给**一批**老师分部门，"不要手工点几百下"——
+   所以形状是**两个多选**（部门 × 老师），一笔请求写完（服务端按笛卡尔积写）。
+
+   🔴 判据不在这里：`canManage` 只是"摆不摆这一块"，真正的闸门是服务端
+      `POST /api/teacher-account` 的 `department` 动作（它拿调用者 JWT 去问
+      `can_create_teacher_accounts()`）。把这一块撬开也什么都做不成。
+   ============================================================ */
+
+function DepartmentBatch({
+  dir,
+  canManage,
+  onDone,
+}: {
+  dir: Directory
+  canManage: boolean
+  onDone: () => Promise<void>
+}) {
+  const push = useToast((s) => s.push)
+  const [depts, setDepts] = useState<string[]>([])
+  const [ids, setIds] = useState<string[]>([])
+  const [busy, setBusy] = useState(false)
+
+  /* 不能维护的人（年级主任 / 组长 / 班主任…）连这一块都看不到 —— 那是"少点几下"，不是判据 */
+  if (!canManage) return null
+
+  const toggle = (list: string[], v: string) =>
+    list.includes(v) ? list.filter((x) => x !== v) : [...list, v]
+
+  const apply = async (on: boolean) => {
+    if (busy) return
+    if (!depts.length || !ids.length) {
+      push({ text: '先选部门、再选老师', tone: 'warn' })
+      return
+    }
+    setBusy(true)
+    const r = await setDepartment({ teacherIds: ids, departments: depts, on })
+    setBusy(false)
+    if (!r.ok) {
+      push({ text: r.message, tone: 'bad', desc: r.detail })
+      return
+    }
+    push({
+      text: on
+        ? `已加上：${ids.length} 位老师 × ${depts.length} 个部门`
+        : `已去掉：${ids.length} 位老师 × ${depts.length} 个部门`,
+      tone: 'ok',
+    })
+    await onDone()
+  }
+
+  const chip = (on: boolean) => ({
+    padding: '4px 10px',
+    borderRadius: 4,
+    fontSize: 12.5,
+    border: `1px solid ${on ? 'var(--color-accent)' : 'var(--color-line2)'}`,
+    background: on ? 'var(--color-accentsoft)' : 'var(--color-surface)',
+    color: on ? 'var(--color-accentink)' : 'var(--color-ink2)',
+    fontWeight: on ? 650 : 500,
+  })
+
+  return (
+    <div className="mb-4">
+      <Sect>部门 · 批量（谁属于哪个处室）</Sect>
+      <Panel bodyClass="p-3">
+        <p style={{ fontSize: 12.5, color: 'var(--color-ink2)', lineHeight: 1.75 }}>
+          部门决定<b>通知能不能发到他</b>：教务处发一条「发给教务处」的通知，这个部门里的人就收得到。
+          ⚠️ 一个人<b>可以属于多个部门</b>，也<b>可以一个都不属于</b>（纯任课老师）——
+          所以下面"加上 / 去掉"都是按 <b>(老师 × 部门)</b> 那一对算的。
+        </p>
+
+        <div className="mt-3">
+          <span className="label">① 选部门（可多选）</span>
+          <div className="flex flex-wrap gap-1.5">
+            {DEPARTMENTS.map((d) => {
+              const on = depts.includes(d.code)
+              return (
+                <button
+                  key={d.code}
+                  type="button"
+                  aria-pressed={on}
+                  onClick={() => setDepts((prev) => toggle(prev, d.code))}
+                  style={chip(on)}
+                  title={d.note}
+                >
+                  {d.name}
+                </button>
+              )
+            })}
+          </div>
+        </div>
+
+        <div className="mt-3">
+          <span className="label">
+            ② 选老师（可多选）· 已选 <span className="num">{ids.length}</span> 位
+          </span>
+          <div
+            className="flex flex-wrap gap-1.5"
+            style={{ maxHeight: 176, overflowY: 'auto' }}
+          >
+            {dir.teachers.map((t) => {
+              const on = ids.includes(t.id)
+              const has = (t.departments ?? []).map((d) => departmentName(d)).join('/')
+              return (
+                <button
+                  key={t.id}
+                  type="button"
+                  aria-pressed={on}
+                  onClick={() => setIds((prev) => toggle(prev, t.id))}
+                  style={chip(on)}
+                >
+                  {t.name}
+                  {has ? ` · ${has}` : ''}
+                </button>
+              )
+            })}
+          </div>
+          <div className="mt-2 flex gap-2">
+            <Button
+              size="sm"
+              onClick={() => setIds(dir.teachers.map((t) => t.id))}
+              disabled={!dir.teachers.length}
+            >
+              全选
+            </Button>
+            <Button size="sm" onClick={() => setIds([])} disabled={!ids.length}>
+              清空
+            </Button>
+          </div>
+        </div>
+
+        <div className="mt-3 flex gap-2">
+          <Button
+            block
+            variant="primary"
+            disabled={busy || !depts.length || !ids.length}
+            onClick={() => void apply(true)}
+          >
+            {busy ? '正在写…' : '加上所选部门'}
+          </Button>
+          <Button block disabled={busy || !depts.length || !ids.length} onClick={() => void apply(false)}>
+            从这些老师身上去掉
+          </Button>
+        </div>
+
+        <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 8, lineHeight: 1.7 }}>
+          谁能维护：<b>教务处 · 办公室 · 最高管理员</b>（部门是"档案属性"，
+          与建号同一档判据 —— 与"指派身份"不是同一件事）。
+          一个人在哪个部门也可以在这页点开他单独改。
+        </p>
+      </Panel>
+    </div>
   )
 }
 
@@ -514,6 +692,7 @@ function TeacherSheet({
   teacher,
   dir,
   canAssign,
+  canSetDept,
   isMe,
   onClose,
   onChanged,
@@ -521,6 +700,8 @@ function TeacherSheet({
   teacher: DirTeacher | null
   dir: Directory | null
   canAssign: boolean
+  /** 🆕 能不能改部门归属（与"建号"同一档：超管 / 教务处 / 办公室主任） */
+  canSetDept: boolean
   isMe: boolean
   onClose: () => void
   onChanged: (teacherId: string) => Promise<void>
@@ -785,6 +966,68 @@ function TeacherSheet({
             <b>指派身份是教务处与最高管理员的事</b> —— 你现在没有这两档身份里的任何一个，
             所以这一页只能看。⚠️ 办公室主任能建账号，但**不指派身份**：
             "招聘"与"决定谁当班主任"是两件事。
+          </p>
+        )}
+      </div>
+
+      {/* ---- 🆕 部门（职能部门归属：可以多个，也可以一个都没有） ---- */}
+      <div className="mt-5">
+        <span className="label">部门（办公室 / 教务处 / 总务处 / 德育处）</span>
+        {canSetDept ? (
+          <>
+            <div className="flex flex-wrap gap-1.5">
+              {DEPARTMENTS.map((d) => {
+                const on = (teacher.departments ?? []).includes(d.code)
+                return (
+                  <button
+                    key={d.code}
+                    type="button"
+                    aria-pressed={on}
+                    disabled={busy}
+                    title={d.note}
+                    onClick={() =>
+                      void run(async () => {
+                        const r = await setDepartment({
+                          teacherIds: [teacher.id],
+                          departments: [d.code],
+                          on: !on,
+                        })
+                        return r.ok ? { ok: true } : { ok: false, message: r.message, detail: r.detail }
+                      })
+                    }
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 4,
+                      padding: '3px 9px',
+                      borderRadius: 4,
+                      fontSize: 12.5,
+                      border: `1px solid ${on ? 'var(--color-accent)' : 'var(--color-line2)'}`,
+                      background: on ? 'var(--color-accentsoft)' : 'var(--color-surface)',
+                      color: on ? 'var(--color-accentink)' : 'var(--color-ink2)',
+                      fontWeight: on ? 650 : 500,
+                    }}
+                  >
+                    {on ? d.name : `+ ${d.name}`}
+                    {on ? <IconX size={13} /> : null}
+                  </button>
+                )
+              })}
+            </div>
+            <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 6, lineHeight: 1.65 }}>
+              点一下加上、再点一下去掉。<b>可以多选</b>；<b>一个都不选也是正常的</b>（纯任课老师）。
+              部门决定"发给某个部门"的通知他收不收得到 —— 而"能发给谁"的判据在服务端
+              （你在这里改不动别人的可见范围）。
+            </p>
+          </>
+        ) : (
+          <p style={{ fontSize: 12.5, color: 'var(--color-ink3)', lineHeight: 1.7 }}>
+            {(teacher.departments ?? []).length
+              ? (teacher.departments ?? []).map((d) => departmentName(d)).join(' · ')
+              : '不属于任何部门'}
+            <br />
+            <b>改部门归属是教务处 · 办公室 · 最高管理员的事</b>（与建号同一档判据）——
+            你现在没有这三档身份里的任何一个，所以这里只能看。
           </p>
         )}
       </div>

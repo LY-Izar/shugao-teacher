@@ -3923,8 +3923,19 @@ end $$;
 --        ⚠️ 若将来要改成"发出时冻结"，改的是**写入端**（发的时候把收件人算出来写进
 --           `notice_targets` 的 kind='teacher' 行），**表结构不用改**。
 --
---  本段可重复执行（幂等），且**不动任何现有表/策略**（只有 `teachers.notice_seen_at`
---  那一列在 §1，它也是纯新增）。
+--  🆕 2026-09-28 第二轮（**部门维度**）：收件维度从**六种**变成**七种**
+--     （`school` / `grade` / `subject` / `grade_subject` / `role` / `custom`
+--      / 🆕 **`department`**），并把 `admin`（教务处主任）加回"按职位发"的清单。
+--     落点：§21.2.2（老师 ↔ 部门的归属表 + 判据）· §21.3.1（两条 check 换版）·
+--     §21.4（能发部门）· §21.5（收件人那一支）。
+--
+--  本段可重复执行（幂等）。它**不动任何现有策略**；对既有对象的动作只有三处，都列在这里：
+--    · `teachers.notice_seen_at` 那一列在 §1（纯新增）；
+--    · §21.3.1 把 `notices.scope_kind` / `notice_targets.target_kind` 两条 check
+--      **换版**（六值 → 七值，多一个 `'department'`）。🔴 这属于**破坏性迁移**
+--      （约束收紧/放宽都改的是既有对象），所以那一段用"**先建新的、再删旧的**"写法
+--      （任何一刻都有约束在），**回退 SQL 就写在它后面（§21.3.2）**；
+--    · §21.2.2 新建 `teacher_departments`（老师 ↔ 职能部门，**多对多且可空**）。
 -- ============================================================
 
 -- -------- 21.1 权限层级（**唯一的一处**）--------
@@ -3974,25 +3985,41 @@ revoke all on function teacher_rank(uuid) from public, anon, authenticated;
 --  用户点名的四种收件维度之一：「**哪个职位**」。
 --  🔴 一条**我替用户定的保守默认**（报告里标为假设）：
 --     **"发给职位"只允许发给自己级别以下的档位** ——
---     年级主任能发给本年级的班主任 / 老师 / 备课组长，**不能**发给校长 / 教务处 / 超管。
+--     年级主任能发给本年级的班主任 / 老师 / 备课组长，**不能**发给校长 / 教务处 / 超管
+--     （后三者：前两档**不在清单里**，超管是"级别比他高"）。
 --     理由：不这么定，任何人都能给超管发通知（通知是"学校对老师说话"，
 --     而"我给校长发了条通知"这句话在语义上就不成立）。
 --
---  ⚠️ 清单里**没有**校级三档（80）、也**没有** `admin`（90）：所以"发某个职位"这一档
---     **谁也发不到校级及以上 —— 包括超管**（"超管拥有一切权限"在这一档上体现为
---     **清单里那七档他一档都不缺**，不是"清单外面还有几档"，`rls-checks` 有一条断言钉着它）。
---     这正是"不许越级"的直接后果，不是漏了：**"下级通知上级"这件事平台不承载**
---     （要给校长 / 教务处递话，走「**全校**」那一档：`school` 对超管是 true，
---       它按 `teachers` 行算 —— 校长也在其中；或者走现实里的路）。
+--  ⚠️ 清单里仍然**没有校级三档（80）** —— 这是**刻意**的，这一轮一个字都没动：
+--     它撑着一条口径：**"下级通知上级"这件事平台不承载** —— 要给校长递话走
+--     「**全校**」那一档（`school` 按 `teachers` 行算，校长也在其中；或者走现实里的路）。
+--
+--  🆕 2026-09-28 第二轮：**把 `admin`（90：教务处主任）加回来**（用户拍板
+--     「把教务处主任加回『按职位发』的清单」）。清单因此是 **八档**。
+--  🔴 **加 `admin` 会不会破坏上面那条口径？不会**（这是本轮的判断，写下来免得被当成漏改）：
+--     · "能发到某一档" = `notice_role_is_sendable(档)`（在清单里）**且**
+--       `me.rank > notice_role_min_rank(档)`（见 §21.4 的 `role` 支）。
+--     · `notice_role_min_rank` 取的是这一档手上**最高**那一档级别（`teacher_rank` 是 `max`），
+--       所以拿 `admin` 的人 rank 恒 ≥ 90 → **只有超管（100）发得到它**；
+--       教务处主任自己（90 > 90 = false）、校长（80）、年级主任（60）都发不到。
+--     · 也就是说 `admin` 进清单**不会**新增任何"下级 → 上级"的路径，
+--       它只是让**超管**多一个"直接发给教务处主任"的落点（原来只能走「全校」）。
+--     · 校级三档**依旧只有「全校」一条路**（对超管也一样），那条口径原样成立。
+--  ⚠️ "超管拥有一切权限"在这一档上体现为**清单里那八档他一档都不缺**，
+--     不是"清单外面还有几档"（`rls-checks` 有一条断言钉着它）。
 --  🔴 **这一组值在三个地方必须是同一组**（少一处就是"同一件事两个口径"）：
 --     本函数 = 服务端 `app/functions/api/notice.ts` 的 `SENDABLE_ROLES`（形状校验，不在里面直接 400）
 --     = 界面拿到的选项（`my_notice_scopes()` 只把本函数的行列出来）。
+--     ⚠️ **上一轮就是栽在这里**：清单从七档变八档时，只改数据库不改服务端 =
+--        数据库说 true、真实调用仍然 400 —— 因为**形状校验在 RPC 之前**，它先说"不认识"。
+--        所以 `nav-checks` 的 **A9** 现在拿**源码文本**逐字比对这两份清单（外加部门那三份）。
 create or replace function public.notice_sendable_roles()
 returns setof text
 language sql
 immutable
 as $$
   select unnest(array[
+    'admin',              -- 90：教务处主任（🆕 本轮加回来的）
     'office_head',        -- 70：办公室主任
     'moral_edu_head',     -- 70：德育处主任
     'grade_head',         -- 60：年级主任
@@ -4021,6 +4048,9 @@ create table if not exists notices (
   -- 纯文本。**不做富文本**：富文本 = XSS 面 + 排版调试，与"不增加录入"的反指标冲突
   body              text not null default '',
   -- 发布范围：与 notice_targets.target_kind 一一对应
+  -- ⚠️ 下面这一串**六值**是**历史原文**（建表那一刻的样子）。🆕 §21.3.1 会把它换成
+  --    **七值**（多一个 `'department'`）—— 那一段是"先建新的、再删旧的"，
+  --    所以**不要在这里改**（改了会让"老库重跑"与"新库首跑"两条路的约束名字不一致）。
   scope_kind        text not null default 'school'
                     check (scope_kind in ('school','grade','subject','grade_subject','role','custom')),
   -- 有效期（为空 = 不过期）：过期后**从默认列表里消失，但不删**（历史仍可查）
@@ -4036,8 +4066,11 @@ create index if not exists notices_sender_idx  on notices (sender_id, created_at
 
 -- 🔴 `notice_targets` 里**没有** `target_id` 那一个"三种语义"的列（方案 §九.4 点名的忌讳）：
 --    一行一个**维度值**，按 `target_kind` 只有一列非空 —— 一个字段只有一种语义。
+--  🆕 2026-09-28 第二轮加部门这一维时，**同样是新增一列 `target_department`，
+--     不是复用 `target_role`** —— 理由就写在那一列旁边（见下）。
 create table if not exists notice_targets (
   notice_id    uuid not null references notices (id) on delete cascade,
+  -- ⚠️ 六值清单同样是**历史原文**，§21.3.1 换成七值（多 `'department'`）。别在这里改。
   target_kind  text not null
                check (target_kind in ('school','grade','subject','grade_subject','role','teacher')),
   grade_id     uuid references grades (id) on delete cascade,  -- kind in ('grade','grade_subject')
@@ -4046,6 +4079,19 @@ create table if not exists notice_targets (
   teacher_id   uuid references teachers (id) on delete cascade,  -- kind = 'teacher'（自定义名单）
   created_at   timestamptz not null default now()
 );
+-- 🆕 `target_department`：kind = 'department'。
+--  🔴 **为什么是新增一列，而不是复用 `target_role`**（本轮的取舍，写下来）：
+--     · 复用 = 让**同一个字段有两种语义**（职位代码 / 部门代码），而"哪一种是哪一种"
+--       要靠 `target_kind` 才能推出来 —— 正是上面那句"一个字段只能有一种语义"要挡的事，
+--       也是 §九.4 点名 `target_id` 时说的同一个形状。
+--     · 具体会坏在哪：一张部门通知的 `target_role` 里躺着 `'academic'`，
+--       而"发给职位"那条判据读同一列 → `notice_role_has_members('academic')` = false
+--       → 收件人算出来是空集（**通知发出去，谁都收不到，而且不报错**）。
+--     · 代价：`notice_targets` 多一列（可空、默认为空，老行一个字都不用动）。
+--       一列的代价 vs "一个字段两种语义"的代价，这里选前者。
+--  ⚠️ 列用 `add column if not exists` 补（线上那张表已经存在，`create table if not exists`
+--     不会改它）—— 与 §10.1.1 ③ 的 `teacher_roles.subject_code` 同一条路。
+alter table notice_targets add column if not exists target_department text;
 -- 幂等：同一条通知同一个维度值只写一次（**不写 unique 约束**是刻意的 ——
 -- `coalesce` 占位那一套在这里反而更难读；服务端去重，脚本按"集合"断言）。
 create index if not exists notice_targets_notice_idx on notice_targets (notice_id);
@@ -4054,6 +4100,83 @@ create index if not exists notice_targets_teacher_idx on notice_targets (teacher
 create index if not exists notice_targets_grade_idx   on notice_targets (grade_id);
 -- 「这条通知里有没有'我这一科'」是**每一次读**都要问的（读策略的第二个 or），给它一条索引
 create index if not exists notice_targets_subject_idx on notice_targets (subject_code);
+-- 🆕 部门那一支的索引（与上面 `subject_code` 那条同一个理由：每一次读都要问）
+create index if not exists notice_targets_department_idx on notice_targets (target_department);
+
+-- -------- 21.3.1 🆕 两条 check **换版**：六值 → 七值（`'department'`）--------
+--  🔴 这属于**破坏性迁移**（改的是既有对象上的约束），所以写法要按 §10.1.1 那条顺序纪律来：
+--     **先建新的（名字带 `_v2`）、再删旧的** —— 两者短暂并存，任何一刻都有约束在。
+--     ⚠️ **不要**写成"先 `drop constraint`、再 `add constraint`"：那会留下一个
+--     "表上没有这条约束"的窗口（这一段脚本恰好被中断在中间时，库就停在无约束状态）。
+--     这里用 `do $$ … $$` + `pg_constraint` 判存在，是同一件事的**幂等**写法
+--     （重跑第二次：`_v2` 已在 → 什么都不做；旧名早被删 → 也什么都不做）。
+--
+--  ⚠️ 旧约束的名字：建表时那条内联 check 由 Postgres 自动命名 = `<表>_<列>_check`。
+--     所以老库上是 `notices_scope_kind_check` / `notice_targets_target_kind_check`。
+do $$
+begin
+  -- ① `notices.scope_kind`（发布范围）：加 'department'
+  if not exists (
+    select 1 from pg_constraint
+     where conrelid = 'notices'::regclass and conname = 'notices_scope_kind_check_v2'
+  ) then
+    alter table notices add constraint notices_scope_kind_check_v2
+      check (scope_kind in ('school','grade','subject','grade_subject','role','custom','department'));
+  end if;
+  if exists (
+    select 1 from pg_constraint
+     where conrelid = 'notices'::regclass and conname = 'notices_scope_kind_check'
+  ) then
+    alter table notices drop constraint notices_scope_kind_check;
+  end if;
+
+  -- ② `notice_targets.target_kind`（收件范围的形状）：加 'department'
+  --    ⚠️ 它与 ① **不是同一组值**：① 有 `'custom'`（那是界面的"勾人"），
+  --       ② 有 `'teacher'`（那是表里存的"一行一个人"）。两份清单在函数里就分开列。
+  if not exists (
+    select 1 from pg_constraint
+     where conrelid = 'notice_targets'::regclass and conname = 'notice_targets_target_kind_check_v2'
+  ) then
+    alter table notice_targets add constraint notice_targets_target_kind_check_v2
+      check (target_kind in ('school','grade','subject','grade_subject','role','teacher','department'));
+  end if;
+  if exists (
+    select 1 from pg_constraint
+     where conrelid = 'notice_targets'::regclass and conname = 'notice_targets_target_kind_check'
+  ) then
+    alter table notice_targets drop constraint notice_targets_target_kind_check;
+  end if;
+
+  -- ③ 🆕 `target_department` 自己的 check（四值清单在 SQL 里的第二处，见 §21.2.2）
+  if not exists (
+    select 1 from pg_constraint
+     where conrelid = 'notice_targets'::regclass and conname = 'notice_targets_department_check'
+  ) then
+    alter table notice_targets add constraint notice_targets_department_check
+      check (target_department is null
+             or target_department in ('office','academic','logistics','moral_edu'));
+  end if;
+end $$;
+
+-- -------- 21.3.2 🆕 回退 SQL（这一段出问题时跑，**手工**）--------
+--  🔴 回退的第一步永远是"**先处理数据、再改约束**"（§10.1.3 同一条纪律）：
+--     约束加不回去，只要表里还有那个新值的行。顺序反了会直接报错。
+--
+--  -- ① 先把部门维度的收件行删掉（**这一步不可逆，先导出一份**）
+--  -- delete from notice_targets where target_kind = 'department';
+--  -- update notices set scope_kind = 'school' where scope_kind = 'department';
+--  -- ② 再把两条约束换回六值版（同样"先建后删"，幂等）
+--  -- alter table notices drop constraint if exists notices_scope_kind_check_v2;
+--  -- alter table notices add constraint notices_scope_kind_check
+--  --   check (scope_kind in ('school','grade','subject','grade_subject','role','custom'));
+--  -- alter table notice_targets drop constraint if exists notice_targets_target_kind_check_v2;
+--  -- alter table notice_targets add constraint notice_targets_target_kind_check
+--  --   check (target_kind in ('school','grade','subject','grade_subject','role','teacher'));
+--  -- ③ 部门归属那一张表**可以留着**（`drop table teacher_departments` 是另一件事）：
+--  --    留着不影响任何东西（没有它就没有部门收件人），而 drop 之后再想加回来要重走一遍迁移。
+--  -- ④ `notice_sendable_roles()` 里那个 `'admin'` 要退回去就改函数体（§21.2）——
+--  --    ⚠️ 但**三处必须一起退**（本函数 + `notice.ts` 的 `SENDABLE_ROLES` + `nav-checks` A9），
+--  --    只退一处就是"数据库说 true、真实调用仍然 400"。
 
 alter table notices        enable row level security;
 alter table notice_targets enable row level security;
@@ -4166,18 +4289,165 @@ $$;
 
 revoke all on function notice_min_rank_of(uuid) from public, anon, authenticated;
 
+-- -------- 21.2.2 🆕 部门归属（老师 ↔ 职能部门）—— 表 + 清单 + 判据（2026-09-28 第二轮）--------
+--  用户原话：「通知这里，应该还可以给各个职能部门发通知呀」。
+--  学校的**真实架构**是四个职能部门：**办公室 · 教务处 · 总务处 · 德育处**。
+--
+--  🔴 三条形状上的硬要求（都是用户的真实情况，不是设计偏好）：
+--     ① **一个人可能兼任多个部门**（教务处 + 德育处 是常见的），
+--     ② **一个人可能不属于任何部门**（纯任课老师）—— 所以关系**多对多且可空**，
+--     ③ 判据形状要跟现有角色体系一致（"谁在哪个范围里"这件事，
+--        `teacher_roles` 那套 `role + scope_type + scope_id` 是现成的先例）。
+--
+--  🔑 **为什么另起一张表，而不是 `teachers` 上加一列 `departments text[]`**
+--     （数组列改起来简单、但是这次**不能**用它，理由是一条真实的可写路径）：
+--     · `teachers` 上那条 `teachers_self` 是 **`for all` = `id = auth.uid()`**（§7）——
+--       也就是说**任何一位老师都能 UPDATE 自己那一行**。部门归属一旦落在 `teachers` 上，
+--       就等于"老师可以自己把自己填进『教务处』"，而那正好是通知的收件范围：
+--       他会**读到自己不该读的通知**（一条真实的越权读取路径，不是理论）。
+--     · 另起一张表可以像 `teacher_roles` 一样**只给 select、一条写策略都不给** ——
+--       写只走服务端 `functions/api/teacher-account.ts`（service_role），判据在那里问数据库。
+--     · 顺带：数组列在"查一个部门有谁"这件事上要 `@>` 扫描，没有索引可用；
+--       这张表上有 `(department)` 索引，收件人那一支是一次索引扫描。
+--     · ⚠️ 代价说清楚：多一张表 = 多一套 RLS（下面四条语句），
+--       而且"一个人挂在哪个部门"这个事实从此**只在这张表里**（不是第二处）。
+--
+--  🔴 **它不进 `teacher_roles`**（这是本轮另一个判断）：`teacher_roles` 那一列存的是
+--     **身份**（有权限的那一档：`admin` = 教务处**主任**），而"属于教务处"是**档案属性** ——
+--     教务处的干事也"属于教务处"，但他**不该**因此拿到 `admin` 的全部权限。
+--     把两者合成一个字段，就是"一个字段两种语义"（§九.4 点名的那个忌讳）。
+--
+--  🔴 **表放在这里而不是 §21.3（建表那一段）**：下面 `notice_department_has_members()`
+--     的函数体在**创建那一刻**就会被解析，表必须先在 ——
+--     本仓库踩过同一个坑两次：`create policy` 与 `language sql` 的函数体引用尚未定义的
+--     东西（函数 / 表）都是**当场报错**，不是等到调用才报。
+create table if not exists teacher_departments (
+  teacher_id uuid not null references teachers (id) on delete cascade,
+  -- 部门代码。⚠️ 这一行是**四值清单在 SQL 里的第二处**（第一处是下面的 `notice_departments()`）——
+  --    列上留一条 check 是让"表自己守得住"（service_role 也塞不进垃圾），
+  --    `rls-checks` 有一条断言把这两处**逐字比对**（少一处对不上就红）。
+  department text not null
+             constraint teacher_departments_department_check
+             check (department in ('office','academic','logistics','moral_edu')),
+  created_at timestamptz not null default now(),
+  -- 主键 = "同一个人同一个部门只有一行"（幂等写入靠它，服务端重复写按 23505 当成功）
+  primary key (teacher_id, department)
+);
+-- 「这个部门有谁」是收件人那一支每一次读都要问的 —— 给它一条索引（主键那条是 (teacher_id, …)）
+create index if not exists teacher_departments_dept_idx on teacher_departments (department);
+
+alter table teacher_departments enable row level security;
+grant select on teacher_departments to authenticated;
+revoke all on teacher_departments from anon;
+
+-- 🔴 **只有一条 select 策略、没有任何写策略**（与 `teacher_roles_read` 逐字同款，§10.4）：
+--    读 = 自己那一行（"我属于哪个部门"）；写 = **没有**，
+--    只能走服务端 `POST /api/teacher-account` 的 `department` 动作（service_role）。
+--    这一条是"读得宽、写得窄"在本表上的落点，也是上面那段"为什么不用数组列"的答案。
+drop policy if exists teacher_departments_read on teacher_departments;
+create policy teacher_departments_read on teacher_departments
+  for select to authenticated using (teacher_id = auth.uid());
+
+--  「有哪些部门」——**SQL 侧的唯一定义**。
+--  ⚠️ 与 `notice_sendable_roles()` 同款：`immutable` + 不读任何表 + grant 给 authenticated
+--     （它只是把四个常量列出来，所以不受"判据链上必须 security definer"那条的影响）。
+--  🔴 这一组值在**三个地方**必须是同一组：
+--     本函数 = 列上那条 check = 服务端 `notice.ts` 的 `DEPARTMENTS`
+--     （界面显示名在 `app/src/lib/departments.ts`，`nav-checks` A9 把这几份逐字比对）。
+create or replace function public.notice_departments()
+returns setof text
+language sql
+immutable
+as $$
+  select unnest(array[
+    'office',     -- 办公室
+    'academic',   -- 教务处
+    'logistics',  -- 总务处
+    'moral_edu'   -- 德育处
+  ]::text[]);
+$$;
+
+grant execute on function notice_departments() to authenticated;
+
+--  「这个部门在清单里吗」——照 `notice_role_is_sendable()` 的写法（判据内判据）。
+--  🔴 判据链上的函数一律 `security definer`（理由见 §21.2.1 那段实测）。
+create or replace function public.notice_department_is_sendable(p_department text)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select coalesce(p_department, '') in (select * from notice_departments());
+$$;
+
+revoke all on function notice_department_is_sendable(text) from public, anon, authenticated;
+
+--  「这个部门里真的有人吗」——照 `notice_role_has_members()` 的写法。
+--  ⚠️ 空了必须**拒**（返回 false），不能靠 `coalesce(…, 0)` 兜 ——
+--     "发给一个没有任何人的部门"与"发给一个不存在的职位"是同一个洞：
+--     通知发出去，**谁都收不到**，而列表里多出一条谜。
+create or replace function public.notice_department_has_members(p_department text)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (select 1 from teacher_departments td where td.department = p_department);
+$$;
+
+revoke all on function notice_department_has_members(text) from public, anon, authenticated;
+
+--  「他能发到**校级单位**那一档吗」= 全校 + 🆕部门 **共用**的那一组人，**唯一的定义处**。
+--  超管 · 教务处 · 校级三档 · 办公室主任 · 德育处主任（七档里除年级主任与两个组长之外的全部）。
+--  🔴 为什么把部门与全校并成一组（本轮的判断，写下来）：
+--     · 部门是**跨班级 / 跨年级的校级单位**（教务处管全校的教务），
+--       所以"面向一个部门说话"是"面向全校说话"的一小部分，不是"面向本年级"那一种 ——
+--       能发全校的人就能发部门，这一条不需要另算级别；
+--     · 反过来：**年级主任 / 组长不许给部门发**。那正是 §21.2 那条口径的另一张脸 ——
+--       教务处 / 办公室的人（级别比他高）就在这些部门里，"下级通知上级"平台不承载。
+--     · ⚠️ 写在**一个函数**里而不是抄两遍：这一组值一改就是两处不一致（I17），
+--       而 `school` 与 `department` 两支都调它。
+create or replace function public.notice_can_publish_school_level(p_uid uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1 from teacher_roles r
+     where r.teacher_id = p_uid
+       and r.role in ('super','admin','principal','vice_principal',
+                      'principal_assistant','office_head','moral_edu_head')
+  );
+$$;
+
+revoke all on function notice_can_publish_school_level(uuid) from public, anon, authenticated;
+
 -- -------- 21.4 「我能给谁发」——**本能力的全部安全性都在它身上**（方案 §九.8 的 P-2）--------
 --  🔴 三个 Check 的顺序就是这三句话：**有没有身份 → 这个范围对不对 → 名单里的人能不能收**。
 --  ⚠️ 与 §13.3 同一套手法：security definer + `set search_path = public`，
 --     且**函数必须由表属主创建**（否则内层读取会再触发策略 → 无限递归）。
 --  两件套（I33）：`_for` 是函数体、显式传人、**一律 revoke**；裸版是薄包装。
+--
+--  🆕 2026-09-28 第二轮：参数多了**第七个** `p_department`（部门维度）。
+--  🔴 **加参数 = 换了签名**（Postgres 的 `CREATE OR REPLACE` 认的是"名字 + 入参类型"）：
+--     不加处理的写法会**多出一个六参重载**，旧的那个继续躺在库里 ——
+--     那就是"同一件事两个入口"（旧入口把 `'department'` 判成 false，症状是
+--     "数据库里七种维度，其中一种怎么发都 403，而一行报错都没有"）。
+--     → 顺序：**先建新的七参版**（下面这一句），**再 drop 掉旧的六参版**（紧跟其后），
+--       最后 revoke 新的那份。这与 §10.1.1 那条"先建新的、后删旧的"是同一条纪律：
+--       任何一刻，库里都有一个能用的版本。
 create or replace function public.can_publish_notice_to_for(
   p_uid uuid,
   p_scope_kind text,
   p_grade_id uuid,
   p_subject_code text,
   p_target_role text,
-  p_teacher_ids uuid[]
+  p_teacher_ids uuid[],
+  p_department text
 )
 returns boolean
 language sql
@@ -4199,10 +4469,25 @@ as $$
         -- 全校：校级三档 + 教务处 + 办公室 + 德育处 + 超管。
         -- 🔴 **年级主任 ❌、组长 ❌** —— 这是本行最要紧的一条边界（I46）：
         --    一位年级主任可以让全校老师的界面上弹出"全体教师周三开会"。
-        exists (select 1 from teacher_roles r, me
-                 where r.teacher_id = me.uid
-                   and r.role in ('super','admin','principal','vice_principal',
-                                  'principal_assistant','office_head','moral_edu_head'))
+        --  ⚠️ 那一组值现在住在 `notice_can_publish_school_level()`（§21.2.2）里，
+        --     因为 🆕`department` 那一支用的**就是它**（部门是校级单位）——
+        --     抄两遍就是"改一处、漏一处"（I17）。
+        --  ⚠️ 传 `p_uid` 而**不是** `me.uid`：这个 `select` 没有 FROM 子句
+        --     （原来的写法只能在外层 with 里通过 `from me` 引用，直接写 `me.uid` 会
+        --      `missing FROM-clause entry for table "me"` —— 本轮实测踩到）。
+        public.notice_can_publish_school_level(p_uid)
+      when 'department' then
+        -- 🆕 发给某个职能部门（办公室 / 教务处 / 总务处 / 德育处）
+        --  三半判据，缺一不可：
+        --    · **部门代码认得出来**（认不出 = 不猜，直接 false）；
+        --    · **这个部门里真的有人**（空了就拒 —— 否则发出去一条谁都收不到的通知）；
+        --    · **我能发到校级单位那一档**（与 `school` 同一组人）——
+        --      年级主任 / 组长**不许**给部门发：教务处 / 办公室的人就在这些部门里，
+        --      那正是 §21.2 那条"下级通知上级，平台不承载"。
+        coalesce(btrim(p_department), '') <> ''
+        and public.notice_department_is_sendable(p_department)
+        and public.notice_department_has_members(p_department)
+        and public.notice_can_publish_school_level(p_uid)
       when 'grade' then
         -- 本年级：年级主任（自己那个年级）· 备课组长（自己那个年级）· 超管 / 教务处 / 德育处
         p_grade_id is not null
@@ -4252,11 +4537,14 @@ as $$
         --         "发给一个根本不存在的职位"变成永远放行（**本轮实测踩到的那条漏洞**）；
         --       · 少了"我比他高" → 年级主任能直接给校长发通知。
         --  🔴 **另一半的边界同样是真的**：`notice_role_is_sendable` 那一半用的就是 §21.2 的
-        --     **七档清单**，而校级三档与 `admin` **都不在里面** → 这一支对 `principal` 恒为 false，
-        --     **连超管也是**（2026-09-28 实测：`notice_role_is_sendable('principal')=false`、
+        --     **八档清单**（🆕 本轮把 `admin` 加了回来），而**校级三档**不在里面 →
+        --     这一支对 `principal` 恒为 false，**连超管也是**
+        --     （2026-09-28 实测：`notice_role_is_sendable('principal')=false`、
         --     `has_members=true`、`min_rank=80`、超管 `rank=100` —— 拒掉它的**不是**级别那一半）。
         --     ⚠️ 这不是待修的 bug：要给校长递话走**「全校」**那一档（`school` 按 teachers 行算，
         --     校长也在其中）；`custom` 那一支也够不着他（它同样要求被勾中的人有一档清单里的身份）。
+        --     🆕 而 `admin` 已进清单：`min_rank('admin') ≥ 90`（`teacher_rank` 取 max），
+        --     所以**只有超管**发得到它 —— 见 §21.2 那段"为什么不破坏那条口径"。
         public.notice_role_is_sendable(p_target_role)
         and public.notice_role_has_members(p_target_role)
         and exists (
@@ -4288,15 +4576,22 @@ as $$
     end;
 $$;
 
-revoke all on function can_publish_notice_to_for(uuid, text, uuid, text, text, uuid[])
+revoke all on function can_publish_notice_to_for(uuid, text, uuid, text, text, uuid[], text)
   from public, anon, authenticated;
+
+-- 🔴 旧签名（六参，没有 `p_department`）**必须 drop 掉** —— 留着就是"同一件事两个入口"，
+--    而且旧入口对 `'department'` 恒为 false（`case` 落到 `else false`）：
+--    症状是"数据库说七种维度，其中一种怎么发都 403，而一行报错都没有"。
+--    顺序上它是**后删**的那一半（新的七参版已经建在上面了）—— §10.1.1 同一条纪律。
+drop function if exists public.can_publish_notice_to_for(uuid, text, uuid, text, text, uuid[]);
 
 create or replace function public.can_publish_notice_to(
   p_scope_kind text,
   p_grade_id uuid,
   p_subject_code text,
   p_target_role text,
-  p_teacher_ids uuid[]
+  p_teacher_ids uuid[],
+  p_department text
 )
 returns boolean
 language sql
@@ -4305,9 +4600,13 @@ security definer
 set search_path = public
 as $$
   select can_publish_notice_to_for(auth.uid(), p_scope_kind, p_grade_id,
-                                   p_subject_code, p_target_role, p_teacher_ids) $$;
+                                   p_subject_code, p_target_role, p_teacher_ids,
+                                   p_department) $$;
 
-grant execute on function can_publish_notice_to(text, uuid, text, text, uuid[]) to authenticated;
+grant execute on function can_publish_notice_to(text, uuid, text, text, uuid[], text) to authenticated;
+
+-- 同上：旧签名（五参）也要 drop 掉（新六参版已经建好了）
+drop function if exists public.can_publish_notice_to(text, uuid, text, text, uuid[]);
 
 -- -------- 21.5 收件人：**算出来的，不是存下来的**（方案 §九.3 ①）--------
 --  给定一条通知，返回**这条通知的收件人 uid 集合**（只算通知自己的那些 target 行）。
@@ -4333,7 +4632,8 @@ as $$
            nt.grade_id,
            nt.subject_code,
            nt.target_role,
-           nt.teacher_id
+           nt.teacher_id,
+           nt.target_department
       from notice_targets nt
      where nt.notice_id = p_notice_id
   )
@@ -4406,6 +4706,15 @@ as $$
     join teacher_roles r on r.role = h.target_role
    where h.target_kind = 'role'
   union
+  -- 🆕「某个部门」= 归属这个部门的老师（**多对多，且可以一个都不属于** —— §21.2.2）。
+  --   ⚠️ 与 `school` 那一支同一条纪律：教室端也有一行 `teachers`，但它不是"某个部门的人" ——
+  --      这里显式挡掉（它本来也读不到通知，这一句是让"收件人集合"这句话本身是真的）。
+  select td.teacher_id
+    from heads h
+    join teacher_departments td on td.department = h.target_department
+   where h.target_kind = 'department'
+     and not exists (select 1 from classroom_accounts ca where ca.id = td.teacher_id)
+  union
   -- 🔴 「任课教师」这一档**要单独展开**（2026-09-28 实测踩到的一处漏人）：
   --    `teacher_roles.role = 'teacher'` 是一个**历史值**，现实里**没有任何一行**用它 ——
   --    任课教师的身份是 `class_subjects` 里的任课关系，**根本不写这张表**（§10.6）。
@@ -4451,14 +4760,21 @@ grant execute on function is_notice_recipient(uuid) to authenticated;
 --  ⚠️ 它**不是**判据的第二处：它只是把 `can_publish_notice_to_for` 的结论**列出来**
 --     给界面用（"摆不摆那个选项"），真正的闸门永远是服务端那一次 RPC（I46）。
 --     前端拿它去 filter **数据行**是违规的（M3），但拿来摆**选项**正是它的用途。
---  返回：`{ scope_kind, grade_id, grade_name, subject_code, role_code }` 六列，行 = 一个可选范围。
+--  返回：`{ scope_kind, grade_id, grade_name, subject_code, role_code, department_code }`
+--        **六列**（🆕 本轮加了 `department_code`），行 = 一个可选范围。
+--  🔴 **`returns table` 的形状变了 → 必须先 `drop` 再 `create`**：
+--     Postgres 不许 `create or replace` 改返回类型（`cannot change return type of existing function`）。
+--     裸版 `my_notice_scopes()` 同理（它的返回类型要跟着改），而且它的 `grant` 会随 drop 一起没了，
+--     所以下面那一份**必须重新 grant** —— 漏了这一句 = 服务端 RPC 当场 403（整个通知页死掉）。
+drop function if exists public.my_notice_scopes_for(uuid);
 create or replace function public.my_notice_scopes_for(p_uid uuid)
 returns table (
   scope_kind text,
   grade_id uuid,
   grade_name text,
   subject_code text,
-  role_code text
+  role_code text,
+  department_code text
 )
 language sql
 stable
@@ -4466,39 +4782,49 @@ security definer
 set search_path = public
 as $$
   -- 全校
-  select 'school'::text, null::uuid, null::text, null::text, null::text
-   where public.can_publish_notice_to_for(p_uid, 'school', null, null, null, null)
+  select 'school'::text, null::uuid, null::text, null::text, null::text, null::text
+   where public.can_publish_notice_to_for(p_uid, 'school', null, null, null, null, null)
   union all
   -- 本年级（逐年级）
-  select 'grade'::text, g.id, g.name, null::text, null::text
+  select 'grade'::text, g.id, g.name, null::text, null::text, null::text
     from grades g
-   where public.can_publish_notice_to_for(p_uid, 'grade', g.id, null, null, null)
+   where public.can_publish_notice_to_for(p_uid, 'grade', g.id, null, null, null, null)
   union all
   -- 本学科（逐学科）
-  select 'subject'::text, null::uuid, null::text, s.code, null::text
+  select 'subject'::text, null::uuid, null::text, s.code, null::text, null::text
     from subjects s
-   where public.can_publish_notice_to_for(p_uid, 'subject', null, s.code, null, null)
+   where public.can_publish_notice_to_for(p_uid, 'subject', null, s.code, null, null, null)
   union all
   -- 本年级 + 本学科（逐组合）
-  select 'grade_subject'::text, g.id, g.name, s.code, null::text
+  select 'grade_subject'::text, g.id, g.name, s.code, null::text, null::text
     from grades g, subjects s
-   where public.can_publish_notice_to_for(p_uid, 'grade_subject', g.id, s.code, null, null)
+   where public.can_publish_notice_to_for(p_uid, 'grade_subject', g.id, s.code, null, null, null)
   union all
   -- 某个职位（逐档；级别不够的那些**不会出现**）
-  select 'role'::text, null::uuid, null::text, null::text, r
+  select 'role'::text, null::uuid, null::text, null::text, r, null::text
     from public.notice_sendable_roles() r
-   where public.can_publish_notice_to_for(p_uid, 'role', null, null, r, null);
+   where public.can_publish_notice_to_for(p_uid, 'role', null, null, r, null, null)
+  union all
+  -- 🆕 某个职能部门（逐部门；**空部门不会出现** —— `notice_department_has_members()` 那一半）
+  select 'department'::text, null::uuid, null::text, null::text, null::text, d
+    from public.notice_departments() d
+   where public.can_publish_notice_to_for(p_uid, 'department', null, null, null, null, d);
 $$;
 
 revoke all on function my_notice_scopes_for(uuid) from public, anon, authenticated;
 
+-- ⚠️ 裸版也要 **drop + create**（返回类型变了），而且 drop 会带走它原来的 grant ——
+--    所以下面这一句 `grant` **不是重复的**：少了它，服务端 `my_notice_scopes` 当场
+--    `permission denied for function`（整个"发通知"页看到的是"数据库没给出任何范围"）。
+drop function if exists public.my_notice_scopes();
 create or replace function public.my_notice_scopes()
 returns table (
   scope_kind text,
   grade_id uuid,
   grade_name text,
   subject_code text,
-  role_code text
+  role_code text,
+  department_code text
 )
 language sql
 stable
@@ -4568,18 +4894,211 @@ create policy notice_targets_visible on notice_targets for select to authenticat
 -- -------- 21.8 核对（把下面整段粘进 SQL 编辑器）--------
 --  ① 逐身份的"我能发给谁"（把 uuid 换成要核对的老师 id）：
 --  with me as (select '00000000-0000-0000-0000-000000000000'::uuid as uid)
---  select scope_kind, grade_name, subject_code, role_code
---    from my_notice_scopes_for((select uid from me)) order by 1,2,3,4;
---  期望：年级主任**没有** scope_kind='school' 那一行；教研组长有 'subject'、没有 'school'。
+--  select scope_kind, grade_name, subject_code, role_code, department_code
+--    from my_notice_scopes_for((select uid from me)) order by 1,2,3,4,5;
+--  期望：年级主任**没有** scope_kind='school'、也**没有** 'department' 那一行；
+--        教研组长有 'subject'、没有 'school'/'department'；
+--        超管**多一行** `role / admin`（🆕 本轮把教务处主任加回了清单）。
 --
 --  ② 逐身份的"我看得到几条通知"（同上换 uuid）：
 --  with me as (select '00000000-0000-0000-0000-000000000000'::uuid as uid)
 --  select
 --    (select count(*) from notice_recipient_ids_for(n.id) x where x = (select uid from me)) as 我是收件人,
---    public.can_publish_notice_to_for((select uid from me), 'school', null, null, null, null) as 能给全校发
+--    public.can_publish_notice_to_for((select uid from me), 'school', null, null, null, null, null) as 能给全校发,
+--    public.can_publish_notice_to_for((select uid from me), 'department', null, null, null, null, 'academic') as 能给教务处发
 --  from notices n order by 1 desc;
 --
---  ③ 🔴 教室端那一条（**这条必须是 0**）：教室端账号的 uid 拿去问，
+--  ③ 🆕 部门归属：谁能维护、"教务处里都有谁"（把 uuid 换成要核对的老师 id）
+--  -- select t.name, td.department from teacher_departments td join teachers t on t.id = td.teacher_id
+--  --  order by td.department, t.name;
+--  -- 维护判据 = `can_create_teacher_accounts_for(uid)`（超管 / 教务处 / 办公室主任）——
+--  -- **不是** `can_assign_roles_for`：部门是**档案属性**，不是身份（§21.2.2）。
+--
+--  ④ 🔴 教室端那一条（**这条必须是 0**）：教室端账号的 uid 拿去问，
 --     `notices` 上的策略会把它筛掉 —— 在 SQL 编辑器里跑不了（那里 auth.uid() 是 null），
---     所以它钉在 `app/scripts/rls-checks.mjs` 第十九节（真 PGlite + 假 JWT）。
+--     所以它钉在 `app/scripts/rls-checks.mjs` 第二·之四 / 之二·之五节（真 PGlite + 假 JWT）。
+-- ============================================================
+
+-- ============================================================
+--  22. 全站公告（2026-09-28 公告轮）—— 「**平台**对老师说话」
+--      设计见 `功能设计与不变量.md` §二十四 · 参考实现 `医路相伴/index.html` 的
+--      `announcements` + `renderSiteAnnBar`（**只借形态，不搬数据模型**）
+--
+--  🔴🔴 **读这一节之前先记住：公告 ≠ 通知（这是本仓库最容易搞混的一处）**
+--
+--     · **通知**（`notices`，§21）＝ **教务通知**：各职能部门（教务处 / 办公室 / 德育处 /
+--       年级主任 / 组长）**发给老师**的事，有**收件范围**（七种维度）、有未读红点、
+--       有 `/notices` 收件箱页、工作台一块。**它问的是"这件事跟我有没有关系"。**
+--     · **公告**（`announcements`，本节）＝ **全站公告**：**关于平台本身**的信息
+--       （"系统今晚维护"、"新功能上线"、"使用提醒"），**全站一条**、
+--       **没有收件范围、没有收件人、没有未读**。形态是**顶部横幅 + 可选弹窗**。
+--       **它问的是"这个平台现在是什么状态"。**
+--     · **两者各自独立，一个字都不许互相塞**：
+--       ⛔ 不许把公告塞进 `notices`（那会让"全校老师"变成公告的收件范围 —— 公告没有范围）；
+--       ⛔ 不许给 `notices` 加 `level` / `popup` / `active_from` 这类列
+--          （教务通知不弹窗、不分等级 —— 那是公告的字段）；
+--       ⛔ 不许让公告搭 §21 那套收件人函数的车（`notice_recipient_ids_for` 与本节无关）。
+--     ⚠️ 用户 2026-09-28 的原话（推翻了 `管理台第二期方案.md` §二.0 原来的判决）：
+--        「**不同意**，这个通知是发给整个平台的**关于平台的信息类通知**，
+--         和各个职能部门发的**教务通知**不同」。
+--        → 那一节原写"不新建任何公告实体"，本轮**按用户口径推翻**，该文档已加更正说明。
+--
+--  🔴 **谁能发：只有超管**（用户口径"公告是关于平台本身的" → 它是**平台运维**的事）。
+--     ⚠️ 这一条是**执行方按用户口径推定的**（用户没有逐字说"只有超管能发公告"），
+--        报告里单列。判据**只在数据库**（`can_publish_announcement_for`），
+--        前端只决定"摆不摆入口"（入口在 `/admin` 面板里，`visibleFor: isSuperAdmin`）。
+--
+--  ⚠️ 一个字段一种语义（本节最要紧的一条）：
+--     `level` 只回答"**多显眼**"（普通 / 重要 / 紧急），
+--     `popup` 只回答"**弹几次**"（不弹 / 每人一次 / 每会话一次 / 每次都弹）。
+--     参照项目把两者混着用（`level='urgent'` 会**顺带**改弹窗行为），本节**不混**：
+--     `level` 唯一影响弹窗的地方是 `popup='never'` 时给**紧急**留的那一个例外（见 §22.2 注）。
+--
+--  本段可重复执行（幂等）：只新增对象（一张表 + 两个判据函数 + 一条读策略），
+--  **不动任何既有对象**。
+-- ============================================================
+
+-- -------- 22.1 建表 --------
+--  ⚠️ 写入**只走服务端** `POST /api/announcement`（service_role，绕过 RLS）——
+--     所以这张表**没有一条 insert/update/delete 策略**（与 §21.3 的 `notices` 同一条纪律）。
+--     这不是"忘了写"：多一条写策略就多一个前端能绕过的口子，
+--     而"谁能发"必须在服务端问数据库（§22.2）。**同一不变量在所有写入路径上守。**
+create table if not exists announcements (
+  id             uuid primary key default gen_random_uuid(),
+  school_id      uuid references schools (id) on delete set null,
+  title          text not null default '',
+  -- 纯文本。**不做富文本**（与 notices 同一条纪律）：富文本 = XSS 面 + 排版调试，
+  -- 而且公告是"一句话说清平台状态"的地方，不是公告板文章
+  body           text not null default '',
+  -- 等级：只决定"**多显眼**"。三值由 check 钉死（与前端 `AnnouncementLevel` 同一组）
+  --   normal    普通 —— 只出现在滚动条里
+  --   important 重要 —— 排序靠前（同置顶档之下）+ **加粗**
+  --   urgent    紧急 —— 用最重的底色；且 `popup='never'` 时**仍然按"每会话一次"弹**
+  level          text not null default 'normal'
+                 check (level in ('normal','important','urgent')),
+  -- 弹窗：只决定"**弹几次**"。四值由 check 钉死
+  --   never   不弹（`level='urgent'` 那一个例外见 §22.2 注）
+  --   once    每人一次 —— 关掉时记进 **localStorage**（`shugao.ann.seen`）
+  --   session 每会话一次 —— 弹出时记进 **sessionStorage**（`shugao.ann.sessSeen`）
+  --   always  每次访问都弹（慎用；它每次开页面都打断人）
+  popup          text not null default 'never'
+                 check (popup in ('never','once','session','always')),
+  -- 置顶：排在**所有**公告之前（与 `level` 是两个维度：一个说"钉住"，一个说"多重"）
+  pin            boolean not null default false,
+  -- 生效区间（**闭区间，两端都含**）：
+  --   `active_from` 为空 = **立即生效**（等价于 -∞）
+  --   `active_to`   为空 = **不过期**（等价于 +∞）
+  --   ⚠️ 过期**不删行**：它只是"不再出现在横幅/弹窗里"，历史仍可查（与 `revoked_at` 同一条纪律）
+  active_from    timestamptz,
+  active_to      timestamptz,
+  -- ---- 邮件四列：🆕 **本轮不做邮件发送，列先留** ----
+  --  🔴 报告里说清楚：这四列**只建、不写、界面不显示**。留着的唯一理由是
+  --     "将来要加发送时不用做迁移"（参照项目用它记"发过几封 / 失败几封"）。
+  --     `email_sent` = 有没有发过；`email_sent_ts` = 最后一次发送时刻；
+  --     `email_count` = 成功封数；`email_fail` = 失败封数（四列语义互不重叠）。
+  email_sent     boolean not null default false,
+  email_sent_ts  timestamptz,
+  email_count    integer not null default 0,
+  email_fail     integer not null default 0,
+  -- 谁建的 / 谁最后改的。⚠️ 用 `on delete set null`（**不是 cascade**）：
+  --    删掉一位老师不该连带删掉公告 —— "这条公告曾经存在过吗"要能回答
+  created_by     uuid references teachers (id) on delete set null,
+  updated_by     uuid references teachers (id) on delete set null,
+  created_at     timestamptz not null default now(),
+  updated_at     timestamptz not null default now(),
+  -- 撤下时刻（为空 = 有效）。⚠️ **撤下不删行**（与 §21.3 的 `revoked_at` 逐字同一条纪律）
+  revoked_at     timestamptz,
+  -- 区间本身要自洽：两端都写了就必须"结束晚于开始"（否则那条公告**永远不会生效**，
+  -- 而列表里多出一条谜）。只写一端一律放行（那一端是 ±∞）
+  constraint announcements_active_range_check
+    check (active_to is null or active_from is null or active_to > active_from)
+);
+-- 「按时间倒序列出」是这张表唯一的热路径 —— 公告是**个位数条**的表，不需要更多索引
+create index if not exists announcements_created_idx on announcements (created_at desc);
+
+-- -------- 22.2 判据：**谁能发公告**（本能力的全部安全性都在它身上）--------
+--  🔴 判据一律走 `_for` / 裸版**两件套**（I33），与 §21.4 完全同款：
+--     `_for` 接受任意 uid = "以任意人身份问一句能不能发公告" → **一律 revoke**，
+--     只留给属主核对（SQL 编辑器 / `rls-checks`）；裸版 grant 给 authenticated，
+--     服务端 `POST /api/announcement` 拿**调用者自己的 JWT** 走
+--     `POST /rest/v1/rpc/can_publish_announcement` 问它。
+--
+--  三半判据，缺一不可（与 `can_publish_notice_to_for` 的第 ① 条同一套写法）：
+--    ① `is_super_admin_for(uid)` —— **只有超管**（用户口径：公告是关于平台本身的）；
+--    ② `teachers` 里有一行 —— 挡住"认不出的 uid"（service_role 那条路不能凭一个幽灵 id 写库）；
+--    ③ **不是教室端** —— 教室里那块屏是给学生看的，它不是"发公告的人"
+--       （超管本来就不会是教室端，这一半是**让这句话本身是真的**，与 §21.5 同一条纪律）。
+--  ⚠️ 判据链上**每一个**函数都必须是 `security definer`（§21.2.1 那次实测的教训）。
+create or replace function public.can_publish_announcement_for(p_uid uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select public.is_super_admin_for(p_uid)
+     and exists (select 1 from teachers t where t.id = p_uid)
+     and not exists (select 1 from classroom_accounts ca where ca.id = p_uid);
+$$;
+
+revoke all on function can_publish_announcement_for(uuid) from public, anon, authenticated;
+
+create or replace function public.can_publish_announcement()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$ select can_publish_announcement_for(auth.uid()) $$;
+
+grant execute on function can_publish_announcement() to authenticated;
+
+--  ⚠️ `level` 与 `popup` 的分工里，那条例外（`popup='never'` + `level='urgent'`
+--     仍然按"每会话一次"弹）落在**读侧**，不在 SQL：实现只有一处 ——
+--     `app/src/lib/announcements.ts` 的 `shouldPopup()`（`nav-checks` 的 A10 逐条断言，
+--     含 `never+urgent` 那一个例外；`rls-checks` 只管 `popup` / `level` 的 check 约束）。
+
+-- -------- 22.3 RLS：**只有一条读策略**（读得宽、写得窄）--------
+alter table announcements enable row level security;
+grant select on announcements to authenticated;
+revoke all on announcements from anon;
+
+--  看得见一条公告 = **未撤下** and **在生效区间内** and **我不是教室端**。
+--
+--  🔴 三条都写在这里，**前端一个字都不筛**（M3 / §11.3）：`/admin` 面板里的公告列表
+--     走的是服务端 service_role（超管才拿得到），教师端横幅走的**就是这条策略**。
+--  🔴 **没有 `insert/update/delete` 策略**（与 §21.3 同一条）：写只走服务端。
+--  ⚠️ 与通知**唯一**相同的一条边界：教室端读不到（I47 的同一条：那块屏是给学生看的，
+--     而"平台今晚维护"这类话里会出现内部信息）。**这不是"照抄通知"，是同一个理由。**
+--  ⚠️ 边界是**闭区间**：`active_from <= now()` 且 `active_to >= now()`（两端都含）——
+--     §22.1 的 check 保证了两端都写时 `active_to > active_from`。
+--  ⚠️ 策略里只调**grant 给 authenticated 的那一半**（`is_classroom_account()`，§10 已 grant）
+--     —— 这是 §21.7 那次 `permission denied for function` 的教训：
+--     策略表达式以**调用者**的身份求值，`security definer` 不免除 EXECUTE 权限那一关。
+drop policy if exists announcements_visible on announcements;
+create policy announcements_visible on announcements for select to authenticated
+  using (
+    revoked_at is null
+    and (active_from is null or active_from <= now())
+    and (active_to   is null or active_to   >= now())
+    and not is_classroom_account()
+  );
+
+-- -------- 22.4 核对（把下面整段粘进 SQL 编辑器）--------
+--  ① 表上只有一条策略、且只有 select（写入只走服务端）：
+--  -- select tablename, policyname, cmd from pg_policies where tablename = 'announcements';
+--  -- 期望：announcements | announcements_visible | SELECT —— **只有这一行**
+--
+--  ② 谁发得到（把 uuid 换成要核对的老师 id）：
+--  -- select public.can_publish_announcement_for('00000000-0000-0000-0000-000000000000'::uuid) as 超管;
+--  -- 期望：超管 true；校长 / 教务处 / 办公室主任 / 德育处主任 / 年级主任 / 教研组长 /
+--  --       备课组长 / 班主任 / 任课教师 / 教室端 **全 false**
+--  --       （公告不是"学校对老师说话"，所以 §21 那套 `can_publish_notice_to` 一个字都不相关）
+--
+--  ③ 生效区间（过期 / 未生效都不该出现在教师端）：
+--  -- select title, level, popup, pin, active_from, active_to, revoked_at from announcements
+--  --  order by created_at desc;
+--
+--  ④ 教室端读不到那一条（**这条必须是 0 行**）：钉在 `app/scripts/rls-checks.mjs`
+--     第二·之六节（真 PGlite + 假 JWT）—— SQL 编辑器里跑不了（那里 auth.uid() 是 null）。
 -- ============================================================

@@ -188,9 +188,18 @@ export function PageHead({
 }) {
   return (
     <header
-      className="sticky top-0 z-30 flex items-center gap-3 px-4"
+      className="sticky z-30 flex items-center gap-3 px-4"
       style={{
         height: 52,
+        /*
+         * 🔴 `top` 走 `--top-stack-h`：顶部可能有**公告条**（`AnnouncementStack`，z-45）
+         *    与**同步出错横幅**（`SyncErrorBanner`，z-70）。页头如果用 `top-0`，
+         *    滚动时会被那两条压住（它们 z 更高）。
+         *    ⚠️ 这个变量由 `AnnouncementStack` 写、**四个地方共用**
+         *    （这里 + `AppShell` 的移动端顶栏 / 桌面左栏 / 右栏）——
+         *    各自写一个数就是"同一件事四个口径"。
+         */
+        top: 'var(--top-stack-h, 0px)',
         background: 'color-mix(in srgb, var(--color-canvas) 88%, transparent)',
         backdropFilter: 'blur(10px)',
         borderBottom: '1px solid var(--color-line)',
@@ -269,12 +278,12 @@ export function Sheet({
         </div>
         <div className="flex-1 overflow-y-auto p-4">{children}</div>
         {/*
-          🔴 `sheet-foot-safe`：只加**底部**安全区，把页脚从移动端底部那两颗悬浮控件
-          （`.glass-light` 胶囊 + 圆按钮，58 高、底距 18px）下面让出来 ——
-          它们展开态时层叠被抬到这张 Sheet 之上（见 AppShell 的 `MobileNav`），
-          不留这一块的话页脚那个「收起」按钮会被压住。
-          ⚠️ 它**不动上半部分的内边距**（还是 `p-3`），也**只在窄屏生效**（见 index.css），
-             所以桌面那些 Sheet（改错名单 / 建号…）的页脚高度与从前逐像素相同。
+          ⚠️ `sheet-foot-safe` 这个类名现在**没有任何 CSS 规则**（2026-09-28 第二轮起）。
+          它原来是给页脚补一块底部安全区、让开移动端那两颗悬浮控件（当时导航被抬到
+          Sheet 之上）；那一轮改成"**展开时整栏淡出**"之后没有东西压着页脚了，
+          规则按用户要求**回退删掉**（留一个说不出理由的 `!important` 更危险）。
+          类名先留着当**锚点**：`shots.mjs` 与这一段注释都按它取页脚，
+          以后真要再让位，加一条规则即可。缘由与实测见 `index.css` 里那段留档。
         */}
         {footer ? (
           <div className="border-t border-line p-3 sheet-foot-safe">{footer}</div>

@@ -26,6 +26,7 @@
    ============================================================ */
 
 import { getSupabase } from './supabase'
+import { departmentName } from './departments'
 import { roleName } from './roles'
 import { subjectShort } from './subjects'
 import {
@@ -178,6 +179,8 @@ const asNotice = (raw: Record<string, unknown>): Notice => ({
         gradeId: (t.gradeId as string | null) ?? null,
         subjectCode: (t.subjectCode as string | null) ?? null,
         targetRole: (t.targetRole as string | null) ?? null,
+        /* 🆕 老库 / 老缓存里没有这一列 → `?? null`（前端不会因为少一个字段崩） */
+        department: (t.department as string | null) ?? null,
         teacherId: (t.teacherId as string | null) ?? null,
       }))
     : [],
@@ -213,6 +216,8 @@ export async function loadNotices(): Promise<NoticeBundle> {
         gradeName: (s.gradeName as string | null) ?? null,
         subjectCode: (s.subjectCode as string | null) ?? null,
         roleCode: (s.roleCode as string | null) ?? null,
+        /* 🆕 部门那一维（老服务端 / 老库上这一列没有 → null，选项自然不出现） */
+        departmentCode: (s.departmentCode as string | null) ?? null,
       }))
     : []
   return {
@@ -238,6 +243,8 @@ export type PublishInput = {
   gradeId?: string
   subjectCode?: string
   targetRole?: string
+  /** 🆕 收件范围 = 某个职能部门时的部门代码 */
+  department?: string
   teacherIds?: string[]
   /** 有效期（天）。0 / 不传 = 不过期 */
   expiresInDays?: number
@@ -288,6 +295,10 @@ export function noticeScopeText(n: Notice): string {
         return `本年级 · ${t.subjectCode ? subjectShort(t.subjectCode, t.subjectCode) : '本学科'}`
       case 'role':
         return `全部${roleName(t.targetRole)}`
+      /* 🆕 某个职能部门：写部门名，而不是"一批老师"。认不出的代码原样回显
+         （`departmentName()` 的口径：不猜、也不吞掉）。 */
+      case 'department':
+        return t.department ? `${departmentName(t.department)}全体` : '某个职能部门'
       case 'custom':
         return '指定的几位老师'
       default:

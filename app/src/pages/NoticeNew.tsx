@@ -4,6 +4,7 @@ import { Page } from '../components/AppShell'
 import { IconAlert, IconSend } from '../components/icons'
 import { Button, Empty, PageHead, Panel, Sect } from '../components/ui'
 import { useStore, useToast } from '../data/store'
+import { departmentName } from '../lib/departments'
 import { canPublishNotice, roleName } from '../lib/roles'
 import { subjectShort } from '../lib/subjects'
 import type { NoticeScopeOption } from '../data/types'
@@ -47,11 +48,12 @@ export default function NoticeNew() {
    * 一份**去重后的选项清单**。
    *
    * `my_notice_scopes()` 给的是**逐维度值**的行（一个年级一行、一个学科一行…），
-   * 所以界面上要按 `scopeKind` 分四组摆：
-   *   · `school`  只有一行（"全校所有老师"）
-   *   · `grade`   一个年级一行
-   *   · `subject` 一个学科一行（**跨年级** —— 这正是教研组长的范围）
-   *   · `role`    一个职位一行
+   * 所以界面上要按 `scopeKind` 分五组摆：
+   *   · `school`     只有一行（"全校所有老师"）
+   *   · `department` 🆕 一个职能部门一行（**校级单位** —— 见 schema §21.4 那个判断）
+   *   · `grade`      一个年级一行
+   *   · `subject`    一个学科一行（**跨年级** —— 这正是教研组长的范围）
+   *   · `role`       一个职位一行
    * ⚠️ `grade_subject`（本年级 + 本学科）不单独成组：它是"年级 + 学科"的组合，
    *    在 UI 上等于连选两次，而当前用它的只有备课组长一个人 —— 先不做，
    *    但**数据库那一侧已经支持**（服务端与 `can_publish_notice_to` 都认它）。
@@ -60,6 +62,7 @@ export default function NoticeNew() {
   const groups = useMemo(() => {
     const g = {
       school: scopes.filter((s) => s.scopeKind === 'school'),
+      department: scopes.filter((s) => s.scopeKind === 'department'),
       grade: scopes.filter((s) => s.scopeKind === 'grade'),
       subject: scopes.filter((s) => s.scopeKind === 'subject'),
       role: scopes.filter((s) => s.scopeKind === 'role'),
@@ -68,9 +71,15 @@ export default function NoticeNew() {
   }, [scopes])
 
   const keyOf = (s: NoticeScopeOption) =>
-    `${s.scopeKind}|${s.gradeId ?? ''}|${s.subjectCode ?? ''}|${s.roleCode ?? ''}`
+    `${s.scopeKind}|${s.gradeId ?? ''}|${s.subjectCode ?? ''}|${s.roleCode ?? ''}|${s.departmentCode ?? ''}`
   const all = useMemo(
-    () => [...groups.school, ...groups.grade, ...groups.subject, ...groups.role],
+    () => [
+      ...groups.school,
+      ...groups.department,
+      ...groups.grade,
+      ...groups.subject,
+      ...groups.role,
+    ],
     [groups],
   )
   const chosen = all.find((s) => keyOf(s) === pick) ?? null
@@ -79,6 +88,8 @@ export default function NoticeNew() {
     switch (s.scopeKind) {
       case 'school':
         return '全校所有老师'
+      case 'department':
+        return `${s.departmentCode ? departmentName(s.departmentCode) : '某个部门'}全体人员`
       case 'grade':
         return `${s.gradeName ?? '本年级'}的老师`
       case 'subject':
@@ -195,6 +206,7 @@ export default function NoticeNew() {
         <Sect>发给谁</Sect>
         <div className="mb-4">
           {blockOf('school', '全校', '全校所有老师')}
+          {blockOf('department', '某个部门', '职能部门（办公室 / 教务处 / 总务处 / 德育处）—— 一个人可以属于多个部门')}
           {blockOf('grade', '本年级', '该年级有任教关系的老师 + 班主任 / 年级主任 / 备课组长')}
           {blockOf('subject', '本学科', '本校这一科的所有老师（跨年级）')}
           {blockOf('role', '某个职位', '只列得出**比你低**的档位 —— 不许越级')}
@@ -283,6 +295,8 @@ export default function NoticeNew() {
               gradeId: chosen.gradeId ?? undefined,
               subjectCode: chosen.subjectCode ?? undefined,
               targetRole: chosen.roleCode ?? undefined,
+              /* 🆕 部门那一维（其余维度时它是 undefined → 服务端收到 null） */
+              department: chosen.departmentCode ?? undefined,
               expiresInDays: days,
             })
             setSending(false)

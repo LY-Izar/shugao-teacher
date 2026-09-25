@@ -100,6 +100,10 @@ export type RoleCode =
  *   `'subject'`       本校一个学科、**跨年级**（教研组长）—— `subjectCode` = 学科代码
  *   `'grade_subject'` 本年级的一个学科（备课组长）—— `scopeId` = 年级 id + `subjectCode`
  * ⚠️ `'department'` **刻意不存在**：平台里没有一条数据是按部门分的（见 `schema.sql` §10.1.1）。
+ *    🆕 2026-09-28 第二轮加的**部门维度**与这一列**无关**，它走的是另外两处：
+ *      归属 = `teacher_departments` 表（§21.2.2，多对多且可空）；
+ *      收件范围 = `notice_targets.target_kind = 'department'`（§21.3.1）。
+ *      ——"属于教务处"是档案属性，"是教务处主任"才是身份，两者不能合并。
  */
 export type TeacherRole = {
   role: RoleCode
@@ -362,6 +366,8 @@ export type NoticeScopeKind =
   | 'grade_subject'
   | 'role'
   | 'custom'
+  /** 🆕 2026-09-28 第二轮：某个**职能部门**（办公室 / 教务处 / 总务处 / 德育处） */
+  | 'department'
 
 /** 收件范围的一行（`notice_targets`）——**一行一个维度值**，按 `kind` 只有一列非空 */
 export type NoticeTarget = {
@@ -369,6 +375,8 @@ export type NoticeTarget = {
   gradeId?: string | null
   subjectCode?: string | null
   targetRole?: string | null
+  /** 🆕 部门代码（`kind === 'department'` 时才有值；**不在 `targetRole` 里复用**） */
+  department?: string | null
   teacherId?: string | null
 }
 
@@ -404,6 +412,8 @@ export type NoticeScopeOption = {
   gradeName: string | null
   subjectCode: string | null
   roleCode: string | null
+  /** 🆕 部门那一维的取值（`scopeKind === 'department'` 时才有） */
+  departmentCode: string | null
 }
 
 /** 通知的读+写入口（`lib/notices.ts`）。表还没建时一律返回"没做成"，前端不崩。 */
@@ -424,6 +434,76 @@ export const EMPTY_NOTICE_BUNDLE: NoticeBundle = {
   notices: [],
   unread: 0,
   seenAt: null,
+}
+
+/* ---------------- 🆕 全站公告（2026-09-28 公告轮）----------------
+ *
+ * 🔴🔴 **公告 ≠ 通知** —— 这是本仓库最容易搞混的一处，先读这段再读下面的类型：
+ *   · `Notice`（上面那一组）＝ **教务通知**：各职能部门发给老师的事，**有收件范围**、
+ *     有未读、有 `/notices` 收件箱页。它问的是"这件事跟我有没有关系"。
+ *   · `Announcement`（这一组）＝ **全站公告**：**关于平台本身**的信息
+ *     （"系统今晚维护"、"新功能上线"），**全站一条、没有收件范围、没有收件人、没有未读**。
+ *     形态是**顶部横幅 + 可选弹窗**。它问的是"这个平台现在是什么状态"。
+ * ⛔ 两者不许互相塞：公告不进 `notices`，通知不加 `level` / `popup`。
+ * 设计见 `功能设计与不变量.md` §二十四 · 表见 `supabase/schema.sql` §22。
+ * ------------------------------------------------------------------ */
+
+/**
+ * 公告**等级** —— 它只回答"**多显眼**"这一个问题（`popup` 回答"弹几次"）。
+ *
+ *   normal    普通 —— 只出现在滚动条里
+ *   important 重要 —— 排序靠前（在置顶那一条之后）+ **加粗**
+ *   urgent    紧急 —— 最重的底色；且 `popup='never'` 时仍然按"每会话一次"弹
+ *
+ * ⚠️ 参照项目（`医路相伴`）把 `level='urgent'` 顺带用来改弹窗行为，
+ *    本项目**不混**：等级只影响"多显眼"，弹窗只由 `popup` 决定（唯一例外见上）。
+ */
+export type AnnouncementLevel = 'normal' | 'important' | 'urgent'
+
+/**
+ * 公告**弹窗** —— 它只回答"**弹几次**"这一个问题。
+ *
+ *   never   不弹（例外：`level='urgent'` 按"每会话一次"弹）
+ *   once    **每人一次** —— 关掉时记 localStorage（`shugao.ann.seen`）
+ *   session **每会话一次** —— 弹出时记 sessionStorage（`shugao.ann.sessSeen`）
+ *   always  **每次访问都弹**（慎用）
+ */
+export type AnnouncementPopup = 'never' | 'once' | 'session' | 'always'
+
+/**
+ * 一条公告（`announcements` 表在前端这一侧的形状，前端的 `asAnnouncement()` 归一）。
+ *
+ * ⚠️ 时间一律是**毫秒时间戳**（与 `Notice.createdAt` 等一致），
+ *    区间两端 `null` = 那一端是 ±∞（见 `activeFrom` / `activeTo` 的注释）。
+ */
+export type Announcement = {
+  id: string
+  title: string
+  body: string
+  level: AnnouncementLevel
+  popup: AnnouncementPopup
+  /** 置顶：排在所有公告之前（与 `level` 是两个维度：一个说"钉住"，一个说"多重"） */
+  pin: boolean
+  /** 生效起点（毫秒）。**null = 立即生效** */
+  activeFrom: number | null
+  /** 生效终点（毫秒，闭区间）。**null = 不过期** */
+  activeTo: number | null
+  createdBy: string | null
+  updatedBy: string | null
+  createdAt: number
+  updatedAt: number
+  /** 撤下时刻（null = 有效）。⚠️ 撤下**不删行**（"这条公告曾经存在过吗"要能回答） */
+  revokedAt: number | null
+  /* ---- 邮件四列：🆕 本轮**不做发送**，列先留（服务端一个字都不写、界面不显示）---- */
+  emailSent: boolean
+  emailSentTs: number | null
+  emailCount: number
+  emailFail: number
+  /**
+   * 这一条是**超管在面板上点的"预览"**（不落库、不进 RLS）——
+   * 它让"我要看它长什么样"能在**教师端真实的长相**里看到，包括已撤下/已过期的那一条。
+   */
+  preview?: boolean
 }
 
 /* ---------------- 教师自定义课表 ---------------- */

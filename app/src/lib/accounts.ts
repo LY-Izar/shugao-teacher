@@ -7,6 +7,9 @@
    `is_super_admin()`）。
    🔴 2026-09-28 起那两个判据**不再同集合**：建号含办公室主任、指派身份不含 ——
       这正是"拆 `can_manage_teachers`"那一轮的目的（见 `管理架构与角色权限方案.md` §三.4）。
+   🆕 2026-09-28 第二轮：**部门归属**（`setDepartment()`）走的是**建号**那一档
+      （`can_create_teacher_accounts`：超管 / 教务处 / 办公室主任），因为它改的是**档案属性**
+      而不是身份 —— 判据仍然只在数据库那一侧，这里一个字都不重写。
    这里只做三件事：补邮箱后缀、带 JWT、把错误翻成人话。
    ============================================================ */
 
@@ -66,6 +69,12 @@ export type DirTeacher = {
   school: string
   roles: DirRole[]
   subjects: DirSubject[]
+  /**
+   * 🆕 他属于哪些职能部门（`teacher_departments`，2026-09-28 第二轮）。
+   * **可以是 0 个**（纯任课老师）、**也可以是多个**（一个人兼任两个部门）。
+   * ⚠️ 老服务端 / 老库上这个字段不存在 → 页面一律写 `t.departments ?? []`。
+   */
+  departments: string[]
 }
 export type Directory = {
   teachers: DirTeacher[]
@@ -186,3 +195,25 @@ export const setRole = (input: {
   roleSubjectCode?: string
   on: boolean
 }) => call<Record<string, never>>({ action: 'role', ...input })
+
+/**
+ * 🆕 改**部门归属**（2026-09-28 第二轮）。
+ *
+ * 与"指派身份"是**两件事**（服务端两道不同的闸门，见 `functions/api/teacher-account.ts`）：
+ *   · 部门归属 = **档案属性**（他在哪个处室），与建号 / 任课关系同一档 →
+ *     `can_create_teacher_accounts()`（超管 / 教务处 / **办公室主任**）；
+ *   · 身份     = `can_assign_roles()`（超管 / 教务处，**不含**办公室主任）。
+ *
+ * 🔴 **参数是数组**（不是单个）：界面上的形状就是"多选"—— 一次给一批老师加/去一批部门，
+ *    服务端按**笛卡尔积**写（用户口径：开学时不要手工点几百下）。
+ *    一个人可以属于多个部门、也可以一个都不属于，所以"去掉"是**按 (人, 部门) 这一对**删的。
+ *
+ * @param input.teacherIds  要改哪几位老师（多选）
+ * @param input.departments 要加/去的部门代码（多选；`lib/departments.ts` 的四个）
+ * @param input.on          true = 加上，false = 去掉
+ */
+export const setDepartment = (input: {
+  teacherIds: string[]
+  departments: string[]
+  on: boolean
+}) => call<Record<string, never>>({ action: 'department', ...input })

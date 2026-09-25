@@ -4,7 +4,7 @@ import { AppShell, ToastHost } from './components/AppShell'
 import { useStore } from './data/store'
 import { useAuthBootstrap } from './hooks/useAuthBootstrap'
 import { authExpired, hasAuthStamp, isClassroomDevice, markLogin } from './lib/session'
-import { devInjectedAccountKind, devInjectedRoles } from './lib/roles'
+import { devInjectedAccountKind, devInjectedRoles, devInjectedSyncError } from './lib/roles'
 import { isRemote } from './lib/supabase'
 import type { TeacherRole } from './data/types'
 import Admin from './pages/Admin'
@@ -318,12 +318,20 @@ function useDevInjection() {
     if (!search) return
     const roles: TeacherRole[] | null = devInjectedRoles(search)
     const kind = devInjectedAccountKind(search)
-    if (!roles && !kind) return
+    /*
+     * 🆕 `?sync=…`（2026-09-28 公告轮）：把一条 `syncError` 塞进 store ——
+     * 它是**顶部层叠**那条断言唯一的前提（本地演示模式下一次云端写都不会发生，
+     * 所以报错横幅本来永远不会出现）。理由与三条边界写在 `lib/roles.ts` 的
+     * `devInjectedSyncError()` 上。
+     */
+    const sync = devInjectedSyncError(search)
+    if (!roles && !kind && !sync) return
     const apply = () => {
       const s = useStore.getState()
-      const patch: { myRoles?: TeacherRole[]; accountKind?: 'classroom' } = {}
+      const patch: { myRoles?: TeacherRole[]; accountKind?: 'classroom'; syncError?: string } = {}
       if (roles && JSON.stringify(s.myRoles) !== JSON.stringify(roles)) patch.myRoles = roles
       if (kind && s.accountKind !== kind) patch.accountKind = kind
+      if (sync && s.syncError !== sync) patch.syncError = sync
       if (Object.keys(patch).length) useStore.setState(patch)
     }
     // 先同步打一次（`useLayoutEffect` 在浏览器绘制**之前**跑完，所以演示模式下

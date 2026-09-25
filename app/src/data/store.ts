@@ -16,9 +16,11 @@ import {
 } from '../lib/subjects'
 import * as remote from './remote'
 import * as noticeApi from '../lib/notices'
+import * as annApi from '../lib/announcements'
 import { makeClassrooms, makeDemoAssignments, makeDemoClasses, makeDemoExams, makeDemoSchedule, makeTemplates } from './seed'
 import type { Exam, ExamScore } from './examTypes'
 import type {
+  Announcement,
   Assignment,
   AssignmentTemplate,
   CallRecord,
@@ -152,6 +154,24 @@ type State = {
   noticesScopes: NoticeScopeOption[]
   /** 我上次把通知看到哪儿的时刻（`teachers.notice_seen_at`，一行一个老师 —— I49） */
   noticesSeenAt: number | null
+
+  /* ---- 🆕 全站公告（2026-09-28 公告轮，见 功能设计与不变量.md §二十四）----
+   *
+   * 🔴 **公告 ≠ 通知**：`notices*` 那一组是「学校对老师说话」（有收件范围），
+   *    这一组是「**平台**对老师说话」（全站一条、没有范围、没有未读）。
+   *    两者各自独立，**一个字都不共享**（两个数据模型、两个表、两个接口）。
+   */
+  /** `announcements` 那张表在不在线上库里（`'missing'` = §22 还没跑，横幅整条不出现） */
+  announcementsState: 'unknown' | 'present' | 'missing'
+  /** 我看得到的公告（**数据库 RLS 筛过的结果**：未撤下 + 在生效区间内 + 不是教室端） */
+  announcements: Announcement[]
+  /**
+   * 超管在面板上点的「预览」那一条（**不落库**）。
+   * ⚠️ 它存在 localStorage（`shugao.ann.preview`）**是刻意的**：超管在 `/admin` 点完
+   *    "预览"，往往要**走到教师端**才看得到真实长相，而那是**换一次页面加载**。
+   *    显示过一次就自动清掉（`clearAnnPreview`），所以不会长期挂在那里。
+   */
+  annPreview: Announcement | null
   /** 是否仍是初始演示数据（未做任何真实改动） */
   isDemo: boolean
   lastSeenAt: number
@@ -205,6 +225,17 @@ type State = {
     noticeId: string,
     pinned: boolean,
   ) => Promise<{ ok: true } | { ok: false; message: string }>
+
+  /* ---- 🆕 全站公告（2026-09-28）---- */
+  /**
+   * 读公告（横幅 + 弹窗的那一份数据）。**所有老师都读**（含班主任与任课教师），
+   * 教室端拿到的是 0 行（数据库那条策略里没有它的分支）。
+   */
+  hydrateAnnouncements: () => Promise<void>
+  /** 超管点「预览」：让某一条**在教师端真实的长相里**出现一次（不落库、不进 RLS） */
+  previewAnnouncement: (a: Announcement | null) => void
+  /** 预览显示过一次之后清掉（同时清 localStorage 里那一份） */
+  clearAnnPreview: () => void
 
   signIn: (name: string) => void
   signOut: () => void
@@ -473,9 +504,71 @@ function freshDemo() {
   }
 }
 
+/* ============================================================
+   🆕 全站公告的**本地演示夹具**（2026-09-28 公告轮）
+   ------------------------------------------------------------
+   🔴 **两条都是 `popup: 'never'`，这是刻意的，别顺手改成 `once` / `urgent`**：
+      本地模式（`npm run dev` 没有 Supabase 变量）就是 `shots.mjs` 跑的那一套，
+      而它有 90 多张截图 —— 一条会弹窗的公告会在**每一张图**上盖一个弹窗，
+      整套截图立刻变成废物。
+      "弹窗长什么样"由**超管面板的「预览」那个按钮**摆出来（那是真功能，
+      参照项目也有 `adminPreviewAnnouncements()`），**不是靠夹具**。
+
+   ⚠️ 为什么夹具放在**初始状态**里、而不是像通知那样放在 `hydrateNotices()` 里：
+      `hydrate()` 在本地模式下**第一句就 return**（`if (!isRemote)`），
+      所以"只有 hydrate 里才灌夹具"的那条路在本地模式**根本不会跑** ——
+      也就是说 `hydrateNotices()` 的那两条夹具通知在实践中是**够不着的**
+      （本轮实测发现的一处既有不一致，**没有顺手去改它**：那是通知那一轮的事）。
+      公告这一轮不重复那个形状：夹具进 `initialState()` 这一侧。
+   ============================================================ */
+function demoAnnouncements(): Announcement[] {
+  const now = Date.now()
+  return [
+    {
+      id: 'demo-a1',
+      title: '系统维护：今晚 23:00–23:30',
+      body:
+        '今晚 23:00–23:30 平台升级数据库，期间可能有一两次保存失败。' +
+        '那个时间段请先不要录入成绩，等升级完成再继续。',
+      level: 'important',
+      popup: 'never',
+      pin: true,
+      activeFrom: null,
+      activeTo: null,
+      createdBy: 't-1',
+      updatedBy: null,
+      createdAt: now - 1800_000,
+      updatedAt: now - 1800_000,
+      revokedAt: null,
+      emailSent: false,
+      emailSentTs: null,
+      emailCount: 0,
+      emailFail: 0,
+    },
+    {
+      id: 'demo-a2',
+      title: '新功能：按学科看考试统计',
+      body: '这次上线了「按学科看考试统计」，在「考试 → 统计」那一页右上角。用得不对的地方直接说。',
+      level: 'normal',
+      popup: 'never',
+      pin: false,
+      activeFrom: null,
+      activeTo: null,
+      createdBy: 't-1',
+      updatedBy: null,
+      createdAt: now - 7200_000,
+      updatedAt: now - 7200_000,
+      revokedAt: null,
+      emailSent: false,
+      emailSentTs: null,
+      emailCount: 0,
+      emailFail: 0,
+    },
+  ]
+}
+
 /** 连了后端就从空开始 —— 数据在服务器上，不能再撒演示数据 */
-function initialState() {
-  if (!isRemote) return freshDemo()
+function initialState() {  if (!isRemote) return freshDemo()
   return {
     classes: [] as Klass[],
     currentClassId: null,
@@ -517,6 +610,15 @@ export const useStore = create<State>()(
       noticesCanPublish: false,
       noticesScopes: [],
       noticesSeenAt: null,
+      announcementsState: isRemote ? 'unknown' : 'present',
+      announcements: isRemote ? [] : demoAnnouncements(),
+      /*
+       * 🔴 预览快照**在 store 创建时就本机读一次**（`shugao.ann.preview`）——
+       *    超管在 `/admin` 点完「预览」要走**一次页面加载**才到得了教师端，
+       *    而 `hydrateAnnouncements()` 在本地模式下根本不会被调到
+       *    （`hydrate()` 第一句就 return），所以不在这里读就永远读不到。
+       */
+      annPreview: annApi.readPreview(),
 
       /* ---------------- 后端 ---------------- */
 
@@ -571,6 +673,13 @@ export const useStore = create<State>()(
          *    "快照读到了"混在同一帧里，读的人分不出是哪一个成功。
          */
         await get().hydrateNotices()
+        /*
+         * 🆕 公告也**单独读**（同一套理由）：线上库还没跑 `schema.sql` 第 22 段时
+         * 它返回空包，页面上是"没有公告"（横幅整条不出现），而**整个应用照常可用**。
+         * ⚠️ 它与通知是**两条独立的路**（`announcements` 表 / `/api/announcement`），
+         *    一个读不到不影响另一个 —— 这是"公告 ≠ 通知"在代码里的样子。
+         */
+        await get().hydrateAnnouncements()
       },
 
       clearSyncError: () => set({ syncError: null }),
@@ -679,6 +788,42 @@ export const useStore = create<State>()(
         return res.ok ? { ok: true as const } : { ok: false as const, message: res.message }
       },
 
+      /* ---- 🆕 全站公告（2026-09-28，见 功能设计与不变量.md §二十四）---- */
+
+      hydrateAnnouncements: async () => {
+        /*
+         * 🔴 **本地演示模式**：没有服务端。夹具见上面的 `demoAnnouncements()`
+         *    （那一段写清了"为什么两条都不弹窗"）。
+         * ⚠️ 本地模式的初始状态里**已经**灌了同一份夹具（见 create 那一段）——
+         *    这里再灌一次是**幂等**的：`hydrate()` 在本地模式下不会走到这条路，
+         *    但"本地模式下刚登出再登入"之类的路会调它，那时读到的仍然该是那两条。
+         */
+        if (!isRemote) {
+          set({
+            announcementsState: 'present',
+            announcements: demoAnnouncements(),
+            annPreview: annApi.readPreview(),
+          })
+          return
+        }
+        const bundle = await annApi.loadAnnouncements()
+        set({
+          announcementsState: bundle.state,
+          announcements: bundle.announcements,
+          annPreview: annApi.readPreview(),
+        })
+      },
+
+      previewAnnouncement: (a) => {
+        annApi.writePreview(a)
+        set({ annPreview: a })
+      },
+
+      clearAnnPreview: () => {
+        annApi.writePreview(null)
+        set({ annPreview: null })
+      },
+
       signIn: (name) =>
         set((s) => ({
           teacher: {
@@ -713,6 +858,11 @@ export const useStore = create<State>()(
           noticesCanPublish: false,
           noticesScopes: [],
           noticesSeenAt: null,
+          // 公告同一条：换账号后不能还留着上一个人看得到的公告
+          // ⚠️ `annPreview` 是**超管的预览快照**，它是本机的东西（localStorage），
+          //    与"这个账号看得到什么"无关 —— 所以这里不清它（清不清由 `clearAnnPreview` 决定）
+          announcementsState: 'unknown',
+          announcements: [],
           hydrated: !isRemote,
           // 身份跟着会话走，别把上一个账号的类型留在内存里
           accountKind: 'teacher',
@@ -1491,6 +1641,8 @@ export const useStore = create<State>()(
           noticesCanPublish: false,
           noticesScopes: [],
           noticesSeenAt: null,
+          announcementsState: 'unknown',
+          announcements: [],
           isDemo: false,
           streakDays: 1,
           hydrated: !isRemote,

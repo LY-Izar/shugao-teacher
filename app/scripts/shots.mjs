@@ -86,6 +86,31 @@ const OUT_REL = `.shots/${runId}`
 const DEMO_CLASSES = makeDemoClasses()
 const DEMO_EXAMS = makeDemoExams(DEMO_CLASSES)
 
+/**
+ * 🆕 公告预览夹具（2026-09-28 公告轮）—— 模拟"超管在 `/admin` 点了「预览」"写进本机的那一份
+ * （`shugao.ann.preview`）。它用在**早间欢迎弹窗那一支**上：那一条 `urgent` + 每人一次，
+ * 于是"公告弹窗会不会跟早间弹窗抢位置"这件事才测得到。
+ */
+const ANN_PREVIEW = {
+  id: 'ann-preview-1',
+  title: '预览：紧急停课通知',
+  body: '这条是超管在面板上点「预览」推过来的一条。\n第二行：正文里的换行要照原样显示。',
+  level: 'urgent',
+  popup: 'once',
+  pin: false,
+  activeFrom: null,
+  activeTo: null,
+  createdBy: 't-1',
+  updatedBy: null,
+  createdAt: Date.now() - 60_000,
+  updatedAt: Date.now() - 60_000,
+  revokedAt: null,
+  emailSent: false,
+  emailSentTs: null,
+  emailCount: 0,
+  emailFail: 0,
+}
+
 const TEACHER_STATE = {
   state: {
     teacher: { id: 't-1', name: '王老师', subject: '物理', school: '树高中学' },
@@ -228,6 +253,19 @@ const EXPECTED_FILES = [
   '86-nav-role-desktop-admin.png',
   '87-nav-role-super-sheet.png',
   '88-nav-role-settings-admin.png',
+  // 🆕 全站公告（2026-09-28 公告轮）。六张各自钉一件事：
+  //   89 = 手机上的顶部横幅（置顶那条 = 独立横幅、普通那条 = 滚动条）
+  //   90 = 点过滚动条的「×」之后：今天不再显示，但置顶那条无视它
+  //   91 = **与 SyncErrorBanner 同时出现**（公告条给它让位，两条都读得到）
+  //   92 = **公告弹窗礼让早间欢迎弹窗**（关掉之后才弹）
+  //   93 = 桌面（左栏/右栏/内容列都在公告条之下，同一根 `--top-stack-h`）
+  //   94 = 超管面板 ⑥ 全站公告那张卡（发/改/撤下/预览 + 编辑时的隐私提醒）
+  '89-ann-bar-mobile.png',
+  '90-ann-bar-hidden-today.png',
+  '91-ann-with-sync-banner.png',
+  '92-ann-popup-after-welcome.png',
+  '93-ann-desktop.png',
+  '94-admin-announcements.png',
 ]
 
 /* ---------------- 断言与日志 ---------------- */
@@ -259,8 +297,7 @@ let sawMobileNavShot = false
 async function step(name, fn) {
   /*
    * 只给**排查这一节**用的临时开关（正常跑不受影响、不设它就没有任何变化）：
-   * `SHUGAO_ONLY_NAV=1` → 跑完「更多入口 · 展开层」那一节就停，不跑后面 90 多张图。
-   * 调层叠/安全区这种改动时，整套要几分钟而这一节只要几十秒。
+   * `SHUGAO_ONLY_NAV=1` → 跑完「更多入口 · 展开层」那一节就停，不跑后面 90 多张图。   * 调层叠/安全区这种改动时，整套要几分钟而这一节只要几十秒。
    * ⚠️ 它会故意报一条"异常中断"，所以**只能在排查时用**，别在正式验收里带这个变量。
    */
   if (name.startsWith('35–37')) sawMobileNavShot = true
@@ -1633,149 +1670,96 @@ await withLock(async () => {
           sheet.body.includes('呼叫记录') ? short(sheet.body, 150) : '没有这条',
         )
 
-        /*
-         * ============================================================
-         * 🆕 2026-09-28：**"它到底看不看得见"** —— 这一轮的核心交付
+        /* ============================================================
+         * 🔴 2026-09-28 **第二轮**：**展开态整栏淡出**（用户改口径，这一节整体重写）
          *
-         * 上面那两条只量了 `aria-expanded` 与箭头 `transform`：它们能证明**状态对了**，
-         * 却证明不了**那颗按钮没被盖住**。真出过的事故就是"状态全对、按钮被 Sheet 盖住"
-         * ——展开发出 0.26s 之后用户只看到一张 Sheet，"朝下的收起箭头"只在收起动画里闪一下
-         * （§十五 15.3 原本记着的那条"已知限制"）。
+         * 上一轮这一节钉的是"**展开态圆按钮仍然看得见、可点**"（做法：把 `<nav>` 抬到
+         * Sheet 之上 `z-[52]`，靠 `elementFromPoint(圆按钮中心)` 命中按钮本身来证明）。
+         * 用户看过之后说：「但是点开后导航栏浮在上面会不会太奇怪了 / 展开后整个导航栏淡出吧」，
+         * 于是**抬层叠整个回退**（现在 `<nav>` 恒 `z-40`），语义**反过来了**：
          *
-         * 判据用 `document.elementFromPoint()` —— **真几何**：在目标的正中心放一个点，
-         * 问浏览器"**这个位置上，最上面那个能被点到的元素是谁**"。谁被别的层盖住，
-         * 这里返回的就是盖住它的那个（`.sheet` / `.scrim` / `.nav` 那条包裹带）。
+         *   展开态 → 导航必须 **不可见（`opacity: 0`）且不可点**
+         *            （`elementFromPoint` 命中的**不是**导航里的任何元素）
          *
-         * 🔴 三条纪律（缺一条这条断言就变成摆设）：
-         *   ① **带反向对照**：每条断言都配一个"把层叠改回去"的对照，**必须**红。
-         *      对照用**内联 `style.setProperty(…, 'important')`**（量完就撤），
-         *      不依赖"某次手工改源码"—— 否则下一个人只能靠信我一句话。
-         *      ⚠️ 圆按钮那条的对照**打在 AppShell 根节点上**，不是打在 `<nav>` 上：
-         *        这一轮真正的坑就是"根节点 `z-[1]` 自成层叠上下文，nav 里的 z-index 出不去"，
-         *        打在 nav 上写什么值都还原不出坏的样子（见 `neg-circle` 那段注释）。
-         *   ② **点要取真中心**（`getBoundingClientRect` 算），不写死坐标：尺寸一漂，
-         *      点就漂到按钮外面，那会变成"恒绿的假断言"。
-         *   ③ 只认"命中的元素是目标本身或它的子元素"（`contains`）：
-         *      圆按钮里那颗 SVG、胶囊里那个高亮 `<span>` 都是子元素，不许因为这点红。
+         * 三条纪律与上一轮相同（缺一条断言就变成摆设）：
+         *   ① **带反向对照**：去掉淡化（`opacity` 与三处 `pointer-events` 一起还原）→ 必须红；
+         *   ② **点取真中心**（`getBoundingClientRect` 算），不写死坐标；
+         *   ③ 对照用**内联 `style.setProperty(…, 'important')`** —— 按元素打，与类名无关
+         *      （上一轮实测过：注入 `<style>` 按类名选，改版后选择器**静默失配**，对照永远绿）。
          *
-         * 两条被钉的事：
-         *   · `stack-circle`：展开态圆按钮中心 → 命中的必须是**那颗按钮**，不是 Sheet/遮罩。
-         *     ⚠️ 它同时钉住"**点它 = 关 Sheet**"（开关语义）：它浮在遮罩之上，
-         *        所以点它是**按钮自己**收到 click（`setMoreAt(null)`），不是"点遮罩关闭"。
-         *        真浏览器里点过一次：`sheet: true → false`、`aria-expanded: true → false`、
-         *        URL 不动、无障碍名回到「展开更多入口」（§十五 15.3）。
-         *   · `stack-foot`：Sheet 页脚那个「收起」按钮的中心**必须在导航之上**。
-         *     `<nav>` 只有 `pointer-events-none`、**没有背景**，所以"压在导航下面"时
-         *     `elementFromPoint` 会**穿过它**返回 `.sheet`（实测就是这么回事：命中
-         *     `.sheet` 的页脚 div，而按钮其实被那两颗控件盖着）—— 单看命中元素会漏判。
-         *     所以这里问的是**位置**：按钮中心（连同页脚垫起来的那块）必须落在
-         *     `<nav>` 的上沿之上。层叠抬上去之后，页脚靠 `.sheet-foot-safe`
-         *     （index.css）补出等效于主列 `pb-24` 的安全区，这一条就是它的机器版。
-         *     实测（414×880）：页脚垫起来后按钮中心 y=783、`nav` 上沿 y=804 ——
-         *     差 21px；抽掉那块安全区就掉到 847（落在 804 以下的带子里）。
-         * ============================================================
-         */
+         * 🔴🔴 **本轮实测踩到的两个"断言会变成摆设"的坑（都写下来）**：
+         *
+         *   ① **"命中谁"在展开态证明不了"能不能点到"**：Sheet（z-51）本来就盖住导航
+         *      那一整条（实测：sheet.top=475、nav.top=804），所以 `elementFromPoint(圆按钮中心)`
+         *      命中 Sheet 里的东西是**理所当然**的，把淡化去掉它照样命中 Sheet
+         *      —— 只按"命中谁"写，对照**永远不红**（第一版就是这么写的，实测红不了）。
+         *      所以"能不能点到"改成直接量**计算出来的 `pointer-events`**：
+         *      淡化在 → 圆按钮/胶囊都是 `none`；淡化去掉 → 回到 `auto`。
+         *   ② **对照要连 `transition` 一起停掉**：`<nav>` 上有 260ms 的
+         *      `transition-opacity`，只把 `opacity` 内联改成 1 的话，**过渡还在跑**
+         *      （实测量到 `opacity=0.23`）—— 那时 `elementFromPoint` 会**跳过**这个
+         *      半透明的层，命中的是下面的 Sheet，对照于是"看着没生效"。
+         *      所以要一起写 `transition: none !important`，让它**立刻**是 1。
+         *
+         * ⚠️ 还留了一条"**真的点一下**"（不只是量样式）：在圆按钮中心 `page.mouse.click()`，
+         *    断言 **URL 没动**。上一轮的回归正是"导航浮在浮层之上、点了会跳页"。
+         * ⚠️ **顺序**：这条"真点一下"挪到了本节**最后** —— 那一下落在 Sheet 自己的
+         *    页脚/条目上，会把 Sheet 关掉（正常语义），所以后面不能再有用 `.sheet` 的断言。
+         * ============================================================ */
         const stackProbe = async (c) =>
           await page.evaluate(async ({ c }) => {
             const nav = document.querySelector('nav[aria-label="主导航"]')
+            const pill = nav?.querySelector('div')
             const circle = nav?.querySelector('button[aria-haspopup="dialog"]')
             const sheet = document.querySelector('.sheet')
             const box = sheet?.querySelector('.sheet-foot-safe')
-            /* AppShell 的根节点：`neg-circle` 那条对照改的就是它（见下） */
-            const root = document.querySelector('div.relative.mx-auto.flex.min-h-full.w-full')
             const foot = box
-              ? [...box.querySelectorAll('button')].find(
-                  (b) => (b.innerText ?? '').trim() === '收起',
-                )
+              ? [...box.querySelectorAll('button')].find((b) => (b.innerText ?? '').trim() === '收起')
               : null
-            if (!nav || !circle || !sheet || !box || !foot || !root) {
+            if (!nav || !pill || !circle || !sheet || !box || !foot) {
               return {
                 c,
                 missing:
-                  'nav / 圆按钮 / .sheet / .sheet-foot-safe / 页脚「收起」按钮 / AppShell 根节点 有一样没找到',
+                  'nav / 胶囊 / 圆按钮 / .sheet / .sheet-foot-safe / 页脚「收起」按钮 有一样没找到',
               }
             }
-            /* 对照场景：把"圆按钮被 Sheet 盖住"那件事**原样做回去** / 去掉页脚那块安全区 */
-            if (c === 'neg-circle') {
-              /*
-               * 🔴 这个对照**必须打在根节点上，不能打在 `<nav>` 上** —— 这正是这次踩到的坑：
-               * `.sheet`（z-51）走 Portal 挂在 body 上，而 `<nav>` 在 AppShell 根节点
-               * `div.relative.z-[1]` 里面；`z-index` 非 auto 的定位元素自成**层叠上下文**，
-               * 子树里的 z-index 出不去 —— 给 nav 写 `z-40` 还是 `z-52` 结果**完全一样**
-               * （都困在 z-1 里）。所以"还原成看不见"= **把那个层叠上下文还给根节点**。
-               *
-               * ⚠️ **用内联 `setProperty(…, 'important')`，不要注入 `<style>`**（实测教训）：
-               *   注入 `<style>` 那版（选择器 `.z-\[1\].mx-auto…`）在真页面上**一点作用都没有**
-               *   —— 因为它按类名选，而这一轮把根节点的 `z-[1]` 摘掉之后那个类**已经不在 DOM 上**了；
-               *   选择器失配是**静默的**（不报错、也不红），对照于是变成一条永远绿的摆设。
-               *   内联样式按**元素**打，与类名无关；`important` 又能压过 Tailwind 的 utility 类。
-               *   同一轮里"页脚安全区"那条对照也有同样的坑（`<style>` 里的 `!important`
-               *   规则同样没生效）—— 两处都改成内联。
-               */
-              root.style.setProperty('z-index', '1', 'important')
-            } else if (c === 'neg-foot') {
-              box.style.setProperty('padding-bottom', '12px', 'important')
-            }
             /*
-             * 等两帧再量：改完样式到"计算值真的变了"之间隔一次样式重算，
-             * 而 `elementFromPoint` **不触发**重算 —— 立刻量会拿到旧值（也会让对照永远不红）。
+             * 对照场景：
+             *   · `neg-fade`  —— 去掉淡化（opacity 1 + 三处 pointer-events auto + 停掉过渡）
+             *                     = 用户改口径之前那种"展开态导航还浮在上面"的样子。
+             * ⚠️ 同时打三处**不是保险起见**：父级 `pointer-events: none` **挡不住**子级
+             *    自己写的 `auto`（这正是"看不见却还能点到"的成因），所以坏样子要完整还原。
              */
-            await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))
-            const undo = () => {
-              if (c === 'neg-circle') root.style.removeProperty('z-index')
-              if (c === 'neg-foot') box.style.removeProperty('padding-bottom')
+            if (c === 'neg-fade') {
+              nav.style.setProperty('opacity', '1', 'important')
+              nav.style.setProperty('pointer-events', 'auto', 'important')
+              nav.style.setProperty('transition', 'none', 'important')
+              pill.style.setProperty('pointer-events', 'auto', 'important')
+              circle.style.setProperty('pointer-events', 'auto', 'important')
             }
             const rectOf = (el) => {
               const r = el.getBoundingClientRect()
-              /* `raw` 留**未取整**的浮点值：命中点要用它算中心（取整会让点在按钮里偏 0.5px） */
               return {
                 raw: r,
                 left: Math.round(r.left),
                 top: Math.round(r.top),
                 width: Math.round(r.width),
                 height: Math.round(r.height),
-                /* 元素自己的层叠：`.sheet` 的 z-index 不在内联样式上，所以读计算值 */
                 z: getComputedStyle(el).zIndex,
-                /* 谁是"能被点到"的：`pointer-events` 继承，nav 那条带子是 none */
                 pe: getComputedStyle(el).pointerEvents,
               }
             }
             const circleRect = rectOf(circle)
-            /* 中心点：取**视口坐标**（elementFromPoint 要的就是这个坐标系） */
-            const cx = circleRect.raw.left + circleRect.raw.width / 2
-            const cy = circleRect.raw.top + circleRect.raw.height / 2
-            const atCircle = document.elementFromPoint(cx, cy)
             const footRect = rectOf(foot)
-            const fcx = footRect.raw.left + footRect.raw.width / 2
-            const fcy = footRect.raw.top + footRect.raw.height / 2
-            const atFoot = document.elementFromPoint(fcx, fcy)
-            const navRect = nav.getBoundingClientRect()
+            const pillRect = rectOf(pill)
             /*
-             * ⚠️ 这两句必须在 `undo()` **之前**读：它们就是"对照到底改上没有"的证据，
-             *    放在还原之后读永远是常态值（`neg-circle` 那条就会显示 root z=auto，
-             *    看着像"对照没生效"）。
+             * ⚠️ 这一整段都必须在 `undo()` **之前**读：它们就是"对照到底改上没有"的证据，
+             *    放在还原之后读永远是常态值（看着像"对照没生效"）。
              */
-            const rootZ = getComputedStyle(root).zIndex
-            const padBottom = getComputedStyle(box).paddingBottom
-            /* 量完了就把对照还原（下面的 `hitIsCircle` / `centerInNavBand` 都是量出来的标量） */
-            undo()
-            const describe = (el) => {
-              if (!el) return '(什么都没有)'
-              const cls =
-                typeof el.className === 'string' && el.className
-                  ? `.${el.className.trim().split(/\s+/).join('.')}`
-                  : ''
-              return `${el.tagName.toLowerCase()}${cls}`
-            }
-            return {
+            const out = {
               case: c,
-              /* 根节点（AppShell 那个 `relative mx-auto flex min-h-full w-full`）的计算 z-index ——
-                 `neg-circle` 那条对照就是改它；把它读回来，对照失效时能一眼看出"是没生效还是没在量" */
-              rootZ,
               circle: {
-                hit: describe(atCircle),
-                hitIsCircle: Boolean(atCircle) && circle.contains(atCircle),
-                /* 只带取整后的那份（含 `raw` 的 DOMRect 序列化出来是一坨，读不动） */
+                pe: getComputedStyle(circle).pointerEvents,
                 rect: {
                   left: circleRect.left,
                   top: circleRect.top,
@@ -1784,83 +1768,82 @@ await withLock(async () => {
                   z: circleRect.z,
                   pe: circleRect.pe,
                 },
-                center: [Math.round(cx), Math.round(cy)],
+                center: [Math.round(circleRect.raw.left + circleRect.raw.width / 2), Math.round(circleRect.raw.top + circleRect.raw.height / 2)],
               },
+              pill: { pe: getComputedStyle(pill).pointerEvents, width: pillRect.width },
               foot: {
-                hit: describe(atFoot),
-                hitIsFoot: Boolean(atFoot) && foot.contains(atFoot),
                 rect: {
                   left: footRect.left,
                   top: footRect.top,
                   width: footRect.width,
                   height: footRect.height,
-                  z: footRect.z,
-                  pe: footRect.pe,
                 },
-                center: [Math.round(fcx), Math.round(fcy)],
-                /* 页脚那块安全区**算出来是多少**（`neg-foot` 那条对照就是压它） */
-                padBottom,
-                /* 按钮中心在不在导航那条带子里（`nav` 只有 pointer-events-none、没有背景，
-                   所以这里要问**位置**，不能只看 elementFromPoint 命中了谁） */
-                centerInNavBand: fcy >= navRect.top,
+                center: [Math.round(footRect.raw.left + footRect.raw.width / 2), Math.round(footRect.raw.top + footRect.raw.height / 2)],
+                padBottom: getComputedStyle(box).paddingBottom,
+                /* 页脚按钮下沿距视口底多少：> 0 = 完全看得见 */
+                bottomGap: Math.round(window.innerHeight - footRect.raw.bottom),
               },
               nav: {
-                top: Math.round(navRect.top),
-                height: Math.round(navRect.height),
+                opacity: getComputedStyle(nav).opacity,
+                pointerEvents: getComputedStyle(nav).pointerEvents,
                 z: getComputedStyle(nav).zIndex,
+                top: Math.round(nav.getBoundingClientRect().top),
+                height: Math.round(nav.getBoundingClientRect().height),
               },
-              sheet: {
-                z: getComputedStyle(sheet).zIndex,
-                rect: {
-                  left: Math.round(sheet.getBoundingClientRect().left),
-                  top: Math.round(sheet.getBoundingClientRect().top),
-                  width: Math.round(sheet.getBoundingClientRect().width),
-                  height: Math.round(sheet.getBoundingClientRect().height),
-                },
-              },
+              sheet: { z: getComputedStyle(sheet).zIndex, top: Math.round(sheet.getBoundingClientRect().top) },
             }
+            /* 对照改完样式到"计算值真的变了"之间隔一次样式重算：等两帧再收尾（口径照上一轮） */
+            await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))
+            if (c === 'neg-fade') {
+              nav.style.removeProperty('opacity')
+              nav.style.removeProperty('pointer-events')
+              nav.style.removeProperty('transition')
+              pill.style.removeProperty('pointer-events')
+              circle.style.removeProperty('pointer-events')
+            }
+            return out
           }, { c })
 
-        /*
-         * 三次取数，各处只取一次：
-         *   · `real`       —— 真层叠（nav 展开态 z-52 在 .sheet 的 z-51 之上）
-         *   · `negCircle`  —— 对照①：给 AppShell 根节点加回 `z-[1]`（= 修之前），圆按钮必须被 Sheet 盖住
-         *   · `negFoot`    —— 对照②：抽掉页脚安全区，页脚按钮必须落进导航那条带子
-         */
+        /* 两次取数，各处只取一次：`real` = 真状态；`negFade` = 对照（去掉淡化） */
         const real = await stackProbe('real')
-        const negCircle = await stackProbe('neg-circle')
-        const negFoot = await stackProbe('neg-foot')
-        /* 探针本身缺东西（选择器漂了 / 页脚没了）→ 后面每条都会是"看着红其实没在量"的假红 */
-        for (const [c, r] of [['real', real], ['neg-circle', negCircle], ['neg-foot', negFoot]]) {
+        const negFade = await stackProbe('neg-fade')
+        for (const [c, r] of [['real', real], ['neg-fade', negFade]]) {
           if (r?.missing) throw new Error(`${SNM}：层叠探针（${c}）取数失败 —— ${r.missing}`)
         }
-        check(
-          real.circle?.hitIsCircle === true,
-          `${SNM}：**展开态的圆按钮真的在最上面**（elementFromPoint 命中的是它自己，不是 Sheet / 遮罩）`,
-          `按钮实占=${JSON.stringify(real.circle?.rect)} 中心=${JSON.stringify(real.circle?.center)} → 命中 ${real.circle?.hit}`,
-          `nav z=${real.nav?.z} · .sheet z=${real.sheet?.z} · .sheet=${JSON.stringify(real.sheet?.rect)}`,
-        )
 
-        // 🔴 **反向对照**：把"根节点自成层叠上下文"加回去（= 这次修之前的样子）→ 这一条**必须**红
+        /* ① 视觉上真的消失了（`opacity` 是"看不见"这件事的可量证据） */
         check(
-          negCircle.circle?.hitIsCircle === false,
-          `${SNM}：🧪 反向对照 —— 给根节点加回 z-[1]（按钮重新被 Sheet 盖住）时，上面那条**必须**红`,
-          `加回根节点 z-index 之后命中 ${negCircle.circle?.hit}（hitIsCircle=${negCircle.circle?.hitIsCircle}，nav z=${negCircle.nav?.z}，root z=${negCircle.rootZ}）`,
-          '若这里还是 true，说明上面那条断言是摆设（它根本没在量层叠）',
+          real.nav?.opacity === '0',
+          `${SNM}：展开态**整栏淡出**（\`<nav>\` 的计算 opacity 为 0）`,
+          `opacity=${real.nav?.opacity}（收起态是 1）· nav z=${real.nav?.z} · .sheet z=${real.sheet?.z}（sheet.top=${real.sheet?.top}）`,
         )
-
+        /* ② **而且点不到** —— 两个子控件各自的 `pointer-events` 都必须被关掉。
+              ⚠️ 为什么不写成"elementFromPoint 命中谁"：Sheet（z-51）本来就盖住导航那一整条，
+                 命中 Sheet 里的东西是**理所当然**的、把淡化去掉也一样（实测过，那样写对照永远不红）。
+                 真正会出事故的是"透明了但 `pointer-events` 还是 auto"——那才是"看不见却会误触"。 */
         check(
-          real.foot?.centerInNavBand === false,
-          `${SNM}：页脚那个「收起」按钮**整体落在导航之上**（不会被抬上去的那对控件压住）`,
-          `按钮实占=${JSON.stringify(real.foot?.rect)} 中心=${JSON.stringify(real.foot?.center)} · nav.top=${real.nav?.top}（centerInNavBand=${real.foot?.centerInNavBand}）→ 命中 ${real.foot?.hit}`,
-          '这一条是 `.sheet-foot-safe`（index.css）那块等效 pb-24 安全区的机器版',
+          real.circle?.pe === 'none' && real.pill?.pe === 'none',
+          `${SNM}：展开态**两个子控件的 pointer-events 都被关掉**（不只是透明）`,
+          `圆按钮 pointer-events=${real.circle?.pe} · 胶囊 pointer-events=${real.pill?.pe} · nav pointer-events=${real.nav?.pointerEvents}`,
+          '父级设 none 是**挡不住**子级自己写的 auto 的 —— 所以这两处必须分别量',
         )
-        // 🔴 反向对照：抽掉页脚那块安全区（padding-bottom 压回 12px）→ 按钮中心落进导航那条带子
+        /* ③ 🔴 **反向对照**：把淡化去掉（opacity 1 + 三处 pointer-events 还原成 auto + 停过渡）
+              → ②那条必须红。实测：还原之后两个子控件都回到 auto。 */
         check(
-          negFoot.foot?.centerInNavBand === true,
-          `${SNM}：🧪 反向对照 —— 抽掉页脚安全区时，上面那条**必须**红`,
-          `padding-bottom 压回 12px 之后 nav.top=${negFoot.nav?.top}、按钮中心 y=${negFoot.foot?.center?.[1]}（centerInNavBand=${negFoot.foot?.centerInNavBand}，页脚 pad-bottom=${negFoot.foot?.padBottom}）`,
-          '红不了就说明页脚其实没被压住，或者这条断言量的不是位置',
+          negFade.nav?.opacity === '1' &&
+            negFade.circle?.pe === 'auto' &&
+            negFade.pill?.pe === 'auto',
+          `${SNM}：🧪 反向对照 —— 去掉淡化的瞬间，两个子控件又**变成可点**了（②那条**必须**红）`,
+          `还原成 opacity=${negFade.nav?.opacity} 之后：圆按钮 pointer-events=${negFade.circle?.pe}、胶囊=${negFade.pill?.pe}`,
+          '⚠️ 对照必须连 `transition:none` 一起写：只改 opacity 的话 260ms 的过渡还在跑，量到的是中间值（实测 opacity=0.23）',
+        )
+        /* ④ 页脚不再需要让位（`.sheet-foot-safe` 按用户要求回退）：按钮整体可见即可。
+              实测 414×880：按钮占 y=826~868、距视口底 12px —— 完整可见、不用滚。 */
+        check(
+          real.foot?.bottomGap > 0,
+          `${SNM}：页脚那个「收起」按钮**完整落在视口内**（导航不再压它，页脚恢复 p-3 也放得下）`,
+          `按钮实占=${JSON.stringify(real.foot?.rect)} 中心=${JSON.stringify(real.foot?.center)} · 下沿距视口底 ${real.foot?.bottomGap}px · 页脚 pad-bottom=${real.foot?.padBottom}`,
+          '这一条替代了上一轮的"页脚安全区"那条（`.sheet-foot-safe` 已按用户要求回退）',
         )
 
         // 展开层里点一条 → 真的跳过去（收起的四条路径之一：点条目先收起再 navigate）
@@ -1872,6 +1855,32 @@ await withLock(async () => {
           after.url === '/schedule' && !after.sheetOpen,
           `${SNM}：点「日程表」跳过去且展开层收起`,
           `url=${after.url} sheetOpen=${after.sheetOpen}`,
+        )
+        /* 收回导航（上一步跳页时已经自动收起，这里显式再点一次展开，给下面的"真点一下"用） */
+        await page.locator('nav[aria-label="主导航"] button[aria-haspopup="dialog"]').click({
+          force: true,
+        })
+        await page.waitForTimeout(700)
+        const reopened = await stackProbe('real')
+        check(
+          reopened.nav?.opacity === '0',
+          `${SNM}：再展开一次，导航又是透明的（下面那条"真点一下"要在展开态量）`,
+          `opacity=${reopened.nav?.opacity} · sheet.top=${reopened.sheet?.top} · 圆按钮中心=${JSON.stringify(reopened.circle?.center)}`,
+        )
+        /* ⑤ 🔴 **真点一下**：在圆按钮中心点一次 —— 那里现在没有导航，
+              点下去命中的是 Sheet 自己的东西，并且 **URL 绝不许动**
+              （"点了导航跳页"正是本轮要防的那个回归）。
+              ⚠️ 不把"Sheet 还开着"当判据：那一点下面是 Sheet 的页脚/条目，
+                 点到「收起」把它关掉是**正常语义**（上一轮实测也是这么记的）。
+              ⚠️ 这一条必须放在**最后**：它会把 Sheet 关掉，后面不能再有 `.sheet` 断言。 */
+        const urlBeforeClick = page.url()
+        await page.mouse.click(reopened.circle.center[0], reopened.circle.center[1])
+        await page.waitForTimeout(320)
+        check(
+          page.url() === urlBeforeClick,
+          `${SNM}：**在圆按钮的位置真点一下 → URL 一动都不动**（那里已经不是导航了）`,
+          `点之前 url=${urlBeforeClick} · 点之后 url=${page.url()}`,
+          '展开态那颗按钮在 DOM 里还在（只是透明 + 不可点），所以"点不动"这件事必须实测',
         )
       })
 
@@ -3753,6 +3762,411 @@ await withLock(async () => {
           `读到 ${readNames.length} 个：${short(readNames.join('、'), 80)}`,
         )
         await shot(adPage, SAD, '83-admin-e7-names', { full: true })
+      })
+
+      /* ============================================================
+         🆕 全站公告（2026-09-28 公告轮）—— 顶部横幅的**层叠**与弹窗的**排队**
+         ------------------------------------------------------------
+         🔴 这一节只验"**摆在哪、跟谁抢位置**"这一半（形态与层叠），另外两半在别处：
+              · 「摆哪几条 / 弹几次 / 排序 / 生效区间」= `nav-checks.mjs` 的 **A10**（纯函数）；
+              · 「谁能发 / 谁能读 / 一条都写不动」= `rls-checks.mjs` 的 **二·之六**（真 PGlite）。
+         用户点名要**实测**的三件事（参考项目为它们写了 128 行的 `renderSiteAnnBar`）：
+           ① 公告条与 `SyncErrorBanner`（`z-[70]`）**同时出现**时谁在上、会不会互相挡；
+           ② 公告弹窗与**早间欢迎弹窗**同时到点怎么办（排队，不打架）；
+           ③ 移动端不能把导航/内容挤没（`--top-stack-h` 那根变量）。
+
+         ⚠️ 时钟：这一节自己开 context。公告条本身不吃时钟，但**早间欢迎弹窗**吃
+            （6:30–9:00），所以第 ② 件事必须在 08:00 那一支里验。
+         ============================================================ */
+      const SAN = '全站公告'
+      const ANN_ROLES = encodeURIComponent(JSON.stringify([{ role: 'super' }]))
+
+      const ctxAnn = await browser.newContext({
+        viewport: { width: 414, height: 880 },
+        locale: 'zh-CN',
+      })
+      await ctxAnn.clock.install({ time: new Date('2026-09-19T10:00:00') })
+      await ctxAnn.addInitScript((base) => {
+        window.localStorage.setItem('shugao.teacher.v1', JSON.stringify(base))
+        window.localStorage.setItem('shugao.deviceRole', 'teacher')
+        /*
+         * ⚠️ 这里**不许**清 `shugao.ann.*`（本轮踩过一次）：`addInitScript` 是**每次导航**都跑的，
+         *    而"今天关过"那条断言专门要验"**刷新之后**仍然不显示" —— 在 initScript 里清掉它，
+         *    等于把被测行为本身擦掉了（实测：断言读到 `hideDay = null`，看着像产品坏了）。
+         *    这个 context 本来就是新的（localStorage 从空开始），不需要任何清理。
+         */
+      }, TEACHER_STATE)
+
+      const annPage = await ctxAnn.newPage()
+      annPage.on('pageerror', (e) => errors.push(`PAGEERROR(公告) :: ${e.message}`))
+      annPage.on('console', (m) => {
+        if (m.type() === 'error') errors.push(`CONSOLE(公告) :: ${m.text()}`)
+      })
+
+      /** 把公告这一摊的几何一次读回来（层叠规则全靠这些数） */
+      const annProbe = (p) =>
+        p.evaluate(() => {
+          const r = (sel) => {
+            const el = document.querySelector(sel)
+            if (!el) return null
+            const b = el.getBoundingClientRect()
+            return { x: Math.round(b.x), y: Math.round(b.y), w: Math.round(b.width), h: Math.round(b.height), bottom: Math.round(b.bottom) }
+          }
+          return {
+            varTopStack: getComputedStyle(document.documentElement).getPropertyValue('--top-stack-h').trim(),
+            stack: r('[data-ann-stack]'),
+            sync: r('[data-sync-error-banner]'),
+            header: r('header.glass'),
+            main: r('main'),
+            bars: [...document.querySelectorAll('[data-ann-bar]')].map((el) => ({
+              level: el.getAttribute('data-ann-bar'),
+              text: String(el.innerText).replace(/\s+/g, ' ').trim(),
+              box: (() => {
+                const b = el.getBoundingClientRect()
+                return { y: Math.round(b.y), h: Math.round(b.height) }
+              })(),
+            })),
+            marquee: document.querySelector('[data-ann-marquee]')
+              ? String(document.querySelector('[data-ann-marquee]').innerText).replace(/\s+/g, ' ').trim()
+              : null,
+            modal: r('.modal'),
+            annPopup: document.querySelector('[data-ann-popup]')
+              ? document.querySelector('[data-ann-popup]').getAttribute('data-ann-popup')
+              : null,
+            annPopupText: document.querySelector('[data-ann-popup]')
+              ? String(document.querySelector('[data-ann-popup]').innerText).replace(/\s+/g, ' ').trim()
+              : '',
+            welcomeOpen: Boolean(document.getElementById('welcome-title')),
+            hideDay: (() => {
+              try {
+                return window.localStorage.getItem('shugao.ann.hideDay')
+              } catch {
+                return null
+              }
+            })(),
+            seen: (() => {
+              try {
+                const raw = window.localStorage.getItem('shugao.ann.seen')
+                return raw ? Object.keys(JSON.parse(raw)) : []
+              } catch {
+                return 'ERR'
+              }
+            })(),
+            previewKey: (() => {
+              try {
+                const raw = window.localStorage.getItem('shugao.ann.preview')
+                return raw ? JSON.parse(raw).id : null
+              } catch {
+                return 'ERR'
+              }
+            })(),
+          }
+        })
+
+      await step(SAN, async () => {
+        await annPage.goto(`${BASE}/`, { waitUntil: 'networkidle' })
+        await annPage.waitForTimeout(700)
+        await expectPage(annPage, `${SAN}·顶部横幅`, {
+          url: '/',
+          markers: ['今日待办', '系统维护：今晚 23:00–23:30'],
+        })
+        const g = await annProbe(annPage)
+
+        /* --- ① 横幅在、内容是那两条演示夹具（置顶的那条 = 独立横幅；普通的那条 = 滚动条） --- */
+        check(
+          g.stack !== null && g.stack.h > 0,
+          `${SAN}：顶部有公告条（本机演示模式下有两条公告夹具）`,
+          `高度 ${g.stack?.h ?? '(没有这个节点)'}px`,
+        )
+        check(
+          g.bars.length === 1 && g.bars[0].level === 'important' && g.bars[0].text.includes('置顶'),
+          `${SAN}：置顶那条走**独立横幅**（等级 important → 暖黄底 + "置顶"徽标）`,
+          JSON.stringify(g.bars.map((b) => `${b.level}:${short(b.text, 40)}`)),
+        )
+        check(
+          (g.marquee ?? '').includes('新功能：按学科看考试统计'),
+          `${SAN}：普通那条在**滚动条**里（一行、最安静的那一档）`,
+          short(g.marquee ?? '(没有滚动条)', 90),
+        )
+
+        /* --- ② 层叠：公告条在最上面，顶栏紧贴它之下，内容再往下 —— **一个都不许被压住** --- */
+        check(
+          g.stack.y === 0 && g.stack.bottom === g.header.y,
+          `${SAN}：🔴 公告条贴在最顶（y=${g.stack?.y}），**移动端顶栏紧贴它之下**（${g.header?.y}）—— 谁也不压谁`,
+          `stack ${g.stack?.y}~${g.stack?.bottom} · header ${g.header?.y}~${g.header?.bottom}`,
+        )
+        check(
+          g.main.y >= g.header.bottom,
+          `${SAN}：页面内容**没有被吃掉一行**（main 从 y=${g.main?.y} 开始，顶栏到 ${g.header?.bottom}）`,
+          `视口 414×880 里公告条 + 顶栏共 ${g.header?.bottom ?? '?'}px（${Math.round(((g.header?.bottom ?? 0) / 880) * 100)}%）`,
+        )
+        check(
+          g.varTopStack === `${g.stack.h}px`,
+          `${SAN}：让位量走 **--top-stack-h**（一个变量，四个地方共用：左栏/右栏/移动顶栏/PageHead）`,
+          `变量 ${g.varTopStack} · 实测高度 ${g.stack.h}px`,
+        )
+        await shot(annPage, SAN, '89-ann-bar-mobile')
+      })
+
+      /* --- ③ 「今天不再显示」：点滚动条的 × → 滚动条消失，但**置顶那条无视它** --- */
+      await step(SAN, async () => {
+        await annPage.click('[data-ann-close-marquee]')
+        await annPage.waitForTimeout(300)
+        const g = await annProbe(annPage)
+        check(
+          g.marquee === null && g.bars.length === 1,
+          `${SAN}：滚动条那一行的「×」= **今天不再显示公告**；置顶/紧急**无视隐藏标志**（照参考项目）`,
+          `滚动条 ${g.marquee === null ? '已收起' : '还在'} · 独立横幅 ${g.bars.length} 条`,
+        )
+        check(
+          /^\d{4}-\d{2}-\d{2}$/.test(String(g.hideDay)),
+          `${SAN}："今天"按**北京时间**记（shugao.ann.hideDay），**不落库** —— 平台不记谁关过`,
+          `hideDay = ${g.hideDay}`,
+        )
+        check(
+          g.stack.bottom === g.header.y && g.varTopStack === `${g.stack.h}px`,
+          `${SAN}：收起之后让位量与顶栏位置**跟着变**（不是写死的一个数）`,
+          `stack 高 ${g.stack.h}px · header y=${g.header.y}`,
+        )
+        await shot(annPage, SAN, '90-ann-bar-hidden-today')
+
+        /* 刷新一次：这一条记在**本机**，所以刷新之后仍然不显示 */
+        await annPage.goto(`${BASE}/`, { waitUntil: 'networkidle' })
+        await annPage.waitForTimeout(500)
+        const g2 = await annProbe(annPage)
+        check(
+          g2.marquee === null,
+          `${SAN}：刷新之后**仍然不显示滚动条**（"今天关过"是本机记的，不是本次会话）`,
+          `hideDay = ${g2.hideDay}`,
+        )
+      })
+
+      /* --- ④ 与 `SyncErrorBanner`（z-[70]）**同时出现**：公告条给它让位，两条都读得到 --- */
+      await step(SAN, async () => {
+        /* `?sync=` 是 DEV-only 钩子（`lib/roles.ts` 的 `devInjectedSyncError()`）——
+           没有它，"本地演示模式下永远不会出现的报错横幅"这件事根本测不了 */
+        await annPage.goto(`${BASE}/?sync=${encodeURIComponent('演示用的同步错误')}`, {
+          waitUntil: 'networkidle',
+        })
+        await annPage.waitForTimeout(600)
+        const g = await annProbe(annPage)
+        check(
+          g.sync !== null && g.sync.y === 0,
+          `${SAN}：同步出错横幅**在最顶**（z-[70]，y=${g.sync?.y}）`,
+          `sync 高 ${g.sync?.h ?? '(没有)'}px`,
+        )
+        check(
+          g.stack !== null && g.stack.y === g.sync.bottom,
+          `🔴 ${SAN}：公告条**给它让位**（公告条 y=${g.stack?.y} == 报错横幅底 ${g.sync?.bottom}）—— ` +
+            '**不是被压在下面**（压住 = 那条公告一个字都读不到）',
+          `sync ${g.sync?.y}~${g.sync?.bottom} · stack ${g.stack?.y}~${g.stack?.bottom} · 重叠 ${(g.sync?.bottom ?? 0) - (g.stack?.y ?? 0)}px`,
+        )
+        check(
+          g.header.y === g.stack.bottom && g.main.y >= g.header.bottom,
+          `${SAN}：顶栏与内容**依次往下**（顶栏 ${g.header?.y} · 内容 ${g.main?.y}）—— 三条互不遮挡`,
+          `stack 底 ${g.stack?.bottom} · header ${g.header?.y}~${g.header?.bottom} · main ${g.main?.y}`,
+        )
+        check(
+          g.varTopStack === `${(g.sync?.h ?? 0) + (g.stack?.h ?? 0)}px`,
+          `${SAN}：让位量 = **报错横幅 + 公告条**（--top-stack-h 把两段加起来）`,
+          `变量 ${g.varTopStack}`,
+        )
+        await shot(annPage, SAN, '91-ann-with-sync-banner')
+      })
+
+      /* --- ⑤ 弹窗与**早间欢迎弹窗**同时到点：公告弹窗排队礼让（08:00 那一支） --- */
+      await step(SAN, async () => {
+        const ctxM = await browser.newContext({ viewport: { width: 414, height: 880 }, locale: 'zh-CN' })
+        await ctxM.clock.install({ time: new Date('2026-09-19T08:00:00') })
+        await ctxM.addInitScript(
+          (payload) => {
+            window.localStorage.setItem('shugao.teacher.v1', JSON.stringify(payload.base))
+            window.localStorage.setItem('shugao.deviceRole', 'teacher')
+            window.localStorage.removeItem('shugao.ann.hideDay')
+            window.localStorage.removeItem('shugao.ann.seen')
+            /* 预览快照：模拟超管在 /admin 点了「预览」（那条是 urgent + 每人一次） */
+            window.localStorage.setItem('shugao.ann.preview', JSON.stringify(payload.preview))
+          },
+          { base: TEACHER_STATE, preview: ANN_PREVIEW },
+        )
+        const pm = await ctxM.newPage()
+        pm.on('pageerror', (e) => errors.push(`PAGEERROR(公告弹窗) :: ${e.message}`))
+        pm.on('console', (m) => {
+          if (m.type() === 'error') errors.push(`CONSOLE(公告弹窗) :: ${m.text()}`)
+        })
+        try {
+          await pm.goto(`${BASE}/`, { waitUntil: 'networkidle' })
+          await pm.waitForTimeout(700)
+          const g1 = await annProbe(pm)
+          check(
+            g1.welcomeOpen && g1.annPopup === null,
+            `🔴 ${SAN}：08:00 进页面 —— **先弹早间欢迎**（"今天要批的作业"），公告弹窗**礼让、不抢位**`,
+            `早间欢迎 ${g1.welcomeOpen ? '开着' : '没开'} · 公告弹窗 ${g1.annPopup ?? '没弹'}`,
+          )
+          check(
+            g1.bars.length >= 1,
+            `${SAN}：礼让的只是**弹窗** —— 顶部横幅照常在（"看得到"与"打断你"是两件事）`,
+            `独立横幅 ${g1.bars.length} 条`,
+          )
+
+          /* 关掉早间欢迎 → 公告弹窗这才出现 */
+          await pm.evaluate(() => {
+            const b = [...document.querySelectorAll('.modal button')].find((x) => /开始今天/.test(x.textContent ?? ''))
+            b?.click()
+          })
+          await pm.waitForTimeout(700)
+          const g2 = await annProbe(pm)
+          check(
+            g2.annPopup === 'urgent' && g2.welcomeOpen === false,
+            `🔴 ${SAN}：关掉早间欢迎之后，**公告弹窗才弹**（排队，不并行、也不丢）`,
+            `弹窗等级 ${g2.annPopup ?? '没弹'} · 文案 ${short(g2.annPopupText, 60)}`,
+          )
+          check(
+            g2.annPopupText.includes('紧急') && g2.annPopupText.includes('预览'),
+            `${SAN}：弹窗把**等级**与"预览"来源都写出来了（紧急 → 强提醒）`,
+            short(g2.annPopupText, 90),
+          )
+          await shot(pm, SAN, '92-ann-popup-after-welcome')
+
+          /* 关掉公告弹窗：`once` 记本机、预览快照清掉 */
+          await pm.evaluate(() => {
+            const b = [...document.querySelectorAll('.modal button')].find((x) => /我知道了/.test(x.textContent ?? ''))
+            b?.click()
+          })
+          await pm.waitForTimeout(500)
+          const g3 = await annProbe(pm)
+          check(
+            g3.annPopup === null && g3.previewKey === null,
+            `${SAN}：关掉之后——弹窗收起、**预览快照自动清掉**（不会下次莫名又弹）`,
+            `preview = ${g3.previewKey} · 弹窗 ${g3.annPopup ?? '没弹'}`,
+          )
+          check(
+            typeof g3.seen !== 'string' && g3.seen.length === 1,
+            `${SAN}：`+"`once` 只在**关掉时**记进本机（`shugao.ann.seen`）—— 平台不记谁看过",
+            `seen = ${JSON.stringify(g3.seen)}`,
+          )
+        } finally {
+          await ctxM.close()
+        }
+      })
+
+      /* --- ⑥ 桌面：左栏/右栏也要让位（同一根 `--top-stack-h`） --- */
+      await step(SAN, async () => {
+        const ctxD = await browser.newContext({ viewport: { width: 1280, height: 800 }, locale: 'zh-CN' })
+        await ctxD.clock.install({ time: new Date('2026-09-19T10:00:00') })
+        await ctxD.addInitScript((base) => {
+          window.localStorage.setItem('shugao.teacher.v1', JSON.stringify(base))
+          window.localStorage.setItem('shugao.deviceRole', 'teacher')
+          window.localStorage.removeItem('shugao.ann.hideDay')
+        }, TEACHER_STATE)
+        const pd = await ctxD.newPage()
+        pd.on('pageerror', (e) => errors.push(`PAGEERROR(公告·桌面) :: ${e.message}`))
+        pd.on('console', (m) => {
+          if (m.type() === 'error') errors.push(`CONSOLE(公告·桌面) :: ${m.text()}`)
+        })
+        try {
+          await pd.goto(`${BASE}/`, { waitUntil: 'networkidle' })
+          await pd.waitForTimeout(600)
+          const g = await pd.evaluate(() => {
+            const r = (sel) => {
+              const el = document.querySelector(sel)
+              if (!el) return null
+              const b = el.getBoundingClientRect()
+              return { x: Math.round(b.x), y: Math.round(b.y), w: Math.round(b.width), bottom: Math.round(b.bottom) }
+            }
+            return {
+              stack: r('[data-ann-stack]'),
+              rail: r('.floating-rail'),
+              main: r('main'),
+              varTopStack: getComputedStyle(document.documentElement).getPropertyValue('--top-stack-h').trim(),
+            }
+          })
+          check(
+            g.rail !== null && g.rail.y >= (g.stack?.bottom ?? 0),
+            `${SAN}（桌面）：左侧悬浮栏**也在公告条之下**（左栏 y=${g.rail?.y} ≥ 公告条底 ${g.stack?.bottom}）`,
+            `公告条 ${g.stack?.y}~${g.stack?.bottom} · 左栏 ${g.rail?.y}`,
+          )
+          check(
+            g.main !== null && g.main.y >= (g.stack?.bottom ?? 0),
+            `${SAN}（桌面）：内容列同样从公告条之下开始（main y=${g.main?.y}）`,
+            `main ${g.main?.x}~ · 变量 ${g.varTopStack}`,
+          )
+          await shot(pd, SAN, '93-ann-desktop')
+        } finally {
+          await ctxD.close()
+        }
+      })
+
+      /* --- ⑦ 入口与**编辑时的隐私提醒**（超管面板 ⑥ 那张卡） --- */
+      await step(SAN, async () => {
+        await annPage.goto(`${BASE}/admin?roles=${ANN_ROLES}`, { waitUntil: 'networkidle' })
+        await annPage.waitForTimeout(600)
+        const b0 = await bodyText(annPage)
+        check(
+          b0.includes('⑥ 全站公告'),
+          `${SAN}：入口在**超管面板**里（公告是"平台自己的状态"，与这块屏的定位一致）`,
+          short(b0.match(/.{0,10}全站公告.{0,40}/)?.[0] ?? '', 90),
+        )
+        check(
+          b0.includes('与「通知」不是一件事'),
+          `🔴 ${SAN}：卡片上就写清了**公告 ≠ 通知**（这是最容易被后人搞混的一处）`,
+          short(b0.match(/.{0,10}不是一件事.{0,60}/)?.[0] ?? '', 120),
+        )
+        await annPage.locator('[data-admin-toggle="⑥ 全站公告（关于平台本身）"]').click()
+        await annPage.waitForTimeout(350)
+        const b1 = await bodyText(annPage)
+        for (const t of ['等级', '弹窗', '生效起', '两端留空', '撤下']) {
+          check(b1.includes(t), `${SAN}：卡里有「${t}」这一项（等级/弹窗/生效区间/撤下都要能操作）`, b1.includes(t) ? '在' : short(b1, 200))
+        }
+        /* 演示模式下表单是**停用**的（没有服务端）—— 但"能不能摆出来"照验 */
+        const submitDisabled = await annPage.locator('[data-admin-ann-submit]').isDisabled()
+        check(
+          submitDisabled,
+          `${SAN}：本地模式（没有 /api/announcement）**发布按钮停用**，并写明原因 —— 不假装能发`,
+          `disabled = ${submitDisabled}`,
+        )
+
+        /* 🔴 编辑时的隐私提醒：输入一段"像成绩"的正文 → 出现软提醒（**不拦提交**） */
+        await annPage.fill('input[placeholder^="标题"]', '月考情况')
+        await annPage.fill('textarea', '高二(1)班张三这次考了 85 分，请各位老师关注。')
+        await annPage.waitForTimeout(250)
+        const hint = await annPage.evaluate(() => {
+          const el = document.querySelector('[data-admin-ann-privacy]')
+          return el ? String(el.innerText).replace(/\s+/g, ' ').trim() : null
+        })
+        check(
+          hint !== null && hint.includes('全站'),
+          `🔴 ${SAN}：正文里出现成绩/姓名 → 给一条**编辑时的提醒**（"公告是全站都看得到的"）`,
+          short(hint ?? '(没有提醒)', 110),
+        )
+        await annPage.fill('textarea', '今晚 23:00–23:30 平台升级数据库，期间可能有一两次保存失败。')
+        await annPage.waitForTimeout(250)
+        const hint2 = await annPage.evaluate(() =>
+          document.querySelector('[data-admin-ann-privacy]') ? '有' : '没有',
+        )
+        check(
+          hint2 === '没有',
+          `${SAN}：反向对照 —— 一句正常的运维文案（含数字）**不该**被提醒（不是"见谁都提醒"）`,
+          `提醒节点：${hint2}`,
+        )
+
+        /* 预览按钮：写本机快照（教师端那一次在 ⑤ 里验过） */
+        await annPage.click('[data-ann-row="demo-a1"] [data-admin-ann-preview]')
+        await annPage.waitForTimeout(300)
+        const previewKey = await annPage.evaluate(() => {
+          try {
+            const raw = window.localStorage.getItem('shugao.ann.preview')
+            return raw ? JSON.parse(raw).id : null
+          } catch {
+            return 'ERR'
+          }
+        })
+        check(
+          previewKey === 'demo-a1',
+          `${SAN}：点「预览」→ 快照写进本机（shugao.ann.preview），去教师端就会看到那一条`,
+          `preview = ${previewKey}`,
+        )
+        await shot(annPage, SAN, '94-admin-announcements', { full: true })
       })
     } catch (e) {
       console.log(`\n💥 脚本在第「${currentStep}」步异常中断：${e instanceof Error ? e.message : String(e)}`)

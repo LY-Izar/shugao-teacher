@@ -15,6 +15,14 @@
  *      `is_super_admin()`               **只有**最高管理员：留给"交接超管身份"这类事
  *    这里拿**调用者自己的 JWT** 走 `POST /rest/v1/rpc/<函数名>` 去问（auth.uid() 就是调用者）。
  *
+ *  🆕 2026-09-28 第二轮：**部门归属**（老师 ↔ 职能部门）也走这个 Function 的 `department` 动作。
+ *     · 判据用 `can_create_teacher_accounts`（超管 / 教务处 / **办公室主任**）——
+ *       部门是**档案属性**（"他在哪个处室"），不是身份，所以与"建号 / 任课关系 / 重置密码"
+ *       同一档，**不是** `can_assign_roles`（那一档不含办公室主任）。
+ *     · 🔴 也**不再新立一个判据函数**：同一个集合写成第二个函数就是"同一件事两个口径"（I17）。
+ *     · 写法是**批量**的（界面上的多选）：一次请求加/去一批 (老师 × 部门)，
+ *       因为用户的口径是"开学时不要手工点几百下"。
+ *
  *  🔴 **2026-09-28：拆成两个函数（建号 ≠ 指派身份）** —— `管理架构与角色权限方案.md` §三.4 的 N-1。
  *     新架构里唯一变宽的写权限是「办公室主任建号」，而 `can_manage_teachers()` 原本
  *     **同时**管建号 / 任课关系 / **指派身份**三件事：
@@ -60,7 +68,7 @@ type RoleCode =
   | 'teacher'
 
 type Body = {
-  action?: 'list' | 'create' | 'reset' | 'assign' | 'role'
+  action?: 'list' | 'create' | 'reset' | 'assign' | 'role' | 'department'
   /** create */
   name?: string
   email?: string
@@ -81,7 +89,25 @@ type Body = {
   scopeId?: string
   /** role：组长两档要的学科代码（`subject_lead` / `lesson_prep_lead` 必填） */
   roleSubjectCode?: string
+  /** 🆕 department：要加/去的部门代码（收件范围用，见 `DEPARTMENTS`） */
+  departments?: string[]
+  /** 🆕 department：对哪些老师（多选；与 `departments` 是**笛卡尔积**关系） */
+  teacherIds?: string[]
 }
+
+/**
+ * 🆕 职能部门清单 —— 与数据库 `notice_departments()` **逐字同值**
+ * （`supabase/schema.sql` §21.2.2；第三处在界面 `app/src/lib/departments.ts`，
+ * `nav-checks` 的 A9 拿源码文本把这几份对齐）。
+ *
+ * 🔴 **它不是身份**：`teacher_roles` 里的 `admin` = 教务处**主任**（有全部权限），
+ *    而"属于教务处"是**档案属性** —— 教务处的干事也属于教务处，但不该拿到 admin 的权限。
+ *    把两者合成一个字段就是"一个字段两种语义"，所以这里单独一张表（`teacher_departments`）。
+ */
+const DEPARTMENTS = ['office', 'academic', 'logistics', 'moral_edu'] as const
+
+/** 一次批量改部门最多几位老师（界面是多选；上限防"一个请求改全校"把 Function 拖死） */
+const DEPARTMENT_BATCH_MAX = 100
 
 /** 去掉容易看错、也难念给同事听的字符：I l O 0 1 */
 const PW_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789'
@@ -136,6 +162,11 @@ const NEED_STAGE13 =
   '到 Supabase → SQL Editor 跑一遍再回来；刚跑完的话等十几秒让接口刷新一下缓存。'
 
 const NEED_STAGE10 = '数据库还没建权限体系的表（schema.sql 第 10 段）。先跑一遍 schema.sql。'
+
+/** 🆕 部门归属那一张表在 `schema.sql` 第 21 段（通知那一段里的 §21.2.2） */
+const NEED_STAGE21 =
+  '数据库还没跑部门归属那一段（仓库里 supabase/schema.sql 第 21 段）。' +
+  '到 Supabase → SQL Editor 跑一遍再回来；刚跑完的话等十几秒让接口刷新一下缓存。'
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -327,7 +358,7 @@ async function loadDirectory(env: Env) {
     return { error: isMissing(tRes) ? NEED_STAGE10 : `读教师失败：${tRes.text.slice(0, 200)}` }
   }
 
-  const [c, g, r, cs, ca] = await Promise.all([
+  const [c, g, r, cs, ca, td] = await Promise.all([
     read(await sb(env, '/rest/v1/classes?select=id,name,grade_id&order=created_at')),
     read(await sb(env, '/rest/v1/grades?select=id,name&order=name')),
     /*
@@ -338,6 +369,11 @@ async function loadDirectory(env: Env) {
     read(await sb(env, '/rest/v1/teacher_roles?select=teacher_id,role,scope_type,scope_id,subject_code')),
     read(await sb(env, '/rest/v1/class_subjects?select=teacher_id,class_id,subject,subject_code')),
     read(await sb(env, '/rest/v1/classroom_accounts?select=id')),
+    /*
+     * 🆕 部门归属（§21.2.2）。这张表可能还不存在（第 21 段没跑 / 老库）——
+     * 它是**附加信息**：读不到就当"还没有人分过部门"，**绝不能让整页打不开**。
+     */
+    read(await sb(env, '/rest/v1/teacher_departments?select=teacher_id,department')),
   ])
 
   // 任何一张附属表读不到（第 10/12 段没跑）都只当"空" —— 列表照常出来，
@@ -356,6 +392,8 @@ async function loadDirectory(env: Env) {
   const grades = (g.ok ? g.rows : []) as unknown as GradeRow[]
   const roles = roleRows
   const roomIds = new Set((ca.ok ? ca.rows : []).map((x) => String(x.id)))
+  /* 🆕 部门归属：表不在 / 读不到 → 空数组（页面上表现为"还没有维护过"，不是整页报错） */
+  const deptRows = (td.ok ? td.rows : []) as { teacher_id?: string; department?: string }[]
 
   const classNames = new Map(classes.map((x) => [x.id, x.name]))
   const gradeNames = new Map(grades.map((x) => [x.id, x.name]))
@@ -395,6 +433,12 @@ async function loadDirectory(env: Env) {
           subjectCode: x.subject_code ?? '',
           subject: x.subject,
         })),
+      /* 🆕 他属于哪些部门（可能 0 个、可能多个 —— §21.2.2 的形状） */
+      departments: deptRows
+        .filter((x) => String(x.teacher_id) === t.id)
+        .map((x) => String(x.department ?? ''))
+        .filter(Boolean)
+        .sort(),
     }))
 
   return { teachers, classes, grades }
@@ -958,6 +1002,123 @@ export async function onRequestPost(context: {
           ]
         : undefined,
     })
+  }
+
+  /* ---------------- department：部门归属（🆕 批量；判据同"建号"那一档） ---------------- */
+  if (action === 'department') {
+    /*
+     * 🔴 **判据**：`can_create_teacher_accounts`（超管 / 教务处 / 办公室主任）——
+     *    上面已经问过数据库了（`mayCreate`），这里**不重写规则**。
+     *    为什么不是 `can_assign_roles`：部门是**档案属性**，不是身份（见文件头那段）。
+     */
+    const departments = [
+      ...new Set(
+        (Array.isArray(body.departments) ? body.departments : [])
+          .map((v) => String(v).trim())
+          .filter(Boolean),
+      ),
+    ]
+    const teacherIds = [
+      ...new Set(
+        (Array.isArray(body.teacherIds) ? body.teacherIds : [])
+          .map((v) => String(v).trim())
+          .filter((v) => UUID_RE.test(v)),
+      ),
+    ]
+    const on = body.on !== false
+
+    if (!teacherIds.length) return json({ status: 'error', message: '还没有选中老师' }, 400)
+    if (!departments.length) return json({ status: 'error', message: '还没有选中部门' }, 400)
+    if (teacherIds.length > DEPARTMENT_BATCH_MAX) {
+      return json(
+        { status: 'error', message: `一次最多改 ${DEPARTMENT_BATCH_MAX} 位老师，分几次来` },
+        400,
+      )
+    }
+    /* 形状校验：部门代码必须是那四个之一（与数据库 `notice_departments()` 同一组） */
+    const unknown = departments.filter((d) => !(DEPARTMENTS as readonly string[]).includes(d))
+    if (unknown.length) {
+      return json(
+        { status: 'error', message: `不认识的部门：${unknown.join('、')}` },
+        400,
+      )
+    }
+
+    /*
+     * 🔴 教室端账号**不是**"某个部门的人"（与 `notice_recipient_ids_for` 那一支同一口径）。
+     *    分块查：一批最多 50 个 id，免得 URL 太长（PostgREST 走的是 query string）。
+     *    ⚠️ 这一步**不是**安全边界（真正的边界在收件人函数里），它只是把用户的操作错误
+     *    在写之前说清楚 —— 所以查不到（老库没有那张表）就直接放行。
+     */
+    for (let i = 0; i < teacherIds.length; i += 50) {
+      const part = teacherIds.slice(i, i + 50)
+      const rooms = await read(
+        await sb(env, `/rest/v1/classroom_accounts?select=id&id=in.(${part.join(',')})`),
+      )
+      if (rooms.ok && rooms.rows.length) {
+        return json(
+          {
+            status: 'error',
+            message: '所选老师里有教室端账号 —— 它不是老师，不能分到部门',
+          },
+          400,
+        )
+      }
+      if (!rooms.ok && isMissing(rooms)) break
+    }
+
+    if (!on) {
+      /*
+       * 移除：一次删掉"所选老师 × 所选部门"那些行。
+       * ⚠️ 键要与写入时**逐字一致**（`teacher_id` + `department`），
+       *    否则会出现"看起来移除了、其实那一行还在"（这个坑在身份那一支踩过一次）。
+       */
+      const res = await read(
+        await sb(
+          env,
+          `/rest/v1/teacher_departments?teacher_id=in.(${teacherIds.join(',')})` +
+            `&department=in.(${departments.map(encodeURIComponent).join(',')})`,
+          { method: 'DELETE', headers: { Prefer: 'return=minimal' } },
+        ),
+      )
+      if (!res.ok) {
+        return json(
+          {
+            status: 'error',
+            message: isMissing(res) ? NEED_STAGE21 : '去掉部门失败',
+            detail: res.text.slice(0, 200),
+          },
+          isMissing(res) ? 503 : 502,
+        )
+      }
+      return json({ status: 'ok' })
+    }
+
+    /* 加上：**一次请求写一批**（笛卡尔积）。
+     * ⚠️ `on_conflict` + `resolution=ignore-duplicates` = `ON CONFLICT DO NOTHING`：
+     *    "这个人已经在这个部门里"是幂等的情形，不该整批失败（主键是 (teacher_id, department)）。 */
+    const rows = teacherIds.flatMap((teacher_id) =>
+      departments.map((department) => ({ teacher_id, department })),
+    )
+    const res = await read(
+      await sb(env, '/rest/v1/teacher_departments?on_conflict=teacher_id,department', {
+        method: 'POST',
+        headers: { Prefer: 'resolution=ignore-duplicates,return=minimal' },
+        body: JSON.stringify(rows),
+      }),
+    )
+    /* 23505 = 冲突（个别 PostgREST 版本会这么答）也算成功：那些行本来就在 */
+    if (!res.ok && !/23505|duplicate key|conflict/i.test(res.text)) {
+      return json(
+        {
+          status: 'error',
+          message: isMissing(res) ? NEED_STAGE21 : '写部门归属失败',
+          detail: res.text.slice(0, 200),
+        },
+        isMissing(res) ? 503 : 502,
+      )
+    }
+    return json({ status: 'ok', pairs: rows.length })
   }
 
   return json({ status: 'error', message: '不认识这个操作' }, 400)
