@@ -3,6 +3,16 @@ name: 数据库备份
 ***REMOVED*** Supabase 免费版**没有自动备份**。
 ***REMOVED*** 作业数据、成绩、错题记录一旦误删或被错误脚本清空，不可恢复 —— 这对学校是事故级风险。
 ***REMOVED*** 这个任务每晚把整个数据库 dump 出来，压缩后传到 Cloudflare R2，保留最近 30 份。
+***REMOVED***
+***REMOVED*** ── 诊断增强：上次红灯复盘 ────────────────────────────────────────────
+***REMOVED*** 上次失败只是因为 SUPABASE_DB_URL 没配，但它只说了「缺失」，不打印它到底拿到了什么。
+***REMOVED*** 而且旧写法 `pg_dump "$URL" ... | gzip -9 > f.gz` 有个真会丢备份的坑：
+***REMOVED*** 管道里 `$?` 拿到的是 gzip 的退出码，pg_dump 挂了会被吞掉，
+***REMOVED*** 留下一个「合法但空」的 .gz，工作流还显示绿灯。现在先落 .sql、查退出码、再压缩。
+***REMOVED*** 现在的失败一定是四类里的一类，日志直接点名：
+***REMOVED***   ① 连不上数据库（DNS / TCP / 超时）  ② 密码或用户名不对
+***REMOVED***   ③ pg_dump 与服务器版本不兼容        ④ R2 上传失败（含配置不全）
+***REMOVED*** 🔴 连接方式不动：用 Direct connection（5432）那条串，实测能跑通。
 
 on:
   schedule:
@@ -13,39 +23,364 @@ jobs:
   backup:
     runs-on: ubuntu-latest
     steps:
-      - name: 安装 postgres 客户端
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
-
-      - name: pg_dump
+      ***REMOVED*** ── 第 1 步：先看 secret 在不在（缺 secret 是最常见的失败原因）──────
+      - name: 环境自检（只报 secret 存在性，绝不打印值）
         env:
-          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          DB_URL_RAW: ${{ secrets.SUPABASE_DB_URL }}
+          R2_ACCESS_KEY_ID_RAW: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY_RAW: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT_RAW: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET_RAW: ${{ secrets.R2_BUCKET }}
         run: |
-          if [ -z "$SUPABASE_DB_URL" ]; then
-            echo "::error::缺少 SUPABASE_DB_URL（控制台 Project Settings → Database → Connection string）"
+          ***REMOVED*** 每个 run: 都是独立 shell，所以这个 trim 小函数在需要的步骤里各留一份
+          ***REMOVED*** （故意的，别抽成共享文件：单看一步就能读明白）。
+          trim() {
+            local s="$1"
+            s="${s//$'\r'/}"
+            s="${s***REMOVED***"${s%%[![:space:]]*}"}"
+            s="${s%"${s***REMOVED******REMOVED****[![:space:]]}"}"
+            printf '%s' "$s"
+          }
+
+          ***REMOVED*** 只输出「有 / 无」（+ 个别非机密项的长度 + 有没有首尾空白）。
+          ***REMOVED*** 🔴 绝不要在这里加 `echo "$2"`：SUPABASE_DB_URL 里是数据库密码，
+          ***REMOVED***    这个仓库的 Actions 日志是公开可读的。掩码后的形态在下一步打印。
+          ***REMOVED***    （顺带一提：secret 值若带尾随换行，GitHub 的自动掩码会因为它已不是
+          ***REMOVED***      「原样字符串」而失效 —— 所以更要靠这里只打存在性，而不是指望自动掩码。）
+          ***REMOVED*** $3 = yes 时额外打印长度（只给非机密 / 半公开的项用）
+          report() {
+            local t
+            t="$(trim "$2")"
+            if [ -z "$t" ]; then
+              echo "  ❌ $1：缺失或为空（trim 后）"
+              return 0
+            fi
+            if [ "$3" = "yes" ]; then
+              echo "  ✅ $1：已配置（原始 ${***REMOVED***2} 字符 → trim 后 ${***REMOVED***t} 字符）"
+            else
+              echo "  ✅ $1：已配置（trim 后非空）"
+            fi
+            if [ "${***REMOVED***2}" != "${***REMOVED***t}" ]; then
+              echo "     ⚠️ 首尾有空白/换行，本次已自动 trim —— 建议去 Settings → Secrets 重新粘贴一次"
+            fi
+            return 0
+          }
+
+          echo "── Secrets 存在性（只报有无，绝不打印值）──"
+          ***REMOVED*** SUPABASE_DB_URL 的长度有用（能看出是不是粘漏了），密码本身不会因为长度泄露。
+          report SUPABASE_DB_URL "$DB_URL_RAW" yes
+          report R2_ENDPOINT "$R2_ENDPOINT_RAW" yes
+          report R2_BUCKET "$R2_BUCKET_RAW" yes
+          ***REMOVED*** 两个 key 连长度都不打：它们不是诊断缺口，没必要多给一点信息。
+          report R2_ACCESS_KEY_ID "$R2_ACCESS_KEY_ID_RAW" no
+          report R2_SECRET_ACCESS_KEY "$R2_SECRET_ACCESS_KEY_RAW" no
+
+          if [ -z "$(trim "$DB_URL_RAW")" ]; then
+            echo "::error::缺少 SUPABASE_DB_URL（trim 后为空）。控制台 → Project Settings → Database → Connection string → Direct connection（5432）那条"
             exit 1
           fi
-          stamp=$(date -u +%Y%m%d-%H%M)
-          ***REMOVED*** 只导 public schema 的数据与结构，够用于恢复
-          pg_dump "$SUPABASE_DB_URL" \
-            --schema=public --no-owner --no-privileges \
-            | gzip -9 > "backup-$stamp.sql.gz"
-          ls -lh backup-*.sql.gz
-          echo "FILE=backup-$stamp.sql.gz" >> "$GITHUB_ENV"
 
-      - name: 上传到 Cloudflare R2
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }} ***REMOVED*** https://<account_id>.r2.cloudflarestorage.com
-          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+      - name: 安装 postgres 客户端
         run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+          ***REMOVED*** 装上的是哪个版本必须打出来：pg_dump 主版本低于服务器主版本时会
+          ***REMOVED*** 直接拒绝导出（server version mismatch），那时第一个要看的就是这两行。
+          pg_dump --version
+          psql --version
+
+      ***REMOVED*** ── 第 3 步：先单独连一次，把「连不上 / 密码错」和「pg_dump 自己的毛病」分开 ──
+      - name: 数据库预检 + pg_dump（失败时按类型给诊断）
+        env:
+          DB_URL_RAW: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          ***REMOVED*** 这一步的纪律：连接串只在「喂给 psql / pg_dump」时出现，
+          ***REMOVED*** 任何要进日志的地方都必须先过 mask_db_url / redact。
+          ***REMOVED*** 网络被阻断时别一直挂着（默认可能等很久）。
+          export PGCONNECT_TIMEOUT=15
+
+          trim() {
+            local s="$1"
+            s="${s//$'\r'/}"
+            s="${s***REMOVED***"${s%%[![:space:]]*}"}"
+            s="${s%"${s***REMOVED******REMOVED****[![:space:]]}"}"
+            printf '%s' "$s"
+          }
+
+          ***REMOVED*** 🔴🔴 掩码函数：这是本仓库唯一被允许「碰」SUPABASE_DB_URL 全文的地方。
+          ***REMOVED***      postgresql://user:PASSWORD@host:5432/postgres?sslmode=require
+          ***REMOVED***   →  postgresql://user:***@host:5432/postgres
+          ***REMOVED***      密码整段丢掉、查询串整段丢掉，只留 scheme / user / host / port / dbname。
+          ***REMOVED*** 🔴🔴 绝对不要把它改成 `echo "$SUPABASE_DB_URL"`、`env`、`set -x`，
+          ***REMOVED***      或 `pg_dump --verbose`（某些版本会把连接串回显出来）——
+          ***REMOVED***      Actions 日志公开可读，那等于把数据库密码贴到网上。
+          ***REMOVED***      解析不出来时宁可一个字都不打（见最后的兜底分支）。
+          mask_db_url() {
+            local u="$1" scheme user host port dbname
+            ***REMOVED*** 带密码的形状。密码用贪婪 `.*` 匹配到「最后一个 @」，
+            ***REMOVED*** 这样密码里就算有 @ 也不会把后半截当成主机名漏出去；
+            ***REMOVED*** 万一把查询串也吞进去，那也只是掩得更多，不会漏。
+            if [[ "$u" =~ ^([A-Za-z][A-Za-z0-9+.-]*)://([^:@/]+):(.*)@([^:/@?]+)(:([0-9]+))?/([^?]*) ]]; then
+              scheme="${BASH_REMATCH[1]}"
+              user="${BASH_REMATCH[2]}"
+              host="${BASH_REMATCH[4]}"
+              port="${BASH_REMATCH[6]:-5432}"
+              dbname="${BASH_REMATCH[7]}"
+              printf '%s://%s:***@%s:%s/%s' "$scheme" "$user" "$host" "$port" "$dbname"
+              return 0
+            fi
+            ***REMOVED*** 不带密码的形状：postgresql://user@host:5432/db
+            if [[ "$u" =~ ^([A-Za-z][A-Za-z0-9+.-]*)://([^:@/]+)@([^:/@?]+)(:([0-9]+))?/([^?]*) ]]; then
+              scheme="${BASH_REMATCH[1]}"
+              user="${BASH_REMATCH[2]}"
+              host="${BASH_REMATCH[3]}"
+              port="${BASH_REMATCH[5]:-5432}"
+              dbname="${BASH_REMATCH[6]}"
+              printf '%s://%s:***@%s:%s/%s' "$scheme" "$user" "$host" "$port" "$dbname"
+              return 0
+            fi
+            ***REMOVED*** 形状不认识（比如粘成了 key=value 的 DSN）：一个字都不打，只报长度。
+            printf '<连接串形状不认识，已整体隐藏>（长度 %s）' "${***REMOVED***u}"
+          }
+
+          ***REMOVED*** 打印任何来自 psql / pg_dump 的输出之前先过一遍：
+          ***REMOVED*** 万一它们把连接串回显出来了，密码也会被换成 ***。
+          redact() {
+            sed -E 's***REMOVED***([A-Za-z][A-Za-z0-9+.-]*://[^:@/[:space:]]+):[^@[:space:]]*@***REMOVED***\1:***@***REMOVED***g'
+          }
+
+          ***REMOVED*** psql / pg_dump 的报错原文 → 人话分类（原文另外单独打，且先过 redact）。
+          diagnose_pg_error() {
+            local err
+            err="$(cat)"
+            local hit=0
+            ***REMOVED*** hit 在外层是 local，内层函数故意不加 local —— 这样能改到外层那份。
+            hit_if() {
+              if grep -qiE "$1" <<<"$err"; then
+                echo "  ▶ 类型：$2"
+                hit=1
+              fi
+              return 0
+            }
+            hit_if 'could not translate host name|name or service not known|nodename nor servname|temporary failure in name resolution' \
+              'DNS 解析失败 —— 连接串的 host 段有问题（拼错，或值里混进了空白/换行）'
+            hit_if 'connection refused' \
+              'TCP 连接被拒 —— 端口不通（Direct connection 用 5432；6543 的 pooler 串在 pg_dump 下常常不通）'
+            hit_if 'timeout expired|connection timed out|timed out' \
+              '连接超时 —— 网络到 *.supabase.co 被阻断（见 AI交接文档 §8.7 坑 1）'
+            hit_if 'password authentication failed|authentication failed|invalid password' \
+              '密码/认证失败 —— secret 里的密码过期或粘错了（注意首尾空白）'
+            hit_if 'role .* does not exist|no such user|tenant or user not found' \
+              '用户名不存在 —— 用了 pooler 串的话，用户名要带项目 ref 后缀（postgres.<ref>）'
+            hit_if 'database .* does not exist' \
+              '库名不存在 —— 连接串最后的路径应当是 /postgres'
+            hit_if 'version mismatch|server version:' \
+              'pg_dump 版本不兼容 —— 客户端主版本低于服务器，pg_dump 会直接拒绝导出'
+            hit_if 'no pg_hba.conf entry|self.signed certificate|certificate verify failed|sslmode' \
+              'TLS/SSL 相关 —— 可在连接串末尾加 ?sslmode=require'
+            if [ "$hit" = "0" ]; then
+              echo "  ▶ 类型：没匹配到已知模式，直接看下面的原始报错"
+            fi
+            return 0
+          }
+
+          DB_URL="$(trim "$DB_URL_RAW")"
+          if [ -z "$DB_URL" ]; then
+            echo "::error::缺少 SUPABASE_DB_URL（trim 后为空）"
+            exit 1
+          fi
+
+          echo "── 1) 连接串体检（只看形状，不看密码）──"
+          ***REMOVED*** 掩码后形如 postgresql://postgres.xxx:***@db.xxx.supabase.co:5432/postgres
+          printf '  掩码后 = [%s]\n' "$(mask_db_url "$DB_URL")"
+          echo "  长度：原始 ${***REMOVED***DB_URL_RAW} 字符 → trim 后 ${***REMOVED***DB_URL} 字符"
+          if [ "${***REMOVED***DB_URL_RAW}" != "${***REMOVED***DB_URL}" ]; then
+            echo "::warning::SUPABASE_DB_URL 首尾有空白/换行，本次已自动 trim；建议去 Settings → Secrets 重新粘贴一次"
+          fi
+
+          echo
+          echo "── 2) 先单独连一次（把「连不上」和「pg_dump 的毛病」彻底分开）──"
+          pre_rc=0
+          server_raw="$(psql "$DB_URL" -Atqc 'show server_version' 2>/tmp/pre.err)" || pre_rc=$?
+          if [ "$pre_rc" -ne 0 ]; then
+            echo "::error::连不上数据库（psql 退出码 $pre_rc）—— pg_dump 也一定会失败，先修这个"
+            diagnose_pg_error < /tmp/pre.err
+            echo "  ── psql stderr（已掩码，最多 15 行）──"
+            redact < /tmp/pre.err | tail -n 15 | sed 's/^/    /'
+            printf '  掩码后的连接串 = [%s]\n' "$(mask_db_url "$DB_URL")"
+            exit 1
+          fi
+          server_ver="$(trim "$server_raw")"
+          echo "  ✅ 连上了。服务器版本 = $server_ver"
+
+          client_full="$(pg_dump --version 2>&1 | awk '{print $3}')"
+          pg_major() { printf '%s' "$1" | sed -E 's/^([0-9]+).*/\1/'; }
+          client_major="$(pg_major "$client_full")"
+          server_major="$(pg_major "$server_ver")"
+          echo "  主版本：客户端（pg_dump）$client_major / 服务器 $server_major"
+          if printf '%s' "$client_major" | grep -qE '^[0-9]+$' && printf '%s' "$server_major" | grep -qE '^[0-9]+$'; then
+            if [ "$client_major" -lt "$server_major" ]; then
+              echo "::warning::pg_dump 主版本（$client_major）低于服务器（$server_major）—— 下一步多半会以 version mismatch 失败。修法：装对应版本客户端，例如 sudo apt-get install -y postgresql-client-$server_major"
+            fi
+          else
+            echo "  （版本号解析失败，跳过主版本比较）"
+          fi
+
+          echo
+          echo "── 3) pg_dump ──"
+          stamp=$(date -u +%Y%m%d-%H%M)
+          raw="backup-$stamp.sql"
+          out="$raw.gz"
+          ***REMOVED*** 只导 public schema 的数据与结构，够用于恢复。
+          ***REMOVED*** 先落 .sql 再压缩：不再用管道，否则管道里 `$?` 是 gzip 的退出码，
+          ***REMOVED*** pg_dump 失败会被吞掉，留下一个「合法但空」的 .gz 还显示绿灯。
+          dump_rc=0
+          pg_dump "$DB_URL" --schema=public --no-owner --no-privileges > "$raw" 2>/tmp/dump.err || dump_rc=$?
+          if [ "$dump_rc" -ne 0 ]; then
+            echo "::error::pg_dump 失败（退出码 $dump_rc），备份没有生成"
+            diagnose_pg_error < /tmp/dump.err
+            echo "  ── pg_dump stderr（已掩码，最多 15 行）──"
+            redact < /tmp/dump.err | tail -n 15 | sed 's/^/    /'
+            rm -f "$raw"
+            exit 1
+          fi
+
+          bytes=$(wc -c < "$raw" | tr -d '[:space:]')
+          tables=$(grep -c '^CREATE TABLE' "$raw" || true)
+          echo "  dump 大小：$bytes 字节；CREATE TABLE 条数：$tables"
+          ***REMOVED*** 空的 / 半截的 dump 比没有 dump 更危险（会让人以为有备份）。
+          if [ "$bytes" -lt 1024 ]; then
+            echo "::error::dump 只有 $bytes 字节，明显不正常。前 15 行："
+            head -n 15 "$raw" | sed 's/^/    /'
+            exit 1
+          fi
+          if ! head -c 4096 "$raw" | grep -q 'PostgreSQL database dump'; then
+            echo "::error::dump 里没有 pg_dump 的头部标记，文件不是一次成功导出的产物。前 15 行："
+            head -n 15 "$raw" | sed 's/^/    /'
+            exit 1
+          fi
+          gzip -9 "$raw"
+          ls -lh "$out"
+          echo "FILE=$out" >> "$GITHUB_ENV"
+
+      ***REMOVED*** ── 第 4 步：上传 R2。未配置 R2 时保留原来的 Artifact 降级路径 ──────
+      - name: 上传到 Cloudflare R2（失败时按类型给诊断）
+        env:
+          AWS_ACCESS_KEY_ID_RAW: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY_RAW: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT_RAW: ${{ secrets.R2_ENDPOINT }} ***REMOVED*** https://<account_id>.r2.cloudflarestorage.com
+          R2_BUCKET_RAW: ${{ secrets.R2_BUCKET }}
+        run: |
+          trim() {
+            local s="$1"
+            s="${s//$'\r'/}"
+            s="${s***REMOVED***"${s%%[![:space:]]*}"}"
+            s="${s%"${s***REMOVED******REMOVED****[![:space:]]}"}"
+            printf '%s' "$s"
+          }
+
+          ***REMOVED*** 把两个 key 的字面值从任何要打印的文本里抹掉。
+          ***REMOVED*** 用 bash 字面替换（不是正则），所以 key 里有什么字符都安全。
+          ***REMOVED*** 🔴 两个 key 绝不 echo；AWS_SECRET_ACCESS_KEY 尤其不能进日志。
+          scrub() {
+            local line
+            while IFS= read -r line; do
+              if [ -n "$AWS_ACCESS_KEY_ID" ]; then
+                line="${line//"$AWS_ACCESS_KEY_ID"/***}"
+              fi
+              if [ -n "$AWS_SECRET_ACCESS_KEY" ]; then
+                line="${line//"$AWS_SECRET_ACCESS_KEY"/***}"
+              fi
+              printf '%s\n' "$line"
+            done
+            return 0
+          }
+
+          ***REMOVED*** aws 的报错原文 → 人话分类。
+          r2_hint() {
+            local err
+            err="$(cat)"
+            local hit=0
+            hit_if() {
+              if grep -qiE "$1" <<<"$err"; then
+                echo "  ▶ 类型：$2"
+                hit=1
+              fi
+              return 0
+            }
+            hit_if 'unable to locate credentials|no credentials|invalidaccesskeyid' \
+              '凭据没读到 —— R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY 缺失，或值里混了空白'
+            hit_if 'signaturedoesnotmatch|signature mismatch' \
+              '签名不匹配 —— R2_SECRET_ACCESS_KEY 粘错了（多半缺字符或带了换行）'
+            hit_if 'requesttimetooskewed|clock' \
+              '请求时间偏差过大 —— 重跑一次通常就好'
+            hit_if 'accessdenied|forbidden|403' \
+              'AccessDenied —— 这个 R2 API Token 没有该 bucket 的 Object Read & Write 权限'
+            hit_if 'nosuchbucket|404' \
+              'NoSuchBucket —— R2_BUCKET 名字写错，或 token 与 bucket 不属于同一个账号'
+            hit_if 'could not connect|endpointconnectionerror|invalid endpoint|name or service not known' \
+              '连不上 endpoint —— R2_ENDPOINT 应当是 https://<account_id>.r2.cloudflarestorage.com（注意别带尾随空白）'
+            hit_if 'ssl|certificate' \
+              'TLS / 证书问题 —— endpoint 是否写成了 http:// 或域名有误'
+            if [ "$hit" = "0" ]; then
+              echo "  ▶ 类型：没匹配到已知模式，请看下面的原始报错"
+            fi
+            return 0
+          }
+
+          R2_ENDPOINT="$(trim "$R2_ENDPOINT_RAW")"
+          R2_BUCKET="$(trim "$R2_BUCKET_RAW")"
+          export AWS_ACCESS_KEY_ID="$(trim "$AWS_ACCESS_KEY_ID_RAW")"
+          export AWS_SECRET_ACCESS_KEY="$(trim "$AWS_SECRET_ACCESS_KEY_RAW")"
+
+          ***REMOVED*** 未配置 R2 → 保留原来的降级路径：交给下面的 Artifact 兜底
           if [ -z "$R2_ENDPOINT" ] || [ -z "$R2_BUCKET" ]; then
-            echo "::warning::未配置 R2，改为把备份作为 Artifact 保留"
+            echo "::warning::未配置 R2（R2_ENDPOINT / R2_BUCKET trim 后为空），改为把备份作为 Artifact 保留"
             exit 0
           fi
-          aws s3 cp "$FILE" "s3://$R2_BUCKET/db-backups/$FILE" --endpoint-url "$R2_ENDPOINT"
 
+          ***REMOVED*** 半配置状态：bucket 配了、钥匙没配 —— 上传必然失败，直接点名，
+          ***REMOVED*** 别让 aws 抛一句看不懂的 Unable to locate credentials。
+          ***REMOVED*** （备份文件已经生成；下面的 Artifact 兜底是 if: always()，照样会保存它。）
+          if [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ]; then
+            echo "::error::R2_ENDPOINT / R2_BUCKET 配了，但 R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY 缺失或 trim 后为空 —— 上传必然失败。修法二选一：① 补上这两个 secret；② 把 R2_ENDPOINT 也清空，正式走 Artifact 方案"
+            exit 1
+          fi
+
+          if [ ! -s "$FILE" ]; then
+            echo "::error::找不到非空的备份文件 FILE=[$FILE]（pg_dump 那一步可能没跑到）"
+            exit 1
+          fi
+          echo "  源文件：[$FILE] $(wc -c < "$FILE" | tr -d '[:space:]') 字节"
+          echo "  目标  ：[s3://$R2_BUCKET/db-backups/$FILE]"
+          echo "  端点  ：[$R2_ENDPOINT]"
+          echo "  aws   ：$(aws --version 2>&1 | head -n 1)"
+
+          up_rc=0
+          aws s3 cp "$FILE" "s3://$R2_BUCKET/db-backups/$FILE" --endpoint-url "$R2_ENDPOINT" 2>/tmp/r2.err || up_rc=$?
+          if [ "$up_rc" -ne 0 ]; then
+            echo "::error::R2 上传失败（aws 退出码 $up_rc）"
+            r2_hint < /tmp/r2.err
+            echo "  ── aws stderr（已抹掉 key 字面值，最多 15 行）──"
+            tail -n 15 /tmp/r2.err | scrub | sed 's/^/    /'
+            echo "  上传失败不影响备份本身：Artifact 兜底那一步是 if: always()，会照样保存。"
+            exit 1
+          fi
+
+          ***REMOVED*** 传完回读一次：aws 说成功、对象其实不在，这种情况不罕见。
+          verify_rc=0
+          aws s3 ls "s3://$R2_BUCKET/db-backups/$FILE" --endpoint-url "$R2_ENDPOINT" 2>/tmp/r2verify.err || verify_rc=$?
+          if [ "$verify_rc" -ne 0 ]; then
+            echo "::warning::上传命令返回成功，但回读校验失败（aws 退出码 $verify_rc）—— 手动去 R2 确认这份对象在不在："
+            tail -n 10 /tmp/r2verify.err | scrub | sed 's/^/    /'
+          else
+            echo "上传并回读确认：$FILE"
+          fi
+
+      ***REMOVED*** 兜底：作为 Artifact 保留 30 天
+      ***REMOVED*** if: always() 是故意的：R2 传失败、甚至 pg_dump 失败时这一步也要跑，
+      ***REMOVED*** 能捞一份就捞一份（没有产物时 upload-artifact 只会给个 warning，不会掩盖真正的错误）。
       - name: 兜底：作为 Artifact 保留 30 天
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: db-backup
@@ -53,17 +388,52 @@ jobs:
           retention-days: 30
 
       - name: 清理 R2 上超过 30 份的旧备份
-        if: env.R2_BUCKET != ''
+        ***REMOVED*** 加了 success()：只有前面每一步都成功，才允许去动 R2 上的老备份。
+        ***REMOVED*** 备份本身没成功的时候，绝不能删老备份。
+        if: ${{ env.R2_BUCKET != '' && success() }}
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
-          ***REMOVED*** 列出全部备份（按文件名倒序），删掉第 31 份之后的
-          aws s3 ls "s3://$R2_BUCKET/db-backups/" --endpoint-url "$R2_ENDPOINT" \
-            | awk '{print $4}' | sort -r | tail -n +31 \
-            | while read -r key; do
-                [ -n "$key" ] && aws s3 rm "s3://$R2_BUCKET/db-backups/$key" --endpoint-url "$R2_ENDPOINT"
-              done
+          ***REMOVED*** 同一个 trim（每步一个独立 shell，所以这里再留一份）
+          trim() {
+            local s="$1"
+            s="${s//$'\r'/}"
+            s="${s***REMOVED***"${s%%[![:space:]]*}"}"
+            s="${s%"${s***REMOVED******REMOVED****[![:space:]]}"}"
+            printf '%s' "$s"
+          }
+          R2_ENDPOINT="$(trim "$R2_ENDPOINT")"
+          R2_BUCKET="$(trim "$R2_BUCKET")"
+          export AWS_ACCESS_KEY_ID="$(trim "$AWS_ACCESS_KEY_ID")"
+          export AWS_SECRET_ACCESS_KEY="$(trim "$AWS_SECRET_ACCESS_KEY")"
+
+          if [ -z "$R2_BUCKET" ] || [ -z "$R2_ENDPOINT" ]; then
+            echo "未配置 R2，跳过清理"
+            exit 0
+          fi
+          ***REMOVED*** 列出全部备份（按文件名倒序），删掉第 31 份之后的。
+          ***REMOVED*** 先单独拿退出码：旧写法从管道里读，`aws s3 ls` 失败会被 sort 的 0 盖掉，
+          ***REMOVED*** 结果「列举失败」看起来像「清理完成」。
+          raw_list="$(mktemp)"
+          list="$(mktemp)"
+          ls_rc=0
+          aws s3 ls "s3://$R2_BUCKET/db-backups/" --endpoint-url "$R2_ENDPOINT" > "$raw_list" 2>/tmp/r2ls.err || ls_rc=$?
+          if [ "$ls_rc" -ne 0 ]; then
+            echo "::error::列不出 R2 上的备份（aws 退出码 $ls_rc），清理跳过。备份本身已经成功，问题只在清理这一环："
+            tail -n 15 /tmp/r2ls.err | sed 's/^/    /'
+            exit 1
+          fi
+          awk '{print $4}' "$raw_list" | sort -r > "$list"
+          total=$(grep -c . "$list" || true)
+          echo "R2 上现有 $total 份备份；第 31 份之后（更老的）会被删掉"
+          tail -n +31 "$list" | while read -r key; do
+              if [ -n "$key" ]; then
+                echo "  删除 $key"
+                aws s3 rm "s3://$R2_BUCKET/db-backups/$key" --endpoint-url "$R2_ENDPOINT"
+              fi
+            done
+          rm -f "$raw_list" "$list"
           echo "清理完成"

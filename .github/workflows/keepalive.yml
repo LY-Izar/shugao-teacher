@@ -8,6 +8,19 @@ name: Supabase 保活
 ***REMOVED*** 我们关掉了「Automatically expose new tables」并收紧了授权，
 ***REMOVED*** anon 角色读 teachers 表会直接报权限错误 —— 那是预期行为，不是故障。
 ***REMOVED*** 所以改成打 Auth 健康检查与 REST 根路径，这两个都不需要任何表权限。
+***REMOVED***
+***REMOVED*** ── 诊断增强：上次红灯复盘 ────────────────────────────────────────────
+***REMOVED*** 上一次红灯的日志只有三行：
+***REMOVED***     Auth → HTTP 000000
+***REMOVED***     REST → HTTP 000000
+***REMOVED***     Error: 保活失败 —— 项目可能已被暂停，去控制台手动 Restore
+***REMOVED*** 两处毛病都在脚本自己身上：
+***REMOVED***   ① `000000` 是脚本 bug：curl 没连上时 `-w '%{http_code}'` 自己就会打 "000"，
+***REMOVED***      后面的 `|| echo "000"` 又追加一个，于是看起来像六位数。
+***REMOVED***      真实含义只有一句：curl 根本没拿到响应。现在改成看 curl 的退出码，
+***REMOVED***      并且区分「没连上」和「连上了但状态码非预期」。
+***REMOVED***   ② 日志不打印实际用的 URL，于是最可能的原因（secret 值带了尾随换行/空格
+***REMOVED***      → 拼出非法 URL）只能靠猜。现在 URL 用方括号包住打印，尾随空白一眼可见。
 
 on:
   schedule:
@@ -20,32 +33,140 @@ jobs:
     steps:
       - name: Ping Supabase
         env:
-          SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
-          SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          ***REMOVED*** 用 *_RAW 接原始值，脚本里 trim 之后再判断/拼接。
+          SUPABASE_URL_RAW: ${{ secrets.VITE_SUPABASE_URL }}
+          SUPABASE_ANON_KEY_RAW: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
         run: |
+          ***REMOVED*** run 默认是 `bash -e {0}`：任何一条命令非零退出都会中断脚本。
+          ***REMOVED*** 所以下面凡是「允许失败」的命令，都写成 `cmd || rc=$?`，不要裸写。
+
+          ***REMOVED*** ── 工具函数 ──────────────────────────────────────────────────
+
+          ***REMOVED*** 去掉首尾空白（空格 / 制表符 / 换行 / \r）。
+          ***REMOVED*** bash 的 [[:space:]] 覆盖 \n 和 \t，所以 secret 末尾那个换行会被吃掉。
+          trim() {
+            local s="$1"
+            s="${s//$'\r'/}"
+            s="${s***REMOVED***"${s%%[![:space:]]*}"}"
+            s="${s%"${s***REMOVED******REMOVED****[![:space:]]}"}"
+            printf '%s' "$s"
+          }
+
+          ***REMOVED*** 只报「有没有」+「trim 后长度」，绝不打印值。
+          ***REMOVED*** 长度能看出是不是被截断，又不泄露内容。
+          ***REMOVED*** 🔴 绝不要在这里加 `echo "$2"`。
+          check_secret() { ***REMOVED*** $1 = 名字（仅用于打印）；$2 = trim 后的值
+            if [ -z "$2" ]; then
+              echo "  ❌ $1：缺失或为空（trim 后仍为空）"
+            else
+              echo "  ✅ $1：已配置（trim 后长度 ${***REMOVED***2}）"
+            fi
+          }
+
+          ***REMOVED*** curl 退出码 → 人话。$? 为 0 才算「拿到了 HTTP 状态码」；
+          ***REMOVED*** 非 0 说明连响应都没有（此时 %{http_code} 恒为 "000"，零信息量）。
+          curl_hint() {
+            case "$1" in
+              6)      echo "DNS 解析失败 —— 域名拼错，或 secret 值里混进了非法字符（空白 / 换行 / 多余的路径）" ;;
+              7)      echo "TCP 连接失败 / 被拒 —— 主机不可达，或到 *.supabase.co 的连接被阻断" ;;
+              28)     echo "连接或响应超时（--max-time 20）" ;;
+              35)     echo "TLS 握手失败 —— 典型特征是 TCP 通、ClientHello 被重置（SNI 阻断，见 AI交接文档 §8.7 坑 1）" ;;
+              51|60)  echo "证书校验失败" ;;
+              52)     echo "服务端没有返回任何内容" ;;
+              56)     echo "接收数据失败 —— 连接被中途重置" ;;
+              *)      echo "curl 退出码 $1（见 curl 手册 EXIT CODES）" ;;
+            esac
+          }
+
+          ***REMOVED*** 失败时补一次 curl -v，只打关键几行，不刷屏。
+          ***REMOVED*** 🔴 必须过滤请求头行：-v 会把 `apikey: ...` / `Authorization: Bearer ...`
+          ***REMOVED***    原样打到 stderr（哪怕这次没带这些头，留着这层过滤防止以后有人加回来）。
+          verbose_diag() {
+            local url="$1"
+            echo "  ── curl -v 关键行（已过滤请求头，最多 12 行）──"
+            curl -sSv -o /dev/null --max-time 20 "$url" 2>&1 \
+              | grep -Eiv 'apikey|authorization|bearer' \
+              | grep -Ei 'trying|connected|resolv|could not|connect|tls|ssl|http/|timed out|error|refused|reset|handshake' \
+              | head -n 12 \
+              | sed 's/^/    /' || true
+            echo "  ── 诊断结束 ──"
+          }
+
+          ***REMOVED*** ── 1) secrets 存在性（放最前面：缺 secret 是最常见的失败原因）──
+          echo "── 1) Secrets 存在性（只报有/无，绝不打印值）──"
+          SUPABASE_URL="$(trim "$SUPABASE_URL_RAW")"
+          SUPABASE_ANON_KEY="$(trim "$SUPABASE_ANON_KEY_RAW")"
+          check_secret VITE_SUPABASE_URL "$SUPABASE_URL"
+          check_secret VITE_SUPABASE_ANON_KEY "$SUPABASE_ANON_KEY"
+
+          ***REMOVED*** ── 2) 实际拿到的值（URL 可公开，方括号包住才看得出首尾空白）──
+          echo
+          echo "── 2) 实际拿到的 URL（末尾方括号如果换行了，说明值里有换行）──"
+          printf '  VITE_SUPABASE_URL = [%s]\n' "$SUPABASE_URL_RAW"
+          echo "  长度：原始 ${***REMOVED***SUPABASE_URL_RAW} 字符 → trim 后 ${***REMOVED***SUPABASE_URL} 字符"
+          if [ "${***REMOVED***SUPABASE_URL_RAW}" != "${***REMOVED***SUPABASE_URL}" ]; then
+            echo "::warning::VITE_SUPABASE_URL 首尾有空白（原始 ${***REMOVED***SUPABASE_URL_RAW} → trim 后 ${***REMOVED***SUPABASE_URL}）；本次已自动去掉，建议去 Settings → Secrets 重新粘贴一遍，别让它下次再坑人"
+          fi
+          if [ "${***REMOVED***SUPABASE_ANON_KEY_RAW}" != "${***REMOVED***SUPABASE_ANON_KEY}" ]; then
+            echo "::warning::VITE_SUPABASE_ANON_KEY 首尾有空白（原始 ${***REMOVED***SUPABASE_ANON_KEY_RAW} → trim 后 ${***REMOVED***SUPABASE_ANON_KEY}）；本次已自动去掉"
+          fi
+
+          ***REMOVED*** null / 空 的判断放在 trim 之后
           if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_ANON_KEY" ]; then
-            echo "::error::缺少 VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY，请在仓库 Settings → Secrets 里配置"
+            echo "::error::缺少 VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY（trim 后为空），请在仓库 Settings → Secrets and variables → Actions 里配置"
             exit 1
           fi
 
+          ***REMOVED*** 去掉尾随斜杠：否则 "$SUPABASE_URL$path" 会拼出 //auth/v1/health，
+          ***REMOVED*** 有些网关把双斜杠当不同路径。trim 之后顺手从根上消掉这个可能。
+          while [ "${SUPABASE_URL%/}" != "$SUPABASE_URL" ]; do
+            SUPABASE_URL="${SUPABASE_URL%/}"
+          done
+          echo "  规范化后的 base URL = [$SUPABASE_URL]"
+
+          ***REMOVED*** ── 3) 探测 ──────────────────────────────────────────────────
           fail=0
-          for spec in "Auth 健康检查 /auth/v1/health" "REST 根路径 /rest/v1/"; do
-            label="${spec%% *}"
-            path="${spec***REMOVED**** }"
-            code=$(curl -s -o /dev/null -w '%{http_code}' \
+          for spec in "Auth 健康检查|/auth/v1/health" "REST 根路径|/rest/v1/"; do
+            label="${spec%%|*}"
+            path="${spec***REMOVED****|}"
+            url="$SUPABASE_URL$path"
+            echo
+            echo "── 3) 探测 $label ──"
+            echo "  请求 URL=[$url]"
+
+            rc=0
+            code="$(curl -sS -o /dev/null -w '%{http_code}' \
               -H "apikey: $SUPABASE_ANON_KEY" \
               -H "Authorization: Bearer $SUPABASE_ANON_KEY" \
-              --max-time 20 "$SUPABASE_URL$path" || echo "000")
-            echo "$label → HTTP $code"
-            ***REMOVED*** 2xx / 401 / 403 都说明接口有响应、项目还活着
+              --max-time 20 "$url")" || rc=$?
+
+            if [ "$rc" -ne 0 ]; then
+              ***REMOVED*** 旧写法 `|| echo "000"` 会把 curl 自己打的 000 再追加一个 → 误导性的 "000000"。
+              ***REMOVED*** 现在只看退出码，压根不打印那个假的 code。
+              echo "  ❌ 没拿到 HTTP 响应：$(curl_hint "$rc")"
+              echo "     （curl 的 %{http_code} 在这种情况下恒为 000，没有信息量，已忽略）"
+              fail=1
+              verbose_diag "$url"
+              continue
+            fi
+
+            echo "  HTTP $code"
+            ***REMOVED*** 2xx / 401 / 403 都说明接口有响应、项目还活着。
+            ***REMOVED*** 🔴 这个接受范围是刻意留宽的，别收紧：anon 读业务表报权限错是预期行为
+            ***REMOVED***    （见文件头注释），401/403 同样证明项目没被暂停。
             case "$code" in
-              2*|401|403) ;;
-              *) fail=1 ;;
+              2*|401|403) echo "  ✅ 有响应，项目活着" ;;
+              *) echo "  ❌ 拿到了非预期状态码（期望 2xx / 401 / 403）"; fail=1 ;;
             esac
           done
 
+          ***REMOVED*** ── 4) 结论 ──────────────────────────────────────────────────
+          echo
           if [ "$fail" != "0" ]; then
-            echo "::error::保活失败 —— 项目可能已被暂停，去控制台手动 Restore"
+            echo "::error::保活失败 —— 按上面的分类对号入座，别急着去控制台 Restore："
+            echo "  · 出现「DNS 解析失败 / TCP 连接失败 / TLS 握手失败 / 超时」→ 项目**没有**被暂停，先查 secret 值（首尾空白）和网络；"
+            echo "  · 拿到了 HTTP 状态码但不在 2xx/401/403 → 看状态码本身（5xx 通常是项目被暂停或上游故障）；"
+            echo "  · 两条都拿到 2xx/401/403 之外的响应、且确认网络没问题 → 去 Supabase 控制台手动 Restore"
             exit 1
           fi
-          echo "保活成功"
+          echo "保活成功（Auth 与 REST 都有响应）"
