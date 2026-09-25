@@ -243,11 +243,7 @@ export default function AssignmentCorrect() {
           <Panel className="overflow-hidden">
             {todo.length === 0 ? (
               <div className="px-3 py-6 text-center" style={{ fontSize: 13, color: 'var(--color-ink3)' }}>
-                {correction.length === 0
-                  ? simple
-                    ? '这份作业还没有改错名单。点右上角「更改名单」，可以按等级挑人（差 / 良）。'
-                    : '这份作业还没有改错名单。点右上角「更改名单」挑人。'
-                  : '都改完了 🎉'}
+                {correction.length === 0 ? '还没有改错名单' : '都改完了 🎉'}
               </div>
             ) : (
               todo.map((s, i) => (

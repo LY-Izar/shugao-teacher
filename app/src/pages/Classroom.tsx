@@ -20,6 +20,8 @@ import { useStore, useToast } from '../data/store'
 import { collectStats } from '../lib/assignments'
 import { BAND_META, gradeStats } from '../lib/grading'
 import { closePip, openPip, pipSupported } from '../lib/pip'
+import { useMaintenanceStatus } from '../lib/useMaintenance'
+import { MaintenanceScreen } from '../components/MaintenanceGate'
 import { ranked } from '../lib/wrongbook'
 import { HEARTBEAT_MS, emit, subscribe } from '../lib/realtime'
 import { isRemote } from '../lib/supabase'
@@ -37,7 +39,8 @@ import {
 /** 备份文件名：固定名字，每次覆盖 —— 免得一天攒几十个文件 */
 const BACKUP_NAME = '树高备份.json'
 import { awayText, dayState, maybeShift, toMinutes, weekdayOf } from '../lib/schedule'
-import { dayKind, holidayOn, isRestDay, nextHoliday, ymdOf } from '../lib/holiday'
+import { beijingNow, dayKind, holidayOn, isRestDay, nextHoliday, ymdOf } from '../lib/holiday'
+import { pickDailyQuote } from '../lib/quotes'
 import { parseScheduleText, type ParsedScheduleItem } from '../lib/scheduleParse'
 import { preparePhoto } from '../lib/photo'
 import { recognize } from '../lib/ocr'
@@ -749,6 +752,46 @@ export default function Classroom() {
   const cur = stats?.questions[seq - 1]
   const pad = (n: number) => String(n).padStart(2, '0')
 
+  /* ============================================================
+     🆕 维护模式（2026-09-29 管理台第二期）—— 教室端**自己**渲染维护画面
+     ------------------------------------------------------------
+     🔴 为什么这一页**不交给全局闸门**（`MaintenanceGate.tsx` 的文件头写的是同一件事）：
+        闸门会把这一页整块卸载掉 —— 而卸载会**停掉心跳**，面板随即显示"教室端离线"，
+        可它其实好好地在显示维护画面：那是往"假在线"那条已知缺陷（H3/W4）
+        上再叠一层假信号。所以这里的顺序是：
+          ① **心跳照发**（上面那个 effect 一行都不用改，它按 `client` 跑）；
+          ② **立刻清掉本页学生数据**（下面那个 effect）；
+          ③ 整屏换成维护画面（下面那个 early return）。
+
+     🔴 **问的是"要不要清"，不是"要不要停"**：维护画面的意义之一就是
+        "别让学生继续看到作业 / 名单"。清的是**这一页渲染出来的东西**：
+        本机文件列表、云端文件列表、播报队列、置顶小窗、语音 ——
+        ⚠️ **不动 `store`**：那是全班/全校的数据，别的老师还在用（清 store 等于删数据）。
+     ============================================================ */
+  const maint = useMaintenanceStatus()
+  const maintOn = maint.enabled
+  useEffect(() => {
+    if (!maintOn) return
+    /* 立刻清屏上/本页里那些"学生看得见"的东西 */
+    stopSpeaking()
+    closePip()
+    mutateQueue(() => [])
+    setCloudFiles([])
+    setLocalFiles([])
+    setSchedReview(null)
+    setPasteText('')
+    setAssignmentId('')
+  }, [maintOn, mutateQueue])
+
+  /* ---------- 维护中：整屏维护画面（心跳与清理见上面那一段） ---------- */
+  if (maintOn) {
+    return (
+      <Shell>
+        <MaintenanceScreen status={maint} variant="classroom" />
+      </Shell>
+    )
+  }
+
   /* ---------- 后端模式下教室端需要一次登录 ---------- */
   if (isRemote && !hydrated) {
     return (
@@ -790,9 +833,6 @@ export default function Classroom() {
         <SyncWrap />
         <Panel bodyClass="p-8 text-center" className="anim-in">
           <div style={{ fontSize: 16, fontWeight: 640 }}>还没有班级数据</div>
-          <div style={{ fontSize: 13, color: 'var(--color-ink3)', marginTop: 6 }}>
-            先在教师端建立班级并录入学生名单，教室端会自动读到。
-          </div>
         </Panel>
       </Shell>
     )
@@ -1038,7 +1078,6 @@ export default function Classroom() {
               </span>
               <div style={{ fontSize: 13, color: '***REMOVED***8a5a12', lineHeight: 1.7 }}>
                 当前浏览器不支持<b>强制置顶小窗</b>（需要 Edge / Chrome 116 及以上）。
-                下面的「当前题目」面板仍然可用，但它会被全屏的新教育平台盖住 ——
                 讲评时请用手机或平板看题号与正确率。
               </div>
             </div>
@@ -1055,7 +1094,7 @@ export default function Classroom() {
                 <IconInfo size={17} />
               </span>
               <div className="flex-1" style={{ fontSize: 13, color: '***REMOVED***0d3f9e', lineHeight: 1.7 }}>
-                点一次「启动置顶小窗」即可：它会浮在全屏的新教育平台之上，显示当前题号与正确率。
+                点一次「启动置顶小窗」：小窗会浮在全屏的新教育平台之上，显示当前题号与正确率。
                 <b>同时这一步也解开了浏览器的声音限制</b>，呼叫播报才能出声。
               </div>
               <Button
@@ -1096,6 +1135,17 @@ export default function Classroom() {
                   </div>
                 </div>
               </Panel>
+
+              {/*
+                每日名言 —— 这一屏是**给学生看的**，所以内容来自 `lib/quotes.ts`
+                （古典诗词 / 名言警句 / 人民日报，**每条都写出处**），
+                与教师端那句问候（`lib/mood.ts`）不是同一批。
+
+                🔴 用 `beijingNow()` 的日期做种子（`pickDailyQuote` 内部走 `dayIndex`），
+                   **不用随机** —— 否则刷新一次就换一句，学生会以为屏幕在乱跳。
+                字号按屏宽走 clamp：最后一排也要看得清，但不许压过右边那块逐题区。
+              */}
+              <DailyQuote />
 
               {collect ? (
                 <Panel className="overflow-hidden">
@@ -1314,13 +1364,7 @@ export default function Classroom() {
                     className="mt-2"
                     style={{ fontSize: 12, color: 'var(--color-ink3)', lineHeight: 1.7 }}
                   >
-                    今天没有排课。点上面的「粘贴课表」把班级课表录进来 ——
-                    贴学校发的电子表最准，也不会漏掉没写时间的节次。
-                    <br />
-                    <span style={{ color: 'var(--color-ink4)' }}>
-                      注意：教师端「日程表」是另一套数据（我什么时候上哪个班），
-                      教室端看的是这个班的课表。
-                    </span>
+                    今天没有排课
                   </div>
                 ) : (
                   <div className="mt-2">
@@ -1497,9 +1541,9 @@ export default function Classroom() {
                   style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.7 }}
                 >
                   {!bkSupported
-                    ? '这个浏览器不支持自动写文件夹。数据在云端有备份，不受影响。'
+                    ? '这个浏览器不支持自动写文件夹'
                     : needsGrant
-                      ? '浏览器重启后权限会失效 —— 点右上角「点一下恢复」即可继续自动备份。'
+                      ? '点右上角「点一下恢复」继续自动备份'
                       : bk
                         ? `上次备份：${new Date(bk).toLocaleString('zh-CN')} · 每 5 分钟一次`
                         : '选一个文件夹（建议放在网盘同步目录里），之后每 5 分钟自动写一份备份。'}
@@ -1513,7 +1557,7 @@ export default function Classroom() {
                     <h2>当前题目</h2>
                     <span className="flex-1" />
                     <span style={{ fontSize: 11, color: 'var(--color-ink3)' }}>
-                      {pipWin ? '与小窗同步' : '小窗兜底'}
+                      {pipWin ? '与小窗同步' : ''}
                     </span>
                   </div>
                   <div className="p-3">
@@ -1564,11 +1608,8 @@ export default function Classroom() {
               ) : !assignment || !stats ? (
                 <Panel bodyClass="p-8 text-center">
                   <div style={{ fontSize: 15, fontWeight: 620 }}>本班还没有已批改的作业</div>
-                  <div style={{ fontSize: 13, color: 'var(--color-ink3)', marginTop: 6 }}>
-                    在教师端完成一次批改后，这里的逐题正确率会自动出现。
-                  </div>
                   <div style={{ fontSize: 12, color: 'var(--color-ink4)', marginTop: 4 }}>
-                    极简模式的档案只记等级，没有逐题正确率，所以不会出现在这里。
+                    极简模式的档案没有逐题正确率。
                   </div>
                 </Panel>
               ) : (
@@ -1810,11 +1851,10 @@ export default function Classroom() {
                     {localFiles.length === 0 && cloudFiles.length === 0 ? (
                       <div className="px-3 py-4" style={{ fontSize: 12.5, color: 'var(--color-ink3)' }}>
                         {filesErr ? (
-                          '（这一栏现在是空的，不代表没人传 —— 见上面那行提示）'
+                          '(列表读不到，不代表没人传)'
                         ) : (
                           <>
-                            这个班还没有文件。教师端在「我的 → 教室端文件」里上传时勾上本班，
-                            传过来会自动存到这台电脑上。
+                            这个班还没有文件
                           </>
                         )}
                       </div>
@@ -1887,8 +1927,7 @@ export default function Classroom() {
                       lineHeight: 1.7,
                     }}
                   >
-                    取回的文件已经存在<b>这台电脑上</b>，断网也能打开；
-                    云端那份还留着（换一台教室电脑也能再取一次，教师端那边删除）。
+                    取回的文件已存在这台电脑上，断网也能打开。
                     {localFiles.length ? (
                       <>
                         {' '}
@@ -1974,8 +2013,6 @@ export default function Classroom() {
                 <div style={{ fontWeight: 600, marginBottom: 6 }}>还没有可讲评的作业</div>
                 <div style={{ fontSize: 12, color: 'var(--color-ink3, ***REMOVED***777)' }}>
                   {klass?.name ?? ''} 还没有批改完的作业。
-                  <br />
-                  教师端批改一次后，这里就会出现题号与正确率。
                 </div>
               </div>
             ),
@@ -2072,6 +2109,45 @@ function Shell({ children }: { children: React.ReactNode }) {
 }
 
 /**
+ * 每日名言（教室大屏给学生看的那一句）。
+ *
+ * ⚠️ **日期口径 `beijingNow()`**（§一 时间口径）：这块屏在别的时区也不会串天。
+ * ⚠️ 它是**自己一个 Panel**，不插进"这个班的课"那块里 —— 课表与呼叫是这块屏的核心，
+ *    名言只占它自己那一格，不挤掉它们。
+ * `data-daily-quote` 是给 `shots.mjs` 断言"当天固定"用的钩子（刷新两次必须同一句）。
+ */
+function DailyQuote() {
+  const q = pickDailyQuote(beijingNow())
+  return (
+    <section className="panel anim-in" data-daily-quote>
+      <div className="px-4 py-3.5">
+        <div
+          style={{
+            fontSize: 'clamp(19px, 1.7vw, 27px)',
+            fontWeight: 620,
+            lineHeight: 1.55,
+            letterSpacing: '.01em',
+            textAlign: 'center',
+          }}
+        >
+          {q.text}
+        </div>
+        <div
+          style={{
+            marginTop: 7,
+            fontSize: 13,
+            color: 'var(--color-ink3)',
+            textAlign: 'center',
+          }}
+        >
+          —— {q.from}
+        </div>
+      </div>
+    </section>
+  )
+}
+
+/**
  * 「数据没能存到服务器」提示。
  *
  * 这条以前只有教师端 AppShell 有 —— 可教室端是**挂在墙上的一块屏**：
@@ -2102,7 +2178,7 @@ function SyncBanner() {
           数据没能存到服务器
         </span>
         <span style={{ display: 'block', fontSize: 12, color: '***REMOVED***96702f', marginTop: 3, lineHeight: 1.7 }}>
-          {syncError} · 这台屏上的改动只在本机，网络恢复后请重新操作一次
+          {syncError} · 本地已保留，网络好了再操作一次
         </span>
       </span>
       <span style={{ fontSize: 11.5, color: '***REMOVED***96702f', flexShrink: 0 }}>知道了</span>

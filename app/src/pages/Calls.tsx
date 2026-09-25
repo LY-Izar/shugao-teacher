@@ -47,7 +47,7 @@ export default function Calls() {
     <>
       <PageHead
         title="呼叫记录"
-        sub={`${calls.length} 次呼叫 · 仅教师可见`}
+        sub={`${calls.length} 次呼叫`}
         onBack={() => navigate('/assignments')}
       />
 
@@ -57,7 +57,6 @@ export default function Calls() {
             <Empty
               icon={<IconMegaphone size={24} />}
               title="还没有呼叫记录"
-              desc="在「作业情况」页挑出错得较多的学生，一次叫 3–8 个人到办公室面批。"
               action={
                 <Button size="sm" variant="primary" onClick={() => navigate('/assignments')}>
                   去看作业情况
@@ -102,14 +101,6 @@ export default function Calls() {
                 只显示最近 3 条（共 <span className="num">{rows.length}</span> 条记录）
               </p>
             ) : null}
-
-            <div
-              className="mt-4 px-1"
-              style={{ fontSize: 11.5, color: 'var(--color-ink4)', lineHeight: 1.7 }}
-            >
-              记录只用于教师自己跟进订正进度。<b>不做被叫次数排行</b> ——
-              一旦变成可比较的数字，它就会变成压力工具，而不是教学工具。
-            </div>
           </>
         )}
       </Page>

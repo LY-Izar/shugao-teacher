@@ -19,7 +19,7 @@ import { getSupabase } from './supabase'
  * 内部账号的邮箱后缀。
  *
  * 这个平台有三类登录身份，只有第一类是人：
- *   教师 / 管理员：用真实邮箱（`admin2@example.com`、`admin@example.com`）
+ *   教师 / 管理员：用**自己的**邮箱（真实邮箱只存在于库里，公开仓库里不写具体地址）
  *   教室端账号：  一个班一个，登录名是 `g2-4` 这种短名 —— 不是人，也不该收信
  *
  * 所以登录框允许**只敲短名**，这里按输入内容补后缀：
@@ -124,8 +124,7 @@ async function call<T>(body: Record<string, unknown>): Promise<Result<T>> {
   if (res.status === 404) {
     return {
       ok: false,
-      message:
-        '这个部署里没有账号服务（/api/teacher-account）。在本地开发环境（npm run dev）下它不存在，线上才有。',
+      message: '账号服务暂时不可用，请稍后再试。',
     }
   }
   return {

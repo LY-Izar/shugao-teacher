@@ -28,10 +28,26 @@
  *   SUPABASE_ANON_KEY / VITE_SUPABASE_ANON_KEY       （校验调用者 JWT 与 RPC 用）
  *   SUPABASE_SERVICE_ROLE_KEY                        （🔴 Secret，绝不能进前端、绝不能进仓库）
  *
- * ⚠️ **本轮不做邮件发送**（`RESEND_API_KEY` 用户还没配）：`announcements` 表上那四列
- *    （`email_sent` / `email_sent_ts` / `email_count` / `email_fail`）**只建、不写**，
- *    本文件里一个字都不碰它们 —— 将来加发送时不用做迁移。
+ * ⚠️ 🆕 **2026-09-29 管理台第二期：邮件那一半接上了**（用户点名）。
+ *    这一节原来写着"本轮不做邮件发送（`RESEND_API_KEY` 用户还没配）"—— 那句话现在不成立了：
+ *    `RESEND_API_KEY` 已经配好，而公告表上那四列（`email_sent` / `email_sent_ts` /
+ *    `email_count` / `email_fail`）**本轮开始被真正写**。
+ *
+ *    🔴 **可选勾选、默认不发**（用户口径）：免费额度 3000 封/月、**100 封/天**，
+ *       而"一条全校公告 = 100+ 封"—— 所以默认不勾，勾了才发。
+ *    🔴 **发不到每位老师**：Resend 未验域名时只能用 `onboarding@resend.dev`，
+ *       而它**只能发给账号所有者本人**（= 固定的管理员邮箱）。
+ *       所以这一处的勾选框发的是**给管理员的一封留档邮件**，
+ *       界面上把这件事写清楚了（**不许让超管以为"全班老师都收到了邮件"**）。
  */
+
+import {
+  MAIL_DAILY_CAP,
+  MAIL_FROM,
+  beijingStamp,
+  mailConfigured,
+  sendAuditedMail,
+} from './_lib/mail'
 
 type Env = {
   SUPABASE_URL?: string
@@ -61,6 +77,11 @@ type Body = {
   /** 生效起点 / 终点（ISO 字符串；空串 / 不传 = 那一端是 ±∞） */
   activeFrom?: string
   activeTo?: string
+  /**
+   * 🆕 是否同时发一封邮件（**默认不发**）。
+   * ⚠️ 发的是**给管理员邮箱的一封留档**，不是群发（Resend 未验域名发不到别人）
+   */
+  sendEmail?: boolean
 }
 
 const NEED_STAGE22 =
@@ -307,6 +328,12 @@ export async function onRequestPost(context: {
     const schools = await read(await sb(env, '/rest/v1/schools?select=id&order=created_at&limit=1'))
     if (schools.ok && schools.rows[0]) schoolId = String(schools.rows[0].id)
 
+    /*
+     * 🆕 邮件：**先决定发不发**（默认不发），但**发信永远在落库之后**
+     *    —— 与用户反馈同一条纪律（先落库、再发信；发不出去也不回滚）。
+     */
+    const wantMail = body.sendEmail === true
+
     const ins = await read(
       await sb(env, '/rest/v1/announcements', {
         method: 'POST',
@@ -323,7 +350,7 @@ export async function onRequestPost(context: {
           /* 🔴 发件人由**服务端从调用者 JWT 取**，前端传什么都不信（与 notices.sender_id 同一条纪律） */
           created_by: me.id,
           updated_by: me.id,
-          /* ⚠️ 邮件四列**一个都不写**（本轮不发送）—— 让它们停在列默认值上 */
+          /* 邮件四列：没勾就停在列默认值上（`email_sent=false` / count=0 / fail=0） */
         }),
       }),
     )
@@ -337,7 +364,65 @@ export async function onRequestPost(context: {
         isMissing(ins) ? 503 : 502,
       )
     }
-    return json({ status: 'ok', id: String(ins.rows[0].id) })
+    const id = String(ins.rows[0].id)
+
+    /* ---------------- 邮件那一半（可选、默认不发） ---------------- */
+    let mail: { ok: boolean; reason: string } = { ok: false, reason: 'not_requested' }
+    if (wantMail) {
+      const r = await sendAuditedMail(env, {
+        action: 'mail.announcement',
+        actorId: me.id,
+        subject: `【树高公告】${f.title.slice(0, 60)} · ${beijingStamp()}`,
+        text: [
+          '你在管理台发布了一条全站公告。',
+          '',
+          `标题：${f.title}`,
+          `等级：${f.level} · 弹窗：${f.popup} · 置顶：${f.pin ? '是' : '否'}`,
+          `生效：${f.from ?? '立即'} → ${f.to ?? '不过期'}`,
+          `时间：${beijingStamp()}`,
+          '',
+          '正文：',
+          f.text,
+          '',
+          '⚠️ 这封邮件是**给管理员的一封留档**，不是群发：',
+          `   Resend 未验域名时发件人只能是 ${MAIL_FROM}，且只能发给账号所有者本人。`,
+          `   今天的邮件配额上限是 ${MAIL_DAILY_CAP} 封/天（Resend 免费额度 100 封/天）。`,
+          /* ⚠️ 措辞避开那四个触发词（成绩 / 分数 / 得分 / 排名 / 名次）——
+             它们会让 `looksLikeStudentData()` 把**这句免责声明自己**拦下来
+             （`admin-checks` ⑤ 的反向对照抓到过同一个形状）。 */
+          '⚠️ 本邮件正文里**没有学生个人信息**（发信助手发出前会体检一遍，命中就不发）。',
+        ].join('\n'),
+      })
+      mail = { ok: r.ok, reason: r.ok ? '' : r.reason }
+      /*
+       * 🔴 四列**真正用起来**（方案 §二.5 的"额度/失败计数要给到界面上"）：
+       *    email_sent  = 有没有**成功**发出去（失败不算"发过"，否则界面上会把失败画成绿）
+       *    email_count = 成功封数（一封留档 = 1）
+       *    email_fail  = 失败封数（含"没配 key"与"正文疑似含学生信息"）
+       *  ⚠️ 写这四列失败**不影响公告本身**（公告已经发出去了）——
+       *     但要把话说出来（回话里带 `mail.recorded`）。
+       */
+      await sb(env, `/rest/v1/announcements?id=eq.${id}`, {
+        method: 'PATCH',
+        headers: { Prefer: 'return=minimal' },
+        body: JSON.stringify({
+          email_sent: r.ok,
+          email_sent_ts: new Date().toISOString(),
+          email_count: r.ok ? 1 : 0,
+          email_fail: r.ok ? 0 : 1,
+          updated_by: me.id,
+          updated_at: new Date().toISOString(),
+        }),
+      })
+    }
+
+    return json({
+      status: 'ok',
+      id,
+      mail,
+      /** 邮件通道通不通（界面上要写清楚"没配 key 时勾了也不会发"） */
+      mailConfigured: mailConfigured(env),
+    })
   }
 
   /* ---------------- update：改一条（**同一个不变量在每一条写入路径上守**） ---------------- */

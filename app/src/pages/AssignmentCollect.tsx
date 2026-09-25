@@ -7,7 +7,6 @@ import {
   IconCheck,
   IconChevronRight,
   IconHash,
-  IconInfo,
   IconRefresh,
   IconScan,
   IconStack,
@@ -29,7 +28,7 @@ type Mark = 'submitted' | 'missing' | 'late'
 type Stage = 'idle' | 'preview' | 'scanning' | 'done'
 
 /** 识别过程中的进度文案 —— 现在是真在跑，不再是演的 */
-const SCAN_STEPS = ['预处理照片（压缩 · 纠偏 · 提对比）', '识别手写学号', '与花名册对账']
+const SCAN_STEPS = ['读取照片', '识别学号', '核对名单']
 
 /** 收缴采用「只记例外」：默认全班已交，只存未交与迟交 */
 function initMark(a?: Assignment): Record<string, Mark> {
@@ -79,6 +78,11 @@ function MockStack({ highlight }: { highlight?: string }) {
                 letterSpacing: '-.02em',
               }}
             >
+              {/*
+                ⚠️ 这里是**演示用的假名**：与 `data/seed.ts` 的 `makeScanDemoRows()`
+                   同一批虚构姓名（王志远 / 李思涵 / 张雨欣 …）。
+                   **不要**改成任何真实学生的姓名 —— 本仓库是公开的。
+              */}
               {isName ? '王志远' : no}
             </span>
             {bad ? (
@@ -1070,16 +1074,6 @@ export default function AssignmentCollect() {
         >
           保存登记
         </Button>
-
-        <div
-          className="mt-3 flex items-start gap-2 px-1"
-          style={{ fontSize: 11.5, color: 'var(--color-ink4)', lineHeight: 1.7 }}
-        >
-          <IconInfo size={13} />
-          <span>
-            无论识别结果如何，都可以直接点学生手工修正 —— 识别只是加速器，永远不会卡住流程。
-          </span>
-        </div>
       </Page>
 
       {/* 绿 → 红：这个人已经批改过，改成未交就得连批改记录一起删 */}
@@ -1109,10 +1103,6 @@ export default function AssignmentCollect() {
             <br />
             改成未交的话，<b>这份批改记录会一起删掉</b> —— 错题、改错名单里的名字、
             「已改错」的登记都会一并清掉，且不能撤销。
-            <br />
-            <span style={{ color: 'var(--color-ink3)', fontSize: 12 }}>
-              「需重点关注」的标记会留着 —— 那是对人的标注，跟他这次交没交无关。
-            </span>
           </div>
         </div>
       </Sheet>

@@ -85,7 +85,7 @@ export function WordImport({
             {busy ? '正在识别…' : '把练习册 Word 稿拖进来'}
           </span>
           <span style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.6 }}>
-            或点击选择 .docx 文件 · 题量、题型、分值、小问自动识别
+            或点击选择 .docx 文件
           </span>
         </button>
       ) : (
@@ -294,7 +294,7 @@ export function WordImport({
           <span>
             {error}
             <br />
-            也可以直接在下面手工填写题量建档，不影响使用。
+            也可以在下面手工填写题量
           </span>
         </div>
       ) : null}

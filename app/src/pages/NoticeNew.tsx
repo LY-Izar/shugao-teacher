@@ -174,7 +174,7 @@ export default function NoticeNew() {
             <Empty
               icon={<IconAlert size={24} />}
               title="你没有发通知的权限"
-              desc="发通知是学校里的管理身份才有的动作（教务处 / 办公室 / 德育处 / 校长 / 年级主任 / 组长）。班主任与任课教师的事务走「呼叫」—— 那是给学生看的大屏。你的收件箱照常能看。"
+              desc="你的收件箱照常能看。"
               action={
                 <Button size="sm" onClick={() => navigate('/notices')}>
                   去看通知
@@ -189,15 +189,14 @@ export default function NoticeNew() {
 
   return (
     <>
-      <PageHead title="发通知" sub="一条通知 = 标题 + 正文" onBack={() => navigate('/notices')} />
+      <PageHead title="发通知" onBack={() => navigate('/notices')} />
       <Page>
         {all.length === 0 ? (
           <Panel className="anim-b in mb-4" bodyClass="p-4">
             <div style={{ fontSize: 13, lineHeight: 1.8 }}>
-              <b>数据库还没给出你能发的范围。</b>
+              <b>暂时拿不到你能发的范围。</b>
               <div className="mt-1" style={{ color: 'var(--color-ink2)' }}>
-                两种情况：① 通知那一段 SQL 还没跑（<code>supabase/schema.sql</code> 第 21 段）；
-                ② 你的身份还不在能发通知的那八档里。范围清单是**数据库算的**，前端不会替你猜。
+                请管理员检查通知功能是否已开启。
               </div>
             </div>
           </Panel>
@@ -207,12 +206,12 @@ export default function NoticeNew() {
         <div className="mb-4">
           {blockOf('school', '全校', '全校所有老师')}
           {blockOf('department', '某个部门', '职能部门（办公室 / 教务处 / 总务处 / 德育处）—— 一个人可以属于多个部门')}
-          {blockOf('grade', '本年级', '该年级有任教关系的老师 + 班主任 / 年级主任 / 备课组长')}
+          {blockOf('grade', '本年级', '本年级的老师')}
           {blockOf('subject', '本学科', '本校这一科的所有老师（跨年级）')}
-          {blockOf('role', '某个职位', '只列得出**比你低**的档位 —— 不许越级')}
+          {blockOf('role', '某个职位', '只列得出比你低的职位')}
           {all.length > 0 && !chosen ? (
             <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', paddingLeft: 2 }}>
-              选一个范围。**你能发哪些范围是数据库算的** —— 看不到"全校"就说明你的身份不能发给全校。
+              请选一个范围
             </p>
           ) : null}
         </div>
@@ -250,7 +249,7 @@ export default function NoticeNew() {
             }}
             value={body}
             maxLength={BODY_MAX}
-            placeholder="时间、地点、要带什么。纯文本 —— 不做富文本，也**不带附件**（材料请放『教室端文件』里，正文里写一句文件名）。"
+            placeholder="时间、地点、要带什么"
             onChange={(e) => setBody(e.target.value)}
           />
           <div className="mt-2 flex flex-wrap items-center gap-3" style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
@@ -276,7 +275,7 @@ export default function NoticeNew() {
                 <option value={30}>30 天</option>
               </select>
             </span>
-            <span>过期后从列表里消失，但**记录不删**</span>
+            <span>过期后从列表里消失，但记录不删</span>
           </div>
         </Panel>
 
@@ -314,11 +313,6 @@ export default function NoticeNew() {
         >
           {sending ? '发送中…' : '发出'}
         </Button>
-
-        <div className="mt-3 px-1" style={{ fontSize: 11.5, color: 'var(--color-ink4)', lineHeight: 1.7 }}>
-          通知**只发给老师**（教室里那块大屏看不到）。它**不弹窗**、**不进早间欢迎弹窗** ——
-          老师在工作台和「通知」页上自己看到。发出去之后**可以撤下**（记录不删）。
-        </div>
       </Page>
     </>
   )

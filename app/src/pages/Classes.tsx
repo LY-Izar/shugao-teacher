@@ -56,7 +56,6 @@ export default function Classes() {
             <div className="empty">
               <IconUsers size={26} />
               <div style={{ fontWeight: 600, color: 'var(--color-ink)' }}>还没有班级</div>
-              <div style={{ fontSize: 13 }}>建立班级后即可导入学生名单</div>
               <Button variant="primary" size="sm" icon={<IconPlus size={15} />} onClick={startNew}>
                 新建班级
               </Button>
@@ -167,10 +166,6 @@ export default function Classes() {
           </div>
         )}
 
-        <div className="mt-4 px-1" style={{ fontSize: 11.5, color: 'var(--color-ink4)', lineHeight: 1.7 }}>
-          学号是系统的唯一索引：批改、统计、呼叫全部以学号定位，
-          因此导入时会自动做序列连续性与重号检查。
-        </div>
       </Page>
 
       {/* 新建 / 编辑 */}
@@ -246,7 +241,7 @@ export default function Classes() {
                 push({ text: '班级已删除', tone: 'warn' })
               }}
             >
-              删除该班级
+              删除班级
             </Button>
           ) : null}
         </div>

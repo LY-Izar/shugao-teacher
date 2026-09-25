@@ -1542,7 +1542,7 @@ function GradeSession({
                 <>
                   <br />
                   拆成 <b className="num">{pendingSub.n}</b> 个小题后，每一条「整题错」
-                  都会同时记到每个小题上 —— <b>一条都不会少</b>。
+                  都会同时记到每个小题上，一条都不会少。
                   谁其实只错了一部分，再点一下对应的小题取消就行。
                 </>
               ) : (
@@ -1596,8 +1596,7 @@ function GradeSession({
             >
               <span style={{ display: 'block', fontSize: 14.5, fontWeight: 650 }}>临时保存</span>
               <span style={{ display: 'block', fontSize: 12, color: 'var(--color-ink3)', lineHeight: 1.6, marginTop: 2 }}>
-                只存下当前进度，未批改的 <b>{unconfirmed}</b> 人<b>不算未交</b>。
-                之后从作业列表点进来会接着这次的状态继续批。
+                只存下当前进度，未批改的 <b>{unconfirmed}</b> 人不算未交。
               </span>
             </button>
             <button
@@ -1610,8 +1609,7 @@ function GradeSession({
                 确认完成批改
               </span>
               <span style={{ display: 'block', fontSize: 12, color: 'var(--color-ink3)', lineHeight: 1.6, marginTop: 2 }}>
-                未批改的 <b>{unconfirmed}</b> 人会被登记为<b>未交</b>。
-                你批的就是交上来的那一摞，不在里面的就是没交。
+                未批改的 <b>{unconfirmed}</b> 人会被登记为未交。
                 {simple ? '' : ' 下一步可以挑需要改错的人。'}
               </span>
             </button>
@@ -1619,8 +1617,7 @@ function GradeSession({
         ) : (
           <>
             <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.7, marginBottom: 8 }}>
-              勾选需要改错的人 —— <b>勾一下就存一下</b>，被叫走了也不丢。
-              这份名单会出现在「改错登记」里。
+              勾选需要改错的人，这份名单会出现在「改错登记」里。
             </p>
 
             <div className="mb-2 flex flex-wrap gap-1.5">

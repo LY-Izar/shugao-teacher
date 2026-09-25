@@ -494,7 +494,10 @@ export type Announcement = {
   updatedAt: number
   /** 撤下时刻（null = 有效）。⚠️ 撤下**不删行**（"这条公告曾经存在过吗"要能回答） */
   revokedAt: number | null
-  /* ---- 邮件四列：🆕 本轮**不做发送**，列先留（服务端一个字都不写、界面不显示）---- */
+  /* ---- 邮件四列：🆕 2026-09-29 管理台第二期起**真正被写**（可选勾选、默认不发）----
+     🔴 发的是**给管理员邮箱的一封留档**，不是群发（Resend 未验域名发不到别人）；
+        四列的语义：`emailSent` = **成功**发过（失败不算"发过"）；
+        `emailCount` = 成功封数；`emailFail` = 失败封数（含没配 key / 正文疑似含学生信息）。 */
   emailSent: boolean
   emailSentTs: number | null
   emailCount: number

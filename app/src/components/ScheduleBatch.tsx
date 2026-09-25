@@ -210,8 +210,7 @@ export function ScheduleBatch({
           </Button>
         </div>
         <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 8, lineHeight: 1.65 }}>
-          支持学校发的 <b>.xlsx</b> 课表、<b>.docx</b>、以及 <b>.csv / .txt</b>。
-          网格式（行是节次、列是星期）和列表式都能认；<b>文件只在本机解析，不会上传</b>。
+          支持 .xlsx / .docx / .csv / .txt
         </p>
         <button
           type="button"
@@ -393,7 +392,7 @@ export function ScheduleBatch({
           style={{ fontSize: 11.5, color: 'var(--color-ink4)', lineHeight: 1.65 }}
         >
           <IconCheck size={13} />
-          <span>点「再加一条」可以一次录完整周；新增时时间会自动接上一节的下一节。</span>
+          <span>点「再加一条」可以一次录完整周。</span>
         </p>
       ) : null}
     </Sheet>

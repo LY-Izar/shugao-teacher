@@ -2,7 +2,6 @@ import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Page } from '../components/AppShell'
 import {
-  IconCalendar,
   IconCheck,
   IconClipboard,
   IconGrid,
@@ -622,18 +621,6 @@ export default function Assignments() {
             })}
           </div>
         )}
-
-        <div
-          className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-1 px-1"
-          style={{ fontSize: 11.5, color: 'var(--color-ink4)' }}
-        >
-          <span className="flex items-center gap-1.5">
-            <IconCalendar size={13} /> 日期默认取前一天
-          </span>
-          <span className="flex items-center gap-1.5">
-            <IconGrid size={13} /> 题号来自模板，不依赖图片识别
-          </span>
-        </div>
       </Page>
 
       {/* 删除确认 */}

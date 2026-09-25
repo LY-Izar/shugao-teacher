@@ -22,7 +22,7 @@ import { teacherSubjectLabel } from '../lib/subjects'
 
 type Stage = 'capture' | 'preview' | 'scanning' | 'review'
 
-const SCAN_STEPS = ['定位名单区域', '识别学号列', '识别姓名列', '序列连续性校验']
+const SCAN_STEPS = ['读取照片', '识别学号', '识别姓名', '检查名单']
 
 /** 无照片时的示意「花名册」——用几何线条合成，不依赖任何素材 */
 function MockSheet() {
@@ -531,8 +531,7 @@ export default function ImportPhoto() {
                   <IconAlert size={16} />
                 </span>
                 <div style={{ fontSize: 12.5, color: '***REMOVED***8a5a12', lineHeight: 1.6 }}>
-                  有 <b className="num">{bad}</b> 行需要人工确认。请对照原图修改——
-                  系统不会把有疑问的行当作正确结果。
+                  有 <b className="num">{bad}</b> 行需要确认，请对照原图修改。
                 </div>
               </div>
             ) : (

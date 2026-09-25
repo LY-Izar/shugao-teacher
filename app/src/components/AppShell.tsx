@@ -169,10 +169,12 @@ for (const n of NAV) {
 }
 
 const MORE_HINT: Record<string, string> = {
-  '/classes': '花名册 · 拍照录入 · 名单体检',
+  '/classes': '花名册 · 拍照录入',
   '/exams': '导入成绩单 · 手动批阅 · 逐题统计',
   '/wrong': '按班级看错题 · 生成重练题卷',
-  '/schedule': '我什么时候上哪个班 · 上课前提醒',
+  // ⚠️ `/schedule` 那一行**故意没有**：它原来写的是"我什么时候上哪个班 · 上课前提醒"，
+  //    而展开层里那一项本来就叫「日程表」—— 一行 11.5px 小字复读标题（用户 2026-09-29 拍板删）。
+  //    渲染处 `MORE_HINT[n.to] ? … : null` 会自己跳过没有的那一项。
 }
 
 /* ---------------- Toast ---------------- */
@@ -1227,7 +1229,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   数据没能存到服务器
                 </span>
                 <span style={{ display: 'block', fontSize: 11.5, color: '***REMOVED***96702f', marginTop: 2 }}>
-                  {syncError} · 网络恢复后重新操作一次即可，本地已保留
+                  {syncError} · 本地已保留
                 </span>
               </span>
               <span style={{ fontSize: 11.5, color: '***REMOVED***96702f', flexShrink: 0 }}>知道了</span>
@@ -1389,7 +1391,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         }
       >
         <div style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginBottom: 8, lineHeight: 1.65 }}>
-          切换后，「作业」「班级」等页面默认就按这个班来。
+          切换后，作业、班级等页面都按这个班显示
         </div>
         <div className="overflow-hidden" style={{ border: '1px solid var(--color-line)', borderRadius: 4 }}>
           {classes.map((c, i) => {

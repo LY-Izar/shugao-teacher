@@ -64,7 +64,6 @@ export default function Notices() {
     <>
       <PageHead
         title="通知"
-        sub="学校对老师说的话 · 与「呼叫」是两件事"
         right={
           mayPublish ? (
             <Button size="sm" variant="primary" icon={<IconPlus size={16} />} onClick={() => navigate('/notices/new')}>
@@ -80,8 +79,7 @@ export default function Notices() {
             <div style={{ fontSize: 13, lineHeight: 1.8 }}>
               <b>数据库里还没有通知表。</b>
               <div className="mt-1" style={{ color: 'var(--color-ink2)' }}>
-                到 Supabase → SQL Editor 跑一遍 <code>supabase/schema.sql</code>（第 21 段），
-                回来刷新这一页就有了。在那之前这个页面什么都不会显示，也**不会影响任何别的功能**。
+                请管理员启用通知功能，回来刷新这一页就有了。
               </div>
             </div>
           </Panel>
@@ -92,11 +90,6 @@ export default function Notices() {
             <Empty
               icon={<IconBell size={24} />}
               title="还没有通知"
-              desc={
-                mayPublish
-                  ? '学校有事务要通知老师时，会出现在这里。你也可以自己发一条。'
-                  : '学校有事务要通知老师时，会出现在这里 —— 收到之后它就在这儿，不会弹窗打断你。'
-              }
               action={
                 mayPublish ? (
                   <Button size="sm" variant="primary" onClick={() => navigate('/notices/new')}>
@@ -143,15 +136,6 @@ export default function Notices() {
                   }}
                 />
               ))}
-            </div>
-
-            <div
-              className="mt-4 px-1"
-              style={{ fontSize: 11.5, color: 'var(--color-ink4)', lineHeight: 1.7 }}
-            >
-              通知<b>只发给老师</b>，教室里那块大屏<b>看不到</b>它 ——
-              那是给学生看的屏，与「呼叫」共用。<b>不做"谁读了这条"的回执</b>：
-              这一页只记"我上次看到哪儿"。通知<b>不会弹窗</b>，也不会进早上的欢迎弹窗。
             </div>
           </>
         ) : null}
@@ -235,7 +219,7 @@ function NoticeCard({
           ) : null}
           {revoked ? (
             <div className="mt-1" style={{ fontSize: 11.5, color: 'var(--color-ink4)' }}>
-              <IconCheck size={13} /> 已撤下 —— 别人看不到了，这一行**没有删**（历史仍可查）。
+              <IconCheck size={13} /> 已撤下
             </div>
           ) : null}
         </div>

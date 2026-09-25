@@ -967,3 +967,284 @@ export function judgeR2(f: SecretFacts): { tone: Tone; text: string; notes: stri
     ],
   }
 }
+
+/* ============================================================
+   🆕 2026-09-29 管理台第二期：三条新判据
+   ------------------------------------------------------------
+   分层与第一期完全一致：**纯逻辑在这里、渲染在 `Admin.tsx`**。
+   阈值做成**导出常量**，因为 `admin-checks.mjs` 要逐档造用例
+   （照第一期 G2 那四个阈值那一节的写法）。
+   ============================================================ */
+
+/* ============================================================
+   🆕 管理台第二期：**分区导航的登记表**
+   ------------------------------------------------------------
+   它放在这个纯逻辑文件里（而不是 `Admin.tsx`）有两个理由：
+     · `react(only-export-components)`：组件文件里导出一张常量表会让 Fast Refresh 失效；
+     · 它是**可被断言的数据**：`admin-checks` 直接 import 它，逐条核对
+       "分区是不是这七个、label 有没有重复" —— 比读源码文本稳。
+   ⚠️ 分区**不是路由**（`/admin` 仍然只有一条裸路由，I41）——
+      这七个 key 只是面板内部的一排标签页。
+   ============================================================ */
+
+export const ADMIN_SECTIONS = [
+  { key: 'overview', label: '概览', hint: '数字磁贴 + 体检结论' },
+  { key: 'health', label: '健康', hint: '版本 / 配置 / 结构 / 备份 / 数据' },
+  { key: 'db', label: '数据库', hint: '用量、逐表体积、单份档案排行' },
+  { key: 'announce', label: '公告', hint: '全站公告（关于平台本身）' },
+  { key: 'maintenance', label: '维护', hint: '开关、定时、自动关闭' },
+  { key: 'errors', label: '错误日志', hint: '前端异常流水（B 类隐私）' },
+  { key: 'feedback', label: '反馈', hint: '老师提的意见与邮件留痕' },
+] as const
+
+export type AdminTab = (typeof ADMIN_SECTIONS)[number]['key']
+
+/* ---------------- ① 数据库用量（配额按 **1 GB** 算 —— 用户拍板） ---------------- */
+
+/**
+ * 🔴 **配额 = 1 GB**（用户 2026-09-28 拍板）。
+ *
+ * ⚠️ 这个常量**只在这里**：服务端 `db_usage_report()`**只量字节数、不判色**
+ *    （`admin-checks` 有一条反向断言：服务端回话里**不许**出现 `quotaBytes` ——
+ *    否则就是"同一个数两处实现"，改一处忘一处时面板会开始骗人）。
+ */
+export const DB_QUOTA_BYTES = 1_073_741_824
+/** 🟡 60%：够用但该看一眼了 */
+export const DB_WARN_PCT = 60
+/** 🔴 85%：再写入就有失败风险 */
+export const DB_BAD_PCT = 85
+/**
+ * 🔴 **与百分比无关的一条红**：单份档案的 `question_meta` > 5 MB。
+ *
+ * 为什么百分比挡不住它：题图是**以 base64 直接塞进 `question_meta`（jsonb）** 的
+ * （`lib/docx.ts:151`），一份档案就能到十几 MB —— 而全库可能才用了 30%。
+ * 真出事的那一刻是"**这一份存不进去了**"，不是"库满了"。
+ * ⚠️ 第一条链在**服务端**：`docx.ts` 的题图预算（单张 / 单份都有上限）。
+ *    这一条是**第二道网**：超了就在这块屏上红给你看。
+ */
+export const ARCHIVE_META_BAD_BYTES = 5 * 1024 * 1024
+
+export type DbTableFact = { name: string; bytes: number; rowsEstimate: number | null }
+export type DbArchiveFact = { assignmentId: string; className: string; bytes: number }
+
+export type DbFacts = {
+  /** 服务端有没有拿到数（false = 没配密钥 / 接口没部署 → **灰**，不是绿也不是红） */
+  configured: boolean
+  totalBytes: number | null
+  tables: DbTableFact[]
+  questionMetaBytes: number | null
+  archives: DbArchiveFact[]
+  /** 捞不到的原因（`null` = 拿到了）。**它是独立字段**，为 null 才允许绿 */
+  unknownReason: string | null
+}
+
+export type DbJudgement = {
+  tone: Tone
+  /** 卡上那一句话（一般只放**一个数字**，照第一期 §3.4 的 L1 密度纪律） */
+  text: string
+  notes: string[]
+  /** 已经用掉的百分比（拿不到是 null） */
+  pct: number | null
+  freeBytes: number | null
+  /** 体积超标的那几份档案（**只有班级名与字节数**，没有题目内容） */
+  oversized: DbArchiveFact[]
+  /** 体积最大的那一份（永远显示：它是"还能不能再塞一份"的答案） */
+  biggest: DbArchiveFact | null
+}
+
+export function judgeDbUsage(f: DbFacts): DbJudgement {
+  const none: Omit<DbJudgement, 'tone' | 'text' | 'notes'> = {
+    pct: null,
+    freeBytes: null,
+    oversized: [],
+    biggest: null,
+  }
+  /* 拿不到数 → **灰**（"没结论"绝不能是红，也绝不能是绿） */
+  if (!f.configured || f.totalBytes === null) {
+    return {
+      tone: 'unknown',
+      text: '无法判断 —— 数据库用量读不到',
+      notes: [
+        f.unknownReason ?? '（服务端没给出原因 —— 这本身就是一条要查的事）',
+        '⚠️ 读不到**不是**"还剩很多"，也**不是**"满了"。这一格永远是灰的。',
+        '要它变绿：确认 `SUPABASE_SERVICE_ROLE_KEY` 在、`schema.sql` §26 跑过、接口部署上了。',
+      ],
+      ...none,
+    }
+  }
+  const pct = (f.totalBytes / DB_QUOTA_BYTES) * 100
+  const freeBytes = Math.max(0, DB_QUOTA_BYTES - f.totalBytes)
+  const oversized = f.archives.filter((a) => a.bytes > ARCHIVE_META_BAD_BYTES)
+  const biggest = [...f.archives].sort((a, b) => b.bytes - a.bytes)[0] ?? null
+
+  const head = `数据库 ${humanBytes(f.totalBytes)} / ${humanBytes(DB_QUOTA_BYTES)}（${pct.toFixed(1)}%）`
+  const notes: string[] = [
+    `剩余 ${humanBytes(freeBytes)}`,
+    /* ⚠️ 交叉引用：本卡回答"全库还剩多少"，**不重复**回答"哪一份档案最大" */
+    '单份档案的体积排行就在**本页明细**里（与"全库还剩多少"是两个问题：一份档案就能到十几 MB）',
+    '🔴 本卡**没有任何写操作**：不给"清理题图""压缩"按钮（题图是老师拍的原始材料，删了找不回来）',
+  ]
+  if (biggest) {
+    notes.push(
+      `体积最大的那一份：${humanBytes(biggest.bytes)}（${biggest.className || '（没有班级名）'}）` +
+        ` —— 它离 ${humanBytes(ARCHIVE_META_BAD_BYTES)} 的红线还有 ${humanBytes(
+          Math.max(0, ARCHIVE_META_BAD_BYTES - biggest.bytes),
+        )}`,
+    )
+  }
+
+  /* 红的第一条：**与百分比无关**（单份档案太大 = 这一份存不进去） */
+  if (oversized.length > 0) {
+    return {
+      tone: 'bad',
+      text: `${head} —— 但有 ${oversized.length} 份档案的题目数据 > ${humanBytes(ARCHIVE_META_BAD_BYTES)}（**单份就超预算**）`,
+      notes: [
+        `最大的一份 ${humanBytes(oversized[0].bytes)}（${oversized[0].className || '（没有班级名）'}）`,
+        '这是一条**与百分比无关的红**：库里可能才用了 30%，但那一份档案已经写不进去了。',
+        '原因：题图以 base64 直接存在 `question_meta` 里（`lib/docx.ts` 的预算只挡住新建的那些）。',
+        ...notes,
+      ],
+      pct,
+      freeBytes,
+      oversized,
+      biggest,
+    }
+  }
+  if (pct > DB_BAD_PCT) {
+    return {
+      tone: 'bad',
+      text: `${head} —— 再写入有失败风险`,
+      notes: ['先去 G2 那一条确认最近一次备份是成功的（要清东西之前，先确保有退路）', ...notes],
+      pct,
+      freeBytes,
+      oversized,
+      biggest,
+    }
+  }
+  if (pct >= DB_WARN_PCT) {
+    return {
+      tone: 'warn',
+      text: `${head} —— 建议看一眼体积排行`,
+      notes: [`过了 ${DB_WARN_PCT}% 就该知道"是谁占的"（明细里有逐表排行）`, ...notes],
+      pct,
+      freeBytes,
+      oversized,
+      biggest,
+    }
+  }
+  return {
+    tone: 'ok',
+    text: `${head} —— 够用`,
+    notes: [
+      /* 阈值是**"还能不能再塞一份档案"**的口径，不是纯百分比 */
+      `还剩 ${humanBytes(freeBytes)}，按最大的一份档案（${
+        biggest ? humanBytes(biggest.bytes) : '（还没量到）'
+      }）算…… 够用`,
+      ...notes,
+    ],
+    pct,
+    freeBytes,
+    oversized,
+    biggest,
+  }
+}
+
+/* ---------------- ② 前端错误日志（24 小时条数） ---------------- */
+
+/** 🟡 出现 1 条就该看一眼（绿 = 近 24 小时一条都没有） */
+export const ERRORS_WARN_24H = 1
+/**
+ * 🔴 30 条以上算红：这个量级基本不是"一个人偶发"，而是**一次回归**
+ *    （130 人的平台，一天 30 条 = 平均每 4 个人就有一个撞上）。
+ */
+export const ERRORS_BAD_24H = 30
+
+export type ErrorFacts = {
+  /** 读得到吗（false = 接口没部署 / 表没建 / 没权限 → 灰） */
+  readable: boolean
+  total: number | null
+  last24h: number | null
+  /** 最近一条的时间戳（毫秒），没有就是 null */
+  lastAt: number | null
+  /** 最近一条的页面（用来回答"集中在哪一页"） */
+  lastView: string
+  unknownReason: string | null
+}
+
+export function judgeErrorLog(f: ErrorFacts): { tone: Tone; text: string; notes: string[] } {
+  if (!f.readable || f.last24h === null) {
+    return {
+      tone: 'unknown',
+      text: '无法判断 —— 错误日志读不到（接口没部署 / 第 24 段没跑 / 没权限）',
+      notes: [
+        f.unknownReason ?? '（服务端没给出原因）',
+        '⚠️ 读不到**不是**"没有错误"。这一格永远是灰的。',
+      ],
+    }
+  }
+  const notes = [
+    `历史共 ${f.total ?? '未知'} 条` + (f.lastAt ? ` · 最近一条 ${agoText(f.lastAt)}` : ' · 还没有任何一条'),
+    '⚠️ 这里可能与 `syncError` 有关但不能互相替代：`syncError` 是**上一次写库失败的原因**（一个字符串槽位、没有时间没有历史），这张表是**浏览器 JS 异常的时间序列**。',
+    '⚠️ 与第一期的 H 组（调用与错误 / 教室端心跳）**零重叠**：那一组是"服务端调用与设备"，这一条是"浏览器里崩了"。',
+    '🔴 隐私：`message` / `stack` 里**可能夹到学生姓名** —— 属隐私三级里的 B 类，明细要点开、固定一行"请勿投屏或截图"。',
+  ]
+  const where = f.lastView ? `（最近一条在 ${f.lastView}）` : ''
+  if (f.last24h >= ERRORS_BAD_24H) {
+    return {
+      tone: 'bad',
+      text: `近 24 小时 ${f.last24h} 条错误${where} —— 疑似一次回归`,
+      notes,
+    }
+  }
+  if (f.last24h >= ERRORS_WARN_24H) {
+    return { tone: 'warn', text: `近 24 小时 ${f.last24h} 条错误${where}`, notes }
+  }
+  return { tone: 'ok', text: `近 24 小时 0 条错误${where}`, notes }
+}
+
+/* ---------------- ③ 用户反馈（未处理数 + 邮件没发出去的数） ---------------- */
+
+export type FeedbackFacts = {
+  readable: boolean
+  total: number | null
+  /** 还没标记处理的条数 */
+  open: number | null
+  /** **邮件没发出去**的条数（`pending` / `failed` / `skipped` 都算） */
+  mailBad: number | null
+  unknownReason: string | null
+}
+
+export function judgeFeedback(f: FeedbackFacts): { tone: Tone; text: string; notes: string[] } {
+  if (!f.readable || f.open === null) {
+    return {
+      tone: 'unknown',
+      text: '无法判断 —— 反馈读不到（接口没部署 / 第 25 段没跑 / 没权限）',
+      notes: [f.unknownReason ?? '（服务端没给出原因）', '⚠️ 读不到**不是**"没有人提过"。这一格永远是灰的。'],
+    }
+  }
+  const notes = [
+    `共 ${f.total ?? '未知'} 条 · 未处理 ${f.open} 条`,
+    '⚠️ 反馈正文是**老师手写的自由文本**，很可能提到具体学生 —— 明细里固定一行"请勿投屏或截图"，`contact` 只在明细里出现。',
+    '🔴 「反馈」与「通知」**方向相反**：通知是学校对老师说话，反馈是老师对学校说话 —— 两张表、两个接口，一个字都不共享。',
+  ]
+  /*
+   * 🔴 **邮件没发出去必须红**（I51 的末句）：没配 key 时不能静默 ——
+   *    否则老师提的意见躺在一个没人打开的页面里，而**双方都以为送到了**。
+   */
+  if (f.mailBad !== null && f.mailBad > 0) {
+    return {
+      tone: 'bad',
+      text: `有 ${f.mailBad} 条反馈**没有发到你邮箱**（照常落库了）· 未处理 ${f.open} 条`,
+      notes: [
+        '为什么这算红：反馈**先落库、再发信** —— 落库那一步是成功的（所以没有丢），但**没人通知你**就等于没人看见。',
+        '修法：去 Cloudflare Pages 确认 `RESEND_API_KEY` 在（面板「发测试邮件」按钮可以当场验通道）。',
+        '⚠️ 别出现"双方都以为送到了"：老师那一边看到的是"已送到"（那是对的，它真的进库了）。',
+        ...notes,
+      ],
+    }
+  }
+  if (f.open > 0) {
+    return { tone: 'warn', text: `未处理反馈 ${f.open} 条`, notes }
+  }
+  return { tone: 'ok', text: `没有未处理的反馈${f.total ? `（共 ${f.total} 条，都已处理）` : ''}`, notes }
+}

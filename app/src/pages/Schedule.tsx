@@ -196,7 +196,7 @@ export default function Schedule() {
             {state.items.length === 0 ? (
               <div className="flex flex-wrap items-center gap-3 p-3.5">
                 <span style={{ fontSize: 12.5, color: 'var(--color-ink3)' }}>
-                  今天没有排课。需要的话点「添加」录一条。
+                  今天没有排课
                 </span>
               </div>
             ) : (

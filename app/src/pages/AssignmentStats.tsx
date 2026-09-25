@@ -174,7 +174,7 @@ export default function AssignmentStats() {
           ) : null}
 
           <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.7 }}>
-            极简模式只记等级，没有逐题数据，所以不做错题统计、也不进错题集。
+            极简模式只记等级，没有逐题数据。
           </p>
         </Page>
       </>
@@ -531,7 +531,7 @@ export default function AssignmentStats() {
                   <IconCheck size={17} />
                 </span>
                 <span style={{ fontSize: 13, color: 'var(--color-ink2)' }}>
-                  没有需要集中讲评的题 —— 错题都在个别辅导的范围内。
+                  没有需要集中讲评的题。
                 </span>
               </div>
             ) : (

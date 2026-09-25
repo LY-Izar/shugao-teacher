@@ -92,7 +92,7 @@ export const EXAM_PRESETS: SubjectExamPreset[] = [
     by: '教育部统一命题（2025 四川用全国二卷 / 新课标 II 卷）',
     confidence: 'confirmed',
     sources: ['https://www.scsqw.cn/scyx/scgkt/2000nyh/yw/content_178418'],
-    note: '「断句」（第 10 题）是**涂卡作答**，用户 2026-09-25 拍板**算客观题** —— 所以它按 single 录入、用 m/n 判分（每涂对一处 1 分）。语文客观题 = 10 道单项选择 + 断句 = **11 题 · 33 分**（主观 117 分）；断句已含在这 11 题里，别再算一遍成 36。',
+    note: '「断句」（第 10 题）是涂卡作答，用户 2026-09-25 拍板算客观题 —— 所以它按 single 录入、用 m/n 判分（每涂对一处 1 分）。语文客观题 = 10 道单项选择 + 断句 = 11 题 · 33 分（主观 117 分）；断句已含在这 11 题里，别再算一遍成 36。',
     groups: [
       { kind: 'single', count: 3, each: 3, objective: true, label: '现代文阅读 I · 单选' },
       { kind: 'reading', count: 2, each: 5, label: '现代文阅读 I · 简答（4 分 + 6 分）' },
@@ -138,7 +138,7 @@ export const EXAM_PRESETS: SubjectExamPreset[] = [
     by: '教育部统一命题（2025 四川用全国二卷 / 新课标 II 卷）',
     confidence: 'inferred',
     sources: ['https://www.renrendoc.com/paper/460952070.html'],
-    note: '**有听力（30 分）、有读后续写（25 分），已无短文改错**。语法填空 15 分已核实，10 空×1.5 分为推断。',
+    note: '有听力（30 分）、有读后续写（25 分），已无短文改错。语法填空 15 分已核实，10 空×1.5 分为推断。',
     groups: [
       { kind: 'listen', count: 5, each: 1.5, objective: true, label: '听力第一节' },
       { kind: 'listen', count: 15, each: 1.5, objective: true, label: '听力第二节' },
@@ -158,7 +158,7 @@ export const EXAM_PRESETS: SubjectExamPreset[] = [
     by: '四川省自主命题',
     confidence: 'confirmed',
     sources: ['https://www.scsqw.cn/scyx/scgkt/2000nyh/lkzhnlcs/content_178750'],
-    note: '六科里**只有物理有多项选择题**（3 题 × 6 分）。客观 46 / 主观 54。',
+    note: '六科里只有物理有多项选择题（3 题 × 6 分）。客观 46 / 主观 54。',
     groups: [
       { kind: 'single', count: 7, each: 4, objective: true, label: '一、单项选择题' },
       { kind: 'multiple', count: 3, each: 6, objective: true, label: '二、多项选择题（选对不全得一半）' },
@@ -177,7 +177,7 @@ export const EXAM_PRESETS: SubjectExamPreset[] = [
     by: '四川省自主命题',
     confidence: 'confirmed',
     sources: ['https://www.scsqw.cn/scyx/scgkt/2000nyh/wkzhnlcs/content_183768'],
-    note: '**第 18 题是开放性设问**（指出疑点—结合史实阐释—得出结论，小论文型）。',
+    note: '第 18 题是开放性设问（指出疑点—结合史实阐释—得出结论，小论文型）。',
     groups: [
       { kind: 'single', count: 16, each: 3, objective: true, label: '一、单项选择题' },
       { kind: 'reading', count: 1, each: 17, label: '17 题 · 材料分析（2 问）', subCount: 2 },
@@ -193,12 +193,12 @@ export const EXAM_PRESETS: SubjectExamPreset[] = [
     by: '四川省自主命题',
     confidence: 'inferred',
     sources: ['https://www.jinchutou.com/shtml/498a370f14ce9791a74d7e25d06bb92a.html'],
-    note: '客观 48 / 主观 52 已核实；**19、20 题各自的分值没查到**（合计 26 分），请老师填。',
+    note: '客观 48 / 主观 52 已核实；19、20 题各自的分值没查到（合计 26 分），请老师填。',
     groups: [
       { kind: 'single', count: 16, each: 3, objective: true, label: '一、单项选择题' },
       { kind: 'reading', count: 1, each: 16, label: '17 题（6 分 + 10 分两问）', subCount: 2 },
       { kind: 'reading', count: 1, each: 10, label: '18 题' },
-      { kind: 'essay', count: 2, each: 13, label: '19、20 题（合计 26 分，**逐题待确认**）' },
+      { kind: 'essay', count: 2, each: 13, label: '19、20 题（合计 26 分，逐题待确认）' },
     ],
   },
   {
@@ -225,7 +225,7 @@ export const EXAM_PRESETS: SubjectExamPreset[] = [
     by: '四川省自主命题',
     confidence: 'inferred',
     sources: ['https://www.jinchutou.com/shtml/85feef3d0b6449232c9701ec3cdc58f2.html'],
-    note: '客观 45 / 主观 55 已核实（15 题 × 3 分 + 4 道非选择共 55 分）；**4 道非选择题各自的分值没查到**。',
+    note: '客观 45 / 主观 55 已核实（15 题 × 3 分 + 4 道非选择共 55 分）；4 道非选择题各自的分值没查到。',
     groups: [
       { kind: 'single', count: 15, each: 3, objective: true, label: '一、单项选择题' },
       { kind: 'experiment', count: 1, each: 14, label: '16 题 · 实验（分值待确认）' },
@@ -242,7 +242,7 @@ export const EXAM_PRESETS: SubjectExamPreset[] = [
     by: '四川省自主命题',
     confidence: 'inferred',
     sources: ['https://www.jinchutou.com/shtml/57fdd2056b439f827f07042665f932e1.html'],
-    note: '客观 45 / 主观 55 已核实；**5 道非选择题各自的分值没查到**，请老师按实际卷子填。',
+    note: '客观 45 / 主观 55 已核实；5 道非选择题各自的分值没查到，请老师按实际卷子填。',
     groups: [
       { kind: 'single', count: 15, each: 3, objective: true, label: '一、单项选择题' },
       { kind: 'reading', count: 5, each: 11, label: '二、非选择题（各题分值待确认）' },
@@ -256,7 +256,7 @@ export const EXAM_PRESETS: SubjectExamPreset[] = [
     by: '四川省合格考（无纸化机考）',
     confidence: 'sample',
     sources: ['https://www.renrendoc.com/paper/328517161.html'],
-    note: '只找到**样卷**，不是当年实考卷；合格考成绩只记"合格/不合格"。',
+    note: '只找到样卷，不是当年实考卷；合格考成绩只记"合格/不合格"。',
     groups: [
       { kind: 'single', count: 20, each: 2, objective: true, label: '一、单选题' },
       { kind: 'judge', count: 10, each: 2, objective: true, label: '二、判断题' },
@@ -270,10 +270,10 @@ export const EXAM_PRESETS: SubjectExamPreset[] = [
     subjectName: '通用技术',
     fullScore: 100,
     minutes: 60,
-    by: '四川省合格考（**由市州命题**）',
+    by: '四川省合格考（由市州命题）',
     confidence: 'sample',
     sources: ['https://www.renrendoc.com/paper/214045896.html'],
-    note: '只找到样卷；且通用技术现由**各市州命题**，不同市州的题型结构可能不同。',
+    note: '只找到样卷；且通用技术现由各市州命题，不同市州的题型结构可能不同。',
     groups: [
       { kind: 'single', count: 20, each: 3, objective: true, label: '一、选择题（单选）' },
       { kind: 'judge', count: 5, each: 2, objective: true, label: '二、判断题' },

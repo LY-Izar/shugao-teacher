@@ -55,6 +55,9 @@ import { registerTsResolve } from './lib/ts-resolve.mjs'
  */
 registerTsResolve()
 const { ranked } = await import('../src/lib/wrongbook.ts')
+/* 🆕 每日名言（2026-09-29 用户拍板）：库与取句口径都从源码里拿，脚本里不许再抄一份 */
+const { DAILY_QUOTES, pickDailyQuote } = await import('../src/lib/quotes.ts')
+const { beijingNow } = await import('../src/lib/holiday.ts')
 
 /* ---------------- 配置 ---------------- */
 
@@ -1254,6 +1257,82 @@ await withLock(async () => {
         if (expectClosing) {
           check(HOME.test(body), '收尾语下方写着「明天 0:00 自动恢复显示作业情况」', HOME.test(body) ? '在' : '不在')
         }
+      }
+
+      /* ================= ⑪ 每日名言：当天固定、隔天换 ================= */
+
+      /*
+       * 🆕 2026-09-29 用户拍板：**教室那块屏加一句每日名言**（给学生看的）。
+       *
+       * 这一节守三件事，**每一件都只有时钟能验**：
+       *   ① 屏上真有一句，而且**写出了出处**（`data-daily-quote`）；
+       *   ② 🔴 **同一天里刷新两次是同一句** —— 用随机数的话刷新一次就换一句，
+       *      学生会以为屏幕在乱跳。所以判据不能只写"两次一样"，必须**对着算出来的
+       *      那一句**比：种子口径与 `pickDailyQuote()` 逐字同一套
+       *      （`dayIndex(beijingNow())`）。
+       *   ③ **换一天要换一句** —— 只钉②的话，"写死一句常量"也绿。
+       *
+       * ⚠️ ②③ 用的是**假时钟**：本脚本正是唯一能把"今天"拨来拨去的地方。
+       */
+      {
+        say('【场景 11】每日名言：同一天刷新两次同一句，换一天换一句')
+        const readQuote = () =>
+          page.evaluate(() => {
+            const el = document.querySelector('[data-daily-quote]')
+            return el ? String(el.innerText).replace(/\s+/g, ' ').trim() : null
+          })
+        const wantOn = (iso) => {
+          const [y, m, d] = iso.split('-').map(Number)
+          return pickDailyQuote(beijingNow(new Date(y, m - 1, d, 10, 0, 0)))
+        }
+
+        await ctx.clock.setFixedTime(new Date('2026-09-24T10:00:00'))
+        await goto(page, '/classroom', { clock: '10:00', date: '2026-09-24', weekday: '四' })
+        const q1 = await readQuote()
+        const w1 = wantOn('2026-09-24')
+        check(
+          q1 !== null && q1.includes(w1.text) && q1.includes(w1.from),
+          '教室屏上有「每日名言」，并且写出了出处',
+          q1 ?? '没找到 [data-daily-quote]',
+          `09-24 期望「${w1.text}」（${w1.from}）`,
+        )
+        check(
+          DAILY_QUOTES.length >= 30 && DAILY_QUOTES.every((q) => q.text && q.from),
+          `名言库里每一条都有出处（共 ${DAILY_QUOTES.length} 条；不足 30 条或有一条缺出处都算红）`,
+          `共 ${DAILY_QUOTES.length} 条，缺出处的 ${DAILY_QUOTES.filter((q) => !q.text || !q.from).length} 条`,
+        )
+
+        // ② 同一天：刷新两次必须一字不差
+        await goto(page, '/classroom', { clock: '10:00', date: '2026-09-24', weekday: '四' })
+        const q2 = await readQuote()
+        check(
+          q2 === q1 && q2 !== null,
+          '同一天里刷新两次 → **同一句**（当天固定，不是随机）',
+          `第一次 ${short(q1, 50)} ／ 第二次 ${short(q2, 50)}`,
+        )
+
+        // ③ 换一天：必须换一句（否则"写死一句常量"也会绿）
+        await ctx.clock.setFixedTime(new Date('2026-09-25T10:00:00'))
+        await goto(page, '/classroom', { clock: '10:00', date: '2026-09-25', weekday: '五' })
+        const q3 = await readQuote()
+        const w3 = wantOn('2026-09-25')
+        check(
+          q3 !== null && q3.includes(w3.text) && q3 !== q1,
+          '换一天（09-24 → 09-25）→ **换一句**，且换成的正是按日期算出来的那一句',
+          `09-25 实测 ${short(q3, 50)}`,
+          `期望「${w3.text}」`,
+        )
+        /*
+         * ⚠️ 上面那条里那个 `q3 !== q1` 只有在**这两天恰好是不同句**时才有信息量
+         *    （库里 45 句，撞上的概率 1/45，但不能靠运气）。所以这里把
+         *    "这两天本来就该不同"这件事**显式断言出来**：它要是哪天变成相等，
+         *    说明取句种子的口径坏了（比如只按年取），那时该红的是这一条。
+         */
+        check(
+          w1.text !== w3.text,
+          '反向对照：这两天的名言本来就是两句不同的（否则上面那条"换一天换一句"是恒真的）',
+          `09-24「${w1.text}」 vs 09-25「${w3.text}」`,
+        )
       }
 
       /* ================= ⑥ TTS 不可用时的浮层最短展示 ================= */

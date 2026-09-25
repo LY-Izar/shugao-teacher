@@ -48,11 +48,15 @@
 --      这里全部取消注释；**原有的说明性注释一条都没删**
 --      （"为什么该是 0"这些话都留着）。
 --   ② uuid 占位改成按姓名查（§13.5 ①②、§15.4 ②、§16.6 ①）：
---        schema.sql 原版：with me as (select '00000000-0000-0000-0000-000000000000'::uuid as uid)
+--        schema.sql 原版：with me as (select '<要核对的老师 id>'::uuid as uid)
 --        本副本：        with me as (select id as uid from teachers
 --                                     where name = '示例教师' order by created_at, id limit 1)
---      为什么改：省得每次手填 uuid。原版那一行**保留在每一处的注释里**，
---      想改回 uuid 写法就照抄注释里那行。
+--      为什么改：省得每次手填 uuid。原版那一行的**形状**保留在每一处的注释里，
+--      想改回 uuid 写法就照那个形状抄。
+--      🔴 `'示例教师'` **是占位符，不是真名**：本文件在公开仓库里，所以
+--         **一律不写真人姓名**（原先这里写的是真实教师姓名，已移除）。
+--         **跑之前把它换成你要核对的那位老师的姓名**，否则 CTE 是空集 → 假通过
+--         （下面每一段开头的「【先跑这一条】人是谁」就是拦这个的）。
 --      ⚠️ 风险：姓名打错 / 库里没有这个人 → CTE 是**空集** → 依赖它的那些
 --      「应为0」会**假通过**（计数变 0 或全 NULL）。所以每段开头都放了一条
 --      「【先跑这一条】」查询：确认人对了再往下跑。
@@ -151,7 +155,7 @@ select coalesce(a.subject, '(空)') as 学科名,
 --       被收窄的是不是都属于"别人的班 + 别人教的科"。
 --    ③ teacher_roles 里 super / admin 各有几个人，一眼看清。
 --  要改什么：① ② 用的是"指定人"参数。本副本已把 uuid 改成按姓名查
---    （默认「示例教师」）—— 见下面【本副本的改动】。换人只改那个姓名。
+--    （默认「示例教师」——**占位符**，跑前换成真名）—— 见下面【本副本的改动】。换人只改那个姓名。
 --  ⚠️ 为什么不能直接写 auth.uid()：SQL 编辑器里没有登录态，auth.uid() 是 NULL，
 --     会得到 0 = 0 的**假通过**。所以必须用 `_for` 变体指定人。
 -- ============================================================
@@ -168,8 +172,8 @@ select id, name, subject, primary_subject_code, created_at from teachers order b
 --           凡是 `teacher_id = 他自己` 的行，新_看得见必须是 true。
 --
 --  【本副本的改动】原版是写死 uuid：
---    with me as (select '00000000-0000-0000-0000-000000000000'::uuid as uid)
---  这里改成按姓名查（默认核对「示例教师」）。换人：把 '示例教师' 改成别的姓名；
+--    with me as (select '<要核对的老师 id>'::uuid as uid)
+--  这里改成按姓名查（默认核对「示例教师」——**占位符**，跑前换成真名）。换人：把 '示例教师' 改成别的姓名；
 --  有重名时把 `limit 1` 换成明确的 `where id = '……'::uuid`，否则核的是"任意一个"同名的。
 with me as (select id as uid from teachers where name = '示例教师' order by created_at, id limit 1)
 select
@@ -190,7 +194,7 @@ join classes c on c.id = a.class_id
 order by 4 desc, 6 desc, 2, 3;
 
 --  ② 汇总：新 ≤ 旧 必须成立（交集只会变小）；"是他建的却新看不见"必须是 0
---  【本副本的改动】同 ①，`me` 由写死 uuid 改成按姓名查（默认「示例教师」）。
+--  【本副本的改动】同 ①，`me` 由写死 uuid 改成按姓名查（默认「示例教师」——占位符，跑前换成真名）。
 with me as (select id as uid from teachers where name = '示例教师' order by created_at, id limit 1),
      j as (
        select a.teacher_id,
@@ -236,7 +240,7 @@ order by r.role, t.name;
 --       ②–B：换一种问法（判每一行自己的老师）→ **每一行都是 true**，汇总「应为0」= 0。
 --    ③ 每个学生一行，班内/年级两个名次；并列时 rank() 会跳号（1,1,3），
 --       那是 rank 的定义，不是 bug。
---  要改什么：② 的姓名（默认「示例教师」）；③ 的 paper_key（默认 '物理练习8'）。
+--  要改什么：② 的姓名（默认「示例教师」——占位符，跑前换成真名）；③ 的 paper_key（默认 '物理练习8'）。
 --  ✅ 2026-09-27 起 ② 直接调**真函数**：`can_edit_exam_for` 已在 schema.sql §15.2 建出来
 --     （定义在薄包装 `can_edit_exam` 之前）。此前它**故意没有建**，本副本只能改成
 --     `is_school_admin_for(...) or teaches_subject_for(...)` 的等价版本 —— 那段历史留在
@@ -257,7 +261,7 @@ select id, name, subject, primary_subject_code, created_at from teachers order b
 --  ② 写判据函数在真实数据上的表现（把 uuid 换成要核对的老师 id）
 --
 --  【本副本的改动 · 2026-09-27 改回真函数】schema.sql 原文写的是：
---    with me as (select '00000000-0000-0000-0000-000000000000'::uuid as uid)
+--    with me as (select '<要核对的老师 id>'::uuid as uid)
 --    select t.name, cs.subject, cs.subject_code, c.name as 班级,
 --           can_edit_exam_for((select uid from me), array[c.id], cs.subject_code, cs.subject) as 他能改
 --    from class_subjects cs
@@ -280,16 +284,18 @@ select id, name, subject, primary_subject_code, created_at from teachers order b
 --     ⚠️ is_school_admin_for 对 authenticated 是 revoke 的，但 SQL 编辑器以 postgres 身份跑，
 --     所以当时那样写不报错 —— 报错的是**函数不存在**，不是权限。
 --
---  🔴 【实测踩到的分叉 · 读串了列】用户跑上一版时看到 `demo-teacher / 测试专用 / false`，
+--  🔴 【实测踩到的分叉 · 读串了列】用户跑上一版时看到 `测试账号 / 测试专用 / false`，
 --     而同一个人同一个班同一个科，走 §16.6 ② 的问法 `teaches_subject_for(t.id, …)` 是 true
 --     —— 看着像矛盾，其实是**两种问法**（已用 PGlite 在同一批数据上复现）：
 --       · 前四列（`t.name` / `cs.subject` / `cs.subject_code` / 班级）说的是**这一行是谁的**；
---       · 最后一列答的是 **`me`（核对对象，默认示例教师）能不能改这一行** —— 两件事。
---     于是 `me` = 示例教师时那一行 false 的意思是"**示例教师**改不了 demo-teacher 的那一行"（正确：
---     示例教师不在「测试专用」班任教），**不是**"demo-teacher 改不了自己的班"。
+--       · 最后一列答的是 **`me`（核对对象，默认「示例教师」）能不能改这一行** —— 两件事。
+--     （下面把"那位物理老师"简写成「示例教师」、「那个测试账号」简写成「测试账号」
+--       —— 真名只存在于库里，公开仓库里不写。）
+--     于是 `me` = 示例教师时那一行 false 的意思是"**示例教师**改不了测试账号的那一行"（正确：
+--     示例教师不在「测试专用」班任教），**不是**"测试账号改不了自己的班"。
 --     同一批数据两种问法的实测对照（rls-checks 第十三节也钉着）：
---       §15.4② 的问法（me = 示例教师）           → demo-teacher/测试专用 = **false**，示例教师自己两行 = true
---       同一句把 me 换成 demo-teacher          → demo-teacher/测试专用 = true，示例教师两行 = false
+--       §15.4② 的问法（me = 示例教师）        → 测试账号/测试专用 = **false**，示例教师自己两行 = true
+--       同一句把 me 换成测试账号             → 测试账号/测试专用 = true，示例教师两行 = false
 --       §16.6② 的问法（判每一行自己的老师）  → 三行**全 true**
 --     所以下面加了 ②–B：要问"他自己能不能"，第一参数就得是 `t.id`。
 --  ⚠️ 另一个会把这条读成"全 false"的坑：`me` 按姓名查不到人 → CTE 是空集 →
@@ -364,7 +370,7 @@ order by 年级排名;
 --    ③ 矩阵审计：每张表的策略都能在 §16.1 那张表里找到出处；
 --       **教室里那块屏不出现在任何写策略里**。
 --    ④ 教室端账号**不该有**任何一张业务表的写权限。
---  要改什么：① 的姓名（默认「示例教师」）；④ 默认取 classroom_accounts 里最早的那个账号。
+--  要改什么：① 的姓名（默认「示例教师」——占位符，跑前换成真名）；④ 默认取 classroom_accounts 里最早的那个账号。
 -- ============================================================
 
 --  ① 逐人可见量对照（**这是"删之前 / 删之后"要相等的那组数**）
@@ -374,8 +380,8 @@ order by 年级排名;
 --     把 uuid 换成要核对的老师 id（`select id, name, subject from teachers;` 拿）。
 --
 --  【本副本的改动】原版是写死 uuid：
---    with me as (select '00000000-0000-0000-0000-000000000000'::uuid as uid)
---  这里改成按姓名查（默认核对「示例教师」）。换人：改姓名；有重名就把 `limit 1`
+--    with me as (select '<要核对的老师 id>'::uuid as uid)
+--  这里改成按姓名查（默认核对「示例教师」——占位符，跑前换成真名）。换人：改姓名；有重名就把 `limit 1`
 --  换成明确的 `where id = '……'::uuid`。
 with me as (select id as uid from teachers where name = '示例教师' order by created_at, id limit 1)
 select

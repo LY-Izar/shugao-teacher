@@ -892,7 +892,7 @@ function ExamGradeSession({ id }: { id: string }) {
         <p style={{ fontSize: 11.5, color: 'var(--color-ink4)', marginTop: 14, lineHeight: 1.7 }}>
           点一个学生 → 只显示他 → 每题录分/选选项 → 右下角「确认批阅」→ 他落到下面的「已批阅」。
           <br />
-          改动会**立刻存在本机**；「批阅完成 → 临时保存」会把进度写回档案，下次点档案接着批。
+          改动会立刻存在本机；「批阅完成 → 临时保存」会把进度写回档案，下次点档案接着批。
         </p>
       </Page>
 

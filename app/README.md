@@ -31,6 +31,30 @@ npm run fetch:holidays   ***REMOVED*** 从中国政府网重新抓取放假安�
 
 ---
 
+***REMOVED******REMOVED*** 🔐 云端环境变量（**邮件收件人由部署环境决定**）
+
+配在 **Cloudflare Pages → Settings → Variables and secrets**，**一律不进仓库**：
+
+| 变量 | 是什么 | 没配会怎样 |
+| --- | --- | --- |
+| `SUPABASE_SERVICE_ROLE_KEY` | 🔴 Secret（建号 / 改身份用） | 教师账号、教室端账号那两页打不开 |
+| `RESEND_API_KEY` | 🔴 Secret（Resend 发信） | 邮件发不出去；接口**显式回错**（不静默） |
+| `ADMIN_NOTIFY_EMAIL` | **邮件收件人**（管理员自己的邮箱，不是 secret） | 邮件**一封也发不出去**：`sendMail()` 回 `reason:'no_to'` + 一句人话 |
+| `R2_ENDPOINT` / `R2_BUCKET` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | 备份归档到 R2 | 那一格显示"无法判断"，备份改留 Artifact |
+| `GITHUB_TOKEN` / `GITHUB_REPO` | 运维面板读 Actions（细粒度 PAT，只给 `Actions: Read`） | 那一格显示"无法判断" |
+
+🔴 **`ADMIN_NOTIFY_EMAIL` 为什么必须由部署方给**：2026-09-30 之前这个收件人地址是
+**写死在源码里**的，而本仓库**公开** —— 真实个人邮箱不能随仓库发给全世界。现在的口径：
+
+- 源码里**没有任何真实邮箱**（`admin-checks` 有一条断言静态扫 `functions/api/_lib/mail.ts`：
+  不许出现 `@qq.com`）；测试夹具用 `admin@example.com`（RFC 2606 保留域名）。
+- **没配就显式报错**（`reason:'no_to'`，人话 + 去处），**绝不静默发到某个默认地址** ——
+  与"没配 `RESEND_API_KEY` 就显式报错"是**同一条纪律**。
+- 面板把"**key 在不在**"与"**收件人在不在**"分两行说：只有 key 没有收件人时，
+  面板会说"收件人不在、一封也发不出去"，**不说"通道是好的"**（面板说谎是最坏的一种）。
+
+---
+
 ***REMOVED******REMOVED*** 🔴 跑验证脚本前必须知道（**每一条都是实测踩过的**）
 
 ***REMOVED******REMOVED******REMOVED*** 0. 五个脚本共用一把锁 —— 同一时刻只能跑一个
@@ -443,6 +467,11 @@ npm run fetch:holidays 2027 <url> ***REMOVED*** 国务院发布次年安排后�
 
 数据存在浏览器 `localStorage`（key `shugao.teacher.v1`），首次打开会自带
 两个演示班级与三份演示作业档案（姓名为程序拼装生成，不对应任何真实个人）。
+
+⚠️ **仓库里不写任何真实个人信息**（教师姓名、学生姓名、学号、邮箱、学校名）：真实数据只在
+数据库里、只出现在运行时。演示数据一律用拼装生成的虚构姓名（`data/seed.ts` 的
+`王志远 / 李思涵 / 张雨欣 …` 那一批），**改演示数据时别顺手填成真名** ——
+本仓库是公开的。邮件收件人这类"部署相关的真实值"走环境变量（见上面那一节）。
 
 接入 Supabase 时只需替换 `src/data/store.ts` 的读写实现，
 并逐表启用 RLS（教师仅可访问自己任教班级）—— 页面层无需改动。

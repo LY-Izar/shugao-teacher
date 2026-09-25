@@ -15,7 +15,7 @@
               第 1–10 列（题 1–10）是**正确答案**（`D` / `AC` / `CD` …），
               第 11–15 列（题 11–15）是**该题满分**（6/10/10/12/16）
      第 5 行起 学生：前 10 题存**学生选的选项**，第 11–15 题存**该题得分**
-     末尾    `未交名单：\n4：李思涵`
+     末尾    `未交名单：\n4：<姓名>`（真实导出里是**真名** —— 本文档不放真名，见仓库隐私纪律）
 
    sheet2「…-选项分布」
      `题号|正确答案|答错人数|答对人数|正答率（%）|选项人数|学生名单`，每题一组行，
@@ -241,8 +241,9 @@ export function parseExamWorkbook(sheets: SheetData[]): ExamImportResult {
     const studentNo = rawNo.replace(/[^\dA-Za-z]/g, '')
     if (!studentNo && !rawName) continue
     /*
-     * 姓名里的修饰符：真实文件里出现过「☆张雨欣」（☆ = 某种标记）。
+     * 姓名里的修饰符：真实文件里出现过「☆+姓名」这种写法（☆ = 某种标记）。
      * 平台的花名册里没有那个符号，**归一化掉**（并在预览里让老师看到原名）。
+     * ⚠️ 具体是谁**不写进仓库**（那份 xlsx 是真实导出，姓名是个人信息）。
      */
     const name = rawName.replace(/^[☆★*·\s]+/, '').trim()
 
@@ -278,7 +279,7 @@ export function parseExamWorkbook(sheets: SheetData[]): ExamImportResult {
 
   if (!out.length) throw new Error('没读到任何学生行 —— 请确认这份文件的表头与格式')
 
-  /* 未交名单：`未交名单：\n4：李思涵` 或 `未交名单：4：李思涵；5：张三` */
+  /* 未交名单：`未交名单：\n4：<姓名>` 或 `未交名单：4：<姓名>；5：张三` */
   const absentNames: Array<{ fileClass: string; name: string }> = []
   for (const r of rows) {
     for (const cell of r) {

@@ -162,7 +162,7 @@ export default function AssignmentGradeDone() {
                     <IconCheck size={17} />
                   </span>
                   <span style={{ fontSize: 13, color: 'var(--color-ink2)' }}>
-                    这次没有评「差」的学生 —— 需要盯的人在「需重点关注」里。
+                    没有评「差」的学生。
                   </span>
                 </div>
               ) : (
@@ -204,7 +204,7 @@ export default function AssignmentGradeDone() {
                   <IconCheck size={17} />
                 </span>
                 <span style={{ fontSize: 13, color: 'var(--color-ink2)' }}>
-                  本次没有需要集中讲评的题 —— 错题都在个别辅导的范围内。
+                  没有需要集中讲评的题。
                 </span>
               </div>
             ) : (
@@ -312,15 +312,6 @@ export default function AssignmentGradeDone() {
         >
           {simple ? '去改错登记挑人呼叫（按等级）' : '一键呼叫错得较多的学生'}
         </Button>
-
-        <div
-          className="mt-3 px-1"
-          style={{ fontSize: 11.5, color: 'var(--color-ink4)', lineHeight: 1.7 }}
-        >
-          {simple
-            ? '极简模式只记等级：改错名单在改错登记里按等级挑（差 / 良），单次最多 8 人。'
-            : '逐题正确率可下钻到学生名单，呼叫默认按错题数排序、默认不预选、单次最多 8 人。'}
-        </div>
       </Page>
     </>
   )

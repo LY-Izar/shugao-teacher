@@ -3,7 +3,6 @@ import { useNavigate } from 'react-router-dom'
 import { Page } from '../components/AppShell'
 import {
   IconAlert,
-  IconCheck,
   IconDownload,
   IconEye,
   IconImage,
@@ -134,9 +133,7 @@ export default function Files() {
         <Page>
           <Panel bodyClass="p-6 text-center">
             <div style={{ fontSize: 14, color: 'var(--color-ink3)', lineHeight: 1.8 }}>
-              这个功能要把文件存到云端，现在还没连接。
-              <br />
-              连上 Supabase 之后就能用了。
+              还没有连接云端，暂时传不了文件。
             </div>
           </Panel>
         </Page>
@@ -374,9 +371,6 @@ export default function Files() {
               })
             )}
           </Panel>
-          <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 8, lineHeight: 1.7 }}>
-            <IconCheck size={12} /> 文件放在私有存储里，链接是限时的 —— 外人拿到地址也打不开。
-          </p>
         </div>
       </Page>
     </>

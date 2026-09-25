@@ -207,8 +207,8 @@ export default function ExamNew() {
       tone: 'ok',
       desc:
         p.confidence === 'confirmed'
-          ? '各题分值已按 2025 年真卷核实，仍可逐题修改'
-          : '部分分值是按常规推断的，**请对着卷子核一遍**',
+          ? '各题分值可逐题修改'
+          : '部分分值是按常规推断的，请对着卷子核一遍',
     })
   }
 
@@ -263,7 +263,6 @@ export default function ExamNew() {
     <>
       <PageHead
         title="新建考试档案"
-        sub="先确认考试类型与数据来源，再设题型分值"
         onBack={() => navigate('/exams')}
       />
 
@@ -284,8 +283,7 @@ export default function ExamNew() {
                 <div className="flex items-start gap-2" style={{ fontSize: 12.5, lineHeight: 1.7 }}>
                   <IconAlert size={15} />
                   <span>
-                    线上数据库还没有考试相关的表，现在建的档案**存不进云端**。
-                    请先到 Supabase → SQL Editor 跑 <b>supabase/schema.sql 第 15 段</b>。
+                    考试功能暂时不可用，请稍后再试。
                   </span>
                 </div>
               </Panel>
@@ -298,8 +296,8 @@ export default function ExamNew() {
                 <div className="flex gap-2">
                   {(
                     [
-                      ['grade', '年级考试', '同一个年级一起考，按试卷名把各班的数据合起来排年级排名'],
-                      ['class', '班级考试', '只有本班的小型考试，只记在本班，不算年级排名'],
+                      ['grade', '年级考试', '同一个年级一起考，算年级排名'],
+                      ['class', '班级考试', '只记在本班，不算年级排名'],
                     ] as const
                   ).map(([k, label, desc]) => {
                     const on = scope === k
@@ -350,8 +348,8 @@ export default function ExamNew() {
                 <div className="flex gap-2">
                   {(
                     [
-                      ['file', '平台文件导入', '新教育导出的成绩单，自动认出试卷名，选个日期就能建'],
-                      ['manual', '手动批阅', '自己在平台上逐题录分（下面第 3、4 步就是为它准备的）'],
+                      ['file', '平台文件导入', '导入新教育导出的成绩单'],
+                      ['manual', '手动批阅', '自己在平台上逐题录分'],
                     ] as const
                   ).map(([k, label, desc]) => {
                     const on = source === k
@@ -397,8 +395,7 @@ export default function ExamNew() {
                 </div>
                 {source === 'file' ? (
                   <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 8, lineHeight: 1.7 }}>
-                    文件导入的入口在<b>考试列表页右上角</b>：选中文件后会自动认出试卷名、题量、每题分值与答案，
-                    并列出未交名单让你核对，确认之后才建档。
+                    文件导入的入口在<b>考试列表页右上角</b>：选中文件后核对内容，确认之后才建档。
                     <br />
                     这里也照样把第 3~5 步填好 —— 导入时会用它们兜住文件里认不出来的部分（比如非选择题的题型）。
                   </p>
@@ -420,9 +417,9 @@ export default function ExamNew() {
                   />
                 </label>
                 <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 6, lineHeight: 1.7 }}>
-                  <IconInfo size={12} /> 年级考试<b>按试卷名认同一场考试</b>：
+                  <IconInfo size={12} /> 年级考试按试卷名认同一场考试：
                   空格不一样、数字写成「八」、少了标点都算同一场
-                  （{normalizePaperName(title) ? `归一化后 =「${normalizePaperName(title)}」` : '填了名字这里会显示归一化结果'}）。
+                  {normalizePaperName(title) ? `，=「${normalizePaperName(title)}」` : ''}。
                 </p>
 
                 {sameOnes.length ? (
@@ -435,10 +432,10 @@ export default function ExamNew() {
                     }}
                   >
                     <div style={{ fontSize: 12.5, fontWeight: 650, color: 'var(--color-accentink)' }}>
-                      已找到 {sameOnes.length} 份**同一场考试**的档案（年级排名会合起来算）
+                      已找到 {sameOnes.length} 份同一场的档案（年级排名会合起来算）
                     </div>
                     <div className="mt-1.5 flex flex-col gap-1">
-                      {sameOnes.map(({ exam, verdict }) => (
+                      {sameOnes.map(({ exam }) => (
                         <div key={exam.id} style={{ fontSize: 11.5, color: 'var(--color-ink2)', lineHeight: 1.6 }}>
                           · {exam.title}（
                           {exam.classIds
@@ -446,8 +443,6 @@ export default function ExamNew() {
                             .join('、')}
                           ）· {exam.examDate} ·{' '}
                           {EXAM_STATUS_TEXT[exam.status]}
-                          <br />
-                          <span style={{ color: 'var(--color-ink3)' }}>判定理由：{verdict.reason}</span>
                         </div>
                       ))}
                     </div>
@@ -706,7 +701,7 @@ export default function ExamNew() {
                     ) : null}
                     {integrity.missingAnswer.length ? (
                       <span style={{ color: 'var(--color-warn)' }}>
-                        <IconAlert size={12} /> 第 {integrity.missingAnswer.join('、')} 题是选择题但**没设正确答案**
+                        <IconAlert size={12} /> 第 {integrity.missingAnswer.join('、')} 题是选择题但没设正确答案
                         —— 「记录答题情况」模式下这些题判不出分
                       </span>
                     ) : null}
@@ -833,13 +828,11 @@ export default function ExamNew() {
                     )
                   })}
                 </div>
-                <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 8, lineHeight: 1.7 }}>
-                  {scope === 'class'
-                    ? '班级考试只记在本班，不参与年级排名 —— 所以只能选一个班。'
-                    : '年级考试可以选自己任教的多个班；同一个年级里别的老师给自己班建的档案，会按试卷名自动合起来算年级排名（你能看见他们在统计里的名次，但改不了别人班的分）。'}
-                  <br />
-                  走班教学班这一轮还没做（班型明天才确认）—— 现在只认行政班。
-                </p>
+                {scope === 'class' ? null : (
+                  <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 8, lineHeight: 1.7 }}>
+                    年级考试可以选自己任教的多个班。
+                  </p>
+                )}
 
                 <label className="mt-3 block">
                   <span className="label">缺考 / 未交学号（可选，用逗号或空格隔开）</span>
@@ -852,7 +845,6 @@ export default function ExamNew() {
                 </label>
                 <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 6, lineHeight: 1.7 }}>
                   缺考的人<b>不参与均分</b>，单独的名单会在统计页列出来。
-                  文件导入时会自动从「未交名单」那一行读出来。
                 </p>
               </Panel>
             </div>

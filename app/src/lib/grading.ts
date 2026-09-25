@@ -191,7 +191,7 @@ export const BAND_META: Record<
     color: 'var(--color-bad)',
   },
   deep: {
-    label: '精讲 + 查前置',
+    label: '重点讲，并检查前置知识',
     action: '多数人没掌握，顺便检查前置知识是否缺失',
     score: 0.86,
     tone: 'warn',

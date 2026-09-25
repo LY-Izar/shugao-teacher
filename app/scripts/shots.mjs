@@ -266,6 +266,25 @@ const EXPECTED_FILES = [
   '92-ann-popup-after-welcome.png',
   '93-ann-desktop.png',
   '94-admin-announcements.png',
+  // 🆕 管理台第二期（2026-09-29）。八张各自钉一件事：
+  //   95 = 面板**新结构**：分区导航 + 概览那一排数字磁贴（"更像管理台"）
+  //   96 = 「数据库」分区（用量进度条 + 逐表排行 + 单份档案体积排行）
+  //   97 = 「维护」分区（四条防呆 + 二次确认输入框 + 发测试邮件）
+  //   98 = 「错误日志」分区（计数 + 关键字 + 勾选删除 + 隐私那一行）
+  //   99 = 「反馈」分区（邮件没发出去那条红警告 + 明细）
+  //  100 = **教师端被送进维护画面**（`?maint=…`；工作台内容整块消失）
+  //  101 = **教室端全屏维护画面**（心跳照发 + 本页学生数据已清空）
+  //  102 = 🔴 **维护中 /admin 仍然进得去**（"开了关不掉"的解药）
+  //  103 = 「我的」页的**反馈块**（关于 → 反馈 → 更新日志，DOM 顺序有断言）
+  '95-admin-sections-overview.png',
+  '96-admin-db.png',
+  '97-admin-maintenance.png',
+  '98-admin-errors.png',
+  '99-admin-feedback.png',
+  '100-maint-teacher.png',
+  '101-maint-classroom.png',
+  '102-maint-admin-exempt.png',
+  '103-settings-feedback.png',
 ]
 
 /* ---------------- 断言与日志 ---------------- */
@@ -581,7 +600,7 @@ await withLock(async () => {
       await shot(page, '02 工作台', '02-workbench', { full: true })
 
       await goto(page, '03 班级列表', '/classes', {
-        markers: ['2 个班级 · 91 名学生', '名单完整', '学号是系统的唯一索引'],
+        markers: ['2 个班级 · 91 名学生', '名单完整'],
       })
       await shot(page, '03 班级列表', '03-classes', { full: true })
 
@@ -1267,7 +1286,9 @@ await withLock(async () => {
       await shot(page, SL, '31-calls', {
         full: true,
         wait: 400,
-        expect: { url: '/calls', markers: ['呼叫记录', '仅教师可见'] },
+        // 期望值变了（文案审查 A+ 力度）：页头那句「· 仅教师可见」是权限声明，
+        // 与页脚重复，用户 2026-09-29 拍板删掉，所以这里不再要求它出现。
+        expect: { url: '/calls', markers: ['呼叫记录'] },
       })
 
       /* ================= S5：教室端（另开标签页，跨标签实时送达） ================= */
@@ -1307,6 +1328,58 @@ await withLock(async () => {
         await expectRoom(SR)
       })
       await shotRaw(room, SR, '32-classroom')
+
+      /* ---------------- 🆕 每日名言（2026-09-29 用户拍板） ----------------
+       *
+       * 要求两条，**都要钉**：
+       *   ① 教室那块屏上真的有一句名言 + 出处（`data-daily-quote`，
+       *      内容来自 `lib/quotes.ts` 的 `DAILY_QUOTES`，**每条都有来源**）；
+       *   ② 🔴 **当天固定**：同一天刷新两次必须是同一句。
+       *      判据不能用"两次读到的东西一样" —— 那样"两句都随机"也会绿。
+       *      这里把**期望句**从源码里那条表按同一天算出来，再和屏上比：
+       *      种子是 `dayIndex(beijingNow())`，与 `pickDailyQuote()` 逐字同一套口径。
+       */
+      await step(SR, async () => {
+        const { DAILY_QUOTES } = await import('../src/lib/quotes.ts')
+        const { dayIndex } = await import('../src/lib/mood.ts')
+        /*
+         * ⚠️ **必须显式给日期**，不能用默认的 `new Date()`：
+         *    页面那边是 `page.clock.setFixedTime()` 钉在 2026-09-19，
+         *    而脚本进程在**真实的今天** —— 默认参数会让"期望句"算成别的日子，
+         *    这条断言就会以一种极难懂的方式红（第一版就踩了）。
+         */
+        const fakeDay = new Date(2026, 8, 19, 10, 0, 0)
+        const want = DAILY_QUOTES[((dayIndex(fakeDay) % DAILY_QUOTES.length) + DAILY_QUOTES.length) % DAILY_QUOTES.length]
+
+        const readQuote = async () =>
+          room.evaluate(() => {
+            const el = document.querySelector('[data-daily-quote]')
+            return el ? String(el.innerText).replace(/\s+/g, ' ').trim() : null
+          })
+
+        const first = await readQuote()
+        check(
+          first !== null && first.includes(want.text) && first.includes(want.from),
+          `${SR}：教室那块屏上有「每日名言」——而且**写出了出处**`,
+          first ?? '没找到 [data-daily-quote]',
+          `期望含「${want.text}」（${want.from}）`,
+        )
+        check(
+          DAILY_QUOTES.every((q) => q.text && q.from),
+          `${SR}：库里每一句名言都有出处（可考据，不许留空）`,
+          `${DAILY_QUOTES.length} 条，缺出处的 ${DAILY_QUOTES.filter((q) => !q.text || !q.from).length} 条`,
+        )
+
+        /* 🔴 刷新一次再读：必须**一字不差**是同一句（当天固定，不是随机） */
+        await room.reload({ waitUntil: 'networkidle' })
+        await room.waitForTimeout(900)
+        const second = await readQuote()
+        check(
+          second === first && second !== null,
+          `${SR}：刷新两次是**同一句**（当天固定 —— 用日期做种子，不是随机）`,
+          `第一次：${short(first, 60)} ／ 第二次：${short(second, 60)}`,
+        )
+      })
 
       /*
        * 教室端那块「逐题正确率」**不能收极简档案**。
@@ -2074,7 +2147,7 @@ await withLock(async () => {
         return {
           body: b,
           accounts: b.includes('建号（带学科）'),
-          files: b.includes('教室端文件'),
+          files: b.includes('传到教室大屏'),
           schedule: b.includes('录入上课与日程'),
           admin: b.includes('只读体检屏'),
         }
@@ -2260,7 +2333,7 @@ await withLock(async () => {
           `${SNAV}：**任课教师**的「我的」页**没有**「教师账号」那一行`,
           r.accounts ? short(r.body, 140) : '没有那一行',
         )
-        check(r.files && r.schedule, `${SNAV}：但「教室端文件」「日程表」两行照旧在`, `files=${r.files} schedule=${r.schedule}`)
+        check(r.files && r.schedule, `${SNAV}：但「传到教室大屏」「日程表」两行照旧在`, `files=${r.files} schedule=${r.schedule}`)
       })
 
       await step(SNAV, async () => {
@@ -2268,7 +2341,7 @@ await withLock(async () => {
         const r = await settingsRows()
         check(
           r.files && r.schedule,
-          `${SNAV}：教导处的「我的」页上「教室端文件」「日程表」两行在（读的是同一张表）`,
+          `${SNAV}：教导处的「我的」页上「传到教室大屏」「日程表」两行在（读的是同一张表）`,
           `files=${r.files} schedule=${r.schedule}`,
         )
         /*
@@ -2479,6 +2552,40 @@ await withLock(async () => {
           `${S42}：欢迎弹窗里不出现极简档案那个没有意义的「6 题」`,
           info.modalOpen ? short(info.modalText, 130) : short(info.body, 120),
         )
+        /*
+         * 🆕 2026-09-29 用户拍板：**问候卡上的话换成新的一批**（`lib/mood.ts` 的 `GREETINGS`）。
+         *
+         * 判据有**两个方向**，缺一不可：
+         *   ① 屏上那句问候**确实来自新的 `GREETINGS`**（按同一天从源码里算出来再比）；
+         *   ② **反向断言**：上一批那几句 AI 味的话**一句都不许再出现**。
+         *      只钉①的话，把旧文案加回去照样绿；只钉②的话，问候整个没了也绿。
+         */
+        const { GREETINGS, pickGreeting, dayIndex } = await import('../src/lib/mood.ts')
+        /* ⚠️ 同上：这一步的假时钟是 2026-09-17，**不能**用脚本进程真实的今天 */
+        const cardDay = new Date(2026, 8, 17, 7, 32, 0)
+        const wantGreeting =
+          GREETINGS[((dayIndex(cardDay) % GREETINGS.length) + GREETINGS.length) % GREETINGS.length]
+        check(
+          pickGreeting(cardDay) === wantGreeting && info.modalText.includes(wantGreeting),
+          `${S42}：问候卡上的话来自**新的一批**（\`GREETINGS\` 第 ${GREETINGS.length} 条里的当天那一句）`,
+          `当天期望：「${wantGreeting}」`,
+        )
+        const AI_OLD = [
+          '愿今天的你，被学生温柔以待。',
+          '你不是在完成指标，你在陪人长大。',
+          '你教的不只是知识，还有怎么当大人。',
+          '你在做的，是看不见回报的那种好。',
+          '愿今天的你，被自己温柔对待。',
+          '新的一天，愿你从心里觉得——还不错。',
+          '你正在做一件很慢、很重要的事。',
+          '你是很多孩子人生里，稳定出现的大人。',
+        ]
+        const stillThere = AI_OLD.filter((s) => info.body.includes(s) || info.modalText.includes(s))
+        check(
+          stillThere.length === 0,
+          `${S42}：上一批那些 AI 味的话**一句都不在**（用户点名要换掉的就是它们）`,
+          stillThere.length ? `还在：${stillThere.join('、')}` : `查了 ${AI_OLD.length} 句，一句都没有`,
+        )
         await page.waitForTimeout(900)
       })
       await shotRaw(page, S42, '42-morning-welcome')
@@ -2672,8 +2779,8 @@ await withLock(async () => {
            */
           markers: [
             '错题集',
-            '我任教的班级 · 点进去看这个班的错题档案',
-            '我任教的 2 个班 · 91 名学生',
+            '我任教的班级',
+            '2 个班 · 91 名学生',
             '批过 1 份',
           ],
           absent: ['批过 2 份'],
@@ -2737,7 +2844,7 @@ await withLock(async () => {
         wait: 0,
         expect: {
           url: '/wrong',
-          markers: ['我任教的班级 · 点进去看这个班的错题档案'],
+          markers: ['我任教的班级'],
         },
       })
 
@@ -3462,12 +3569,15 @@ await withLock(async () => {
           `assigned=${FL.fileClassAssigned([cA], ['c1'])}`,
         )
 
-        /* ④ 真界面：本地模式下这一页还是"还没连接"，且不许把上传控件摆出来 */
+        /* ④ 真界面：本地模式下这一页还是"没连云端"，且不许把上传控件摆出来 */
         crumb('goto /files')
         await page.goto(`${BASE}/files`, { waitUntil: 'networkidle' })
         await expectPage(page, SFL, {
           url: '/files',
-          markers: ['教室端文件', '还没连接'],
+          // 期望值变了：这句原文是「这个功能要把文件存到云端，现在还没连接。连上 Supabase
+          // 之后就能用了。」—— 文案审查判它改写（`Supabase` 是实现细节，老师不需要知道），
+          // 现在写「还没有连接云端，暂时传不了文件。」
+          markers: ['教室端文件', '还没有连接云端'],
           absent: ['给哪些班看', '选择文件'],
         })
       })
@@ -3955,9 +4065,22 @@ await withLock(async () => {
           `${SAN}：同步出错横幅**在最顶**（z-[70]，y=${g.sync?.y}）`,
           `sync 高 ${g.sync?.h ?? '(没有)'}px`,
         )
+        /*
+         * 🔴 让位：公告条从**报错横幅的底边**开始 —— 既不重叠（压住 = 那条公告一个字都读不到），
+         *    也不白让（多让一层就是白吃一屏）。
+         *
+         * ⚠️ 这里**不写 `===`**（原来写的是 `stack.y === sync.bottom`，本轮实测红）：
+         *    那个 `top` 是 `AnnouncementStack` 里 `Math.ceil(报错横幅实测高度)` 写出来的，
+         *    而这里读回来的是 `annProbe` 里 `Math.round` 的矩形 —— 同一个 58.25px 高的横幅，
+         *    一边得 59、一边得 58（实测），**这 1px 是取整方式的差，不是"公告条被压住了"**。
+         *    "被压住"会差一整个公告条的高度（35~69px），所以判据写成
+         *    「落在 [底边, 底边+1px]」：上限挡压盖，下限挡白让，两头都还管着。
+         *    反向对照（实测）：把公告条 `top` 注射成 0 → gap = -58 → **这条当场红**。
+         */
+        const gap = g.stack !== null && g.sync !== null ? g.stack.y - g.sync.bottom : null
         check(
-          g.stack !== null && g.stack.y === g.sync.bottom,
-          `🔴 ${SAN}：公告条**给它让位**（公告条 y=${g.stack?.y} == 报错横幅底 ${g.sync?.bottom}）—— ` +
+          gap !== null && gap >= 0 && gap <= 1,
+          `🔴 ${SAN}：公告条**给它让位**（公告条 y=${g.stack?.y} · 报错横幅底 ${g.sync?.bottom} · 差 ${gap}px）—— ` +
             '**不是被压在下面**（压住 = 那条公告一个字都读不到）',
           `sync ${g.sync?.y}~${g.sync?.bottom} · stack ${g.stack?.y}~${g.stack?.bottom} · 重叠 ${(g.sync?.bottom ?? 0) - (g.stack?.y ?? 0)}px`,
         )
@@ -3966,10 +4089,20 @@ await withLock(async () => {
           `${SAN}：顶栏与内容**依次往下**（顶栏 ${g.header?.y} · 内容 ${g.main?.y}）—— 三条互不遮挡`,
           `stack 底 ${g.stack?.bottom} · header ${g.header?.y}~${g.header?.bottom} · main ${g.main?.y}`,
         )
+        /*
+         * 让位量 = **报错横幅 + 公告条**（`--top-stack-h` 把两段加起来，四个地方共用那一个变量）。
+         *
+         * ⚠️ 1px 容差，理由与上面那条**同一个**：变量里是两段各自 `Math.ceil`，
+         *    这里读回来的是 `Math.round` 的矩形（实测 58.25 → ceil 59 / round 58）。
+         *    这一条要抓的是"只算了一段 / 一段都没算"（那会差 35~69px）。
+         *    反向对照（实测）：把变量注射成"只有报错横幅"的 59px → **这条当场红**。
+         */
+        const wantTopStack = (g.sync?.h ?? 0) + (g.stack?.h ?? 0)
+        const gotTopStack = Number.parseFloat(String(g.varTopStack))
         check(
-          g.varTopStack === `${(g.sync?.h ?? 0) + (g.stack?.h ?? 0)}px`,
-          `${SAN}：让位量 = **报错横幅 + 公告条**（--top-stack-h 把两段加起来）`,
-          `变量 ${g.varTopStack}`,
+          Number.isFinite(gotTopStack) && Math.abs(gotTopStack - wantTopStack) <= 1,
+          `${SAN}：让位量 = **报错横幅 + 公告条**（--top-stack-h 把两段加起来：${gotTopStack} ≈ ${g.sync?.h} + ${g.stack?.h}）`,
+          `变量 ${g.varTopStack} · 报错横幅 ${g.sync?.h ?? '(没有)'}px + 公告条 ${g.stack?.h ?? '(没有)'}px = ${wantTopStack}px`,
         )
         await shot(annPage, SAN, '91-ann-with-sync-banner')
       })
@@ -4097,10 +4230,24 @@ await withLock(async () => {
         }
       })
 
-      /* --- ⑦ 入口与**编辑时的隐私提醒**（超管面板 ⑥ 那张卡） --- */
+      /* --- ⑦ 入口与**编辑时的隐私提醒**（超管面板的「公告」分区） --- */
       await step(SAN, async () => {
         await annPage.goto(`${BASE}/admin?roles=${ANN_ROLES}`, { waitUntil: 'networkidle' })
         await annPage.waitForTimeout(600)
+        /*
+         * 🆕 2026-09-29 管理台第二期：面板改成了**左侧分区导航 + 一排数字磁贴**，
+         *    公告搬进了自己那一格（概览上只留一句指路）。
+         *    ⚠️ 窄屏（414）下左栏折叠成**顶部横向分段**，所以这里点的是
+         *    `data-admin-seg-key` —— 与桌面那套 `data-admin-nav-key` 是同一份分区表。
+         */
+        const navSeg = annPage.locator('[data-admin-seg-key="announce"]')
+        check(
+          (await navSeg.count()) === 1,
+          `${SAN}：面板自己有分区导航（窄屏是顶部横向分段），公告是其中一格`,
+          `分段数 ${await annPage.locator('[data-admin-seg-key]').count()}`,
+        )
+        await navSeg.click()
+        await annPage.waitForTimeout(250)
         const b0 = await bodyText(annPage)
         check(
           b0.includes('⑥ 全站公告'),
@@ -4167,6 +4314,435 @@ await withLock(async () => {
           `preview = ${previewKey}`,
         )
         await shot(annPage, SAN, '94-admin-announcements', { full: true })
+      })
+
+      /* ============================================================
+         🆕 ⑧ 管理台第二期（2026-09-29）：新结构 + 三个新分区 + 维护模式的三种行为
+         ------------------------------------------------------------
+         🔴 这一节验的是**用户点名的那三句话**（每一句都要有**反向对照**）：
+            ① 面板"更像管理台"了：分区导航 + 概览一排数字磁贴；
+            ② 「**所有在线用户被强制返回到正在维护中的页面**」→ 先证明"不维护时页面
+               是正常的"，再证明"维护时整块被换掉"（否则"换掉了"可能只是"页面本来就空"）；
+            ③ 「**超管自己必须还能进 `/admin`**」→ 维护中敲 `/admin` 仍然拿得到体检结果
+               （这是"开了关不掉"的解药，也是这一期最容易被漏掉的一条）；
+            ④ 「教室端：全屏维护画面 + **心跳照发** + **立刻清掉本页学生数据**」
+               → 先证明"不维护时班里那串数据是在屏上的"，再证明维护时**一个字都不在**。
+
+         ⚠️ 维护状态靠 **DEV-only 钩子 `?maint=…`**（`lib/roles.ts` 的
+            `devInjectedMaintenance()`）：本地演示模式没有服务端，不装它这一整块**断言不了**。
+            生产构建里它被摇掉（`nav-checks` 的 D7 读 dist 核对）。
+         ============================================================ */
+      const S2 = '管理台第二期'
+
+      await step(S2, async () => {
+        /*
+         * 折叠卡：**先点开再查**。
+         *
+         * 这是 `超管运维面板方案.md` 风险表里已经写明的那条纪律（第一期第 3 条）：
+         * 「面板折叠卡让'首屏就该有'这类断言全错（G2 的字节数行、C1 的表都在明细里，
+         * 默认折叠）→ 断言改成**先点开再查**，并且找按钮用 `[data-admin-toggle="…"]`
+         * 这个**稳定钩子**而不是可见文案 —— 文案改一个字不该弄红断言」。
+         * 第二期的三张新卡里「错误日志 / 反馈」是**折叠**的（第一张「维护模式」按方案
+         * §三 的表是**不折叠**的，所以它在 `Admin.tsx` 里传了 `defaultOpen`，这里不用点）。
+         *
+         * ⚠️ 先看 `aria-expanded`：已经是展开态就不点（点两次 = 又收起去了）。
+         */
+        const openCard = async (title) => {
+          const btn = annPage.locator(`[data-admin-toggle="${title}"]`)
+          if ((await btn.getAttribute('aria-expanded')) !== 'true') {
+            await btn.click()
+            await annPage.waitForTimeout(250)
+          }
+        }
+
+        /* ---------------- ① 新结构：分区导航 + 数字磁贴 ---------------- */
+        await annPage.goto(`${BASE}/admin?roles=${ANN_ROLES}`, { waitUntil: 'networkidle' })
+        await annPage.waitForTimeout(600)
+        const nav = await annPage.evaluate(() => ({
+          segs: [...document.querySelectorAll('[data-admin-seg-key]')].map((e) =>
+            e.getAttribute('data-admin-seg-key'),
+          ),
+          tiles: [...document.querySelectorAll('[data-admin-tile]')].map((e) =>
+            e.getAttribute('data-admin-tile'),
+          ),
+          l0: document.querySelector('[data-admin-l0]')?.getAttribute('data-admin-l0') ?? null,
+        }))
+        check(
+          nav.segs.join(',').includes('overview') &&
+            nav.segs.length === 7 &&
+            nav.segs.includes('maintenance') &&
+            nav.segs.includes('feedback'),
+          `${S2}：面板**自己一套分区导航**（7 格：概览/健康/数据库/公告/维护/错误日志/反馈）`,
+          `分区：${nav.segs.join('、')}`,
+        )
+        check(
+          nav.tiles.includes('db') &&
+            nav.tiles.includes('backup') &&
+            nav.tiles.includes('errors') &&
+            nav.tiles.includes('feedback') &&
+            nav.tiles.includes('version'),
+          `${S2}：概览是**一排数字磁贴**（数据库用量 / 备份 / 需处理 / 错误 24h / 未读反馈 / 维护 / 版本）`,
+          `磁贴：${nav.tiles.join('、')}`,
+        )
+        check(
+          nav.l0 !== null,
+          `🔴 ${S2}：**L0 健康条还在**（第一期那句话一个字没丢），颜色 = ${nav.l0}`,
+          `data-admin-l0 = ${nav.l0}`,
+        )
+        const bShell = await bodyText(annPage)
+        check(
+          bShell.includes('数据库用量') && bShell.includes('未读反馈') && bShell.includes('这一页怎么读'),
+          `${S2}：磁贴下面还有一段"这一页怎么读"（绿/黄/红/**灰**四色的口径写在屏上）`,
+          short(bShell.match(/.{0,20}这一页怎么读.{0,60}/)?.[0] ?? '', 140),
+        )
+        await shot(annPage, S2, '95-admin-sections-overview', { full: true })
+
+        /* ---------------- ② 数据库分区 ---------------- */
+        await annPage.locator('[data-admin-seg-key="db"]').click()
+        await annPage.waitForTimeout(300)
+        const bDb = await bodyText(annPage)
+        check(
+          bDb.includes('数据库使用情况') &&
+            bDb.includes('配额') &&
+            bDb.includes('1 GB') &&
+            bDb.includes('三档线') &&
+            bDb.includes('60') &&
+            bDb.includes('85'),
+          `${S2}：数据库那一格写着**配额按 1 GB 算**（用户拍板）与三档线（60 / 85）` +
+            ' —— 而且**读不到用量时也在屏上**（灰的是"用掉多少"，不是口径）',
+          short(bDb.match(/.{0,10}配额按.{0,60}/)?.[0] ?? '', 140),
+        )
+        check(
+          bDb.includes('无法判断') || bDb.includes('题图占多少'),
+          `🔴 ${S2}：本地模式读不到用量 → **灰的"无法判断"**（不是 0 MB、也不是绿）`,
+          short(bDb.match(/.{0,14}(无法判断|题图占多少).{0,40}/)?.[0] ?? '', 120),
+        )
+        await shot(annPage, S2, '96-admin-db', { full: true })
+
+        /* ---------------- ③ 维护分区（四条防呆 + 二次确认） ---------------- */
+        await annPage.locator('[data-admin-seg-key="maintenance"]').click()
+        await annPage.waitForTimeout(300)
+        const onBtn = annPage.locator('[data-maint-on]')
+        const confirmBox = annPage.locator('[data-maint-confirm]')
+        check(
+          (await onBtn.count()) === 1 && (await confirmBox.count()) === 1,
+          `${S2}：维护那一格有**二次确认输入框** + 开启按钮`,
+          `按钮 ${await onBtn.count()} 个 · 确认框 ${await confirmBox.count()} 个`,
+        )
+        const disabledBefore = await onBtn.isDisabled()
+        check(
+          disabledBefore,
+          `🔴 ${S2}：没输入确认字符串时按钮是**真 disabled**（不是"灰一下还能点"）`,
+          `disabled = ${disabledBefore}`,
+        )
+        await confirmBox.fill('MAINTENANCE')
+        await annPage.waitForTimeout(200)
+        /* 🔴 四条校验之一（R3）：只填结束时间 → 预览那句**直接说不行** */
+        await annPage.fill('[data-maint-to]', '2027-01-01T10:00')
+        await annPage.waitForTimeout(250)
+        const preview = await annPage.evaluate(() =>
+          String(document.querySelector('[data-maint-preview]')?.textContent ?? ''),
+        )
+        check(
+          preview.includes('只填了结束时间'),
+          `🔴 ${S2}：**R3**（只填结束时间）→ 预览当场说清"要么补开始、要么清掉结束"`,
+          short(preview, 120),
+        )
+        const disabledR3 = await onBtn.isDisabled()
+        check(disabledR3, `🔴 ${S2}：R3 命中时开启按钮仍然 disabled（拒在提交之前）`, `disabled = ${disabledR3}`)
+        /* 反向对照：把结束时间清掉 → 预览变成"立即开启 + 4 小时自动关" */
+        await annPage.fill('[data-maint-to]', '')
+        await annPage.waitForTimeout(250)
+        const preview2 = await annPage.evaluate(() =>
+          String(document.querySelector('[data-maint-preview]')?.textContent ?? ''),
+        )
+        check(
+          preview2.includes('立即开启') && preview2.includes('自动关闭'),
+          `🔴 ${S2}：反向对照 —— 清掉之后预览变成"立即开启 · N 小时后自动关闭"（不是恒拒）`,
+          short(preview2, 120),
+        )
+        check(
+          !(await onBtn.isDisabled()),
+          `${S2}：这时开启按钮**可以点**（确认字符串已输入、表单自洽）`,
+        )
+        const bMaint = await bodyText(annPage)
+        check(
+          bMaint.includes('心跳照发') || bMaint.includes('心跳一直在发'),
+          `${S2}：那一格写明了**教室端心跳照发**（否则面板会开始显示"教室端离线"）`,
+          short(bMaint.match(/.{0,12}心跳.{0,40}/)?.[0] ?? '', 100),
+        )
+        check(
+          bMaint.includes('发测试邮件'),
+          `${S2}：带一个「**发测试邮件**」按钮（不用真等到毕业才验通道）`,
+        )
+        await shot(annPage, S2, '97-admin-maintenance', { full: true })
+
+        /* ---------------- ④ 错误日志分区 ---------------- */
+        await annPage.locator('[data-admin-seg-key="errors"]').click()
+        await annPage.waitForTimeout(300)
+        /* 🔴 先点开：口径（"匿名也能上报" / "has_pii 是启发式、不许当成'已脱敏'"）在卡内明细里 ——
+           `bodyText` 读的是 `innerText`，**折叠着就等于屏上没有**（这正是本轮两条红的原因）。 */
+        await openCard('前端错误日志')
+        const bErr = await bodyText(annPage)
+        check(
+          bErr.includes('前端错误日志') && bErr.includes('匿名'),
+          `${S2}：错误日志那一格写明**匿名也能上报**（登录页 / 教室端 / hydrate 失败三个现场）`,
+          short(bErr.match(/.{0,12}匿名.{0,50}/)?.[0] ?? '', 120),
+        )
+        check(
+          bErr.includes('启发式') && bErr.includes('不许') && bErr.includes('已脱敏'),
+          `🔴 ${S2}：明确写了 has_pii 是**启发式**、**不许当成"已脱敏"**（隐私 B 类的口径）`,
+          short(bErr.match(/.{0,16}启发式.{0,50}/)?.[0] ?? '', 120),
+        )
+        check(
+          bErr.includes('请勿投屏或截图') || bErr.includes('无法判断'),
+          `${S2}：读不到时是灰的"无法判断"（本地模式没有 /api/admin/errors）`,
+          short(bErr.match(/.{0,14}(请勿投屏或截图|无法判断).{0,40}/)?.[0] ?? '', 120),
+        )
+        await shot(annPage, S2, '98-admin-errors', { full: true })
+
+        /* ---------------- ⑤ 反馈分区 ---------------- */
+        await annPage.locator('[data-admin-seg-key="feedback"]').click()
+        await annPage.waitForTimeout(300)
+        /* 同上：先点开再查（「先落库再发信」「反馈 ≠ 通知」写在卡内明细里） */
+        await openCard('用户反馈')
+        const bFb = await bodyText(annPage)
+        check(
+          bFb.includes('先落库') && bFb.includes('反馈 ≠ 通知'),
+          `🔴 ${S2}：反馈那一格写明**先落库再发信**与**反馈 ≠ 通知**（两处最容易搞混的）`,
+          short(bFb.match(/.{0,14}先落库.{0,60}/)?.[0] ?? '', 140),
+        )
+        check(
+          bFb.includes('无法判断'),
+          `${S2}：读不到时是灰的"无法判断"（**不是"没有人提过"**）`,
+          short(bFb.match(/.{0,14}无法判断.{0,40}/)?.[0] ?? '', 120),
+        )
+        await shot(annPage, S2, '99-admin-feedback', { full: true })
+      })
+
+      /* ---------------- ⑥ 维护模式：教师端 / 教室端 / 超管三条行为 ---------------- */
+      await step(S2, async () => {
+        const ctxM = await browser.newContext({ viewport: { width: 1280, height: 800 }, locale: 'zh-CN' })
+        await ctxM.clock.install({ time: new Date('2026-09-19T10:00:00') })
+        await ctxM.addInitScript((base) => {
+          window.localStorage.setItem('shugao.teacher.v1', JSON.stringify(base))
+          window.localStorage.setItem('shugao.deviceRole', 'teacher')
+        }, TEACHER_STATE)
+        const mp = await ctxM.newPage()
+        mp.on('pageerror', (e) => errors.push(`PAGEERROR(维护) :: ${e.message}`))
+        mp.on('console', (m) => {
+          if (m.type() === 'error') errors.push(`CONSOLE(维护) :: ${m.text()}`)
+        })
+        try {
+          /* ---- 反向对照 A：**不维护时**，工作台是正常的一整页 ---- */
+          await mp.goto(`${BASE}/`, { waitUntil: 'networkidle' })
+          await mp.waitForTimeout(600)
+          const normal = await mp.evaluate(() => ({
+            maint: document.querySelectorAll('[data-maintenance-screen]').length,
+            work: document.body.innerText.includes('今日'),
+            cls: document.body.innerText.includes('高二(3)班'),
+          }))
+          check(
+            normal.maint === 0 && normal.work,
+            `🔴 ${S2}：反向对照 —— 不维护时**没有维护画面**，工作台照常（含"今日"那一段）`,
+            `维护画面 ${normal.maint} 个 · 工作台 ${normal.work ? '在' : '不在'}`,
+          )
+
+          /* ---- ① 教师端：维护中 → 整块被换成维护画面 ---- */
+          await mp.goto(`${BASE}/?maint=1`, { waitUntil: 'networkidle' })
+          await mp.waitForTimeout(700)
+          const maint = await mp.evaluate(() => {
+            const el = document.querySelector('[data-maintenance-screen]')
+            return {
+              count: document.querySelectorAll('[data-maintenance-screen]').length,
+              variant: el?.getAttribute('data-maintenance-variant') ?? null,
+              title: String(document.querySelector('[data-maintenance-title]')?.textContent ?? ''),
+              text: el ? String(el.innerText).replace(/\s+/g, ' ').trim() : '',
+              work: document.body.innerText.includes('今日要批的作业'),
+              cls: document.body.innerText.includes('高二(3)班'),
+            }
+          })
+          check(
+            maint.count === 1 && maint.variant === 'teacher',
+            `${S2}：维护中 → 教师端整块**被换成维护画面**（data-maintenance-variant=teacher）`,
+            `维护画面 ${maint.count} 个（variant=${maint.variant}）`,
+          )
+          check(
+            maint.title.includes('系统维护中'),
+            `${S2}：而且写得明明白白是"系统维护中"（不是白屏、不是报错）`,
+            short(maint.title, 60),
+          )
+          check(
+            !maint.work && !maint.cls,
+            `🔴 ${S2}：**工作台内容整块消失**（"今日要批的作业"与班级名都不在屏上）`,
+            `工作台 ${maint.work ? '还在' : '没了'} · 班级名 ${maint.cls ? '还在' : '没了'}`,
+          )
+          check(
+            maint.text.includes('不会被登出') || maint.text.includes('登录状态'),
+            `🔴 ${S2}：明确写了**不会把任何人登出**（用户拍板：只跳转、不登出）`,
+            short(maint.text, 160),
+          )
+          await shot(mp, S2, '100-maint-teacher', { full: true })
+
+          /* ---- ② 教室端：全屏维护画面 + 数据清空 + 心跳照发 ---- */
+          await mp.goto(`${BASE}/classroom`, { waitUntil: 'networkidle' })
+          await mp.waitForTimeout(700)
+          const clsNormal = await mp.evaluate(() => ({
+            cls: document.body.innerText.includes('高二(3)班'),
+            maint: document.querySelectorAll('[data-maintenance-screen]').length,
+          }))
+          check(
+            clsNormal.cls && clsNormal.maint === 0,
+            `🔴 ${S2}：反向对照 —— 不维护时教室端**屏上就是那个班**（这条是下面"清空了"的前提）`,
+            `班级名 ${clsNormal.cls ? '在' : '不在'} · 维护画面 ${clsNormal.maint} 个`,
+          )
+
+          await mp.goto(`${BASE}/classroom?maint=1`, { waitUntil: 'networkidle' })
+          await mp.waitForTimeout(800)
+          const clsMaint = await mp.evaluate(() => {
+            const el = document.querySelector('[data-maintenance-screen]')
+            return {
+              count: document.querySelectorAll('[data-maintenance-screen]').length,
+              variant: el?.getAttribute('data-maintenance-variant') ?? null,
+              clock: String(document.querySelector('[data-maintenance-clock]')?.textContent ?? '').trim(),
+              text: el ? String(el.innerText).replace(/\s+/g, ' ').trim() : '',
+              cls: document.body.innerText.includes('高二(3)班'),
+              names: document.body.innerText.includes('逐题正确率') || document.body.innerText.includes('本次作业'),
+            }
+          })
+          check(
+            clsMaint.count === 1 && clsMaint.variant === 'classroom',
+            `🔴 ${S2}：教室端 → **整屏**维护画面（data-maintenance-variant=classroom）`,
+            `维护画面 ${clsMaint.count} 个（variant=${clsMaint.variant}）`,
+          )
+          check(
+            /^\d{2}:\d{2}:\d{2}$/.test(clsMaint.clock),
+            `${S2}：那块屏 24 小时亮着 —— 维护画面上有一个**大号时钟**（"还有多久"是它唯一有用的信息）`,
+            `时钟 = ${clsMaint.clock}`,
+          )
+          check(
+            !clsMaint.cls && !clsMaint.names,
+            `🔴 ${S2}：**立刻清掉本页学生数据** —— 班级名 / 作业区一个字都不在屏上` +
+              `（维护画面的意义之一就是"别让学生继续看到作业/名单"）`,
+            `班级名 ${clsMaint.cls ? '还在' : '没了'} · 作业区 ${clsMaint.names ? '还在' : '没了'}`,
+          )
+          /*
+           * 🔴 **心跳照发**（用户原话 + 方案 §四 拍板 4 的第 ① 条）—— 这里验的是**真行为**：
+           *    `Classroom.tsx` 那个心跳 effect 挂在维护 `early return` **之前**，
+           *    所以维护画面盖上来之后它照跑（本地模式走 `BroadcastChannel('shugao.classroom.v1')`，
+           *    4 秒一次 —— `lib/realtime.ts` 的 `HEARTBEAT_MS`）。
+           *
+           * ⚠️ 原来这一条断的是**屏上有没有"心跳"两个字**（`clsMaint.text.includes('心跳')`）——
+           *    那是**断言写错了**，不是产品缺功能：方案 §四 给教室端维护屏规定的是
+           *    "学校名 + 「系统维护中」+ 通告正文 + 大号时钟"**四样**，
+           *    "心跳照发"是**行为**（不许把心跳停掉），不是要求那块屏**写着**这句话。
+           *    所以改成"开一个同名 BroadcastChannel 数一数"：收到心跳 = 心跳照发；
+           *    谁把那个 effect 挪到 early return 之后，这条立刻会红。
+           */
+          await mp.evaluate(() => {
+            window.__beats = []
+            window.__beatCh = new BroadcastChannel('shugao.classroom.v1')
+            window.__beatCh.onmessage = (e) => {
+              if (e.data && e.data.type === 'heartbeat') window.__beats.push(e.data.at)
+            }
+          })
+          /* 心跳 4 秒一次 → 等 5.2 秒至少该收到 1 条（等的这段里维护画面一直盖着） */
+          await mp.waitForTimeout(5200)
+          const beat = await mp.evaluate(() => {
+            window.__beatCh?.close()
+            return {
+              n: (window.__beats ?? []).length,
+              at: window.__beats ?? [],
+              screen: document.querySelectorAll('[data-maintenance-screen]').length,
+            }
+          })
+          check(
+            beat.screen === 1 && beat.n >= 1,
+            `🔴 ${S2}：**维护画面盖着的时候心跳照发**（等 5.2 秒收到 ${beat.n} 条心跳 · 维护画面 ${beat.screen} 个）—— ` +
+              `不许让面板把它显示成"离线"（那是往"假在线"那条已知缺陷上再叠一层假信号）`,
+            beat.n
+              ? `心跳 ${beat.n} 条（at=${beat.at.join('、')}）`
+              : '一条心跳都没收到 —— 心跳那个 effect 被维护画面停掉了（或者维护画面在这 5 秒里掉了）',
+          )
+          await shot(mp, S2, '101-maint-classroom', { full: true })
+        } finally {
+          await ctxM.close()
+        }
+
+        /* ---- ③ 🔴 超管仍能进 /admin（"开了关不掉"的解药） ---- */
+        await annPage.goto(`${BASE}/admin?roles=${ANN_ROLES}&maint=1`, { waitUntil: 'networkidle' })
+        await annPage.waitForTimeout(700)
+        const adminInMaint = await annPage.evaluate(() => ({
+          maint: document.querySelectorAll('[data-maintenance-screen]').length,
+          l0: document.querySelector('[data-admin-l0]')?.getAttribute('data-admin-l0') ?? null,
+          line: document
+            .querySelector('[data-admin-maint-line]')
+            ?.getAttribute('data-admin-maint-line'),
+          head: String(document.querySelector('[data-admin-headline]')?.textContent ?? ''),
+          lineText: String(
+            document.querySelector('[data-admin-maint-line]')?.textContent ?? '',
+          ).replace(/\s+/g, ' '),
+        }))
+        check(
+          adminInMaint.maint === 0 && adminInMaint.l0 !== null,
+          `🔴🔴 ${S2}：**维护中 /admin 仍然进得去**（维护画面 0 个 · L0 健康条在，颜色 = ${adminInMaint.l0}）` +
+            ` —— 否则开了就关不掉，这是这一件最坏的失败模式`,
+          `维护画面 ${adminInMaint.maint} 个 · data-admin-l0 = ${adminInMaint.l0}`,
+        )
+        check(
+          adminInMaint.line === 'on' && adminInMaint.lineText.includes('维护模式已开启'),
+          `🔴 ${S2}：而且 L0 上**常驻一行"维护模式已开启"**（防呆：挡"忘了自己开着"）`,
+          `data-admin-maint-line = ${adminInMaint.line} · ${short(adminInMaint.lineText, 120)}`,
+        )
+        check(
+          adminInMaint.head.includes('平台'),
+          `${S2}：体检结论照样拿得到（"${short(adminInMaint.head, 40)}"）—— 面板存在的意义就是"半坏状态下也看得到"`,
+        )
+        await shot(annPage, S2, '102-maint-admin-exempt', { full: true })
+      })
+
+      /* ---------------- ⑦ 「我的」页的反馈块（**位置是被点名的**） ---------------- */
+      await step(S2, async () => {
+        await annPage.goto(`${BASE}/settings?roles=${ANN_ROLES}`, { waitUntil: 'networkidle' })
+        await annPage.waitForTimeout(700)
+        const fb = await annPage.evaluate(() => {
+          const block = document.querySelector('[data-feedback-block]')
+          const txt = String(document.body.innerText)
+          return {
+            has: block !== null,
+            input: document.querySelectorAll('[data-feedback-input]').length,
+            contact: document.querySelectorAll('[data-feedback-contact]').length,
+            submit: document.querySelectorAll('[data-feedback-submit]').length,
+            /* DOM 顺序：关于 → **反馈** → 更新日志（用可见文案的下标比，够稳且不依赖 DOM 细节） */
+            iAbout: txt.indexOf('关于'),
+            iFb: txt.indexOf('反馈'),
+            iLog: txt.indexOf('更新日志'),
+            text: block ? String(block.innerText).replace(/\s+/g, ' ').trim() : '',
+          }
+        })
+        check(
+          fb.has && fb.input === 1 && fb.submit === 1,
+          `${S2}：「我的」页有一块**反馈**（一个输入框 + 一个提交按钮）`,
+          `块 ${fb.has} · 输入框 ${fb.input} · 提交 ${fb.submit}`,
+        )
+        check(
+          fb.iAbout >= 0 && fb.iFb > fb.iAbout && fb.iLog > fb.iFb,
+          `🔴 ${S2}：位置就是用户点名的那个 —— **「关于」之后、「更新日志」之前**` +
+            `（下标 关于=${fb.iAbout} < 反馈=${fb.iFb} < 更新日志=${fb.iLog}）`,
+          `关于=${fb.iAbout} 反馈=${fb.iFb} 更新日志=${fb.iLog}`,
+        )
+        check(
+          fb.text.includes('系统会自动上报'),
+          `🔴 ${S2}：并且指出"登录不上 / 页面报错"走**自动上报**那条路（不允许匿名提交反馈）`,
+          short(fb.text, 200),
+        )
+        /* 提交按钮：正文不到 5 个字时**真 disabled** */
+        const submitBtn = annPage.locator('[data-feedback-submit]')
+        check(await submitBtn.isDisabled(), `${S2}：正文少于 5 个字时提交按钮 disabled`, 'disabled = true')
+        await annPage.fill('[data-feedback-input]', '作业导入的图太大，点导出没反应')
+        await annPage.waitForTimeout(200)
+        check(!(await submitBtn.isDisabled()), `${S2}：写了正文之后按钮可以点（本地模式点了也只会得到人话错误）`, 'disabled = false')
+        await shot(annPage, S2, '103-settings-feedback', { full: true })
       })
     } catch (e) {
       console.log(`\n💥 脚本在第「${currentStep}」步异常中断：${e instanceof Error ? e.message : String(e)}`)

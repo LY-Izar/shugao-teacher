@@ -10,6 +10,7 @@ import {
   IconDownload,
   IconLogout,
   IconPencil,
+  IconSend,
   IconSliders,
   IconSwap,
   IconUpload,
@@ -32,6 +33,7 @@ import {
   backupSummary,
   downloadJson,
   makeBackup,
+  notifyBackupDone,
   pushBackupToCloud,
   readJsonFile,
   validateBackup,
@@ -40,6 +42,15 @@ import { REMIND_BEFORE, itemsForDate } from '../lib/schedule'
 // 只用到时间工具：节假日「数据来源」面板已删（见 功能设计与不变量.md §十七 17.2），
 // 判定函数（isRestDay / dayKind / holidayOn / nextHoliday）仍在别处使用，没有动。
 import { beijingNow, ymdOf } from '../lib/holiday'
+import { toISODate, friendlyDate } from '../lib/date'
+import {
+  FEEDBACK_MAX,
+  FEEDBACK_MIN,
+  FEEDBACK_MINE_LIMIT,
+  myFeedback,
+  submitFeedback,
+  type MyFeedback,
+} from '../lib/feedback'
 import {
   currentIdentityLabel,
   entryVisible,
@@ -67,6 +78,63 @@ export default function Settings() {
   const navigate = useNavigate()
   const push = useToast((s) => s.push)
   const mode = connectionMode()
+
+  /* 🆕 反馈（2026-09-29 管理台第二期）—— 状态都在这一页里，不落 store（它是一次性的表单） */
+  const [fbBody, setFbBody] = useState('')
+  const [fbContact, setFbContact] = useState('')
+  const [fbBusy, setFbBusy] = useState(false)
+  const [fbMsg, setFbMsg] = useState('')
+  const [fbErr, setFbErr] = useState('')
+  const [fbRows, setFbRows] = useState<MyFeedback[]>([])
+  const [fbLoadErr, setFbLoadErr] = useState('')
+  /** 🆕 备份通知（邮件）正在发 */
+  const [bkNotifyBusy, setBkNotifyBusy] = useState(false)
+
+  /**
+   * 「我提过的」：进页面读一次。
+   * ⚠️ **读不到就说读不到**（`fbLoadErr`），**不许显示成"还没有提过"** ——
+   *    那两句在用户眼里是完全不同的两件事（本项目最贵的一条教训）。
+   */
+  useEffect(() => {
+    if (!isRemote) return
+    let alive = true
+    void myFeedback().then((r) => {
+      if (!alive) return
+      if (r.ok) {
+        setFbRows(r.rows)
+        setFbLoadErr('')
+      } else {
+        setFbLoadErr(`读不到你提过的反馈：${r.message}`)
+      }
+    })
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  const submitFb = async () => {
+    if (fbBusy) return
+    setFbBusy(true)
+    setFbErr('')
+    setFbMsg('')
+    const res = await submitFeedback({
+      body: fbBody,
+      contact: fbContact,
+      page: '/settings',
+      authorRoles: currentIdentityLabel(myRoles, teacher),
+    })
+    setFbBusy(false)
+    if (!res.ok) {
+      setFbErr(res.message)
+      return
+    }
+    /* 🔴 文案只说"已送到"（= 已经进库、管理员看得到）——**绝不写"已发到邮箱"** */
+    setFbMsg('已送到学校管理员。你可以在下面看到它的处理进度。')
+    setFbBody('')
+    setFbContact('')
+    const again = await myFeedback()
+    if (again.ok) setFbRows(again.rows)
+  }
 
   /* 编辑教师身份 */
   const updateTeacher = useStore((s) => s.updateTeacher)
@@ -192,7 +260,7 @@ export default function Settings() {
     a.download = `树高教师平台-数据导出-${new Date().toISOString().slice(0, 10)}.json`
     a.click()
     URL.revokeObjectURL(url)
-    push({ text: '已导出全部数据', tone: 'ok', desc: 'JSON 格式，不锁定在平台内' })
+    push({ text: '已导出全部数据', tone: 'ok' })
   }
 
   return (
@@ -369,7 +437,7 @@ export default function Settings() {
                 <IconUpload size={18} />
               </span>
               <span className="min-w-0 flex-1">
-                <span style={{ fontSize: 14.5, fontWeight: 620 }}>教室端文件</span>
+                <span style={{ fontSize: 14.5, fontWeight: 620 }}>传到教室大屏</span>
                 <span className="mt-0.5 block" style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
                   把题图、PDF、HTML、PPT 传到教室一体机上打开
                 </span>
@@ -447,6 +515,43 @@ export default function Settings() {
                 }}
               >
                 导出备份文件
+              </Button>
+              {/*
+                🆕 2026-09-29 管理台第二期：「**毕业备份**」那条链的落点
+                   —— 备份 → 发信 → **发不出去就不许删**。
+
+                ⚠️ 为什么要有这个按钮：备份通知邮件是"毕业归档 / 换账号搬数据"这类
+                   一次性动作的留痕。没有它，那条链只有在真出毕业那件事时才第一次运行
+                   —— 而它没跑通过的东西，不该压在一次不可逆的操作上。
+                ⚠️ 发信失败时**必须显式说"先别删那份文件"**（这就是"不许删"的落地）。
+              */}
+              <Button
+                block
+                icon={<IconSend size={16} />}
+                disabled={bkNotifyBusy}
+                data-backup-notify
+                onClick={() => {
+                  const b = makeBackup(useStore.getState())
+                  downloadJson(b, `树高备份-${ymdOf(beijingNow())}.json`)
+                  setBkNotifyBusy(true)
+                  void notifyBackupDone(`本机备份已导出：${backupSummary(b)}`, `文件：树高备份-${ymdOf(beijingNow())}.json`).then(
+                    (r) => {
+                      setBkNotifyBusy(false)
+                      if (r.ok) {
+                        push({ text: '备份已导出，并已通知管理员邮箱', tone: 'ok' })
+                      } else {
+                        /* 🔴 **不发假成功**：邮件没出去就说没出去，并把"不许删"讲清楚 */
+                        push({
+                          text: '备份已导出，但通知邮件没发出去',
+                          tone: 'warn',
+                          desc: `${r.message}，发不出去就先别删刚才那份备份文件`,
+                        })
+                      }
+                    },
+                  )
+                }}
+              >
+                {bkNotifyBusy ? '正在发通知…' : '备份并通知管理员邮箱'}
               </Button>
               <Button block icon={<IconUpload size={16} />} onClick={() => bkRef.current?.click()}>
                 从备份文件恢复
@@ -646,6 +751,110 @@ export default function Settings() {
               k="存储"
               v={mode === 'remote' ? '云端 · 手机与教室端共用一份' : '本机浏览器 · 未连云端'}
             />
+          </Panel>
+        </div>
+
+        {/*
+          🆕 反馈（2026-09-29 管理台第二期）—— **用户点名的位置**：
+             「我的」页面最下面、**更新日志之前**（这一块与「关于」之间没有别的东西，
+             下一次整理页面顺序时**别把它挪走** —— `shots.mjs` 有一条 DOM 顺序断言钉着）。
+
+          🔴 三条口径（都写在 `功能设计与不变量.md` §二十五）：
+             · **先落库、再发信**：发信失败**不改变**用户看到的结果 ——
+               所以这里只说"已送到"（送到管理员那儿 = 已经进库了），
+               **绝不写"已发到邮箱"**（那是我们控制不了的事）；
+             · **只给管理员看、不会出现在通知里**（用户点名要处理这个混淆）；
+             · **不允许匿名提交** —— 登录不上 / 页面报错走的是**前端错误上报**
+               （那个匿名也能报）。
+        */}
+        <div className="mb-4" data-feedback-block>
+          <Sect>反馈</Sect>
+          <Panel bodyClass="p-3">
+            <div style={{ fontSize: 12.5, color: 'var(--color-ink2)', lineHeight: 1.8 }}>
+              遇到问题、想提建议，写在这里 —— 会直接送到学校管理员。
+              <br />· 登录不上、或者某个页面报错打不开：不用写在这里，系统会自动上报。
+            </div>
+            <textarea
+              className="input mt-2.5"
+              style={{ minHeight: 84, fontSize: 13, lineHeight: 1.75 }}
+              placeholder={`最多 ${FEEDBACK_MAX} 个字。写清在哪个页面、点了什么、看到什么。`}
+              value={fbBody}
+              onChange={(e) => setFbBody(e.target.value)}
+              data-feedback-input
+            />
+            <input
+              className="input mt-2"
+              style={{ height: 34, fontSize: 13 }}
+              placeholder="要不要留个联系方式？（选填，方便回你）"
+              value={fbContact}
+              onChange={(e) => setFbContact(e.target.value)}
+              data-feedback-contact
+            />
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <Button
+                size="sm"
+                variant="primary"
+                disabled={fbBusy || fbBody.trim().length < FEEDBACK_MIN}
+                onClick={() => void submitFb()}
+                data-feedback-submit
+              >
+                {fbBusy ? '正在发送…' : '提交反馈'}
+              </Button>
+              <span style={{ fontSize: 11.5, color: 'var(--color-ink4)' }}>
+                提交后你可以在下面看到处理进度。
+              </span>
+            </div>
+            {fbMsg ? (
+              <div
+                className="mt-2 flex items-center gap-1.5"
+                style={{ fontSize: 12.5, color: 'var(--color-ok)' }}
+                data-feedback-ok
+              >
+                <IconCheck size={14} />
+                {fbMsg}
+              </div>
+            ) : null}
+            {fbErr ? (
+              <div
+                className="mt-2 flex items-center gap-1.5"
+                style={{ fontSize: 12.5, color: 'var(--color-bad)' }}
+                data-feedback-err
+              >
+                <IconAlert size={14} />
+                {fbErr}
+              </div>
+            ) : null}
+
+            <div className="mt-3 border-t border-line pt-2.5">
+              <div style={{ fontSize: 12, fontWeight: 620, color: 'var(--color-ink3)' }}>
+                我提过的（最近 {FEEDBACK_MINE_LIMIT} 条）
+              </div>
+              {fbRows.length === 0 ? (
+                <div style={{ fontSize: 12, color: 'var(--color-ink4)', marginTop: 4 }}>
+                  {fbLoadErr ? fbLoadErr : '还没有提过。'}
+                </div>
+              ) : (
+                fbRows.map((r) => (
+                  <div
+                    key={r.id}
+                    className="mt-2"
+                    style={{ fontSize: 12.5, lineHeight: 1.7 }}
+                    data-feedback-mine={r.id}
+                  >
+                    <div className="flex items-start gap-2">
+                      <span className="min-w-0 flex-1" style={{ wordBreak: 'break-word' }}>
+                        {r.body}
+                      </span>
+                      <Tag tone={r.status === '已处理' ? 'ok' : undefined}>{r.status}</Tag>
+                    </div>
+                    <div style={{ fontSize: 11.5, color: 'var(--color-ink4)' }}>
+                      {r.createdAt ? `${friendlyDate(toISODate(new Date(r.createdAt)))}` : ''}
+                      {r.reply ? ` · 管理员回复：${r.reply}` : ''}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
           </Panel>
         </div>
 

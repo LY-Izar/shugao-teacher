@@ -6,7 +6,6 @@ import {
   BAR_MAX_DESKTOP,
   BAR_MAX_MOBILE,
   LEVEL_TEXT,
-  POPUP_TEXT,
   addSeen,
   addSessSeen,
   announcementPopupQueue,
@@ -419,7 +418,6 @@ export function AnnouncementStack({ suppressPopup = false }: { suppressPopup?: b
             <div className="p-4">
               <div className="flex flex-wrap items-center gap-2">
                 <span className={BADGE_STYLE[current.level]}>{LEVEL_TEXT[current.level]}</span>
-                <span className="tag tag-idle">弹窗：{POPUP_TEXT[current.popup]}</span>
                 {current.preview ? <span className="tag tag-accent">预览</span> : null}
                 <span className="flex-1" />
                 <span style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
@@ -436,16 +434,6 @@ export function AnnouncementStack({ suppressPopup = false }: { suppressPopup?: b
                 }}
               >
                 {current.body}
-              </div>
-              <div
-                style={{
-                  marginTop: 10,
-                  fontSize: 11.5,
-                  color: 'var(--color-ink4)',
-                  lineHeight: 1.7,
-                }}
-              >
-                这是**平台**发的公告（关于平台本身的信息）—— 与「通知」里的教务通知不是一件事。
               </div>
               <Button block variant="primary" className="mt-3" onClick={closePopup}>
                 我知道了

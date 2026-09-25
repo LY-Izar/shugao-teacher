@@ -111,7 +111,7 @@ export default function Login() {
               lineHeight: 1.6,
             }}
           >
-            面向高中各科作业全链路：批量录名单、点选批改、一键讲评
+            批量录名单 · 点选批改 · 一键讲评
           </div>
         </div>
 
@@ -216,7 +216,7 @@ export default function Login() {
         >
           <IconWifi size={14} />
           <span>
-            {isRemote ? '已连接云端 · 手机与教室端共享数据' : '本地存储模式 · 尚未连接 Supabase'}
+            {isRemote ? '已连接云端 · 手机与教室端共享数据' : '本地存储模式 · 尚未连接'}
           </span>
         </div>
       </div>

@@ -6,7 +6,6 @@ import {
   IconCheck,
   IconClipboard,
   IconGrid,
-  IconInfo,
   IconPlus,
   IconRefresh,
   IconTrash,
@@ -272,8 +271,7 @@ export default function Exams() {
             <div className="flex items-start gap-2" style={{ fontSize: 12.5, lineHeight: 1.7 }}>
               <IconAlert size={15} />
               <span className="flex-1">
-                线上数据库还没有考试相关的表（<b>schema.sql 第 15 段</b>），
-                所以现在**读不到也存不进**考试档案。跑完那一段再回来。
+                考试功能暂时不可用，请稍后再试。
               </span>
               <Button size="sm" variant="ghost" icon={<IconRefresh size={13} />} onClick={() => void refreshExamTables()}>
                 重试
@@ -287,7 +285,6 @@ export default function Exams() {
             <Empty
               icon={<IconClipboard size={24} />}
               title="还没有考试档案"
-              desc="有两种建法：从新教育导出的成绩单导入，或者自己在平台上逐题录分。"
               action={
                 <div className="flex gap-2">
                   <Button size="sm" variant="primary" icon={<IconPlus size={15} />} onClick={() => navigate('/exams/new')}>
@@ -425,14 +422,6 @@ export default function Exams() {
           </div>
         )}
 
-        <div
-          className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-1 px-1"
-          style={{ fontSize: 11.5, color: 'var(--color-ink4)' }}
-        >
-          <span className="flex items-center gap-1.5">
-            <IconInfo size={13} /> 年级考试按试卷名认同一场，各班档案自动合起来排名
-          </span>
-        </div>
       </Page>
 
       {/* ---------------- 删除确认 ---------------- */}
@@ -460,7 +449,7 @@ export default function Exams() {
         }
       >
         <div style={{ fontSize: 13.5, color: 'var(--color-ink2)', lineHeight: 1.7 }}>
-          将删除「{exams.find((x) => x.id === confirmId)?.title}」以及这次考试的**全部学生成绩**。
+          将删除「{exams.find((x) => x.id === confirmId)?.title}」以及这次考试的全部学生成绩。
           该操作不可恢复。
           {examScores.filter((r) => r.examId === confirmId).length ? (
             <>
@@ -529,8 +518,7 @@ export default function Exams() {
                 {busy ? '正在读取…' : '选一份 .xlsx 成绩单'}
               </div>
               <div style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 4, lineHeight: 1.7 }}>
-                新教育导出的那两个 sheet（原始成绩 / 选项分布）都能读。
-                文件**只在本机解析，不上传**。
+                新教育导出的成绩单
               </div>
             </label>
             {err ? (
@@ -652,11 +640,10 @@ export default function Exams() {
                   className="mb-2 p-2.5"
                   style={{ background: 'var(--color-warnsoft)', borderRadius: 4, fontSize: 12.5, lineHeight: 1.8 }}
                 >
-                  <IconAlert size={13} /> 这些人**不会**被导入（花名册里找不到）：
+                  <IconAlert size={13} /> 这些人不会被导入（花名册里找不到）：
                   {unmatched.map((u) => `${u.imported.fileClass ? `${u.imported.fileClass}班 ` : ''}${u.name}`).join('、')}
                   <br />
-                  常见原因：名字里有「☆」之类的标记、或者学生还没录进平台。
-                  先去「班级」把人补上，再回来导一次即可。
+                  名字里有多余标记、或者还没录进平台。先去「班级」补上再导一次。
                 </div>
               ) : null}
               {matched.missing.length ? (
@@ -723,7 +710,7 @@ export default function Exams() {
                     </span>
                   </div>
                   <div style={{ color: 'var(--color-ink3)', marginTop: 4 }}>
-                    题目与答案已经认出来了，**只差这一个数**。
+                    题目与答案已经认出来了，只差每题分值。
                     {choiceEach ? `第 ${parsed.choiceNos.join('、')} 题各记 ${choiceEach} 分。` : '不填的话选择题一律 0 分。'}
                   </div>
                 </div>
@@ -768,9 +755,8 @@ export default function Exams() {
                 })}
               </div>
               <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 8, lineHeight: 1.7 }}>
-                文件把选择题的**正确答案**给了出来，所以那几题自动认成了选择题；
-                其余题（填空题、解答题…）文件里只有分值、没有题型，需要你选一下
-                —— 选错只影响"按题型聚合"的统计，不影响分数。
+                这几题文件里给了答案，已认成选择题；其余题需要你选一下题型。
+                选错只影响按题型聚合的统计，不影响分数。
               </p>
             </div>
 
@@ -799,10 +785,6 @@ export default function Exams() {
                     </div>
                   ))}
                 </div>
-                <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 6, lineHeight: 1.7 }}>
-                  这一段是**文件给的原话**，用来跟平台自己算出来的选项分布对照
-                  （统计页 → 点某道题 → 选项分布）。
-                </p>
               </div>
             ) : null}
 
@@ -816,16 +798,16 @@ export default function Exams() {
                   style={{ border: '1px solid var(--color-accent)', background: 'var(--color-accentsoft)', borderRadius: 4 }}
                 >
                   <div style={{ fontSize: 12.5, fontWeight: 650, color: 'var(--color-accentink)' }}>
-                    库里已有 {same.length} 份**同一场考试**
+                    库里已有 {same.length} 份同一场考试
                   </div>
-                  {same.map(({ exam, verdict }) => (
+                  {same.map(({ exam }) => (
                     <div key={exam.id} style={{ fontSize: 11.5, color: 'var(--color-ink2)', marginTop: 3, lineHeight: 1.6 }}>
-                      · {exam.title}（{exam.classIds.map(nameOfClass).join('、')}）—— {verdict.reason}
+                      · {exam.title}（{exam.classIds.map(nameOfClass).join('、')}）
                     </div>
                   ))}
                   <div style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 4, lineHeight: 1.7 }}>
-                    归一化后：<b>{normalizePaperName(parsed.title)}</b>。
-                    同场考试的各班档案会合起来算年级排名；这次导入只写你这个班的分，不会动别人的。
+                    =「{normalizePaperName(parsed.title)}」这一场的各班档案会合起来算年级排名；
+                    这次只写你这个班的分。
                   </div>
                 </div>
               )

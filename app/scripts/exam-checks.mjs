@@ -360,10 +360,25 @@ await withLock(async () => {
         eq('第 11 题满分 6', r.questions[11].fullScore, 6)
         eq('第 15 题满分 16', r.questions[15].fullScore, 16)
 
-        // 一名学生的逐题数据（第一名：王志远）
+        /*
+         * 一名学生的逐题数据。
+         * 🔴 **这里不许钉真名 / 真学号**（本脚本在公开仓库里，而那份 xlsx 是**真实导出**）：
+         *    原先这两条断言把真实学生姓名与学号写进了字面量 —— 那是个人信息，
+         *    已按隐私整改换成**形状断言**。形状断言抓的是同一件事
+         *    （姓名列 / 学号列有没有解析对：非空、是汉字、学号是纯数字），
+         *    而且**不依赖那份文件里恰好是谁** —— 换一份导出照样能跑。
+         */
         const s0 = r.rows[0]
-        eq('第 1 名学生学号', s0.studentNo, '10001')
-        eq('第 1 名学生姓名', s0.name, '王志远')
+        ok(
+          '第 1 名学生有学号（纯数字，非空）',
+          /^\d{2,}$/.test(s0.studentNo),
+          JSON.stringify(s0.studentNo),
+        )
+        ok(
+          '第 1 名学生有姓名（汉字，2–4 字，且不含 ☆ 之类的修饰符）',
+          /^[\u4e00-\u9fa5]{2,4}$/.test(s0.name),
+          JSON.stringify(s0.name),
+        )
         eq('学生选的选项（第 8 题 AC）', s0.answers[8], 'AC')
         eq('非选择题的分值（第 11 题 6 分）', s0.scores[11], 6)
         eq('文件给的总分原样保留', s0.total, 71)
@@ -371,14 +386,19 @@ await withLock(async () => {
         eq('文件给的年级排名原样保留', s0.gradeRank, 5)
         ok('第 14 题那个 `*` 不会被当成分数', s0.scores[14] === undefined || Number.isFinite(s0.scores[14]))
 
-        // 姓名里的修饰符（真实文件里有一个「☆张雨欣」）
+        // 姓名里的修饰符（**真实文件里有一个带「☆」前缀的姓名** —— 具体是谁不写进仓库）
         const star = r.rows.find((x) => x.name.includes('☆'))
-        ok('姓名里的「☆」被剥掉了（花名册里没有那个符号）', !star, star?.name)
+        ok('姓名里的「☆」被剥掉了（花名册里没有那个符号）', !star, star ? '还有一个带☆的没剥掉' : '')
 
         // 汇总行与未交名单
         eq('汇总行的未交人数', r.summary.absent, 1)
         eq('未交名单解析出 1 人', r.absentNames.length, 1)
-        eq('未交名单的姓名', r.absentNames[0]?.name, '李思涵')
+        /* ⚠️ 同样**不钉真名**（见上面那段）：只验"解析出来的确实是一个没被污染的中文姓名"。 */
+        ok(
+          '未交名单里的姓名解析正确（汉字，2–4 字）',
+          /^[\u4e00-\u9fa5]{2,4}$/.test(String(r.absentNames[0]?.name ?? '')),
+          JSON.stringify(r.absentNames[0]?.name),
+        )
         ok('汇总的"已交 37"与学生行数一致', r.summary.submitted === r.rows.length, `汇总 ${r.summary.submitted} / 实际 ${r.rows.length}`)
 
         // 选项分布（sheet2）

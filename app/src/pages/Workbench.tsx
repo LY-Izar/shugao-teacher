@@ -8,8 +8,6 @@ import {
   IconCheck,
   IconChevronRight,
   IconClipboard,
-  IconHash,
-  IconInfo,
   IconPlus,
   IconScan,
   IconUsers,
@@ -216,7 +214,7 @@ export default function Workbench() {
                 <IconCheck size={17} />
               </span>
               <span style={{ fontSize: 13, color: 'var(--color-ink2)' }}>
-                没有待处理的作业。去「作业」里新建一份档案开始记录。
+                暂无待办
               </span>
             </div>
           ) : (
@@ -396,7 +394,6 @@ export default function Workbench() {
             <div className="empty">
               <IconUsers size={26} />
               <div style={{ fontWeight: 600, color: 'var(--color-ink)' }}>还没有班级</div>
-              <div style={{ fontSize: 13 }}>先建一个班级，再把学生名单录进来</div>
               <Button
                 variant="primary"
                 size="sm"
@@ -463,24 +460,6 @@ export default function Workbench() {
             </div>
           )}
         </Panel>
-      </div>
-
-      <div
-        className="flex flex-wrap items-center gap-x-4 gap-y-1 px-1 pt-1"
-        style={{ fontSize: 11.5, color: 'var(--color-ink4)' }}
-      >
-        <span className="flex items-center gap-1.5">
-          <IconHash size={13} /> 学号为主键
-        </span>
-        <span className="flex items-center gap-1.5">
-          <IconScan size={13} /> 序列自检
-        </span>
-        <span className="flex items-center gap-1.5">
-          <IconZap size={13} /> 离线可录入
-        </span>
-        <span className="flex items-center gap-1.5">
-          <IconInfo size={13} /> 教室端已就绪
-        </span>
       </div>
 
       {/* 新建班级 */}
@@ -604,8 +583,7 @@ function NoticeBlock() {
               <IconBell size={17} />
             </span>
             <span className="min-w-0 flex-1" style={{ fontSize: 13, color: 'var(--color-ink2)' }}>
-              还没有通知。学校有事务要通知老师时，会出现在这里 ——
-              它<b>不弹窗</b>，也不进早上的欢迎弹窗。
+              暂无通知
             </span>
           </button>
         ) : (

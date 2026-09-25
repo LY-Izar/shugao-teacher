@@ -1,4 +1,5 @@
 import { getSupabase } from './supabase'
+import { postApi, apiMessage } from './api'
 import { useStore, useToast } from '../data/store'
 import { toISODate } from './date'
 import { clampQuestionCount } from './assignments'
@@ -507,8 +508,36 @@ export function backupSummary(b: Backup): string {
 
 /* ---------------- ① 导出 / 导入 ---------------- */
 
-export function downloadJson(data: unknown, filename: string) {
-  const blob = new Blob([JSON.stringify(data)], { type: 'application/json' })
+/* ============================================================
+   🆕 备份完成通知（邮件）—— 2026-09-29 管理台第二期「三处接入」的第二处
+   ------------------------------------------------------------
+   🔴 那条链的规矩（用户口径，**既定**）：**备份 → 发信 → 发不出去就不许删**。
+      落在这里的是中间那一环（发信），"不许删"落在调用处（`Settings.tsx`）：
+      发信失败时**必须显式告诉老师"先别删刚才那份备份文件"**，而不是静默过去。
+
+   🔴 正文**由服务端构造**（只有摘要 + 时间 + 一句纪律），
+      所以这条邮件**结构上不可能**带学生姓名 / 学号 / 成绩（`_lib/mail.ts` 的三条硬要求）。
+      ⚠️ 摘要也别塞学生姓名 —— 那是调用方的责任（这里只截断长度）。
+
+   ⚠️ 它**不抛错**：备份本身已经成功了，通知失败不该让"备份成功"这件事看起来失败。
+   ============================================================ */
+
+export type NotifyBackupResult = { ok: true } | { ok: false; message: string }
+
+export async function notifyBackupDone(
+  summary: string,
+  detail = '',
+): Promise<NotifyBackupResult> {
+  const r = await postApi('/api/mail', {
+    action: 'backup',
+    summary: summary.slice(0, 200),
+    detail: detail.slice(0, 400),
+  })
+  if (!r.ok) return { ok: false, message: apiMessage(r, '备份通知没发出去') }
+  return { ok: true }
+}
+
+export function downloadJson(data: unknown, filename: string) {  const blob = new Blob([JSON.stringify(data)], { type: 'application/json' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
@@ -721,7 +750,7 @@ export async function pushBackupToCloud(b: Backup, teacherId: string): Promise<s
   const sb = getSupabase()
   if (!sb) return '本地模式：只恢复到本机'
   if (!UUID_RE.test(teacherId)) {
-    return '本地已恢复，但当前没有登录账号 —— 云端收不下，刷新会丢，请先登录再恢复一次'
+    return '已恢复到本机，但还没登录 —— 刷新就会丢，请先登录再恢复一次'
   }
 
   const classIds = new Set(b.classes.map((c) => c.id))

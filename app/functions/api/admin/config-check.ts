@@ -46,11 +46,21 @@
  *   SUPABASE_URL / VITE_SUPABASE_URL          —— 校验调用者 JWT 与 RPC 用
  *   SUPABASE_ANON_KEY / VITE_SUPABASE_ANON_KEY
  *   SUPABASE_SERVICE_ROLE_KEY                 —— 🔴 Secret（本 Function 只检查它在不在）
- *   RESEND_API_KEY                            —— 可选（B2：目前全仓无代码引用它）
+ *   RESEND_API_KEY                            —— 🆕 2026-09-29 起**已有代码引用**：
+ *        `functions/api/_lib/mail.ts` 是全仓唯一一处调 Resend 的地方，
+ *        三处接入（用户反馈 / 备份通知 / 公告可选）。
+ *        ⚠️ 第一期 B2 那一行原来写的是"目前全仓无代码引用它"—— **那句话现在不成立了**，
+ *        面板上的文案跟着改了（**面板说谎是最坏的一种**，方案 §二.6 R3）。
+ *   ADMIN_NOTIFY_EMAIL                        —— 🆕 2026-09-30（隐私整改）：**邮件收件人**。
+ *        🔴 以前这个地址是**写死在源码里**的，2026-09-30 抽成环境变量并把这个字面量
+ *        从仓库里删掉（真实个人邮箱不能随公开仓库发出去）。
+ *        ⚠️ 与 `RESEND_API_KEY` 是**两件事**：只有 key、没有它，邮件一封也发不出去
+ *        （`sendMail()` 会显式回 `reason:'no_to'`，**绝不静默发到默认地址**）。
+ *        本 Function 只检查它**在不在**（`Record<string, boolean>`），不看值。
  *   R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / R2_ENDPOINT / R2_BUCKET
  *                                             —— 🔴 Secret（同样只检查存在性）
  *   GITHUB_TOKEN                              —— 🔴 Secret，**细粒度 PAT，只给 Actions: Read**
- *   GITHUB_REPO                               —— 例 `your-org/shugao-teacher`
+ *   GITHUB_REPO                               —— 形如 `你的组织/这个仓库`（例：`your-org/your-repo`）
  * ⚠️ **不要把 R2 的凭据塞进 GitHub 之外的任何前端位置**：本 Function 从头到尾
  *    **不读它们的值**，只用 `Boolean(env.X)` 判断在不在。
  */
@@ -62,6 +72,7 @@ type Env = {
   VITE_SUPABASE_ANON_KEY?: string
   SUPABASE_SERVICE_ROLE_KEY?: string
   RESEND_API_KEY?: string
+  ADMIN_NOTIFY_EMAIL?: string
   R2_ACCESS_KEY_ID?: string
   R2_SECRET_ACCESS_KEY?: string
   R2_ENDPOINT?: string
@@ -70,10 +81,23 @@ type Env = {
   GITHUB_REPO?: string
 }
 
-type Body = { action?: 'config' | 'backup' | 'all' }
+type Body = { action?: 'config' | 'backup' | 'db' | 'all' }
+
+/**
+ * 🆕 2026-09-29（管理台第二期）：`action` 从三个变四个 —— 多了 **`db`**（数据库用量）。
+ * ⚠️ 严格照第一期 `§4.3` 第 2 条："**只加一个 Function、多个 action**……
+ *    不要为每条指标建一个接口（19 个接口 = 19 处判据 = 19 个可能漏掉自校验的地方）"。
+ *    ⚠️ **不是**新开 `/api/admin/db`：那会变成第二个"只有超管能打"的接口，
+ *       而它的判据本来就和这里逐字相同（`is_super_admin()`）。
+ */
 
 const NEED_STAGE13 =
   '数据库还没跑权限函数（仓库里 supabase/schema.sql 第 13 段：is_super_admin / can_manage_teachers）。' +
+  '到 Supabase → SQL Editor 跑一遍再回来；刚跑完的话等十几秒让接口刷新一下缓存。'
+
+/** 🆕 管理台第二期：数据库用量那一段（§26 的 `db_usage_report()`） */
+const NEED_STAGE26 =
+  '数据库还没跑运维只读报告那一段（仓库里 supabase/schema.sql 第 26 段：db_usage_report）。' +
   '到 Supabase → SQL Editor 跑一遍再回来；刚跑完的话等十几秒让接口刷新一下缓存。'
 
 function json(data: unknown, status = 200): Response {
@@ -428,12 +452,127 @@ async function backupReport(env: Env): Promise<BackupReport | { error: string }>
 }
 
 /* ============================================================
+   🆕 数据库用量（`action:'db'`，2026-09-29 管理台第二期）
+   ------------------------------------------------------------
+   设计见 `管理台第二期方案.md` §二.2 · 落地口径见 `功能设计与不变量.md` §二十五。
+
+   🔴 **为什么必须走服务端**：`pg_database_size()` / `pg_total_relation_size()` 是
+      目录表上的函数，anon key 够不着（前端也不该有）。它们被包在 `schema.sql` §26 的
+      `db_usage_report()` 里，**只 grant 给 service_role**（对 anon / authenticated revoke）。
+
+   🔴 **它只量数、不判色**：配额（1 GB）与三档阈值在 `app/src/lib/adminChart.ts` ——
+      **一个常量只能有一处**。这里回话里**没有** `quotaBytes`（有断言钉着这一点）。
+
+   🔴 **`unknownReason` 必须是独立字段**，且为 `null` 才允许显示绿 ——
+      这是第一期 G2 那条纪律（"字节数捞不到 → 黄，不是绿"）的同一条（§20.3 / I45）。
+   ============================================================ */
+
+type DbReport = {
+  configured: boolean
+  /** 全库字节数（`pg_database_size`）。捞不到是 **null**，不是 0 */
+  totalBytes: number | null
+  /** 逐表排行（已按字节降序，最多 12 张） */
+  tables: Array<{ name: string; bytes: number; rowsEstimate: number | null }>
+  /** `assignments.question_meta` 的总字节（题图的 base64 就存在那一列里） */
+  questionMetaBytes: number | null
+  /** 体积最大的几份档案：**只有班级名 / 档案 id / 字节数**，没有任何成绩与题目内容 */
+  archives: Array<{ assignmentId: string; className: string; bytes: number }>
+  /** 为什么捞不到 —— 给界面用（`null` = 一切正常拿到了） */
+  unknownReason: string | null
+}
+
+/** 用**管理员密钥**调 Supabase（绕过 RLS）—— 只有"读数据库用量"这一步用它 */
+function sb(env: Env, path: string, init?: RequestInit): Promise<Response> {
+  const key = env.SUPABASE_SERVICE_ROLE_KEY ?? ''
+  return fetch(`${baseUrl(env)}${path}`, {
+    ...init,
+    headers: {
+      apikey: key,
+      Authorization: `Bearer ${key}`,
+      'Content-Type': 'application/json',
+      ...(init?.headers ?? {}),
+    },
+  })
+}
+
+const emptyDb = (unknownReason: string): DbReport => ({
+  configured: true,
+  totalBytes: null,
+  tables: [],
+  questionMetaBytes: null,
+  archives: [],
+  unknownReason,
+})
+
+async function dbReport(env: Env): Promise<DbReport> {
+  if (!(env.SUPABASE_SERVICE_ROLE_KEY ?? '').trim()) {
+    /* 🔴 没配密钥 = **无法判断**（灰），**绝不是"0 MB"、也绝不是绿** */
+    return {
+      configured: false,
+      totalBytes: null,
+      tables: [],
+      questionMetaBytes: null,
+      archives: [],
+      unknownReason: '服务端还没有管理员密钥（SUPABASE_SERVICE_ROLE_KEY），数据库用量读不到',
+    }
+  }
+  let res: Response
+  try {
+    res = await sb(env, '/rest/v1/rpc/db_usage_report', { method: 'POST', body: '{}' })
+  } catch (e) {
+    return emptyDb(`连不上数据库：${e instanceof Error ? e.message : String(e)}`)
+  }
+  const text = await res.text()
+  if (!res.ok) {
+    return emptyDb(
+      /PGRST202|does not exist|schema cache/i.test(text)
+        ? NEED_STAGE26
+        : `读数据库用量失败（HTTP ${res.status}）：${text.slice(0, 160)}`,
+    )
+  }
+  let raw: Record<string, unknown>
+  try {
+    raw = JSON.parse(text) as Record<string, unknown>
+  } catch {
+    return emptyDb('数据库用量回话解不开（不是 JSON）')
+  }
+  const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null)
+  const tables = Array.isArray(raw.tables)
+    ? (raw.tables as Array<Record<string, unknown>>).map((t) => ({
+        name: String(t.name ?? ''),
+        bytes: num(t.bytes) ?? 0,
+        /* ⚠️ `reltuples < 0`（还没 ANALYZE 过）在 SQL 里已经归一成 null = **无法判断**，
+           这里**不许**把它掰成 0（"0 行"与"还没统计过"是两件事） */
+        rowsEstimate: num(t.rowsEstimate),
+      }))
+    : []
+  const archives = Array.isArray(raw.archives)
+    ? (raw.archives as Array<Record<string, unknown>>).map((a) => ({
+        assignmentId: String(a.assignmentId ?? ''),
+        className: String(a.className ?? ''),
+        bytes: num(a.bytes) ?? 0,
+      }))
+    : []
+  const totalBytes = num(raw.totalBytes)
+  return {
+    configured: true,
+    totalBytes,
+    tables,
+    questionMetaBytes: num(raw.questionMetaBytes),
+    archives,
+    unknownReason: totalBytes === null ? '回话里没有 totalBytes（SQL 那一段可能没跑全）' : null,
+  }
+}
+
+/* ============================================================
    配置完整性：**只回答"在 / 不在"**
    ============================================================ */
 
 const CONFIG_KEYS = [
   'SUPABASE_SERVICE_ROLE_KEY',
   'RESEND_API_KEY',
+  /* 🆕 2026-09-30：邮件收件人（以前写死在源码里，现在必须由部署环境给） */
+  'ADMIN_NOTIFY_EMAIL',
   'R2_ACCESS_KEY_ID',
   'R2_SECRET_ACCESS_KEY',
   'R2_ENDPOINT',
@@ -533,11 +672,17 @@ export async function onRequestPost(context: { request: Request; env: Env }): Pr
     return json({ status: 'ok', backup: r })
   }
 
+  /* 🆕 数据库用量（只读，只有超管；配额与阈值在前端 `adminChart.ts`） */
+  if (action === 'db') {
+    return json({ status: 'ok', db: await dbReport(env) })
+  }
+
   const r = await backupReport(env)
   return json({
     status: 'ok',
     config: cfg,
     backup: 'error' in r ? { configured: Boolean((env.GITHUB_TOKEN ?? '').trim() && (env.GITHUB_REPO ?? '').trim()), error: r.error } : r,
+    db: await dbReport(env),
   })
 }
 
@@ -550,7 +695,7 @@ export async function onRequestGet(): Promise<Response> {
     status: 'ok',
     endpoint: '/api/admin/config-check',
     method: 'POST',
-    body: { action: 'config | backup | all' },
+    body: { action: 'config | backup | db | all' },
     note: '需要登录，且判据是数据库的 is_super_admin()',
   })
 }

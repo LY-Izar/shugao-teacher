@@ -457,7 +457,9 @@ export const ENTRIES: Record<EntryKey, EntryRule> = {
   '/wrong': { label: '错题集', visibleFor: () => true },
   '/schedule': { label: '日程表', visibleFor: () => true },
   '/settings': { label: '我的', visibleFor: () => true },
-  '/files': { label: '教室端文件', visibleFor: () => true },
+  // 入口名按"老师要做什么"写（"教室端文件"是内部命名，老师不知道"教室端"指哪台机器）。
+  // ⚠️ 页面本身的标题仍是「教室端文件」（那一页说的是它自己），改的只是这一行的入口名。
+  '/files': { label: '传到教室大屏', visibleFor: () => true },
   // §2.3 ***REMOVED***17：能走到呼叫页的人（= 能改这份作业的老师）就有记录可看，
   // 六个教师身份都是 V；管理身份与任课老师的差别**在数据范围**（RLS），不在入口。
   '/calls': { label: '呼叫记录', visibleFor: () => true },
@@ -656,4 +658,29 @@ export function devInjectedSyncError(search: string): string | null {
   if (!(import.meta.env.DEV && search)) return null
   const raw = new URLSearchParams(search).get('sync')
   return raw ? raw : null
+}
+
+/**
+ * 🧪 DEV-only 测试钩子：`?maint=…` 把"维护模式"**装成开着的**（**生产构建里被编译掉**）。
+ *
+ * 为什么必须有它（2026-09-29 管理台第二期）：维护状态是**服务端**给的
+ * （`GET /api/status`），而 `shots.mjs` 跑的是**本地演示模式**（没有服务端）——
+ * 于是"全员被送进维护页""教室端切成全屏维护画面""**超管仍然进得去 `/admin`**"
+ * 这三句话**一句都断言不了**（这正是这一期最要紧的三条行为）。
+ *
+ * ⚠️ 三条边界与 `devInjectedSyncError()` **逐字相同**：
+ *   ① 只在 `import.meta.env.DEV` 生效（`nav-checks.mjs` 的 D7 读 dist 核对
+ *      `maint` 这个查询参数与函数名一次都没出现）；
+ *   ② 它只影响**渲染**（`useMaintenanceStatus` 那一处），**一个字都不写数据库**、
+ *      也不碰任何数据（`classes` / `assignments` 全不动）；
+ *   ③ 空值（`?maint=`）当作"没有这个钩子" —— 否则"没有维护画面"这种断言
+ *      会在忘记写参数时**静默通过**（假通过）。
+ *
+ * ⚠️ 返回值就是**通告正文**（方便截图里出现一句像样的文案）；`?maint=1` 时用默认文案。
+ */
+export function devInjectedMaintenance(search: string): string | null {
+  if (!(import.meta.env.DEV && search)) return null
+  const raw = new URLSearchParams(search).get('maint')
+  if (!raw) return null
+  return raw === '1' ? '系统维护中，请稍后重试。' : raw
 }

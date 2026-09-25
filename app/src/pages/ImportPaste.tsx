@@ -110,7 +110,7 @@ export default function ImportPaste() {
               <div className="empty">
                 <IconPaste size={24} />
                 <div style={{ fontWeight: 600, color: 'var(--color-ink)' }}>还没有内容</div>
-                <div style={{ fontSize: 13 }}>把名单粘贴到上方，这里会实时解析并校验</div>
+                <div style={{ fontSize: 13 }}>粘贴后这里会显示校验结果</div>
               </div>
             ) : (
               <>

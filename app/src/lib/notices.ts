@@ -150,8 +150,7 @@ async function call(body: Record<string, unknown>): Promise<
   if (res.status === 404) {
     return {
       ok: false,
-      message:
-        '这个部署里没有通知服务（/api/notice）。在本地开发环境（npm run dev）下它不存在，线上才有。',
+      message: '通知服务暂时不可用，请稍后再试。',
     }
   }
   const message = String(payload.message ?? `操作失败（HTTP ${res.status}）`)

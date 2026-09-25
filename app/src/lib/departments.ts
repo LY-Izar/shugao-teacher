@@ -32,10 +32,10 @@ export type DepartmentCode = 'office' | 'academic' | 'logistics' | 'moral_edu'
  *    `教师账号` 页里那位总务处的老师可以一条身份行都没有（= 任课教师那一档）。
  */
 export const DEPARTMENTS: { code: DepartmentCode; name: string; note: string }[] = [
-  { code: 'office', name: '办公室', note: '日常行政 / 公文 / 会议' },
-  { code: 'academic', name: '教务处', note: '教务口径的日常执行' },
-  { code: 'logistics', name: '总务处', note: '后勤 / 资产 / 场地' },
-  { code: 'moral_edu', name: '德育处', note: '班主任管理 / 学生活动' },
+  { code: 'office', name: '办公室', note: '行政事务 · 公文 · 会议' },
+  { code: 'academic', name: '教务处', note: '课务与考试安排' },
+  { code: 'logistics', name: '总务处', note: '后勤 · 资产 · 场地' },
+  { code: 'moral_edu', name: '德育处', note: '班主任工作 · 学生活动' },
 ]
 
 /**

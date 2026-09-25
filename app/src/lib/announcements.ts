@@ -486,6 +486,15 @@ export type AnnouncementInput = {
   activeFrom?: string
   /** 生效终点（ISO 字符串）；空串 = 不过期 */
   activeTo?: string
+  /**
+   * 🆕 2026-09-29 管理台第二期：**是否同时发一封邮件**（可选勾选、**默认不发**）。
+   *
+   * 🔴 发的是**给管理员邮箱的一封留档**，**不是群发**：Resend 未验域名时
+   *    发件人只能是 `onboarding@resend.dev`，而它**只能发给账号所有者本人**。
+   *    ⚠️ 界面上必须把这句话写出来 —— 不许让超管以为"全校老师都收到邮件了"。
+   * 🔴 默认不发的另一半理由：免费额度 3000 封/月、**100 封/天**。
+   */
+  sendEmail?: boolean
 }
 
 async function call(
@@ -527,8 +536,7 @@ async function call(
   if (res.status === 404) {
     return {
       ok: false,
-      message:
-        '这个部署里没有公告服务（/api/announcement）。在本地开发环境（npm run dev）下它不存在，线上才有。',
+      message: '公告服务暂时不可用，请稍后再试。',
     }
   }
   const message = String(payload.message ?? `操作失败（HTTP ${res.status}）`)
@@ -595,7 +603,7 @@ export function announcementPrivacyHint(title: string, body: string): string | n
    */
   if (/(学号|分数|成绩|排名|平均分|及格率|名次)/.test(text) || /\d+\s*分(?!钟)/.test(text)) {
     return (
-      '正文里出现了「成绩 / 分数 / 学号」一类的词。公告是**给全站看的**，' +
+      '正文里出现了「成绩 / 分数 / 学号」一类的词。公告是给全站看的，' +
       '请不要写具体的学生姓名、学号或成绩 —— 那类事走「通知」（只有相关老师看得到）。'
     )
   }

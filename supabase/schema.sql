@@ -610,11 +610,18 @@ alter table classroom_accounts enable row level security;
 -- -------- 10.2 回填现有数据（只增不改）--------
 --  ⚠️ 回填**只做能确证的事**：学校、年级、班级归属、任课关系这些是数据事实；
 --      **角色一律显式指派**（见 §10.6），不做任何推断式提权。
---  真实情况（用户 2026-09-24 确认）：教师有两位 —— 示例教师（高二(1)班 / 高二(4)班 的
---  **物理老师，不是班主任**）和一个测试账号；班级三个（含一个「测试专用」）。
---  设计 §七 里记的「示例教师一人 / 两个班 / 2 份作业」是 09-23 的快照，早已过时。
+--  真实情况（用户 2026-09-24 确认）：教师有两位 —— 一位物理老师（高二(1)班 / 高二(4)班 的
+--  **任课老师，不是班主任**）和一个测试账号；班级三个（含一个「测试专用」）。
+--  ⚠️ 真名只存在于**库里那一行**（`teachers.name`），**仓库里一律不写真人姓名**
+--     —— 本文件是公开的。下文一律用「示例教师」指代他。
+--  设计 §七 里记的「一位教师 / 两个班 / 2 份作业」是 09-23 的快照，早已过时。
 
 -- ① 学校：优先沿用 teachers.school 里已经填过的名字，没有才用默认
+--  ⚠️ 下面那个默认名是**中性占位**（`示例中学`），它只在「**新库** + `teachers.school` 也是空」时才会被用到：
+--     整句被 `where not exists (select 1 from schools)` 守着 —— **线上库已经有 schools 行了，
+--     这条永远是 no-op（改不到线上数据）**。所以「把默认名换掉」不涉及任何已建好的库：
+--     真名留在各自的库里，由部署方自己维护。
+--     新库想直接用真名：把 `示例中学` 换掉，或先给 `teachers.school` 填上（那一支优先）。
 insert into schools (name)
 select coalesce(
   (select nullif(school, '') from teachers where school <> '' limit 1),
@@ -645,15 +652,15 @@ where c.grade_id is null
 
 -- ⑤ 超管：**不回填**。
 --    设计 §七 步骤 2 写的是「给现有教师插一条 role='super'」—— 那是 09-23 的假设，
---    当时以为库里只有示例教师一位教师、而且他就是管理员。
---    实际不是：示例教师只是任课教师，库里还有测试账号，真正的主管另有一个专用账号
---    （用户 2026-09-24 决定：**只留 Admin 一个最高管理员**）。
+--    当时以为库里只有一位教师、而且他就是管理员。
+--    实际不是：那位老师只是任课教师，库里还有测试账号，真正的主管另有一个专用账号
+--    （用户 2026-09-24 决定：**最高管理员只留一个**）。
 --    「按拥有班级的人自动提权」这条规则尤其危险：它会顺手把任何一个建过班的老师
 --    变成全校可见 —— 那不是权限设计，那是漏洞。所以超管必须**显式指派**，见 §10.6。
 
 -- ⑥ 班主任：**不回填**。
 --    旧模型里 classes.teacher_id 的含义是「这条班级记录是谁建的」，
---    **不等于班主任** —— 本项目里示例教师是这两个班的物理老师，不是班主任
+--    **不等于班主任** —— 本项目里那位老师只是这两个班的物理老师，不是班主任
 --    （用户 2026-09-24 明确）。设计 §七 步骤 3 里「班级所有者 = 班主任」是错的：
 --    照它回填会让任课教师拿到班主任的实权。
 --    ⚠️ 不要为了方便把它加回来 —— 这是权限，不是便利。
@@ -858,7 +865,7 @@ select '有班级却没人任课', count(*) from classes c
 
 -- ② 回填明细
 --    期望：1 所学校 / 3 个年级 / 3 个班 / **0 条 super、0 条班主任**（角色显式指派，见 §10.6）
---          / 3 行任课关系（示例教师 × 物理 × 高二(1)、高二(4)；测试账号 × 物理 × 测试专用）
+--          / 3 行任课关系（物理老师 × 物理 × 高二(1)、高二(4)；测试账号 × 物理 × 测试专用）
 select '学校' as 表, count(*)::text as 行数 from schools
 union all select '年级', count(*)::text from grades
 union all select '班级', count(*)::text from classes
@@ -868,6 +875,8 @@ union all select '任课关系', count(*)::text from class_subjects;
 
 -- ③ 🔴 新旧策略对比（阶段 5 的放行条件）
 --    把 uuid 换成要核对的教师 id（教师 id 用 select id, name, subject from teachers; 拿）
+--    ⚠️ 下面写的是**占位**（原先这里是维护者本人的教师 id —— 本文件是公开的，已移除）。
+--       不换成真人就跑：CTE 是空集 → 判据**全部为 false**（假失败），§15.4 记过这个坑。
 --    左右两组数**必须完全相等**，才允许进阶段 5 去删旧策略。
 with me as (select '00000000-0000-0000-0000-000000000000'::uuid as uid)
 select
@@ -926,7 +935,7 @@ select
 --
 --  ⚠️ 这一步是「加策略」，不是「换策略」。
 --     PostgreSQL 的 permissive 策略之间是 **OR** —— 新旧并存时可见范围是两者的**并集**。
---     已验证（用户实跑）：对示例教师，visible_class_ids_for() 与旧策略 teacher_id = auth.uid()
+--     已验证（用户实跑）：对那位物理老师，visible_class_ids_for() 与旧策略 teacher_id = auth.uid()
 --     看到的**完全相等**（班级 2 / 学生 80 / 作业 8），所以这个并集就是原来那个集合 ——
 --     教师的可见范围一点没变。这正是设计 §七 要求的"先并存核对，再删旧的"。
 --
@@ -1657,6 +1666,7 @@ create policy assignments_visible on assignments for select to authenticated
 --  直接写 auth.uid() 的话 SQL 编辑器里是 NULL，会得到 0 = 0 的**假通过**。
 --
 --  ① 逐行对照（把 uuid 换成要核对的老师 id；教师 id 用 `select id, name from teachers;` 拿）
+--     ⚠️ 里面的 uuid 是**占位**（原先写着维护者本人的教师 id，已从公开仓库移除）。
 --     期望：**新_看得见 = false 的行，全部都是"他自己没建、也不教这一科"的**；
 --           凡是 `teacher_id = 他自己` 的行，新_看得见必须是 true。
 with me as (select '00000000-0000-0000-0000-000000000000'::uuid as uid)
@@ -2002,7 +2012,7 @@ revoke all on exams, exam_scores from anon;
 --  where schemaname = 'public' and tablename in ('exams','exam_scores') order by 1,2;
 --  期望：exams 2 条（visible=SELECT / write=ALL）、exam_scores 2 条，共 4 条。
 
---  ② 写判据函数在真实数据上的表现（把 uuid 换成要核对的老师 id）
+--  ② 写判据函数在真实数据上的表现（把 uuid 换成要核对的老师 id；下面是占位）
 -- with me as (select '00000000-0000-0000-0000-000000000000'::uuid as uid)
 -- select t.name, cs.subject, cs.subject_code, c.name as 班级,
 --        can_edit_exam_for((select uid from me), array[c.id], cs.subject_code, cs.subject) as 他能改
@@ -2019,8 +2029,8 @@ revoke all on exams, exam_scores from anon;
 --  🔴 读这条结果时最容易搞错的一点（2026-09-27 用户实测踩到，记下来）：
 --     前四列（`t.name` / `cs.subject` / `cs.subject_code` / 班级）说的是**这一行是谁的**，
 --     最后一列 `他能改` 说的是 **`me`（核对对象）能不能改这一行** —— 这是两件事。
---     所以 `me` = 示例教师时看到 `demo-teacher / 物理 / 测试专用 = false`，它的意思是
---     "**示例教师**改不了 demo-teacher 那一行"（正确），**不是**"demo-teacher 改不了自己的班"。
+--     所以 `me` = 示例教师时看到 `测试账号 / 物理 / 测试专用 = false`，它的意思是
+--     "**示例教师**改不了测试账号那一行"（正确），**不是**"测试账号改不了自己的班"。
 --     要问后者就得判**每一行自己的老师**（§16.6 ② 的问法：`…_for(t.id, c.id, …)`），
 --     两者在同一批数据上的实测对照记在 rls-checks 第十三节。
 --  ⚠️ 另一个会把这条读成"全 false"的坑：`me` 按姓名查不到人 → CTE 是空集 →
@@ -2570,6 +2580,7 @@ drop policy if exists classrooms_own     on classrooms;
 --     期望：**逐行相同** —— 本段只重写了读策略里"自己建的"那几支（16.3.0），
 --     效果与旧 `for all` 策略的 select 分支**相等**；删旧策略不该让任何人少看见一行。
 --     把 uuid 换成要核对的老师 id（`select id, name, subject from teachers;` 拿）。
+--     ⚠️ 里面的 uuid 是**占位**（原先写着维护者本人的教师 id，已从公开仓库移除）。
 with me as (select '00000000-0000-0000-0000-000000000000'::uuid as uid)
 select
   (select count(*) from classes    where id       in (select visible_class_ids_for((select uid from me)))) as 看得见_班级,
@@ -2872,8 +2883,8 @@ create policy shared_files_not_classroom_delete on shared_files
 --  为什么专门写一节：`can_edit_exam_for` 这个变体此前**故意没有建**
 --  （§15.4 的旧注释说"它不需要在编辑器里被指定人核对"），代价是两条：
 --    ① 在 Supabase SQL 编辑器里**验不了考试那条写判据** —— 编辑器里 `auth.uid()` 是 NULL，
---       `can_edit_exam(...)` 对**任何人**都返回 false（用户实测：示例教师 / demo-teacher / 所有班全 false）。
---       于是"示例教师能不能建高二(1)班的物理考试"这个最基本的问题，当时**没有答案**；
+--       `can_edit_exam(...)` 对**任何人**都返回 false（用户实测：两位教师 / 所有班全 false）。
+--       于是"某位老师能不能建高二(1)班的物理考试"这个最基本的问题，当时**没有答案**；
 --    ② `app/scripts/rls-checks.mjs` 里对考试写判据**一条断言都没有**（没法以指定身份调用）——
 --       而那条判据守着的正是"谁能建 / 改考试档案"。
 --
@@ -5101,4 +5112,488 @@ create policy announcements_visible on announcements for select to authenticated
 --
 --  ④ 教室端读不到那一条（**这条必须是 0 行**）：钉在 `app/scripts/rls-checks.mjs`
 --     第二·之六节（真 PGlite + 假 JWT）—— SQL 编辑器里跑不了（那里 auth.uid() 是 null）。
+-- ============================================================
+
+
+-- ============================================================
+--  23. 平台设置：**维护模式**（2026-09-29 管理台第二期）—— 「平台对自己说话」
+--      设计见 `管理台第二期方案.md` §二.3 · 落地口径见 `功能设计与不变量.md` §二十五
+--
+--  🔴🔴 **读这一节之前先记住：维护 ≠ 公告 ≠ 通知**（三个东西，三种收件人）
+--
+--     · **通知**（`notices` §21）＝ 学校对老师说话（有收件范围、有未读）；
+--     · **公告**（`announcements` §22）＝ 平台对老师说话（全站一条、横幅 + 弹窗）；
+--     · **维护**（本节）＝ **平台现在还开不开门**。它不是"一条消息"，
+--       而是一个**状态**：匿名可读（未登录的人也要知道"现在进不去"）、
+--       有**时间窗**（到点自动开 / 到点自动关）、**超管自己不受影响**。
+--     ⛔ 不许用一条置顶公告代替它（教室端读不到公告、公告靠人点进去看、
+--        而维护要的是"进门就被拦"）；⛔ 也不许给 `announcements` 加 `enabled` 列
+--        （那是把"一个状态"塞进"一篇文章"里）。
+--
+--  🔴 **谁都能读、只有超管能写**：
+--     · 读：**只有一个公开出口** `GET /api/status`（**只回 3 个字段**）；
+--       这张表**一条策略都不建**，而且对 anon / authenticated **连 SELECT 都不给**
+--       —— 一旦给了，将来往这张表里放任何东西都变成匿名可见。
+--     · 写：**只有一个出口** `POST /api/admin/maintenance`（service_role，
+--       判据 = `is_super_admin()`，**不是** `can_manage_teachers()`）。
+--
+--  ⚠️ 本段可重复执行（幂等）：只新增对象（两张表 + 一行种子），不动任何既有对象。
+-- ============================================================
+
+-- -------- 23.1 操作留痕（`admin_audit`）--------
+--  🔴 为什么要有它（而这一版**刻意不建"谁看过什么"那种浏览留痕**，见 §20.2）：
+--     维护模式是**唯一一个能把全校锁住**的动作，删错误日志是**不可逆**的动作。
+--     这两种"改动了系统的状态"的事必须留一句"谁、什么时候、改成了什么"。
+--     ⚠️ 它与"谁看了什么"是两件事：这里只记**写动作**（开/关维护、删日志、发信），
+--        不记任何一次读。
+--  ⚠️ 表名刻意叫 `admin_audit` 而不是 `maintenance_log`：它记的是**平台侧写动作**，
+--     维护只是第一个用它的功能（第二个是删错误日志 / 发信计数）。
+create table if not exists admin_audit (
+  id          bigint generated always as identity primary key,
+  at          timestamptz not null default now(),
+  -- 谁做的。⚠️ `on delete set null`（**不是 cascade**）：人走了不等于那件事没发生
+  actor_id    uuid references teachers (id) on delete set null,
+  -- 名字**快照**：账号删了之后这一行还要能被人读懂
+  actor_name  text not null default '',
+  -- 动作代码，形如 `maintenance.on` / `errors.delete` / `mail.test`（见 §23.2 与相关接口）
+  action      text not null default '',
+  -- 作用对象（被删的 id / 清理的截止日期 / 邮件收件人），纯文本，不回显任何正文
+  target      text not null default '',
+  -- 一句人话的补充（**不许放学生数据**：这张表会被一起备份，见 §二十四 的同一句纪律）
+  detail      text not null default '',
+  -- 影响行数（删了几条 / 发了几封）。默认 0，不是"未知"
+  affected    integer not null default 0
+);
+-- 「最近的写动作」是这张表唯一的热路径 —— 它是个位数/百位数条的表
+create index if not exists admin_audit_at_idx on admin_audit (at desc);
+-- 📩 发信配额要数"最近 24 小时发了几封"（Resend 免费额度 100 封/天）
+create index if not exists admin_audit_action_idx on admin_audit (action, at desc);
+
+alter table admin_audit enable row level security;
+-- 🔴 **一条策略都不建，而且连 SELECT 都不给**：读只走服务端（超管接口）。
+--    理由与 `site_state` 逐字相同：这张表将来会长出别的东西，
+--    "建了策略再想"就是"将来某一天它匿名可见了"。
+revoke all on admin_audit from anon, authenticated;
+
+-- -------- 23.2 维护模式状态（`site_state`，`key='maintenance'`）--------
+--  ⚠️ 用 `key` 做主键（而不是"只有一行"）：将来别的小开关（例如"只读模式"）
+--     往同一个表里加一行即可，不用再建一张设置表。
+--  ⚠️ 字段是**显式列**而不是一个 `jsonb`：显式列能在数据库这一层写 check
+--     （`until > scheduled_from`），而 jsonb 里那个约束只能靠应用层 ——
+--     "表自己守得住"是本仓库一贯的口径（与 `announcements_active_range_check` 同款）。
+create table if not exists site_state (
+  key             text primary key,
+  -- 超管的**开关意图**（一个字段一种语义）。⚠️ "现在到底是不是维护中"要把这一列
+  -- 与下面两个时刻一起算 —— 判据只有一处：服务端 `maintenanceEffective()`
+  -- （`functions/api/_lib/maintenance.ts`，前端那份同名函数只用于面板预览）。
+  enabled         boolean not null default false,
+  -- 给全校看的通告正文（服务端截断到 200 字）。空 = 用默认文案
+  message         text not null default '',
+  -- 自动关闭时刻。空 = 不自动关（⚠️ 服务端在开启时**强制**写它，默认 now()+4h）
+  until           timestamptz,
+  -- 定时开启时刻。空 = 不是定时开启（`enabled` 立刻生效）
+  scheduled_from  timestamptz,
+  updated_by      uuid references teachers (id) on delete set null,
+  updated_at      timestamptz not null default now(),
+  -- 区间自洽：两端都写了就必须"结束晚于开始"（否则那一段永远不生效，
+  -- 而界面上会多出一条谜 —— 与 §22.1 的 `announcements_active_range_check` 同一条纪律）
+  constraint site_state_range_check
+    check (until is null or scheduled_from is null or until > scheduled_from)
+);
+
+insert into site_state (key) values ('maintenance') on conflict (key) do nothing;
+
+alter table site_state enable row level security;
+-- 🔴 读也只有一个公开出口（`GET /api/status`）—— 所以这里**连 SELECT 都不给**。
+--    给前端 select 这张表的权限 = 将来往里放任何东西都匿名可见（方案 §二.3 原文）。
+revoke all on site_state from anon, authenticated;
+
+-- -------- 23.3 核对（把下面整段粘进 SQL 编辑器）--------
+--  ① 两张表上一共几条策略（**必须都是 0 行**）：
+--  -- select tablename, policyname, cmd from pg_policies
+--  --  where tablename in ('site_state','admin_audit');
+--  -- 期望：（0 行）
+--
+--  ② 连 SELECT 都没给（**这两条也必须都是 false**）：
+--  -- select has_table_privilege('anon','site_state','select') as anon读,
+--  --        has_table_privilege('authenticated','site_state','select') as 老师读;
+--
+--  ③ 种子行在（`key='maintenance'`，未开启）：
+--  -- select key, enabled, message is null as 消息为空, until, scheduled_from from site_state;
+-- ============================================================
+
+
+-- ============================================================
+--  24. 前端错误日志（2026-09-29 管理台第二期 · `frontend_errors`）
+--      设计见 `管理台第二期方案.md` §二.4
+--
+--  🔴 **它为什么必须存在**：教师端与教室端出问题时，**现场只有那块屏**。
+--     `syncError` 只留"上一次写库失败的原因"（一个字符串槽位，没有时间没有历史，
+--     见 §十 留档的"老师说他改了、刷新就没了"），而浏览器里的 JS 异常
+--     **一个字都没留下**。这张表就是那条流水。
+--
+--  🔴 **上报是本项目唯一一个对匿名开放的写接口**（登录页 / 教室端 / hydrate 失败
+--     这三个现场**都没有会话**，而那正是最该报上来的三种）。所以它比别的写路径多四道：
+--     ① **限流**（同一人 5 分钟 ≤ 20 条 + 全表 5 分钟 ≤ 200 条兜底）；
+--     ② **每个字段都在服务端截断**（不信前端）；
+--     ③ **回话里绝不回显正文**（否则它就成了一个"写进去能读回来"的通道）；
+--     ④ **超限返回正常 JSON**（`{ok:false,reason:'rate-limited'}`，**不是错误码**）。
+--
+--  🔴 **隐私：B 类（可能升到 C，所以要防）**。`message` / `stack` 里**可能夹到学生姓名**
+--     （例：`throw new Error('张三这次没交')`、或 Postgres 的
+--     `Key (student_no)=(20230115) already exists`）。三条措施：
+--     ① 这张表里**根本没有**学生字段（不是"界面不渲染"，是**想显示都显示不出来**）；
+--     ② 读只走服务端（超管），界面复用第一期的 `PrivacyLine`（"请勿投屏或截图"）；
+--     ③ `has_pii` 用**窄启发式**标出来（邮箱 / 连续 15+ 位数字），
+--        ⚠️ 屏上必须写明**它是启发式**，绝不许写成"已脱敏"。
+--
+--  ⚠️ 本段可重复执行（幂等）。
+-- ============================================================
+
+-- -------- 24.1 建表 --------
+create table if not exists frontend_errors (
+  id            bigint generated always as identity primary key,
+  -- 谁报的。未登录 = null（游客 / 登录页 / 教室端还没有会话时）
+  account_id    uuid references teachers (id) on delete set null,
+  username      text not null default '',   -- left(…,60)  快照：人不在册了也读得懂
+  role          text not null default '',   -- left(…,40)  身份标签快照
+  view          text not null default '',   -- left(…,120) 页面路径 / 活动视图
+  message       text not null default '',   -- left(…,500) 空则 '未知错误'
+  stack         text not null default '',   -- left(…,2000)
+  ua            text not null default '',   -- left(…,300)
+  env           text not null default '',   -- left(…,20)  'web' | 'kiosk'
+  -- 🔴 本项目独有的一列：上报那一刻 `store.syncError` 的原文。
+  --    §十 留档过「老师说他改了、刷新就没了」—— 有了它，才有可能把
+  --    "页面崩了"与"写入被静默拒绝"关联起来。⚠️ **这不是 D1/D2**：
+  --    它只是顺手把现场那一句话带回来，不改 `syncError` 的形态。
+  sync_error    text not null default '',   -- left(…,300)
+  -- 启发式标出来"这条可能含学生信息"（见文件头 ③）
+  has_pii       boolean not null default false,
+  ts            timestamptz not null default now()
+);
+-- 「最近 24 小时」与「按时间倒序列出」是这张表唯一的热路径
+create index if not exists frontend_errors_ts_idx on frontend_errors (ts desc);
+-- 限流要按"同一人在最近 5 分钟"数行
+create index if not exists frontend_errors_account_idx on frontend_errors (account_id, ts desc);
+create index if not exists frontend_errors_username_idx on frontend_errors (username, ts desc);
+
+alter table frontend_errors enable row level security;
+-- 🔴 读只走服务端（超管接口 `/api/admin/errors`）→ 一条策略都不建、SELECT 也不给。
+revoke all on frontend_errors from anon, authenticated;
+
+-- -------- 24.2 上报（`report_frontend_error`）--------
+--  🔴 **唯一一处实现"截断 + 限流 + 洗一遍"**。前端（`src/lib/errors.ts`）只负责
+--     调用它，并且**自己那一层也限流**（每会话同一条错误最多 2 条、总计 10 条）
+--     —— 两层限的不是同一件事：前端那层是"别让一个崩溃循环把页面拖死"，
+--     这一层是"别让任何人把这张表撑爆"。
+--  ⚠️ `security definer`：它要绕过"表上一条策略都没有"往表里写。
+--     因为它是 definer，**每一条入参都必须当成敌意输入**（这就是它存在的理由）。
+create or replace function public.report_frontend_error(
+  p_username   text default '',
+  p_role       text default '',
+  p_view       text default '',
+  p_message    text default '',
+  p_stack      text default '',
+  p_ua         text default '',
+  p_env        text default '',
+  p_sync_error text default ''
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  -- ① 截断（长度常量与服务端 `functions/api/errors.ts` 逐字相同，见那边的注释表）
+  v_username text := left(coalesce(p_username, ''), 60);
+  v_role     text := left(coalesce(p_role, ''), 40);
+  v_view     text := left(coalesce(p_view, ''), 120);
+  -- ⚠️ 空消息归一成 '未知错误'（**不是空串**）：屏上一行空白比"未知错误"更难查
+  v_message  text := left(coalesce(nullif(btrim(coalesce(p_message, '')), ''), '未知错误'), 500);
+  v_stack    text := left(coalesce(p_stack, ''), 2000);
+  v_ua       text := left(coalesce(p_ua, ''), 300);
+  v_env      text := left(coalesce(p_env, ''), 20);
+  v_sync     text := left(coalesce(p_sync_error, ''), 300);
+  -- 限流的"人"：登录了按 auth.uid()，没登录按自报的 username（匿名没有 IP 可用，
+  -- 见 `功能设计与不变量.md` §二十五「已知边界」那一条 —— 明说这是"限洪"）
+  v_key      text := coalesce(auth.uid()::text, v_username);
+  v_mine     integer;
+  v_all      integer;
+  v_pii      boolean;
+  v_id       bigint;
+begin
+  -- ② 限流一：同一人 5 分钟 ≤ 20 条
+  select count(*) into v_mine
+    from frontend_errors e
+   where e.ts > now() - interval '5 minutes'
+     and coalesce(e.account_id::text, e.username) = v_key;
+  if v_mine >= 20 then
+    -- ⚠️ **正常 JSON + 200**（不是错误码）：超限不是"出错"，前端什么都不用做
+    return jsonb_build_object('ok', false, 'reason', 'rate-limited', 'scope', 'account');
+  end if;
+
+  -- ③ 限流二：全表 5 分钟 ≤ 200 条（匿名可以换 username 绕过限流一，这层挡洪水）
+  select count(*) into v_all from frontend_errors e where e.ts > now() - interval '5 minutes';
+  if v_all >= 200 then
+    return jsonb_build_object('ok', false, 'reason', 'rate-limited', 'scope', 'global');
+  end if;
+
+  -- ④ 洗一遍：**URL 的 query string 一律抹掉**（`?access_token=…` / `?roles=…` 都不能进这张表）
+  --    ⚠️ 前端也洗（`lib/errors.ts` 的 `scrubForReport`），但**不指望前端** ——
+  --       手打这个 RPC 的人不会洗（I49 的"服务端要再洗一遍"）。
+  v_message := regexp_replace(v_message, '(https?://[^?\s]+)\?[^\s]*', '\1', 'g');
+  v_stack   := regexp_replace(v_stack,   '(https?://[^?\s]+)\?[^\s]*', '\1', 'g');
+
+  -- ⑤ `has_pii`：**窄启发式**（邮箱 / 连续 15+ 位数字）。
+  --    ⚠️ 它会有漏、也可能误标 —— 界面上必须写明"启发式"，**不许写成"已脱敏"**。
+  --    ⚠️ 刻意**不做**"查库里有没有这个学生姓名"那一条：一次上报查一次全校名单，
+  --       成本与隐私都不划算（方案 §二.4 的建议也是只做前两条）。
+  v_pii := (v_message || ' ' || v_stack) ~ '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
+        or (v_message || ' ' || v_stack) ~ '[0-9]{15,}';
+
+  insert into frontend_errors
+    (account_id, username, role, view, message, stack, ua, env, sync_error, has_pii)
+  values
+    (auth.uid(), v_username, v_role, v_view, v_message, v_stack, v_ua, v_env, v_sync, v_pii)
+  returning id into v_id;
+
+  -- ⑤ 回话里**只有 id 与有没有疑似隐私**，**绝不回显正文**（那会变成读回通道）
+  return jsonb_build_object('ok', true, 'id', v_id, 'has_pii', v_pii);
+end $$;
+
+-- 🔴 这个函数**故意** grant 给 anon：登录页 / 教室端 / hydrate 失败三个现场都没有会话。
+--    它是本项目唯一一个对匿名开放的函数（`ocr.ts` 是"无鉴权"的反例，不是先例）。
+grant execute on function report_frontend_error(text, text, text, text, text, text, text, text)
+  to anon, authenticated;
+
+-- -------- 24.3 核对（把下面整段粘进 SQL 编辑器）--------
+--  ① 表上 0 条策略：
+--  -- select policyname from pg_policies where tablename = 'frontend_errors';  -- 期望 0 行
+--
+--  ② 匿名能上报、但**读不到**（这两条一起看才是重点）：
+--  -- select public.report_frontend_error('测试','teacher','/x','探针','','','web','');
+--  -- select count(*) from frontend_errors;   -- 以 anon 身份：42501 权限不足（不是 0 行）
+--
+--  ③ 截断真的生效（插一条 800 字的，回来看长度）：
+--  -- select length(message) as 消息长度, length(stack) as 堆栈长度
+--  --   from frontend_errors order by ts desc limit 1;   -- 期望 500 / 2000
+--
+--  ④ 限流：连打 21 次之后第 21 次回 `{"ok": false, "reason": "rate-limited"}`
+--     —— 钉在 `app/scripts/rls-checks.mjs` 第二·之七节（真 PGlite）。
+-- ============================================================
+
+
+-- ============================================================
+--  25. 用户反馈（2026-09-29 管理台第二期 · `feedback`）
+--      设计见 `管理台第二期方案.md` §二.5
+--
+--  🔴🔴 **反馈 ≠ 通知：方向相反，数据模型零复用**（本仓库最容易搞混的第二处）
+--
+--     · **通知**（`notices` §21）＝ **学校对老师**说话：`sender_id` 是一个有身份的账号，
+--       收件人是**算出来的范围**，有 `scope_kind` / `pinned` / `revoked_at` / `expires_at`。
+--     · **反馈**（本节）＝ **老师对学校**说话：`author_id` 是任何一位在册教师，
+--       「收件人」就是**一个人 / 一个邮箱**，没有范围、没有已读、没有置顶。
+--     ⛔ 反馈表里**不许**出现 `scope_kind` / `pinned` / `revoked_at` / `expires_at`；
+--     ⛔ 通知表里**不许**出现 `handled_at` / `mail_state` / `contact`。
+--     ⚠️ 界面上的实招：两条通道的**入口位置分开**（通知在导航 + 工作台；
+--        反馈在「我的」页最下面），且反馈块上明写一句「只给管理员看，不会出现在通知里」。
+--
+--  🔴 **先落库、再发信**（本件的验收核心）：插入成功就**立刻**算"已送到"，
+--     发信失败**不回滚、也不改用户看到的结果** —— 反过来（只发信不存库）会让
+--     邮件一失败那条反馈**永久消失**，而双方都以为送到了。
+--     数据库里 `mail_state` / `mail_error` 就是那条留痕；
+--     `/admin` 的反馈卡上必须**显式报警**（`mail_state <> 'sent'` 的条数）。
+--
+--  🔴 **读**：这张表**一条策略都不建**、连 SELECT 都不给 —— 因为"内部字段不能给作者看"
+--     这件事 **RLS 表达不了**（RLS 管行，不管列）。所以：
+--       · 作者看自己那几条 → `POST /api/feedback {action:'mine'}`（按 JWT 过滤 + 剥字段）；
+--       · 超管看全部     → `POST /api/feedback {action:'admin-list'}`。
+--     两条都走同一个 Function（service_role），**判据在数据库**。
+--
+--  ⚠️ **不做附件**（方案 §二.5 的三条理由）：硬挂 `shared_files` 会出现
+--     "老师传给管理员的截图，教室里那块屏也看得见"。
+--
+--  ⚠️ 本段可重复执行（幂等）。
+-- ============================================================
+
+-- -------- 25.1 建表 --------
+create table if not exists feedback (
+  id            uuid primary key default gen_random_uuid(),
+  school_id     uuid references schools (id) on delete set null,
+  -- 谁提的。⚠️ 本项目**不允许匿名提交**（用户 2026-09-28 拍板：未登录 / 前端问题
+  -- 一律走前端错误上报那条路）。所以它是 `not null` —— 这张表里不会有"幽灵反馈"。
+  author_id     uuid not null references teachers (id) on delete cascade,
+  -- 名字 / 身份标签的**快照**（提交时那一刻的，便于人不在了也读得懂）
+  author_name   text not null default '',   -- left(…,60)
+  author_roles  text not null default '',   -- left(…,120)
+  -- 正文（服务端 left(…,1000)）。**< 5 字直接拒**（不是静默截断）
+  body          text not null default '',
+  -- 选填联系方式，left(…,120)
+  contact       text not null default '',
+  -- 自动附带的现场（**不带任何学生数据**：不带当前班级、不带名单）
+  page          text not null default '',   -- left(…,120)
+  env           text not null default '',   -- left(…,20) 'remote' | 'local'
+  ua            text not null default '',   -- left(…,300)
+  -- ---- 邮件那一半：**必须落库**（邮件会失败，存库才有留底）----
+  --   pending 刚插入、还没试发
+  --   sent    发出去了（Resend 回了 id）
+  --   failed  试了但失败（原因在 mail_error）
+  --   skipped 没配 key / 正文疑似含学生信息（**没试**，原因在 mail_error）
+  mail_state    text not null default 'pending'
+                check (mail_state in ('pending','sent','failed','skipped')),
+  mail_error    text not null default '',   -- left(…,300) **不回给用户**
+  mail_at       timestamptz,
+  -- ---- 处理状态（给"我提过的"用；**作者只看得到这一列的结论**）----
+  handled_at    timestamptz,
+  internal_note text not null default '',   -- left(…,300) **内部字段，作者看不到**
+  reply         text not null default '',   -- left(…,1000) 可选回复（作者看得到）
+  handled_by    uuid references teachers (id) on delete set null,
+  created_at    timestamptz not null default now()
+);
+create index if not exists feedback_created_idx on feedback (created_at desc);
+-- 「我提过的」是作者维度的热路径
+create index if not exists feedback_author_idx on feedback (author_id, created_at desc);
+-- 反馈卡的"待处理 / 邮件没发出去"两个计数都要按状态数
+create index if not exists feedback_mail_idx on feedback (mail_state);
+
+alter table feedback enable row level security;
+-- 🔴 一条策略都不建，连 SELECT 都不给（理由见文件头：RLS 管不了列）
+revoke all on feedback from anon, authenticated;
+
+-- -------- 25.2 判据：**这位在册教师能不能给管理员发消息** --------
+--  🔴 判据一律走 `_for` / 裸版**两件套**（与 §21.4 / §22.2 同一套）：
+--     `_for` 接受任意 uid（= "以任意人身份问一句"）→ **一律 revoke**，只留给属主核对；
+--     裸版 grant 给 authenticated，服务端拿**调用者自己的 JWT** 走 RPC 问它。
+--
+--  ⚠️ 语义刻意**不叫** `can_send_feedback`：它守的不只是反馈这一条路 ——
+--     `POST /api/mail` 的 `backup` 那一支（备份完成通知）用的是**同一个条件**
+--     （"在册教师、不是教室端"）。**一个判据一种语义**，两条路共用它，
+--     所以名字说的是那件共同的事（"能不能给管理员发消息"）。
+--
+--  两半判据（与 `can_publish_announcement_for` 逐字同款）：
+--    ① `teachers` 里有一行 —— 挡住"认不出的 uid"（service_role 那条路不能凭幽灵 id 写库）；
+--    ② **不是教室端** —— 教室里那块屏没有「我的」页，也没有"给学校提意见"这个身份。
+create or replace function public.can_contact_admin_for(p_uid uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (select 1 from teachers t where t.id = p_uid)
+     and not exists (select 1 from classroom_accounts ca where ca.id = p_uid);
+$$;
+
+revoke all on function can_contact_admin_for(uuid) from public, anon, authenticated;
+
+create or replace function public.can_contact_admin()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$ select can_contact_admin_for(auth.uid()) $$;
+
+grant execute on function can_contact_admin() to authenticated;
+
+-- -------- 25.3 核对（把下面整段粘进 SQL 编辑器）--------
+--  ① 表上 0 条策略、连 SELECT 都没给：
+--  -- select policyname from pg_policies where tablename = 'feedback';   -- 期望 0 行
+--  -- select has_table_privilege('authenticated','feedback','select');    -- 期望 false
+--
+--  ② 判据（把 uuid 换成要核对的老师 id）：
+--  -- select public.can_contact_admin_for('00000000-0000-0000-0000-000000000000'::uuid);
+--  -- 期望：任课教师 true；**教室端 false**；认不出的 uuid false
+--
+--  ③ `mail_state` 的四个值由 check 钉死，塞第五个值必须报错：
+--  -- update feedback set mail_state = 'nonsense';   -- 期望 23514 check 违反
+--
+--  ④ **先落库再发信**（发信失败时库里仍有行）：钉在
+--     `app/scripts/admin-checks.mjs`（假 Supabase + 真 Function）——
+--     SQL 编辑器里跑不了（那里没有 Resend 的两条分支）。
+-- ============================================================
+
+
+-- ============================================================
+--  26. 运维只读报告：**数据库用量**（2026-09-29 管理台第二期）
+--      设计见 `管理台第二期方案.md` §二.2 · 落地口径见 `功能设计与不变量.md` §二十五
+--
+--  🔴 **为什么必须是一个函数**：`pg_database_size()` / `pg_total_relation_size()`
+--     都是**目录表上的函数**，PostgREST 的表端点上拿不到（anon key 连权限都没有，
+--     而且前端不该有）。所以照本仓库一贯的做法：**服务端拿 service_role 调它**，
+--     前端永远看不到原生的字节数来源。
+--
+--  🔴 **它只回答"字节数与计数"，绝不回任何行内容**（`question_meta` 那一列
+--     里是**题图的 base64**：只报**体积**，绝不显示图片 —— 与第一期 J2 同一条纪律）。
+--     排行里给的是「班级名 + 档案 id + 字节数」，**没有学生、没有题目、没有成绩**。
+--
+--  ⚠️ **配额（1 GB）与阈值不在这里**：它们在 `app/src/lib/adminChart.ts`
+--     （`DB_QUOTA_BYTES` / `DB_WARN_PCT` / `DB_BAD_PCT`）。
+--     **一个常量只能有一处** —— 这个函数只量数，不判色。
+--
+--  ⚠️ 行数是 `pg_class.reltuples`，那是**规划器的估算**，不是精确值：
+--     还没被 ANALYZE 过的表回 -1 → 这里归一成 **null（= 无法判断）**，
+--     ⚠️ **绝不归一成 0**（"0 行"与"还没统计过"是两件事，本项目最贵的一条教训）。
+--
+--  ⚠️ 本段可重复执行（幂等）。
+-- ============================================================
+
+create or replace function public.db_usage_report()
+returns jsonb
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  with t as (
+    select c.relname::text as name,
+           pg_total_relation_size(c.oid) as bytes,
+           c.reltuples::bigint as rows_estimate
+      from pg_class c
+      join pg_namespace n on n.oid = c.relnamespace
+     where n.nspname = 'public' and c.relkind in ('r', 'p', 'm')
+  ),
+  a as (
+    select x.id::text as assignment_id,
+           coalesce(cl.name, '') as class_name,
+           octet_length(x.question_meta::text) as bytes
+      from assignments x
+      left join classes cl on cl.id = x.class_id
+  )
+  select jsonb_build_object(
+    'totalBytes', pg_database_size(current_database()),
+    'tables', coalesce((
+      select jsonb_agg(jsonb_build_object(
+               'name', t.name,
+               'bytes', t.bytes,
+               'rowsEstimate', case when t.rows_estimate < 0 then null else t.rows_estimate end)
+             order by t.bytes desc)
+        from (select * from t order by bytes desc limit 12) t
+    ), '[]'::jsonb),
+    'questionMetaBytes', coalesce((select sum(octet_length(question_meta::text))::bigint from assignments), 0),
+    'archives', coalesce((
+      select jsonb_agg(jsonb_build_object(
+               'assignmentId', a.assignment_id,
+               'className', a.class_name,
+               'bytes', a.bytes)
+             order by a.bytes desc)
+        from (select * from a order by bytes desc limit 10) a
+    ), '[]'::jsonb)
+  );
+$$;
+
+-- 🔴 只有服务端（service_role）能调它：给 anon / authenticated 就等于
+--    把整库的字节数（含逐表排行）摊给任何人 —— 面板的数据**只走服务端**。
+revoke all on function db_usage_report() from public, anon, authenticated;
+
+-- -------- 26.1 核对（把下面整段粘进 SQL 编辑器）--------
+--  ① 匿名 / 登录用户都调不动（两条都必须报 42501 权限不足）：
+--  -- select public.db_usage_report();     -- 以 anon 身份
+--
+--  ② 形状（以属主身份跑，看四个键在不在）：
+--  -- select jsonb_object_keys(public.db_usage_report());
+--  -- 期望：totalBytes / tables / questionMetaBytes / archives
+--
+--  ③ ⚠️ **这个函数只量数，不判色**（配额与阈值在 `adminChart.ts`）：
+--  -- select public.db_usage_report() -> 'totalBytes';   -- 是个数字，不是颜色
 -- ============================================================

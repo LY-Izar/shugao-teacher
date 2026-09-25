@@ -47,3 +47,6 @@ _tmp/
 /*.md
 ***REMOVED*** 被实现取代的早期方案稿（同样是内部文档）
 _archive/
+***REMOVED*** 给 AI 的协作纪律（token 教训 / agent 犯过的错 / 学校规模）—— 同属内部文档。
+***REMOVED*** 留在本地：工具链照旧会读它、agent 照旧会守；但 git 永远看不到。
+app/AGENTS.md

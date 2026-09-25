@@ -275,10 +275,10 @@ export default function ExamStats() {
                 ))}
               </div>
               <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 8, lineHeight: 1.7 }}>
-                两种情形**不是一回事**：<b>缺考</b>的人不进均分；<b>没批改</b>的人按 0 分进均分。
+                两种情形不是一回事：<b>缺考</b>的人不进均分；<b>没批改</b>的人按 0 分进均分。
                 {exam.absentNos.length
                   ? '（本次缺考名单建档时登记过，可以点右上角「档案」改。）'
-                  : '（若有人缺考，可在「档案 → 缺考学号」里登记，他就会从不进均分。）'}
+                  : ''}
               </p>
             </Panel>
           </div>
@@ -437,8 +437,7 @@ export default function ExamStats() {
           <Panel bodyClass="p-3">
             {trendItems.length <= 1 ? (
               <div style={{ fontSize: 12.5, color: 'var(--color-ink3)', lineHeight: 1.8 }}>
-                这一科目前只有这一场已完成的考试，还看不出趋势。
-                再录一场（同一学科、同一个班）之后，这里会连出得分率曲线。
+                只有这一场考试，还看不出趋势
               </div>
             ) : (
               <>
@@ -608,7 +607,7 @@ export default function ExamStats() {
                   ))}
                   {!openStat.choices.length ? (
                     <div style={{ fontSize: 12.5, color: 'var(--color-ink3)' }}>
-                      没有选项数据 —— 这份档案是「记录分值」模式，或者这道题没人录过选项。
+                      没有选项数据
                     </div>
                   ) : null}
                 </div>
@@ -683,7 +682,7 @@ export default function ExamStats() {
               ) : (
                 <div style={{ fontSize: 12.5, color: 'var(--color-ink3)', lineHeight: 1.8 }}>
                   {report.points.length
-                    ? '这次没有明显低于班级水平的知识点 —— 丢分比较分散。'
+                    ? '丢分比较分散，没有明显薄弱的知识点'
                     : '题目还没挂知识点，看不出薄弱点。'}
                 </div>
               )}

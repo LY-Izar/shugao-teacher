@@ -1767,9 +1767,12 @@ section('第十一节 · D7：dist 产物里没有 `?as=` / `?kind=` 的痕迹�
       ["get('kind')", '`?kind=` 的读取'],
       /* 🆕 2026-09-28 公告轮：第三个钩子 `?sync=`（公告条与报错横幅的层叠断言靠它） */
       ["get('sync')", '`?sync=` 的读取'],
+      /* 🆕 2026-09-29 管理台第二期：第四个钩子 `?maint=`（维护模式那三种行为的断言靠它） */
+      ["get('maint')", '`?maint=` 的读取'],
       ['devInjectedRoles', '钩子函数名'],
       ['devInjectedAccountKind', '钩子函数名'],
       ['devInjectedSyncError', '钩子函数名'],
+      ['devInjectedMaintenance', '钩子函数名'],
     ]) {
       eq(`D7：产物里没有 ${why}`, all.includes(needle), false)
     }

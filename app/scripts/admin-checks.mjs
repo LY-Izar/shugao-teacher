@@ -139,6 +139,33 @@ await withLock(async () => {
   /** 表里有没有行（判"这一段跑过没有"的正面证据：`subjects` 字典该有 15 行） */
   const tableRows = new Map([['subjects', [{ code: 'physics', name: '物理' }]]])
   /**
+   * 🆕 2026-09-29 管理台第二期：假库补上**写**的语义。
+   *
+   * 为什么必须补：第二期新增的不变量里有两条**只有看写入才验得出来**：
+   *   · 「维护模式：`enabled=true` 时服务端**强制**写 `until`」→ 要看 PATCH 的载荷；
+   *   · 「反馈：**先落库、再发信**」→ 要看"插入"与"发信"的**先后顺序**。
+   * 所以每一次写都记进 `writes`（方法 / 表 / 查询串 / 载荷），
+   * 并按 PostgREST 的形状回话（`Prefer: return=representation` 时回那一行）。
+   */
+  const writes = []
+  /** 跨"假库"与"假 Resend"的**事件流水** —— 断言先后顺序用（先落库再发信） */
+  const flow = []
+  /** `Prefer: count=exact` 时 `Content-Range` 里回几（null = 按 tableRows 数） */
+  let countOverride = null
+  /** `can_contact_admin` 对调用者返回什么（在册教师 true / 教室端 false） */
+  let contactValue = 'true'
+  /** 假 `db_usage_report()` 的回话（第七节·补二 要造"读不到"那一支） */
+  let dbReportValue = {
+    totalBytes: 300 * 1024 * 1024,
+    tables: [{ name: 'assignments', bytes: 200 * 1024 * 1024, rowsEstimate: 9 }],
+    questionMetaBytes: 190 * 1024 * 1024,
+    archives: [{ assignmentId: 'a-big', className: '高二(1)班', bytes: 6 * 1024 * 1024 }],
+  }
+  /** 假 Resend 的状态码（200 = 发得出去，500 = 发不出去） */
+  let resendStatus = 200
+  /** 假 Resend 收到过哪些请求 */
+  const mailsSent = []
+  /**
    * 🔴 假库的**列模型**（补的是一次真实误报，留档在 `功能设计与不变量.md` §20.7）。
    *
    * 老假库对任何 `select=` 一律回 `[]`（"默认什么都在"）——
@@ -161,13 +188,22 @@ await withLock(async () => {
    */
   const flakyTables = new Set()
 
-  const server = createServer((req, res) => {
+  const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', `http://127.0.0.1:${PORT}`)
     seen.push({ path: url.pathname, auth: req.headers.authorization ?? '', search: url.search })
+    /** 🆕 读请求体（第二期要验写入的载荷：维护的 `until` / 反馈的 `mail_state`） */
+    const bodyText = await new Promise((resolve) => {
+      let s = ''
+      req.on('data', (c) => {
+        s += c
+      })
+      req.on('end', () => resolve(s))
+    })
     const send = (code, body, type = 'application/json') => {
       res.writeHead(code, { 'Content-Type': type })
       res.end(typeof body === 'string' ? body : JSON.stringify(body))
     }
+    const wantsRepr = /return=representation/i.test(String(req.headers.prefer ?? ''))
 
     if (url.pathname === '/auth/v1/user') {
       if (!tokenOk) return send(401, { message: 'invalid token' })
@@ -187,12 +223,16 @@ await withLock(async () => {
         }
         return send(200, superValue) // PostgREST 的 rpc 返回裸 JSON 标量
       }
+      /** 🆕 管理台第二期：反馈 / 备份通知共用的那一个判据（§25.2） */
+      if (fn === 'can_contact_admin') return send(200, contactValue)
+      /** 🆕 数据库用量报告（§26）—— 它回的是 **json 对象**，不是一个标量 */
+      if (fn === 'db_usage_report') return send(200, dbReportValue)
       if (fn === 'can_manage_teachers') return send(200, 'true')
       // §16 / §15 的裸版判据：对未登录调用者恒为 false（这就是"函数在"的正面证据）
       return send(200, 'false')
     }
 
-    /* ---- 表 / 列的存活性探测 ---- */
+    /* ---- 表 / 列的存活性探测 + 🆕 写入 ---- */
     if (url.pathname.startsWith('/rest/v1/')) {
       const rest = url.pathname.replace('/rest/v1/', '')
       const table = rest.split('/')[0]
@@ -201,6 +241,28 @@ await withLock(async () => {
           code: 'PGRST205',
           message: `Could not find the table 'public.${table}' in the schema cache`,
         })
+      }
+      const method = String(req.method ?? 'GET').toUpperCase()
+      /* 🆕 **写**：记下方法 / 表 / 查询串 / 载荷，并按 PostgREST 的形状回话 */
+      if (method !== 'GET' && method !== 'HEAD') {
+        let payload = null
+        try {
+          payload = bodyText ? JSON.parse(bodyText) : null
+        } catch {
+          payload = null
+        }
+        writes.push({ table, method, search: url.search, payload, prefer: req.headers.prefer ?? '' })
+        flow.push({ kind: 'db-write', table, method })
+        if (method === 'DELETE') {
+          /* 真 PostgREST：`return=representation` 时回**被删掉的那些行** */
+          const rows = tableRows.get(table) ?? []
+          return wantsRepr ? send(200, rows) : send(204, '')
+        }
+        if (!wantsRepr) return send(204, '')
+        /* `return=representation`：回写入的那一行（缺 id 时补一个假的，真库有 default） */
+        const row = Array.isArray(payload) ? payload[0] : payload
+        const withId = { id: 'written-1', ...(row ?? {}) }
+        return send(201, [withId])
       }
       const cols = url.searchParams.get('select') ?? '*'
       if (flakyTables.has(table)) {
@@ -226,6 +288,12 @@ await withLock(async () => {
           }
         }
       }
+      /* 🆕 `Prefer: count=exact` → `Content-Range: 0-<n-1>/<n>`（真 PostgREST 的形状） */
+      if (/count=exact/i.test(String(req.headers.prefer ?? ''))) {
+        const rows = tableRows.get(table) ?? []
+        const n = countOverride === null ? rows.length : countOverride
+        res.setHeader('Content-Range', n > 0 ? `0-0/${n}` : `*/0`)
+      }
       return send(200, tableRows.get(table) ?? [])
     }
 
@@ -233,15 +301,38 @@ await withLock(async () => {
   })
   await new Promise((r) => server.listen(PORT, '127.0.0.1', r))
 
-  /* ---------------- GitHub 窄桩 ----------------
+  /* ---------------- GitHub 窄桩 + 🆕 Resend 窄桩 ----------------
    *
-   * ⚠️ **只认 `api.github.com`，其余请求原样转发给真 fetch** ——
+   * ⚠️ **只认 `api.github.com` 与 `api.resend.com`，其余请求原样转发给真 fetch** ——
    *    否则假 Supabase 那一路会被这个桩自己吃掉（那就成"自己测自己"了）。
+   * 🔴 Resend 那一路必须拦：邮件助手会去 `POST https://api.resend.com/emails`，
+   *    而"一个字节都不出网"是这个脚本的硬纪律（第一节那段的注释里写着）。
    */
   const gh = { runs: [], logText: null, logStatus: 200 }
   const ghCalls = []
   globalThis.fetch = async (input, init) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+    /* 🆕 假 Resend：只认这一个地址，按 `resendStatus` 回话 */
+    if (/^https:\/\/api\.resend\.com\//.test(url)) {
+      let body = null
+      try {
+        body = init?.body ? JSON.parse(String(init.body)) : null
+      } catch {
+        body = null
+      }
+      mailsSent.push({ url, body, auth: String(new Headers(init?.headers ?? {}).get('authorization') ?? '') })
+      flow.push({ kind: 'mail' })
+      if (resendStatus !== 200) {
+        return new Response(JSON.stringify({ message: 'resend 挂了' }), {
+          status: resendStatus,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      return new Response(JSON.stringify({ id: 'mail-ok-1' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
     if (!/^https:\/\/api\.github\.com\//.test(url)) return realFetch(input, init)
     ghCalls.push(url.replace('https://api.github.com', ''))
 
@@ -264,13 +355,105 @@ await withLock(async () => {
     })
   }
 
+  /*
+   * ⚠️ 夹具值，**不是真地址**（2026-09-30 隐私整改）：
+   *    邮件收件人从"写死在源码里的真实邮箱"改成了环境变量 `ADMIN_NOTIFY_EMAIL`，
+   *    所以这里的断言值跟着换成 `admin@example.com`（`example.com` 是 RFC 2606
+   *    保留给文档/测试的域名，永远不会是某个人的邮箱）。
+   *    → 期望值变了的原因：**隐私需求**（真实个人邮箱不能进公开仓库），不是为了让绿而改绿。
+   */
+  const FIXTURE_MAIL_TO = 'admin@example.com'
+
   const ENV = {
     SUPABASE_URL: `http://127.0.0.1:${PORT}`,
     SUPABASE_ANON_KEY: 'fake-anon',
     SUPABASE_SERVICE_ROLE_KEY: 'fake-service-role',
     GITHUB_TOKEN: 'fake-gh-token',
-    GITHUB_REPO: 'your-org/shugao-teacher',
+    // ⚠️ 仓库地址 / 收件人都是**假夹具**：真实的 GitHub 账号名与邮箱一律不写进仓库。
+    GITHUB_REPO: 'your-org/your-repo',
+    ADMIN_NOTIFY_EMAIL: FIXTURE_MAIL_TO,
   }
+
+  /* ============================================================
+     🆕 2026-09-29 管理台第二期：假库的种子行 + 五个新 Function
+     ------------------------------------------------------------
+     ⚠️ 与第一期一样：**import 仓库里的真源码**（不是复刻）。
+        这一期新增的五个 Function 与两个 `_lib` 都从真文件里导进来跑。
+     ============================================================ */
+
+  const siteRow = (over = {}) => ({
+    key: 'maintenance',
+    enabled: false,
+    message: '',
+    until: null,
+    scheduled_from: null,
+    updated_by: null,
+    updated_at: '2026-09-29T00:00:00.000Z',
+    ...over,
+  })
+  tableRows.set('site_state', [siteRow()])
+  tableRows.set('admin_audit', [])
+  tableRows.set('frontend_errors', [
+    {
+      id: 7,
+      ts: new Date(Date.now() - 3_600_000).toISOString(),
+      username: '甲老师',
+      role: 'teacher',
+      view: '/assignments/x/grade',
+      message: '导出按钮点了没反应',
+      stack: 'at foo (app.js:1)',
+      ua: 'Mozilla/5.0',
+      env: 'web',
+      sync_error: '',
+      has_pii: false,
+    },
+  ])
+  tableRows.set('feedback', [
+    {
+      id: 'fb-1',
+      created_at: new Date(Date.now() - 7_200_000).toISOString(),
+      author_id: '11111111-1111-4111-8111-111111111111',
+      author_name: '甲老师',
+      author_roles: '任课教师',
+      body: '作业导入的图太大',
+      contact: '13800000000',
+      page: '/settings',
+      env: 'remote',
+      ua: 'Mozilla/5.0',
+      handled_at: null,
+      internal_note: '',
+      reply: '',
+      mail_state: 'sent',
+      mail_error: '',
+    },
+  ])
+
+  const STATUS = await import(mod('functions/api/status.ts', '?status'))
+  const MAINT = await import(mod('functions/api/admin/maintenance.ts', '?maint'))
+  const ERRORS = await import(mod('functions/api/admin/errors.ts', '?errors'))
+  const FB = await import(mod('functions/api/feedback.ts', '?fb'))
+  const MAILFN = await import(mod('functions/api/mail.ts', '?mail'))
+  const MAILLIB = await import(mod('functions/api/_lib/mail.ts', '?maillib'))
+
+  /** 调一个 Function（真文件）—— 与 `post()` 同款，只是文件名不同 */
+  const call = (F, path, body, headers = {}, env = ENV, method = 'POST') =>
+    (method === 'GET' ? F.onRequestGet({ request: new Request(`http://x${path}`, { method }), env })
+      : F.onRequestPost({
+          request: new Request(`http://x${path}`, {
+            method,
+            headers: { 'Content-Type': 'application/json', ...headers },
+            body: JSON.stringify(body),
+          }),
+          env,
+        }))
+  /** 清掉写 / 流水（每一小组断言之前调一次，免得看到上一组的痕迹） */
+  const clearFlow = () => {
+    writes.length = 0
+    flow.length = 0
+    mailsSent.length = 0
+  }
+  const lastWrite = (table, method = 'POST') =>
+    [...writes].reverse().find((w) => w.table === table && w.method === method)
 
   const FN = await import(mod('functions/api/admin/config-check.ts', '?admin'))
   const post = (body, headers = {}) =>
@@ -1166,6 +1349,925 @@ await withLock(async () => {
     )
     flakyTables.clear()
   }
+
+  /* ============================================================
+     第七节·补二 · 🆕 管理台第二期（§23–§26）：维护 / 错误日志 / 反馈 / 用量 / 邮件
+     ------------------------------------------------------------
+     用户点名要的断言（每一条都**带反向对照**，否则就是"永远为绿"的摆设）：
+       · 维护模式「**超管仍能进 / 别人被拦**」；
+       · `GET /api/status` **只回三个字段**（多一个就红）；
+       · 错误上报的**限流**与**截断**（限流/截断的真库那一半在 `rls-checks` 二·之七，
+         这里钉**读与删的判据 + 留痕 + 服务端再判一次截止时间**）；
+       · 反馈「**先落库再发信**」（发信失败时库里仍有行 —— 这一条**只有看流水才验得出来**）；
+       · 数据库用量**三档阈值** + 那条与百分比无关的红（单份档案 > 5 MB）；
+       · 邮件助手的三条硬要求（没配 key 显式报错 / 失败留痕 / 正文不许有学生信息）。
+     ============================================================ */
+
+  section('第七节·补二 🆕 管理台第二期：维护 · 状态接口 · 错误日志 · 反馈 · 用量 · 邮件')
+
+  /* ---------------- ① 维护模式：「超管仍能进 / 别人被拦」 ---------------- */
+  {
+    clearFlow()
+    superValue = 'true'
+    tokenOk = true
+
+    /* 正向：超管能读状态 */
+    {
+      tableRows.set('site_state', [siteRow()])
+      const r = await call(MAINT, '/api/admin/maintenance', { action: 'state' }, AUTH)
+      const body = await r.json()
+      eq('① 超管读维护状态 → 200', r.status, 200)
+      eq('① 且回话里 `effective=false`（未开启）', body.maintenance.effective, false)
+      ok(
+        '① 状态回话里带着**邮件通道**那一块（面板要把"今天已发几封"显示出来）',
+        typeof body.mail?.configured === 'boolean' && 'cap' in body.mail,
+        JSON.stringify(body.mail),
+      )
+    }
+
+    /* 🔴 反向：非超管 → 403（这就是"别人被拦"的服务端那一半） */
+    {
+      superValue = 'false'
+      const r = await call(MAINT, '/api/admin/maintenance', { action: 'state' }, AUTH)
+      const body = await r.json()
+      eq('🔴 ① **非超管（教务处）→ 403**（"别人被拦"的服务端那一半）', r.status, 403)
+      ok('① 而且那句话点明"只有最高管理员"', body.message.includes('最高管理员'), body.message)
+      const w = await call(
+        MAINT,
+        '/api/admin/maintenance',
+        { action: 'set', enabled: true, confirm: 'MAINTENANCE', hours: 4 },
+        AUTH,
+      )
+      eq('🔴 ① 非超管**连写也被拦**（403，不是"读了才拦"）', w.status, 403)
+      superValue = 'true'
+    }
+
+    /* 🔴 第 13 段没跑 → 503（**不是 403**） */
+    {
+      superValue = 'missing'
+      const r = await call(MAINT, '/api/admin/maintenance', { action: 'state' }, AUTH)
+      eq('① 权限函数没建（第 13 段没跑）→ **503 而不是 403**', r.status, 503)
+      ok('① 而且那句话指向"去跑第 13 段"', (await r.json()).message.includes('第 13 段'))
+      superValue = 'true'
+    }
+
+    /* 🔴 二次确认：少了 / 打错 `MAINTENANCE` 一律 400（前端 disabled 不是闸门） */
+    {
+      clearFlow()
+      const noConfirm = await call(
+        MAINT,
+        '/api/admin/maintenance',
+        { action: 'set', enabled: true, hours: 4 },
+        AUTH,
+      )
+      eq('🔴 ① 开启维护**不带确认字符串 → 400**（手打接口也过不去）', noConfirm.status, 400)
+      ok(
+        '① 而且那句话把要输入的字符串写出来了（MAINTENANCE）',
+        (await noConfirm.json()).message.includes('MAINTENANCE'),
+      )
+      const wrong = await call(
+        MAINT,
+        '/api/admin/maintenance',
+        { action: 'set', enabled: true, confirm: 'maintenance', hours: 4 },
+        AUTH,
+      )
+      eq('🔴 ① 确认字符串**大小写不对也拒**（`maintenance` ≠ `MAINTENANCE`）', wrong.status, 400)
+      eq('① 这两次都没写库', writes.filter((w) => w.table === 'site_state').length, 0)
+    }
+
+    /* 🔴 四条表单校验：逐条各造一个用例（R1 / R3 / R4 拒；R2 降级） */
+    {
+      clearFlow()
+      const now = Date.now()
+      const R1 = await call(
+        MAINT,
+        '/api/admin/maintenance',
+        {
+          action: 'set',
+          enabled: true,
+          confirm: 'MAINTENANCE',
+          scheduled: true,
+          toMs: now + 6 * 3600_000,
+          hours: 4,
+        },
+        AUTH,
+      )
+      const r1 = await R1.json()
+      eq('🔴 R1：勾了定时 + 只填结束 → **400**', R1.status, 400)
+      eq('🔴 R1 的代号就是 `R1`（前端能按代号摆提示）', r1.rule, 'R1')
+      ok('R1 的话说明白"只填结束的那一段没有起点"', r1.message.includes('开始时间'), r1.message)
+
+      const R3 = await call(
+        MAINT,
+        '/api/admin/maintenance',
+        { action: 'set', enabled: true, confirm: 'MAINTENANCE', scheduled: false, toMs: now + 6 * 3600_000, hours: 4 },
+        AUTH,
+      )
+      const r3 = await R3.json()
+      eq('🔴 R3：没勾定时 + 只填结束 → **400**', R3.status, 400)
+      eq('🔴 R3 的代号就是 `R3`', r3.rule, 'R3')
+
+      const R4 = await call(
+        MAINT,
+        '/api/admin/maintenance',
+        {
+          action: 'set',
+          enabled: true,
+          confirm: 'MAINTENANCE',
+          scheduled: true,
+          fromMs: now + 6 * 3600_000,
+          toMs: now + 2 * 3600_000,
+          hours: 4,
+        },
+        AUTH,
+      )
+      const r4 = await R4.json()
+      eq('🔴 R4：结束早于开始 → **400**', R4.status, 400)
+      eq('🔴 R4 的代号就是 `R4`', r4.rule, 'R4')
+
+      eq('① 三条被拒的用例**一条都没写库**（拒就得拒干净）', writes.filter((w) => w.table === 'site_state').length, 0)
+
+      /* R2：勾了定时但两个都没填 → **降级为立即生效，不报错** */
+      clearFlow()
+      const R2 = await call(
+        MAINT,
+        '/api/admin/maintenance',
+        { action: 'set', enabled: true, confirm: 'MAINTENANCE', scheduled: true, hours: 4 },
+        AUTH,
+      )
+      const r2 = await R2.json()
+      eq('🔴 R2：勾了定时但两个都没填 → **200（降级为立即生效，不报错）**', R2.status, 200)
+      eq('🔴 R2 明确回了 `downgraded=true`（界面要能告诉超管"它降级了"）', r2.downgraded, true)
+      eq('🔴 R2 之后：`scheduled_from` 是 null（立即生效）', r2.maintenance.scheduledFromIso, null)
+    }
+
+    /* 🔴 强制自动关闭：`enabled=true` 时 `until` **一定要有计划**（默认 4 小时） */
+    {
+      clearFlow()
+      const before = Date.now()
+      const r = await call(
+        MAINT,
+        '/api/admin/maintenance',
+        { action: 'set', enabled: true, confirm: 'MAINTENANCE', hours: 4 },
+        AUTH,
+      )
+      eq('① 开启 → 200', r.status, 200)
+      const patch = lastWrite('site_state', 'PATCH')
+      ok('① 而且真的 PATCH 了 `site_state`', Boolean(patch), JSON.stringify(writes.map((w) => `${w.method} ${w.table}`)))
+      const until = patch?.payload?.until ? Date.parse(patch.payload.until) : null
+      ok(
+        '🔴 ① **强制自动关闭**：载荷里的 `until` ≈ now + 4 小时（不允许"永久开启"）',
+        until !== null && Math.abs(until - (before + 4 * 3600_000)) < 60_000,
+        String(patch?.payload?.until),
+      )
+      eq('① 而且 `enabled=true` 落进了载荷', patch?.payload?.enabled, true)
+      eq(
+        '① `updated_by` 是**调用者自己的 id**（服务端取，不信前端传的）',
+        patch?.payload?.updated_by,
+        '11111111-1111-4111-8111-111111111111',
+      )
+      const audit = lastWrite('admin_audit')
+      ok(
+        '🔴 ① 开维护**写了操作留痕**（`maintenance.on`）—— 这是"能把全校锁住"的动作，必须留痕',
+        audit?.payload?.action === 'maintenance.on',
+        JSON.stringify(audit?.payload ?? null),
+      )
+
+      /* 反向：四个小时档位都认；认不出的档 → 归一成默认 4（不许留空） */
+      clearFlow()
+      await call(MAINT, '/api/admin/maintenance', { action: 'set', enabled: true, confirm: 'MAINTENANCE', hours: 12 }, AUTH)
+      const p12 = lastWrite('site_state', 'PATCH')
+      const u12 = p12?.payload?.until ? Date.parse(p12.payload.until) : 0
+      ok('反向对照：填 12 小时 → `until` ≈ now + 12 小时（档位真的起作用）', u12 - Date.now() > 11 * 3600_000, String(p12?.payload?.until))
+      clearFlow()
+      await call(MAINT, '/api/admin/maintenance', { action: 'set', enabled: true, confirm: 'MAINTENANCE', hours: 999 }, AUTH)
+      const pBad = lastWrite('site_state', 'PATCH')
+      const uBad = pBad?.payload?.until ? Date.parse(pBad.payload.until) : 0
+      ok(
+        '🔴 反向对照：认不出的档位（999）→ **归一成默认 4 小时**（不许留空 = 不许永久开启）',
+        uBad - Date.now() < 5 * 3600_000,
+        String(pBad?.payload?.until),
+      )
+    }
+
+    /* 🔴 关闭：`until` / `scheduled_from` 一起清空（"message 只在开启时有意义"） */
+    {
+      clearFlow()
+      const r = await call(MAINT, '/api/admin/maintenance', { action: 'set', enabled: false, hours: 4 }, AUTH)
+      eq('① 关闭维护 → 200（**关闭不需要确认字符串**：关错了的代价是"能用了"）', r.status, 200)
+      const patch = lastWrite('site_state', 'PATCH')
+      eq('① 关闭时 `enabled=false`', patch?.payload?.enabled, false)
+      eq('① 关闭时 `until` 清空', patch?.payload?.until, null)
+      eq('① 关闭时 `scheduled_from` 清空', patch?.payload?.scheduled_from, null)
+      eq('① 关闭时 `message` 清空', patch?.payload?.message, '')
+      const audit = lastWrite('admin_audit')
+      eq('① 关闭也留痕（`maintenance.off`）', audit?.payload?.action, 'maintenance.off')
+    }
+
+    /* 🔴 到点自动关：读状态时顺手把过期的行落回 false（幂等），并留痕 */
+    {
+      clearFlow()
+      tableRows.set('site_state', [
+        siteRow({ enabled: true, message: '升级中', until: new Date(Date.now() - 60_000).toISOString() }),
+      ])
+      const r = await call(MAINT, '/api/admin/maintenance', { action: 'state' }, AUTH)
+      const body = await r.json()
+      eq('🔴 到点自动关：`enabled=true` 但 `until` 已过 → 回话里 `autoOff=true`', body.maintenance.autoOff, true)
+      eq('🔴 而且这次读**顺手把 `enabled` 落回 false**', lastWrite('site_state', 'PATCH')?.payload?.enabled, false)
+      eq(
+        '🔴 而且写了一条 `maintenance.auto-off` 的留痕（"它自己关的"也要能回答）',
+        lastWrite('admin_audit')?.payload?.action,
+        'maintenance.auto-off',
+      )
+      eq('① 落回之后 `effective=false`', body.maintenance.effective, false)
+      tableRows.set('site_state', [siteRow()])
+    }
+
+    /* 🔴 「超管仍能进」的前端那一半：`/admin` 与 `/classroom` 在豁免名单里（源码文本） */
+    {
+      const gate = readFileSync(resolvePath(APP, 'src/components/MaintenanceGate.tsx'), 'utf8')
+      ok(
+        '🔴 ① 闸门的豁免名单里**同时**有 `/admin` 与 `/classroom`：前者是「开了关不掉」的解药，' +
+          '后者是「心跳照发 + 就地清数据」的唯一落点',
+        /MAINTENANCE_EXEMPT_PATHS\s*=\s*\[[^\]]*'\/admin'[^\]]*'\/classroom'[^\]]*\]/.test(gate),
+        gate.match(/MAINTENANCE_EXEMPT_PATHS[\s\S]{0,120}/)?.[0] ?? '(没找到那个常量)',
+      )
+      ok(
+        '🔴 ① 而且文件头写清了「开了关不掉是最坏的失败模式」（免得后人把 /admin 从豁免里删掉）',
+        gate.includes('开了关不掉'),
+      )
+      const classroom = readFileSync(resolvePath(APP, 'src/pages/Classroom.tsx'), 'utf8')
+      ok(
+        '🔴 ① 教室端**自己**渲染维护画面（含 `variant="classroom"`），不是交给全局闸门 —— ' +
+          '否则组件被卸载 = 心跳停发 = 面板开始显示「教室端离线」',
+        classroom.includes('variant="classroom"') && classroom.includes('useMaintenanceStatus'),
+      )
+      ok(
+        '🔴 ① 而且维护一开就**清掉本页学生数据**（`mutateQueue(() => [])` + 清文件列表 + 关小窗）',
+        classroom.includes('mutateQueue(() => [])') && classroom.includes('closePip()') && classroom.includes('setCloudFiles([])'),
+      )
+      /*
+       * 🔴 「心跳照发」的**结构性证据**：心跳那个 effect 必须排在维护 early-return **之前** ——
+       *    排在后面 = 维护期间它所在的整块被 return 掉 = 心跳停 = 面板开始显示"教室端离线"，
+       *    而它其实好好地在显示维护画面（往"假在线"那条已知缺陷上再叠一层假信号）。
+       */
+      ok(
+        '🔴 ① 心跳那段代码排在维护 early-return **之前**（组件不卸载 = 心跳照发）',
+        classroom.indexOf('HEARTBEAT_MS') > 0 &&
+          classroom.indexOf('if (maintOn)') > classroom.indexOf('HEARTBEAT_MS'),
+        `心跳第 ${classroom.indexOf('HEARTBEAT_MS')} 字符 · 维护 early-return 第 ${classroom.indexOf('if (maintOn)')} 字符`,
+      )
+    }
+  }
+
+  /* ---------------- ② `GET /api/status`：**只回三个字段** ---------------- */
+  {
+    /* ① 未开启 */
+    tableRows.set('site_state', [siteRow()])
+    {
+      const r = await call(STATUS, '/api/status', null, AUTH, ENV, 'GET')
+      const body = await r.json()
+      eq('② `GET /api/status` → 200（匿名可读）', r.status, 200)
+      eq(
+        '🔴 ② **回话的键恰好是 enabled / message / until**（多一个就是泄露面）',
+        Object.keys(body).sort().join(','),
+        'enabled,message,until',
+      )
+      eq('② 未开启时 `enabled=false`', body.enabled, false)
+      eq('② 未开启时 `message` 是空串（不是默认文案 —— 没维护就没话可说）', body.message, '')
+      eq('② 未开启时 `until=null`', body.until, null)
+    }
+
+    /* ② 开启中：三个字段各就各位 */
+    {
+      const until = new Date(Date.now() + 3600_000).toISOString()
+      tableRows.set('site_state', [siteRow({ enabled: true, message: '今晚升级', until })])
+      const r = await call(STATUS, '/api/status', null, AUTH, ENV, 'GET')
+      const body = await r.json()
+      eq('② 开启中 → `enabled=true`', body.enabled, true)
+      eq('② `message` 原样回（这是给全校看的那句话）', body.message, '今晚升级')
+      eq('② `until` 回 ISO 串', body.until, until)
+      ok(
+        '🔴 ② 回话里**没有** `updated_by` / `updated_at` / `scheduled_from`（"谁开的"是内部信息）',
+        !('updated_by' in body) && !('updated_at' in body) && !('scheduled_from' in body),
+        Object.keys(body).join(','),
+      )
+      ok(
+        '② 而且 `Cache-Control: no-store`（维护状态**任何一层缓存都不许留**）',
+        /no-store/i.test(r.headers.get('cache-control') ?? ''),
+        r.headers.get('cache-control') ?? '(没有)',
+      )
+    }
+
+    /* ③ 定时还没到 / ④ 到点该关 —— 都必须是 `enabled=false`（**算出来的**，不是原值） */
+    {
+      tableRows.set('site_state', [
+        siteRow({ enabled: true, scheduled_from: new Date(Date.now() + 3600_000).toISOString() }),
+      ])
+      const a = await (await call(STATUS, '/api/status', null, AUTH, ENV, 'GET')).json()
+      eq('② **定时还没到** → `enabled=false`（到点自动开 = 读的时候算）', a.enabled, false)
+
+      tableRows.set('site_state', [
+        siteRow({ enabled: true, until: new Date(Date.now() - 60_000).toISOString() }),
+      ])
+      const b = await (await call(STATUS, '/api/status', null, AUTH, ENV, 'GET')).json()
+      eq('② **已过自动关闭时刻** → `enabled=false`（到点自动关 = 读的时候算）', b.enabled, false)
+      eq('② 而且这时 `until` 回 null（没在维护，就别再给一个时刻）', b.until, null)
+
+      /* 反向对照：把 `until` 挪到未来 → 立刻又是 true（证明上面那两个 false 不是"恒 false"） */
+      tableRows.set('site_state', [
+        siteRow({ enabled: true, until: new Date(Date.now() + 60_000).toISOString() }),
+      ])
+      const c = await (await call(STATUS, '/api/status', null, AUTH, ENV, 'GET')).json()
+      eq('🔴 反向对照：`until` 在未来 → `enabled=true`（上面那两个 false 不是"恒 false"）', c.enabled, true)
+    }
+
+    /* ⑤ 读不到时：503 + **一个只有 error 的体**（fail-open 的那一半） */
+    {
+      const noKey = { ...ENV, SUPABASE_SERVICE_ROLE_KEY: '' }
+      const r = await call(STATUS, '/api/status', null, AUTH, noKey, 'GET')
+      const body = await r.json()
+      eq('② 服务端没配密钥 → **503**（前端按"未维护"放行 = fail-open）', r.status, 503)
+      eq('🔴 ② 而且 503 的体里**只有 error 一个键**（不许出现 enabled / until = 假结论）', Object.keys(body).join(','), 'error')
+      ok('② 那句话是人话（点出去处）', String(body.error).includes('RESEND_API_KEY') || String(body.error).includes('SUPABASE_SERVICE_ROLE_KEY'), String(body.error))
+    }
+    tableRows.set('site_state', [siteRow()])
+  }
+
+  /* ---------------- ③ 错误日志：读 / 删的判据 + 留痕 + 服务端再判一次 ---------------- */
+  {
+    clearFlow()
+    superValue = 'true'
+    tokenOk = true
+    countOverride = 3
+
+    {
+      const r = await call(ERRORS, '/api/admin/errors', { action: 'list' }, AUTH)
+      const body = await r.json()
+      eq('③ 超管读错误日志 → 200', r.status, 200)
+      eq('③ 总数读得到（`Prefer: count=exact` → `Content-Range`）', body.errors.total, 3)
+      ok('③ 24 小时那个数也在（面板磁贴要用）', typeof body.errors.last24h === 'number', String(body.errors.last24h))
+      ok(
+        '🔴 ③ 列表里带着 `has_pii`（**启发式**标记 —— 界面上必须写明它是启发式）',
+        body.errors.rows.every((x) => 'has_pii' in x),
+        JSON.stringify(body.errors.rows[0] ?? null),
+      )
+      ok(
+        '③ 关键字里的 PostgREST 语法字符被清掉（手打接口的人不能靠关键字注入出别的过滤条件）',
+        !/[(),*]/.test((await (await call(ERRORS, '/api/admin/errors', { action: 'list', keyword: 'a,b(c)*d' }, AUTH)).json()).errors.keyword ?? ''),
+        '关键字被清过之后还剩什么，见上一条的实现',
+      )
+    }
+
+    /* 🔴 非超管 → 403 */
+    {
+      superValue = 'false'
+      const r = await call(ERRORS, '/api/admin/errors', { action: 'list' }, AUTH)
+      eq('🔴 ③ 非超管 → 403（错误日志里**可能夹到学生姓名**，所以这一档只给超管）', r.status, 403)
+      superValue = 'true'
+    }
+
+    /* 🔴 删除：服务端**再判一次**"截止时间必须早于此刻" */
+    {
+      clearFlow()
+      const future = await call(
+        ERRORS,
+        '/api/admin/errors',
+        { action: 'delete', before: Date.now() + 86_400_000 },
+        AUTH,
+      )
+      eq('🔴 ③ 按截止日期清理：**截止时间在未来 → 400**（会连刚发生的一起删掉）', future.status, 400)
+      ok(
+        '③ 那句话说明了原因',
+        (await future.json()).message.includes('早于当前时间'),
+      )
+      eq('③ 而且一条都没删', writes.filter((w) => w.method === 'DELETE').length, 0)
+
+      const none = await call(ERRORS, '/api/admin/errors', { action: 'delete' }, AUTH)
+      eq('🔴 ③ 既没勾选也没填日期 → 400（不许"什么都没指定就把表清空"）', none.status, 400)
+
+      /* 按 id 删（正常路径）：写留痕 */
+      clearFlow()
+      const del = await call(ERRORS, '/api/admin/errors', { action: 'delete', ids: [7, 8, 'x'] }, AUTH)
+      const db = await del.json()
+      eq('③ 按 id 删 → 200', del.status, 200)
+      eq('③ 认不出的 id（`x`）被丢掉，只删那两个真的', lastWrite('frontend_errors', 'DELETE')?.search.includes('in.(7,8)'), true)
+      ok('③ 删掉的行数回给了调用方（面板要显示"删了几条"）', typeof db.deleted === 'number', String(db.deleted))
+      const audit = lastWrite('admin_audit')
+      ok(
+        '🔴 ③ 删除**写了留痕**（`errors.delete` + 受影响行数）—— 这是不可逆动作',
+        audit?.payload?.action === 'errors.delete' && typeof audit?.payload?.affected === 'number',
+        JSON.stringify(audit?.payload ?? null),
+      )
+
+      /* 按截止日期删（过去的时间）：放行 */
+      clearFlow()
+      const past = await call(
+        ERRORS,
+        '/api/admin/errors',
+        { action: 'delete', before: Date.now() - 86_400_000 },
+        AUTH,
+      )
+      eq('③ 反向对照：截止时间在**过去** → 200（上面那条 400 不是"一律拒")', past.status, 200)
+      ok(
+        '③ 而且服务端把它翻成了 ISO 串去过滤（不是把毫秒原样塞进 URL）',
+        /ts=lt\./.test(lastWrite('frontend_errors', 'DELETE')?.search ?? ''),
+        lastWrite('frontend_errors', 'DELETE')?.search,
+      )
+    }
+    countOverride = null
+  }
+
+  /* ---------------- ④ 反馈：**先落库、再发信** ---------------- */
+  {
+    const ENV_MAIL = { ...ENV, RESEND_API_KEY: 'fake-resend-key' }
+    superValue = 'true'
+    tokenOk = true
+
+    /* ① 未登录 → 401（**不允许匿名提交** —— 用户拍板） */
+    {
+      const r = await call(FB, '/api/feedback', { action: 'submit', body: '登录不上' }, {})
+      eq('🔴 ④ 未登录提交反馈 → **401**（用户拍板：不允许匿名；登录不上走前端错误上报）', r.status, 401)
+      ok(
+        '④ 而且那句话**指了另一条路**（前端错误上报那条不需要登录）',
+        (await r.json()).message.includes('错误上报'),
+      )
+    }
+
+    /* ② 教室端（判据 false）→ 403；反向：在册教师 → 放行 */
+    {
+      contactValue = 'false'
+      const r = await call(FB, '/api/feedback', { action: 'submit', body: '作业导入的图太大' }, AUTH)
+      eq('🔴 ④ 判据 false（教室端）→ 403', r.status, 403)
+      contactValue = 'true'
+    }
+
+    /* ③ 正文校验：< 5 字 拒；> 1000 字 **拒**（不静默截断） */
+    {
+      const short = await call(FB, '/api/feedback', { action: 'submit', body: '坏了' }, AUTH)
+      eq('🔴 ④ 正文 < 5 字 → 400', short.status, 400)
+      const long = await call(FB, '/api/feedback', { action: 'submit', body: 'x'.repeat(1001) }, AUTH)
+      eq('🔴 ④ 正文 > 1000 字 → 400（**不静默截断**，照 notices 的 TITLE_MAX 纪律）', long.status, 400)
+    }
+
+    /* ④ 🔴 核心：发信**失败**时库里**仍然有行**，且顺序是"先落库、再发信" */
+    {
+      clearFlow()
+      resendStatus = 500
+      const r = await call(
+        FB,
+        '/api/feedback',
+        { action: 'submit', body: '作业导入的图太大，点导出没反应', page: '/settings' },
+        AUTH,
+        ENV_MAIL,
+      )
+      const body = await r.json()
+      eq('🔴 ④ 发信 500 → **接口仍然 200**（落库那一步是成功的）', r.status, 200)
+      eq('🔴 ④ 而且回话里说"已送到"（`delivered=true`）—— 它**真的**进库了', body.delivered, true)
+      eq('🔴 ④ `mail.ok=false`（发信失败如实回报，**不假成功**）', body.mail?.ok, false)
+      const ins = lastWrite('feedback', 'POST')
+      ok('🔴 ④ **先落库**：确实 POST 了 `feedback` 一行', Boolean(ins), JSON.stringify(writes.map((w) => `${w.method} ${w.table}`)))
+      eq('🔴 ④ 插入时 `mail_state` 是 `pending`（还没试发）', ins?.payload?.mail_state, 'pending')
+      const patch = lastWrite('feedback', 'PATCH')
+      eq('🔴 ④ **发信失败要留痕**：随后 PATCH 把 mail_state 落成 failed', patch?.payload?.mail_state, 'failed')
+      ok(
+        '④ 失败原因的原文也留在库里（排错要看得到 "Resend 回了 500"）',
+        String(patch?.payload?.mail_error ?? '').includes('500'),
+        String(patch?.payload?.mail_error ?? ''),
+      )
+      ok(
+        '🔴 ④ **顺序**：`feedback` 的插入在"调 Resend"**之前**（先落库、再发信）',
+        flow.findIndex((x) => x.kind === 'db-write' && x.table === 'feedback') <
+          flow.findIndex((x) => x.kind === 'mail'),
+        JSON.stringify(flow),
+      )
+      ok(
+        '④ 而且调用方**没有**自己去"重试"或"删掉那一行"（失败就是失败，留痕即可）',
+        writes.filter((w) => w.method === 'DELETE').length === 0,
+      )
+    }
+
+    /* ⑤ 反向对照：发信成功 → `mail_state='sent'`（证明上面那条 failed 不是恒真） */
+    {
+      clearFlow()
+      resendStatus = 200
+      const r = await call(FB, '/api/feedback', { action: 'submit', body: '再提一条正常的建议' }, AUTH, ENV_MAIL)
+      const body = await r.json()
+      eq('④ 反向对照：发信成功 → 200 + `mail.ok=true`', [r.status, body.mail?.ok], [200, true])
+      eq('④ 而且库里落的是 mail_state = sent', lastWrite('feedback', 'PATCH')?.payload?.mail_state, 'sent')
+      eq(
+        '④ 发出去的收件人就是部署环境配的那个（`ADMIN_NOTIFY_EMAIL`）—— ' +
+          '⚠️ 期望值 2026-09-30 从真实邮箱换成夹具：**源码里不再有任何真实地址**（隐私需求）',
+        mailsSent[0]?.body?.to?.[0],
+        FIXTURE_MAIL_TO,
+      )
+      eq('④ 发件人是未验域名时唯一允许的那个', mailsSent[0]?.body?.from, 'onboarding@resend.dev')
+      ok(
+        '④ 而且用的是纯文本（`text`，**没有** `html` —— 与本仓库"通知不做富文本"同一条判断）',
+        typeof mailsSent[0]?.body?.text === 'string' && !('html' in (mailsSent[0]?.body ?? {})),
+        JSON.stringify(Object.keys(mailsSent[0]?.body ?? {})),
+      )
+    }
+
+    /* ⑥ 🔴 正文疑似含学生信息 → **不发信**，但**仍然落库**（mail_state='skipped'） */
+    {
+      clearFlow()
+      resendStatus = 200
+      const r = await call(
+        FB,
+        '/api/feedback',
+        { action: 'submit', body: '张三这次考了 85 分但系统显示未交' },
+        AUTH,
+        ENV_MAIL,
+      )
+      const body = await r.json()
+      eq('🔴 ④ 正文疑似含学生信息 → 接口仍然 200（**它已经落库了**）', r.status, 200)
+      eq('🔴 ④ 但 `mail.ok=false`（邮件会离开系统，宁可不发）', body.mail?.ok, false)
+      eq('🔴 ④ 原因就是 `pii_blocked`', body.mail?.reason, 'pii_blocked')
+      eq('🔴 ④ 库里落 mail_state = skipped（没试发 与 试了失败 是两件事）', lastWrite('feedback', 'PATCH')?.payload?.mail_state, 'skipped')
+      eq('🔴 ④ 而且**一封邮件都没出去**', mailsSent.length, 0)
+      ok('④ 那一行仍然在库里（正文一个字都没丢）', Boolean(lastWrite('feedback', 'POST')))
+    }
+
+    /* ⑦ 超管那一半：admin-list 的三个计数（尤其**邮件没发出去**那一个） */
+    {
+      clearFlow()
+      tableRows.set('feedback', [
+        { ...tableRows.get('feedback')[0], mail_state: 'failed' },
+      ])
+      const r = await call(FB, '/api/feedback', { action: 'admin-list' }, AUTH)
+      const body = await r.json()
+      eq('④ 超管读反馈清单 → 200', r.status, 200)
+      ok(
+        '🔴 ④ **`mailBad` 是独立的一个计数**（`pending` / `failed` / `skipped` 都算）—— ' +
+          '没配 key 时不能静默：否则老师的意见躺在一个没人打开的页面里，双方都以为送到了',
+        typeof body.feedback.mailBad === 'number',
+        JSON.stringify({ total: body.feedback.total, open: body.feedback.open, mailBad: body.feedback.mailBad }),
+      )
+      superValue = 'false'
+      const no = await call(FB, '/api/feedback', { action: 'admin-list' }, AUTH)
+      eq('🔴 ④ 非超管读全部反馈 → 403（正文是老师手写的自由文本，很可能提到具体学生）', no.status, 403)
+      superValue = 'true'
+    }
+
+    /* ⑧ 「我提过的」：只回作者自己的、且**剥掉内部字段** */
+    {
+      clearFlow()
+      const r = await call(FB, '/api/feedback', { action: 'mine' }, AUTH)
+      const body = await r.json()
+      eq('④ `mine` → 200', r.status, 200)
+      const row = body.mine[0] ?? {}
+      ok(
+        '🔴 ④ 「我提过的」**不带内部字段**（`mail_error` / `internal_note` / `handled_by` 一个都不在）',
+        !('mail_error' in row) && !('internal_note' in row) && !('handled_by' in row) && !('mail_state' in row),
+        JSON.stringify(row),
+      )
+      ok('④ 但给了一个结论性的状态（已收到 / 已处理）', typeof row.status === 'string' && row.status.length > 0, JSON.stringify(row.status))
+      ok(
+        '④ 并且按 `author_id=eq.<我自己>` 过滤（服务端过滤，不是回全表再让前端筛）',
+        /author_id=eq\.11111111-1111-4111-8111-111111111111/.test(
+          seen.filter((s) => s.path === '/rest/v1/feedback').slice(-1)[0]?.search ?? '',
+        ),
+        seen.filter((s) => s.path === '/rest/v1/feedback').slice(-1)[0]?.search,
+      )
+    }
+    resendStatus = 200
+  }
+
+  /* ---------------- ⑤ 邮件助手的三条硬要求 ---------------- */
+  {
+    /* ① 没配 key → **显式报错**（人话 + 去处），绝不静默失败 */
+    {
+      const r = await MAILLIB.sendMail(ENV, { subject: 'x', text: 'y' })
+      eq('🔴 ⑤ 没配 `RESEND_API_KEY` → `ok=false` + `reason=no_key`', [r.ok, r.reason], [false, 'no_key'])
+      ok(
+        '🔴 ⑤ 而且给的是**人话 + 去处**（不是一句 "failed"）',
+        String(r.message).includes('RESEND_API_KEY') && String(r.message).includes('Cloudflare'),
+        r.message,
+      )
+      const before = mailsSent.length
+      eq('🔴 ⑤ 而且**一个请求都没发出去**（没配就不许"试一下"）', mailsSent.length, before)
+    }
+
+    /*
+     * ①–B 🆕 2026-09-30（隐私整改）：**收件人**从"写死在源码里的真实邮箱"
+     *     改成环境变量 `ADMIN_NOTIFY_EMAIL`。这里是它的两条硬要求：
+     *       · 没配 → **显式报错**（`reason:'no_to'` + 人话 + 去处），**绝不静默发到默认地址**；
+     *       · 源码里**不许**再出现那个真实邮箱（`@qq.com` 个人地址一律不许）。
+     *     ⚠️ 两条都带反向对照（"配回来必须能发" + "源码扫描不能恒真"）——
+     *        否则它们就是永远为绿的摆设。
+     */
+    {
+      const r = await MAILLIB.sendMail(
+        { ...ENV, RESEND_API_KEY: 'k', ADMIN_NOTIFY_EMAIL: '' },
+        { subject: 'x', text: 'y' },
+      )
+      eq(
+        '🔴 ⑤ 配了 key 但**没配收件人**（`ADMIN_NOTIFY_EMAIL`）→ `ok=false` + `reason=no_to`',
+        [r.ok, r.reason],
+        [false, 'no_to'],
+      )
+      ok(
+        '🔴 ⑤ 而且说清了该去哪儿配（人话 + 去处，不是一句 failed）',
+        String(r.message).includes('ADMIN_NOTIFY_EMAIL') && String(r.message).includes('Cloudflare'),
+        r.message,
+      )
+      const before = mailsSent.length
+      eq(
+        '🔴 ⑤ 而且**一个请求都没发出去** —— 没有"默认收件人"这回事（发到默认地址 = 把信发给别人）',
+        mailsSent.length,
+        before,
+      )
+      /* 反向对照：把收件人配回来 → 必须能发（证明上面那条 no_to 不是恒真） */
+      resendStatus = 200
+      const okr = await MAILLIB.sendMail({ ...ENV, RESEND_API_KEY: 'k' }, { subject: 'x', text: 'y' })
+      eq(
+        '⑤ 反向对照：把收件人配回来 → `ok=true`，而且 `to` 就是配的那个（不是别的默认值）',
+        [okr.ok, okr.ok ? okr.to : ''],
+        [true, FIXTURE_MAIL_TO],
+      )
+      /*
+       * 🔴 源码扫描（这一条才是"隐私整改有没有落地"的直接判据）：
+       *    `_lib/mail.ts` 是全仓唯一一处决定收件人的地方，它里面**不许有 @qq.com**。
+       * ⚠️ 它是**静态**断言，所以上面那条"配回来能发"是它的行为侧对照。
+       */
+      const mailSrc = readFileSync(resolvePath(APP, 'functions/api/_lib/mail.ts'), 'utf8')
+      ok(
+        '🔴 ⑤ `functions/api/_lib/mail.ts` 里**没有任何 @qq.com 个人邮箱**（收件人只从环境变量来）',
+        !/@qq\.com/i.test(mailSrc),
+        (mailSrc.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g) ?? []).join(' / ') || '(一个邮箱字面量都没有)',
+      )
+    }
+
+    /* ② 失败留痕：Resend 4xx/5xx → reason=failed + 原文（调用方把它写进库） */
+    {
+      resendStatus = 500
+      const r = await MAILLIB.sendMail({ ...ENV, RESEND_API_KEY: 'k' }, { subject: 'x', text: 'y' })
+      eq('🔴 ⑤ Resend 500 → `reason=failed`', [r.ok, r.reason], [false, 'failed'])
+      ok('🔴 ⑤ 而且把 Resend 的状态码与原文带回来（要落进库里的那一句）', String(r.message).includes('500'), r.message)
+      resendStatus = 200
+      const okr = await MAILLIB.sendMail({ ...ENV, RESEND_API_KEY: 'k' }, { subject: 'x', text: 'y' })
+      eq('⑤ 反向对照：Resend 200 → `ok=true`（上面那条 failed 不是恒真）', okr.ok, true)
+    }
+
+    /* ③ 正文不许出现学生姓名/成绩 —— 窄判据 + **反向对照（不许误伤正常运维文案）** */
+    {
+      ok(
+        '🔴 ⑤ 「张三这次考了 85 分」→ 判定含学生信息（成绩写法）',
+        Boolean(MAILLIB.looksLikeStudentData('张三这次考了 85 分')),
+        MAILLIB.looksLikeStudentData('张三这次考了 85 分') ?? '(没命中)',
+      )
+      ok(
+        '🔴 ⑤ 「学号：2025007」→ 判定含学生信息（7 位序列号 + 标注）',
+        Boolean(MAILLIB.looksLikeStudentData('学号：2025007 的作业没交')),
+      )
+      eq(
+        '🔴 ⑤ 反向对照：**正常运维文案一个字都不许误伤**（"今晚 23:00–23:30 维护"）',
+        MAILLIB.looksLikeStudentData('系统维护：今晚 23:00-23:30 升级，预计 30 分钟'),
+        null,
+      )
+      eq(
+        '🔴 ⑤ 反向对照：「版本 0.9.1 上线」也不许误伤（公告里合法出现数字）',
+        MAILLIB.looksLikeStudentData('版本 0.9.1 上线，新增错题集导出'),
+        null,
+      )
+      eq(
+        '⑤ 而且它是**启发式**：只写"张三"（没有分数、没有学号）**抓不到** —— ' +
+          '这一条是诚实留档，别把界面上写成"已脱敏"',
+        MAILLIB.looksLikeStudentData('张三这次又没交作业'),
+        null,
+      )
+    }
+
+    /* ④ 洗凭据：URL 的 query string / Bearer / 长串一律抹掉（邮件会离开系统） */
+    {
+      const s = MAILLIB.scrubSecrets('见 https://x.supabase.co/a?apikey=SECRET1 Bearer abcdefghijklmnop 联系我')
+      ok('🔴 ⑤ URL 的 query string 被抹掉', !s.includes('SECRET1') && s.includes('https://x.supabase.co/a'), s)
+      ok('🔴 ⑤ `Bearer …` 被抹掉', !s.includes('abcdefghijklmnop'), s)
+      ok('⑤ 而正文主体还在（不是把整句删了）', s.includes('联系我'), s)
+    }
+
+    /* ⑤ 面板那两个按钮走的就是这个接口（`/api/mail`） */
+    {
+      const ENV_MAIL = { ...ENV, RESEND_API_KEY: 'fake-resend-key' }
+      superValue = 'true'
+      tokenOk = true
+      const noKey = await call(MAILFN, '/api/mail', { action: 'test' }, AUTH)
+      eq(
+        '🔴 ⑤ `/api/mail` 的 test：没配 key → **503 + reason=no_key**（显式报错，不是静默失败）',
+        [noKey.status, (await noKey.json()).reason],
+        [503, 'no_key'],
+      )
+      resendStatus = 200
+      const okT = await call(MAILFN, '/api/mail', { action: 'test' }, AUTH, ENV_MAIL)
+      eq(
+        '⑤ 反向对照：配了 key + Resend 200 → 200，而且收件人就是**部署环境配的那个**' +
+          '（期望值 2026-09-30 从真实邮箱换成夹具：源码里不再有真实地址）',
+        [okT.status, (await okT.json()).to],
+        [200, FIXTURE_MAIL_TO],
+      )
+      /*
+       * 🔴 没配收件人 → **503**（不是 502：那是"环境没准备好"，不是上游故障）。
+       *    这条是 `/api/mail` 那一层对 `no_to` 的处理，与 `_lib` 那一层分开各验一次。
+       */
+      const noTo = await call(MAILFN, '/api/mail', { action: 'test' }, AUTH, {
+        ...ENV_MAIL,
+        ADMIN_NOTIFY_EMAIL: '',
+      })
+      eq(
+        '🔴 ⑤ `/api/mail` 的 test：配了 key 但没配收件人 → **503 + reason=no_to**',
+        [noTo.status, (await noTo.json()).reason],
+        [503, 'no_to'],
+      )
+      superValue = 'false'
+      const forbidden = await call(MAILFN, '/api/mail', { action: 'test' }, AUTH, ENV_MAIL)
+      eq('🔴 ⑤ 非超管发测试邮件 → **403**（它用的是平台的邮件配额）', forbidden.status, 403)
+      superValue = 'true'
+      contactValue = 'false'
+      const bNo = await call(MAILFN, '/api/mail', { action: 'backup', summary: 'x' }, AUTH, ENV_MAIL)
+      eq('🔴 ⑤ `backup` 那一支用的是 `can_contact_admin`（教室端 → 403）', bNo.status, 403)
+      contactValue = 'true'
+      const bOk = await call(
+        MAILFN,
+        '/api/mail',
+        { action: 'backup', summary: '树高备份-2026-09-29.json' },
+        AUTH,
+        ENV_MAIL,
+      )
+      eq('⑤ 反向对照：在册教师 → 200（"备份→发信"那条链的中间一环真的通）', bOk.status, 200)
+      const audit = lastWrite('admin_audit')
+      eq('🔴 ⑤ 而且发信**留痕了**（`mail.backup` —— 配额就是数这张表算的）', audit?.payload?.action, 'mail.backup')
+    }
+  }
+
+  /* ---------------- ⑥ 数据库用量的三档阈值 + 那条"与百分比无关的红" ---------------- */
+  {
+    const GB = 1024 ** 3
+    const facts = (bytes, archives = [], extra = {}) => ({
+      configured: true,
+      totalBytes: bytes,
+      tables: [],
+      questionMetaBytes: null,
+      archives,
+      unknownReason: null,
+      ...extra,
+    })
+    eq('⑥ 配额常量就是 **1 GB**（用户拍板）', C.DB_QUOTA_BYTES, GB)
+    eq('⑥ 三档线就是 60 / 85', [C.DB_WARN_PCT, C.DB_BAD_PCT], [60, 85])
+    eq('⑥ 单份档案的红线就是 **5 MB**', C.ARCHIVE_META_BAD_BYTES, 5 * 1024 * 1024)
+
+    eq('⑥ 30% → 绿', C.judgeDbUsage(facts(0.3 * GB)).tone, 'ok')
+    eq('⑥ 60% → 黄（**边界含在黄里**）', C.judgeDbUsage(facts(0.6 * GB)).tone, 'warn')
+    eq('⑥ 84% → 黄', C.judgeDbUsage(facts(0.84 * GB)).tone, 'warn')
+    eq('⑥ 86% → 红', C.judgeDbUsage(facts(0.86 * GB)).tone, 'bad')
+    ok(
+      '⑥ 绿的那一档会把"还剩多少 + 最大的一份"说出来（阈值口径是"还能不能再塞一份"）',
+      C.judgeDbUsage(facts(0.1 * GB, [{ assignmentId: 'a', className: '高二(1)班', bytes: 1024 }])).text.includes('够用'),
+    )
+
+    /* 🔴 与百分比无关的那条红：单份 question_meta > 5 MB */
+    const big = [{ assignmentId: 'a-big', className: '高二(1)班', bytes: 6 * 1024 * 1024 }]
+    {
+      const j = C.judgeDbUsage(facts(0.1 * GB, big))
+      eq('🔴 ⑥ 库才用了 10%，但**有一份档案 > 5 MB → 照样红**（与百分比无关）', j.tone, 'bad')
+      ok('⑥ 而且那句话点出"单份就超预算"', j.text.includes('单份') || j.text.includes('超预算'), j.text)
+      eq('⑥ 并且把超预算的那几份列出来（给界面用）', j.oversized.length, 1)
+      /* 反向对照：刚好 5 MB **不算**超（边界是 `>`，不是 `>=`） */
+      eq(
+        '⑥ 反向对照：刚好 5 MB → **不红**（边界是 `>`，不是 `>=`）',
+        C.judgeDbUsage(facts(0.1 * GB, [{ ...big[0], bytes: 5 * 1024 * 1024 }])).tone,
+        'ok',
+      )
+    }
+
+    /* 🔴 读不到 → **灰**（绝不许画成绿，也绝不许画成红） */
+    {
+      const j = C.judgeDbUsage({ configured: false, totalBytes: null, tables: [], questionMetaBytes: null, archives: [], unknownReason: '没配密钥' })
+      eq('🔴 ⑥ 服务端没配 / 读不到 → **灰（无法判断）**', j.tone, 'unknown')
+      ok('⑥ 而且把原因写出来', j.text.includes('无法判断') && j.notes.join(' ').includes('没配密钥'), j.notes.join(' | '))
+      ok('⑥ 并且明确写"读不到不是还剩很多"', j.notes.join(' ').includes('不是'), j.notes.join(' | '))
+      /* 反向对照：**有数**的时候不许是灰 */
+      eq('⑥ 反向对照：有数时不是灰', C.judgeDbUsage(facts(0.3 * GB)).tone !== 'unknown', true)
+    }
+
+    /* 🔴 服务端回话里**不许**有 `quotaBytes`（配额只能有一处实现） */
+    {
+      dbReportValue = {
+        totalBytes: 300 * 1024 * 1024,
+        tables: [{ name: 'assignments', bytes: 1024, rowsEstimate: 9 }],
+        questionMetaBytes: 512,
+        archives: [{ assignmentId: 'a', className: '高二(1)班', bytes: 256 }],
+      }
+      const r = await post({ action: 'db' }, AUTH)
+      const body = await r.json()
+      eq('⑥ 服务端 `action:db` → 200', r.status, 200)
+      eq('⑥ 回话里有 `db` 那一块', typeof body.db, 'object')
+      ok(
+        '🔴 ⑥ 服务端回话里**没有** `quotaBytes` / `percent` / `tone`（**只量数、不判色**）',
+        !('quotaBytes' in body.db) && !('percent' in body.db) && !('tone' in body.db),
+        Object.keys(body.db).join(','),
+      )
+      eq('⑥ 而 `unknownReason` 是**独立字段**，拿到数时是 null', body.db.unknownReason, null)
+      eq(
+        '⑥ 行数为负（还没 ANALYZE 过）时归一成 **null = 无法判断**，不是 0',
+        C.judgeDbUsage({
+          configured: true,
+          totalBytes: 1024,
+          tables: [{ name: 'x', bytes: 1, rowsEstimate: null }],
+          questionMetaBytes: 0,
+          archives: [],
+          unknownReason: null,
+        }).tone,
+        'ok',
+      )
+      /* 反向对照：RPC 报错（第 26 段没跑）→ `unknownReason` 有值（那就是灰） */
+      const saved = dbReportValue
+      missingTables.add('__never__')
+      const saveFn = dbReportValue
+      dbReportValue = undefined
+      const broken = await post({ action: 'db' }, AUTH)
+      const bb = await broken.json()
+      ok(
+        '⑥ 反向对照：RPC 回话解不开时 → `unknownReason` 有值（面板那一格是灰的）',
+        typeof bb.db.unknownReason === 'string' && bb.db.totalBytes === null,
+        JSON.stringify(bb.db).slice(0, 160),
+      )
+      missingTables.delete('__never__')
+      dbReportValue = saved ?? saveFn
+    }
+  }
+
+  /* ---------------- ⑦ 面板新结构（静态：分区表 / 导航在面板内部） ---------------- */
+  {
+    eq(
+      '🔴 ⑦ 分区就是那七个（概览 / 健康 / 数据库 / 公告 / 维护 / 错误日志 / 反馈）',
+      C.ADMIN_SECTIONS.map((s) => s.key).join(','),
+      'overview,health,db,announce,maintenance,errors,feedback',
+    )
+    eq(
+      '⑦ 每个分区都有显示名与一句说明（登记表要能被人读）',
+      C.ADMIN_SECTIONS.every((s) => s.label.length > 0 && s.hint.length > 0),
+      true,
+    )
+    eq('⑦ 标签不重复（否则导航上会出现两个"同名"项）', new Set(C.ADMIN_SECTIONS.map((s) => s.label)).size, C.ADMIN_SECTIONS.length)
+    const admin = readFileSync(resolvePath(APP, 'src/pages/Admin.tsx'), 'utf8')
+    ok(
+      '🔴 ⑦ 面板**自己**有导航（`data-admin-nav`），没有改去套 `AppShell`',
+      admin.includes('data-admin-nav') && admin.includes('data-admin-segments') && !/from '\.\.\/components\/AppShell'/.test(admin),
+    )
+    ok(
+      '🔴 ⑦ **L0 健康条那句话一个字没丢**（`data-admin-l0` + 那句人话 + 本地模式那条红警告）',
+      admin.includes('data-admin-l0') &&
+        admin.includes('平台有问题 ·') &&
+        admin.includes('平台正常 · 没有发现异常') &&
+        admin.includes('所有数据只写在这台浏览器里'),
+    )
+    ok(
+      '🔴 ⑦ **隐私三级仍然在位**：`PrivacyLine`（请勿投屏或截图）+ 默认只给学号 + 姓名要显式点开',
+      admin.includes('请勿投屏或截图') && admin.includes('data-admin-names') && admin.includes("'显示姓名'"),
+    )
+    ok(
+      '🔴 ⑦ 「没结论必须是灰」仍然只有一处实现（`driftTone`）—— 面板里没有自己再写一套三元',
+      admin.includes('driftTone(') && !/state === 'present' \? 'ok'/.test(admin),
+    )
+    ok(
+      '⑦ 顶栏工具栏四样齐：版本号 / 构建哈希 / 环境 / 刷新（+ 回教师端）',
+      admin.includes('data-admin-version') &&
+        admin.includes('data-admin-hash') &&
+        admin.includes('data-admin-env') &&
+        admin.includes('data-admin-refresh') &&
+        admin.includes('回教师端'),
+    )
+    ok(
+      '⑦ 概览是一排**数字磁贴**（`data-admin-tiles` + 每块一个 `data-admin-tile`）',
+      admin.includes('data-admin-tiles') && admin.includes('data-admin-tile='),
+    )
+    /* 🔴 服务端与前端**两份**维护表单逻辑必须逐字相同（照 `nav-checks` A9 的那个写法） */
+    const srv = readFileSync(resolvePath(APP, 'functions/api/_lib/maintenance.ts'), 'utf8')
+    const web = readFileSync(resolvePath(APP, 'src/lib/maintenance.ts'), 'utf8')
+    const SHARED = [
+      'MAINTENANCE_HOURS = [1, 4, 12, 24]',
+      'MAINTENANCE_DEFAULT_HOURS = 4',
+      'MAINTENANCE_MESSAGE_MAX = 200',
+      "MAINTENANCE_CONFIRM_WORD = 'MAINTENANCE'",
+      "MAINTENANCE_DEFAULT_MESSAGE = '系统维护中，请稍后重试。'",
+      "rule: 'R1'",
+      "rule: 'R3'",
+      "rule: 'R4'",
+      '填了结束时间就必须填开始时间',
+      '结束时间必须晚于开始时间',
+      '降级为立即生效，不报错',
+    ]
+    for (const s of SHARED) {
+      ok(`🔴 ⑦ 服务端与前端两份维护逻辑逐字相同：${s.slice(0, 30)}`, srv.includes(s) && web.includes(s), srv.includes(s) ? '前端那份缺' : '服务端那份缺')
+    }
+    /* 反向对照：随便编一句不该在两边都出现的话 —— 证明上面那组不是"什么都包含" */
+    ok(
+      '🔴 ⑦ 反向对照：编一句两处都没有的话 → 判否（证明上面那组不是恒真）',
+      !(srv.includes('这句不该存在-ZZ9') && web.includes('这句不该存在-ZZ9')),
+    )
+  }
+
 
   /* ============================================================
      第八节 · 颜色合成与时间/字节的显示口径

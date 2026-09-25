@@ -59,8 +59,8 @@ export default function WrongBook() {
         title="错题集"
         sub={
           classes.length
-            ? `我任教的 ${classes.length} 个班 · ${totalStudents} 名学生`
-            : '按班查看错题档案'
+            ? `${classes.length} 个班 · ${totalStudents} 名学生`
+            : undefined
         }
         onBack={() => navigate('/')}
       />
@@ -72,7 +72,7 @@ export default function WrongBook() {
               <IconUsers size={26} />
               <div style={{ fontWeight: 600, color: 'var(--color-ink)' }}>名下还没有班级</div>
               <div style={{ fontSize: 13, maxWidth: 280 }}>
-                错题集按班归档。先建一个班并导入学生名单，批过作业之后这里就会有数据。
+                先建一个班，批过作业后这里就有数据。
               </div>
               <Button
                 variant="primary"
@@ -86,7 +86,7 @@ export default function WrongBook() {
           </Panel>
         ) : (
           <div className="mb-4">
-            <Sect>我任教的班级 · 点进去看这个班的错题档案</Sect>
+            <Sect>我任教的班级</Sect>
             <div className="flex flex-col gap-2.5 stagger">
               {classes.map((c) => {
                 const st = stats.get(c.id)
@@ -135,7 +135,7 @@ export default function WrongBook() {
                           {graded === 0 ? (
                             <>
                               <IconClipboard size={14} className="shrink-0" />
-                              还没批改过作业 · 先批一份才有数据
+                              还没批改过作业
                             </>
                           ) : wrong === 0 ? (
                             <>
@@ -160,11 +160,6 @@ export default function WrongBook() {
             </div>
           </div>
         )}
-
-        <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.7 }}>
-          这里只列<b>你任教</b>的班级。点开一个班进入它的错题档案：主体是学生名单（按丢分排序），
-          右上角是「班级总结错题」。
-        </p>
       </Page>
     </>
   )

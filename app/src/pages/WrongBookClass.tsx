@@ -103,7 +103,7 @@ export default function WrongBookClass() {
         title={klass.name}
         sub={
           gradedCount
-            ? `错题档案 · ${students.length} 人 · 基于 ${gradedCount} 份已批改的作业`
+            ? `错题档案 · ${students.length} 人 · ${gradedCount} 份作业`
             : `错题档案 · ${students.length} 人`
         }
         onBack={() => navigate('/wrong')}
@@ -151,7 +151,7 @@ export default function WrongBookClass() {
                     className="px-3 py-5 text-center"
                     style={{ fontSize: 12.5, color: 'var(--color-ink3)' }}
                   >
-                    这段时间没有人错题 —— 要么确实都会了，要么这份作业里没有可归类的错处。
+                    这段时间没有错题
                   </div>
                 ) : (
                   books.map((b, i) => (
@@ -231,7 +231,7 @@ export default function WrongBookClass() {
         <Panel bodyClass="p-3">
           {cls.points.length === 0 ? (
             <div style={{ fontSize: 12.5, color: 'var(--color-ink3)' }}>
-              这段时间没有人错题，还没有高频错点。
+              还没有高频错点
             </div>
           ) : (
             <>

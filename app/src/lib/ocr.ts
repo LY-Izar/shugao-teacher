@@ -156,7 +156,7 @@ export async function recognize(
   if (!token) {
     return {
       status: 'error',
-      message: '拍照识别要用登录账号（识别额度是学校的）。请先登录老师账号再试。',
+      message: '拍照识别需要先登录',
     }
   }
 
@@ -185,7 +185,7 @@ export async function recognize(
         status: 'error',
         message:
           res.status === 404
-            ? '识别服务还没部署（缺少 /api/ocr）。请重新部署一次，或检查 functions 目录。'
+            ? '识别服务暂时不可用，请稍后再试。'
             : `识别服务返回了无法解析的内容（HTTP ${res.status}）`,
       }
     }

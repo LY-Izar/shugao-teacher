@@ -1,6 +1,9 @@
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { useEffect, useLayoutEffect, useState } from 'react'
 import { AppShell, ToastHost } from './components/AppShell'
+import { ErrorBoundary } from './components/ErrorBoundary'
+import { MaintenanceGate } from './components/MaintenanceGate'
+import { installErrorReporting } from './lib/errors'
 import { useStore } from './data/store'
 import { useAuthBootstrap } from './hooks/useAuthBootstrap'
 import { authExpired, hasAuthStamp, isClassroomDevice, markLogin } from './lib/session'
@@ -136,25 +139,23 @@ function ClassroomGate({ children }: { children: React.ReactNode }) {
                 教师账号不能在这台设备上打开教室端。
               </p>
               <p className="mt-2" style={{ color: 'var(--color-ink2)' }}>
-                这块屏是<b>挂在教室里给学生看</b>的，而教师账号在它上面渲染的是
-                <b>你自己的全部班级数据</b>（名单、收缴、讲评材料）。
-                只提醒一句就放行，等于让学生有机会看到这些 —— 所以这里直接拦住。
+                这块屏是挂在教室里给学生看的，而教师账号在它上面渲染的是
+                你自己的全部班级数据（名单、收缴、讲评材料）。
               </p>
               <p className="mt-3" style={{ color: 'var(--color-ink2)' }}>
                 <b>三条出路：</b>
               </p>
               <ul className="mt-1" style={{ color: 'var(--color-ink3)', paddingLeft: 18 }}>
                 <li>
-                  一体机上请用<b>教室端账号</b>登录 —— 教室端账号只看得见它自己那个班，
-                  这正是它的用途（在「我的 → 教室端账号」里建）。
+                  一体机上请用教室端账号登录 —— 教室端账号只看得见它自己那个班
+                  （在「我的 → 教室端账号」里建）。
                 </li>
                 <li>
-                  想核对这块屏长什么样：去<b>另一台设备</b>（自己的电脑/手机）打开
-                  <code> /classroom</code>，那边的设备标记不是教室端，照常可看。
+                  想核对这块屏长什么样：去另一台设备（自己的电脑/手机）打开
+                  <code> /classroom</code>，照常可看。
                 </li>
                 <li>
-                  这台机器本来就是教师端：到<b>登录页用教师密码登一次</b>
-                  （登录会把设备角色改回教师端），之后就能正常进教师控制台。
+                  这台机器本来就是教师端：到登录页用教师密码登一次，之后就能正常进教师控制台。
                 </li>
               </ul>
               <div className="mt-4 flex flex-wrap gap-2">
@@ -204,7 +205,6 @@ function ClassroomGate({ children }: { children: React.ReactNode }) {
         >
           预览模式 —— 你用的是<b>教师账号</b>，显示的是你自己的班。
           一体机上那台用的是教室端账号，只看得见它自己那个班。
-          ⚠️ 在<b>被标成教室端的设备</b>上这条路是**拦住**的（那台屏是给学生看的）。
         </div>
       ) : null}
       {children}
@@ -253,10 +253,6 @@ function SyncErrorBanner() {
         <b>云端同步出错，改动可能没有保存。</b>
         <span style={{ display: 'block', opacity: 0.9 }}>
           {syncError}
-          <span style={{ opacity: 0.8 }}>
-            {' '}
-            —— 若你刚才被踢回登录页，原因大概率就是它（数据没读全，路由守卫会当成"未登录"）。
-          </span>
         </span>
       </span>
       <button
@@ -344,10 +340,29 @@ function useDevInjection() {
 export default function App() {
   useAuthBootstrap()
   useDevInjection()
+  /*
+   * 🆕 2026-09-29 管理台第二期：装前端错误上报的三个入口里的两个
+   *    （`window.onerror` + `unhandledrejection`；第三个是下面的 `<ErrorBoundary>`）。
+   * ⚠️ 它在**最外层**装：登录页 / 教室端 / `hydrate()` 失败这三个"没有会话"的现场
+   *    也必须报得上来（判据全在服务端：`report_frontend_error()` 自己做限流与截断）。
+   */
+  useEffect(() => installErrorReporting(), [])
   return (
+    <ErrorBoundary>
     <BrowserRouter>
       <ToastHost />
       <SyncErrorBanner />
+      {/*
+        🆕 维护模式闸门（2026-09-29 管理台第二期）。
+
+        🔴 它挂在 `<Routes>` **外面**：维护一开，**当前页整块被替换成维护画面**
+           （下一次轮询 / 下一次切回标签页时生效 —— 用户原话是"所有在线用户
+           强制返回到一个正在维护中的页面"）。
+        🔴 **两个豁免写在 `MaintenanceGate.tsx` 的文件头**：`/admin`（超管必须还能
+           关掉它，否则"开了关不掉"）与 `/classroom`（那块屏要自己渲染维护画面，
+           因为**心跳必须照发**、学生数据要就地清掉）。
+      */}
+      <MaintenanceGate>
       <Routes>
         <Route path="/login" element={<Login />} />
         {/*
@@ -623,6 +638,8 @@ export default function App() {
         />
         <Route path="*" element={<NotFound />} />
       </Routes>
+      </MaintenanceGate>
     </BrowserRouter>
+    </ErrorBoundary>
   )
 }

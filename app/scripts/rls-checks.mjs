@@ -2391,6 +2391,326 @@ await withLock(async () => {
     }
 
     /* ============================================================
+       二·之七 🆕 管理台第二期（§23 / §24 / §25 / §26）
+       ------------------------------------------------------------
+       四件事，每一件都要有**反向对照**（否则就是"永远为绿"的摆设）：
+
+         ① **维护模式（`site_state`）**：一张设置表，**开 RLS、零策略、连 SELECT 都不给**
+            —— 读只有一个公开出口（`GET /api/status`，匿名、只回 3 个字段），
+            写只有一个出口（`POST /api/admin/maintenance`，判据 `is_super_admin()`）。
+            ⚠️ 给前端 select 这张表的权限 = **将来往里放任何东西都匿名可见**。
+         ② **前端错误日志（`frontend_errors`）**：**匿名能上报**（这是本项目唯一一个
+            对匿名开放的写接口），但**读不到**；上报函数自己做**截断 + 限流**。
+         ③ **用户反馈（`feedback`）**：零策略、连 SELECT 都不给（RLS 管不了列，
+            而"内部字段不能给作者看"是列级的事）；判据 `can_contact_admin`。
+         ④ **数据库用量（`db_usage_report()`）**：只有服务端能调（anon / 老师都调不动）。
+
+       ⚠️ 与 `admin-checks` 的分工：那边测**接口与判据链**（假 Supabase + 真 Function），
+          这一节测**数据库自己守不守得住**（真 PGlite）—— 两边都要跑才算覆盖。
+       ============================================================ */
+
+    section('二·之七 🆕 管理台第二期（§23–§26）：维护设置 / 错误上报 / 反馈 / 用量报告')
+
+    {
+      /* `asUser` 只会切到 authenticated；匿名要自己来一段（同一套：事务 + rollback） */
+      async function asAnon(db, fn) {
+        await db.exec('begin')
+        try {
+          await db.query(`select set_config('request.jwt.claims', $1, true)`, [
+            JSON.stringify({ role: 'anon' }),
+          ])
+          await db.exec('set local role anon')
+          return await fn()
+        } finally {
+          await db.exec('rollback')
+        }
+      }
+      /**
+       * 与 `asAnon` 同款，但**提交**（不回滚）。
+       * 🔴 为什么需要它：错误上报那几条要**读回刚写进去的那一行**，
+       *    而 `frontend_errors` 对 anon **连 SELECT 都没给**（这正是要钉的不变量）——
+       *    所以只能"以 anon 身份写、以属主身份读"，那就必须提交。
+       *    写进去的行在这一节的末尾**统一删掉**（不让它影响后面的可见量断言）。
+       */
+      async function asAnonCommit(db, fn) {
+        await db.exec('begin')
+        try {
+          await db.query(`select set_config('request.jwt.claims', $1, true)`, [
+            JSON.stringify({ role: 'anon' }),
+          ])
+          await db.exec('set local role anon')
+          const out = await fn()
+          await db.exec('commit')
+          return out
+        } catch (e) {
+          await db.exec('rollback')
+          throw e
+        }
+      }
+
+      const policiesOf = async (table) =>
+        (
+          await db.query(
+            `select policyname, cmd from pg_policies where schemaname='public' and tablename=$1 order by policyname`,
+            [table],
+          )
+        ).rows.map((r) => `${r.policyname}:${r.cmd}`)
+
+      const canSelect = async (role, table) =>
+        Boolean(
+          (
+            await db.query(`select has_table_privilege($1, $2, 'select') as v`, [role, table])
+          ).rows[0].v,
+        )
+
+      /* ---------------- ① 维护模式：一张"谁都读不到"的设置表 ---------------- */
+
+      eq('🔴 `site_state`：**一条策略都没有**（读只有一个公开出口 `/api/status`）', await policiesOf('site_state'), [])
+      eq(
+        '🔴 `site_state`：anon / authenticated **连 SELECT 都没给**（给了 = 将来放任何东西都匿名可见）',
+        [await canSelect('anon', 'site_state'), await canSelect('authenticated', 'site_state')],
+        [false, false],
+      )
+      /* 反向对照：换一张**故意**给老师读的表，同样两个问法都要回 true（证明上面那两条不是"什么都查不到"） */
+      eq(
+        '正向对照：`announcements` 对 authenticated 是**能读**的（证明上面那个 false 不是"权限函数坏了"）',
+        await canSelect('authenticated', 'announcements'),
+        true,
+      )
+      eq(
+        '🔴 `admin_audit`（操作留痕）：同样零策略、连 SELECT 都不给（只有服务端能写能读）',
+        [await policiesOf('admin_audit'), await canSelect('anon', 'admin_audit'), await canSelect('authenticated', 'admin_audit')],
+        [[], false, false],
+      )
+      /* 种子行：`key='maintenance'` 必须已经存在（`insert … on conflict do nothing`） */
+      const seed = await db.query(`select key, enabled, until, scheduled_from from site_state`)
+      eq('种子行在：`site_state` 里恰好一行 `maintenance`（幂等：重跑不会多一行）', seed.rows.length, 1)
+      eq('种子行的初始状态是**未开启**', [seed.rows[0].key, seed.rows[0].enabled, seed.rows[0].until], ['maintenance', false, null])
+
+      /* 区间自洽那条 check（与公告同一条纪律）：结束必须晚于开始 */
+      try {
+        await db.query(
+          `insert into site_state (key, enabled, scheduled_from, until)
+           values ('bad-range', true, now(), now() - interval '1 hour')`,
+        )
+        ok('🔴 维护区间：`until` 早于 `scheduled_from` → 拒（否则那一段永远不会生效）', false, '居然插进去了')
+      } catch (e) {
+        const m = shortErr(e)
+        ok(
+          '🔴 维护区间：`until` 早于 `scheduled_from` → 拒（约束名：site_state_range_check）',
+          /site_state_range_check/i.test(m),
+          m,
+        )
+      }
+      /* 反向对照：合法区间插得进去 */
+      const okRange = await db.query(
+        `insert into site_state (key, enabled, scheduled_from, until)
+         values ('ok-range', true, now(), now() + interval '4 hours') returning key`,
+      )
+      eq('反向对照：合法区间（4 小时窗口）插得进去', okRange.rows.length, 1)
+      await db.query(`delete from site_state where key = 'ok-range'`)
+
+      const stateWrites = await attempt(db, U.super, `update site_state set enabled = true where key = 'maintenance'`)
+      denied('🔴 连超管（人）都改不动 `site_state`（写只走服务端 service_role）', stateWrites)
+
+      /* ---------------- ② 前端错误上报：匿名能写、谁都读不到、截断 + 限流 ---------------- */
+
+      eq('🔴 `frontend_errors`：**一条策略都没有**（读只走服务端）', await policiesOf('frontend_errors'), [])
+      eq(
+        '🔴 `frontend_errors`：anon / authenticated **连 SELECT 都没给**',
+        [await canSelect('anon', 'frontend_errors'), await canSelect('authenticated', 'frontend_errors')],
+        [false, false],
+      )
+      {
+        /*
+         * ⚠️ 上报必须**在同一次 `asAnon()` 里**读回那一行 —— `asUser` 那套是
+         *    "事务 + 一律 rollback"，跨调用再看就没有那一行了（第一版就是这么红的）。
+         */
+        const report = (username, role, view, message, stack = '', ua = '', env = 'web', sync = '') =>
+          asAnonCommit(db, async () => {
+            const j = (
+              await db.query(
+                `select report_frontend_error($1,$2,$3,$4,$5,$6,$7,$8) as j`,
+                [username, role, view, message, stack, ua, env, sync],
+              )
+            ).rows[0].j
+            return { j }
+          })
+
+        /* 截断：message 500 / stack 2000 / ua 300 / view 120（**每一列都单独量**） */
+        const long = 'x'.repeat(3000)
+        const r = await report(long, long, long, long, long, long)
+        eq('匿名能上报（回话 ok=true）', r.j.ok, true)
+        /* ⚠️ 以**属主**身份读回那一行：anon 读不到（这正是上面 `canSelect` 那两条断言的事） */
+        const rowOf = async (id) =>
+          (
+            await db.query(
+              `select length(username) as u, length(role) as r, length(view) as v,
+                      length(message) as m, length(stack) as s, length(ua) as a, message
+                 from frontend_errors where id = $1`,
+              [id],
+            )
+          ).rows[0]
+        const row = await rowOf(r.j.id)
+        eq(
+          '🔴 服务端**逐列截断**（username 60 / role 40 / view 120 / message 500 / stack 2000 / ua 300）',
+          [row.u, row.r, row.v, row.m, row.s, row.a],
+          [60, 40, 120, 500, 2000, 300],
+        )
+        const empty = await report('', '', '', '', '', '')
+        eq(
+          '空消息归一成「未知错误」（**不是空串** —— 一行空白比"未知错误"更难查）',
+          (await rowOf(empty.j.id)).message,
+          '未知错误',
+        )
+
+        /* 🔴 限流：同一人 5 分钟 ≤ 20 条，第 21 次回**正常 JSON**（不是错误码） */
+        const rate = await asAnon(db, async () => {
+          const out = []
+          for (let i = 0; i < 22; i++) {
+            const rr = await db.query(
+              `select report_frontend_error('限流探针', 'teacher', '/x', '第 ' || $1 || ' 条', '', '', 'web', '') as j`,
+              [i],
+            )
+            out.push(rr.rows[0].j)
+          }
+          return out
+        })
+        const oks = rate.filter((x) => x.ok === true).length
+        const limited = rate.filter((x) => x.ok === false && x.reason === 'rate-limited')
+        eq('🔴 限流：同一人 5 分钟内**最多 20 条**进得来（不是 22）', oks, 20)
+        eq('而且超限的那几次**全部**回 `{ok:false, reason:"rate-limited"}`（**正常 JSON，不是错误码**）', limited.length, 2)
+        ok(
+          '限流的回话里带 `scope`（是"按人"还是"全表兜底"限的 —— 排错时要知道是哪一层拦的）',
+          limited.every((x) => x.scope === 'account'),
+          JSON.stringify(limited[0] ?? null),
+        )
+        /* 反向对照：**换一个人**（另一个 username）照样报得上来 —— 证明限流是按人，不是把全表锁死 */
+        const other = await report('另一个人', 'teacher', '/y', '正常一条')
+        eq('反向对照：**换一个人**照样进得来（限流是按人，不是把整张表锁死）', other.j.ok, true)
+
+        /* 🔴 URL 的 query string 必须被服务端洗掉（I49：不许把 token 写进这张表） */
+        const scrubbed = await report(
+          'u',
+          'teacher',
+          '/x',
+          '见 https://a.example.com/p?access_token=SECRET123&x=1 这里',
+        )
+        const scrubbedMsg = (await rowOf(scrubbed.j.id)).message
+        ok(
+          '🔴 服务端会把 URL 的 query string 洗掉（`?access_token=…` 一个字都不留）',
+          scrubbedMsg.includes('https://a.example.com/p') && !scrubbedMsg.includes('SECRET123'),
+          scrubbedMsg,
+        )
+        ok(
+          '反向对照：洗过之后**正文主体仍然在**（不是把整条消息扔了）',
+          scrubbedMsg.includes('这里'),
+          scrubbedMsg,
+        )
+        /* `has_pii` 是一个**启发式**标记（15+ 位数字 / 邮箱） */
+        const pii = await report('u', 'teacher', '/x', '张三 138001380001234 没交')
+        eq('启发式 `has_pii`：15+ 位数字会被标出来（**它是启发式，界面上必须这么写**）', pii.j.has_pii, true)
+        const noPii = await report('u', 'teacher', '/x', '导出按钮点了没反应')
+        eq('反向对照：普通错误文案**不**被标成含隐私（不是"一律 true"）', noPii.j.has_pii, false)
+
+        /* 收尾：把这一节写进去的行删掉（不影响后面的可见量断言） */
+        await db.query(`delete from frontend_errors`)
+      }
+      /* 老师也读不到（读只走服务端超管接口）—— ⚠️ 这里是**权限拒绝**，不是"0 行" */
+      const readErr = await attempt(db, U.super, `select count(*) from frontend_errors`)
+      denied('🔴 连超管（人）也读不到错误日志（`/api/admin/errors` 才读得到）', readErr)
+
+      /* ---------------- ③ 用户反馈：零策略 + 判据 ---------------- */
+
+      eq('🔴 `feedback`：**一条策略都没有**（读也走服务端 —— RLS 管不了列）', await policiesOf('feedback'), [])
+      eq(
+        '🔴 `feedback`：anon / authenticated **连 SELECT 都没给**（内部字段不能给作者看，所以整表收口）',
+        [await canSelect('anon', 'feedback'), await canSelect('authenticated', 'feedback')],
+        [false, false],
+      )
+      {
+        const can = (uid) =>
+          db.query(`select can_contact_admin_for($1) as v`, [uid]).then((r) => r.rows[0].v === true)
+        eq('判据 `can_contact_admin`：在册教师 → true', await can(U.phy), true)
+        eq('判据：**教室端 → false**（那块屏没有「我的」页，也没有"给学校提意见"这个身份）', await can(U.room), false)
+        eq('判据：认不出的 uid → false（service_role 那条路不能凭幽灵 id 写库）', await can('00000000-0000-0000-0000-000000000000'), false)
+        /* 两件套：裸版 grant 给 authenticated，`_for` 变体 revoke（I33） */
+        eq(
+          '两件套（I33）：`can_contact_admin()` 裸版对 authenticated **有** EXECUTE',
+          Boolean(
+            (
+              await db.query(
+                `select has_function_privilege('authenticated', 'public.can_contact_admin()', 'EXECUTE') as v`,
+              )
+            ).rows[0].v,
+          ),
+          true,
+        )
+        /* `mail_state` 的四值由 check 钉死；塞第五个值必须报错（属主身份也插不进去） */
+        try {
+          await db.query(
+            `insert into feedback (author_id, body, mail_state) values ($1, '探针', 'nonsense')`,
+            [U.phy],
+          )
+          ok('🔴 `mail_state` 的 check 钉住了取值（第五个值插不进去）', false, '居然插进去了')
+        } catch (e) {
+          const m = shortErr(e)
+          ok('🔴 `mail_state` 的 check 钉住了取值（第五个值插不进去）', /feedback_mail_state_check/i.test(m), m)
+        }
+        const okFb = await db.query(
+          `insert into feedback (author_id, body) values ($1, '合法的一条') returning id, mail_state`,
+          [U.phy],
+        )
+        eq('反向对照：合法的一条插得进去，且 `mail_state` 默认 `pending`（"还没试发"）', okFb.rows[0].mail_state, 'pending')
+        await db.query(`delete from feedback where id = $1`, [okFb.rows[0].id])
+      }
+
+      /* ---------------- ④ 数据库用量报告：只有服务端能调 ---------------- */
+
+      {
+        eq(
+          '🔴 `db_usage_report()` 对 anon / authenticated **都 revoke 了**（只有 service_role 能调）',
+          [
+            Boolean(
+              (
+                await db.query(
+                  `select has_function_privilege('anon', 'public.db_usage_report()', 'EXECUTE') as v`,
+                )
+              ).rows[0].v,
+            ),
+            Boolean(
+              (
+                await db.query(
+                  `select has_function_privilege('authenticated', 'public.db_usage_report()', 'EXECUTE') as v`,
+                )
+              ).rows[0].v,
+            ),
+          ],
+          [false, false],
+        )
+        /* 正向对照：以属主身份调它 —— 四个键必须在，而且**只量数、不判色** */
+        const rep = (await db.query(`select db_usage_report() as j`)).rows[0].j
+        eq(
+          '正向对照：属主调得到，回话就是那四个键（totalBytes / tables / questionMetaBytes / archives）',
+          Object.keys(rep).sort(),
+          ['archives', 'questionMetaBytes', 'tables', 'totalBytes'],
+        )
+        ok('而且 `totalBytes` 是个**数字**（不是颜色、也不是布尔 —— 判色在前端）', typeof rep.totalBytes === 'number', typeof rep.totalBytes)
+        ok(
+          '🔴 回话里**没有** `quotaBytes`（配额那一个常量只许在 `adminChart.ts` 一处 —— 两处实现迟早对不上）',
+          !('quotaBytes' in rep),
+          Object.keys(rep).join('、'),
+        )
+        ok(
+          '而且档案排行里**只有** 档案 id / 班级名 / 字节数（没有任何学生、题目、成绩字段）',
+          rep.archives.length > 0 &&
+            rep.archives.every((a) => Object.keys(a).sort().join(',') === 'assignmentId,bytes,className'),
+          JSON.stringify(rep.archives[0] ?? null),
+        )
+      }
+    }
+
+    /* ============================================================
        三、逐人可见量（文档 §16.4 ① 那张「该看见」的表）
        ============================================================ */
 
@@ -3173,8 +3493,9 @@ await withLock(async () => {
        * ---- ⑧ 🔴 没有登录态时裸版对**所有人**都是 false ----
        * 这一条不是在测权限，是在**钉住"为什么必须有 `_for` 变体"**：
        * 用户实测过 —— 在 Supabase SQL 编辑器里跑 `can_edit_exam(...)`，
-       * 示例教师 / demo-teacher / 所有班**全是 false**，于是"示例教师能不能建高二(1)班的物理考试"
-       * 这个问题当时没有答案。这里以脚本身份（无会话、auth.uid() = NULL）复现同一件事。
+       * **两位真实教师 / 所有班全是 false**（真名不写进仓库，见隐私整改），
+       * 于是"某位老师能不能建高二(1)班的物理考试"这个问题当时没有答案。
+       * 这里以脚本身份（无会话、auth.uid() = NULL）复现同一件事。
        */
       const editorNull = await db.query(`select can_edit_exam(array[$1]::uuid[], 'physics', '物理') as v`, [C.c1])
       eq(
@@ -3203,13 +3524,18 @@ await withLock(async () => {
        *
        * 🆕 21 → **22**：`can_publish_announcement_for` 是**同日「公告轮」（`schema.sql` §22）**
        *    新增的判据（公告 ≠ 通知，两个实体各自独立），它同样守两件套（`_for` + 裸版 + 一律 revoke）。
+       * 🆕 22 → **23**：`can_contact_admin_for`（**管理台第二期**，`schema.sql` §25）——
+       *    它守的是"**在册教师 且 不是教室端** 才能给管理员发消息"，
+       *    被**用户反馈**（`/api/feedback`）与**备份通知**（`/api/mail` 的 `backup`）**共用**
+       *    （一个判据一种语义：不为第二条路再发明一个名字相近的函数）。
        *    这一行只是"数一数"的记账：**判据别只写裸版**这条纪律一个字没变。
        */
       const forNames = forCount.rows.map((r) => r.proname)
       ok(
-        '`_for` 变体一共 22 个（13 + 管理架构轮 8 个 + 🆕公告轮 1 个 `can_publish_announcement_for`）' +
+        '`_for` 变体一共 23 个（13 + 管理架构轮 8 个 + 公告轮 1 个 `can_publish_announcement_for`' +
+          ' + 🆕管理台第二期 1 个 `can_contact_admin_for`）' +
           ' —— id 变体也算判据的两件套，新增判据别只写裸版',
-        forNames.length === 22,
+        forNames.length === 23,
         `实际 ${forNames.length} 个：${forNames.join('、')}`,
       )
       const hasBare = await db.query(`select has_function_privilege('authenticated', 'public.can_edit_exam(uuid[], text, text)', 'EXECUTE') as v`)
