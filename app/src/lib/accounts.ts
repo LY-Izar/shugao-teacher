@@ -77,11 +77,36 @@ export type DirTeacher = {
    * ⚠️ 老服务端 / 老库上这个字段不存在 → 页面一律写 `t.departments ?? []`。
    */
   departments: string[]
+  /**
+   * 🆕 **这个人能不能被选去"教书"**（班主任 / 年级主任 / 走班老师 / 批量写任教关系那几处下拉）。
+   *
+   * 🔴 判据在**服务端**（`functions/api/teacher-account.ts` 的 `loadDirectory()`）：
+   *    没有 `super` 身份 = `true`。最高管理员是平台主人、不是这个学校的任课老师，
+   *    所以**不该被当成老师选中去教书**；⚠️ 教务处（`admin`）照旧 `true`。
+   *
+   * ⚠️ 它**只管"能不能被选去教书"**：`false` 的人**照旧出现在「教师管理」名单里**
+   *    （那一页管理的是账号，不是任教分配）—— 所以这是**带标记**，不是"从列表里删掉"。
+   */
+  teachable: boolean
 }
 export type Directory = {
   teachers: DirTeacher[]
   classes: { id: string; name: string }[]
   grades: { id: string; name: string }[]
+}
+
+/**
+ * 🆕 2026-10-09：**"选老师去教书"的那几处下拉用这一份**。
+ *
+ * 🔴 判据不在前端：只照服务端回的那一位 `teachable` 筛（M1/M2 —— 前端不自己看 `roles`）。
+ *    落点（`grep teachers.map` 逐个过完的那一份清单）：
+ *      · `pages/GradeSetup.tsx` 四处 —— 年级主任 / 班主任 / 按老师批量写任教关系 / 走班班老师
+ *      · `pages/Classes.tsx` 一处 —— 走班班的「走班老师」
+ *    ⚠️ **不在**这里的：「教师管理」（`pages/TeacherAccounts.tsx`）与部门分配、
+ *    以及 `GradeSetup` 里那句"班主任配齐没"的计数 —— 那些是**管理名单/统计**，照旧看全部人。
+ */
+export function teachableOnly(list: readonly DirTeacher[]): DirTeacher[] {
+  return list.filter((t) => t.teachable)
 }
 export type CreatedAccount = {
   id: string
@@ -188,6 +213,24 @@ export const resetTeacherPassword = (teacherId: string) =>
  */
 export const renameTeacher = (teacherId: string, name: string) =>
   call<{ teacher: { id: string; name: string } }>({ action: 'rename', teacherId, name })
+
+/**
+ * 🆕 2026-10-06：存**教师档案**（家庭住址 / 电话号码 / 邮箱，`teacher_profiles`）。
+ *
+ * 🔴 **判据在服务端那一句 `can_create_teacher_accounts()`**（超管 / 教务处 / 办公室主任）——
+ *    与"建号 / 部门 / 显示姓名"同一档，这里**不重写规则**。
+ *    ⚠️ 老师本人改不了自己的档案（他读得到自己那一行，写不了）—— 这是本轮的决定，
+ *    理由在 `supabase/schema.sql` §36（"改档案"是管档案的人的活）。
+ *
+ * 🔴 它**不碰登录账号**：`email` 是**联系邮箱**，登录名在 `auth.users.email` —— 两回事。
+ *
+ * ⚠️ 三个字段**全可空**：空串 = 清掉这一格（服务端落库统一成 null）。
+ *    形状（电话 / 邮箱）由数据库那两条 check 守，服务端把 23514 翻成一句人话回来。
+ */
+export const saveTeacherProfile = (
+  teacherId: string,
+  profile: { homeAddress: string; phone: string; email: string },
+) => call<{ profile: { homeAddress: string; phone: string; email: string } }>({ action: 'profile', teacherId, profile })
 
 export const assignSubject = (input: {
   teacherId: string

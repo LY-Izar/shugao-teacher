@@ -1,15 +1,20 @@
 import type { ImportRow, Student } from '../data/types'
 import { isSerial } from './serial'
 
-/* ---------------- 名单的统一排序（**唯一一处**） ----------------
+/* ---------------- 名单的统一排序（**只有这一处**） ----------------
 
-   P1（序列号键迁移）之后，"按学号排"这句话有了两个候选：**序列号**还是**班内学号**。
+   名单顺序**只在这里定义**，页面里不许自己写 `.sort()` 的比较（各写一份必然走散）。
+   两个比较器，按"屏上显示的是哪个号"分工：
+     · `compareRoster()`    —— **序列号**优先 → 走班班 / 年级名单（跨行政班不会出现"两个 12 号"）；
+     · `compareStudentNo()` —— **班级内学号** → 班级页名单 / 错题集（屏上显示的就是它）。
+
    选**序列号**（`选科走班实施计划.md` P1 的"名单排序改成按序列号排"），理由：
      · 序列号是**全校唯一**的 → 走班班（跨行政班）的名单用它排才不会出现"两个 12 号"；
      · 它按届 + 届内序号生成，同一届的名单顺序在任何班里都一致。
    ⚠️ 兼容期：**还没有序列号的学生**（线上库还没跑 §20）按班内学号排 ——
       老库上的显示顺序一个字节都不变。
-   ⚠️ 界面上**显示**的仍然是班内学号（Q6：老师看到的东西一模一样）。 */
+   ⚠️ 界面上**显示**的仍然是班内学号（Q6：老师看到的东西一模一样）；
+      所以"屏上显示班内学号"的那两块屏（班级页、错题集）改用 `compareStudentNo()`。 */
 export function compareRoster(
   a: Pick<Student, 'serial' | 'studentNo' | 'name'>,
   b: Pick<Student, 'serial' | 'studentNo' | 'name'>,
@@ -19,7 +24,32 @@ export function compareRoster(
   if (sa && sb) return sa.localeCompare(sb) || a.name.localeCompare(b.name)
   if (sa) return -1
   if (sb) return 1
-  return Number(a.studentNo) - Number(b.studentNo) || a.name.localeCompare(b.name)
+  return studentNoValue(a.studentNo) - studentNoValue(b.studentNo) || a.name.localeCompare(b.name)
+}
+
+/* ---------------- 按「班级内学号」排（班级页 / 错题集的名单顺序） ----------------
+
+   ⚠️ **"按学号排"有两个不同的字段**，两个函数各管一边（别混用）：
+     · `compareRoster()`    —— **序列号**优先。走班班（跨行政班）用它排才不会出现"两个 12 号"。
+     · `compareStudentNo()` —— **班级内学号**。班级页的名单、错题集的学生列表用它：
+       那两块屏上**显示**的就是班内学号（序列号是内部键），老师照着屏上的号找人，
+       顺序就得跟屏上那个号一致。**用户 2026-09-26 拍板**：新增学生后要落进他该在的位置，
+       不许追加在末尾（截图口径：44·32·38·5… → 1·2·3…）。
+
+   ⚠️ 必须按**数字**排：直接比字符串会把 `10` 排到 `2` 前面（`'10' < '2'`）。 */
+export function compareStudentNo(
+  a: Pick<Student, 'studentNo' | 'name'>,
+  b: Pick<Student, 'studentNo' | 'name'>,
+): number {
+  return studentNoValue(a.studentNo) - studentNoValue(b.studentNo) || a.name.localeCompare(b.name, 'zh')
+}
+
+/** 班内学号 → 数字。
+ *  不是数字的（空号 / 意外值）当**最大**处理 —— 沉到名单末尾，
+ *  而不是当 0 冲到最前（那看起来像名单错乱）。 */
+function studentNoValue(no: string): number {
+  const t = String(no).trim()
+  return /^\d+$/.test(t) ? Number(t) : Number.MAX_SAFE_INTEGER
 }
 
 /* ============================================================
@@ -383,7 +413,6 @@ export function analyzeRoster(students: Student[]): RosterHealth {
   const active = students.filter((s) => s.status === 'active')
   const nos = active.map((s) => Number(s.studentNo)).filter((n) => Number.isFinite(n))
   const maxNo = nos.length ? Math.max(...nos) : 0
-
   const seen = new Map<number, number>()
   for (const n of nos) seen.set(n, (seen.get(n) ?? 0) + 1)
   const dupNos = [...seen.entries()].filter(([, c]) => c > 1).map(([n]) => String(n))
@@ -403,9 +432,61 @@ export function analyzeRoster(students: Student[]): RosterHealth {
     dupNos,
     dupNames,
     noNumber,
-    healthy: gaps.length === 0 && dupNos.length === 0 && dupNames.length === 0 && noNumber === 0,
+    /*
+     * 🔴 **0 人不算"完整"**（2026-10-08 修）。
+     *    原来这里 `gaps.length === 0 && dupNos.length === 0 && …` 对一个**空名单**恒为真
+     *    —— 一个 0 人的班于是显示「名单完整」、体检写「学号 1–0 连续无缺号，无重号重名」、
+     *    待核对写「正常」。那是这个项目栽过最多次的形状：**没有数据被当成一切正常**
+     *    （RLS 挡下写入返回 0 行不报错 / 心跳条件恒假 / 探针读不到）。
+     *    现在 `count > 0` 是完整的**前提**；"0 人"这件事只有一处判据：`rosterStateOf()`。
+     */
+    healthy: active.length > 0 && gaps.length === 0 && dupNos.length === 0 && dupNames.length === 0 && noNumber === 0,
   }
 }
+
+/* ---------------- 名单这件事的**四态**（读不到 / 空 / 完整 / 待核对） ----------------
+ *
+ * 🔴 为什么要有它（2026-10-08 修的那条链）：
+ *    `analyzeRoster()` 只看"手上这一份名单"，它**分不开**下面四件事 ——
+ *      ① 有 45 人、完整；
+ *      ② 有 45 人、有缺号（待核对）；
+ *      ③ **这个班还没有名单**（0 人）；
+ *      ④ **名单没读到**（老库没有那张表 / 断网）—— 这一条最要命：
+ *         它与 ③ 长得一模一样，而 ③ 又与 ① 长得一模一样（都是"没有缺号"）。
+ *    走班班尤其明显：它的人来自 `class_members`（多对多），
+ *    `students.class_id` 上永远是空的 → 读错了源就恒为 0 人，而屏上写着"名单完整"。
+ *
+ * 判据只有这一处；页面**不许**自己写 `count === 0` 那一套（第二个判定入口 = I17）。
+ */
+export type RosterStateKind = 'unknown' | 'nobody' | 'ok' | 'warn'
+
+export type RosterState = {
+  kind: RosterStateKind
+  /** 名单上的人（`unknown` 时是 0，但**那不是**"这个班没人"） */
+  count: number
+  health: RosterHealth | null
+  /**
+   * 人数从哪儿来的：`students.class_id` 还是 `class_members`（多对多）。
+   * 走班班是后者 —— 屏上"学号 1–N 连续"那套体检对它**没有意义**（它没有班内学号）。
+   */
+  source: 'class' | 'members'
+}
+
+export function rosterStateOf(
+  students: readonly Student[],
+  source: 'class' | 'members',
+  /** `false` = 成员关系那一侧**没读到**（≥0 人这件事无从判断） */
+  known = true,
+): RosterState {
+  if (!known) return { kind: 'unknown', count: 0, health: null, source }
+  const health = analyzeRoster([...students])
+  /* 🔴 `analyzeRoster()` 自己已经把 0 人判成 `healthy: false`；这里只把它翻成四态。
+     不直接读 `health.count === 0` 再拼一套的理由：**判据只有一处**。 */
+  if (health.healthy) return { kind: 'ok', count: health.count, health, source }
+  if (health.count === 0) return { kind: 'nobody', count: 0, health: null, source }
+  return { kind: 'warn', count: health.count, health, source }
+}
+
 
 /* ---------------- 粘贴文本解析 ---------------- */
 

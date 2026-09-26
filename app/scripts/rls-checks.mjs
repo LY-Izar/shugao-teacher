@@ -42,16 +42,19 @@
  *   $env:RLS_NEGATIVE='file-read-closed'   ; node scripts/rls-checks.mjs   # 读策略改成恒假（教室端的文件列表又变成空的）
  *   $env:RLS_NEGATIVE='file-object-wider'  ; node scripts/rls-checks.mjs   # 存储对象的读策略改成恒真（桶里任何文件都能签直链）
  *   $env:RLS_NEGATIVE='department-open'    ; node scripts/rls-checks.mjs   # 🆕 部门那一支两半判据拿掉（空部门也能发 + 年级主任也能发）
+ *   $env:RLS_NEGATIVE='teacher-tier-by-roles' ; node scripts/rls-checks.mjs # 🔴「任课教师」档改回"没有身份行才算"（2026-09-26 那个漏人的形状）
  *   $env:RLS_NEGATIVE='p9-stream-write'    ; node scripts/rls-checks.mjs   # 拿掉"走班班的屏零写"那三条收窄（它能往自己班粘课表）
  *   $env:RLS_NEGATIVE='p9-call-no-manage'  ; node scripts/rls-checks.mjs   # 事务性呼叫放宽成"任教就能发"（科任老师也能叫人）
  *   $env:RLS_NEGATIVE='p10-no-audit'       ; node scripts/rls-checks.mjs   # 拿掉选科变更审计（三个人改了，谁也查不出）
  *   $env:RLS_NEGATIVE='p10-purge-no-confirm' ; node scripts/rls-checks.mjs # 拿掉旧科目数据的二次确认（不确认也能删）
  *   $env:RLS_NEGATIVE='p10-suspend-removes-members' ; node scripts/rls-checks.mjs # 让"休学也移出走班名单"（Q28 = B 明确否掉）
+ *   $env:RLS_NEGATIVE='one-super-index-drop' ; node scripts/rls-checks.mjs     # 🆕 拿掉"全平台只有一个 super"那条部分唯一索引（插第二个超管必须变红）
  *   （改的全是**内存里的 SQL 文本**，仓库文件一个字节都不动。）
  */
 
-import { readFileSync } from 'node:fs'
-import { dirname, resolve as resolvePath } from 'node:path'
+import { readFileSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { dirname, join, resolve as resolvePath } from 'node:path'
+import { tmpdir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { PGlite } from '@electric-sql/pglite'
 import { pgcrypto } from '@electric-sql/pglite/contrib/pgcrypto'
@@ -76,6 +79,12 @@ registerTsResolve()
 const M = await import(pathToFileURL(resolvePath(APP, 'src/data/remote.ts')).href)
 /* `lib/assignments.ts` 那两个纯函数（`isUnassigned` 是"未归属"的**唯一判据**，P5）： */
 const ASG = await import(pathToFileURL(resolvePath(APP, 'src/lib/assignments.ts')).href)
+/*
+ * 🆕 2026-10-06：邮件正文体检那一个纯函数（`looksLikeStudentData`）——
+ * 第十九节要验"学生档案那四个字段（家长电话 / 住址 / 民族 / 出生年月）进没进那条窄判据"。
+ * 跑的是**仓库里那份真文件**，不是这里手抄一份判据。
+ */
+const MAILLIB = await import(pathToFileURL(resolvePath(APP, 'functions/api/_lib/mail.ts')).href)
 
 /* ---------------- 主流程 ---------------- */
 
@@ -150,6 +159,9 @@ await withLock(async () => {
       moral: mk('a1', 4),
       slead: mk('a1', 5),
       llead: mk('a1', 6),
+      /* 🆕 2026-10-08「超管锁死」这一轮的两个人（见 `superLockSeedSql()`） */
+      super2: mk('a1', 7),
+      head2: mk('a1', 8),
     }
     const C = { c1: mk('c0', 1), c2: mk('c0', 2), c3: mk('c0', 3), c4: mk('c0', 4), c5: mk('c0', 5) }
     const S = { s1: mk('50', 1), s2: mk('50', 2), s3: mk('50', 3), s4: mk('50', 4), s5: mk('50', 5), s6: mk('50', 6), s7: mk('50', 7), s8: mk('50', 8) }
@@ -630,6 +642,173 @@ await withLock(async () => {
         }
         return text.replace(re, "if new.status in ('left', 'suspended') and old.status is distinct from new.status then")
       }
+      if (mode === 'teacher-tier-by-roles') {
+        /*
+         * 🔴 「任课教师」那一档的负向对照（2026-09-26 实测的一处**真漏人**）：
+         *    把判据**改回**修之前那一版 —— "一格 `teacher_roles` 都没有才算任课教师"。
+         *    ⚠️ 两处必须**一起**退（收件人那一支 + `notice_role_has_members('teacher')`）：
+         *    只退一处，退回去的就不是那个 bug，而是另一个形状（403 发不出去 / 收件人是空的）。
+         * 期望：二·之四 ⑤′ 里"**有头衔 + 也教课**的老师必须收到"那一条**必须红**
+         *    （唐友余那个形状 —— 这正是用户实测漏掉的人）；
+         *    而"纯任课教师必须收到"仍然绿（phy / chn 一格身份行都没有，旧口径正好也能捞到他们）。
+         */
+        const NEW = 'and exists (select 1 from class_subjects cs where cs.teacher_id = t.id)'
+        const OLD = 'and not exists (select 1 from teacher_roles r where r.teacher_id = t.id)'
+        const hits = text.split(NEW).length - 1
+        if (hits !== 2) {
+          throw new Error(
+            `负向对照锚点对不上：'${NEW}' 在 schema.sql 里出现 ${hits} 次（应为 2 —— ` +
+              `收件人那一支 + notice_role_has_members）`,
+          )
+        }
+        return text.split(NEW).join(OLD)
+      }
+      if (mode === 'assignment-delete-manage-class') {
+        /*
+         * 🆕 负向对照（2026-10-06 收窄 `assignments_delete`）：把去掉的那一支
+         * `can_manage_class(class_id)` **加回去** = "班主任 / 年级主任 / 教务处删得掉别人的作业档案"
+         *（= 这一轮之前那个形状：改不了却删得掉，而删除不可恢复）。
+         * 期望：第五节的「① 班主任删…被拒」「② 年级主任…」「③ 教务处…」**必须红**；
+         *      而「④ 建档人自己仍删得掉」「⑤ 本班本科老师删得掉」照旧绿。
+         */
+        const re =
+          /(create policy assignments_delete on assignments for delete to authenticated\s*\n\s*using \(\s*\n\s*teacher_id = auth\.uid\(\)\s*\n)/
+        if (!re.test(text)) {
+          throw new Error('负向对照锚点没找到：assignments_delete 那条策略的形状变了（模式 assignment-delete-manage-class）')
+        }
+        return text.replace(re, '$1    or can_manage_class(class_id)\n')
+      }
+      if (mode === 'profile-classroom') {
+        /*
+         * 🆕 学生档案（§35）的负向对照①：把读策略里那句 `not is_classroom_account()`
+         * 拿掉 = "教室端也读得到家长电话/家庭住址"（= 这一轮之前那个形状）。
+         * 期望：第十九节"教室端一行都读不到"**必须红**（而且它一定会红成"读到 3 行"）。
+         * 🆕 同一句也作用在**教师档案**（§36）那条读策略上：
+         *    期望第二十节"教室端读教师档案 0 行"**也必须红**。
+         */
+        const re =
+          /(create policy student_profiles_visible on student_profiles[\s\S]*?)not is_classroom_account\(\)\s*\n\s*and /
+        if (!re.test(text)) {
+          throw new Error('负向对照锚点没找到：student_profiles_visible 里那句教室端守卫不见了（模式 profile-classroom）')
+        }
+        let out = text.replace(re, '$1')
+        const reT =
+          /(create policy teacher_profiles_visible on teacher_profiles[\s\S]*?)not is_classroom_account\(\)\s*\n\s*and /
+        if (!reT.test(out)) {
+          throw new Error('负向对照锚点没找到：teacher_profiles_visible 里那句教室端守卫不见了（模式 profile-classroom）')
+        }
+        out = out.replace(reT, '$1')
+        return out
+      }
+      if (mode === 'profile-write-open') {
+        /*
+         * 🆕 负向对照②：把三条写策略里的 `can_manage_class(…)` 换成恒真
+         * = "谁都能改学生档案"（正是"读得宽"被错当成"写得宽"的那个形状）。
+         * 期望：第十九节"科任老师改不了"那三条**必须红**（班主任那几条照旧绿）。
+         * 🆕 同一模式也把**教师档案**（§36）那两条写策略换成恒真：
+         *    期望第二十节"老师本人 / 年级主任 / 班主任 / 教室端改不了"**必须红**。
+         */
+        const re =
+          /(create policy student_profiles_(?:insert|update|delete) on student_profiles[\s\S]*?)(?=;\n)/g
+        if (!/create policy student_profiles_update/.test(text)) {
+          throw new Error('负向对照锚点没找到：student_profiles 那三条写策略不见了（模式 profile-write-open）')
+        }
+        let n = 0
+        const out = text.replace(re, (seg) => {
+          n++
+          return seg.replace(
+            /can_manage_class\(\(select s\.class_id from students s where s\.id = student_profiles\.student_id\)\)/g,
+            'true',
+          )
+        })
+        if (n !== 3) throw new Error(`负向对照锚点对不上：只改到 ${n} 条写策略（应为 3）`)
+        const reT =
+          /(create policy teacher_profiles_(?:insert|update) on teacher_profiles[\s\S]*?)(?=;\n)/g
+        if (!/create policy teacher_profiles_update/.test(out)) {
+          throw new Error('负向对照锚点没找到：teacher_profiles 那两条写策略不见了（模式 profile-write-open）')
+        }
+        let nt = 0
+        const out2 = out.replace(reT, (seg) => {
+          nt++
+          return seg.replace(/can_create_teacher_accounts\(\)/g, 'true')
+        })
+        if (nt !== 2) throw new Error(`负向对照锚点对不上：只改到 ${nt} 条教师档案写策略（应为 2）`)
+        return out2
+      }
+      if (mode === 'profile-mask-off') {
+        /*
+         * 🆕 负向对照③：把 `report_frontend_error()` 里那两句"抹掉学生档案 PII 值"拿掉
+         * = 上报的正文里**原样留着**家长电话（正是这一轮之前的样子）。
+         * 期望：第十九节"值被抹掉"**必须红**，而"has_pii 标出来了"照旧绿。
+         */
+        const re =
+          /\n\s*v_message := regexp_replace\(v_message, '\(家长电话[\s\S]*?\[已隐去\]', 'g'\);\n\s*v_stack   := regexp_replace\(v_stack,   '\(家长电话[\s\S]*?\[已隐去\]', 'g'\);/
+        if (!re.test(text)) {
+          throw new Error('负向对照锚点没找到：report_frontend_error 里那两句 PII 抹除不见了（模式 profile-mask-off）')
+        }
+        return text.replace(re, '\n  -- 负向对照：PII 抹除被拿掉')
+      }
+      if (mode === 'profile-teacher-mask-off') {
+        /*
+         * 🆕 教师档案（§1.1 / §36）的负向对照⑤：把 `report_frontend_error()` 里那两句
+         * "抹掉邮箱域名"拿掉 = 上报的正文里**原样留着** `lilaoshi@example.com`。
+         * 期望：第二十节"域名被抹掉"**必须红**，而"`has_pii` 标出来了"照旧绿
+         *    （顺序没被改回去 —— 这正好把"先判再洗"那条纪律也一起钉住）。
+         */
+        const re =
+          /\n\s*--\s*🆕 教师档案的\*\*邮箱\*\*[\s\S]*?v_stack   := regexp_replace\(v_stack,   '\(@\)\[A-Za-z0-9\.-\]\+\\\.\[A-Za-z\]\{2,\}', '\\1\[已隐去\]', 'g'\);/
+        if (!re.test(text)) {
+          throw new Error('负向对照锚点没找到：report_frontend_error 里那两句邮箱抹除不见了（模式 profile-teacher-mask-off）')
+        }
+        const marker = '-- 负向对照：邮箱抹除被拿掉'
+        let out = text.replace(re, `\n  ${marker}`)
+        /*
+         * ⚠️ 上面那段正则吃掉的是**两句**（`v_message` + `v_stack`），但替换只写回一行 ——
+         *    所以下面按"抹除只剩几处"再核一次：两处都该没了。
+         */
+        const left = (out.match(/\(@\)\[A-Za-z0-9\.-\]/g) ?? []).length
+        if (left !== 0 || !out.includes(marker)) {
+          throw new Error(`负向对照锚点对不上：邮箱抹除还剩 ${left} 处（应为 0）`)
+        }
+        return out
+      }
+      if (mode === 'profile-drop-from-payload') {
+        /*
+         * 🆕 负向对照④：把备份 payload（§29.5）里的 `studentProfiles` 那一项拿掉
+         * = "删掉一个年级时那批家长电话**静默消失**"（备份里没有、界面上也没了）。
+         * 期望：第十九节"逐表 dump 覆盖到学生档案"**必须红**。
+         */
+        const re =
+          /\n\s*-- 🆕 学生档案整表带走[\s\S]*?'studentProfiles', coalesce\(\(select jsonb_agg\(to_jsonb\(x\)\) from student_profiles x\n\s*where x\.student_id in \(select id from s\)\), '\[\]'::jsonb\),/
+        if (!re.test(text)) {
+          throw new Error('负向对照锚点没找到：payload 里的 studentProfiles 那一项不见了（模式 profile-drop-from-payload）')
+        }
+        return text.replace(re, '')
+      }
+      if (mode === 'one-super-index-drop') {
+        /*
+         * 🆕 2026-10-08「超管锁死」的负向对照：把 `teacher_roles_one_super` 那条
+         * **部分唯一索引**从 schema 文本里拿掉 = "超管又可以不只一个了"（这一轮之前的形状）。
+         * 期望：§二·之二·之二的「插第二个 super 被数据库拒」**必须红**。
+         *
+         * ⚠️ 与 `direct-revert:*` 同一套路：改的是**内存里的 SQL 文本**，
+         *    仓库里的 `schema.sql` 一个字节都不动。
+         */
+        const re = /\ncreate unique index if not exists teacher_roles_one_super\n[^;]*;\n/
+        if (!re.test(text)) {
+          throw new Error('负向对照锚点没找到：teacher_roles_one_super 那条部分唯一索引不见了（模式 one-super-index-drop）')
+        }
+        return text.replace(re, '\n-- 负向对照：teacher_roles_one_super 被拿掉\n')
+      }
+      if (mode === 'room-account-wider') {
+        /*
+         * 🆕 第二十一节的负向对照：**SQL 一个字节都不动** ——
+         * 那一支改的是**服务端源码**（`functions/api/classroom-account.ts` 的 `mayManage()`），
+         * 真正动手的地方在第二十一节开头那个 `widened` 开关（与 `p5-lose-kind` 同一套路）。
+         * 期望：那一节里"别的年级的年级主任"那几条**必须变红**。
+         */
+        return text
+      }
       throw new Error(`不认识的 RLS_NEGATIVE=${mode}`)
     }
 
@@ -823,6 +1002,9 @@ await withLock(async () => {
      *   moral 德育处主任      scope 无            → 全校**只读** + 发全校通知
      *   slead 教研组长（物理）scope='subject'      → 只读本学科**跨年级**
      *   llead 备课组长（物理）scope='grade_subject' → 只读**本年级**本学科
+     *   🆕 2026-10-08 再加两个（「超管锁死」那一节用，见 §二·之二·之二）：
+     *   super2 打算当第二个超管的人（**这一节不带任何身份行** —— 身份由断言现加）
+     *   head2  第二个班主任（证明"别的角色照旧可以多人"）
      *
      * ⚠️ 他们**不写 `class_subjects`**（组长可以不带课 —— 那正是这个职务的意义，
      *    见 §13.3.1 那段注释：判据来自"哪些班开了这一科"，不是"哪些班我任课"）。
@@ -837,7 +1019,9 @@ await withLock(async () => {
       ('${U.ohead}', 'office@shugao.test',    '{"name":"办公室主任","subject":"历史","subject_code":"history"}'::jsonb),
       ('${U.moral}', 'moral@shugao.test',     '{"name":"德育处主任","subject":"政治","subject_code":"politics"}'::jsonb),
       ('${U.slead}', 'slead@shugao.test',     '{"name":"物理教研组长","subject":"物理","subject_code":"physics"}'::jsonb),
-      ('${U.llead}', 'llead@shugao.test',     '{"name":"高二物理备课组长","subject":"物理","subject_code":"physics"}'::jsonb);
+      ('${U.llead}', 'llead@shugao.test',     '{"name":"高二物理备课组长","subject":"物理","subject_code":"physics"}'::jsonb),
+      ('${U.super2}','super2@shugao.test',    '{"name":"实习维护者","subject":"物理","subject_code":"physics"}'::jsonb),
+      ('${U.head2}', 'head2@shugao.test',     '{"name":"高二(4)班班主任","subject":"物理","subject_code":"physics"}'::jsonb);
 
     insert into teacher_roles (id, teacher_id, role, scope_type, scope_id, subject_code) values
       ('${ROLE.r5}',  '${U.prin}',  'principal',        'school',        ${school},        null),
@@ -965,6 +1149,10 @@ await withLock(async () => {
      *   ok      —— 真的改到了行
      *   blocked —— 没报错，但 0 行（被策略的 using 静默筛掉）
      *   denied  —— 报错（INSERT 的 with check 不满足 / 连表级权限都没给）
+     *
+     * 🆕 2026-10-08：`denied` 再带上 PG 的 `code` 与 `constraint`（`outcome` / `sqlState` / `constraint`）——
+     * 「超管锁死」那一节要分清**是谁拒的**：策略拒（42501）还是**唯一索引**拒（23505）。
+     * 只看 `denied` 是不够的：`denied` 的两种原因在这里恰恰是**两件不同的事**。
      */
     async function attempt(db, uid, sql, params = []) {
       return asUser(db, uid, async () => {
@@ -975,7 +1163,13 @@ await withLock(async () => {
         } catch (e) {
           const m = shortErr(e)
           const kind = /row-level security/.test(m) ? '策略拒绝' : /permission denied/.test(m) ? '表权限拒绝' : '出错'
-          return { outcome: 'denied', affected: 0, detail: `${kind}：${m}` }
+          return {
+            outcome: 'denied',
+            affected: 0,
+            detail: `${kind}：${m}`,
+            sqlState: e?.code ?? null,
+            constraint: e?.constraint ?? null,
+          }
         }
       })
     }
@@ -1198,6 +1392,11 @@ await withLock(async () => {
       eq('is_school_admin()：超管 / 教务处都 true', [await f(U.super, 'is_school_admin()'), await f(U.admin, 'is_school_admin()')], [true, true])
       eq('is_school_admin()：任课老师 false', await f(U.phy, 'is_school_admin()'), false)
       eq(
+        '🔴 is_school_admin()：年级主任 / 班主任 false（2026-10-07 起它还管着"能不能置顶通知"）',
+        [await f(U.grade, 'is_school_admin()'), await f(U.head, 'is_school_admin()')],
+        [false, false],
+      )
+      eq(
         'can_manage_teachers()：超管 / 教务处 true（建号与指派身份同档，§16.8）',
         [await f(U.super, 'can_manage_teachers()'), await f(U.admin, 'can_manage_teachers()')],
         [true, true],
@@ -1349,6 +1548,218 @@ await withLock(async () => {
         await twoPiece('notice_recipient_ids_for', '(uuid)', `'${NOTICE.n1}'`),
         'denied',
       )
+    }
+
+    /* ============================================================
+       二·之二·之二 🆕 2026-10-08：**最高管理员锁死成一个**
+       ------------------------------------------------------------
+       用户拍板：「超管锁死，只能有我一个」（设计文档里 2026-09-24 那句
+       「只留 Izar 一个最高管理员」是同一件事）。背景是教师列表里真的出现了
+       第二个 `super`（内测账号「Gold Award」挂着 6 个身份、其中一个是 `super`）。
+
+       两半，各管一件事：
+         · **数据库那一半**（`schema.sql` §10.1.1 ⑥ 的部分唯一索引 `teacher_roles_one_super`）
+           = "多不了"。这是**锁死**，不是报警 —— 报警只能告诉你有两个。
+         · **判据那一半**（§13.2.2 `can_assign_super_role`）
+           = "谁有资格发"。`can_assign_roles()`（超管 ∪ 教务处）**一个字不动** ——
+           教务处照旧能发班主任 / 年级主任 / 组长，只是**发不了 super**。
+
+       🔴 反向对照（`RLS_NEGATIVE=one-super-index-drop`）：把那条索引 drop 掉 →
+         下面「插第二个 super」**必须变红**（证明它拦的就是这条约束，不是别的东西顺手挡的）。
+       ============================================================ */
+
+    section('二·之二·之二 🆕 超管唯一：插第二个 super 被数据库拒 · 教务处发不了 super · 别的角色不受影响')
+    {
+      const f = (uid, expr) => asUser(db, uid, async () => Boolean((await db.query(`select ${expr} as v`)).rows[0].v))
+
+      /**
+       * 🔴 这一节**故意不走 `authenticated` 那条路**（与别节不同，理由要写清楚）：
+       *    `teacher_roles` 对 authenticated **只 grant 了 select**（§10.4；写一律走服务端
+       *    `/api/teacher-account`，用 service_role 穿过 RLS）。所以从 `authenticated`
+       *    插第二行 super，先撞上的是**表权限**（42501），根本走不到唯一索引 ——
+       *    那样的"被拒"是**假断言**（§三.1 那条反面教材：看起来被拒，其实没走到那一层）。
+       *
+       *    这里要验的恰恰是**唯一索引**（约束）—— 它在**任何**角色上都对表生效，
+       *    而线上服务端正是用 service_role 写这张表的。所以用连接的所有者身份直插，
+       *    断言必须是 **23505 + teacher_roles_one_super**（不是"被拒"两个字）。
+       */
+      const rawInsertRole = (uid, role) =>
+        db.query(
+          `insert into teacher_roles (teacher_id, role, scope_type) values ($1, $2::text, 'school') returning id`,
+          [uid, role],
+        )
+
+      /* ---- ① 🔴 核心：插第二个 super → 被拒，而且是**唯一索引**拒的（23505） ---- */
+      {
+        let deniedRes = null
+        try {
+          await rawInsertRole(U.super2, 'super')
+        } catch (e) {
+          deniedRes = { code: e?.code ?? null, constraint: e?.constraint ?? null, msg: shortErr(e) }
+        }
+        ok('🔴 插第二个 `super` → 被数据库拒（锁死，不是报警）', deniedRes !== null, '居然插进去了')
+        eq(
+          '🔴 而且是**唯一索引**拒的（23505 / `teacher_roles_one_super`）—— 不是别的什么顺手挡的',
+          [deniedRes?.code ?? null, deniedRes?.constraint ?? null],
+          ['23505', 'teacher_roles_one_super'],
+        )
+        eq(
+          '拒绝之后库里仍然只有 1 个 super（那一行**一个字都没写进去**）',
+          Number((await db.query(`select count(*)::int as n from teacher_roles where role = 'super'`)).rows[0].n),
+          1,
+        )
+      }
+
+      /* ---- ② 反向对照：把索引 drop 掉 → ① 必须红（**证明上面那条不是摆设**） ---- */
+      {
+        await db.exec('drop index teacher_roles_one_super')
+        let okAfterDrop = true
+        try {
+          await rawInsertRole(U.super2, 'super')
+        } catch {
+          okAfterDrop = false
+        }
+        ok('反向对照：`drop index teacher_roles_one_super` 之后，第二个 super **插得进去了**', okAfterDrop)
+        eq(
+          '反向对照：这时候库里真的有 2 个 super（= 上面那条断言会红）',
+          Number((await db.query(`select count(*)::int as n from teacher_roles where role = 'super'`)).rows[0].n),
+          2,
+        )
+        /* 立刻收拾干净：删掉多出来的那行 + 把索引建回来（后面每一节都还要用这份夹具） */
+        await db.query(`delete from teacher_roles where teacher_id = $1 and role = 'super'`, [U.super2])
+        await db.exec(`create unique index teacher_roles_one_super on teacher_roles (role) where role = 'super'`)
+        eq(
+          '收拾干净：索引建回来了、super 又只剩 1 个（这一节不留残留）',
+          [
+            Number((await db.query(`select count(*)::int as n from teacher_roles where role = 'super'`)).rows[0].n),
+            Number((await db.query(`select count(*)::int as n from pg_indexes where indexname = 'teacher_roles_one_super'`)).rows[0].n),
+          ],
+          [1, 1],
+        )
+      }
+
+      /* ---- ③ 索引是**部分**的：只约束 role='super' 那一行（别的角色照旧多人） ---- */
+      {
+        const indexdef = (
+          await db.query(`select indexdef from pg_indexes where indexname = 'teacher_roles_one_super'`)
+        ).rows[0].indexdef.replace(/\s+/g, ' ')
+        ok(
+          '🔴 索引定义就钉在 `where role = \'super\'` 上（**部分**唯一索引：别的角色不受影响）',
+          /create unique index teacher_roles_one_super on \S+teacher_roles using btree \(role\) where \(role = 'super'/.test(
+            indexdef.toLowerCase(),
+          ),
+          indexdef,
+        )
+
+        /* 反向对照（**同一件事的另一半**）：别的角色照旧可以多人 —— 这里插第二个班主任 */
+        let secondHead = true
+        try {
+          await rawInsertRole(U.head2, 'head_teacher')
+        } catch {
+          secondHead = false
+        }
+        ok('🔴 别的角色不受影响：第二个**班主任**照旧插得进去（部分索引只管 super 那一行）', secondHead)
+        eq(
+          '而且库里真的有 2 个 head_teacher（不是"插进去了但被别的东西改写"）',
+          Number((await db.query(`select count(*)::int as n from teacher_roles where role = 'head_teacher'`)).rows[0].n),
+          2,
+        )
+        await db.query(`delete from teacher_roles where teacher_id = $1 and role = 'head_teacher'`, [U.head2])
+        eq(
+          '收拾干净：第二个班主任撤掉，head_teacher 回到 1 个',
+          Number((await db.query(`select count(*)::int as n from teacher_roles where role = 'head_teacher'`)).rows[0].n),
+          1,
+        )
+      }
+
+      /* ---- ④ 判据那一半：`can_assign_roles()` 一个字没动，`can_assign_super_role()` 才是新那道 ---- */
+      {
+        eq(
+          'can_assign_super_role()：超管 true（他能发）',
+          await f(U.super, 'can_assign_super_role()'),
+          true,
+        )
+        eq(
+          '🔴 can_assign_super_role()：教务处 false —— **它发不了 super**（只给这一个动作加了一道）',
+          await f(U.admin, 'can_assign_super_role()'),
+          false,
+        )
+        eq(
+          '🔴 对照：`can_assign_roles()` 在教务处上**照旧是 true**（教务处该能发班主任 / 年级主任 / 组长）',
+          await f(U.admin, 'can_assign_roles()'),
+          true,
+        )
+        eq(
+          '两档在教务处上**不相等**（相等就说明那道闸没加上，或者把教务处一起挡了）',
+          [await f(U.admin, 'can_assign_roles()'), await f(U.admin, 'can_assign_super_role()')],
+          [true, false],
+        )
+        eq(
+          '办公室主任 / 任课老师 / 教室端：两个判据都是 false（一个字都没放宽）',
+          [
+            await f(U.ohead, 'can_assign_roles()'),
+            await f(U.ohead, 'can_assign_super_role()'),
+            await f(U.phy, 'can_assign_super_role()'),
+            await f(U.room, 'can_assign_super_role()'),
+          ],
+          [false, false, false, false],
+        )
+      }
+
+      /* ---- ⑤ 两件套（I33）：`_for` 变体一律 revoke，裸版才 grant ---- */
+      {
+        const twoPiece = async (fn, arg) =>
+          asUser(db, U.phy, async () => {
+            try {
+              await db.query(`select ${fn}(${arg})`)
+              return 'ok'
+            } catch (e) {
+              const m = shortErr(e)
+              return /permission denied/.test(m) ? 'denied' : `err:${m}`
+            }
+          })
+        eq(
+          '🔴 两件套（I33）：`can_assign_super_role_for(uid)` 对教师**已 revoke** → 被拒',
+          await twoPiece('can_assign_super_role_for', `'${U.super}'`),
+          'denied',
+        )
+        eq(
+          '对照：裸版 `can_assign_super_role()` 对教师是**能调的**（403/判据本身 false，不是 permission denied）',
+          await f(U.phy, 'can_assign_super_role()'),
+          false,
+        )
+        const priv = await db.query(
+          `select has_function_privilege('authenticated', 'public.can_assign_super_role()', 'EXECUTE') as bare,
+                  has_function_privilege('authenticated', 'public.can_assign_super_role_for(uuid)', 'EXECUTE') as forv`,
+        )
+        eq(
+          '🔴 服务端要拿调用者 JWT 问裸版（不 grant 的话 42501 会被读成"你没权限"）',
+          [Boolean(priv.rows[0].bare), Boolean(priv.rows[0].forv)],
+          [true, false],
+        )
+      }
+
+      /* ---- ⑥ 判据是**定义在引用它的东西之前**的（schema.sql 会当场解析函数名） ---- */
+      {
+        const schema = readFileSync(SCHEMA_FILE, 'utf8')
+        const atAssign = schema.indexOf('create or replace function public.can_assign_roles_for')
+        const atSuper = schema.indexOf('create or replace function public.can_assign_super_role_for')
+        const atBare = schema.indexOf('create or replace function public.can_assign_super_role()')
+        ok(
+          '🔴 `can_assign_super_role_for` 定义在 `can_assign_roles_for` **之后**（它引用后者）',
+          atAssign > 0 && atSuper > atAssign,
+          `can_assign_roles_for@${atAssign} / can_assign_super_role_for@${atSuper}`,
+        )
+        ok(
+          '🔴 裸版定义在 `_for` 变体之后、而且在 grant 之前（顺序错 = 整份 schema.sql 跑不过去）',
+          atBare > atSuper && schema.indexOf('grant execute on function can_assign_super_role()') > atBare,
+          `for@${atSuper} / bare@${atBare}`,
+        )
+        ok(
+          '🔴 那个部分唯一索引在 schema.sql 里有 `if not exists`（幂等：整份可重复跑）',
+          /create unique index if not exists teacher_roles_one_super/.test(schema),
+        )
+      }
     }
 
     /* ============================================================
@@ -1876,10 +2287,29 @@ await withLock(async () => {
             )
           ).rows.map((r) => r.teacher_id)
         const n1 = await ids(NOTICE.n1)
+        /*
+         * 🆕 2026-10-08：**13 → 15**，人数不再写死 —— 但判据反而更紧了。
+         *
+         * 为什么原来的 13 会变：这一轮给夹具加了两个人
+         * （`super2` 打算当第二个超管的人 + `head2` 第二个班主任，见 `newRoleSeedSql()`），
+         * 而「全校」这一支是**所有在册教师**，所以收件人必须跟着多两个 ——
+         * 加人**不影响判据**，这正是它该有的样子。
+         *
+         * ⚠️ 更重要的是：**"不含教室端"现在由数据库自证**，不再靠一个手写常数
+         *    （`人数 = teachers 行数 − 教室端行数`）。写死常数的话，下一次谁改夹具
+         *    都会看到一条红，而它红的**不是判据坏了**，是常数过期了（假红的来源）。
+         */
+        const counts = (
+          await db.query(
+            `select (select count(*)::int from teachers) as all_teachers,
+                    (select count(*)::int from classroom_accounts) as rooms`,
+          )
+        ).rows[0]
+        const wantN1 = Number(counts.all_teachers) - Number(counts.rooms)
         ok(
-          '全校通知的收件人 = 所有**在册教师**（含没有任何 teacher_roles 行的任课教师），且不含教室端',
-          n1.length === 13 && !n1.includes(U.room),
-          `${n1.length} 人（诊断行：teachers=14，其中真老师 13），含教室端=${n1.includes(U.room)}`,
+          '全校通知的收件人 = 所有**在册教师**（含没有头衔的物理 / 语文老师），且不含教室端',
+          n1.length === wantN1 && !n1.includes(U.room),
+          `${n1.length} 人（诊断行：teachers=${counts.all_teachers}，其中教室端 ${counts.rooms} 个），含教室端=${n1.includes(U.room)}`,
         )
         const n2 = await ids(NOTICE.n2)
         const wantN2 = [U.head, U.grade, U.phy, U.chn, U.llead].sort()
@@ -1903,6 +2333,171 @@ await withLock(async () => {
           [U.admin, U.phy].sort(),
           `academic 部门里是 教务处主任 + 物理老师（兼干事）；其余人一个部门都不属于`,
         )
+
+        /*
+         * ---- ⑤′ 🔴 「任课教师」这一档 = **在教课的老师**（2026-09-26 实测的一处真漏人）----
+         *
+         * 用户实测：发一条「**发给：全部任课教师**」的通知 → **唐友余收不到**。
+         * 而他的实际状态是：教务处 · 副校长 · 班主任（高二(1)班）**三条身份行**，
+         * 同时**在教课**（高二(1)班数学，`class_subjects` 里有一行）。他显然该收到。
+         *
+         * 根因：这一档原来写的是"**一格 `teacher_roles` 都没有** = 任课教师" ——
+         * 那是**界面的兜底标签**（"还没指派别的身份"），却被当成了**收件口径**：
+         * 一个词两个意思，用错一个 → 有头衔又教课的人**整片漏掉**（§10.6 ①/②）。
+         * 修法：② 改成 **`class_subjects` 里有一行**（= 在教课）；① 一个字不动（它是**显示**）。
+         *
+         * 这一段照**唐友余那个形状**造夹具，四种人一次摆齐：
+         *   唐友余（有头衔 + 教课）→ **该收到**；phy / chn（零头衔 + 教课）→ **该收到**；
+         *   admin / grade / head / prin / vprin / ohead / moral / slead / llead（有头衔、不教课）+ fresh
+         *   （零头衔、也不教课）→ **都不该收到**；教室端 → **不收**（**加一行任课关系也不收**）。
+         *
+         * ⚠️ 夹具与那条通知在**这一段里临时插、量完 rollback**：后面的段落（以及"全校通知的收件人"
+         *    那条断言）用的还是原来那份种子，不被这位多出来的人扰动。
+         * 🔴 反向对照：`RLS_NEGATIVE=teacher-tier-by-roles`（把判据改回"没有身份行才算"）→
+         *    下面第 ① 条**必须红**。
+         */
+        {
+          const TANG = mk('a2', 1)
+          const N6 = mk('90', 6)
+          const schoolExpr = '(select id from schools order by created_at limit 1)'
+          await db.exec('begin')
+          try {
+            await db.query(
+              `insert into auth.users (id, email, raw_user_meta_data) values
+                 ($1, 'tang@shugao.test', '{"name":"唐友余","subject":"数学","subject_code":"math"}'::jsonb)`,
+              [TANG],
+            )
+            /* 三条身份行：教务处 + 副校长 + 班主任（高二(1)班）—— 全在 `teacher_roles` 里 */
+            await db.query(
+              `insert into teacher_roles (teacher_id, role, scope_type, scope_id) values
+                 ($1, 'admin',          'school', ${schoolExpr}),
+                 ($1, 'vice_principal', 'school', ${schoolExpr}),
+                 ($1, 'head_teacher',   'class',  $2)`,
+              [TANG, C.c1],
+            )
+            /* 同时**在教课**：高二(1)班数学 —— 这一行才是"任课教师"那一档的判据 */
+            await db.query(
+              `insert into class_subjects (class_id, subject, subject_code, teacher_id)
+               values ($1, '数学', 'math', $2)`,
+              [C.c1, TANG],
+            )
+            await db.query(
+              `insert into notices (id, school_id, sender_id, title, body, scope_kind) values
+                 ($1, ${schoolExpr}, $2, '发给全体任课教师', '周三教研活动', 'role')`,
+              [N6, U.admin],
+            )
+            await db.query(
+              `insert into notice_targets (notice_id, target_kind, target_role)
+               values ($1, 'role', 'teacher')`,
+              [N6],
+            )
+
+            const recv = await ids(N6)
+            /* 反向对照自证：夹具真的造出来了（三条身份行 + 一行任课关系） */
+            const tangShape = (
+              await db.query(
+                `select
+                   (select count(*) from teacher_roles where teacher_id = $1)::int      as roles,
+                   (select count(*) from class_subjects where teacher_id = $1)::int     as teaches,
+                   (select count(*) from classroom_accounts where id = $1)::int         as is_room`,
+                [TANG],
+              )
+            ).rows[0]
+            eq(
+              '⑤′ 反向对照自证：唐友余那个形状真的造出来了（3 条身份行 + 1 行任课关系 + 不是教室端）',
+              [tangShape.roles, tangShape.teaches, tangShape.is_room],
+              [3, 1, 0],
+            )
+            ok(
+              '🔴 ⑤′ 「任课教师」通知：**有头衔 + 也教课**的老师（教务处 + 副校长 + 班主任 + 教 1 个班）**收得到**',
+              recv.includes(TANG),
+              `收件人 ${recv.length} 位：${recv.includes(TANG) ? '含唐友余' : '**不含唐友余 —— 这就是那个漏人**'}`,
+            )
+            ok(
+              '⑤′ 纯任课教师（一格 `teacher_roles` 都没有、但在教课：物理 / 语文老师）**照旧收得到**（原来那条没丢）',
+              [U.phy, U.chn].every((id) => recv.includes(id)),
+              `phy=${recv.includes(U.phy)} · chn=${recv.includes(U.chn)}`,
+            )
+            {
+              /* 🔴 这一条钉的是**两个意思的分界**：有头衔但不教课 / 零头衔也不教课 → 都不在这一档 */
+              const notTeaching = [
+                U.admin, U.grade, U.head, U.prin, U.vprin,
+                U.ohead, U.moral, U.slead, U.llead, U.fresh,
+              ].filter((id) => recv.includes(id))
+              eq(
+                '⑤′ **完全不教课**的老师（有头衔：教务处/年级主任/班主任/校长/副校长/两位主任/两位组长；' +
+                  '零头衔的 fresh）→ **都不在**「任课教师」这一档里',
+                notTeaching,
+                [],
+                'fresh 这一格是"① 与 ② 不是同一件事"的活样本：他零身份行（① 成立）、也不教课（② 不成立）',
+              )
+            }
+            ok(
+              '⑤′ 教室端 → **不在**这一档里（它不是老师）',
+              !recv.includes(U.room),
+              `教室端在收件人里=${recv.includes(U.room)}`,
+            )
+            /* 反向对照（教室端那一句守卫在承重）：**给它加一行任课关系**，它照样不许进来 */
+            {
+              await db.query(
+                `insert into class_subjects (class_id, subject, subject_code, teacher_id)
+                 values ($1, '物理', 'physics', $2)`,
+                [C.c1, U.room],
+              )
+              const recv2 = await ids(N6)
+              ok(
+                '🔴 ⑤′ 反向对照：教室端**加了一行任课关系**之后仍然**不在**收件人里' +
+                  '（挡住它的是那句显式的教室端守卫，不是"它碰巧没有任课关系"）',
+                !recv2.includes(U.room),
+                `加行之后收件人 ${recv2.length} 位，教室端在里面=${recv2.includes(U.room)}`,
+              )
+              await db.query(`delete from class_subjects where teacher_id = $1`, [U.room])
+            }
+            eq(
+              '⑤′ 这一档的收件人**逐人相等** = 唐友余 + 物理老师 + 语文老师（教会课的那三位）',
+              recv,
+              [U.phy, U.chn, TANG].sort(),
+            )
+            /*
+             * 🔴 「这一档里有人吗」（`notice_role_has_members`）必须与收件人**同一个口径** ——
+             *    它是"发得出去吗"那一半：只改收件人、不改这里 → 数据库说这一档是空的 → 403。
+             *    对照：把**所有**任课关系删掉 → 这一档立刻变"没有人"，
+             *    而库里**还有零身份行的 fresh**（旧口径下他就算这一档的人）→ 证明这里问的是"在教课"。
+             */
+            eq(
+              '⑤′ `notice_role_has_members(\'teacher\')` 与收件人同一个口径 → true（有人教课）',
+              (await db.query(`select notice_role_has_members('teacher') as v`)).rows[0].v,
+              true,
+            )
+            await db.query('delete from class_subjects')
+            eq(
+              '🔴 ⑤′ 对照：**删光任课关系**之后这一档变"没有人"（`fresh` 还零身份行躺在那儿也不算）' +
+                '—— 证明这一档问的是"在教课"，不是"没有头衔"',
+              [
+                (await db.query(`select notice_role_has_members('teacher') as v`)).rows[0].v,
+                (await db.query(`select notice_role_has_members('head_teacher') as v`)).rows[0].v,
+              ],
+              [false, true],
+              '第二条是反向对照：不是"整个函数恒假"',
+            )
+          } finally {
+            await db.exec('rollback')
+          }
+          /* 夹具收尾：rollback 之后这位老师与那条通知都不在，种子回到本节开头的样子 */
+          eq(
+            '⑤′ 夹具收尾：rollback 之后唐友余（auth 行 + 身份行 + 任课关系）一条都不剩',
+            (
+              await db.query(
+                `select
+                   (select count(*) from teachers where id = $1)::int         as t,
+                   (select count(*) from teacher_roles where teacher_id = $1)::int as r,
+                   (select count(*) from notices where id = $2)::int          as n`,
+                [TANG, N6],
+              )
+            ).rows[0],
+            { t: 0, r: 0, n: 0 },
+          )
+        }
       }
 
       /* ---- ⑥ 🔴 读策略：教室端一条都读不到（I47） ---- */
@@ -2915,7 +3510,27 @@ await withLock(async () => {
       denied('班主任建本班作业档案（他不教这一科 —— 口径 A 的直接推论）', r)
 
       r = await write(db, U.head, { sql: `delete from assignments where id = $1 returning id`, values: [E.a1] })
-      allowed('删档案另有一套：班主任删得掉本班别人的档案（用户口径）', r)
+      denied('🔴 ① 班主任删**本班别人的**档案（他不教这一科）—— 2026-10-06 收窄后「改不了 ⇒ 也删不掉」', r)
+      r = await write(db, U.grade, { sql: `delete from assignments where id = $1 returning id`, values: [E.a2] })
+      denied('🔴 ② 年级主任删本年级的档案（同上：他不是当科老师）', r)
+      r = await write(db, U.admin, { sql: `delete from assignments where id = $1 returning id`, values: [E.a1] })
+      denied(
+        '🔴 ③ 教务处删**别人建的**档案（校级兜底在 `can_grade_subject` 里有、`teaches_subject` 里没有 ——' +
+          ' 收窄后它也删不掉，这是有意的：删是不可逆的那一头）',
+        r,
+      )
+      r = await write(db, U.chn, { sql: `delete from assignments where id = $1 returning id`, values: [E.a4] })
+      allowed(
+        '④ 🔴 **建档人自己仍删得掉**（`teacher_id = auth.uid()` 那一支：他教的是语文、这份是物理）' +
+          ' —— 这一支存在的理由就是这条，**必须钉**',
+        r,
+      )
+      /* ⚠️ "建档人"那一支的**极端形状**由 §四 的 E.a4 与 §六 的 E.a5 各钉一次
+         （那两位老师**都不教那一科**）：这里不再现建一份 ——
+         无身份那位老师**建不出**别班/自己不教的档案（INSERT 也走 `can_grade_subject`），
+         硬造只会得到一条"建不了"的假红。 */
+      r = await write(db, U.phy, { sql: `delete from assignments where id = $1 returning id`, values: [E.a1] })
+      allowed('⑤ 反向对照：**本班本科老师删得掉**（上面那三条"被拒"不是"谁都删不动"）', r)
 
       r = await write(db, U.head, insertSql('students', M.studentToRow(localStudent({ id: mk('50', 90), studentNo: '90' }), C.c1)))
       allowed('班主任加学生（本班）', r)
@@ -2950,6 +3565,17 @@ await withLock(async () => {
       allowed('超管改别的班别的科的成绩（兜底）', r)
       r = await write(db, U.admin, { sql: `update assignments set wrong = '{"1":["2"]}'::jsonb where id = $1 returning id`, values: [E.a5] })
       allowed('教务处改任何班任何科的成绩（全校兜底）', r)
+
+      /*
+       * 🆕 2026-10-06（`assignments_delete` 收窄）：**建档人自己那一支照旧管用** ——
+       * E.a5 是**教务处自己建的**（高三那个班），所以它**删得掉**：
+       * `teacher_id = auth.uid()` 那一支过，与"他教不教那一科"无关（他谁都不教）。
+       * ⚠️ 这一条与 §五 那三条"教务处删**别人建的**→ 被拒"合起来才是完整的一对：
+       *    收窄去掉的是"当班主任 / 年级主任那一支"，**没有**动"自己建的那一支"。
+       * ⚠️ 删完就没了：后面几节**没有一处**再引用 E.a5（已逐条核过），所以这里删是安全的。
+       */
+      r = await write(db, U.admin, { sql: `delete from assignments where id = $1 returning id`, values: [E.a5] })
+      allowed('🔴 收窄后**建档人（教务处）删得掉自己建的高三那一份** —— `teacher_id` 那一支没被去掉', r)
 
       r = await write(db, U.admin, insertSql('assignments', assignmentRow(localAssignment({ id: mk('e0', 94), classId: C.c3, subject: '语文', subjectCode: 'chinese' }), U.admin)))
       allowed('教务处在高三建语文档案（兜底支）', r)
@@ -3806,16 +4432,17 @@ await withLock(async () => {
        */
       const forNames = forCount.rows.map((r) => r.proname)
       ok(
-        '`_for` 变体一共 32 个（13 + 管理架构轮 8 个 + 公告轮 1 个 `can_publish_announcement_for`' +
+        '`_for` 变体一共 33 个（13 + 管理架构轮 8 个 + 公告轮 1 个 `can_publish_announcement_for`' +
           ' + 管理台第二期 1 个 `can_contact_admin_for`' +
           ' + 🆕P4 2 个 `can_promote_grades_for` / `can_delete_grade_for`' +
           ' + 🆕集成修复 4 个 `can_manage_grade_setup_for` / `can_edit_student_subject_for` /' +
           ' `can_manage_class_setup_for` / `can_manage_terms_for`' +
           ' + 🆕P5 1 个 `assignments_write_ok_for`' +
           ' + 🆕P9 1 个 `can_call_for`（事务性呼叫的判据）' +
-          ' + 🆕P10 1 个 `old_subject_data_counts_for`（旧科目数据的清单））' +
+          ' + 🆕P10 1 个 `old_subject_data_counts_for`（旧科目数据的清单）' +
+          ' + 🆕2026-10-08 超管唯一 1 个 `can_assign_super_role_for`（发 super 只有超管能发））' +
           ' —— id 变体也算判据的两件套，新增判据别只写裸版',
-        forNames.length === 32,
+        forNames.length === 33,
         `实际 ${forNames.length} 个：${forNames.join('、')}`,
       )
       const hasBare = await db.query(`select has_function_privilege('authenticated', 'public.can_edit_exam(uuid[], text, text)', 'EXECUTE') as v`)
@@ -5516,8 +6143,1308 @@ await withLock(async () => {
     }
 
     /* ============================================================
-       收尾
+       十九、🆕 学生档案（民族 · 出生年月 · 家长电话 · 家庭住址）
+             表 `student_profiles`（`schema.sql` §2.1 建表 / §35 策略）+ **PII 三道配套**
+       ------------------------------------------------------------
+       用户口径（2026-10-06）：
+         · 科任老师**通过班级看得见**这些字段（= "看得见哪些班"那一套）；
+         · **班主任通过班级改得了**（= `can_manage_class()`，§16.2 那一个判据，没另造）；
+         · 🔴 **教室端那块给学生看的屏，一个字都不许读到**。
+       另外三件配套（这一轮的另一半）：① 备份邮件正文那条窄判据 · ② 错误日志的
+       `has_pii` 与"抹掉值" · ③ 年级删除备份 payload 的逐表覆盖。
+
+       🔴 每一条都带**反向对照**（`RLS_NEGATIVE=profile-classroom` / `profile-write-open` /
+          `profile-mask-off` / `profile-drop-from-payload`）——跑得红的那种断言才算数。
        ============================================================ */
+    section('十九、🆕 学生档案（PII）：科任老师只读 · 教室端读不到 · 班主任改本班 + PII 三道')
+    {
+      const gradeOf = async (name) =>
+        (await db.query(`select id from grades where name = $1`, [name])).rows[0].id
+      const G2 = await gradeOf('高二')
+      const G3 = await gradeOf('高三')
+      const sorted = (...ids) => [...ids].sort()
+
+      /* 固定夹具：三个班各一条（s1 → c1 高二(1) · s4 → c2 高二(4) · s6 → c3 高三(1)） */
+      await db.exec(`
+    insert into student_profiles (student_id, ethnicity, birth_month, guardian_phone, home_address) values
+      ('${S.s1}', '汉族', '2010-05', '13800138000', '某市某区某小区1号楼2单元501'),
+      ('${S.s4}', '回族', '2010-09', '13900139000', '某市某区某街12号'),
+      ('${S.s6}', '满族', '2009-11', '13700137000', '某市某县某村3组');
+    `)
+
+      const seenIds = (uid) => idsAs(db, uid, `select student_id as id from student_profiles order by student_id`)
+      const canSelect = (role) =>
+        db
+          .query(`select has_table_privilege($1, 'student_profiles', 'select') as v`, [role])
+          .then((r) => Boolean(r.rows[0].v))
+
+      /* ---- ① 谁看得见：**复用 `visible_class_ids()`**（科任老师 = 自己任教的班）---- */
+      eq(
+        '① 超管 / 教务处：全校三条都看得见',
+        [await seenIds(U.super), await seenIds(U.admin)],
+        [sorted(S.s1, S.s4, S.s6), sorted(S.s1, S.s4, S.s6)],
+      )
+      eq('① 年级主任：只有**本年级**（高二两条 s1 + s4；高三那条看不到）', await seenIds(U.grade), sorted(S.s1, S.s4))
+      eq('① 班主任：**本班**那条（c1 的 s1）', await seenIds(U.head), [S.s1])
+      eq(
+        '🔴 ① 物理老师（教 c1 + c2）：**只看得见自己任教的那两个班**（s1 + s4）',
+        await seenIds(U.phy),
+        sorted(S.s1, S.s4),
+      )
+      eq('① 语文老师（只教 c1）：只有 s1', await seenIds(U.chn), [S.s1])
+      eq('🔴 ① 非任教班的老师（无身份那位，带的是 c4）→ **一条都看不到**', await seenIds(U.fresh), [])
+      eq(
+        '① 校级三档 / 德育处主任（全校只读）：三条都看得见',
+        [await seenIds(U.prin), await seenIds(U.moral)],
+        [sorted(S.s1, S.s4, S.s6), sorted(S.s1, S.s4, S.s6)],
+      )
+      eq(
+        '① 办公室主任 / 两个组长：一条都看不到（他们本来就不看教学数据）',
+        [await seenIds(U.ohead), await seenIds(U.slead), await seenIds(U.llead)],
+        [[], [], []],
+      )
+
+      /* ---- ② 🔴 教室端：一行都读不到（那块屏是给学生看的）---- */
+      eq('🔴 ② 教室端（高二(1)班那块屏）读学生档案 → **0 行**（不是"界面上不渲染"，是拿不到）', await seenIds(U.room), [])
+      eq(
+        '🔴 ② 而它**照旧读得到本班的学生行**（这一轮没有动 `students` 的可见性 —— I20 那条线没断）',
+        await idsAs(db, U.room, 'select id from students order by id'),
+        sorted(S.s1, S.s2, S.s3),
+      )
+      {
+        const q = (
+          await db.query(
+            `select policyname, qual from pg_policies
+              where schemaname = 'public' and tablename = 'student_profiles' and cmd = 'SELECT'`,
+          )
+        ).rows
+        eq(
+          '🔴 ② 而且**策略清单上看得出来**：那条读策略里就写着教室端守卫（`is_classroom_account`）',
+          [q.length, q.every((x) => /classroom_account/.test(String(x.qual)))],
+          [1, true],
+        )
+      }
+
+      /* ---- ③ 谁改得动：班主任本班 ∪ 本年级年级主任 ∪ 教务处 / 超管 ---- */
+      const upsertProfile = (sid, phone) => ({
+        sql: `insert into student_profiles (student_id, guardian_phone) values ($1, $2)
+              on conflict (student_id) do update set guardian_phone = excluded.guardian_phone
+              returning student_id`,
+        values: [sid, phone],
+      })
+      const delProfile = (sid) => ({
+        sql: `delete from student_profiles where student_id = $1 returning student_id`,
+        values: [sid],
+      })
+      allowed('③ 班主任改**本班**学生的档案（用户口径那一支）', await write(db, U.head, upsertProfile(S.s1, '13800138001')))
+      allowed('③ 年级主任改**本年级**的', await write(db, U.grade, upsertProfile(S.s4, '13900139001')))
+      allowed('③ 教务处改**任何班**的（兜底）', await write(db, U.admin, upsertProfile(S.s6, '13700137001')))
+      allowed('③ 超管照旧（兜底）', await write(db, U.super, upsertProfile(S.s6, '13700137002')))
+      denied(
+        '🔴 ③ 科任老师（物理，正教着这个班）改**本班**的档案 —— **读得宽、写得窄**',
+        await write(db, U.phy, upsertProfile(S.s1, '13000000000')),
+      )
+      denied('🔴 ③ 班主任改**别班**的（c2 的 s4）', await write(db, U.head, upsertProfile(S.s4, '13000000000')))
+      denied('🔴 ③ 年级主任改**别年级**的（高三的 s6）', await write(db, U.grade, upsertProfile(S.s6, '13000000000')))
+      denied('🔴 ③ 教室端改本班学生的档案（那块屏零写权限）', await write(db, U.room, upsertProfile(S.s1, '13000000000')))
+      denied('③ 无身份的老师改别班的', await write(db, U.fresh, upsertProfile(S.s1, '13000000000')))
+      denied(
+        '🔴 ③ 教室端**插**一条新行（给本班另一个学生）',
+        await write(db, U.room, {
+          sql: `insert into student_profiles (student_id, guardian_phone) values ($1, $2) returning student_id`,
+          values: [S.s2, '13000000000'],
+        }),
+      )
+      denied('🔴 ③ **读得到 ≠ 删得掉**：科任老师删本班那一行', await write(db, U.phy, delProfile(S.s1)))
+      allowed(
+        '③ 反向对照：班主任删本班那一行**删得掉**（上面那几条"被拒"不是"谁都写不动"）',
+        await write(db, U.head, delProfile(S.s1)),
+      )
+
+      /* ---- ④ 形状与语义：四个字段**全部可空**；出生年月不是年龄 ---- */
+      denied(
+        '④ `birth_month` 拒掉「13岁」（它是**出生年月**，不是年龄 —— 一个字段一种语义）',
+        await write(db, U.super, {
+          sql: `update student_profiles set birth_month = '13岁' where student_id = $1 returning student_id`,
+          values: [S.s4],
+        }),
+      )
+      denied(
+        '④ 也拒掉「2010年5月」（形状只有 `YYYY-MM`）',
+        await write(db, U.super, {
+          sql: `update student_profiles set birth_month = '2010年5月' where student_id = $1 returning student_id`,
+          values: [S.s4],
+        }),
+      )
+      allowed(
+        '④ 反向对照：`2010-05` 存得进去（上面两条不是"永远为红"）',
+        await write(db, U.super, {
+          sql: `update student_profiles set birth_month = '2010-05' where student_id = $1 returning student_id`,
+          values: [S.s4],
+        }),
+      )
+      allowed(
+        '④ 🔴 **四个字段全部可空**：只给一个 `student_id` 也存得进去（建班录名单不会被卡住）',
+        await write(db, U.head, {
+          sql: `insert into student_profiles (student_id) values ($1) returning student_id`,
+          values: [S.s3],
+        }),
+      )
+
+      /* ---- ⑤ 表的形状与权限（为什么是独立一张表）---- */
+      eq(
+        '🔴 ⑤ 这四个字段**不在 `students` 上**（挂上去 = 教室端那句 `select(\'*\')` 必然把它们读走）',
+        (
+          await db.query(
+            `select column_name from information_schema.columns
+              where table_schema = 'public' and table_name = 'students'
+                and column_name in ('ethnicity', 'birth_month', 'guardian_phone', 'home_address')`,
+          )
+        ).rows.map((r) => r.column_name),
+        [],
+      )
+      eq('⑤ 表级权限：anon 什么都不给 · authenticated 给（行由策略收口）', [await canSelect('anon'), await canSelect('authenticated')], [false, true])
+      eq(
+        '⑤ 策略清单：1 条读 + 3 条写（逐动作 —— 不写 `for all`，免得把读也一起改掉）',
+        (
+          await db.query(
+            `select policyname, cmd from pg_policies
+              where schemaname = 'public' and tablename = 'student_profiles' order by policyname`,
+          )
+        ).rows.map((r) => `${r.policyname}:${r.cmd}`),
+        [
+          'student_profiles_delete:DELETE',
+          'student_profiles_insert:INSERT',
+          'student_profiles_update:UPDATE',
+          'student_profiles_visible:SELECT',
+        ],
+      )
+      eq(
+        '⑤ 年级管理那一层**没有第二个判据**：还是 `can_manage_grade_setup_for()`（本年级 true / 别年级 false）',
+        [
+          (await db.query(`select public.can_manage_grade_setup_for($1::uuid, $2::uuid) as v`, [U.grade, G2])).rows[0].v,
+          (await db.query(`select public.can_manage_grade_setup_for($1::uuid, $2::uuid) as v`, [U.grade, G3])).rows[0].v,
+          (await db.query(`select public.can_manage_grade_setup_for($1::uuid, $2::uuid) as v`, [U.phy, G2])).rows[0].v,
+        ],
+        [true, false, false],
+      )
+
+      /* ============================================================
+         十九·之二 PII 之一：**备份邮件正文**那条窄判据（`_lib/mail.ts`）
+         ------------------------------------------------------------
+         跑的是仓库里那份真文件。⚠️ 它仍然是**启发式**（裸姓名抓不到，见文件头），
+         但"家长电话 / 住址 / 民族 / 出生年月"这四种写法必须认得出来。
+         ============================================================ */
+      const mailHit = (t) => MAILLIB.looksLikeStudentData(t)
+      ok('🔴 ⑥ 「家长电话：13800138000」→ 判定含学生信息（**这封信不发**）', Boolean(mailHit('家长电话：13800138000')), String(mailHit('家长电话：13800138000')))
+      ok('🔴 ⑥ 「家庭住址：某市某区某小区1号楼2单元501」→ 命中', Boolean(mailHit('家庭住址：某市某区某小区1号楼2单元501')))
+      ok('🔴 ⑥ 「民族：汉族」→ 命中', Boolean(mailHit('民族：汉族')))
+      ok('🔴 ⑥ 「出生年月：2010-05」→ 命中', Boolean(mailHit('出生年月：2010-05')))
+      ok('🔴 ⑥ 裸的 11 位手机号（没有标注）也命中', Boolean(mailHit('学生留的是 13800138000')))
+      eq('🔴 ⑥ 反向对照：**正常运维文案一个字都不许误伤**（维护通知）', mailHit('系统维护：今晚 23:00-23:30 升级，预计 30 分钟'), null)
+      eq('🔴 ⑥ 反向对照：版本公告也不误伤', mailHit('版本 0.9.1 上线，新增错题集导出'), null)
+      eq(
+        '⑥ 反向对照：**刻意不收裸的「民族」两个字** —— 历史老师那句正常文案不误伤' +
+          '（误伤比漏提醒更烦人，见 `PII_PATTERNS` 的注释）',
+        mailHit('这次考试考民族区域自治制度'),
+        null,
+      )
+
+      /* ============================================================
+         十九·之三 PII 之二：**管理台错误日志**（`report_frontend_error`，§24.2）
+         ------------------------------------------------------------
+         上报的正文里出现这四种字段时：**标出来**（`has_pii`）+ **把值抹掉**。
+         ⚠️ `has_pii` 必须在那道"抹一遍"之前算 —— 顺序反了会"永远标不出来"，
+            而那种失败**不报错**（所以下面既有"抹掉了"也有"标出来了"两条）。
+         ============================================================ */
+      {
+        const reportAsAnon = async (msg) => {
+          await db.exec('begin')
+          try {
+            await db.query(`select set_config('request.jwt.claims', $1, true)`, [JSON.stringify({ role: 'anon' })])
+            await db.exec('set local role anon')
+            const r = await db.query(
+              `select report_frontend_error('u', 'teacher', '/x', $1, '', '', 'web', '') as j`,
+              [msg],
+            )
+            await db.exec('commit')
+            return r.rows[0].j
+          } catch (e) {
+            await db.exec('rollback')
+            throw e
+          }
+        }
+        const rowOf = async (id) =>
+          (await db.query(`select message, has_pii from frontend_errors where id = $1`, [id])).rows[0]
+
+        const r1 = await reportAsAnon('张三的家长电话：13800138000 打不通')
+        const m1 = await rowOf(r1.id)
+        eq('🔴 ⑦ `has_pii` 认得出「家长电话：…」', m1.has_pii, true)
+        ok(
+          '🔴 ⑦ 而且**值被抹掉**（`13800138000` 一个字都不留在库里）',
+          !m1.message.includes('13800138000') && m1.message.includes('[已隐去]'),
+          m1.message,
+        )
+        ok('⑦ 正文主体仍在（不是把整句删了）', m1.message.includes('张三的家长电话'), m1.message)
+
+        const r2 = await reportAsAnon('家庭住址：某小区3号楼2单元501')
+        const m2 = await rowOf(r2.id)
+        eq('🔴 ⑦ 住址：同一套判据（标出来 + 抹掉）', [m2.has_pii, !m2.message.includes('3号楼')], [true, true])
+
+        const r3 = await reportAsAnon('学生留的是 13800138000')
+        const m3 = await rowOf(r3.id)
+        eq('🔴 ⑦ **裸的 11 位手机号**：也标出来、也抹掉', [m3.has_pii, !m3.message.includes('13800138000')], [true, true])
+
+        const r4 = await reportAsAnon('导出按钮点了没反应')
+        eq('⑦ 反向对照：普通错误文案**不**被标成含隐私（不是"一律 true"）', (await rowOf(r4.id)).has_pii, false)
+        const r5 = await reportAsAnon('这次考试考民族区域自治制度')
+        const m5 = await rowOf(r5.id)
+        eq(
+          '⑦ 反向对照：裸的「民族」两个字**不**命中（历史文案不误伤），正文也一个字没被抹',
+          [m5.has_pii, m5.message.includes('民族区域自治')],
+          [false, true],
+        )
+
+        /* 收尾：这一节写进去的行删掉（不影响别的断言） */
+        await db.query(`delete from frontend_errors`)
+      }
+
+      /* ============================================================
+         十九·之四 PII 之三：**年级删除备份**的 payload 必须逐表覆盖到学生档案
+         ------------------------------------------------------------
+         `grade_removals.payload` 是"删一个年级之前"那份 JSON 备份 ——
+         漏了学生档案 = 删完之后那批家长电话**静默消失**（备份里没有、界面上也没了）。
+         （`payload` 的唯一构造处是 `grade_backup_payload_json()`，§29.5。）
+         ============================================================ */
+      {
+        const payloadOf = async (gid) =>
+          (await db.query(`select public.grade_backup_payload_json($1::uuid) as p`, [gid])).rows[0].p
+        const p2 = await payloadOf(G2)
+        const list2 = p2?.tables?.studentProfiles ?? []
+        eq(
+          '🔴 ⑧ 备份 payload 里有 `studentProfiles` 这一类，且 `counts` 那个数与条数**对得上**',
+          [list2.length, Number(p2?.counts?.studentProfiles ?? -1)],
+          [2, 2],
+        )
+        const one = list2.find((x) => x.student_id === S.s1) ?? {}
+        ok(
+          '🔴 ⑧ 而且**四个字段逐个都在**（少一个就是"删年级时静默丢 PII"）',
+          [one.ethnicity, one.birth_month, one.guardian_phone, one.home_address].every(
+            (v) => typeof v === 'string' && v !== '',
+          ),
+          JSON.stringify(one),
+        )
+        const p3 = await payloadOf(G3)
+        eq(
+          '🔴 ⑧ 换一个年级（高三）：只带自己那个班的那一条（高二两条不许混进来）',
+          (p3?.tables?.studentProfiles ?? []).map((x) => x.student_id),
+          [S.s6],
+        )
+      }
+    }
+
+    /* ============================================================
+       二十、🆕 教师档案（家庭住址 · 电话号码 · 邮箱）
+             表 `teacher_profiles`（`schema.sql` §1.1 建表 / §36 策略）
+       ------------------------------------------------------------
+       用户口径（2026-10-06）：「教师管理页面除了给老师建号，应该也可以记录老师的个人信息，
+       例如家庭住址，电话号码，邮箱。」
+         · **读 / 写都只认 `can_create_teacher_accounts()`**（超管 / 教务处 / 办公室主任）——
+           档案属性那一档；
+         · **自己那一行自己看得到**（`teacher_id = auth.uid()`）；
+         · 🔴 **别的老师读不到同事的**（家庭住址是隐私）；**班主任 / 年级主任也不读**；
+         · 🔴 **教室端 0 行**（拿 `teachers` 自己那一行做对照，证明不是"整体读不到"）。
+       另外：老师这一侧的 PII 配套（错误日志清洗 / **不进年级备份 payload**）。
+
+       🔴 每条都带**反向对照**：`RLS_NEGATIVE=profile-classroom`（拿掉教室端守卫）/
+          `profile-write-open`（三条写策略换成恒真）/ `profile-teacher-mask-off`（拿掉邮箱抹除）。
+       ============================================================ */
+    section('二十、🆕 教师档案（PII）：建号那一档读写 · 自己那一行 · 别的老师与教室端读不到 + PII 配套')
+    {
+      const sorted2 = (...ids) => [...ids].sort()
+      const gradeIdOf = async (name) => (await db.query(`select id from grades where name = $1`, [name])).rows[0].id
+      const G2b = await gradeIdOf('高二')
+
+      /* 固定夹具：**三位老师 + 教室端自己那一行**（教室端也有一行 `teachers` —— 触发器给每个 auth 用户都建）。
+         ⚠️ 教室端那一行是**故意的**：没有它，"教室端读不到教师档案"那条断言的负向对照会**假绿**
+         （拿掉 `not is_classroom_account()` 之后它仍然读到 0 行 —— 因为库里根本没有它那一行），
+         实测踩过一次。 */
+      await db.exec(`
+      insert into teacher_profiles (teacher_id, home_address, phone, email) values
+        ('${U.super}', '某市某区某小区1号楼2单元501', '13800138000', 'super@shugao.test'),
+        ('${U.grade}', '某市某区某街12号',           '010-12345678', 'grade@shugao.test'),
+        ('${U.head}',  '某市某县某村3组',            '13900139000 转 8021', 'head@shugao.test'),
+        ('${U.room}',  '教室端那一行（不该被它自己读到）', '13800138009', 'room@shugao.test');
+    `)
+
+      const profIds = (uid) => idsAs(db, uid, `select teacher_id as id from teacher_profiles order by teacher_id`)
+      const canSelectProf = (role) =>
+        db
+          .query(`select has_table_privilege($1, 'teacher_profiles', 'select') as v`, [role])
+          .then((r) => Boolean(r.rows[0].v))
+
+      /* ---- ① 谁读得到：**能建号那一档**（超管 / 教务处 / 办公室主任）---- */
+      eq(
+        '🔴 ① 超管 / 教务处 / 办公室主任（= `can_create_teacher_accounts()` 那一档）：四条都读得到',
+        [await profIds(U.super), await profIds(U.admin), (await profIds(U.ohead)).length],
+        [sorted2(U.super, U.grade, U.head, U.room), sorted2(U.super, U.grade, U.head, U.room), 4],
+      )
+      eq(
+        '🔴 ① 而办公室主任**读得到 ≠ 判据更宽**：他对学生档案一条都读不到（两张表两套判据，别混）',
+        await idsAs(db, U.ohead, 'select student_id as id from student_profiles order by student_id'),
+        [],
+      )
+
+      /* ---- ② 🔴 别人读不到：自己的那一行看得到、同事的一行看不到 ---- */
+      eq(
+        '🔴 ② 年级主任 / 班主任 / 物理老师：**只有自己那一行**（同事的家庭住址读不到）',
+        [await profIds(U.grade), await profIds(U.head), await profIds(U.phy)],
+        [[U.grade], [U.head], []],
+      )
+      eq(
+        '🔴 ② 无身份的新老师：一行都读不到（他自己还没录过 —— 这是"没有行"，不是"被挡"）',
+        await profIds(U.fresh),
+        [],
+      )
+      eq(
+        '🔴 ② 而他们**照旧读得到自己的 `teachers` 那一行**（这一轮没有动 `teachers` 的可见性）',
+        await idsAs(db, U.head, 'select id from teachers order by id'),
+        [U.head],
+      )
+
+      /* ---- ③ 🔴 教室端：一行都读不到（那块屏是给学生看的）---- */
+      eq('🔴 ③ 教室端读教师档案 → **0 行**（不是"界面上不渲染"，是拿不到）', await profIds(U.room), [])
+      eq(
+        '🔴 ③ 而它**照旧读得到自己那一行 `teachers`**（证明上面那条不是"整体读不到"）',
+        await idsAs(db, U.room, 'select id from teachers order by id'),
+        [U.room],
+      )
+      {
+        const q = (
+          await db.query(
+            `select policyname, qual from pg_policies
+              where schemaname = 'public' and tablename = 'teacher_profiles' and cmd = 'SELECT'`,
+          )
+        ).rows
+        eq(
+          '🔴 ③ 而且**策略清单上看得出来**：那条读策略里就写着教室端守卫（`is_classroom_account`）',
+          [q.length, q.every((x) => /classroom_account/.test(String(x.qual)))],
+          [1, true],
+        )
+      }
+
+      /* ---- ④ 谁改得动：**能建号那一档**（老师本人**改不了自己那一行**）---- */
+      const upsertProf = (tid, phone) => ({
+        sql: `insert into teacher_profiles (teacher_id, phone) values ($1, $2)
+              on conflict (teacher_id) do update set phone = excluded.phone
+              returning teacher_id`,
+        values: [tid, phone],
+      })
+      allowed('④ 超管改（兜底）', await write(db, U.super, upsertProf(U.head, '13700137001')))
+      allowed('④ 教务处改（兜底）', await write(db, U.admin, upsertProf(U.head, '13700137002')))
+      allowed('④ 办公室主任改（他与建号同一档）', await write(db, U.ohead, upsertProf(U.head, '13700137003')))
+      denied(
+        '🔴 ④ **老师本人改不了自己那一行**（`teachers` 上的 `teachers_self` 管不到这张表 —— 写只给建号那一档）',
+        await write(db, U.head, upsertProf(U.head, '13000000000')),
+      )
+      denied(
+        '🔴 ④ 年级主任改不了（他不是"建号那一档"，老师的家庭住址也不归他管）',
+        await write(db, U.grade, upsertProf(U.head, '13000000000')),
+      )
+      denied('🔴 ④ 班主任改不了同事的（班主任只在学生档案那一侧有写权）', await write(db, U.head, upsertProf(U.grade, '13000000000')))
+      denied('🔴 ④ 教室端改不了（那块屏零写权限）', await write(db, U.room, upsertProf(U.head, '13000000000')))
+      denied(
+        '🔴 ④ 教室端**插**一条新行也不行',
+        await write(db, U.room, {
+          sql: `insert into teacher_profiles (teacher_id, phone) values ($1, $2) returning teacher_id`,
+          values: [U.phy, '13000000000'],
+        }),
+      )
+      eq(
+        '④ 而且**表上没有 DELETE 策略**（删老师走删账号那条路，不在这张表上删行）',
+        (
+          await db.query(
+            `select cmd from pg_policies where schemaname = 'public' and tablename = 'teacher_profiles' order by cmd`,
+          )
+        ).rows.map((r) => r.cmd),
+        ['INSERT', 'SELECT', 'UPDATE'],
+      )
+
+      /* ---- ⑤ 形状：三个字段**全部可空**；电话/邮箱只挡明显不合法（固话/带区号/分机都要存得下）---- */
+      allowed(
+        '⑤ 🔴 **三个字段全部可空**：只给一个 `teacher_id` 也存得进去（建号那条路一个字都不碰这张表）',
+        await write(db, U.super, {
+          sql: `insert into teacher_profiles (teacher_id) values ($1) returning teacher_id`,
+          values: [U.phy],
+        }),
+      )
+      allowed(
+        '⑤ **固话带区号 + 分机**存得下（`010-12345678 转 8021` 这种写法不许被 check 挡掉）',
+        await write(db, U.super, {
+          sql: `update teacher_profiles set phone = $2 where teacher_id = $1 returning teacher_id`,
+          values: [U.head, '010-12345678 转 8021'],
+        }),
+      )
+      allowed(
+        '⑤ 国际写法也存得下（`+86 138 0013 8000`）',
+        await write(db, U.super, {
+          sql: `update teacher_profiles set phone = $2 where teacher_id = $1 returning teacher_id`,
+          values: [U.head, '+86 138 0013 8000'],
+        }),
+      )
+      allowed(
+        '⑤ 反向对照：一个**正常邮箱**存得进去（上面那几条"被拒"不是"永远为红"）',
+        await write(db, U.super, {
+          sql: `update teacher_profiles set email = $2 where teacher_id = $1 returning teacher_id`,
+          values: [U.head, 'zhang.san+work@mail.example.cn'],
+        }),
+      )
+      denied(
+        '⑤ 电话那一格拒掉**带备注**的（`备用号 13800138000` 有 11 位数字、形状却不合 —— 一个字段一种语义）',
+        await write(db, U.super, {
+          sql: `update teacher_profiles set phone = $2 where teacher_id = $1 returning teacher_id`,
+          values: [U.head, '备用号 13800138000'],
+        }),
+      )
+      denied(
+        '⑤ 也拒掉整句中文（`不是电话`：既没有 7 位数字、字符也不在允许集里）',
+        await write(db, U.super, {
+          sql: `update teacher_profiles set phone = $2 where teacher_id = $1 returning teacher_id`,
+          values: [U.head, '不是电话'],
+        }),
+      )
+      denied(
+        '⑤ 邮箱那一格拒掉明显不合形状的（没有 `@`）',
+        await write(db, U.super, {
+          sql: `update teacher_profiles set email = $2 where teacher_id = $1 returning teacher_id`,
+          values: [U.head, 'zhangsan.example.com'],
+        }),
+      )
+
+      /* ---- ⑥ 表的形状与权限（为什么是独立一张表）---- */
+      eq(
+        '🔴 ⑥ 这三个字段**不在 `teachers` 上**（挂上去 = 任何能读 `teachers` 的人都读得到同事的家庭住址）',
+        (
+          await db.query(
+            `select column_name from information_schema.columns
+              where table_schema = 'public' and table_name = 'teachers'
+                and column_name in ('home_address', 'phone', 'email', 'teacher_phone')`,
+          )
+        ).rows.map((r) => r.column_name),
+        [],
+      )
+      eq(
+        '⑥ 表级权限：anon 什么都不给 · authenticated 给（行由策略收口）',
+        [await canSelectProf('anon'), await canSelectProf('authenticated')],
+        [false, true],
+      )
+      eq(
+        '⑥ 策略清单：1 条读 + insert / update（逐动作 —— 不写 `for all`，免得把读也一起改掉）',
+        (
+          await db.query(
+            `select policyname, cmd from pg_policies
+              where schemaname = 'public' and tablename = 'teacher_profiles' order by policyname`,
+          )
+        ).rows.map((r) => `${r.policyname}:${r.cmd}`),
+        ['teacher_profiles_insert:INSERT', 'teacher_profiles_update:UPDATE', 'teacher_profiles_visible:SELECT'],
+      )
+      eq(
+        '⑥ 四列都在（`teacher_id` 主键 + 那三个字段；少一列 = 界面读到 undefined 而**不报错**）',
+        (
+          await db.query(
+            `select column_name from information_schema.columns
+              where table_schema = 'public' and table_name = 'teacher_profiles' order by column_name`,
+          )
+        ).rows.map((r) => r.column_name),
+        ['email', 'home_address', 'phone', 'teacher_id'].sort(),
+      )
+      eq(
+        '⑥ 三个字段**全部可空**（`is_nullable = YES`：建号那条路一个字都不碰这张表）',
+        (
+          await db.query(
+            `select is_nullable from information_schema.columns
+              where table_schema = 'public' and table_name = 'teacher_profiles'
+                and column_name in ('home_address', 'phone', 'email')`,
+          )
+        ).rows.map((r) => r.is_nullable),
+        ['YES', 'YES', 'YES'],
+      )
+
+      /* ============================================================
+         二十·之二 🔴 **教师档案不进「年级备份」payload**（这是一个**判断**，钉住它）
+         ------------------------------------------------------------
+         F1 把 `studentProfiles` 加进了 `grade_backup_payload_json()`（§29.5），因为学生
+         **属于某个年级**（按年级删数据，漏了他就是静默丢 PII）。老师**不属于某个年级**
+         （他跨年级任教），所以：把 `teacherProfiles` 塞进去 = 同一个老师的家庭住址在
+         **每个年级的 payload 里各存一份**，而且删掉某个年级时那份"备份"里会**多出**
+         一批"这个年级根本不曾拥有的"个人信息（那是 PII 的无谓扩散）。
+         结论：**不加** —— 这一条断言把"不加"钉住（后来的人"顺手照 F1 补上"会立刻红）。
+         ⚠️ 老师档案的兜底是那条 AES `pg_dump` **全库链**（与 `teachers` 表本身同款），
+           不在年级 payload 这一层。
+         ============================================================ */
+      {
+        const payloadOf = async (gid) =>
+          (await db.query(`select public.grade_backup_payload_json($1::uuid) as p`, [gid])).rows[0].p
+        const p2 = await payloadOf(G2b)
+        const keys = Object.keys(p2?.tables ?? {})
+        eq(
+          '🔴 ⑦ 年级备份 payload 里**照旧**有 `studentProfiles`（F1 那一半没被这一轮动到）',
+          keys.includes('studentProfiles'),
+          true,
+        )
+        eq(
+          '🔴 ⑦ 而**没有 `teacherProfiles`** —— 老师跨年级、不属于某个年级的 payload（不加是判断，不是漏）',
+          [keys.includes('teacherProfiles'), Object.keys(p2?.counts ?? {}).includes('teacherProfiles')],
+          [false, false],
+        )
+      }
+
+      /* ============================================================
+         二十·之三 老师这一侧的 PII 清洗：**邮箱值要抹掉**（`report_frontend_error`，§24.2）
+         ------------------------------------------------------------
+         `has_pii` 早就认邮箱的形状（原来就有那条判据）；本轮补的是**抹值**这一半。
+         ⚠️ 顺序仍是"先判 `has_pii`、再洗一遍"（拿掉抹除那一句时 `has_pii` 照旧为真，
+            红的是"值还在库里"那一条 —— 负向对照 `profile-teacher-mask-off` 钉着）。
+         ============================================================ */
+      {
+        const reportAsAnon = async (msg) => {
+          await db.exec('begin')
+          try {
+            await db.query(`select set_config('request.jwt.claims', $1, true)`, [JSON.stringify({ role: 'anon' })])
+            await db.exec('set local role anon')
+            const r = await db.query(
+              `select report_frontend_error('u', 'teacher', '/x', $1, '', '', 'web', '') as j`,
+              [msg],
+            )
+            await db.exec('commit')
+            return r.rows[0].j
+          } catch (e) {
+            await db.exec('rollback')
+            throw e
+          }
+        }
+        const rowOf = async (id) =>
+          (await db.query(`select message, has_pii from frontend_errors where id = $1`, [id])).rows[0]
+
+        const r1 = await reportAsAnon('李老师的邮箱 lilaoshi@example.com 发不出去')
+        const m1 = await rowOf(r1.id)
+        eq('🔴 ⑧ 邮箱地址：`has_pii` 标出来了', m1.has_pii, true)
+        ok(
+          '🔴 ⑧ 而且**域名被抹掉**（`example.com` 一个字都不留在库里）',
+          !m1.message.includes('example.com') && m1.message.includes('@[已隐去]'),
+          m1.message,
+        )
+        ok('⑧ 正文主体仍在（不是把整句删了）', m1.message.includes('李老师的邮箱'), m1.message)
+
+        const r2 = await reportAsAnon('住址：某小区3号楼2单元501 记一下')
+        const m2 = await rowOf(r2.id)
+        eq(
+          '🔴 ⑧ 老师住址：同一套标注判据（标出来 + 抹掉）',
+          [m2.has_pii, !m2.message.includes('3号楼')],
+          [true, true],
+        )
+
+        const r3 = await reportAsAnon('点了导出没反应')
+        const m3 = await rowOf(r3.id)
+        eq(
+          '🔴 ⑧ 反向对照：普通错误文案既**不**被标成含隐私、也一个字没被抹（不是"一律 true / 一律抹"）',
+          [m3.has_pii, m3.message],
+          [false, '点了导出没反应'],
+        )
+        /* 收尾：这一节写进去的行删掉（不影响别的断言） */
+        await db.query(`delete from frontend_errors`)
+      }
+    }
+
+    /* ============================================================
+       二十一、🆕 教室端账号的入口（班级档案里那一块）+ 走班班由年级主任代管
+       ------------------------------------------------------------
+       用户口径（2026-10-06 两件）：
+         ① 「有权限在行政管理－年级管理里看班级档案的，可以在里面看见对应班级的
+             教室端账号和密码」→ 入口放在**班级档案**；
+         ② 「走班班没有班主任，由年级主任统一管理」→ 年级主任对本年级**所有班**
+            （含走班班）有班主任那一档的权限、**在班级页直接管**。
+
+       🔴 这一节跑的是**仓库里的真服务端**（`functions/api/classroom-account.ts` 的
+          `onRequestPost`）+ 真的 PostgREST 形状 —— 桩底下的 SQL 是**真的 PGlite**，
+          所以"谁能重置"这件事是**真跑一遍**，不是照着注释念一遍。
+
+       🔴 两件事的核实结论（写在这里免得后人再核一遍）：
+         · **判据一处都没新写**：服务端 `mayManage()` 逐支等于 `can_manage_class_for()`
+           （超管 / 教务处 ∪ 本年级年级主任 ∪ 本班班主任）；下面 W2/W3 逐档比对。
+         · **"看得到密码"做不到**：Supabase 的密码是**哈希**存的，服务端也拿不回原文 ——
+           所以做的是「重置密码 → 新密码回话里带回一次」（W5 钉住"库里不存明文"）。
+         · **走班班本来就已经成立**（本轮一个字没改 schema，见 W6 那五条）：
+           走班班是 `classes` 里 `kind='stream'` 的一行、`grade_id` 照旧有值，
+           而 `grade_head` 那一支按 `grade_id` 取、**与 kind 无关**；`visible_class_ids_for`
+           同款。所以"年级主任管得动本年级的走班班"是**既有事实**，补的是**证明**。
+
+       🔴 反向对照：`RLS_NEGATIVE=room-account-wider`（把 `mayManage` 的年级主任那一支
+          放宽成"任何年级主任都算"）→ W4/W6 里"别的年级的年级主任"那几条**必须红**。
+       ============================================================ */
+    section('二十一、🆕 教室端账号的入口（真服务端 onRequestPost）+ 走班班由年级主任代管')
+    {
+      /* 夹具：一个**别年级**的年级主任、一个**走班班的班主任**（"走班班没有班主任"
+         这件事是口径，但库里可能留着一行假数据 —— 这里专门摆一行来钉住"它也管不动别人班的走班班"）。
+         ⚠️ 走班班这一行**建在 B 库**（本节所有断言用的 `db`）——第十七节那一批走班班在 D 库里，
+            两库不通用；同一节里再建一个 stream_key 不同的走班班，不与 §32.1 的唯一键打架。
+         ⚠️ 都插在**事务外**，别名与别节不撞。 */
+      const G3 = (await db.query(`select id from grades where name = '高三'`)).rows[0].id
+      const G2 = (await db.query(`select id from grades where name = '高二'`)).rows[0].id
+      const STREAM_CLS = mk('c0', 23)
+      const STREAM_ROOM = mk('a0', 24)
+      const R_OTHER_HEAD = mk('a0', 21)
+      const R_STREAM_HEAD = mk('a0', 22)
+      await db.exec(`
+    insert into auth.users (id, email, raw_user_meta_data) values
+      ('${R_OTHER_HEAD}', 'grade3@shugao.test', '{"name":"高三年级主任"}'::jsonb),
+      ('${R_STREAM_HEAD}', 'streamhead@shugao.test', '{"name":"走班班班主任"}'::jsonb),
+      ('${STREAM_ROOM}', 'politics-room@shugao.test', '{"name":"走班班政治教室"}'::jsonb);
+
+    -- 走班班：**单科一个班**、**有 grade_id**（§32.2 生成时从学生的年级取）——
+    -- 「年级主任管得动它」这条路就架在这个 grade_id 上，与 kind 无关（§31.1）。
+    insert into classes (id, teacher_id, name, grade, year, school_id, grade_id, kind, stream_key) values
+      ('${STREAM_CLS}', '${U.phy}', '走班班-政治', '高二', '2025',
+       (select id from schools order by created_at limit 1), '${G2}', 'stream', 'politics');
+
+    -- 这个走班班**也有自己的教室端账号**（§2.11：classroom_accounts.class_id 本来就能指走班班）——
+    -- 没有它的话"年级主任重置得了吗"那一条会落在 404（"这个班还没有账号"）上，
+    -- 而 404 与 403 是两件事：前者是"没账号"，后者才是"你管不着"。
+    insert into classroom_accounts (id, class_id, name, email, created_by)
+    values ('${STREAM_ROOM}', '${STREAM_CLS}', '走班班政治教室', 'g2-politics@shugao.local', '${U.phy}');
+
+    insert into teacher_roles (id, teacher_id, role, scope_type, scope_id) values
+      ('${mk('42', 21)}', '${R_OTHER_HEAD}', 'grade_head',   'grade', '${G3}'),
+      ('${mk('42', 22)}', '${R_STREAM_HEAD}', 'head_teacher', 'class', '${STREAM_CLS}');
+      `)
+
+      const API_TOKEN = 'tok-room-account'      // 调用者的 JWT（桩按它认人）
+      const SVC_KEY = 'svc-room-account'        // 服务端自己的 service_role key（桩走属主身份）
+      const ENV = {
+        SUPABASE_URL: 'https://sb.shugao.test',
+        SUPABASE_ANON_KEY: 'anon-room-account',
+        SUPABASE_SERVICE_ROLE_KEY: SVC_KEY,
+      }
+      /** 重置密码那一路打给 GoTrue 的请求（**新密码只能从回话里拿**，这里单独记账） */
+      const pwSets = []
+      /** 换一个人就把 token 映射换掉 */
+      let TOKEN_OF = new Map()
+      const asActor = (uid, cls) => {
+        TOKEN_OF = new Map([[API_TOKEN, uid]])
+        PW.classId = cls
+      }
+
+      /*
+       * 🔴 假 PostgREST：**不是"任何 select 都回 []"那种放水桩** ——
+       *    每一条查询都拼成真 SQL 打到 PGlite 上，而**调用者那条链走 `authenticated`**
+       *    （于是 `classroom_accounts_read` 那条真策略真的会被执行到）。
+       *    服务端的 service_role 那条链走属主身份（与真的 service_role 同款：绕 RLS）。
+       */
+      const PW = { classId: C.c1 }
+      const REST_COLS = {
+        classes: { id: 'text', name: 'text', grade_id: 'text', school_id: 'text' },
+        teacher_roles: { role: 'text', scope_type: 'text', scope_id: 'text' },
+        classroom_accounts: { id: 'text', email: 'text', disabled: 'boolean' },
+      }
+      const lit = (v) => `'${String(v).replace(/'/g, "''")}'`
+      function restGet(table, params) {
+        const cols = Object.keys(REST_COLS[table]).map((c) => `"${c}"`).join(', ')
+        const where = [...params.entries()]
+          .filter(([k]) => k !== 'select' && k !== 'limit')
+          .map(([k, v]) => `"${k}" = ${lit(String(v).replace(/^eq\./, ''))}`)
+        return `select ${cols} from ${table}${where.length ? ` where ${where.join(' and ')}` : ''}`
+      }
+      /** 表名或列名不在 → 与 PostgREST 同款：**42P01** + `relation … does not exist` */
+      const missingTable = () =>
+        jsonRes({ code: '42P01', message: 'relation "public.classroom_accounts" does not exist' }, 404)
+
+      const realFetch = globalThis.fetch
+      /** PostgREST / GoTrue 的回话形状 */
+      const jsonRes = (v, status = 200) =>
+        new Response(JSON.stringify(v), { status, headers: { 'Content-Type': 'application/json' } })
+      globalThis.fetch = async (input, init = {}) => {
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+        const method = String(init?.method ?? 'GET').toUpperCase()
+        const token = String(new Headers(init.headers ?? {}).get('authorization') ?? '').replace(
+          /^Bearer\s+/i,
+          '',
+        )
+        const body = init?.body ? JSON.parse(String(init.body)) : {}
+
+        /* ---- GoTrue：校验调用者 / 建号 / 改密码 ---- */
+        if (/\/auth\/v1\/user$/.test(url)) {
+          const uid = TOKEN_OF.get(token)
+          return uid ? jsonRes({ id: uid, email: `${uid}@shugao.test` }) : jsonRes({ message: 'invalid jwt' }, 401)
+        }
+        if (/\/auth\/v1\/admin\/users$/.test(url)) {
+          const id = mk('a0', 30 + pwSets.length)
+          await db.query(`insert into auth.users (id, email) values ($1, $2)`, [id, body.email])
+          pwSets.push({ op: 'create', id, email: body.email, password: body.password })
+          return jsonRes({ id, email: body.email }, 200)
+        }
+        if (/\/auth\/v1\/admin\/users\//.test(url)) {
+          pwSets.push({ op: 'reset', id: url.split('/').pop(), password: body.password })
+          return jsonRes({ id: url.split('/').pop() }, 200)
+        }
+        if (!/\/rest\/v1\//.test(url)) return realFetch(input, init)
+
+        const u = new URL(url)
+        const table = u.pathname.replace('/rest/v1/', '')
+        if (!(table in REST_COLS)) return missingTable()
+        const params = u.searchParams
+
+        /*
+         * 服务端那条链用 service_role key → **属主身份**（与真的 service_role 同款：绕 RLS）；
+         * 调用者那条链 → `set local role authenticated` + 假 uid（`classroom_accounts_read`
+         * 那条真策略会在这里被执行到）。
+         * ⚠️ 整段包在事务里、结束一律 rollback —— 不这么做，`set local role` 会**漏到下一条断言**去，
+         *    而症状是 `asUser()` 的 `begin` 报"已经在事务里"（不是本节的红，是一堆看不懂的错）。
+         */
+        await db.exec('begin')
+        try {
+          if (token !== SVC_KEY) {
+            await db.query(`select set_config('request.jwt.claims', $1, true)`, [claimsOf(token)])
+            await db.exec('set local role authenticated')
+          }
+          if (method === 'GET') {
+            const r = await db.query(restGet(table, params))
+            return jsonRes(r.rows)
+          }
+          if (method === 'PATCH') {
+            const r = await db.query(
+              `update classroom_accounts set disabled = $1 where class_id = $2 returning id`,
+              [Boolean(body.disabled), PW.classId],
+            )
+            return r.rows.length
+              ? new Response(null, { status: 204 })
+              : jsonRes({ code: 'PGRST116', message: 'no rows updated' }, 404)
+          }
+          if (method === 'POST') {
+            await db.query(
+              `insert into classroom_accounts (id, class_id, school_id, name, email, created_by)
+               values ($1, $2, (select id from schools order by created_at limit 1), $3, $4,
+                       (select id from teachers order by created_at limit 1))`,
+              [body.id, PW.classId, body.name, body.email],
+            )
+            return new Response(null, { status: 201 })
+          }
+          return jsonRes({ message: `unsupported ${method}` }, 405)
+        } catch (e) {
+          const m = String(e?.message ?? e)
+          return jsonRes({ code: /does not exist/.test(m) ? '42P01' : '23505', message: m }, 409)
+        } finally {
+          await db.exec('rollback')
+        }
+      }
+
+      try {
+        /*
+         * 🔴 负向对照：把 `mayManage()` 里"年级主任"那一支**放宽一档**
+         *    （原来要 `scope_id = 本班所在年级`，改成一个恒真的 `true`）——
+         *    改的是**内存里的源码文本**，仓库文件一个字节都不动。
+         *    期望：下面"别的年级的年级主任"那几条**必须变红**。
+         *
+         * ⚠️ 写到一个一次性的 `.ts` 再 import：Node 的类型剥离只认**磁盘上的** `.ts` 文件 ——
+         *    `data:` URL 走另一条加载路径，`type Env = {` 会当场语法错（试过）。
+         *    收尾一律 `rmSync` 删掉那个临时目录。
+         */
+        const src = readFileSync(resolvePath(APP, 'functions/api/classroom-account.ts'), 'utf8')
+        const widened = src.replace(
+          /if \(r\.role === 'grade_head'\) return cls\.grade_id != null && r\.scope_id === cls\.grade_id/,
+          `if (r.role === 'grade_head') return true /* 负向对照：放宽一档 */`,
+        )
+        if (NEGATIVE === 'room-account-wider' && widened === src) {
+          throw new Error('负向对照锚点没找到：mayManage 里年级主任那一支变了（模式 room-account-wider）')
+        }
+        const modSrc = NEGATIVE === 'room-account-wider' ? widened : src
+        const tmpDir = mkdtempSync(join(tmpdir(), 'shugao-roomacct-'))
+        const tmpFile = join(tmpDir, 'classroom-account.ts')
+        writeFileSync(tmpFile, modSrc, 'utf8')
+        let mod
+        try {
+          mod = await import(pathToFileURL(tmpFile).href)
+        } finally {
+          rmSync(tmpDir, { recursive: true, force: true })
+        }
+        const call = async (body) => {
+          const req = new Request('https://x.test/api/classroom-account', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${API_TOKEN}` },
+            body: JSON.stringify(body),
+          })
+          const res = await mod.onRequestPost({ request: req, env: ENV })
+          return { status: res.status, body: await res.json().catch(() => ({})) }
+        }
+
+        /* `classroom_accounts` 里已有的那一行（高二(1)班，§10 的夹具）——
+           `status` 这一条要在它上面真读一次库。 */
+        const c1Email = (
+          await db.query(`select email from classroom_accounts where class_id = $1`, [C.c1])
+        ).rows[0].email
+
+        /* ---- ① 🔴 一个字节都不回密码：`status` 三个身份都只拿到账号 ---- */
+        for (const [who, uid] of [
+          ['超管', U.super],
+          ['教务处', U.admin],
+          ['本年级年级主任', U.grade],
+          ['本班班主任', U.head],
+        ]) {
+          asActor(uid, C.c1)
+          const r = await call({ action: 'status', classId: C.c1 })
+          eq(
+            `① ${who} 看得见这个班的教室端账号（只回账号）`,
+            [r.status, r.body.hasAccount, r.body.account?.email, 'password' in (r.body.account ?? {})],
+            [200, true, c1Email, false],
+          )
+        }
+        /* 反向对照：**别的年级的年级主任 / 科任老师 / 教室端** 三档都拿不到结论 */
+        for (const [who, uid, cls] of [
+          ['别的年级的年级主任（高三）', R_OTHER_HEAD, C.c1],
+          ['科任老师（语文老师，教 c1 但不管班）', U.chn, C.c1],
+          ['教室端自己', U.room, C.c1],
+        ]) {
+          asActor(uid, cls)
+          const r = await call({ action: 'status', classId: cls })
+          eq(
+            `🔴 ① 反向对照：${who} → 拿不到（403 / 教室端是那句专门的拒绝）`,
+            [r.status, String(r.body.message ?? '').includes('教室端账号没有管理账号的权限') || r.status === 403],
+            [403, true],
+          )
+        }
+
+        /* ---- ② 判据只有一处：逐档比对 `mayManage` 与数据库的 `can_manage_class_for` ---- */
+        {
+          const rows = (uid) =>
+            db
+              .query(
+                `select role, scope_type::text as scope_type, scope_id::text as scope_id
+                   from teacher_roles where teacher_id = $1`,
+                [uid],
+              )
+              .then((r) => r.rows)
+          const clsRow = (cid) =>
+            db
+              .query(`select id, name, grade_id::text as grade_id, school_id::text as school_id from classes where id = $1`, [cid])
+              .then((r) => r.rows[0])
+          const cases = [
+            ['超管', U.super, C.c1],
+            ['教务处', U.admin, C.c1],
+            ['本年级年级主任', U.grade, C.c1],
+            ['本班班主任', U.head, C.c1],
+            ['科任老师（语文）', U.chn, C.c1],
+            ['别的年级的年级主任', R_OTHER_HEAD, C.c1],
+            ['走班班班主任（非本年级主任）', R_STREAM_HEAD, STREAM_CLS],
+            ['本年级年级主任 → 本年级的走班班', U.grade, STREAM_CLS],
+            ['高三的年级主任 → 高二的走班班', R_OTHER_HEAD, STREAM_CLS],
+          ]
+          const mismatches = []
+          for (const [who, uid, cid] of cases) {
+            const mine = mod.mayManage(await rows(uid), await clsRow(cid))
+            const dbs = (
+              await db.query(`select public.can_manage_class_for($1::uuid, $2::uuid) as v`, [uid, cid])
+            ).rows[0].v
+            if (mine !== dbs) mismatches.push(`${who}: 服务端 ${mine} / 数据库 ${dbs}`)
+          }
+          eq(
+            '🔴 ② `mayManage()` 九档逐档等于 `can_manage_class_for()`（同一件事没有第二个入口）',
+            mismatches,
+            [],
+          )
+        }
+
+        /* ---- ③ 重置密码：四个有权的人都能重置（真打一遍 onRequestPost）---- */
+        for (const [who, uid, cls] of [
+          ['超管', U.super, C.c1],
+          ['教务处', U.admin, C.c1],
+          ['本年级年级主任', U.grade, C.c1],
+          ['本班班主任', U.head, C.c1],
+          ['本年级年级主任 → 本年级的走班班', U.grade, STREAM_CLS],
+          /*
+           * ⚠️ **已知边界**（核过、写在这里）：库里**真的**挂着一行"走班班的班主任"时，
+           *    这个人**管得动**那个走班班 —— 因为 `can_manage_class_for` 的 head_teacher 那一支
+           *    判的是 `scope_id = classes.id`，**不看 kind**。用户的口径是"走班班**没有**班主任"，
+           *    那是**不发这一行**，不是在代码里另加一句话去挡它（挡它就得再发明一个判据，
+           *    而且会顺带把"他能不能批改这个走班班的作业"之类一起搅进来）。
+           */
+          ['走班班的班主任（库里真挂了一行）→ 他自己的走班班', R_STREAM_HEAD, STREAM_CLS],
+        ]) {
+          asActor(uid, cls)
+          const before = pwSets.length
+          const r = await call({ action: 'reset', classId: cls })
+          const sent = pwSets.slice(before)
+          ok(
+            `③ ${who} 重置密码 → 新密码在回话里`,
+            r.status === 200 &&
+              typeof r.body.account?.password === 'string' &&
+              r.body.account.password.length === 12 &&
+              sent.length === 1 &&
+              sent[0].password === r.body.account.password,
+            `HTTP ${r.status} · 回话 ${String(r.body.account?.password ?? '').length} 位 · 打给 GoTrue ${sent.length} 次`,
+          )
+        }
+
+        /* ---- ④ 🔴 反向对照：没有权限的三档**重置不了**（403，一个 12 位口令都没发出去）---- */
+        for (const [who, uid, cls] of [
+          ['别的年级的年级主任（高三 → 高二的班）', R_OTHER_HEAD, C.c1],
+          ['科任老师（语文老师，教 c1 但不管班）', U.chn, C.c1],
+          ['别的年级的年级主任（高三 → 高二的走班班）', R_OTHER_HEAD, STREAM_CLS],
+          ['教室端自己', U.room, C.c1],
+        ]) {
+          asActor(uid, cls)
+          const before = pwSets.length
+          const r = await call({ action: 'reset', classId: cls })
+          eq(
+            `🔴 ④ ${who} 重置密码 → 被拒（403），而且**没有任何口令打给 GoTrue**`,
+            [r.status, pwSets.length - before],
+            [403, 0],
+          )
+        }
+
+        /* ---- ⑤ 🔴 重置之后：新密码在回话里，**库里不存明文**（再查一次也拿不到）---- */
+        {
+          asActor(U.head, C.c1)
+          const r = await call({ action: 'reset', classId: C.c1 })
+          const pw = String(r.body.account?.password ?? '')
+          const row = (
+            await db.query(`select * from classroom_accounts where class_id = $1`, [C.c1])
+          ).rows[0]
+          ok(
+            '🔴 ⑤ 重置后的那一行里**没有任何一列**等于新密码（Supabase 里存的是哈希，原文拿不回）',
+            pw.length === 12 && !Object.values(row).some((v) => String(v) === pw),
+            `回话里 ${pw.length} 位 · 行里的列：${Object.keys(row).join('/')}`,
+          )
+          /* 再查一次（这一回合之后）：`status` 照旧只回账号 */
+          const again = await call({ action: 'status', classId: C.c1 })
+          eq(
+            '🔴 ⑤ 再查一次：照旧**没有** `password` 这个键（"看原密码"这件事本身做不到）',
+            [again.status, 'password' in (again.body.account ?? {}), again.body.account?.email],
+            [200, false, c1Email],
+          )
+        }
+
+        /* ---- ⑥ 🆕 走班班：年级主任在班级页看得见、管得动（**本来就已经成立**，这里钉住）---- */
+        eq(
+          '⑥ 年级主任**看得见**本年级的走班班（`visible_class_ids_for`：按 `grade_id` 取，与 kind 无关）',
+          await idsAs(db, U.grade, `select id from classes where id = $1`, [STREAM_CLS]),
+          [STREAM_CLS],
+        )
+        eq(
+          '⑥ 反向对照：**高三**的年级主任看不见高二的走班班',
+          await idsAs(db, R_OTHER_HEAD, `select id from classes where id = $1`, [STREAM_CLS]),
+          [],
+        )
+        eq(
+          '🔴 ⑥ 走班班**有没有 `grade_id`** —— 有值才是"年级主任管得动"的前提（P7 生成时从学生的年级取）',
+          (await db.query(`select grade_id::text as g from classes where id = $1`, [STREAM_CLS])).rows[0].g,
+          G2,
+        )
+        ok(
+          '🔴 ⑥ 而 **schema 没有把"走班班必须有年级"这条钉住**（`classes.grade_id` 可空、也没有 check）—— ' +
+            '手工建的走班班一旦漏了年级，年级主任就静默看不见它（本轮**不加约束**：线上可能已有这种行，加了会让 schema.sql 跑不过；' +
+            '入口那一侧照旧——`/classes` 列表与班级页都在，见下面这条）',
+          (await db.query(
+            `select is_nullable from information_schema.columns
+              where table_name = 'classes' and column_name = 'grade_id'`,
+          )).rows[0].is_nullable === 'YES',
+        )
+        const classesPageSrc = readFileSync(resolvePath(APP, 'src/pages/Classes.tsx'), 'utf8')
+        ok(
+          '⑥ 班级页（`/classes`）**两种班都列**（走班班单独一块，`splitByKind` 是唯一入口）—— 所以年级主任有个地方点进去',
+          /splitByKind/.test(classesPageSrc) && /streamClasses/.test(classesPageSrc),
+        )
+        eq(
+          '⑥ 反过来：**行政班**的班主任（非年级主任）管不动别人的走班班',
+          await idsAs(db, U.head, `select id from classes where id = $1`, [STREAM_CLS]),
+          [],
+        )
+
+        /* ---- ⑦ 前端那一层：**摆不摆**（静态读源码 —— 本地演示模式打不开这个块）----
+           走班班在班级页上、教室端账号那一块也在班级页上，所以这一节顺手把"前端只决定摆不摆"
+           这条纪律也钉住。⚠️ 这里**不是**端到端：本地演示模式没有服务端（`isRemote` false），
+           这个块在屏上根本不渲染（`shots.mjs` 也就拍不到它）—— 真正能不能读/能不能重置，
+           上面 ①–⑤ 已经在**真服务端 + 真库**上跑过了。 */
+        const detailSrc = readFileSync(resolvePath(APP, 'src/pages/ClassDetail.tsx'), 'utf8')
+        ok(
+          '⑦ 班级档案里那一块**只对管得着这个班的人摆**（`{canManageThis ? … : null}`）—— 科任老师一个字节都看不到账号',
+          /\{canManageThis \? \(/.test(detailSrc),
+        )
+        ok(
+          '🔴 ⑦ 而且它**复用页面上已有的那一个粗档**（`canEditClassFor`）—— 没有为它另写一套 role 判断',
+          (detailSrc.match(/canEditClassFor\(\s*myRoles/g) ?? []).length === 1 &&
+            !/role === 'grade_head'/.test(detailSrc),
+          `调用点 ${(detailSrc.match(/canEditClassFor\(\s*myRoles/g) ?? []).length} 处 · 页面里出现 role 判断 ${/role === 'grade_head'/.test(detailSrc) ? '有' : '无'}`,
+        )
+        ok(
+          '⑦ 界面上写着"密码只在生成时显示这一次"（照教师账号那块既有写法；文案只有 `lib/classroomAccount.ts` 那一处）',
+          /PASSWORD_SHOWN_ONCE/.test(detailSrc) &&
+            /PASSWORD_SHOWN_ONCE\s*=/.test(
+              readFileSync(resolvePath(APP, 'src/lib/classroomAccount.ts'), 'utf8'),
+            ),
+        )
+      } finally {
+        globalThis.fetch = realFetch
+      }
+    }
+
+    /* ============================================================
+       二十二、🆕 走班班的编辑 / 删除（§37：手工增删 `class_members` 的判据）
+       ------------------------------------------------------------
+       内测现场：「走班班都没有编辑键」「删不了」。
+       核出来的结论：**能做，只是没摆** —— 走班班是 `classes` 里 `kind='stream'` 的一行、
+       **有 `grade_id`**，所以 `classes_update` / `classes_delete` 用的
+       `can_manage_class_for()` 对它天然成立（§32.6 / 第二十一节已经核过一遍）。
+       真正缺的是**成员那一条写路径**：`class_members` 对 `authenticated` **零写权限**
+       （§27.8 / §32.4），所以 §37.1 新增了 `write_stream_members()`。
+
+       本节钉的就是那一个函数的判据 + 写法（**判据一个新发明都没有**：
+       函数体里第一句就是 `can_manage_class(p_class_id)`）。
+
+       ⚠️ 仍然守着那条纪律：`can_manage_class_for` 的 `head_teacher` 那一支判
+          `scope_id = classes.id`、**不看 kind** —— 库里真挂一行"走班班的班主任"时他管得动。
+          这不是漏洞，是用户口径（"走班班没有班主任"= **不发那一行**，不是在代码里加一句话去挡）。
+       ============================================================ */
+    section('二十二、🆕 走班班的编辑 / 删除（`write_stream_members` 的判据与写法）')
+
+    const S10 = {
+      cls: mk('c8', 1),
+      cls2: mk('c8', 2),
+      stu: mk('53', 1),
+      stu2: mk('53', 2),
+      stuStranger: mk('53', 9),
+      /** 高三的年级主任（**本节自己的夹具** —— 第二十一节那个出不了它的作用域） */
+      otherHead: mk('a3', 1),
+    }
+    const SCHOOL1 = '(select id from schools order by created_at limit 1)'
+    const G2 = `(select id from grades where name = '高二')`
+    const G3 = `(select id from grades where name = '高三')`
+
+    /* 夹具（**必须由属主写**：`class_members` 对 authenticated 零写权限，这正是本节的主题）：
+       · 两个**高二**的走班班（单科键，不与 §32.1 的唯一索引打架）
+       · 三个高二的学生 + 一个**高三**的学生（年级那一支的反向对照要用）
+       · 一个**高三的年级主任**（"管不着高二的走班班"那一档 —— ⚠️ 每个年级只有一个年级主任
+         那条部分唯一索引在，所以**先让出**这一档，否则夹具插不进去） */
+    await db.exec(`
+    insert into auth.users (id, email, raw_user_meta_data) values
+      ('${S10.otherHead}', 's10-other-head@shugao.test', '{"name":"高三的年级主任"}'::jsonb)
+    on conflict (id) do nothing;
+    delete from teacher_roles
+     where role = 'grade_head' and scope_type = 'grade'
+       and scope_id = (select id from grades where name = '高三')
+       and teacher_id <> '${S10.otherHead}';
+    insert into teacher_roles (id, teacher_id, role, scope_type, scope_id) values
+      ('${mk('42', 31)}', '${S10.otherHead}', 'grade_head', 'grade', ${G3})
+    on conflict (id) do nothing;
+    insert into classes (id, teacher_id, name, grade, year, school_id, grade_id, kind, class_type, stream_key) values
+      ('${S10.cls}',  '${U.head}', '走班班-生物', '高二', '2025', ${SCHOOL1}, ${G2}, 'stream', '', 'biology'),
+      ('${S10.cls2}', '${U.head}', '走班班-地理', '高二', '2025', ${SCHOOL1}, ${G2}, 'stream', '', 'geography')
+    on conflict (id) do nothing;
+    insert into students (id, class_id, student_no, name) values
+      ('${S10.stu}',  '${C.c1}', '11', '走班甲'),
+      ('${S10.stu2}', '${C.c2}', '11', '走班乙'),
+      ('${S10.stuStranger}', '${C.c3}', '11', '高三丙')
+    on conflict (id) do nothing;
+    `)
+
+    /* ⚠️ 用 `countAs`（**不是 `attempt`**）：`attempt` 判的是 `affectedRows`，而
+       `select <函数>` 的 affectedRows 是 0（它没有 DML 计数），会被读成"blocked"——
+       那是**假红**。`countAs` 只判"这一回合有没有报错"，报错就是被拒（§三.1 的假绿 / 假红）。 */
+    const callMembers = (uid, cid, ids) =>
+      countAs(db, uid, `select public.write_stream_members($1::uuid, $2::uuid[]) is not null as n`, [
+        cid,
+        ids,
+      ])
+        .then((n) => ({ outcome: n === 1 ? 'ok' : 'blocked', detail: String(n) }))
+        .catch((e) => ({ outcome: 'denied', detail: shortErr(e) }))
+    const memberCount = (cid) =>
+      db
+        .query(`select count(*)::int as n from class_members where class_id = $1`, [cid])
+        .then((r) => Number(r.rows[0].n))
+
+    /* 前置：夹具真的落成"走班班"了（不然下面每条都会以别的理由红，读不出真原因） */
+    eq(
+      '⓪ 前置：夹具那一行真的是 `kind = stream`（函数第一句判的就是它）',
+      (
+        await db.query(`select kind, grade_id::text as g from classes where id = $1`, [S10.cls])
+      ).rows[0],
+      { kind: 'stream', g: (await db.query(`select id::text as g from grades where name = '高二'`)).rows[0].g },
+    )
+
+    /* ---- ① 判据那一档：能管这个走班班的人都能增删（与 `can_manage_class_for` 同一把尺子）----
+       ⚠️ `U.head`（c1 的班主任）**不在这里** —— 他不是这个走班班的班主任，见下面 ② 的反向对照。 */
+    for (const [who, uid] of [
+      ['最高管理员', U.super],
+      ['教务处', U.admin],
+      ['本年级（高二）的年级主任', U.grade],
+    ]) {
+      const r = await callMembers(uid, S10.cls, [S10.stu, S10.stu2])
+      allowed(`① ${who} 手工增删走班班成员`, r)
+    }
+
+    /* ---- ② 反向对照：不管这个班的人一律拒（**真的走到函数体里那句 can_manage_class**）---- */
+    for (const [who, uid] of [
+      ['科任老师（教这个走班班所在的年级，但不是管理身份）', U.phy],
+      ['无身份的新老师', U.fresh],
+      ['别的年级（高三）的年级主任', S10.otherHead],
+      ['教室端账号', U.room],
+      ['这个走班班的**行政班**班主任（`U.head` 是 c1 的班主任，管不着 c1 之外的班）', U.head],
+    ]) {
+      const r = await callMembers(uid, S10.cls, [S10.stu])
+      denied(`🔴 ② 反向对照：${who} → 改不动`, r)
+    }
+
+    /* ---- ③ 反向对照：拿一个**行政班**的 id 进来 → 显式报错（不许静默）---- */
+    {
+      const r = await callMembers(U.super, C.c1, [S10.stu])
+      denied('🔴 ③ 反向对照：拿**行政班**的 id 调它 → 报错"这不是走班班"（显式，不静默）', r)
+      ok(
+        '🔴 ③ 而且报的是**人话**（不是 42501 那种"权限"）—— 说明它真的走到了"kind 不对"那一句',
+        /这不是走班班/.test(String(r.detail ?? '')),
+        String(r.detail ?? '').slice(0, 120),
+      )
+    }
+
+    /* ---- ④ 反向对照：**别年级**的学生塞不进来（年级那一支）---- */
+    {
+      const r = await callMembers(U.super, S10.cls, [S10.stuStranger])
+      denied('🔴 ④ 反向对照：**高三**的学生不能塞进高二的走班班', r)
+      ok(
+        '🔴 ④ 报的是年级那句人话（不是静默放进去了）',
+        /不在这个走班班所属的年级/.test(String(r.detail ?? '')),
+        String(r.detail ?? '').slice(0, 120),
+      )
+    }
+
+    /* ---- ⑤ 真的写进去了（两张皮：`attempt` 里那一回合写完就 rollback，所以另起一步由属主写）---- */
+    await db.exec(`insert into class_members (class_id, student_id) values
+      ('${S10.cls}', '${S10.stu}'), ('${S10.cls}', '${S10.stu2}') on conflict do nothing`)
+    eq('⑤ 增：两个成员真的落在 `class_members` 上（不是 `students.class_id`）', await memberCount(S10.cls), 2)
+    eq(
+      '⑤ 而且**没碰** `students.class_id`（学生的行政班照旧是 c1 / c2）',
+      (
+        await db.query(`select class_id::text as c from students where id = $1`, [S10.stu])
+      ).rows[0].c,
+      C.c1,
+    )
+    await db.exec(`delete from class_members where class_id = '${S10.cls}' and student_id = '${S10.stu2}'`)
+    eq('⑤ 删：移掉一个成员 → 只剩一行', await memberCount(S10.cls), 1)
+
+    /* ---- ⑥ 🔴 一个学生同时在两个走班班（多对多，**不许被去重**）---- */
+    await db.exec(`insert into class_members (class_id, student_id) values
+      ('${S10.cls2}', '${S10.stu}') on conflict do nothing`)
+    eq(
+      '🔴 ⑥ 一个学生**同时在两个走班班**里 → 两行都在（多对多没被去重）',
+      (
+        await db.query(
+          `select class_id::text as id from class_members where student_id = $1 order by class_id`,
+          [S10.stu],
+        )
+      ).rows.map((r) => r.id).sort(),
+      [S10.cls, S10.cls2].sort(),
+    )
+
+    /* ---- ⑦ 🔴 反向对照（判据那一侧）：把"能管"放宽一档 → 上面 ② 里那些"被拒"必须变红 ----
+       ⚠️ 这条对照**不跑**（它是给人看的判据说明），真正的负向对照由 `RLS_NEGATIVE=p10-…` 那套跑。
+          这里只核**同一把尺子**：函数的结论 == `can_manage_class_for()` 的结论。 */
+    {
+      const mismatches = []
+      for (const [who, uid] of [
+        ['超管', U.super],
+        ['教务处', U.admin],
+        ['高二的年级主任', U.grade],
+        ['科任老师', U.phy],
+        ['无身份新老师', U.fresh],
+        ['c1 的班主任', U.head],
+        ['教室端', U.room],
+      ]) {
+        const direct = (
+          await db.query(`select public.can_manage_class_for($1::uuid, $2::uuid) as v`, [uid, S10.cls])
+        ).rows[0].v
+        const viaFn = await callMembers(uid, S10.cls, [])
+        if (direct !== (viaFn.outcome === 'ok')) mismatches.push(`${who}: 函数 ${viaFn.outcome} / 判据 ${direct}`)
+      }
+      eq(
+        '🔴 ⑦ `write_stream_members()` 的结论**逐档等于** `can_manage_class_for()`（同一件事没有第二个判据）',
+        mismatches,
+        [],
+      )
+    }
+
+    /* ---- ⑧ 客户端**照旧**零写权限（函数是唯一那条路）---- */
+    denied(
+      '⑧ `class_members` 客户端直写**照旧被拒**（写只走 §37.1 那个函数）',
+      await attempt(
+        db,
+        U.super,
+        `insert into class_members (class_id, student_id) values ($1, $2)`,
+        [S10.cls2, S10.stu2],
+      ),
+    )
+    eq(
+      '⑧ 对照：上面那条"被拒"不是"这一行本来就存在"（换成另一个学生也拒）',
+      (await attempt(db, U.admin, `insert into class_members (class_id, student_id) values ($1, $2)`, [S10.cls, S10.stuStranger])).outcome,
+      'denied',
+    )
+
+    /* ---- ⑨ `classes_delete` 对走班班天然成立（"删不了"那一半的判据）---- */
+    eq(
+      '🔴 ⑨ 年级主任**删得掉**本年级的走班班（`classes_delete` 用的就是 `can_manage_class_for`，不看 kind）',
+      (await attempt(db, U.grade, `delete from classes where id = $1 returning id`, [S10.cls2])).outcome,
+      'ok',
+    )
+    denied(
+      '🔴 ⑨ 反向对照：**别的老师**（`U.fresh`，c4 的班主任但没有任何管理身份）删不掉这个走班班',
+      await attempt(db, U.fresh, `delete from classes where id = $1 returning id`, [S10.cls]),
+    )
+    /* ⚠️ **不用 `U.head` 当这一条的反向对照**：他是这个走班班的 `teacher_id`（夹具里那么写的），
+       而 `classes_delete` 的策略是 `can_manage_class(id) or owns_class(id)` ——
+       `owns_class()` 那一支对"建档人"放行，那是**既有语义**（§16.3），不是漏洞。
+       拿他当"删不掉"的反例会得出"策略坏了"的错误结论（假红）。 */
+    eq(
+      '🔴 ⑨ 反过来（登记这条已知边界）：**这个走班班的 `teacher_id` 本人**删得掉 —— `owns_class()` 那一支放行',
+      (await attempt(db, U.head, `delete from classes where id = $1 returning id`, [S10.cls])).outcome,
+      'ok',
+    )
+    denied(
+      '🔴 ⑨ 反向对照：科任老师删不掉（`U.phy` 教 c1 / c2，但这个走班班不归他管）',
+      await attempt(db, U.phy, `delete from classes where id = $1 returning id`, [S10.cls]),
+    )
+    eq(
+      '🔴 ⑨ `class_members` 是 `on delete cascade` —— 删走班班**不留孤儿成员行**',
+      await memberCount(S10.cls),
+      1,
+    )
+    eq(
+      '🔴 ⑨ 反向对照：`class_members.class_id` 对 `classes(id)` 的那条外键写着 cascade（不是"靠人清"）',
+      (
+        await db.query(
+          `select confdeltype::text as t from pg_constraint
+            where conrelid = 'class_members'::regclass and contype = 'f'
+              and conkey = array[(select attnum from pg_attribute
+                                   where attrelid = 'class_members'::regclass and attname = 'class_id')]`,
+        )
+      ).rows.map((r) => r.t),
+      ['c'],
+    )
+
+    /* ---- ⑩ 前端那一层：入口判据是数据库那条的前端影子，且成员写的是 `class_members` ---- */
+    {
+      const clSrc = readFileSync(resolvePath(APP, 'src/pages/Classes.tsx'), 'utf8')
+      ok(
+        '⑩ 班级页的走班班入口用 `canEditClassFor(myRoles, c.id, c.gradeId)`（`can_manage_class_for` 的前端影子）',
+        /canEditClassFor\(myRoles, c\.id, c\.gradeId\)/.test(clSrc),
+      )
+      ok(
+        '🔴 ⑩ 而且这个判据**不复用 `.kind`**（权限判断与"是不是走班班"是两件事）',
+        !/canEditClassFor\([^)]*kind/.test(clSrc),
+      )
+      ok(
+        '🔴 ⑩ 成员那一条写路径的名字对得上（`saveStreamMembers` → `write_stream_members`）',
+        /saveStreamMembers/.test(clSrc) &&
+          /write_stream_members/.test(readFileSync(resolvePath(APP, 'src/data/remote.ts'), 'utf8')),
+      )
+    }
+
+
 
     await B.db.close()
     await A.db.close()

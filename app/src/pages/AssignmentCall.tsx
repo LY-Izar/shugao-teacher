@@ -272,11 +272,11 @@ export default function AssignmentCall() {
               className="mt-2 flex items-start gap-2 p-2.5"
               style={{
                 background: 'var(--color-warnsoft)',
-                border: '1px solid #ecd9ae',
+                border: '1px solid var(--color-warnline)',
                 borderRadius: 4,
                 fontSize: 12.5,
                 lineHeight: 1.7,
-                color: '#8a5a12',
+                color: 'var(--color-warnink)',
               }}
             >
               <IconAlert size={15} />
@@ -407,7 +407,7 @@ export default function AssignmentCall() {
                           padding: '0 3px',
                           borderRadius: 99,
                           background: 'var(--color-bad)',
-                          color: '#fff',
+                          color: 'var(--color-onbad)',
                           fontSize: 9.5,
                           lineHeight: '15px',
                           fontWeight: 700,
@@ -722,6 +722,9 @@ export default function AssignmentCall() {
         <div
           className="relative overflow-hidden"
           style={{
+            /* ⚠️ 这一块是**深色演示屏**（模拟教室端那块屏），亮暗两档都仍然是深底 ——
+               所以里面 `#10151c / #4ade9a / #fff` 这些**故意不换令牌**：
+               换成 `--color-surface*` 之后，亮色下它就不是"那块深色屏"了。 */
             background: 'linear-gradient(180deg, #10151c, #161d26)',
             borderRadius: 6,
             padding: '22px 16px',

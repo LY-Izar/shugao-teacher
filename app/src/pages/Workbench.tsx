@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Page } from '../components/AppShell'
 import {
@@ -26,6 +26,8 @@ import { isAdminClass } from '../lib/pick'
 import { analyzeRoster } from '../lib/roster'
 import { currentIdentityLabel, IDENTITY_TAG_STYLE } from '../lib/roles'
 import { noticeScopeText } from '../lib/notices'
+import { pendingForMe, type TeachingRow } from '../lib/teaching'
+import { loadClassSubjects } from '../data/remote'
 
 const todoPath = (a: { id: string; status: string }) =>
   a.status === 'collected' ? `/assignments/${a.id}/grade` : `/assignments/${a.id}/collect`
@@ -68,16 +70,46 @@ export default function Workbench() {
   const todayItems = moodState.day.items
   const nextItemId = moodState.day.next?.id
 
+  /*
+   * 🔴 「我的任教关系」（`class_subjects`）—— **待办唯一的判据来源**（`lib/teaching.ts`）。
+   *
+   * **「看得见」≠「待办」**：
+   *   · 看得见哪些班的档案是**数据库**（RLS）给的 —— 班主任 / 年级主任 / 教务处
+   *     看得见整班各科的作业，那是"看"的权限，本页一个字都没动它；
+   *   · 「今日待办」是**我要干的活** —— 判据是 `(班, 科)` 在我的任教关系里。
+   * 不收这一刀的后果（本轮修的 bug）：班主任的待办里混进数学 / 英语，
+   * 点进去是「改成绩只给任课老师」那一页 → 一条改不了、只能退出来的**死路待办**。
+   *
+   * ⚠️ 三态（`lib/teaching.ts` 的 `isMyTodo()` 里写清了）：`null` = **不知道**我的任教关系
+   *    （还没读回来 / 读失败 / 本地演示模式没有数据库）→ **不筛**（宁多不藏）。
+   *    走班班的作业不需要特例：P7 分配走班老师时自动补的那一行 `class_subjects` 就是判据。
+   */
+  const [teachingRows, setTeachingRows] = useState<TeachingRow[] | null>(null)
+  useEffect(() => {
+    let alive = true
+    const ids = classes.map((c) => c.id)
+    if (ids.length) {
+      /* `loadClassSubjects` 读不到时回 `null`（"不知道"），**不许回空数组**（那是"我什么课都不教"） */
+      void loadClassSubjects(ids).then((r) => {
+        if (alive) setTeachingRows(r)
+      })
+    }
+    return () => {
+      alive = false
+    }
+  }, [classes])
+  /* 一个班都没有（换过账号 / 清空过）→ 上一次的任教关系一并作废，退回"不知道" */
+  const relations: TeachingRow[] | null = classes.length ? teachingRows : null
+
   const pending = useMemo(
     () =>
-      assignments
-        .filter((a) => a.status === 'open' || a.status === 'collected')
+      pendingForMe(assignments, relations, teacher?.id)
         .map((a) => {
           const klass = classes.find((c) => c.id === a.classId)
           return { a, klass, stats: collectStats(klass?.students ?? [], a) }
         })
         .sort((x, y) => (x.a.assignDate < y.a.assignDate ? 1 : -1)),
-    [assignments, classes],
+    [assignments, classes, relations, teacher?.id],
   )
 
   const health = useMemo(() => adminClasses.map((c) => ({ c, h: analyzeRoster(c.students) })), [adminClasses])
@@ -158,7 +190,7 @@ export default function Workbench() {
           className="anim-in mb-4 flex items-start gap-3 p-3"
           style={{
             background: 'var(--color-warnsoft)',
-            border: '1px solid #ecd9ae',
+            border: '1px solid var(--color-warnline)',
             borderRadius: 6,
           }}
         >
@@ -166,10 +198,10 @@ export default function Workbench() {
             <IconAlert size={17} />
           </span>
           <div className="flex-1">
-            <div style={{ fontSize: 13, fontWeight: 620, color: '#8a5a12' }}>
+            <div style={{ fontSize: 13, fontWeight: 620, color: 'var(--color-warnink)' }}>
               当前是演示数据（2 个虚拟班级 + 3 份作业档案）
             </div>
-            <div style={{ fontSize: 12, color: '#96702f', marginTop: 2, lineHeight: 1.5 }}>
+            <div style={{ fontSize: 12, color: 'var(--color-warnink2)', marginTop: 2, lineHeight: 1.5 }}>
               姓名均为程序拼装生成，不对应任何真实个人。开始录入真实班级后会自动切换。
             </div>
           </div>
@@ -209,6 +241,10 @@ export default function Workbench() {
              */
             { k: '班级', v: classes.length },
             { k: '学生', v: total },
+            /*
+             * 🔴 这一格数的**就是**下面「今日待办」那个列表（同一个 `pending`，同一次调用）——
+             *    所以它天然跟着任教关系走：别人教的那一科既不进列表、也不进这个数。
+             */
             {
               k: '待办',
               v: pending.length,

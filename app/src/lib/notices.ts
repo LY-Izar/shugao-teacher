@@ -171,6 +171,23 @@ const asNotice = (raw: Record<string, unknown>): Notice => ({
   revokedAt: raw.revokedAt === null || raw.revokedAt === undefined ? null : Number(raw.revokedAt),
   expired: raw.expired === true,
   mine: raw.mine === true,
+  /*
+   * 🆕 「撤下」这个入口摆不摆 —— **服务端算的**（`functions/api/notice.ts` 的 list 分支：
+   * `自己发的 || is_school_admin()`）。前端**不在这里重新判断角色**：
+   * 🔴 2026-10-07 修的 bug 就是"前端自己写窄了"（原来写 `mine`）→ 最高管理员与教务处
+   *    在别人的通知上看不到「撤下」，而服务端是允许的。
+   * ⚠️ 老服务端（没有这个字段）→ `false` = **不摆**：宁可少一个按钮，也不编一个
+   *    必然 403 的按钮出来（与 `?as=` 那套"摆不摆"的纪律一致）。
+   */
+  canRevoke: raw.canRevoke === true,
+  /*
+   * 🆕 「置顶 / 取消置顶」这个入口摆不摆 —— **服务端算的**（`functions/api/notice.ts` 的
+   *    list 分支：`is_school_admin()`，与 `pin` 那一支**同一套**判据）。
+   * 🔴 前端**不在这里重新判断角色**（同 `canRevoke` 那条纪律）。
+   * ⚠️ 老服务端没有这个字段 → `false` = **不摆**：宁可少一个按钮，
+   *    也不编一个必然 403 的按钮出来。
+   */
+  canPin: raw.canPin === true,
   unread: raw.unread === true,
   targets: Array.isArray(raw.targets)
     ? (raw.targets as Record<string, unknown>[]).map((t) => ({

@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useStore } from '../data/store'
+import { loadClassSubjects } from '../data/remote'
+import { isMyTodo, type TeachingRow } from '../lib/teaching'
 import { dayMood, isMorningWindow, pickGreeting, type DayMood } from '../lib/mood'
 import {
   COUNTDOWN_NEAR,
@@ -45,6 +47,8 @@ function writeDates(key: string, dates: string[]) {
 export function useMood() {
   const schedule = useStore((s) => s.schedule)
   const assignments = useStore((s) => s.assignments)
+  const classes = useStore((s) => s.classes)
+  const teacherId = useStore((s) => s.teacher?.id)
   const teacherName = useStore((s) => s.teacher?.name ?? '老师')
 
   const [now, setNow] = useState(() => beijingNow())
@@ -68,7 +72,49 @@ export function useMood() {
     () => dayState(schedule.filter((s) => s.scope !== 'class'), now),
     [schedule, now],
   )
-  const pending = useMemo(() => assignments.filter((a) => a.status === 'collected'), [assignments])
+
+  /*
+   * 我的任教关系（`class_subjects`）—— 与 `Workbench.tsx` **同一处读法、同一个判据**：
+   *   · 读不到回 `null`（"不知道"）→ `isMyTodo()` **不筛**（宁多不藏）；
+   *   · 一个班都没有（换过账号 / 清空过）→ 上一次的结论一并作废，退回"不知道"。
+   */
+  const [teachingRows, setTeachingRows] = useState<TeachingRow[] | null>(null)
+  useEffect(() => {
+    let alive = true
+    const ids = classes.map((c) => c.id)
+    if (ids.length) {
+      void loadClassSubjects(ids).then((r) => {
+        if (alive) setTeachingRows(r)
+      })
+    }
+    return () => {
+      alive = false
+    }
+  }, [classes])
+  const relations: TeachingRow[] | null = classes.length ? teachingRows : null
+
+  const pending = useMemo(
+    /*
+     * 🔴 **弹窗这一处的口径**（2026-10-07 F3 修的是它的**另一半**）：
+     *
+     *   ① **任教关系那一半**（这一轮修的）：复用 `lib/teaching.ts` 的 `isMyTodo()` ——
+     *      班主任早上一打开，欢迎弹窗「今天要批的作业」里原来会列出**数学**
+     *      （他不上这一科；点进去是「改成绩只给任课老师」那一页 = 改不了的死路）。
+     *      ⚠️ **不另写一份** `(班, 科)` 判断：工作台那一屏走的是同一个函数。
+     *   ② **状态那一半**：这里是「**今天要批的作业**」→ 只要 **`collected`（待批改）**。
+     *      ⚠️ 别用 `pendingForMe()` 的**整体**结果：它按「今日待办」的口径把 `open`
+     *      （待收缴）也算进去 —— 那是**工作台「今日待办」列表**的口径（那边照旧），
+     *      但"待收缴"的作业还没收上来，**没有东西可批**，列进「今天要批的作业」是错的。
+     *      （实测过：拿 `pendingForMe()` 的整体结果顶在这里，会让演示数据里那两份
+     *      `open` 的作业混进弹窗，而且"今日完成"再也到不了 —— `shots` S46 当场红。）
+     *
+     * ⚠️ **三态照旧**（`isMyTodo()` 里写清了）：任教关系 `null` = **不知道**
+     *    （还没读回来 / 读失败 / 本地演示模式没有数据库）→ **不筛**（宁多不藏）。
+     */
+    () =>
+      assignments.filter((a) => a.status === 'collected' && isMyTodo(a, relations, teacherId)),
+    [assignments, relations, teacherId],
+  )
 
   const mood: DayMood = dayMood(now, {
     dateStr,

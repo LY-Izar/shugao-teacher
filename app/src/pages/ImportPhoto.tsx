@@ -29,6 +29,7 @@ function MockSheet() {
   return (
     <div
       className="absolute inset-0"
+      /* 🔴 示意的**白纸**：暗色下也白（它不是 UI 面，是"被拍的那张纸"，理由同 AssignmentCollect） */
       style={{ background: '#fff', padding: '9% 11%', display: 'flex', flexDirection: 'column', gap: 9 }}
     >
       <div style={{ width: '46%', height: 9, background: 'var(--color-line2)', borderRadius: 2 }} />
@@ -226,6 +227,7 @@ export default function ImportPhoto() {
                       right: 0,
                       bottom: 0,
                       padding: '7px 10px',
+                      /* 压在**深色渐变**上的字（拍照预览底栏），亮暗两档都白 —— 故意不令牌化 */
                       color: '#fff',
                       fontSize: 11.5,
                       display: 'flex',
@@ -286,10 +288,10 @@ export default function ImportPhoto() {
                         className="mt-2.5 flex items-start gap-2 p-2.5"
                         style={{
                           background: 'var(--color-warnsoft)',
-                          border: '1px solid #ecd9ae',
+                          border: '1px solid var(--color-warnline)',
                           borderRadius: 4,
                           fontSize: 11.5,
-                          color: '#8a5a12',
+                          color: 'var(--color-warnink)',
                           lineHeight: 1.6,
                         }}
                       >
@@ -311,10 +313,10 @@ export default function ImportPhoto() {
                         className="mt-2.5 flex items-start gap-2 p-2.5"
                         style={{
                           background: 'var(--color-badsoft)',
-                          border: '1px solid #f0c9c9',
+                          border: '1px solid var(--color-badline)',
                           borderRadius: 4,
                           fontSize: 11.5,
-                          color: '#8f2b2b',
+                          color: 'var(--color-badink)',
                           lineHeight: 1.6,
                         }}
                       >
@@ -485,14 +487,14 @@ export default function ImportPhoto() {
                 className="mb-3 flex items-start gap-2.5 p-3"
                 style={{
                   background: 'var(--color-warnsoft)',
-                  border: '1px solid #ecd9ae',
+                  border: '1px solid var(--color-warnline)',
                   borderRadius: 6,
                 }}
               >
                 <span style={{ color: 'var(--color-warn)', marginTop: 1, flexShrink: 0 }}>
                   <IconAlert size={16} />
                 </span>
-                <div style={{ fontSize: 12.5, color: '#8a5a12', lineHeight: 1.65 }}>
+                <div style={{ fontSize: 12.5, color: 'var(--color-warnink)', lineHeight: 1.65 }}>
                   {lowConf.size > 0 ? (
                     <>
                       有 <b className="num">{lowConf.size}</b> 行识别得不够确定，
@@ -525,24 +527,24 @@ export default function ImportPhoto() {
             {bad > 0 ? (
               <div
                 className="mb-3 flex items-start gap-2.5 p-3"
-                style={{ background: 'var(--color-warnsoft)', border: '1px solid #ecd9ae', borderRadius: 6 }}
+                style={{ background: 'var(--color-warnsoft)', border: '1px solid var(--color-warnline)', borderRadius: 6 }}
               >
                 <span style={{ color: 'var(--color-warn)', marginTop: 1 }}>
                   <IconAlert size={16} />
                 </span>
-                <div style={{ fontSize: 12.5, color: '#8a5a12', lineHeight: 1.6 }}>
+                <div style={{ fontSize: 12.5, color: 'var(--color-warnink)', lineHeight: 1.6 }}>
                   有 <b className="num">{bad}</b> 行需要确认，请对照原图修改。
                 </div>
               </div>
             ) : (
               <div
                 className="mb-3 flex items-center gap-2.5 p-3"
-                style={{ background: 'var(--color-oksoft)', border: '1px solid #b9e2cf', borderRadius: 6 }}
+                style={{ background: 'var(--color-oksoft)', border: '1px solid var(--color-okline)', borderRadius: 6 }}
               >
                 <span style={{ color: 'var(--color-ok)' }}>
                   <IconCheck size={16} />
                 </span>
-                <span style={{ fontSize: 12.5, color: '#0b6b4a' }}>
+                <span style={{ fontSize: 12.5, color: 'var(--color-okink)' }}>
                   校验通过：学号连续，无重号重名。
                 </span>
               </div>
@@ -670,7 +672,7 @@ export default function ImportPhoto() {
           <div
             className="scrim"
             onClick={() => setZoom(false)}
-            style={{ background: 'rgb(14 20 27 / .82)' }}
+            style={{ background: 'rgb(var(--color-scrimstrong) / .82)' }}
           />
           <div
             className="fixed inset-0 z-[51] grid place-items-center p-4"
@@ -683,6 +685,7 @@ export default function ImportPhoto() {
                 width: '100%',
                 borderRadius: 6,
                 border: '1px solid var(--color-line2)',
+                /* 🔴 照片的衬底：暗色下也偏白（理由同 AssignmentCollect 那一处） */
                 background: '#fff',
               }}
             >

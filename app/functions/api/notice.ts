@@ -344,12 +344,40 @@ export async function onRequestPost(context: {
       seenAt = null
     }
 
+    /*
+     * 「撤下」摆不摆 —— **判据由服务端算好、随每一条通知回给前端**（I16 / I29：
+     * 前端只决定"摆不摆入口"，**不另写一套判据**）。判据与下面 `revoke` 那一支
+     * **逐字同一套**：`自己发的 || is_school_admin()`（教务处与超管是唯一的例外）。
+     *
+     * 🔴 2026-10-07 修的 bug：前端原来写的是 `notice.mine` —— 于是**最高管理员与教务处
+     *    在别人的通知上根本看不到「撤下」**，而服务端明明允许。用户实测报的就是它：
+     *    「我作为最高管理员为什么没法删除其他人发的通知」。这是"**服务端允许、
+     *    前端没摆按钮**"这一类 bug 的**第二次**（第一次是开学准备页）。
+     *
+     * ⚠️ `is_school_admin` 只问**一次**：它是"我"的属性，与"哪一条通知"无关 ——
+     *    放进 `map` 里逐条问就是 N+1（列表上限 200 条 = 200 次 RPC）。
+     * ⚠️ 函数不在（第 21 段没跑）时**不静默当 false** —— 那正好会让超管看不到按钮
+     *    （就是这一类 bug 的形状）；与 revoke / pin 两支同一条处置：503 + 人话。
+     */
+    const revokeBroad = await rpcBool(env, me.token, 'is_school_admin')
+    if (revokeBroad === 'missing') return json({ status: 'error', message: NEED_STAGE21 }, 503)
+
+    /*
+     * 🆕 「置顶」摆不摆 —— 判据就是 `is_school_admin()` **它本身**（教务处 ∪ 超管），
+     *    与下面 `pin` 那一支**逐字同一套**（别再写一个）。
+     * ⚠️ 它与「撤下」用的是**同一次回答**（`revokeBroad` 存的就是那个值）——
+     *    同一个布尔喂两个按钮，**不是**"换个名字再问一遍"：`is_school_admin` 是"我"的属性、
+     *    与"哪一条通知"无关 → 整个列表**只问一次**（上限 200 条，逐条问就是 N+1）。
+     */
+    const schoolAdmin = revokeBroad
+
     const nowMs = Date.now()
     const list = notices.map((n) => {
       const createdMs = Date.parse(String(n.created_at ?? '')) || 0
       const expiresAt = (n.expires_at as string | null) ?? null
       const expired = expiresAt ? Date.parse(expiresAt) <= nowMs : false
       const seenMs = seenAt ? Date.parse(seenAt) : 0
+      const isMine = String(n.sender_id ?? '') === me.id
       return {
         id: String(n.id),
         title: String(n.title ?? ''),
@@ -361,7 +389,20 @@ export async function onRequestPost(context: {
         pinned: n.pinned === true,
         revokedAt: n.revoked_at ? Date.parse(String(n.revoked_at)) : null,
         expired,
-        mine: String(n.sender_id ?? '') === me.id,
+        mine: isMine,
+        /*
+         * 🆕 能不能撤下这一条（**服务端算的**）：自己发的 ∪ 教务处 / 超管（`is_school_admin`）。
+         * ⚠️ 它只说"**许可**"，**不含"已撤下"这个状态** —— 一个字段只能有一种语义：
+         *    "撤过了"由前端按 `revokedAt` 判断（按钮条件 = `canRevoke && !revoked`）。
+         */
+        canRevoke: isMine || revokeBroad,
+        /*
+         * 🆕 能不能给这一条置顶 / 取消置顶（**服务端算的**）：`is_school_admin()`
+         *    —— 与 `pin` 那一支同一套判据（"置顶别人的通知 = 改别人话的权重"，不该人人都有）。
+         * ⚠️ 与 `canRevoke` 一样，它只说"**许可**"：**这一条现在是不是置顶的**是另一件事，
+         *    由 `pinned`（上面）说 —— 一个字段只能有一种语义（按钮文字 = `pinned` 决定）。
+         */
+        canPin: schoolAdmin,
         // 未读 = 有 created_at > 我的 notice_seen_at 的通知（I49：**只有这一个时间戳**）
         unread: createdMs > seenMs,
         targets: targets

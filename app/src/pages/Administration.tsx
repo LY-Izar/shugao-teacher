@@ -138,7 +138,7 @@ export default function Administration() {
               你的账号看不到这一页的内容。
             </div>
             <div style={{ fontSize: 12, color: 'var(--color-ink4)', lineHeight: 1.7 }}>
-              年级管理、档案与教师账号分别由教务处 / 年级主任 / 办公室主任维护。
+              年级管理、档案与教师管理分别由教务处 / 年级主任 / 办公室主任维护。
             </div>
           </Panel>
         ) : null}

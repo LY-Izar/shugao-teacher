@@ -173,6 +173,12 @@ await withLock(async () => {
   let countOverride = null
   /** `can_contact_admin` 对调用者返回什么（在册教师 true / 教室端 false） */
   let contactValue = 'true'
+  /**
+   * 🆕 `can_publish_announcement` 对调用者返回什么（§22.2；只有超管 true）。
+   * ⚠️ 默认 `'false'`：**别的节**本来就走不到发公告那一条；
+   *    第五节 ③-B 要端到端验"公告那一封留档邮件能不能发出去"时显式开它。
+   */
+  let publishValue = 'false'
   /** 假 `db_usage_report()` 的回话（第七节·补二 要造"读不到"那一支） */
   let dbReportValue = {
     totalBytes: 300 * 1024 * 1024,
@@ -245,6 +251,8 @@ await withLock(async () => {
       }
       /** 🆕 管理台第二期：反馈 / 备份通知共用的那一个判据（§25.2） */
       if (fn === 'can_contact_admin') return send(200, contactValue)
+      /** 🆕 第五节 ③-B：公告留档邮件那一支的判据（§22.2，只有超管） */
+      if (fn === 'can_publish_announcement') return send(200, publishValue)
       /** 🆕 数据库用量报告（§26）—— 它回的是 **json 对象**，不是一个标量 */
       if (fn === 'db_usage_report') return send(200, dbReportValue)
       if (fn === 'can_manage_teachers') return send(200, 'true')
@@ -346,8 +354,49 @@ await withLock(async () => {
    */
   const gh = { runs: [], logText: null, logStatus: 200 }
   const ghCalls = []
+  /**
+   * 🆕 2026-10-07 · 假 **Supabase Management API**（出流量那一格）。
+   * ⚠️ 与 GitHub / Resend 同款：**只认 `api.supabase.com`**，其余请求原样转发给真 fetch
+   *    —— 否则假 Supabase（127.0.0.1）那一路会被这个桩自己吃掉。
+   * 🔴 **一个字节都不出网**：这里必须拦住它（真 PAT 是不存在的夹具值）。
+   */
+  const sbUsage = {
+    status: 200,
+    /** 让第一个候选端点回 404（验"候选表会往下试"） */
+    firstNotFound: false,
+    /** 回话体（字节口径：egress 6 MB、库 53 MB） */
+    body: {
+      egress: 6 * 1024 * 1024,
+      db_size: 53 * 1024 * 1024,
+      period_start: '2026-10-01',
+      period_end: '2026-11-01',
+    },
+    calls: [],
+    auth: [],
+  }
   globalThis.fetch = async (input, init) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+    /* 🆕 假 Supabase Management API（出流量）—— 只认这一个域名 */
+    if (/^https:\/\/api\.supabase\.com\//.test(url)) {
+      sbUsage.calls.push(url)
+      sbUsage.auth.push(String(new Headers(init?.headers ?? {}).get('authorization') ?? ''))
+      if (sbUsage.firstNotFound && url.includes('/v1/projects/')) {
+        return new Response(JSON.stringify({ message: 'Not Found' }), {
+          status: 404,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      if (sbUsage.status !== 200) {
+        return new Response(JSON.stringify({ message: 'management api 挂了' }), {
+          status: sbUsage.status,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      return new Response(JSON.stringify(sbUsage.body), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
     /* 🆕 假 Resend：只认这一个地址，按 `resendStatus` 回话 */
     if (/^https:\/\/api\.resend\.com\//.test(url)) {
       let body = null
@@ -408,6 +457,9 @@ await withLock(async () => {
     // ⚠️ 仓库地址 / 收件人都是**假夹具**：真实的 GitHub 账号名与邮箱一律不写进仓库。
     GITHUB_REPO: 'your-org/your-repo',
     ADMIN_NOTIFY_EMAIL: FIXTURE_MAIL_TO,
+    /* 🆕 2026-10-07：出流量（Management API）—— 同样是**假夹具**，永不出网 */
+    SUPABASE_PAT: 'fake-sb-pat',
+    SUPABASE_PROJECT_REF: 'abcdefghijklmnopqrst',
   }
 
   /* ============================================================
@@ -472,6 +524,8 @@ await withLock(async () => {
   const FB = await import(mod('functions/api/feedback.ts', '?fb'))
   const MAILFN = await import(mod('functions/api/mail.ts', '?mail'))
   const MAILLIB = await import(mod('functions/api/_lib/mail.ts', '?maillib'))
+  /** 🆕 第五节 ③-B：公告那一支的**真** Function（"系统正文自测"要端到端跑它） */
+  const ANNOUNCE = await import(mod('functions/api/announcement.ts', '?ann'))
 
   /** 调一个 Function（真文件）—— 与 `post()` 同款，只是文件名不同 */
   const call = (F, path, body, headers = {}, env = ENV, method = 'POST') =>
@@ -1398,6 +1452,10 @@ await withLock(async () => {
          这里钉**读与删的判据 + 留痕 + 服务端再判一次截止时间**）；
        · 反馈「**先落库再发信**」（发信失败时库里仍有行 —— 这一条**只有看流水才验得出来**）；
        · 数据库用量**三档阈值** + 那条与百分比无关的红（单份档案 > 5 MB）；
+       · 🆕 2026-10-07「用量卡让人误判」那一修：**百分比按整库算**（反向对照：改回
+         "只算用户表" → 必须红）、配额 **500 MB**、两个口径并排解释；
+       · 🆕 **出流量**（Supabase Management API，只读 PAT）：三态（没配 / 读不到 / 拿到数）、
+         端到端拿数（含候选端点兜底）、**PAT 一个字节都不回显**、限额只在 `adminChart.ts`；
        · 邮件助手的三条硬要求（没配 key 显式报错 / 失败留痕 / 正文不许有学生信息）。
      ============================================================ */
 
@@ -2077,6 +2135,223 @@ await withLock(async () => {
       )
     }
 
+    /*
+     * ③-B 🆕 2026-10-06：**系统自己构造的正文，不许被自己的判据拦下**
+     *
+     * 线上事故（同一种形状的**第 2 次**）：`/api/mail {action:'test'}` **恒 502** ——
+     * 测试邮件正文里印了发件人地址（`onboarding@resend.dev`），被"邮箱形状"那条窄判据拦下。
+     * 第 1 次是备份通知的免责声明里写了"成绩"两个字（判据是"出现成绩类词"）。
+     *
+     * 治法：正文统一在 `SYSTEM_MAIL_BODIES`（`_lib/mail.ts`）里构造，这里**逐条**喂给判据。
+     * `admin-checks` ⑤ 是全量体检的入口 —— **新加一处发信就要加一条目录项**，
+     * 否则它就是一条"没被体检过"的正文（`mail.ts` 那段注释写着这条纪律）。
+     */
+    {
+      const stamp = '2026-10-06 21:30'
+      const ctx = { stamp, sentToday: 3 }
+      /** 每一类系统邮件一份**真实形状**的正文（与线上调用处同款入参） */
+      const bodies = {
+        测试邮件: MAILLIB.SYSTEM_MAIL_BODIES.test(ctx),
+        备份通知: MAILLIB.SYSTEM_MAIL_BODIES.backup({
+          ...ctx,
+          summary: '3 个班级 · 128 名学生 · 42 份作业档案',
+          detail: '文件：树高备份-2026-09-29.json',
+        }),
+        公告通知: MAILLIB.SYSTEM_MAIL_BODIES.announcement({
+          ...ctx,
+          title: '周五下午调课',
+          level: 'normal',
+          popup: 'once',
+          pin: true,
+          from: null,
+          to: null,
+          text: '周五下午三节课改为两节，放学时间提前 30 分钟。',
+        }),
+        反馈回执: MAILLIB.SYSTEM_MAIL_BODIES.feedback({
+          stamp,
+          authorName: '王老师',
+          authorId: 't-1',
+          authorRoles: '任课老师',
+          page: '/settings',
+          env: 'web',
+          contact: '',
+          text: '作业导入的图太大，点导出没反应。',
+        }),
+        毕业备份通知: MAILLIB.SYSTEM_MAIL_BODIES.gradeBackup({
+          stamp,
+          gradeName: '2026 届',
+          countsLine: '班级 3 个 · 学生 128 人',
+          sizeLine: '2.3 MB',
+          checksumLine: 'd41d 8cd9 8f00 b204',
+          tokenPath: '/api/grade-promote?token=abc123',
+        }),
+      }
+      eq(
+        '🔴 ⑤ 系统正文共 5 类（**有几类就体检几类**；新加一处发信 = 这里加一条）',
+        Object.keys(bodies).length,
+        5,
+      )
+      for (const [name, text] of Object.entries(bodies)) {
+        const hit = MAILLIB.looksLikeStudentData(text)
+        /*
+         * ⚠️ 判据跑的是 `sendMail()` 里**洗过一遍**的那份（`scrubSecrets()` 在体检之前），
+         *    所以这里也洗一遍 —— 否则断言与线上不是同一条正文。
+         */
+        const afterScrub = MAILLIB.looksLikeStudentData(MAILLIB.scrubSecrets(text))
+        eq(
+          `🔴 ⑤ 系统正文「${name}」→ **判据放行**（它结构上不可能带学生数据，被拦下就是判据误伤自己）`,
+          [hit, afterScrub],
+          [null, null],
+        )
+      }
+      /* 反向对照：**真地址**塞回去 → 必须红（证明上面那 5 条不是"判据睡着了"） */
+      const withAddr = `${bodies.测试邮件}\n备用联系方式：onboarding@resend.dev`
+      ok(
+        '🔴 ⑤ 反向对照：往测试邮件正文里塞回一个**真地址** → 判据必须命中（上面那 5 条不是恒绿）',
+        Boolean(MAILLIB.looksLikeStudentData(withAddr)),
+        MAILLIB.looksLikeStudentData(withAddr) ?? '(没命中 —— 判据睡着了)',
+      )
+      /* 判据**只看"值"不看"词"**：写"邮箱"两个字、版本号、文件名都不许误伤 */
+      eq(
+        '🔴 ⑤ 判据收窄：正文里写"邮箱"两个字**不是触发词**（"有问题发我邮箱"照旧放行）',
+        MAILLIB.looksLikeStudentData('有问题发我邮箱，或者直接回复这封信。'),
+        null,
+      )
+      eq(
+        '🔴 ⑤ 判据收窄：`版本 1.2.3@2026.10.06` **不是邮箱**（那一条原先只看"@"就拦，已收窄）',
+        MAILLIB.looksLikeStudentData('版本 1.2.3@2026.10.06 上线'),
+        null,
+      )
+      eq(
+        '🔴 ⑤ 判据收窄：`报告.docx@2026-10-06` 也不是邮箱',
+        MAILLIB.looksLikeStudentData('见 报告.docx@2026-10-06 这一版'),
+        null,
+      )
+      ok(
+        '🔴 ⑤ 而**真地址一个都没漏**（收窄不许收出漏网）',
+        Boolean(MAILLIB.looksLikeStudentData('有事发 teacher@school.edu.cn')),
+      )
+      ok(
+        '🔴 ⑤ 这条判据量的是"值"：**光有 `@` 不算**（这正是它原先过宽的地方）',
+        !MAILLIB.looksLikeStudentData('a@b') && Boolean(MAILLIB.looksLikeStudentData('x@y.com')),
+      )
+    }
+
+    /*
+     * ③-C 🆕 2026-10-06：**"哪些正文会被这条判据拦下"的清单**（同一个坑的第三次预防）
+     *
+     * 做法：把"系统会发出去的正文"与"会显示给用户的错误消息"逐条喂给判据，
+     * **每条都写上期望值**（拦 / 放）。期望值是"拦"的那些是本项目**有意要拦**的
+     * （成绩、学号、家长电话、邮箱地址…）—— 清单的价值在于：**新的误伤会当场红**，
+     * 而不是等到线上某个按钮恒 502 才发现。
+     *
+     * 🔴 这份清单的结论（2026-10-06 实测）：系统正文里**还有一处**会被拦 ——
+     *    `公告通知`（第 3 次同一种形状：免责声明里印了发件人地址）。
+     *    它已经跟着这次修复一起改掉（`SYSTEM_MAIL_BODIES.announcement`），
+     *    并在下面单独列一条**端到端**断言（真跑 `/api/announcement` 那一支）。
+     * ⚠️ 错误消息里那几条命中"邮箱形状"的（`邮箱格式不对（例如 …@qq.com）` 这种）
+     *    **是有意的**：判据在这里被当成"这句话里有没有地址"，它**不发给任何人**，
+     *    所以"命中"不是 bug —— 列在这里是为了让下一个人一眼看出**为什么**是拦。
+     */
+    {
+      /** 第 1 列：这段文本；第 2 列：期望判据说什么（`null` = 放行） */
+      const BLOCKLIST = [
+        /* ---- A 类：会**发出去**的系统正文（必须全放行） ---- */
+        ['A 系统正文`测试邮件`', MAILLIB.SYSTEM_MAIL_BODIES.test({ stamp: '2026-10-06 21:30', sentToday: 3 }), null],
+        [
+          'A 系统正文`备份通知`',
+          MAILLIB.SYSTEM_MAIL_BODIES.backup({
+            stamp: '2026-10-06 21:30',
+            sentToday: null,
+            summary: '3 个班级 · 128 名学生',
+            detail: '文件：树高备份-2026-09-29.json',
+          }),
+          null,
+        ],
+        [
+          'A 系统正文`公告通知`（🔴 第 3 处误伤，本次修掉）',
+          MAILLIB.SYSTEM_MAIL_BODIES.announcement({
+            stamp: '2026-10-06 21:30',
+            sentToday: null,
+            title: '周五下午调课',
+            level: 'normal',
+            popup: 'once',
+            pin: false,
+            from: null,
+            to: null,
+            text: '周五下午三节课改为两节。',
+          }),
+          null,
+        ],
+        [
+          'A 系统正文`反馈回执`（联系方式留空时）',
+          MAILLIB.SYSTEM_MAIL_BODIES.feedback({
+            stamp: '2026-10-06 21:30',
+            authorName: '王老师',
+            authorId: 't-1',
+            authorRoles: '任课教师',
+            page: '/settings',
+            env: 'web',
+            contact: '',
+            text: '作业导入的图太大。',
+          }),
+          null,
+        ],
+        [
+          'A 系统正文`毕业备份通知`',
+          MAILLIB.SYSTEM_MAIL_BODIES.gradeBackup({
+            stamp: '2026-10-06 21:30',
+            gradeName: '2026 届',
+            countsLine: '班级 3 个',
+            sizeLine: '2.3 MB',
+            checksumLine: 'd41d 8cd9',
+            tokenPath: '/api/grade-promote?token=abc',
+          }),
+          null,
+        ],
+        /* ---- B 类：会**显示给用户**的错误消息（同上，都是服务端自己写的字） ---- */
+        ['B 错误消息`pii_blocked`', '正文疑似含学生信息（出现 11 位手机号）—— 按纪律**不发信**；这一条会留在数据库里，面板上看得到', null],
+        [
+          'B 错误消息`no_key`',
+          '服务端还没配置邮件密钥（RESEND_API_KEY）—— 到 Cloudflare Pages → Settings → Variables and secrets 添加它（Secret），然后重新部署。在此之前邮件发不出去。',
+          null,
+        ],
+        [
+          'B 错误消息`no_to`',
+          '服务端还没配置邮件收件人（ADMIN_NOTIFY_EMAIL）—— 到 Cloudflare Pages → Settings → Variables and secrets 添加它（填你自己的邮箱），然后重新部署。',
+          null,
+        ],
+        [
+          'B 错误消息`quota`',
+          `最近 24 小时已经发了 ${MAILLIB.MAIL_DAILY_CAP} 封，到了自己设的上限（${MAILLIB.MAIL_DAILY_CAP} 封/天，Resend 免费额度是 100 封/天）—— 今天先别再发了`,
+          null,
+        ],
+        ['B 错误消息`Resend 失败`', 'Resend 回了 500：{"message":"internal"}', null],
+        ['B 错误消息`反馈未登录`', '反馈需要先登录（这样才能把它和你的账号对上，你也能在「我的」里看到处理进度）。', null],
+        ['B 错误消息`反馈不够长`', '请多写几个字（至少 5 个字），不然没法定位问题', null],
+        ['B 错误消息`测试邮件非超管`', '只有最高管理员能发测试邮件（它用的是平台的邮件配额）', null],
+        /* 那两条**故意**命中的（下面用 `not: true` 标出来）：它们是"把地址当作内容在说"的地方 */
+        ['B 错误消息`邮箱格式不对`（有意的：它就是在**说**地址长什么样）', '邮箱格式不对（例如 123456@qq.com）', '出现邮箱地址的形状（`@` + 域名）'],
+        ['B 错误消息`邮箱已建号`（有意的：回显的是**调用者自己**填进去的那一个）', '这个邮箱已经建过账号了：teacher@school.edu.cn。忘密码就点「重置密码」。', '出现邮箱地址的形状（`@` + 域名）'],
+        /* ---- C 类：**越界对照**（正常运维文案不许被误伤） ---- */
+        ['C 对照`维护窗口`', '系统维护：今晚 23:00-23:30 升级，预计 30 分钟', null],
+        ['C 对照`版本号`', '版本 0.9.1 上线，新增错题集导出', null],
+        ['C 对照`提到邮箱两个字`', '有问题发我邮箱，或者直接回复这封信。', null],
+        ['C 对照`版本@日期`', '版本 1.2.3@2026.10.06 上线', null],
+        ['C 对照`文件名@日期`', '见 报告.docx@2026-10-06 这一版', null],
+        /* ---- D 类：**要拦的真东西**（判据的正经用途，一条都不能漏） ---- */
+        ['D 要拦`成绩`', '张三这次考了 85 分', '出现"NN 分"这种成绩写法'],
+        ['D 要拦`成绩类词`', '这次的平均分统计好了', '出现成绩类词'],
+        ['D 要拦`学号标注`', '学号：2025007 的作业没交', '出现"学号/姓名："这种标注'],
+        ['D 要拦`家长电话标注`', '监护人电话：13800000000', '出现"家长电话/家庭住址/出生年月/民族："这种标注'],
+        ['D 要拦`真实邮箱值`', '有事发 teacher@school.edu.cn', '出现邮箱地址的形状（`@` + 域名）'],
+      ]
+      for (const [name, text, want] of BLOCKLIST) {
+        eq(`🔴 ⑤ 体检清单：${name}`, MAILLIB.looksLikeStudentData(text) ?? null, want)
+      }
+      eq('🔴 ⑤ 清单条数（**增删都要动这一条**，免得清单被悄悄缩短）', BLOCKLIST.length, 25)
+    }
+
     /* ④ 洗凭据：URL 的 query string / Bearer / 长串一律抹掉（邮件会离开系统） */
     {
       const s = MAILLIB.scrubSecrets('见 https://x.supabase.co/a?apikey=SECRET1 Bearer abcdefghijklmnop 联系我')
@@ -2135,12 +2410,92 @@ await withLock(async () => {
       eq('⑤ 反向对照：在册教师 → 200（"备份→发信"那条链的中间一环真的通）', bOk.status, 200)
       const audit = lastWrite('admin_audit')
       eq('🔴 ⑤ 而且发信**留痕了**（`mail.backup` —— 配额就是数这张表算的）', audit?.payload?.action, 'mail.backup')
+
+      /*
+       * 🔴 ⑤-B 🆕 2026-10-06：**端到端**验"系统正文没有被自己的判据拦下"。
+       *     上面 ③-B 是拿 `SYSTEM_MAIL_BODIES` 逐条体检（快、能定位）；
+       *     这一组是**真的调接口**，量的是"线上跑的那条路上，最后到 Resend 手里的正文"——
+       *     两组合起来才既防"目录漏了一类"，又防"目录与调用处各写一份"。
+       *     ⚠️ 这里必须断言 `reason !== 'pii_blocked'`，不能只断言 200：
+       *        200 也可能是"根本没走到发信那一支"—— 那就成了假绿。
+       */
+      clearFlow()
+      resendStatus = 200
+      const e2eT = await call(MAILFN, '/api/mail', { action: 'test' }, AUTH, ENV_MAIL)
+      const e2eTBody = await e2eT.json()
+      eq(
+        '🔴 ⑤-B `/api/mail` test 端到端：**200**，而且不是 `pii_blocked`（线上恒 502 的那一条）',
+        [e2eT.status, e2eTBody.reason ?? null],
+        [200, null],
+      )
+      ok(
+        '🔴 ⑤-B 而且**真的发了一封**，正文里没有 `@` 形状的地址（发件人地址不再印在正文里）',
+        mailsSent.length === 1 && !/[\w.%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/.test(String(mailsSent[0]?.body?.text ?? '')),
+        JSON.stringify({ sent: mailsSent.length, text: String(mailsSent[0]?.body?.text ?? '').slice(0, 120) }),
+      )
+      ok(
+        '🔴 ⑤-B 但**发件人字段照旧**是那个地址（正文里不印 ≠ 发件人不发）',
+        mailsSent[0]?.body?.from === 'onboarding@resend.dev',
+        String(mailsSent[0]?.body?.from ?? '(没发出去)'),
+      )
+
+      clearFlow()
+      const e2eB = await call(
+        MAILFN,
+        '/api/mail',
+        { action: 'backup', summary: '3 个班级 · 128 名学生', detail: '文件：树高备份-2026-09-29.json' },
+        AUTH,
+        ENV_MAIL,
+      )
+      eq('🔴 ⑤-B `/api/mail` backup 端到端：200，不是 `pii_blocked`', [e2eB.status, (await e2eB.json()).reason ?? null], [200, null])
+      ok('🔴 ⑤-B 而且真的发了一封（正文是被体检过的那一份）', mailsSent.length === 1, String(mailsSent.length))
+
+      /*
+       * 公告那一支（**第 3 处同一种形状的误伤就在这里**）：真跑 `/api/announcement` 的
+       * `create` + 勾选框。⚠️ 只跑"发与不发"这一支，落库/权限那一半不归这里管。
+       */
+      clearFlow()
+      publishValue = 'true'
+      superValue = 'true'
+      const e2eA = await call(
+        ANNOUNCE,
+        '/api/announcement',
+        {
+          action: 'create',
+          title: '周五下午调课',
+          body: '周五下午三节课改为两节，放学时间提前 30 分钟。',
+          level: 'normal',
+          popup: 'once',
+          pin: false,
+          sendEmail: true,
+        },
+        AUTH,
+        ENV_MAIL,
+      )
+      const e2eABody = await e2eA.json()
+      eq(
+        /* ⚠️ 成功时 `mail.reason` 是**空串**（`announcement.ts` 的 `r.ok ? '' : r.reason`），不是 null */
+        '🔴 ⑤-B `/api/announcement` 勾了发信 → **发得出去**（不是 `pii_blocked`；这一处原先也中招）',
+        [e2eA.status, e2eABody.mail?.reason || null],
+        [200, null],
+      )
+      ok(
+        '🔴 ⑤-B 而且那一封的正文里也没有 `@` 形状的地址（免责声明不再复述发件人地址）',
+        mailsSent.length === 1 && !/[\w.%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/.test(String(mailsSent[0]?.body?.text ?? '')),
+        JSON.stringify({ sent: mailsSent.length }),
+      )
+      ok(
+        '🔴 ⑤-B 而且数据库那四列是"发成功了"（`email_sent=true` / `email_fail=0`）—— 面板上看得见',
+        lastWrite('announcements', 'PATCH')?.payload?.email_sent === true &&
+          lastWrite('announcements', 'PATCH')?.payload?.email_fail === 0,
+        JSON.stringify(lastWrite('announcements', 'PATCH')?.payload ?? null),
+      )
+      publishValue = 'false'
     }
   }
 
   /* ---------------- ⑥ 数据库用量的三档阈值 + 那条"与百分比无关的红" ---------------- */
   {
-    const GB = 1024 ** 3
     const facts = (bytes, archives = [], extra = {}) => ({
       configured: true,
       totalBytes: bytes,
@@ -2150,30 +2505,43 @@ await withLock(async () => {
       unknownReason: null,
       ...extra,
     })
-    eq('⑥ 配额常量就是 **1 GB**（用户拍板）', C.DB_QUOTA_BYTES, GB)
-    eq('⑥ 三档线就是 60 / 85', [C.DB_WARN_PCT, C.DB_BAD_PCT], [60, 85])
+    eq(
+      '⑥ 配额常量就是 **500 MB**（免费版的库上限；2026-10-07 从 1 GB 改过来 —— ' +
+        '线上跑的是免费版，控制台写 0.5 GB，配额写大一倍 = 百分比小一半）',
+      C.DB_QUOTA_BYTES,
+      500 * 1024 * 1024,
+    )
+    eq('⑥ 三档线就是 60 / 85（**一个字没动**）', [C.DB_WARN_PCT, C.DB_BAD_PCT], [60, 85])
     eq('⑥ 单份档案的红线就是 **5 MB**', C.ARCHIVE_META_BAD_BYTES, 5 * 1024 * 1024)
+    eq(
+      '⑥ 出流量的限额就是 **5 GB**（免费版 · 与库配额同一条"只在这里"的纪律）',
+      C.EGRESS_QUOTA_BYTES,
+      5 * 1024 ** 3,
+    )
 
-    eq('⑥ 30% → 绿', C.judgeDbUsage(facts(0.3 * GB)).tone, 'ok')
-    eq('⑥ 60% → 黄（**边界含在黄里**）', C.judgeDbUsage(facts(0.6 * GB)).tone, 'warn')
-    eq('⑥ 84% → 黄', C.judgeDbUsage(facts(0.84 * GB)).tone, 'warn')
-    eq('⑥ 86% → 红', C.judgeDbUsage(facts(0.86 * GB)).tone, 'bad')
+    /* ⚠️ 下面这些百分比**按 500 MB 的配额**算（原来按 1 GB 写死的那几个数，
+       在配额改成 500 MB 之后含义全变了 —— 期望值变了，因为它们量的是"配额的比例"） */
+    const Q = 500 * 1024 * 1024
+    eq('⑥ 30% → 绿', C.judgeDbUsage(facts(0.3 * Q)).tone, 'ok')
+    eq('⑥ 60% → 黄（**边界含在黄里**）', C.judgeDbUsage(facts(0.6 * Q)).tone, 'warn')
+    eq('⑥ 84% → 黄', C.judgeDbUsage(facts(0.84 * Q)).tone, 'warn')
+    eq('⑥ 86% → 红', C.judgeDbUsage(facts(0.86 * Q)).tone, 'bad')
     ok(
       '⑥ 绿的那一档会把"还剩多少 + 最大的一份"说出来（阈值口径是"还能不能再塞一份"）',
-      C.judgeDbUsage(facts(0.1 * GB, [{ assignmentId: 'a', className: '高二(1)班', bytes: 1024 }])).text.includes('够用'),
+      C.judgeDbUsage(facts(0.1 * Q, [{ assignmentId: 'a', className: '高二(1)班', bytes: 1024 }])).text.includes('够用'),
     )
 
     /* 🔴 与百分比无关的那条红：单份 question_meta > 5 MB */
     const big = [{ assignmentId: 'a-big', className: '高二(1)班', bytes: 6 * 1024 * 1024 }]
     {
-      const j = C.judgeDbUsage(facts(0.1 * GB, big))
+      const j = C.judgeDbUsage(facts(0.1 * Q, big))
       eq('🔴 ⑥ 库才用了 10%，但**有一份档案 > 5 MB → 照样红**（与百分比无关）', j.tone, 'bad')
       ok('⑥ 而且那句话点出"单份就超预算"', j.text.includes('单份') || j.text.includes('超预算'), j.text)
       eq('⑥ 并且把超预算的那几份列出来（给界面用）', j.oversized.length, 1)
       /* 反向对照：刚好 5 MB **不算**超（边界是 `>`，不是 `>=`） */
       eq(
         '⑥ 反向对照：刚好 5 MB → **不红**（边界是 `>`，不是 `>=`）',
-        C.judgeDbUsage(facts(0.1 * GB, [{ ...big[0], bytes: 5 * 1024 * 1024 }])).tone,
+        C.judgeDbUsage(facts(0.1 * Q, [{ ...big[0], bytes: 5 * 1024 * 1024 }])).tone,
         'ok',
       )
     }
@@ -2185,7 +2553,295 @@ await withLock(async () => {
       ok('⑥ 而且把原因写出来', j.text.includes('无法判断') && j.notes.join(' ').includes('没配密钥'), j.notes.join(' | '))
       ok('⑥ 并且明确写"读不到不是还剩很多"', j.notes.join(' ').includes('不是'), j.notes.join(' | '))
       /* 反向对照：**有数**的时候不许是灰 */
-      eq('⑥ 反向对照：有数时不是灰', C.judgeDbUsage(facts(0.3 * GB)).tone !== 'unknown', true)
+      eq('⑥ 反向对照：有数时不是灰', C.judgeDbUsage(facts(0.3 * Q)).tone !== 'unknown', true)
+    }
+
+    /* ============================================================
+       🔴 ⑥-补（2026-10-07）**百分比按整库算** —— 这一条就是那张卡原来的 bug
+       ------------------------------------------------------------
+       实测现场：控制台说 11%（整库 53 MB / 500 MB），面板说 1.4%
+       （因为面板把"用户表之和"14.8 MB 当成了整库）。差 3.6 倍。
+       ============================================================ */
+    {
+      const MB = 1024 * 1024
+      /** 用户表之和 14.8 MB、整库 53 MB 的现场 */
+      const scene = (over = {}) => ({
+        configured: true,
+        /* ⚠️ 两个表加起来正好 14.8 MB —— 分辨率够验"没有按它算" */
+        tables: [
+          { name: 'assignments', bytes: 10 * MB, rowsEstimate: 9 },
+          { name: 'question_meta 那一类', bytes: 4.8 * MB, rowsEstimate: null },
+        ],
+        questionMetaBytes: 10 * MB,
+        archives: [],
+        unknownReason: null,
+        totalBytes: 53 * MB,
+        ...over,
+      })
+
+      const j = C.judgeDbUsage(scene())
+      eq('🔴 ⑥-补 `userTableBytes` 就是逐表全量相加（14.8 MB）', j.userTableBytes, 14.8 * MB)
+      eq(
+        '🔴 ⑥-补 **百分比按整库算**：53 MB / 500 MB = 10.6%（用户表之和那一支会给 2.96%）',
+        j.pct.toFixed(1),
+        '10.6',
+      )
+      ok(
+        '🔴 ⑥-补 屏上那句话写的是"整库"（口径写在脸上，不是只写在注释里）',
+        j.text.includes('整库'),
+        j.text,
+      )
+      ok(
+        '🔴 ⑥-补 两个口径**并排解释**（用户表之和 + 差额来自系统目录 / WAL / 其他 schema）',
+        j.notes.join(' ').includes('用户表之和') &&
+          j.notes.join(' ').includes('系统目录') &&
+          j.notes.join(' ').includes('schema'),
+        j.notes.join(' | ').slice(0, 300),
+      )
+      /* 🔴 **反向对照**：把"整库"改回"只算用户表"（= 把 totalBytes 填成那个和）
+         —— 百分比立刻从 10.6% 掉到 2.96%，而且一致性判据必须**红**。
+         这一条保证"改回旧口径"不会静默通过。 */
+      const back = C.judgeDbUsage(scene({ totalBytes: 14.8 * MB }))
+      eq('🔴 ⑥-补 反向对照：改回"只算用户表" → 百分比变成 3.0%（就是那个骗人的读数）', back.pct.toFixed(1), '3.0')
+      eq(
+        '🔴 ⑥-补 反向对照：而且**必须红**（整库不可能小于用户表之和 = 口径不对的指纹）',
+        back.tone,
+        'bad',
+      )
+      ok(
+        '🔴 ⑥-补 而且那句话点名"旧版（只算用户表）"与修法（重跑第 26 段）',
+        back.text.includes('旧版') && back.notes.join(' ').includes('第 26 段'),
+        back.notes.join(' | ').slice(0, 200),
+      )
+      /* 反向对照的反向：整库 > 用户表之和（正常）→ **不许红** */
+      eq(
+        '🔴 ⑥-补二 反向对照的反向：正常情形（整库 53 MB > 用户表之和 14.8 MB）→ 绿（否则那条判据就是恒红）',
+        C.judgeDbUsage(scene({ totalBytes: 53 * MB })).tone,
+        'ok',
+      )
+    }
+
+    /* ============================================================
+       🆕 ⑥-补二（2026-10-07）**出流量**：三态 + 取数 + 不泄露 PAT
+       ============================================================ */
+    {
+      const MB = 1024 * 1024
+      const eFacts = (over = {}) => ({
+        configured: true,
+        bytes: null,
+        dbSizeBytes: null,
+        wholeDbBytes: null,
+        reason: null,
+        source: 'https://api.supabase.com/v1/projects/x/usage',
+        ...over,
+      })
+
+      /* ① 配了 PAT + ref → 真报数 */
+      sbUsage.status = 200
+      sbUsage.firstNotFound = false
+      sbUsage.calls.length = 0
+      {
+        const r = await post({ action: 'db' }, AUTH)
+        const body = await r.json()
+        eq('🆕 ⑥-补二 `action:db` → 200', r.status, 200)
+        eq(
+          '🆕 ⑥-补二 出流量报出来了（6 MB，字节口径 —— 控制台上写 0.006 GB）',
+          body.db.egress.bytes,
+          6 * MB,
+        )
+        eq('🆕 ⑥-补二 `configured` 为 true 且**没有** reason（拿到了就是 null）', [body.db.egress.configured, body.db.egress.reason], [true, null])
+        ok(
+          '🆕 ⑥-补二 顺手把**库大小**也拿回来对账（53 MB）',
+          body.db.egress.dbSizeBytes === 53 * MB,
+          String(body.db.egress.dbSizeBytes),
+        )
+        ok(
+          '🆕 ⑥-补二 账单周期也回报了（界面要能说清"这是哪个周期"）',
+          body.db.egress.periodStart === '2026-10-01' && body.db.egress.periodEnd === '2026-11-01',
+          `${body.db.egress.periodStart} → ${body.db.egress.periodEnd}`,
+        )
+        ok(
+          '🔴 ⑥-补二 **PAT 一个字节都不回显**（连长度、前缀都没有）',
+          !JSON.stringify(body).includes('fake-sb-pat'),
+          JSON.stringify(body).slice(0, 160),
+        )
+        ok(
+          '🔴 ⑥-补二 但**确实带着** PAT 去调了（Authorization: Bearer，只在服务端那一跳上）',
+          sbUsage.auth.some((a) => a === 'Bearer fake-sb-pat'),
+          sbUsage.auth.join(' | '),
+        )
+        ok(
+          '🔴 ⑥-补二 出流量那一格也不许带回限额（`quotaBytes` 只能有一处：`adminChart.ts`）',
+          !('quotaBytes' in body.db.egress) && !('tone' in body.db.egress) && !('pct' in body.db.egress),
+          Object.keys(body.db.egress).join(','),
+        )
+      }
+
+      /* ② 判据：6 MB / 5 GB = 0.1% → 绿；而 5 GB 的 90% → 红 */
+      eq(
+        '🆕 ⑥-补二 6 MB / 5 GB → 绿（<60%）',
+        C.judgeEgress(eFacts({ bytes: 6 * MB })).tone,
+        'ok',
+      )
+      ok(
+        '🆕 ⑥-补二 0.1% 那句话把"已用 / 限额"都写出来',
+        C.judgeEgress(eFacts({ bytes: 6 * MB })).text.includes('5.00 GB'),
+        C.judgeEgress(eFacts({ bytes: 6 * MB })).text,
+      )
+      eq(
+        '🆕 ⑥-补二 90% → 红（与库那一格**同一套三档线**）',
+        C.judgeEgress(eFacts({ bytes: 4.5 * 1024 ** 3 })).tone,
+        'bad',
+      )
+
+      /* ③ 拿到出流量之后**那张卡不自相矛盾**：对账那一行必须同时出现两个数 */
+      {
+        const j = C.judgeEgress(eFacts({ bytes: 6 * MB, dbSizeBytes: 53 * MB, wholeDbBytes: 52 * MB }))
+        ok(
+          '🔴 ⑥-补二 对账：Management API 的库大小与本页整库**并排写出来**（差 %）',
+          j.notes.join(' ').includes('对账') &&
+            j.notes.join(' ').includes('53.0 MB') &&
+            j.notes.join(' ').includes('52.0 MB'),
+          j.notes.join(' | ').slice(0, 260),
+        )
+        /* 反向对照：本页整库没读到 → 必须明说"对不了账"，**不许默认对上了** */
+        ok(
+          '🔴 ⑥-补二 反向对照：本页整库没读到 → 明说"对不了账"（不是默认对上了）',
+          C.judgeEgress(eFacts({ bytes: 6 * MB, dbSizeBytes: 53 * MB, wholeDbBytes: null }))
+            .notes.join(' ')
+            .includes('对不了账'),
+          C.judgeEgress(eFacts({ bytes: 6 * MB, dbSizeBytes: 53 * MB, wholeDbBytes: null })).notes.join(' | '),
+        )
+      }
+
+      /* ④ **没配** → 灰（不是红、不是 0）*/
+      {
+        const r = await FN.onRequestPost({
+          request: new Request('http://x/api/admin/config-check', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...AUTH },
+            body: JSON.stringify({ action: 'db' }),
+          }),
+          env: { ...ENV, SUPABASE_PAT: '', SUPABASE_PROJECT_REF: '' },
+        })
+        const body = await r.json()
+        eq('🆕 ⑥-补二 没配 PAT / ref → **仍然是 200**（这是"无法判断"，不是错误）', r.status, 200)
+        eq(
+          '🔴 ⑥-补二 没配 → `configured:false` + `bytes:null`（**绝不是 0**）',
+          [body.db.egress.configured, body.db.egress.bytes],
+          [false, null],
+        )
+        ok(
+          '🔴 ⑥-补二 没配 → 原因写清楚（说了是哪个变量缺）',
+          typeof body.db.egress.reason === 'string' && body.db.egress.reason.includes('SUPABASE_PAT'),
+          body.db.egress.reason,
+        )
+        eq(
+          '🔴 ⑥-补二 判据是**灰**（与"③ 备份"那一格同款）—— 不是红',
+          C.judgeEgress(eFacts({ configured: false, bytes: null, reason: body.db.egress.reason })).tone,
+          'unknown',
+        )
+        ok(
+          '🔴 ⑥-补二 而且屏上那句话写的是"读不到"，并点明"不是还有 5 GB"',
+          C.judgeEgress(eFacts({ configured: false, bytes: null })).text.includes('读不到') &&
+            C.judgeEgress(eFacts({ configured: false, bytes: null })).notes.join(' ').includes('不是'),
+          C.judgeEgress(eFacts({ configured: false, bytes: null })).notes.join(' | ').slice(0, 200),
+        )
+        /* ⚠️ 库大小那一格**不受影响**：两条来源各读各的 */
+        ok(
+          '🔴 ⑥-补二 出流量没配**不影响**库大小那一格（两条来源各读各的）',
+          body.db.totalBytes === 300 * 1024 * 1024,
+          String(body.db.totalBytes),
+        )
+      }
+
+      /* ⑤ **配了但取不回来** → 灰 + 显式原因（绝不许静默成 0）*/
+      sbUsage.status = 500
+      {
+        const r = await post({ action: 'db' }, AUTH)
+        const body = await r.json()
+        eq('🆕 ⑥-补二 Management API 500 → 面板这一格仍是 200 的"无法判断"', r.status, 200)
+        ok(
+          '🔴 ⑥-补二 **显式失败**：reason 里有 HTTP 状态（不是静默的 0）',
+          typeof body.db.egress.reason === 'string' && body.db.egress.reason.includes('500'),
+          body.db.egress.reason,
+        )
+        eq(
+          '🔴 ⑥-补二 判据同样是**灰**，不是红、也不是 0',
+          C.judgeEgress(eFacts({ bytes: null, reason: body.db.egress.reason })).tone,
+          'unknown',
+        )
+      }
+      sbUsage.status = 200
+
+      /* ⑥ 候选端点：第一个回 404 → 往下试第二个（口径换了不至于整格瞎掉）*/
+      sbUsage.firstNotFound = true
+      sbUsage.calls.length = 0
+      {
+        const r = await post({ action: 'db' }, AUTH)
+        const body = await r.json()
+        eq('🆕 ⑥-补二 首选端点 404 → 仍然拿得到数（候选表会往下试）', body.db.egress.bytes, 6 * MB)
+        ok(
+          '🆕 ⑥-补二 而且把**实际用的那个端点**回报给界面（诊断用）',
+          body.db.egress.source.includes('/platform/projects/'),
+          body.db.egress.source,
+        )
+        eq('🆕 ⑥-补二 两个候选都试过（404 那个也记下来了）', sbUsage.calls.length, 2)
+      }
+      sbUsage.firstNotFound = false
+
+      /* ⑦ 回话里**没有**出流量字段 → 灰 + 把见到的键列出来（换字段名时唯一的线索）*/
+      sbUsage.body = { total_outgoing: 'n/a', shape: true }
+      {
+        const r = await post({ action: 'db' }, AUTH)
+        const body = await r.json()
+        eq('🔴 ⑥-补二 回话里没有出流量字段 → `bytes` 是 **null**（不是 0）', body.db.egress.bytes, null)
+        ok(
+          '🔴 ⑥-补二 而且把**见到的键名**列出来（端点换了字段名时唯一能查的线索）',
+          typeof body.db.egress.reason === 'string' && body.db.egress.reason.includes('total_outgoing'),
+          body.db.egress.reason,
+        )
+      }
+      sbUsage.body = {
+        egress: 6 * 1024 * 1024,
+        db_size: 53 * 1024 * 1024,
+        period_start: '2026-10-01',
+        period_end: '2026-11-01',
+      }
+
+      /* ⑧ GB 口径的歧义（键名带 `_gb`）—— 0.006 GB 要认成 6 MB，不能认成 0.006 字节 */
+      sbUsage.body = { egress_gb: 0.006, db_size_gb: 0.053 }
+      {
+        const r = await post({ action: 'db' }, AUTH)
+        const body = await r.json()
+        eq('🔴 ⑥-补二 `egress_gb` 按 GB 解（0.006 GB = 6.29 MB）', body.db.egress.bytes, Math.round(0.006 * 1024 ** 3))
+        ok(
+          '🆕 ⑥-补二 `db_size_gb` 也认（0.053 GB ≈ 54 MB，与 53 MB 对得上）',
+          Math.abs(body.db.egress.dbSizeBytes - 0.053 * 1024 ** 3) < 1024,
+          String(body.db.egress.dbSizeBytes),
+        )
+      }
+      sbUsage.body = {
+        egress: 6 * 1024 * 1024,
+        db_size: 53 * 1024 * 1024,
+        period_start: '2026-10-01',
+        period_end: '2026-11-01',
+      }
+
+      /* ⑨ 嵌套形状也认（`{egress:{bytes:…}}` / `{usage:{db_size:…}}`）—— 回话层级换了不至于瞎掉 */
+      sbUsage.body = { usage: { egress: { bytes: 6 * 1024 * 1024 }, db_size: 53 * 1024 * 1024 } }
+      {
+        const r = await post({ action: 'db' }, AUTH)
+        const body = await r.json()
+        eq('🆕 ⑥-补二 嵌套形状（`{egress:{bytes:…}}`）也认得出', body.db.egress.bytes, 6 * MB)
+        eq('🆕 ⑥-补二 嵌套里的 `db_size` 也认得出（对账那一半）', body.db.egress.dbSizeBytes, 53 * MB)
+      }
+      sbUsage.body = {
+        egress: 6 * 1024 * 1024,
+        db_size: 53 * 1024 * 1024,
+        period_start: '2026-10-01',
+        period_end: '2026-11-01',
+      }
     }
 
     /* 🔴 服务端回话里**不许**有 `quotaBytes`（配额只能有一处实现） */
@@ -2232,6 +2888,45 @@ await withLock(async () => {
       )
       missingTables.delete('__never__')
       dbReportValue = saved ?? saveFn
+    }
+
+    /* ============================================================
+       🆕 ⑥-补三（2026-10-07）**源码层**：SQL 的口径 + 屏上的两个口径
+       ------------------------------------------------------------
+       判据函数会被单测，但"SQL 到底量的是整库还是只量用户表"只有看源码才认得出 ——
+       这一组就是钉住那个（并顺手钉住"屏上必须把两个口径都写出来"）。
+       ============================================================ */
+    {
+      const schema = readFileSync(resolvePath(APP, '..', 'supabase/schema.sql'), 'utf8')
+      const admin2 = readFileSync(resolvePath(APP, 'src/pages/Admin.tsx'), 'utf8')
+      const fn = readFileSync(resolvePath(APP, 'functions/api/admin/config-check.ts'), 'utf8')
+
+      ok(
+        '🔴 ⑥-补三 `db_usage_report()` 的 `totalBytes` 量的是**整库**（`pg_database_size(current_database())`）',
+        /'totalBytes',\s*pg_database_size\(current_database\(\)\)/.test(schema),
+        'schema.sql 里没找到那一句',
+      )
+      ok(
+        '🔴 ⑥-补三 逐表那一栏**不再限 12 张**（面板要算"用户表之和"这个完整口径）',
+        !/from \(select \* from t order by bytes desc limit 12\)/.test(schema),
+        '还留着 limit 12',
+      )
+      ok(
+        '🔴 ⑥-补三 仍然只有 anon / authenticated 被 revoke（service_role 那条路照旧）',
+        /revoke all on function db_usage_report\(\) from public, anon, authenticated;/.test(schema),
+      )
+      ok(
+        '🔴 ⑥-补三 屏上写清了两个口径（"整库" + "用户表之和"），不是只给一个数',
+        admin2.includes('整库') && admin2.includes('用户表之和'),
+      )
+      ok(
+        '🔴 ⑥-补三 出流量那一格把限额写在**前端**（服务端只回报用掉多少 —— 一个常量只能有一处）',
+        admin2.includes('EGRESS_QUOTA_BYTES') && !/quotaBytes\s*:/.test(fn),
+      )
+      ok(
+        '🔴 ⑥-补三 服务端**不读** PAT 的值（只用它去调接口；回话只报"在/不在"）',
+        !/config:\s*\{[^}]*SUPABASE_PAT/.test(fn) && fn.includes("'SUPABASE_PAT'"),
+      )
     }
   }
 
@@ -2411,6 +3106,77 @@ function sourceFileHealth(rel) {
    它是"文件还在、名字还对、git 也看得见改动"，只有真跑 tsc / 打开页面才发现。
    而且它对**任何**带中文的源码文件都成立（这个仓库里几乎每个文件都有中文注释）。
    ============================================================ */
+
+  /* ============================================================
+     第八节·补 🆕 2026-10-08：**最高管理员那一格**（超管锁死成一个）
+     ------------------------------------------------------------
+     用户批注：「超管锁死，只能有我一个」→ 数据库那一半是
+     `schema.sql` §10.1.1 ⑥ 的部分唯一索引（**多不了**），所以这一格
+     **不是**"多 super 报警"。
+     🔴 它真正要防的是 **0 个**：谁也管不了平台，而且**不报错**。
+
+     这一节断言的是**屏上那一个判据**（`judgeSuperAdminCount`），
+     不是复刻一份 —— 面板渲染直接调它（`Admin.tsx` 的 `superJudge`）。
+     ============================================================ */
+
+  section('第八节·补 🆕 最高管理员那一格：0 个 = 红 · 1 个 = 绿 · 读不到 = 灰')
+
+  eq(
+    '🔴 0 个 → 红（**这才是它要防的状态**：谁也管不了平台）',
+    C.judgeSuperAdminCount({ readable: true, count: 0, unknownReason: null }).tone,
+    'bad',
+  )
+  eq(
+    '反向对照：1 个 → 绿（正常就应该是这一格）',
+    C.judgeSuperAdminCount({ readable: true, count: 1, unknownReason: null }).tone,
+    'ok',
+  )
+  eq(
+    '多于 1 个 → 红（有约束在就不可能，留着这一支防"索引被人 drop 掉"）',
+    C.judgeSuperAdminCount({ readable: true, count: 2, unknownReason: null }).tone,
+    'bad',
+  )
+  eq(
+    '🔴 读不到 → **灰**（不是"有 1 个"，也不是"0 个"——三态里"没结论"绝不许画成绿）',
+    C.judgeSuperAdminCount({ readable: false, count: null, unknownReason: '表没建' }).tone,
+    'unknown',
+  )
+  ok(
+    '🔴 "0 个"与"读不到"是**两种颜色**（把灰渲染成红 / 绿 = 同一类误报的第二种形状）',
+    C.judgeSuperAdminCount({ readable: false, count: null, unknownReason: null }).tone !==
+      C.judgeSuperAdminCount({ readable: true, count: 0, unknownReason: null }).tone,
+  )
+  eq('期望值就写死成 1（"全平台只留一个"这条口径只有一个数）', C.SUPER_ADMIN_EXPECTED, 1)
+
+  /* 反向对照②：**判据不是恒真/恒假** —— 把四条 Tone 收一遍，必须出现三种 */
+  {
+    const tones = [0, 1, 2].map((n) => C.judgeSuperAdminCount({ readable: true, count: n, unknownReason: null }).tone)
+    tones.push(C.judgeSuperAdminCount({ readable: false, count: null, unknownReason: null }).tone)
+    eq(
+      '反向对照：这一格真的分得出三种颜色（不是恒红 / 恒绿的摆设）',
+      [...new Set(tones)].sort(),
+      ['bad', 'ok', 'unknown'],
+    )
+  }
+  /* 静态钉子：那一格必须**真的接进了概览的磁贴 + 参与 allTones**（别只写个函数没人调） */
+  {
+    const admin = readFileSync(resolvePath(APP, 'src/pages/Admin.tsx'), 'utf8')
+    ok(
+      '🔴 `Admin.tsx` 里那一格用的是同一个判据函数（判据只许有一处）',
+      /judgeSuperAdminCount\(superAdmins\)/.test(admin),
+      '没找到 `judgeSuperAdminCount(superAdmins)`',
+    )
+    ok("🔴 那一格的标签写着「超级管理员」（用户点名的就是这一格）", admin.includes("label: '超级管理员'"))
+    ok(
+      '🔴 它的颜色进了 `allTones`（0 个 super 必须在"概览那句话"里说出口，不能只躺在磁贴里）',
+      /const toneSuper: Tone = superJudge\.tone/.test(admin) && /allTones = \[[^\]]*toneSuper\]/.test(admin),
+    )
+    ok(
+      "🔴 读它用的是 `select('*')`（**不是 `select('id')`** —— 本项目在这上面踩过两次）",
+      /from\('teacher_roles'\)[\s\S]{0,80}select\('\*'\)/.test(admin),
+      "没找到 teacher_roles 的 select('*')",
+    )
+  }
 
   section('第九节 · 文件编码体检（BOM / 严格 UTF-8 / 中文没被 mojibake）')
 

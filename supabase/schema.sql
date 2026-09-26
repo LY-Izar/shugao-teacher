@@ -67,6 +67,72 @@ create trigger on_auth_user_created
 --  · ⚠️ 一个字段只能有一种语义：它只用于通知，不许拿它做"最后活跃时间"之类的第二用途。
 alter table teachers add column if not exists notice_seen_at timestamptz;
 
+-- -------- 1.1 🆕 教师档案（2026-10-06）：**家庭住址 · 电话号码 · 邮箱** --------
+--  用户口径（原话）：「教师管理页面除了给老师建号，应该也可以记录老师的个人信息的，
+--  例如家庭住址，电话号码，邮箱。」**全可空、全非必填**。
+--
+--  🔑 **为什么是 1:1 表 `teacher_profiles`，而不是 `teachers` 上加三列**
+--     （与学生档案 `student_profiles` 同一套判断，§2.1 那份理由的教师版）：
+--     · **RLS 只能按行收口、不能按列** —— 而全仓读 `teachers` 的路径里有 `select('*')`
+--       （`functions/api/*` 与 `data/remote.ts`），`select('*')` 会展开成全部列。
+--       三列一旦挂在 `teachers` 上，**任何能读 `teachers` 的人都读得到同事的家庭住址**。
+--     · 独立表 = 独立的一条读策略（§36）：**自己那一行 + 能建号的那一档**，
+--       别的老师一行都读不到（家庭住址是隐私），教室端更是一个字节都读不到。
+--     · 与 `teacher_departments`（§21.2.2）同一条先例：档案属性落在**单独一张表**上，
+--       写只走服务端（`functions/api/teacher-account.ts` 的 `profile` 动作）。
+--     ⚠️ 更要紧的一条：`teachers` 上那条 `teachers_self` 是 **`for all` = `id = auth.uid()`**
+--        （§7）—— 三列挂在 `teachers` 上还等于"每位老师都能改自己的家庭住址"，
+--        而这一档（改档案）本轮**明确不给**老师本人（见 §36 的判据说明）。
+--
+--  · **一个字段一种语义**（别把它们用成别的东西）：
+--      `home_address` = 家庭住址**原文**（不切片、不结构化）
+--      `phone`        = 联系电话**原文**（手机 / 座机 / 带区号 / 带分机都要存得下）
+--      `email`        = **联系邮箱**（⚠️ 不是登录账号 —— 登录名在 `auth.users.email`，
+--                       两者可能不一样，改它**不动登录方式**）
+--  · 形状由下面两条 check 守（**认形状、不卡人**：见各条上面的注释）。
+create table if not exists teacher_profiles (
+  teacher_id   uuid primary key references teachers (id) on delete cascade,
+  home_address text,
+  phone        text,
+  email        text
+);
+
+--  ⚠️ 这两条是**新约束**（没有旧名要 drop）。`drop … if exists` 那两句只为**幂等**：
+--     本文件可能被重复跑（`teacher_profiles_phone_check` 第二次会报 already exists）。
+--     将来要改它们的形状时，按 AGENTS.md 那条来：**先建新的、再 drop 旧名**，
+--     别"先 drop 再 add"。
+alter table teacher_profiles drop constraint if exists teacher_profiles_phone_check;
+alter table teacher_profiles
+  add constraint teacher_profiles_phone_check
+  check (
+    phone is null
+    -- 至少 7 位数字（本地号码的最短形状）、最多 20 位数字（带国家码 + 分机也够）；
+    -- 数字之外只允许**分隔符 / 分机词**：空格 · 短横 · 点 · 括号（中英文）· 加号 · 「转」。
+    -- ⚠️ 这一条**故意比"11 位手机号"宽得多**：固话（010-12345678）、
+    --    带区号、带分机、国际写法（+86 138 0013 8000）都是合法输入 ——
+    --    把它们挡掉比存进一个格式不统一的号码贵得多。
+    --    「转」是**中文里分机最常见的写法**（"13900139000 转 8021"），所以它在允许集里；
+    --    别的汉字（备注、姓名）会被这一条挡掉 —— 一个字段一种语义。
+    --    🔴 两个条件必须**括号括起来再 `or null`**：写成 `and` 会把"空着"整格判失败。
+    or (
+      phone ~ '^[0-9+()（）. \-转]{7,32}$'
+      and length(regexp_replace(phone, '[^0-9]', '', 'g')) between 7 and 20
+    )
+  );
+
+alter table teacher_profiles drop constraint if exists teacher_profiles_email_check;
+alter table teacher_profiles
+  add constraint teacher_profiles_email_check
+  check (
+    email is null
+    -- `@` 两边都要有东西、不许有空格。**只挡明显不合法**：
+    -- ⚠️ 刻意**不写**"必须以 .com/.cn 结尾"那种判据 —— 它会把合法的写法挡在外面。
+    or email ~ '^[^@[:space:]]+@[^@[:space:]]+$'
+  );
+
+-- fail-safe：先开 RLS。授权与策略在 **§36**（判据函数在 §13.2 就定义完了）
+alter table teacher_profiles enable row level security;
+
 -- ============================================================
 --  2. 班级与学生
 -- ============================================================
@@ -92,6 +158,35 @@ create table if not exists students (
   unique (class_id, student_no)
 );
 create index if not exists students_class_idx on students (class_id);
+
+-- -------- 2.1 学生档案（民族 / 出生年月 / 家长电话 / 家庭住址）--------
+--  🔴 **为什么是独立的一张 1:1 表，而不是 `students` 上的四列**（2026-10-06 定）：
+--     RLS **只能按行收口、不能按列**；而教室端账号与老师**同属** `authenticated`
+--     （`classroom_accounts.id` 就是它的 auth uid，§10.5），`students` 的读策略
+--     （§11 `students_visible` → §10.3 `visible_class_ids()`）里**有"教室端：本班"那一支**
+--     （I20 要它读作业）。于是这四列一旦挂在 `students` 上，**教室里那块给学生看的大屏**
+--     就一定读得到家长电话 —— 而前端读 `students` 的唯一路径是 `data/remote.ts` 的
+--     `select('*')`（`select('*')` 会展开成全部列，"少给几列"这种写法在 Postgres 里做不到）。
+--     放进独立表 = §21 通知（I47）与 §34 选科变更审计用过的**同一个做法**：
+--     "教室端一个字节都读不到"由**这张表的读策略**保证（§35）。
+--  · **全部可空、全部非必填**：建班录名单（粘贴 / 拍照导入）一个字都不碰这张表，
+--    一行都没有 = 没录过 —— 不报错、不拦人。
+--  · **一个字段一种语义**（别把它们用成别的东西）：
+--      `ethnicity`      = 民族（原文，如"汉族"）
+--      `birth_month`    = **出生年月**（`YYYY-MM`）—— **不是**年龄、也不是完整生日；
+--                         形状由下面那条 check 守住（改它时**先建新的再 drop 旧的**）
+--      `guardian_phone` = 家长联系电话**原文**（座机 / 多个号码 / 带分隔符都要存得下，
+--                         所以**不**做格式 check：卡住人比存进一个脏值更贵）
+--      `home_address`   = 家庭住址原文
+create table if not exists student_profiles (
+  student_id     uuid primary key references students (id) on delete cascade,
+  ethnicity      text,
+  birth_month    text check (birth_month is null or birth_month ~ '^\d{4}-\d{2}$'),
+  guardian_phone text,
+  home_address   text
+);
+-- fail-safe：先开 RLS。授权与策略在 **§35**（判据函数都在那之前定义完了）
+alter table student_profiles enable row level security;
 
 -- ============================================================
 --  3. 作业档案
@@ -509,6 +604,55 @@ create unique index if not exists teacher_roles_one_lesson_prep_lead
                     coalesce(subject_code, ''))
   where role = 'lesson_prep_lead' and scope_type = 'grade_subject';
 
+-- ⑥ 🆕 最高管理员（`super`）：**全平台只能有一个**（用户 2026-09-24 决定：
+--    「只留 Izar 一个最高管理员」；2026-10-08 用户拍板「超管锁死，只能有我一个」）。
+--
+--    这是**锁死**，不是报警：教师列表里真的出现过第二个 `super`
+--    （内测账号挂着 6 个身份、其中一个是 `super`）—— 报警只能告诉你有两个，
+--    而两个超管各说各话时，**谁也说不清哪个才算数**。所以做成数据库约束。
+--
+--    ⚠️ **部分唯一索引**：`where role = 'super'` 只约束那一行 ——
+--       别的角色照旧可以多人（两个班主任、三个年级主任、两个教务处…一个字不受影响）。
+--    ⚠️ 幂等：`create unique index if not exists`（整份 schema.sql 可重复跑）。
+--
+--    ⚠️ 顺序：**先查冲突再建索引**（照 §27.6「年级主任一个年级一个」那一段的既有写法）——
+--       库里有第二个 `super` 时，`create unique index` 会抛一句人话都读不出来的 23505，
+--       而且失败发生在整份 schema.sql 里。
+do $$
+declare
+  v_n       int := 0;
+  v_dropped int := 0;
+begin
+  select count(*) into v_n from teacher_roles where role = 'super';
+
+  if v_n > 1 then
+    raise notice '[§10.1.1 ⑥] 库里现在有 % 个最高管理员（super）—— 本段只保留**最早创建的那一个**（created_at 最早；并列时取 id 最小的），删掉其余 % 个。', v_n, v_n - 1;
+    raise notice '[§10.1.1 ⑥] ⚠️ 要保留**另一个人**：先把这一行手工 `delete from teacher_roles where role = ''super'' and teacher_id = ''<要撤掉的那个 uuid>'';`，再重跑本段。';
+    raise notice '[§10.1.1 ⑥] ⚠️ 想先看清是谁：`select t.id, t.name, r.created_at from teacher_roles r join teachers t on t.id = r.teacher_id where r.role = ''super'' order by r.created_at;`（真身是 `is_super_admin()` 为 true 的那一行，见 §13.2）。';
+
+    with ranked as (
+      select r.id,
+             row_number() over (order by r.created_at, r.id) as rn
+        from teacher_roles r
+       where r.role = 'super'
+    )
+    delete from teacher_roles t
+     using ranked k
+     where t.id = k.id and k.rn > 1;
+    get diagnostics v_dropped = row_count;
+    raise notice '[§10.1.1 ⑥] 已撤掉 % 行多余的 super（只动 role = ''super'' 那一行，别的身份一个都没碰）。', v_dropped;
+  end if;
+
+  if v_n = 0 then
+    raise notice '[§10.1.1 ⑥] ⚠️ 库里现在**一个最高管理员都没有** —— 本段不会替你造一个（数据库不猜谁是维护者）。';
+    raise notice '[§10.1.1 ⑥] ⚠️ 0 个 super = **谁也管不了平台**（建号 / 指派身份 / 发公告全废）—— 管理台「概览」那一格会显示红。';
+    raise notice '[§10.1.1 ⑥] 补一个的办法见 §10.6 的角色指派模板（`insert into teacher_roles …` 那一行）。';
+  end if;
+end $$;
+
+create unique index if not exists teacher_roles_one_super
+  on teacher_roles (role) where role = 'super';
+
 -- ⚠️ 年级主任那条唯一约束（Q25=B「一个年级一个年级主任」）**不在这里** ——
 --    它不是本轮的拍板项，且加它同样要先清洗历史数据。见方案 §6.3。
 
@@ -911,6 +1055,25 @@ select
 --    班主任        teacher_roles: role='head_teacher', scope_type='class', scope_id=<classes.id>
 --    任课教师      **不写 teacher_roles**，写 class_subjects（见 10.2 ⑦）——
 --                  它只决定"能不能批改这一科"，**不代表班主任身份**
+--
+--  🔴 **补：`任课教师` 这个词有两个意思，别互换**（2026-09-26，一次真实漏人的根子就在这）。
+--
+--    | | ① **界面兜底标签**（**只用于显示**） | ② **通知的收件档位**（"发给：全部任课教师"） |
+--    |---|---|---|
+--    | 判据 | **一行 `teacher_roles` 都没有** | **`class_subjects` 里有一行任课关系**（= 他在教课） |
+--    | 回答的问题 | "这个人**还没指派别的身份**"（档案口径） | "这个人**在不在教课**"（收件口径） |
+--    | 住在哪 | `app/src/pages/TeacherAccounts.tsx` / `Settings.tsx` 的标签 | `notice_recipient_ids_for()` · `notice_role_has_members('teacher')`（§21.5 / §21.2.1） |
+--    | 两者关系 | **一个教课的老师可以同时有头衔** —— 那时 ① 不成立、② 成立 | 反过来"零头衔但不教课"的 ① 成立、② 不成立 |
+--
+--    🔴 **2026-09-26 的实际事故**：② 错用了 ① 的口径（"没有任何 `teacher_roles` 行"），
+--    于是 "教务处 · 副校长 · 班主任（都在 `teacher_roles` 里）**+ 教 1 个班**" 的老师
+--    （用户实测：唐友余）**收不到**「发给：全部任课教师」的通知 ——
+--    界面上写着"全部任课教师"，发出去却漏掉正在教课的人。
+--    → ② 的正确判据是 **`class_subjects` 里有一行**（"在教课"）；**① 一个字不动**（它是**显示**，
+--      不是收件口径）。两者本来就不是同一件事，**别为了"对齐"把它们合成一个判据**。
+--    ⚠️ 还有第三处提到"任课教师"，它**不是收件口径**，别拿它当判据：§21.1 级别表里那个
+--      **`1 任课教师`** 是一个**历史值**（`teacher_roles.role = 'teacher'` 现实里一行都没有），
+--      级别只用来判"发通知时不许越级"（§21.4）。
 --
 --  指派模板（把姓名和班名换成真实的）：
 --
@@ -1353,6 +1516,35 @@ revoke all on function can_manage_teachers_for(uuid) from public, anon, authenti
 revoke all on function can_create_teacher_accounts_for(uuid) from public, anon, authenticated;
 revoke all on function can_assign_roles_for(uuid) from public, anon, authenticated;
 
+-- -------- 13.2.2 🆕 「发 super」这一个动作：**只有最高管理员能发**（2026-10-08）--------
+--  用户拍板：「超管锁死，只能有我一个」。
+--
+--  数据库那一半在 §10.1.1 ⑥（部分唯一索引 `teacher_roles_one_super`）—— 那是**兜底**：
+--  它保证"多不了"。这一半管的是**谁有资格发**，以及**为什么被拒**要有一句人话。
+--
+--  🔴 为什么还要这一道：`can_assign_roles()` = 最高管理员 ∪ 教务处（**保持不动**）——
+--     教务处该能发班主任 / 年级主任 / 组长。但它**不该**能发 `super`：
+--     那等于"教务处可以给自己升一级"，把一个本来只该有一个人拿的身份变成人人可争的东西。
+--     所以**只给"发 super"这一个动作**加一道：`can_assign_roles()` **且** `is_super_admin()`。
+--
+--  ⚠️ 判据形状照 §13.2 `_for(uid, …)` + 裸版两件套（I33）：
+--     `_for` 一律 revoke（它接受任意 uid = "以任意人身份问一句能不能发超管"）；
+--     裸版只认 `auth.uid()`，grant 给 authenticated —— 服务端拿**调用者自己的 JWT** 问它。
+--
+--  ⚠️ **它只判"发"**，不判"撤"（撤那一半在服务端：不许把最后一条 super 摘掉，
+--     见 `functions/api/teacher-account.ts` 的 role 动作）。
+create or replace function public.can_assign_super_role_for(p_uid uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select can_assign_roles_for(p_uid) and is_super_admin_for(p_uid);
+$$;
+
+revoke all on function can_assign_super_role_for(uuid) from public, anon, authenticated;
+
 -- 当前登录者版本（界面与服务端都用它）
 create or replace function public.is_super_admin()
 returns boolean
@@ -1386,6 +1578,15 @@ security definer
 set search_path = public
 as $$ select can_assign_roles_for(auth.uid()) $$;
 
+-- 🆕 §13.2.2：当前登录者能不能**发最高管理员**（后端接口问它；界面只在 /admin 读它，见 §23）
+create or replace function public.can_assign_super_role()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$ select can_assign_super_role_for(auth.uid()) $$;
+
 grant execute on function is_super_admin()     to authenticated;
 grant execute on function can_manage_teachers() to authenticated;
 -- 🔴 这两个也必须 grant 给 authenticated：`/api/teacher-account` 是**拿调用者自己的 JWT**
@@ -1394,6 +1595,10 @@ grant execute on function can_manage_teachers() to authenticated;
 --    症状是"办公室主任点了建号，被告知没权限"，**而数据库里那条判据其实是对的**。
 grant execute on function can_create_teacher_accounts() to authenticated;
 grant execute on function can_assign_roles() to authenticated;
+-- 🆕 「发 super」那一道：服务端拿**调用者自己的 JWT** 问它（auth.uid() 就是调用者）——
+--    不 grant 的话会拿到 42501，`rpcBool()` 把 403 读成 `false` →
+--    症状是"超管想发超管，被告知'只能由最高管理员授予'"，**而数据库里那条判据其实是对的**。
+grant execute on function can_assign_super_role() to authenticated;
 
 -- -------- 13.3 学科可见性：谁看得见「这个班里的这一科」--------
 --  用户口径（原话）：**学科教师只能看见自己所教的学科；班主任 / 年级主任能看见一个班的所有学科。**
@@ -1661,7 +1866,9 @@ create policy assignments_visible on assignments for select to authenticated
 -- 🔴 组长**写不了**任何作业档案（用户 Q4 拍板）—— 这一条不是靠"没加策略"，
 --    而是靠 §16.3 的三条写策略里**没有一支**认组长：
 --      assignments_insert / update 用 `can_grade_subject()`（super/admin + 本班本科研课老师）
---      assignments_delete 用 `teacher_id = auth.uid() or can_manage_class(...) or teaches_subject(...)`
+--      assignments_delete 用 `teacher_id = auth.uid() or teaches_subject(...)`
+--        🆕 2026-10-06：这里原来还有一支 `can_manage_class(...)`（班主任 / 年级主任 / 教务处），
+--           已收窄掉 —— 它与"改"那一侧不对称（见 §16.3 那段注释）。
 --    三者都不含 subject_lead / lesson_prep_lead —— 它们**只在上面那条 select 策略里出现过**。
 --    反向对照（`rls-checks.mjs` 第十九节）：组长改本学科**别班**的成绩 → 必须被拒。
 
@@ -2473,15 +2680,24 @@ create policy assignments_update on assignments for update to authenticated
   using (can_grade_subject(class_id, subject_code, subject))
   with check (can_grade_subject(class_id, subject_code, subject));
 
---  删：自己建的 · 管得着这个班 · 在本班教这一科。
+--  删：**自己建的 · 在本班教这一科**（2026-10-06 收窄）。
+--      🔴 **去掉的是一支 `can_manage_class(class_id)`**（班主任 / 年级主任 / 教务处）——
+--      原来的形状**不对称**：**建 / 改**都靠 `can_grade_subject()`（只有当科老师 + 校级兜底，
+--      班主任与年级主任都改不了，用户明确要的"只读"），而**删**多认一支 `can_manage_class`
+--      → 结果就是"班主任改不了数学老师的作业，却删得掉它"，**而删除不可恢复**。
+--      收窄之后三件事同一把尺子：**能改的才删得掉**。
+--      ⚠️ 校级兜底（超管 / 教务处）那一支**没丢**：`teaches_subject` 不含他们，
+--         但他们改作业靠 `can_grade_subject` 的校级兜底 —— 所以教务处**删不掉**了。
+--         这是**有意的**（删是不可逆的那一头，口径宁可窄；要删由当科老师或建档人自己删）。
 --      「自己建的」这一支是**故意留的**：任课关系被撤掉之后，
 --      他建过的档案还得删得掉（否则那些档案谁也删不了），
 --      与 §13.3 的"自己建的永远看得见"是同一条纪律。
+--      `rls-checks` 第十六节钉着五条（含"建档人任课关系已撤 → 仍删得掉"），
+--      负向对照 `RLS_NEGATIVE=assignment-delete-manage-class`（把那一支加回去 → 班主任那条必须红）。
 drop policy if exists assignments_delete on assignments;
 create policy assignments_delete on assignments for delete to authenticated
   using (
     teacher_id = auth.uid()
-    or can_manage_class(class_id)
     or teaches_subject(class_id, subject_code, subject)
   );
 
@@ -4207,13 +4423,14 @@ alter table notice_targets enable row level security;
 grant select on notices, notice_targets to authenticated;
 revoke all on notices, notice_targets from anon;
 
---  「这个人算不算**任课教师**那一档」——🔴 2026-09-28 实测踩到的一处漏人：
---  `teacher_roles.role = 'teacher'` 是一个**历史值**，现实里**没有任何一行**用它 ——
---  任课教师的身份是 `class_subjects` 里的任课关系，**根本不写那张表**（§10.6）。
---  所以"发给任课教师"如果只按 `role = 'teacher'` 去查，**一个人都发不到**，
---  而那正是最常见的一档。
---  口径（与 §10.6 对"任课教师"的定义逐字一致）：
---    **没有任何 `teacher_roles` 行的在册教师（不含教室端）= 任课教师**。
+--  「这个人**一格 `teacher_roles` 都没有**吗」——⚠️ 这是「任课教师」这个词的**第一种意思**
+--  （**界面的兜底标签**："还没指派别的身份"，§10.6 ①），**不是**通知收件那一档的判据。
+--  🔴 **收件口径是"他在不在教课"= `class_subjects` 里有一行**，住在
+--  `notice_recipient_ids_for()` 的「任课教师」那一支与 `notice_role_has_members('teacher')`（§21.5）。
+--  别拿本函数去算"发给全部任课教师"的收件人：一个"有头衔 + 也在教课"的老师在这里是 **false**，
+--  却在那一档里（2026-09-26 的漏人就是这么来的）。
+--  本函数今天**只有一个用途**：`can_publish_notice_to_for` 的 `custom`（勾人）那一支 ——
+--  问"这个人有没有一档**认得出来的身份**"（要么在清单里，要么零身份行）。
 --  ⚠️ 它只回答"这一档里有没有他"，**不回答"能不能给他发"** —— 后者还要比级别（§21.4）。
 create or replace function public.notice_is_plain_teacher(p_uid uuid)
 returns boolean
@@ -4246,11 +4463,15 @@ security definer
 set search_path = public
 as $$
   select case
-    -- 'teacher' 那一档的现实形状见 `notice_is_plain_teacher()`
+    -- 🔴 'teacher' 那一档 = **在教课的老师**（`class_subjects` 里有一行任课关系）——
+    --    §10.6 ② 的收件口径，**不是**"没有任何 `teacher_roles` 行"（那是界面兜底标签 ①）。
+    --    ⚠️ 它必须与 `notice_recipient_ids_for()` 里那一支**同一个口径**：
+    --       只改收件人、不改这里 = "数据库说这一档是空的 → 403"，通知**根本发不出去**；
+    --       只改这里、不改收件人 = 发得出去，**收件人是空的**（发一条谁都收不到的通知）。
     when p_role = 'teacher' then exists (
       select 1 from teachers t
        where not exists (select 1 from classroom_accounts ca where ca.id = t.id)
-         and not exists (select 1 from teacher_roles r where r.teacher_id = t.id))
+         and exists (select 1 from class_subjects cs where cs.teacher_id = t.id))
     else exists (select 1 from teacher_roles r where r.role = p_role)
   end;
 $$;
@@ -4584,9 +4805,10 @@ as $$
               or not exists (
                    select 1 from me
                     where me.rank > coalesce(public.notice_min_rank_of(t.tid), 0)
-                      -- ⚠️ 「按最低那一档」在**没有角色行**时是 0：那一档正是任课教师（rank 1），
-                      --    所以这里对"零角色行"的人允许（他比任何人都低）；
-                      --    但对"教室端"已经在上面一句挡掉了。
+                      -- ⚠️ 「按最低那一档」在**没有角色行**时是 0（§21.1：0 = 一格身份行都没有）：
+                      --    那一档比级别表里那个历史值 `1 任课教师` 还低，所以这里对"零角色行"的人允许
+                      --    （他比任何人都低）。⚠️ 别把"级别 0/1"当成收件档位 —— §10.6 那两种意思。
+                      --    对"教室端"已经在上面一句挡掉了。
                       and (
                         exists (select 1 from teacher_roles r
                                  where r.teacher_id = t.tid
@@ -4639,6 +4861,12 @@ drop function if exists public.can_publish_notice_to(text, uuid, text, text, uui
 --
 --  Q14 = A 的口径（用户拍板）：**"本年级的老师" = 在该年级的班上有任教关系的
 --    + 该年级的班主任 / 年级主任 / 备课组长** —— 与 `visible_class_ids()` **同源**。
+--
+--  🔴 「任课教师」这一档（`target_kind='role'` + `target_role='teacher'`）=
+--     **在 `class_subjects` 里有一行任课关系的在册教师**（= 他在教课），§10.6 ②。
+--     ⚠️ 它**不是**"一格 `teacher_roles` 都没有"—— 那是**界面的兜底标签**（§10.6 ①），
+--     两者本来就不同：一个"有头衔 + 也在教课"的老师，① 不成立、② 成立。
+--     2026-09-26 修的漏人就是这一支错用了 ①（见下面那一支的注释）。
 --
 --  ⚠️ `heads` 那个 CTE 是**必须**的，别顺手删：`subject_lead` 那一支要问
 --     "这个组长是不是也在本年级任课（`class_subjects`）"，而组长**很可能不带课** ——
@@ -4738,17 +4966,25 @@ as $$
    where h.target_kind = 'department'
      and not exists (select 1 from classroom_accounts ca where ca.id = td.teacher_id)
   union
-  -- 🔴 「任课教师」这一档**要单独展开**（2026-09-28 实测踩到的一处漏人）：
-  --    `teacher_roles.role = 'teacher'` 是一个**历史值**，现实里**没有任何一行**用它 ——
-  --    任课教师的身份是 `class_subjects` 里的任课关系，**根本不写这张表**（§10.6）。
-  --    所以"发给任课教师"如果只按 `role = 'teacher'` 去查，**一个人都发不到**，
-  --    而那正是最常见的一档。这里的口径：**没有任何 `teacher_roles` 行的在册教师
-  --    （不含教室端）就是"任课教师"那一档** —— 与 §10.6 对"任课教师"的定义逐字一致。
+  -- 🔴 「任课教师」这一档 = **在 `class_subjects` 里有一行任课关系的在册教师**（不含教室端）。
+  --    判据是"**他在不在教课**"，**不是**"他有没有头衔" —— 后者是**界面的兜底标签**（§10.6 ①）。
+  --    🔴 2026-09-26 实测的漏人：这一支原来错用了兜底标签那个口径（"没有任何 `teacher_roles` 行"），
+  --    于是"教务处 + 副校长 + 班主任（三条身份行）**+ 教 1 个班**"的老师**收不到**
+  --    「发给：全部任课教师」的通知 —— 而这正是最常见的一档。
+  --    口径见 §10.6 ②：**教课 = `class_subjects` 里有一行**（`class_subjects` 是任课关系唯一的住处，
+  --    `teacher_roles.role = 'teacher'` 那个历史值现实里一行都没有）。
+  --    ⚠️ 与 `school` / `department` 那两支同一条纪律：教室端也有一行 `teachers`，显式挡掉 ——
+  --    它本来也没有任课关系（`exists` 天然排除它），写这一句是让"收件人集合"这句话本身是真的，
+  --    而且**教室端永远不会因为这个口径改动而被漏进来**。
+  --    ⚠️ 同一个口径还住在 `notice_role_has_members('teacher')`（§21.2.1，"这一档里有人吗"）——
+  --    两处必须同改：只改一处，要么"数据库说这一档是空的 → 403 发不出去"，
+  --    要么"发得出去，收件人是空的"（一条谁都收不到的通知）。
+  --    ⚠️ 别把 `notice_is_plain_teacher()` 当这里的判据：它回答的是"有没有头衔"（§10.6 ①）。
   select t.id
     from heads h
     join teachers t on true
    where h.target_kind = 'role' and h.target_role = 'teacher'
-     and not exists (select 1 from teacher_roles r where r.teacher_id = t.id)
+     and exists (select 1 from class_subjects cs where cs.teacher_id = t.id)
      and not exists (select 1 from classroom_accounts ca where ca.id = t.id);
 $$;
 
@@ -5256,7 +5492,7 @@ revoke all on site_state from anon, authenticated;
 --     `Key (student_no)=(20230115) already exists`）。三条措施：
 --     ① 这张表里**根本没有**学生字段（不是"界面不渲染"，是**想显示都显示不出来**）；
 --     ② 读只走服务端（超管），界面复用第一期的 `PrivacyLine`（"请勿投屏或截图"）；
---     ③ `has_pii` 用**窄启发式**标出来（邮箱 / 连续 15+ 位数字），
+--     ③ `has_pii` 用**窄启发式**标出来（邮箱 / 连续 15+ 位数字 / 🆕 学生档案与教师档案那几个字段），
 --        ⚠️ 屏上必须写明**它是启发式**，绝不许写成"已脱敏"。
 --
 --  ⚠️ 本段可重复执行（幂等）。
@@ -5350,18 +5586,41 @@ begin
     return jsonb_build_object('ok', false, 'reason', 'rate-limited', 'scope', 'global');
   end if;
 
-  -- ④ 洗一遍：**URL 的 query string 一律抹掉**（`?access_token=…` / `?roles=…` 都不能进这张表）
+  -- ④ 先判 `has_pii`：**窄启发式**（邮箱 / 连续 15+ 位数字 / 🆕 学生档案那四个字段
+  --    / 🆕 教师档案那三个字段）。⚠️ 它会有漏、也可能误标 —— 界面上必须写明"启发式"，
+  --    **不许写成"已脱敏"**。
+  --    ⚠️ 刻意**不做**"查库里有没有这个学生姓名"那一条：一次上报查一次全校名单，
+  --       成本与隐私都不划算（方案 §二.4 的建议也是只做前两条）。
+  --    🔴 **它必须排在下一条"洗一遍"之前**：洗完值就没了，之后再算永远为假 ——
+  --       而"永远标不出来"这种失败**不报错**（面板上那一列会一直是 false，没人发现）。
+  v_pii := (v_message || ' ' || v_stack) ~ '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
+        or (v_message || ' ' || v_stack) ~ '[0-9]{15,}'
+        -- 🆕 带标注的四个字段（"家长电话：…" 这种写法）
+        --    🆕 2026-10-06 教师档案：**住址**那一支照旧管用（老师的家庭住址同样是"住址：…"）；
+        --       老师的**邮箱**由上面第一条 `@` 的形状判据兜住（老师这一侧没有新增标注词）；
+        --       老师的**电话**由下面那条 11 位手机号兜住。
+        or (v_message || ' ' || v_stack) ~ '(家长电话|监护人电话|联系电话|手机号|家庭住址|现住址|住址|出生年月|出生日期|民族)\s*[:：]'
+        -- 🆕 裸的 11 位手机号（家长电话 / 老师电话最常见的形状）
+        or (v_message || ' ' || v_stack) ~ '\y1[3-9][0-9]{9}\y';
+
+  -- ⑤ 洗一遍：**URL 的 query string + 学生/家长/老师的 PII 值**一律抹掉
+  --    （`?access_token=…` / `?roles=…` / `家长电话：138…` / `邮箱 a@b.com` 都不能进这张表）
   --    ⚠️ 前端也洗（`lib/errors.ts` 的 `scrubForReport`），但**不指望前端** ——
   --       手打这个 RPC 的人不会洗（I49 的"服务端要再洗一遍"）。
   v_message := regexp_replace(v_message, '(https?://[^?\s]+)\?[^\s]*', '\1', 'g');
   v_stack   := regexp_replace(v_stack,   '(https?://[^?\s]+)\?[^\s]*', '\1', 'g');
-
-  -- ⑤ `has_pii`：**窄启发式**（邮箱 / 连续 15+ 位数字）。
-  --    ⚠️ 它会有漏、也可能误标 —— 界面上必须写明"启发式"，**不许写成"已脱敏"**。
-  --    ⚠️ 刻意**不做**"查库里有没有这个学生姓名"那一条：一次上报查一次全校名单，
-  --       成本与隐私都不划算（方案 §二.4 的建议也是只做前两条）。
-  v_pii := (v_message || ' ' || v_stack) ~ '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
-        or (v_message || ' ' || v_stack) ~ '[0-9]{15,}';
+  --    🆕 学生档案那四个字段（§2.1 / §35）的值：**带标注的按标注抹、裸的手机号按形状抹**。
+  --       判据与 `functions/api/_lib/mail.ts` 的 `looksLikeStudentData()` **同源**
+  --       （那边是"不发这封信"，这边是"上报的正文里不留值"）。
+  v_message := regexp_replace(v_message, '(家长电话|监护人电话|联系电话|手机号|家庭住址|现住址|住址|出生年月|出生日期|民族)\s*[:：]\s*[^\s,，;；|]+', '\1：[已隐去]', 'g');
+  v_stack   := regexp_replace(v_stack,   '(家长电话|监护人电话|联系电话|手机号|家庭住址|现住址|住址|出生年月|出生日期|民族)\s*[:：]\s*[^\s,，;；|]+', '\1：[已隐去]', 'g');
+  v_message := regexp_replace(v_message, '\y1[3-9][0-9]{9}\y', '[已隐去]', 'g');
+  v_stack   := regexp_replace(v_stack,   '\y1[3-9][0-9]{9}\y', '[已隐去]', 'g');
+  --    🆕 教师档案的**邮箱**（§1.1 / §36）：值只抹掉 `@` 之后那一段域名
+  --       （`账号@域名` → `账号@[已隐去]`）—— 与 `has_pii` 那条判据同源。
+  --       ⚠️ 它与上面那条"URL 的 query string"不冲突：`?email=a@b.com` 已经被上一句抹成 `?email=`。
+  v_message := regexp_replace(v_message, '(@)[A-Za-z0-9.-]+\.[A-Za-z]{2,}', '\1[已隐去]', 'g');
+  v_stack   := regexp_replace(v_stack,   '(@)[A-Za-z0-9.-]+\.[A-Za-z]{2,}', '\1[已隐去]', 'g');
 
   insert into frontend_errors
     (account_id, username, role, view, message, stack, ua, env, sync_error, has_pii)
@@ -5369,7 +5628,7 @@ begin
     (auth.uid(), v_username, v_role, v_view, v_message, v_stack, v_ua, v_env, v_sync, v_pii)
   returning id into v_id;
 
-  -- ⑤ 回话里**只有 id 与有没有疑似隐私**，**绝不回显正文**（那会变成读回通道）
+  -- ⑥ 回话里**只有 id 与有没有疑似隐私**，**绝不回显正文**（那会变成读回通道）
   return jsonb_build_object('ok', true, 'id', v_id, 'has_pii', v_pii);
 end $$;
 
@@ -5539,15 +5798,33 @@ grant execute on function can_contact_admin() to authenticated;
 --     里是**题图的 base64**：只报**体积**，绝不显示图片 —— 与第一期 J2 同一条纪律）。
 --     排行里给的是「班级名 + 档案 id + 字节数」，**没有学生、没有题目、没有成绩**。
 --
---  ⚠️ **配额（1 GB）与阈值不在这里**：它们在 `app/src/lib/adminChart.ts`
+--  🔴 **两个口径必须同时给出，别把它们混起来**（2026-10-07 修「用量卡让人误判」）：
+--     · `totalBytes` = **整库**（`pg_database_size(current_database())`）—— 与 Supabase
+--       控制台「Database size」**同一个口径**，**百分比按它算**。
+--     · `tables`     = **public schema 逐表**（`pg_total_relation_size`，含索引与 TOAST）。
+--       它们的和 = "**用户表之和**"，**比整库小**：差的是**系统目录 / WAL / 其他 schema
+--       （auth / storage / realtime / supabase_migrations…）**。
+--     ⚠️ **口径混用就是这次那个 bug**：只按用户表求和算百分比 → 面板报 1.4% 而控制台
+--        已经 11% → 等面板显示 50% 的时候库早就真的满了。
+--        `app/src/lib/adminChart.ts` 的 `judgeDbUsage()` 里有一条**一致性判据**：
+--        整库 < 用户表之和（不可能）→ 直接红，点名"服务端那个函数还是旧版"。
+--     ⚠️ `tables` **不再只取前 12 名**：面板要能算出"用户表之和"这个**完整**口径，
+--        所以这里给全量（页面显示时才取前几名）。
+--
+--  ⚠️ **配额（500 MB）与阈值不在这里**：它们在 `app/src/lib/adminChart.ts`
 --     （`DB_QUOTA_BYTES` / `DB_WARN_PCT` / `DB_BAD_PCT`）。
 --     **一个常量只能有一处** —— 这个函数只量数，不判色。
+--     ⚠️ 500 MB 是 Supabase **免费版**的库上限（控制台写 0.5 GB），不是我们拍的数。
 --
 --  ⚠️ 行数是 `pg_class.reltuples`，那是**规划器的估算**，不是精确值：
 --     还没被 ANALYZE 过的表回 -1 → 这里归一成 **null（= 无法判断）**，
 --     ⚠️ **绝不归一成 0**（"0 行"与"还没统计过"是两件事，本项目最贵的一条教训）。
 --
 --  ⚠️ 本段可重复执行（幂等）。
+--
+--  ⚠️ 「**出流量**」**不在这个函数里**：出流量是 Supabase **账单周期**的口径
+--     （免费版 5 GB/月），数据库里量不到 —— 服务端 `functions/api/admin/config-check.ts`
+--     拿只读 PAT 调 **Management API** 取（见 `功能设计与不变量.md` §二十五）。
 -- ============================================================
 
 create or replace function public.db_usage_report()
@@ -5580,7 +5857,7 @@ as $$
                'bytes', t.bytes,
                'rowsEstimate', case when t.rows_estimate < 0 then null else t.rows_estimate end)
              order by t.bytes desc)
-        from (select * from t order by bytes desc limit 12) t
+        from (select * from t) t
     ), '[]'::jsonb),
     'questionMetaBytes', coalesce((select sum(octet_length(question_meta::text))::bigint from assignments), 0),
     'archives', coalesce((
@@ -5596,6 +5873,18 @@ $$;
 
 -- 🔴 只有服务端（service_role）能调它：给 anon / authenticated 就等于
 --    把整库的字节数（含逐表排行）摊给任何人 —— 面板的数据**只走服务端**。
+--
+--  ⚠️ **为什么 revoke 之后 service_role 还调得动**（2026-10-07 复核过线上）：
+--     `revoke … from public, anon, authenticated` 只收回这三档；Supabase 的
+--     `service_role` 是**平台另给的一套角色**（有 bypassrls 与它自己的授权），
+--     线上面板从 §26 落地那天起就是拿 service_role 调它、一直有数 —— 而
+--     `pg_database_size()` 只要求对**当前库**有 CONNECT（service_role 有）。
+--     所以这次加 `pg_database_size` **没有多出任何新的授权需求**。
+--  🔴 **PGlite 里没有"service_role"这个概念**（本地回归用的是单角色嵌入式 PG）：
+--     所以 `rls-checks` 只验 anon / authenticated 两条被 revoke + 属主调得动，
+--     **不去 `has_function_privilege('service_role', …)`** —— 那在 PGlite 里会
+--     直接报 `role "service_role" does not exist`（假红）。这条纪律写在这里，
+--     免得后来的人"顺手补一条 service_role 的断言"把门禁弄红。
 revoke all on function db_usage_report() from public, anon, authenticated;
 
 -- -------- 26.1 核对（把下面整段粘进 SQL 编辑器）--------
@@ -5608,6 +5897,13 @@ revoke all on function db_usage_report() from public, anon, authenticated;
 --
 --  ③ ⚠️ **这个函数只量数，不判色**（配额与阈值在 `adminChart.ts`）：
 --  -- select public.db_usage_report() -> 'totalBytes';   -- 是个数字，不是颜色
+--
+--  ④ 🔴 **两个口径对一遍**（整库必然 >= 用户表之和；反过来就说明跑的还是旧版）：
+--  -- select (public.db_usage_report() ->> 'totalBytes')::bigint as 整库,
+--  --        (select sum((x ->> 'bytes')::bigint)
+--  --           from jsonb_array_elements(public.db_usage_report() -> 'tables') x) as 用户表之和;
+--  -- 期望：整库 >= 用户表之和，而且**差额有几千字节到几十 MB 都正常**
+--  --       （差额 = 系统目录 / WAL / auth / storage 等**不在 public schema** 的部分）。
 -- ============================================================
 
 
@@ -7270,6 +7566,10 @@ as $$
     'counts', jsonb_build_object(
       'classes',      (select count(*) from c),
       'students',     (select count(*) from s),
+      -- 🆕 学生档案（民族 / 出生年月 / 家长电话 / 家庭住址，§2.1 / §35）：
+      --    **逐表 dump 必须覆盖它** —— 这张表现在比别的表更值钱（第三方 PII），
+      --    漏了它 = 删掉一个年级时那批家长电话**静默消失**（备份里没有、界面上也没了）。
+      'studentProfiles', (select count(*) from student_profiles sp where sp.student_id in (select id from s)),
       'assignments',  (select count(*) from assignments a where a.class_id in (select id from c)),
       'calls',        (select count(*) from calls x where x.class_id in (select id from c)),
       'exams',        (select count(*) from ex),
@@ -7291,6 +7591,9 @@ as $$
       'grades',     coalesce((select jsonb_agg(to_jsonb(g)) from grades g where g.id = p_grade_id), '[]'::jsonb),
       'classes',    coalesce((select jsonb_agg(to_jsonb(x)) from c x), '[]'::jsonb),
       'students',   coalesce((select jsonb_agg(to_jsonb(x)) from s x), '[]'::jsonb),
+      -- 🆕 学生档案整表带走（`student_id` 指向上面的学生行）—— 与 `counts` 里那个数**同一次口径**
+      'studentProfiles', coalesce((select jsonb_agg(to_jsonb(x)) from student_profiles x
+                                    where x.student_id in (select id from s)), '[]'::jsonb),
       'studentSubjects', coalesce((select jsonb_agg(to_jsonb(x)) from student_subjects x
                                     where x.student_id in (select id from s)), '[]'::jsonb),
       'classMembers', coalesce((select jsonb_agg(to_jsonb(x)) from class_members x
@@ -7546,14 +7849,14 @@ begin
   /* ---- ② 备份：存在 + 已发出 + 没过期 ---- */
   select * into v_rec from grade_removals where grade_id = p_grade_id;
   if v_rec.id is null then
-    raise exception '还没有备份 —— 毕业删除的第一步是「生成备份并发到超管邮箱」，先做那一步';
+    raise exception '还没有备份 —— 毕业删除的第一步是「生成备份」，先做那一步';
   end if;
   if not v_rec.mail_ok then
-    raise exception '备份还没有发到超管邮箱（%）—— 删除流程停在这里：先把信发出去',
+    raise exception '备份还没有完成（%）—— 删除流程停在这里：先重新生成一次备份',
       coalesce(nullif(v_rec.mail_reason, ''), '原因不明');
   end if;
   if v_rec.expires_at is not null and v_rec.expires_at <= now() then
-    raise exception '备份的下载链接已经过期（%）—— 重新生成一份备份、重新发信之后再删', v_rec.expires_at;
+    raise exception '备份的下载链接已经过期（%）—— 重新生成一份备份之后再删', v_rec.expires_at;
   end if;
   if v_rec.payload is null then
     raise exception '这条备份记录里没有内容 —— 重新生成一份备份';
@@ -8310,13 +8613,50 @@ begin
   /* ① 走班班这一行的"老师"（`classes.teacher_id`：它是"这个班的负责人"，与任教关系是两件事） */
   update classes set teacher_id = p_teacher_id where id = p_class_id;
 
-  /* ② **自动补任教关系**：一门课一行 —— `can_grade_subject` 就是按 (班, 科目) 问的 */
+  /*
+   * ② **换老师 = 真的换**（2026-10-08 修）。
+   *
+   * 原来这里只有一条 `insert … on conflict (class_id, subject_code, teacher_id) do nothing`：
+   *   · 同一位老师重复分配 → 幂等，没问题；
+   *   · **换成另一位老师** → 上面那条 unique 元组（class, subject, teacher）不同，
+   *     于是**两行都留着**（旧老师 + 新老师），而 `class_subjects` 上
+   *     **没有 (class_id, subject_code) 的唯一约束** —— 一个班一科两位老师是"合法"的脏数据。
+   *     前端那一边（`GradeSetup` 的老师下拉）用「第一条命中」回显 → 页面一刷新顺序变了，
+   *     看起来就是「刚分配的老师刷新就没了」。
+   * 所以先**按科目清掉这一科上别的老师**（同一事务，且只清走班班这一科），再插入。
+   */
+  /*    ⚠️ 两句判据：`subject_code` 认得出就用它；**认不出**（老数据是 NULL）就退回按科目名比 ——
+         只写 subject_code 那一半的话，老库上换老师仍然会留下两行（只修了一半）。 */
+  delete from class_subjects cs
+   where cs.class_id = p_class_id
+     and cs.teacher_id <> p_teacher_id
+     and (
+       cs.subject_code = any (v_codes)
+       or cs.subject in (select s.name from subjects s where s.code = any (v_codes))
+     );
+
+  /* ③ **自动补任教关系**：一门课一行 —— `can_grade_subject` 就是按 (班, 科目) 问的 */
   insert into class_subjects (class_id, subject, teacher_id, subject_code)
   select p_class_id, s.name, p_teacher_id, s.code
     from subjects s
    where s.code = any (v_codes)
   on conflict (class_id, subject_code, teacher_id) do nothing;
   get diagnostics v_added = row_count;
+
+  /*
+   * ④ 断言（把"看起来成功、其实没落库"变成当场报错）。
+   * 🔴 上面两条写完必须**真的**读得出"这一科 = 这位老师" —— 这是 §三.5
+   *    （"不可写的路径要显式报错"）在走班班这条链上的落地：
+   *    线上库还没跑这一段时，前端会看到这句人话，而不是一个空下拉。
+   */
+  if not exists (
+    select 1 from class_subjects cs
+     where cs.class_id = p_class_id
+       and cs.teacher_id = p_teacher_id
+       and cs.subject_code = any (v_codes)
+  ) then
+    raise exception '走班班老师没有落库（班级 %，老师 %）—— 请检查 class_subjects 这一段的权限与唯一约束', p_class_id, p_teacher_id;
+  end if;
 
   return jsonb_build_object('ok', true, 'classId', p_class_id, 'teacherId', p_teacher_id,
                             'subjects', to_jsonb(v_codes), 'added', v_added);
@@ -9116,3 +9456,279 @@ create trigger students_stream_membership_cleanup
 --  -- select column_name from information_schema.columns
 --  --  where table_schema='public' and table_name='subjects' and column_name='can_stream';
 -- ============================================================
+
+
+-- ============================================================
+--  35. 学生档案的可见性与修改权（2026-10-06）
+--        表在 §2.1：`student_profiles`（民族 / 出生年月 / 家长电话 / 家庭住址）
+-- ------------------------------------------------------------
+--  🔴 **判据一个都不新造**，两处都复用现有的那两个：
+--    · **看**（谁读得到这一行）：走 §10.3 的 `visible_class_ids()` —— 就是"看得见哪些班"
+--      那一族（`visible_class_ids_for()` / `visible_class_ids()`）：
+--        科任老师 → 只看得见**自己任教的班**；非任教班的老师 → 看不到（I25 那半句照旧：
+--        "自己建的班永远看得见"，所以带 `owns_class()`）。
+--      🔴 另外**显式**加 `not is_classroom_account()`（§10.5 那唯一一个教室端判据）：
+--         `visible_class_ids()` 里**有"教室端：本班"那一支**（I20 要它读本班全科作业），
+--         而家长电话与家庭住址是**第三方 PII** —— 教室里那块屏是**给学生看的**，
+--         绝不能读到（`功能设计与不变量.md` §十七·补 那条线）。这一句是**故意的**，
+--         不是"顺手多加一支"：拿掉它，教室端立刻读得到（`rls-checks` 第十九节 + 负向对照钉着）。
+--    · **改**（谁写得动）：复用 §16.2 的 `can_manage_class()`
+--      （= 最高管理员 / 教务处 ∪ **本年级**年级主任 ∪ **本班**班主任）——
+--      用户口径「班主任通过班级可以改这些信息」就是它，**不另写一个替换它的判据**。
+--  ⚠️ 写的那三条策略**不额外挡教室端**：`can_manage_class_for()` 里没有教室端那一支
+--     （它是"管得着这个班"，不是"看得见这个班"），教室端本来就被拒。
+--  ⚠️ 年级管理（`/grades`，职能部门与年级主任管这个学校/年级的班级）那一侧判据是
+--     `can_manage_grade_setup_for()`（§27.13），**它一个字没动**：班级页这一层只多出一张表，
+--     不多出第二个"能不能管这个班"的说法。
+-- ============================================================
+
+grant select, insert, update, delete on student_profiles to authenticated;
+-- 匿名用户什么都不给（与 §6 里那七张业务表同一条）
+revoke all on student_profiles from anon;
+
+--  读：看得见这个班的人（∪ 自己建的班）· 教室端一律不算
+drop policy if exists student_profiles_visible on student_profiles;
+create policy student_profiles_visible on student_profiles for select to authenticated
+  using (
+    not is_classroom_account()
+    and exists (
+      select 1 from students s
+      where s.id = student_profiles.student_id
+        and (s.class_id in (select visible_class_ids()) or owns_class(s.class_id))
+    )
+  );
+
+--  增 / 改 / 删：**管得着这个班**（`can_manage_class` 自己取 `auth.uid()`，前端插不上手）
+--  ⚠️ `with check` 与 `using` 同款：否则能把一行改到"另一个班的学生"身上（自己管不着的地方）
+drop policy if exists student_profiles_insert on student_profiles;
+create policy student_profiles_insert on student_profiles for insert to authenticated
+  with check (
+    can_manage_class((select s.class_id from students s where s.id = student_profiles.student_id))
+  );
+
+drop policy if exists student_profiles_update on student_profiles;
+create policy student_profiles_update on student_profiles for update to authenticated
+  using (
+    can_manage_class((select s.class_id from students s where s.id = student_profiles.student_id))
+  )
+  with check (
+    can_manage_class((select s.class_id from students s where s.id = student_profiles.student_id))
+  );
+
+drop policy if exists student_profiles_delete on student_profiles;
+create policy student_profiles_delete on student_profiles for delete to authenticated
+  using (
+    can_manage_class((select s.class_id from students s where s.id = student_profiles.student_id))
+  );
+
+-- -------- 35.1 核对（把下面整段粘进 SQL 编辑器；`<学生 id>` / `<教室端账号 id>` 换成真实值）--------
+--  ① 表与列都在（期望 5 行：student_id / ethnicity / birth_month / guardian_phone / home_address）：
+--  -- select column_name from information_schema.columns
+--  --  where table_schema='public' and table_name='student_profiles' order by 1;
+--  ② 策略清单（期望 4 条：1 条 SELECT + insert / update / delete）：
+--  -- select policyname, cmd from pg_policies
+--  --  where schemaname='public' and tablename='student_profiles' order by 2,1;
+--  ③ 教室端**一行都读不到**（以教室端账号身份跑，期望 0）：
+--  -- set role authenticated;   -- 并在请求头带上那个教室端账号的 JWT
+--  -- select count(*) from student_profiles;
+-- ④ 班主任读得到本班、读不到别班（换成真实的两个班各一个学生）：
+--  -- select student_id from student_profiles
+--  --  where student_id in ('<本班学生 id>', '<别班学生 id>');   -- 期望只有本班那一行
+--  ⑤ 改一行（以班主任身份，期望 1 行；以科任老师身份，期望 0 行）：
+--  -- update student_profiles set guardian_phone = '<新号码>' where student_id = '<本班学生 id>';
+--  ⑥ 备份那条链**带上了它**（`payload` 里有 `studentProfiles`，且条数 = 这个年级的学生档案数）：
+--  -- select jsonb_array_length(payload -> 'tables' -> 'studentProfiles'),
+--  --        payload -> 'counts' ->> 'studentProfiles' from grade_removals order by deleted_at desc limit 1;
+-- ============================================================
+
+-- ============================================================
+--  36. 🆕 教师档案的可见性与修改权（2026-10-06）
+--        表在 §1.1：`teacher_profiles`（家庭住址 / 电话号码 / 邮箱）
+-- ------------------------------------------------------------
+--  🔴 **判据一个都不新造**，两处都复用现有的那一个：
+--    · **读 / 写都只认 `can_create_teacher_accounts()`**（§13.2，= 超管 / 教务处 /
+--      **办公室主任**）—— 正是上一轮「显示姓名」与「部门归属」用的那一档，
+--      理由也同一个：**这三列是档案属性**（这个人住在哪、电话多少、邮箱是哪个），
+--      与"能不能建号"是一档事，而不是教学数据。
+--      ⚠️ 这一档用**两次**（读一次、写一次），是**故意**的：别的地方是"读得宽、写得窄"，
+--         这一张表是**读得窄、写得更窄** —— 老师和同事都不该读到别人的家庭住址
+--         （第三方隐私，和教室端不许读家长电话是同一条线）。
+--    · 🔴 **自己看自己那一行**（`teacher_id = auth.uid()`）：天经地义，单独一支。
+--      没有它，"老师自己在 /accounts 页上看不到自己填过的电话"——而那是**他自己**的信息。
+--  🔴 **班主任 / 年级主任都不在里面**（这是本轮的一个判断，写清楚免得后来的人"顺手补上"）：
+--     学生档案那一侧班主任能改（`can_manage_class`，§35），因为家长电话是**他管的学生**的；
+--     而**老师的家庭住址不是班主任该看的** —— "管得着这个班的学生"与"管得着这个老师的档案"
+--     是两件事。所以这里**照 `can_create_teacher_accounts` 一档**，一个班主任何都不加。
+--  🔴 **教室端读不到**（`teacher_profiles_visible` 里那句 `not is_classroom_account()` 是
+--     **显式的**、不是"顺手多加一支"）：拿掉它，"能建号那一档"对教室端恒假、单看策略像"已经够了"，
+--     但教室端有自己的一行 `teachers`（触发器给每个 auth 用户都建）——
+--     不写这一句，"自己那一行"那一支就对教室端成立。`rls-checks` 第二十节钉着它
+--     （含负向对照 `profile-teacher-classroom`）。
+--  ⚠️ **写唯一入口是服务端**：`functions/api/teacher-account.ts` 的 `profile` 动作
+--     （service_role，判据 `can_create_teacher_accounts()`）。
+--     下面那条 update 策略用的**是同一个判据**，它管的是**另一条路**（`authenticated` 直连
+--     PostgREST，service_role 那条看不到它）—— 两条路同一把尺子，所以"判据只写一次"仍然成立。
+-- ============================================================
+
+grant select, insert, update, delete on teacher_profiles to authenticated;
+-- 匿名用户什么都不给（与 §6 那七张业务表、§35 学生档案同一条）
+revoke all on teacher_profiles from anon;
+
+--  读：**自己那一行** ∪ **能建号的那一档**（超管 / 教务处 / 办公室主任）· 教室端一律不算
+drop policy if exists teacher_profiles_visible on teacher_profiles;
+create policy teacher_profiles_visible on teacher_profiles for select to authenticated
+  using (
+    not is_classroom_account()
+    and (teacher_id = auth.uid() or can_create_teacher_accounts())
+  );
+
+--  增 / 改：**能建号的那一档**（`can_create_teacher_accounts` 自己取 `auth.uid()`，前端插不上手）
+--  ⚠️ `with check` 与 `using` 同款：否则能把一行写到"另一个老师"身上（= 给别人改档案）
+drop policy if exists teacher_profiles_insert on teacher_profiles;
+create policy teacher_profiles_insert on teacher_profiles for insert to authenticated
+  with check (can_create_teacher_accounts());
+
+drop policy if exists teacher_profiles_update on teacher_profiles;
+create policy teacher_profiles_update on teacher_profiles for update to authenticated
+  using (can_create_teacher_accounts())
+  with check (can_create_teacher_accounts());
+
+--  ⚠️ **没有 delete 策略**（故意的，与 §17 那句"没有 teachers 的 DELETE 策略"同一条）：
+--     删一位老师走的是删账号那条路（`auth.users` → 级联），**不是**在这张表上删一行。
+--     留着它只会多一条"能把档案删掉、人还在"的路径。
+
+-- -------- 36.1 核对（把下面整段粘进 SQL 编辑器；`<老师 id>` / `<教室端账号 id>` 换成真实值）--------
+--  ① 表与列都在（期望 4 行：teacher_id / home_address / phone / email）：
+--  -- select column_name from information_schema.columns
+--  --  where table_schema='public' and table_name='teacher_profiles' order by 1;
+--  ② 策略清单（期望 3 条：1 条 SELECT + insert / update）：
+--  -- select policyname, cmd from pg_policies
+--  --  where schemaname='public' and tablename='teacher_profiles' order by 2,1;
+--  ③ 教室端**一行都读不到**（以教室端账号身份跑，期望 0）：
+--  -- set role authenticated;   -- 并在请求头带上那个教室端账号的 JWT
+--  -- select count(*) from teacher_profiles;
+--  ④ 别的老师**读不到同事那一行**（换成两位真实老师；期望只有自己那一行）：
+--  -- select teacher_id from teacher_profiles where teacher_id in ('<自己>', '<同事>');
+--  ⑤ 形状：一个明显不是电话/邮箱的值要被拒（期望报 check 约束错）：
+--  -- update teacher_profiles set phone = '不是电话' where teacher_id = '<老师 id>';
+--  -- update teacher_profiles set email = '没有 at 符号' where teacher_id = '<老师 id>';
+--  ⑥ ⚠️ 教师档案**不进年级备份 payload**（这一条是"确认它不在"，期望 0 行）：
+--  -- select jsonb_object_keys(payload -> 'tables') from grade_removals
+--  --  where deleted_at is not null order by 1 limit 1;   -- 里面没有 teacherProfiles
+-- ============================================================
+
+-- ============================================================
+-- §37 🔑 走班班的编辑 / 删除（走班班也是 `classes` 的一行）
+-- ============================================================
+--  内测现场（2026-10-08）：「走班班都没有编辑键」「删不了」。
+--
+--  🔴 **判据一个新发明都没有**（§四）：走班班是 `classes` 里 `kind='stream'` 的一行，
+--     它的"读 / 改 / 删"天然是 `classes_*` 那三条策略，而它们用的是
+--     **§16.2 的 `can_manage_class_for()`** —— 最高管理员 / 教务处 ∪ **本年级**年级主任
+--     ∪ **本班**班主任（`head_teacher` 那一支判 `classes.id`，**不看 kind**）。
+--     走班班有 `grade_id`（§32.2 生成时从学生的年级取）→ 年级主任那一支**真的成立**。
+--     §32.6 / 第二十一节已经核过这一条；本节不新增判据函数、不改任何既有策略。
+--     断言见 `app/scripts/rls-checks.mjs` 第二十二节（带反向对照）。
+--
+--  ⚠️ **改名 / 换老师 / 加删成员三条路都不在这里**：
+--     · 改名 → `classes_update`（`classes.name`，前端 `remote.saveClass()`）；
+--     · 换老师 → **§32.3 `assign_stream_teacher()`**（它同时补 `class_subjects`，
+--       服务端 `/api/grade-setup` 的 `classSubjectAssign` 已经在调它，**不另写一套**）；
+--     · 加删成员 → 就是下面这一个函数。
+
+-- -------- 37.1 🔑 手工增删走班班成员（**一个事务**；写的是 `class_members`）--------
+--  🔴 **写的是 `class_members`**（多对多），**不是** `students.class_id`。
+--     走班班的人**永远不在** `students.class_id` 上（§27.5）—— 写错源就是恒为 0 人
+--     （2026-10-08 刚修过的那条链）。一个学生**可以同时在两个走班班**里（U-1 = A），
+--     所以这里**不去重**跨班的关系，只保证 `(class_id, student_id)` 这一对不重复。
+--
+--  🔴 为什么必须是函数、而不是前端直接写：`authenticated` 对 `class_members`
+--     **只有 select 策略、零写权限**（§27.8 / §32.4）—— 前端直写是**显式报错**（42501），
+--     不是静默失败（§三.5 要的就是这个）。所以手工增删只有这一条路：`security definer` 函数。
+--  ⚠️ 与 §32.4 那两个函数不同，**本函数要 `grant execute … to authenticated`**：
+--     它判据在上面的 `can_manage_class()`（自己取 `auth.uid()`，前端插不上手），
+--     而且它只碰**一个走班班的一张关系表**，没有 §32.4 那种"批量建班 / 改任教关系"的杀伤面。
+--     不给 grant = 这个功能在线上**根本做不了**（服务端目前没有对应的 action）。
+--  ⚠️ 入参是**整份名单**（替换语义）：与 §32.2 生成走班班时的"整组重算"同一个口径 ——
+--     "谁该在里面"只有一份答案，不用在前端算增量。
+--
+--  ⚠️ 「同一科不许进两个走班班」（§32.2 那条）**故意不在这里判**：那是**自动生成**那条路的冲突规则；
+--     手工增删是设计明确要求的口子（P7：「其他」组合的学生**必须手工选走班班**，§27.9 同一个口子），
+--     库里也已经有这种行（差 2 门的学生同时在两个班里）。在这里判它会让"手工加人"随时被拒。
+--  ⚠️ 年级也要对得上：走班班属于一个年级，只收**本年级**的学生 —— 别班的进不来（显式报错）。
+drop function if exists public.write_stream_members(uuid, uuid[]);
+create or replace function public.write_stream_members(
+  p_class_id   uuid,
+  p_student_ids uuid[]
+) returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_grade uuid;
+  v_kind  text;
+  v_bad   int := 0;
+  v_rows  int := 0;
+begin
+  select c.grade_id, c.kind into v_grade, v_kind from classes c where c.id = p_class_id;
+  if v_kind is null then
+    raise exception '这个班不存在';
+  end if;
+  /* 🔴 显式报错，不许静默：拿一个行政班的 id 进来时必须当场被拒 */
+  if v_kind <> 'stream' then
+    raise exception '这不是走班班（成员增删只对 kind = stream 的班）';
+  end if;
+  if not public.can_manage_class(p_class_id) then
+    raise exception '你没有改这个走班班成员的权限';
+  end if;
+
+  if v_grade is null then
+    raise exception '这个走班班没有年级 —— 先把它挂到年级上再改成员';
+  end if;
+
+  select count(*) into v_bad
+    from unnest(coalesce(p_student_ids, '{}'::uuid[])) x
+   where not exists (
+           select 1 from students s
+             join classes c on c.id = s.class_id
+            where s.id = x and c.grade_id = v_grade
+         );
+  if v_bad > 0 then
+    raise exception '有 % 个学生不在这个走班班所属的年级里（走班班只收本年级的学生）', v_bad;
+  end if;
+
+  /* 整份替换：先清、再按**去重后**的名单插回去（一个事务，改一半的情况不发生） */
+  delete from class_members where class_id = p_class_id;
+  insert into class_members (class_id, student_id)
+  select p_class_id, x
+    from (select distinct x from unnest(coalesce(p_student_ids, '{}'::uuid[])) x) t;
+  get diagnostics v_rows = row_count;
+
+  /* 🔴 断言（§三.5）：写完必须**真的**读得出这么多行 —— "看起来成功、其实没落库"当场报错 */
+  if (select count(*) from class_members where class_id = p_class_id) <> v_rows then
+    raise exception '成员没有按预期落库（写了 % 行）', v_rows;
+  end if;
+
+  return jsonb_build_object('ok', true, 'classId', p_class_id, 'members', v_rows);
+end $$;
+
+--  ⚠️ `_for` 那种"以任意人身份问权限"的变体**一律不建**（§27.12 同一条）：
+--     本函数自己取 `auth.uid()`，前端塞不进别人的身份。
+grant execute on function public.write_stream_members(uuid, uuid[]) to authenticated;
+revoke all on function public.write_stream_members(uuid, uuid[]) from public, anon;
+
+-- -------- 37.2 核对（把下面整段粘进 SQL 编辑器；以**有权限的人**的 JWT 跑）--------
+--  ① 函数在、authenticated 能调（期望 1 行）：
+--  -- select proname from pg_proc where proname = 'write_stream_members';
+--  ② 本年级的年级主任调得动本年级的走班班（期望 ok = true）：
+--  -- select public.write_stream_members('<走班班 id>', array['<学生 id>']::uuid[]);
+--  ③ 反向对照：**科任老师 / 别班班主任 / 别年级的年级主任 / 教室端**调它（期望报人话异常）：
+--  -- select public.write_stream_members('<走班班 id>', '{}'::uuid[]);
+--  ④ 反向对照：拿一个**行政班**的 id 调它（期望"这不是走班班"）：
+--  -- select public.write_stream_members('<行政班 id>', '{}'::uuid[]);
+--  ⑤ 写完之后：`select count(*) from class_members where class_id = '<走班班 id>';` = 数组长度
+--  ⑥ 一个学生同时属于两个走班班（多对多没被去重掉）：
+--  -- select class_id from class_members where student_id = '<学生 id>';
+-- ============================================================
+

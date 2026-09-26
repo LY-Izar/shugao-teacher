@@ -38,7 +38,12 @@ import {
   rpcBool,
   serviceKey,
 } from './_lib/supa'
-import { MAIL_DAILY_CAP, beijingStamp, mailConfigured, sendAuditedMail } from './_lib/mail'
+import {
+  SYSTEM_MAIL_BODIES,
+  beijingStamp,
+  mailConfigured,
+  sendAuditedMail,
+} from './_lib/mail'
 
 const NEED_STAGE13 =
   '数据库还没跑权限函数（仓库里 supabase/schema.sql 第 13 段：is_super_admin）。' +
@@ -90,18 +95,12 @@ export async function onRequestPost(context: { request: Request; env: Env }): Pr
       action: 'mail.test',
       actorId: me.id,
       subject: `【树高平台】邮件通道自测 · ${beijingStamp()}`,
-      text: [
-        '这是一封测试邮件 —— 你在「管理台 → 维护 / 发测试邮件」点了那个按钮。',
-        '',
-        `时间：${beijingStamp()}`,
-        `发件人：onboarding@resend.dev（Resend 未验域名时的固定发件人）`,
-        `收件人：这个邮箱（Resend 未验域名时只能发给账号所有者本人）`,
-        `今天已发：${sent === null ? '读不到' : sent} 封（上限 ${MAIL_DAILY_CAP}/天，Resend 免费额度 100/天）`,
-        '',
-        '收到这封信 = 邮件通道是通的。',
-        /* ⚠️ 措辞同样避开那四个触发词（见下面 backup 那一支的注释） */
-        '⚠️ 本邮件正文**不含任何学生个人信息**（发信助手的三条硬要求之一）。',
-      ].join('\n'),
+      /*
+       * 🔴 正文从 `SYSTEM_MAIL_BODIES.test` 来（**唯一一处构造**）——
+       *    线上恒 502 的那次事故就是这一条：正文里印了发件人地址，
+       *    被自己的"邮箱形状"判据拦下。别在这里另写一段正文。
+       */
+      text: SYSTEM_MAIL_BODIES.test({ stamp: beijingStamp(), sentToday: sent }),
       skipQuota: true,
     })
     if (!r.ok) {
@@ -139,25 +138,13 @@ export async function onRequestPost(context: { request: Request; env: Env }): Pr
       action: 'mail.backup',
       actorId: me.id,
       subject: `【树高备份】${beijingStamp()}`,
-      text: [
-        '有一次备份完成了。',
-        '',
-        summary || '(没有摘要)',
-        detail ? `细节：${detail}` : '',
-        '',
-        `时间：${beijingStamp()}`,
-        '',
-        /*
-         * 🔴 这一句的措辞是**被断言逼出来的**（`admin-checks` ⑤ 反向对照当场抓到）：
-         *    第一版写的是"没有任何学生姓名 / 学号 / **成绩**"，而 `looksLikeStudentData()`
-         *    里有一条"出现成绩类词" → **这句免责声明把自己给拦下了**（备份通知永远发不出去）。
-         *    → 服务端自己构造的正文里，**别出现那四个触发词**（成绩 / 分数 / 得分 / 排名 / 名次）。
-         */
-        '⚠️ 本邮件由服务端构造正文：**只有摘要与时间，没有任何学生个人信息**。',
-        '🔴 如果这封信没发出去，那条链上的规矩是：**不许删**（本机备份文件要留着）。',
-      ]
-        .filter((x) => x !== '')
-        .join('\n'),
+      /* 正文在 `SYSTEM_MAIL_BODIES.backup`（唯一一处构造；自测逐条喂它） */
+      text: SYSTEM_MAIL_BODIES.backup({
+        stamp: beijingStamp(),
+        sentToday: null,
+        summary,
+        detail,
+      }),
     })
     if (!r.ok) {
       return json(

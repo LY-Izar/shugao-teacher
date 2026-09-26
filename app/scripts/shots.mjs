@@ -52,7 +52,7 @@
  * ⚠️ 这个脚本跑的是**本地演示模式**（dev 下没有 Supabase 变量），
  *    所以它**永远覆盖不到云端路径 / 权限** —— 那是 `rls-checks.mjs` 的活，别在这里补。
  */
-import { mkdirSync, writeFileSync, readdirSync, existsSync } from 'node:fs'
+import { mkdirSync, writeFileSync, readdirSync, existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { registerTsResolve } from './lib/ts-resolve.mjs'
@@ -294,9 +294,71 @@ const EXPECTED_FILES = [
   //  ⚠️ 图号续在 103 之后，不清空旧图；`EXPECTED_FILES` 是**集合相等**，两张都登记了。
   '104-manage-admin.png',
   '105-manage-teacher.png',
+  // 🆕 2026-10-06 学生档案（民族 / 出生年月 / 家长电话 / 家庭住址）：
+  //  106 = 班级页 → 名单那一行的「档案」→ 浮层上的四个字段（科任老师那一侧：只读、不摆"修改档案"）
+  '106-student-profile.png',
+  // 🆕 顶层 tab 的「返回」（`/schedule` / `/wrong`，见 S6b 那一节）：
+  //  58a = 从 tab 进日程表 → 返回回上一页（班级列表，不是「我的」）
+  //  58b = 从「我的」那一行进日程表 → 返回回「我的」
+  //  58c = **直开**日程表（书签/PWA）→ 返回回兜底 `/`（不退出应用）
+  //  58d = **直开**错题集 → 同样回兜底 `/`
+  //  ⚠️ 用 `58a–58d` 而不是接着 107 编：这四个是**顶层 tab 的返回**这一件事的四张证据，
+  //     跟着 S6b 那一节走比接着图号排队更好找（`EXPECTED_FILES` 是集合相等，编号不参与比对）。
+  '58a-back-schedule-tab.png',
+  '58b-back-schedule-mine.png',
+  '58c-back-direct-schedule.png',
+  '58d-back-direct-wrong.png',
+  // 🆕 2026-10-07 F3：年级管理里的「班级档案」展开条（见 S6c 那一节）。
+  //  107 = `/grades` 上三个年级各有一条「班级档案」（与「开学准备」并列，收起态）
+  //  108 = 点高二那条 → **向下展开**这个年级的全部班（行政班那一块）
+  //  109 = 点展开条里的「高二(3)班」→ 进的**就是** `/classes/c-demo-1`（同一个班级档案页）
+  '107-grade-archive-bar.png',
+  '108-grade-archive-expanded.png',
+  '109-grade-archive-class-detail.png',
+  // 🆕 2026-10-08（见 S8 那一节）：**「生成走班 → 班级页看名单」这条链**。
+  //  110 = 本地演示模式下 `/classes` 上的走班班与那个 **0 人的班**：
+  //        走班班那一行写「人数待读」（成员在 `class_members` 上，本地没有后端 → **不写 0 人**）；
+  //        0 人的班写「还没有名单」（**不是**「名单完整」）。
+  //        ⚠️ **只有这一张**：其余三张（注入假客户端之后的正向画面）在本轮实测里**跑不出来**
+  //        —— `isRemote` 是构建期常量，注入假客户端会把页面踢回登录页。不摆假证据。
+  '110-stream-classes-nokb.png',
+  // 🆕 2026-10-08「导航项那一块溢出时自己滚 + 交界处渐隐」（见 B1c 那一节）：
+  //  114 = 矮视口（1440×500）滚到**中间**：导航项上下**两端都有渐隐**（mask，不是盖色），
+  //        底部的「已连接云端 / N 个班级」仍在最底下没动；
+  //  115 = 高视口（1440×1200）放得下：**没有滚动条、也没有渐隐**（反向对照的那一半）。
+  '114-rail-scroll-mid.png',
+  '115-rail-fit-tall.png',
+  // 🆕 2026-10-08（见 S10 那一节）：**走班班的编辑 / 删除** + 右栏「名单体检」的 0 人。
+  //  111 = 宽视口下 `/classes` 的**右栏「名单体检」**：0 人的班写「还没有名单」而**不画绿勾**，
+  //        走班班那一行写「人数待读」（成员在 `class_members` 上，本地读不到 → 不许写 0 人）。
+  //  112 = 走班班的**编辑面板**（改名 / 换走班老师 / 手工增删成员 + 删除入口）。
+  '111-classes-health-zero.png',
+  '112-stream-edit-sheet.png',
+  // 🆕 2026-10-09 F4：**暗色主题**（见最后那一节）。
+  //  ⚠️ 这四张是**暗色**（前 112 张仍是亮色，一张都不许变）：
+  //  116 工作台 / 117 班级 / 118 管理台（`/admin`）/ 119 **教室端在暗色偏好下仍然是亮色**
+  //  —— 最后那张是这一轮唯一一条"必须和偏好相反"的证据。
+  '116-dark-workbench.png',
+  '117-dark-classes.png',
+  '118-dark-admin.png',
+  '119-classroom-still-light.png',
 ]
 
 /* ---------------- 断言与日志 ---------------- */
+
+/**
+ * 🆕 F4：**亮色的那一组 24 个 `--color-*` 令牌**（暗色块里必须逐个有一份）。
+ *
+ * 为什么把它放在模块级而不是某一节里：**两处**要用它（源码级那一节 + 浏览器里读值时），
+ * 而"同一件事两个清单"这个仓库栽过不止一次。加令牌时**只改这一处**。
+ */
+const COLOR_TOKENS = [
+  'canvas', 'surface', 'surface2', 'surface3',
+  'line', 'line2', 'line3',
+  'ink', 'ink2', 'ink3', 'ink4',
+  'accent', 'accentink', 'accentsoft', 'cyan', 'cyansoft',
+  'ok', 'oksoft', 'warn', 'warnsoft', 'bad', 'badsoft', 'idle', 'idlesoft',
+]
 
 let passed = 0
 const failures = []
@@ -560,6 +622,139 @@ await withLock(async () => {
       console.log(`  目标：${BASE}`)
       console.log(`  输出：${OUT_REL}/（本轮 ${EXPECTED_FILES.length} 张）`)
 
+      /* ================= S0：待办口径（纯函数 · 与浏览器无关） =================
+       *
+       * 🔴 **「看得见」≠「待办」**（`功能设计与不变量.md`）：
+       *    · **看得见**是数据库（RLS）给的 —— 班主任 / 年级主任 / 教务处看得见整班各科的
+       *      作业档案，那是"看"的权限，**本轮一个字没动**（`/assignments` 照旧列全班各科）；
+       *    · **待办**是"我要干的活" —— 一条作业进我的待办，当且仅当它的 `(班, 科)`
+       *      在我的任教关系（`class_subjects`）里（`lib/teaching.ts`，唯一判定入口）。
+       *
+       * 这一组不需要页面（判据是纯函数），所以放在启动 Edge 之前；第 ⑩ 条再从**源码**上
+       * 钉一句"工作台那一屏真的走这个判据" —— 免得以后页面被改回旧写法而这一组还是绿的。
+       */
+      await step('00 待办口径（纯函数）', async () => {
+        const { pendingForMe, isMyTodo, teachesClassSubject, isTodoStatus } = await import(
+          '../src/lib/teaching.ts'
+        )
+        const ME = 't-me'
+        const OTHER = 't-other'
+        /* 我的任教关系：高二(3) 的物理 + 那个**走班班**的政治（= P7「分配走班老师」自动补进去的那一行的形状） */
+        const rel = [
+          { classId: 'c-3', subjectCode: 'physics', teacherId: ME },
+          { classId: 'c-3', subjectCode: 'math', teacherId: OTHER },
+          { classId: 'c-7', subjectCode: 'chinese', teacherId: OTHER },
+          { classId: 'c-stream-politics', subjectCode: 'politics', teacherId: ME },
+        ]
+        /* 一次快照里能看见的档案（= RLS 给的那一份，各科都在） */
+        const rows = [
+          { id: 'x1', classId: 'c-3', subjectCode: 'physics', subject: '物理', status: 'collected' },
+          { id: 'x2', classId: 'c-3', subjectCode: 'math', subject: '数学', status: 'collected' },
+          { id: 'x3', classId: 'c-stream-politics', subjectCode: 'politics', subject: '政治', status: 'open' },
+          { id: 'x4', classId: 'c-7', subjectCode: 'chinese', subject: '语文', status: 'open' },
+          { id: 'x5', classId: 'c-3', subjectCode: 'physics', subject: '物理', status: 'graded' },
+          { id: 'x6', classId: 'c-3', subjectCode: 'math', subject: '数学', status: 'open' },
+        ]
+        const ids = (list) => list.map((a) => a.id).sort().join(',') || '（空）'
+        const mine = pendingForMe(rows, rel, ME)
+
+        /* ① 班主任：数学**看得见**，但不是他教的 → 不进待办（本轮修的那条） */
+        check(
+          rows.filter((a) => isTodoStatus(a.status)).some((a) => a.id === 'x2'),
+          '待办①：班主任**看得见**本班那份数学作业（"看"的那一面照旧给）',
+          `输入里那份数学（x2 · 待批改）在可见档案里 = ${rows.some((a) => a.id === 'x2')}`,
+        )
+        check(
+          !mine.some((a) => a.id === 'x2') && !mine.some((a) => a.id === 'x6'),
+          '待办①（🔴 本轮修的）：班主任的待办里**没有**数学（他不上这一科）→ 不再有"点进去改不了"的死路待办',
+          `他的待办 = ${ids(mine)}`,
+        )
+
+        /* ② 任课老师：自己那一科（待批改）在待办里 */
+        check(
+          mine.some((a) => a.id === 'x1'),
+          '待办②：任课老师自己那一科的档案在待办里（待批改）',
+          `他的待办 = ${ids(mine)}`,
+        )
+
+        /* ③ 走班班老师：走班班的作业要落进来（走班班也是 `classes` 一行，判据不开特例） */
+        check(
+          teachesClassSubject(rel, ME, 'c-stream-politics', 'politics'),
+          '待办③：走班班的任教关系命中（`class_subjects` 那行：走班班 id + 那一科 + 我）',
+          'c-stream-politics · politics · t-me',
+        )
+        check(
+          mine.some((a) => a.id === 'x3'),
+          '待办③b：**走班班的作业落进了走班老师的待办**（做题的规则与行政班同一条）',
+          `他的待办 = ${ids(mine)}`,
+        )
+
+        /* ④ 纯超管（不教课）：看得见全部，但一条任教关系都没有 → 待办为空 */
+        const superTodo = pendingForMe(rows, [], 't-super')
+        check(
+          superTodo.length === 0 && rows.length > 0,
+          '待办④：纯超管（看得见全部 6 份档案、但一条任教关系都没有）→ **待办为空**',
+          `可见档案 ${rows.length} 份，他的待办 = ${ids(superTodo)}`,
+        )
+
+        /* ⑤ 不教这一科的年级主任：待办里只有他自己教的那一科 */
+        const deanTodo = pendingForMe(rows, [{ classId: 'c-7', subjectCode: 'chinese', teacherId: 't-dean' }], 't-dean')
+        check(
+          ids(deanTodo) === 'x4',
+          '待办⑤：不教数学 / 物理的年级主任 → 待办里只有他自己教的语文（x4）',
+          `他的待办 = ${ids(deanTodo)}`,
+        )
+
+        /* ⑥ 三态：任教关系**不知道**（还没读回来 / 读失败 / 本地演示模式没有数据库）→ 不筛 */
+        const unknown = pendingForMe(rows, null, ME)
+        check(
+          ids(unknown) === 'x1,x2,x3,x4,x6',
+          '待办⑥：任教关系**不知道**时**不筛**（宁多不藏 —— 待办少一条比多一条危险）',
+          `待办 = ${ids(unknown)}`,
+        )
+
+        /* ⑦ 反向对照（常驻）：按**旧的"只按 status"**筛，数学就在里面 —— 证明①不是靠"数据里本来没有数学"才绿的 */
+        const legacy = rows.filter((a) => a.status === 'open' || a.status === 'collected')
+        check(
+          ids(legacy) === 'x1,x2,x3,x4,x6' && !ids(mine).includes('x2'),
+          '待办⑦（反向对照）：同一份数据按旧的"只按 status"筛 → 数学 x2/x6 混了进来（bug 的样子）；按任教关系筛 → 不在',
+          `旧 = ${ids(legacy)}；新 = ${ids(mine)}`,
+        )
+
+        /* ⑧ 状态那一半照旧：已批改（graded）永远不是待办 */
+        check(
+          !isTodoStatus('graded') && !mine.some((a) => a.id === 'x5'),
+          '待办⑧：已批改（graded）不是待办（状态口径照旧，只多了任教关系这一半）',
+          `x5（已批改）在待办里 = ${mine.some((a) => a.id === 'x5')}`,
+        )
+
+        /* ⑨ 老档案的学科认不出来（`subjectCodeOf` 反查不到字典）→ 按"我教这个班"放行，不许静默丢待办 */
+        check(
+          isMyTodo({ classId: 'c-3', subject: '物理竞赛', status: 'open' }, rel, ME) &&
+            !isMyTodo({ classId: 'c-8', subject: '物理竞赛', status: 'open' }, rel, ME),
+          '待办⑨：学科认不出的老档案 → 我教这个班就放行（c-3 进）；我完全不教的班仍然不进（c-8 不进）',
+          'c-3 → 进；c-8 → 不进',
+        )
+
+        /* ⑩ 源码级：工作台那一屏**真的**走这个判据（否则上面全绿也没意义） */
+        const wb = readFileSync(join(HERE, '..', 'src', 'pages', 'Workbench.tsx'), 'utf8')
+        check(
+          (wb.match(/pendingForMe\(/g) ?? []).length === 1,
+          '待办⑩：`Workbench.tsx` 的待办**恰好有一处** `pendingForMe()`（判据只有一份，不是页面里再抄一遍）',
+          `pendingForMe( 出现 ${(wb.match(/pendingForMe\(/g) ?? []).length} 次`,
+        )
+        check(
+          !/filter\(\s*\(a\)\s*=>\s*a\.status === 'open'\s*\|\|\s*a\.status === 'collected'/.test(wb),
+          '待办⑩b（对照的机器版）：`Workbench.tsx` 里**不再有**"只按 status 筛待办"的那一句（改回去这条就红）',
+          /filter\(\s*\(a\)\s*=>[^\n]*status === 'open'/.test(wb) ? '还能搜到"只按 status 筛"的写法' : '搜不到旧写法',
+        )
+        check(
+          /v: pending\.length/.test(wb) && /pending\.length \? `\$\{pending\.length\} 份待处理`/.test(wb),
+          '待办⑩c：那一格「待办」数字与快捷操作上的「N 份待处理」都数**同一个 `pending`**（同一次调用，不会两处打架）',
+          'v: pending.length 与 `${pending.length} 份待处理` 都在',
+        )
+      })
+
       browser = await launchBrowser({ headless: true })
       const ctx = await browser.newContext({
         viewport: { width: 414, height: 880 },
@@ -617,6 +812,106 @@ await withLock(async () => {
         markers: ['学生名单 · 45 人', '名单体检通过'],
       })
       await shot(page, '04 班级详情', '04-class-detail', { full: true })
+
+      /* ===== 04b–04d：学生档案（民族 / 出生年月 / 家长电话 / 家庭住址）=====
+       *
+       * 表是 `student_profiles`（`supabase/schema.sql` §2.1 建表 / §35 策略）。
+       * 🔴 **判据全在数据库**：读 = `visible_class_ids()`（看得见哪些班）且**不是教室端**；
+       *    写 = `can_manage_class()`（超管 / 教务处 ∪ 本年级年级主任 ∪ **本班班主任**）——
+       *    那一侧由 `rls-checks` 第十九节逐身份验（含"教室端 0 行"）。这里只验**界面这一层**：
+       *      ① 默认身份（演示模式 = 任课教师）：四个字段看得见，**不摆**"修改档案"；
+       *      ② `?as=head_teacher`（班主任）：**摆**，而且录入 → 保存 → 屏上就看得到；
+       *      ③ 反向对照 `?as=teacher`（明写任课教师）：**又不摆** —— 证明②不是"恒摆"。
+       * ⚠️ 本地演示模式没有数据库，但这一页**不走探针**（`loadStudentProfiles` 在
+       *    `!isRemote` 时直接读内存那份，见 `lib/studentProfile.ts`），所以屏上是
+       *    「未录入」而**不是**「读不到」—— 那两句话在界面上是分开的，别混。
+       */
+      await goto(page, '04b 学生档案（科任老师只读）', '/classes/c-demo-1', {
+        markers: ['学生名单 · 45 人', '档案'],
+      })
+      await step('04b 学生档案（科任老师只读）', async () => {
+        await page.getByRole('button', { name: '学生档案' }).first().click()
+        await page.waitForTimeout(320)
+        const info = await pageInfo(page)
+        check(
+          '打开的是「学生档案」那一张浮层',
+          info.sheetOpen && info.sheetTitle.startsWith('学生档案'),
+          `sheetOpen=${info.sheetOpen} · 标题=${info.sheetTitle}`,
+        )
+        const labels = ['民族', '出生年月', '家长电话', '家庭住址']
+        check(
+          '四个字段的标题都在屏上',
+          labels.every((l) => info.body.includes(l)),
+          labels.map((l) => `${l}:${info.body.includes(l)}`).join(' · '),
+        )
+        check(
+          '还没录过时写的是「未录入」（**不是**「读不到」—— 三态不许混）',
+          info.body.includes('未录入') && !info.body.includes('读不到学生档案'),
+          short(info.body, 130),
+        )
+        const canEdit = await page.getByRole('button', { name: '修改档案' }).count()
+        check(
+          '🔴 任课教师 / 无身份 → **不摆**"修改档案"（前端只决定摆不摆，判据在数据库）',
+          canEdit === 0,
+          `按钮数=${canEdit}`,
+        )
+      })
+      await shot(page, '04b 学生档案（科任老师只读）', '106-student-profile', { wait: 320 })
+
+      await step('04c 学生档案（班主任改本班）', async () => {
+        await page.goto(`${BASE}/classes/c-demo-1?as=head_teacher`, { waitUntil: 'networkidle' })
+        await page.waitForTimeout(500)
+        await page.getByRole('button', { name: '学生档案' }).first().click()
+        await page.waitForTimeout(260)
+        const before = await page.getByRole('button', { name: '修改档案' }).count()
+        check(
+          '🔴 班主任（`?as=head_teacher`）→ **摆**"修改档案"（用户口径：班主任通过班级改本班这些信息）',
+          before === 1,
+          `按钮数=${before}`,
+        )
+        if (before !== 1) return
+        await page.getByRole('button', { name: '修改档案' }).click()
+        await page.waitForTimeout(220)
+        const boxCount = await page.locator('.sheet input').count()
+        check('点开之后是四个输入框（民族 / 出生年月 / 家长电话 / 家庭住址）', boxCount === 4, `输入框数=${boxCount}`)
+        if (boxCount !== 4) return
+        await page.locator('.sheet input').nth(0).fill('汉族')
+        await page.locator('.sheet input').nth(1).fill('2010-05')
+        await page.locator('.sheet input').nth(2).fill('13800138000')
+        await page.locator('.sheet input').nth(3).fill('某市某区某小区1号楼2单元501')
+        await page.getByRole('button', { name: '保存' }).click()
+        await page.waitForTimeout(450)
+        const after = await pageInfo(page)
+        check(
+          '🔴 保存之后屏上就出现了刚录进去的家长电话（录入 → 看到是一条真链路）',
+          after.body.includes('13800138000') && after.body.includes('汉族'),
+          short(after.body, 130),
+        )
+        check(
+          '而且回到了只读视图（"修改档案"又摆出来了）—— 不是卡在编辑态',
+          after.sheetOpen && (await page.getByRole('button', { name: '修改档案' }).count()) === 1,
+          `sheetOpen=${after.sheetOpen}`,
+        )
+      })
+
+      await step('04d 学生档案：任课教师那一侧的反向对照', async () => {
+        await page.goto(`${BASE}/classes/c-demo-1?as=teacher`, { waitUntil: 'networkidle' })
+        await page.waitForTimeout(500)
+        await page.getByRole('button', { name: '学生档案' }).first().click()
+        await page.waitForTimeout(260)
+        const cnt = await page.getByRole('button', { name: '修改档案' }).count()
+        check(
+          '🔴 反向对照：明写 `?as=teacher`（任课教师）→ **又不摆**"修改档案"（证明上一步不是"恒摆"）',
+          cnt === 0,
+          `按钮数=${cnt}`,
+        )
+        const info = await pageInfo(page)
+        check(
+          '⚠️ 而字段**照旧看得见**（只读）—— 科任老师不是"看不到"，是"改不了"',
+          info.body.includes('家长电话') && info.body.includes('家庭住址'),
+          short(info.body, 110),
+        )
+      })
 
       await goto(page, '05–07 拍照录名单', '/classes/c-demo-1/import/photo', {
         markers: ['拍照录名单', '第 1 步 · 拍摄花名册', '识别约定'],
@@ -1474,6 +1769,401 @@ await withLock(async () => {
 
       /*
        * ============================================================
+       * S8（2026-10-08）：**「生成走班 → 班级页看名单」这条链**
+       * ============================================================
+       * 内测现场：⑥ 生成走班说「走班班-地理 2 人」，而班级页说「走班班-地理 名单完整 **0 人**」
+       *   —— **同一份数据两个页面自相矛盾**。
+       *
+       * 根因（读的那一侧，不是写的那一侧，见 `功能设计与不变量.md` §四十六）：
+       *   走班班的人在 `class_members`（多对多，§27.5），`students.class_id` 上**永远没有他们**；
+       *   而班级列表 / 班级页原来读的都是 `klass.students` → 恒为 0 人，
+       *   而 `analyzeRoster([])` 又把它判成「名单完整」（0 人没有缺号、没有重号）
+       *   —— "没有数据被当成一切正常"，这个项目栽过最多次的形状。
+       *
+       * ⚠️ **这一节能验到哪一层（如实登记，别把它读成"整条链都验过了"）**：
+       *   ① 判据层（纯函数）：四态 + "0 人不是完整" —— **正反两路都在这一层钉死**；
+       *   ② 界面层：真浏览器打开 `/classes`，看**0 人的班那一行**（本地演示模式下可跑）；
+       *   ③ 源码层：班级页走班那一支必须从 `class_members` 读、两页都走 `rosterStateOf()`。
+       *   🔴 **验不到的一层（已知限制）**：本地演示模式下 `isRemote` 是**构建期常量 false**
+       *      → `getSupabase()` 恒回 null → `class_members` / `class_subjects` 那两条**真读库**的路
+       *      在本地跑不出来（本轮实测过：注入假客户端会让 zustand persist 的 rehydrate 走另一支，
+       *      页面被 Guard 踢回登录页）。"生成之后班级页的人数 = 生成时的人数"这一条
+       *      **只在有后端的环境上**成立；本节用①+③两条合起来逼近它：
+       *      判据对 + 页面无第二个判定入口 → 线上不会分叉。
+       */
+      const S8 = 'S8 生成走班 → 班级页（名单 / 老师 / 0 人）'
+      const S8_STREAM = '走班班-地理'
+      const S8_ZERO = '高二(9)班'
+
+      const ctxS8 = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: 'zh-CN' })
+      await ctxS8.clock.install({ time: new Date('2026-09-19T10:00:00') })
+      /** 注入那一份班级快照：两个行政班（原样）+ 一个走班班 + **一个 0 人的行政班** */
+      await ctxS8.addInitScript((base) => {
+        const classes = [
+          ...base.classes.map((c) => ({ ...c })),
+          {
+            id: 'c-stream-geo',
+            name: '走班班-地理',
+            grade: '高二',
+            year: '2025-2026',
+            createdAt: 1,
+            students: [],
+            kind: 'stream',
+            streamKey: 'geography',
+          },
+          { id: 'c-demo-9', name: '高二(9)班', grade: '高二', year: '2025-2026', createdAt: 2, students: [] },
+        ]
+        window.localStorage.setItem('shugao.teacher.v1', JSON.stringify({ state: { ...base, classes }, version: 1 }))
+        window.localStorage.setItem('shugao.deviceRole', 'teacher')
+      }, TEACHER_STATE.state)
+
+      const s8Page = await ctxS8.newPage()
+      s8Page.on('pageerror', (e) => errors.push(`PAGEERROR(${S8}) :: ${e.message}`))
+      s8Page.on('console', (m) => {
+        if (m.type() === 'error') errors.push(`CONSOLE(${S8}) :: ${m.text()}`)
+      })
+
+      await step(S8, async () => {
+        /* ---------- ① 判据层：四态（正反两路都在这一层） ---------- */
+        const { rosterStateOf, analyzeRoster } = await import('../src/lib/roster.ts')
+        const mk = (n, nos) =>
+          Array.from({ length: n }, (_, i) => ({
+            id: `p${i}`,
+            name: `学生${i + 1}`,
+            studentNo: String(nos[i]),
+            status: 'active',
+            createdAt: i,
+          }))
+        const none = rosterStateOf([], 'class')
+        const ok2 = rosterStateOf(mk(2, [1, 2]), 'members')
+        const gap = rosterStateOf(mk(2, [1, 3]), 'class')
+        const lost = rosterStateOf(mk(2, [1, 2]), 'members', false)
+        check(
+          none.kind === 'nobody' && ok2.kind === 'ok' && gap.kind === 'warn' && lost.kind === 'unknown',
+          `${S8}：名单**四态分得开**（0 人 = 还没有名单 / 2 人 = 完整 / 缺号 = 待核对 / 没读到 = unknown）`,
+          `nobody=${none.kind} · ok=${ok2.kind} · warn=${gap.kind} · unknown=${lost.kind}`,
+        )
+        check(
+          ok2.count === 2 && none.count === 0 && lost.count === 0,
+          `${S8}：**2 人的走班班与 0 人的班在判据这一层就长得不一样**（不是靠文案）`,
+          `走班班 2 人 → ${ok2.count} · 空班 → ${none.count} · 没读到 → ${lost.count}`,
+        )
+        check(
+          analyzeRoster([]).healthy === false && analyzeRoster(mk(2, [1, 2])).healthy === true,
+          `${S8} ③ 🔴 **0 人不是"名单完整"**（反向对照：把 analyzeRoster 的 healthy 改回"只看缺号重号" → 这条红）`,
+          `空名单 healthy=${analyzeRoster([]).healthy} · 2 人 healthy=${analyzeRoster(mk(2, [1, 2])).healthy}`,
+        )
+        /* 班级页体检那一块的三档（它由 rosterState 推出来，这里钉那三档的输入输出） */
+        check(
+          ok2.kind === 'ok' && ok2.health !== null && ok2.health.maxNo === 2 && none.health === null,
+          `${S8}：2 人的走班班 → 体检块写"名单完整"；0 人的班 → **没有 health**（写不出"学号 1–0"）`,
+          `2 人 health.maxNo=${ok2.health?.maxNo} · 0 人 health=${String(none.health)}`,
+        )
+        check(
+          rosterStateOf(mk(2, [1, 2]), 'members').source === 'members' &&
+            rosterStateOf(mk(2, [1, 2]), 'class').source === 'class',
+          `${S8}：人数从哪儿来的**分得清**（走班班 = class_members / 行政班 = students.class_id）`,
+          'source 逐条不同',
+        )
+
+        /* ---------- ② 界面层：0 人的班那一行（本地演示模式真的能跑这一段） ---------- */
+        await s8Page.goto(`${BASE}/classes`, { waitUntil: 'networkidle' })
+        await s8Page.waitForTimeout(700)
+        check(
+          s8Page.url().endsWith('/classes'),
+          `${S8}：这一遍**真的落在 /classes**（不是被 Guard 踢回登录页 —— 那样后面的断言会假绿）`,
+          s8Page.url(),
+        )
+        const b = await bodyText(s8Page)
+        check(
+          b.includes(S8_ZERO) && b.includes('还没有名单'),
+          `${S8} ③：0 人的班在班级列表上写**「还没有名单」**`,
+          short(b.match(new RegExp(`${S8_ZERO}[^]{0,40}`))?.[0] ?? b, 140),
+        )
+        check(
+          !new RegExp(`${S8_ZERO}[^]{0,40}名单完整`).test(b),
+          `${S8} ③b：0 人的班**不写**「名单完整」（反向对照：把班级卡片的徽章改回 h.healthy ? … → 这条红）`,
+          short(b.match(new RegExp(`${S8_ZERO}[^]{0,40}`))?.[0] ?? b, 140),
+        )
+        check(
+          b.includes('人数待读'),
+          `${S8}：走班班的卡片上写**「人数待读」**（本地演示模式读不到 ` + '`class_members`' + ` 时就是这个状态；
+             线上读得到时写真实人数 —— **不许写 0 人**）`,
+          short(b.match(new RegExp(`${S8_STREAM}[^]{0,60}`))?.[0] ?? b, 90),
+        )
+        check(
+          !b.includes('学号 1–0'),
+          `${S8} ③c：**没有任何一张卡片写"学号 1–0"**（0 人的班不许编一个不存在的学号区间）`,
+          b.includes('学号 1–0') ? '还在写 学号 1–0' : '搜不到 学号 1–0',
+        )
+        await shot(s8Page, S8, '110-stream-classes-nokb', { full: true })
+
+        /* ---------- ③ 源码层：读成员那条路**只有一处**，页面上不许退回 klass.students ---------- */
+        const cdSrc = readFileSync(join(HERE, '..', 'src', 'pages', 'ClassDetail.tsx'), 'utf8')
+        const clSrc = readFileSync(join(HERE, '..', 'src', 'pages', 'Classes.tsx'), 'utf8')
+        check(
+          /loadClassMembersFull\(\[id\]\)/.test(cdSrc) &&
+            /const roster = isStream \? members : klass\.students/.test(cdSrc),
+          `${S8}：班级页的名单 —— 走班班那一支从 class_members 读（loadClassMembersFull），不是 klass.students`,
+          /loadClassMembersFull/.test(cdSrc) ? '读成员那一路在' : '搜不到（改回旧写法这条就红）',
+        )
+        check(
+          /rosterStateOf\(/.test(cdSrc) && /rosterStateOf\(/.test(clSrc),
+          `${S8}：班级页与班级列表**都用 rosterStateOf() 判四态**（页面里没有第二套"0 人就完整"）`,
+          `ClassDetail=${(cdSrc.match(/rosterStateOf\(/g) ?? []).length} 处 · Classes=${(clSrc.match(/rosterStateOf\(/g) ?? []).length} 处`,
+        )
+        check(
+          !/h\.healthy \? <Tag/.test(clSrc),
+          `${S8}（对照的机器版）：班级列表里**不再有**"healthy 就写名单完整"那一句`,
+          /h\.healthy \? <Tag/.test(clSrc) ? '还能搜到旧写法' : '搜不到旧写法',
+        )
+        check(
+          /loadClassMembersFull/.test(readFileSync(join(HERE, '..', 'src', 'data', 'remote.ts'), 'utf8')),
+          `${S8}：读成员那一份（带姓名 / 学号）在 data/remote.ts 里**只有一处实现**`,
+          'loadClassMembersFull 在',
+        )
+      })
+
+      await ctxS8.close()
+
+
+      /*
+       * ============================================================
+       * S10（2026-10-08）：**走班班的编辑 / 删除** + 右栏「名单体检」的 0 人
+       * ============================================================
+       * 内测现场：①「走班班都没有编辑键」②「删不了」③ 右栏「名单体检」给 0 人的班画绿勾。
+       *
+       * ①② 的根因（**读的那一侧**，不是权限那一侧）：
+       *   走班班是 `classes` 里 `kind='stream'` 的一行、**有 `grade_id`**，
+       *   `classes_update` / `classes_delete` 用的 `can_manage_class_for()` 对它**天然成立**
+       *   —— 也就是说"能做，只是没摆"。补的是**入口**（前端）+ **成员那一条写路径**
+       *   （`class_members` 对 `authenticated` 零写权限，所以要 §37.1 那个函数）。
+       *   ⚠️ 判据层那几条（年级主任 / 科任 / 别班班主任 / 教室端）在 `rls-checks.mjs` 第二十二节。
+       *
+       * ⚠️ **这一节能验到哪一层**（如实登记）：本地演示模式 `isRemote` 是构建期常量 false
+       *    → `class_members` / `class_subjects` 两条真读库的路跑不出来（见 S8 那段）。
+       *    所以这里验的是：**入口摆不摆**（判据层用假的 `myRoles` 注入）+ **右栏那两行字**
+       *    （本地能跑的那一半）+ **源码层**（成员写的是 `class_members`，不是 `students.class_id`）。
+       */
+      const S10 = 'S10 走班班的编辑/删除 + 右栏名单体检的 0 人'
+      const S10_STREAM = '走班班-政治'
+      const S10_ZERO = '高二(8)班'
+
+      const ctxS10 = await browser.newContext({ viewport: { width: 1500, height: 900 }, locale: 'zh-CN' })
+      await ctxS10.clock.install({ time: new Date('2026-09-19T10:00:00') })
+      await ctxS10.addInitScript((base) => {
+        const classes = [
+          ...base.classes.map((c) => ({ ...c })),
+          {
+            id: 'c-s10-stream',
+            name: '走班班-政治',
+            grade: '高二',
+            year: '2025-2026',
+            createdAt: 1,
+            students: [],
+            kind: 'stream',
+            streamKey: 'politics',
+          },
+          { id: 'c-s10-zero', name: '高二(8)班', grade: '高二', year: '2025-2026', createdAt: 2, students: [] },
+        ]
+        /* `?roles=` 注入身份（与身份标签那一节同一个手法）——**只影响"摆不摆入口"** */
+        const raw = new URLSearchParams(location.search).get('roles')
+        const state = raw ? { ...base, classes, myRoles: JSON.parse(raw) } : { ...base, classes }
+        window.localStorage.setItem('shugao.teacher.v1', JSON.stringify({ state, version: 1 }))
+        window.localStorage.setItem('shugao.deviceRole', 'teacher')
+      }, TEACHER_STATE.state)
+
+      const s10Page = await ctxS10.newPage()
+      s10Page.on('pageerror', (e) => errors.push(`PAGEERROR(${S10}) :: ${e.message}`))
+      s10Page.on('console', (m) => {
+        if (m.type() === 'error') errors.push(`CONSOLE(${S10}) :: ${m.text()}`)
+      })
+
+      /** 右栏「名单体检」那一块：每行 = `名称|文字|是哪一颗图标`（**按 svg 的 path 认**，不按"有没有 svg"） */
+      const healthRows = () =>
+        s10Page.evaluate(() => {
+          const sec = [...document.querySelectorAll('section.panel')].find((s) =>
+            (s.textContent ?? '').includes('名单体检'),
+          )
+          if (!sec) return []
+          return [...sec.querySelectorAll('div.flex.items-center.gap-2')].map((d) => {
+            const svg = d.querySelector('svg')
+            /* 绿勾只有那一条 path（`IconCheck`）；`IconAlert` 是别的形状 ——
+               ⚠️ **不能**用"有没有 svg"当判据：两个图标都是 svg，那样量出来恒为 true（第一版就这么栽的） */
+            const html = svg ? svg.innerHTML : ''
+            return {
+              text: (d.innerText ?? '').replace(/\s+/g, ' ').trim(),
+              icon: !svg ? 'none' : /4\.9 12\.6/.test(html) ? 'check' : 'alert',
+            }
+          })
+        })
+
+      await step(S10, async () => {
+        /* ---------- ① 右栏名单体检：0 人的班不许是绿勾 ---------- */
+        await s10Page.goto(`${BASE}/classes?roles=${encodeURIComponent('[{"role":"super"}]')}`, {
+          waitUntil: 'networkidle',
+        })
+        await s10Page.waitForTimeout(700)
+        check(
+          new URL(s10Page.url()).pathname === '/classes',
+          `${S10}：这一遍**真的落在 /classes**（不是被 Guard 踢回登录页 —— 那样后面的断言会假绿）`,
+          s10Page.url(),
+        )
+        const rows = await healthRows()
+        check(
+          rows.length >= 3,
+          `${S10}：右栏「名单体检」这一块**真的渲染了**（不然下面两条是假绿）`,
+          `读到 ${rows.length} 行：${rows.map((r) => r.text).join(' / ')}`,
+        )
+        const zeroRow = rows.find((r) => r.text.includes(S10_ZERO))
+        check(
+          Boolean(zeroRow) && /还没有名单/.test(zeroRow.text),
+          `${S10} 🔴 0 人的班（${S10_ZERO}）右栏写**「还没有名单」**，不写「0 人」`,
+          zeroRow ? zeroRow.text : '右栏里找不到这一行',
+        )
+        check(
+          Boolean(zeroRow) && zeroRow.icon !== 'check',
+          `${S10} 🔴 **0 人的班不许画绿勾**（反向对照：把右栏改回 issues === 0 ? <IconCheck/> → 这条红）`,
+          zeroRow ? `图标=${zeroRow.icon} · 文字=${zeroRow.text}` : '右栏里找不到这一行',
+        )
+        const streamRow = rows.find((r) => r.text.includes(S10_STREAM))
+        check(
+          Boolean(streamRow) && /人数待读|还没有名单|名单没读到/.test(streamRow.text),
+          `${S10}：走班班那一行的人数**从 ` + '`class_members`' + ` 来** —— 本地读不到就写「人数待读」，**绝不写 0 人**`,
+          streamRow ? `图标=${streamRow.icon} · 文字=${streamRow.text}` : '右栏里找不到这一行',
+        )
+        check(
+          Boolean(streamRow) && streamRow.icon !== 'check',
+          `${S10} 🔴 走班班**名单没读到**时也不许画绿勾（同一条：没有数据 ≠ 一切正常）`,
+          streamRow ? `图标=${streamRow.icon} · 文字=${streamRow.text}` : '右栏里找不到这一行',
+        )
+        await shot(s10Page, S10, '111-classes-health-zero', { full: true })
+
+        /* ---------- ② 走班班的编辑 / 删除入口（摆不摆 = 判据的前端影子） ---------- */
+        const entries = () =>
+          s10Page.evaluate(() => ({
+            edit: document.querySelectorAll('[data-stream-edit="1"]').length,
+            del: document.querySelectorAll('[data-stream-del="1"]').length,
+          }))
+        const eSuper = await entries()
+        check(
+          eSuper.edit === 1 && eSuper.del === 1,
+          `${S10}：超管在班级页**点得到**走班班的编辑与删除（内测「都没有编辑键」「删不了」）`,
+          `编辑=${eSuper.edit} 删除=${eSuper.del}`,
+        )
+
+        await s10Page.goto(`${BASE}/classes?roles=${encodeURIComponent('[{"role":"teacher"}]')}`, {
+          waitUntil: 'networkidle',
+        })
+        await s10Page.waitForTimeout(600)
+        const eTeacher = await entries()
+        check(
+          eTeacher.edit === 0 && eTeacher.del === 0,
+          `${S10} 🔴 **反向对照**：只有任课教师这一档 → 走班班的编辑 / 删除入口**一个都不摆**` +
+            `（反向对照：把入口的判据放宽成"任何登录者" → 这条红）`,
+          `编辑=${eTeacher.edit} 删除=${eTeacher.del}`,
+        )
+
+        await s10Page.goto(
+          `${BASE}/classes?roles=${encodeURIComponent('[{"role":"grade_head","scopeType":"grade"}]')}`,
+          { waitUntil: 'networkidle' },
+        )
+        await s10Page.waitForTimeout(600)
+        const eGrade = await entries()
+        check(
+          eGrade.edit === 1 && eGrade.del === 1,
+          `${S10}：**本年级**年级主任摆（走班班有 grade_id，` + '`can_manage_class_for`' + ` 的年级那一支成立）`,
+          `编辑=${eGrade.edit} 删除=${eGrade.del}`,
+        )
+
+        /* ---------- ③ 面板真的打得开：这三件事都在里面 ---------- */
+        await s10Page.goto(`${BASE}/classes?roles=${encodeURIComponent('[{"role":"super"}]')}`, {
+          waitUntil: 'networkidle',
+        })
+        await s10Page.waitForTimeout(600)
+        await s10Page.click('[data-stream-edit="1"]')
+        await s10Page.waitForTimeout(500)
+        const sheet = await bodyText(s10Page)
+        check(
+          sheet.includes('编辑走班班') &&
+            sheet.includes('走班老师') &&
+            sheet.includes('走班成员') &&
+            sheet.includes('删除这个走班班'),
+          `${S10}：面板里三件事齐（改名 / 换走班老师 / 手工增删成员）+ 删除入口`,
+          short(sheet.match(/编辑走班班[^]{0,120}/)?.[0] ?? sheet, 160),
+        )
+        check(
+          sheet.includes('一个学生可以同时在两个走班班里'),
+          `${S10}：成员那一栏写清了口径（**多对多**，一个学生可以在两个走班班）`,
+          short(sheet.match(/走班成员[^]{0,90}/)?.[0] ?? sheet, 120),
+        )
+        await s10Page.click('button:has-text("删除这个走班班")')
+        await s10Page.waitForTimeout(300)
+        const confirmText = await bodyText(s10Page)
+        check(
+          /会一起删掉/.test(confirmText) && /确认删除/.test(confirmText) && /先不删/.test(confirmText),
+          `${S10}：删除要**二次确认**，而且说清会删掉什么`,
+          short(confirmText.match(/删除「[^]{0,140}/)?.[0] ?? confirmText, 170),
+        )
+        await shot(s10Page, S10, '112-stream-edit-sheet', { full: true })
+
+        /* ---------- ④ 源码层：成员写的是 `class_members`，不是 `students.class_id` ---------- */
+        const clSrc = readFileSync(join(HERE, '..', 'src', 'pages', 'Classes.tsx'), 'utf8')
+        const rmSrc = readFileSync(join(HERE, '..', 'src', 'data', 'remote.ts'), 'utf8')
+        const sqlSrc = readFileSync(join(HERE, '..', '..', 'supabase', 'schema.sql'), 'utf8')
+        check(
+          /saveStreamMembers/.test(clSrc) && /write_stream_members/.test(rmSrc),
+          `${S10} 🔴 加删成员走的是 ` + '`write_stream_members()`' + `（写 ` + '`class_members`' + `）`,
+          '面板 → remote.saveStreamMembers → write_stream_members',
+        )
+        check(
+          /insert into class_members \(class_id, student_id\)/.test(sqlSrc) &&
+            !/update students set class_id[\s\S]{0,200}write_stream_members/.test(sqlSrc),
+          `${S10} 🔴 那个函数写的是 ` + '`class_members`' + `，**没有**去碰 ` + '`students.class_id`' + `（上一轮栽过）`,
+          'class_members 那一句在 · students.class_id 那一句不在',
+        )
+        check(
+          /delete from class_members where class_id = p_class_id/.test(sqlSrc) &&
+            /grant execute on function public\.write_stream_members\(uuid, uuid\[\]\) to authenticated/.test(
+              sqlSrc,
+            ),
+          `${S10}：整份替换（先清再插）+ ` + '`authenticated`' + ` 能调（函数自己问 ` + '`can_manage_class`' + `）`,
+          'delete + insert + grant 都在',
+        )
+        check(
+          /canEditClassFor\(myRoles, c\.id, c\.gradeId\)/.test(clSrc),
+          `${S10}：入口判据是 ` + '`canEditClassFor()`' + `（` + '`can_manage_class_for`' + ` 的前端影子）——` +
+            `这里**不新发明判据**、` + '`kind`' + ` 不参与权限判断`,
+          'canEditClassFor(myRoles, c.id, c.gradeId) 在',
+        )
+        check(
+          /name: name\.trim\(\)/.test(clSrc) && /\bapiAssignStreamTeacher\(/.test(clSrc),
+          `${S10}：改名走 ` + '`saveStreamName`' + `、换老师走 **已有**的 ` +
+            '`apiAssignStreamTeacher`' + `（§32.3，它会补 class_subjects，不另写一套）` +
+            ` —— ⚠️ 换老师**不能**顺手打一次：那一条的判据比改名窄（不含班主任），多打会让纯改名也失败`,
+          `saveStreamName=${/saveStreamName/.test(clSrc)} · apiAssignStreamTeacher=${/\bapiAssignStreamTeacher\(/.test(clSrc)} · name.trim=${/name: name\.trim\(\)/.test(clSrc)}`,
+        )
+
+        /* ---------- ⑤ 源码层：右栏那一块也不许再有"0 人也画勾" ---------- */
+        const asSrc = readFileSync(join(HERE, '..', 'src', 'components', 'AppShell.tsx'), 'utf8')
+        check(
+          /rosterStateOf\(/.test(asSrc) && !/const h = analyzeRoster\(c\.students\)/.test(asSrc),
+          `${S10} 🔴 右栏「名单体检」走 ` + '`rosterStateOf()`' + ` 四态，不再自己算 ` + '`analyzeRoster`',
+          /rosterStateOf\(/.test(asSrc) ? 'rosterStateOf 在 · 旧写法不在' : '旧写法还在',
+        )
+        check(
+          /classKindOf\(c\) === 'stream'/.test(asSrc) && /loadClassMembersFull/.test(asSrc),
+          `${S10}：右栏对走班班从 ` + '`class_members`' + ` 数（` + '`loadClassMembersFull`' + `），不是 ` +
+            '`students.class_id`',
+          'classKindOf + loadClassMembersFull 都在',
+        )
+      })
+
+      await ctxS10.close()
+
+
+      /*
+       * ============================================================
        * G7（用户 2026-09-28 拍板）：教师账号在**被标成教室端的设备**上打开 /classroom → 拦住
        * ============================================================
        * 为什么这不是"把黄条改红"那么轻的一件事：
@@ -1966,6 +2656,439 @@ await withLock(async () => {
         )
       })
 
+      /* ============================================================
+         ===== 液态玻璃 · 果冻指示器 · 触控尺寸（2026-10-01 第三轮） =====
+         ------------------------------------------------------------
+         这一节钉四件事（每一件都带反向对照，见 `AGENTS.md` 三·2）：
+
+           ① **触控目标不许缩**：老师是手指点的，改圆角 / 间距 / 材质都不许把入口改小
+              （反向对照：把那几格**真的**缩到 40px → 上面那条必须红）；
+           ② **降级路径存在**：折射关掉之后仍然"只有模糊 + 描边"（不是变透明），
+              并且折射开着时真的接到了 SVG 滤镜上（不是只写了个属性）；
+           ③ **静态扫源码**：特性检测（`CSS.supports` 两条）/ 低端机判据 / 掉帧看门狗 /
+              `prefers-reduced-motion` 分支都在，且 **CSS 里的 `url(#…)` 与 TSX 里的 id 同字**
+              （不一致 = 指针指空 = 静默不生效，这一条正是属于"不报错但就是不对"那一类）；
+              反向对照：把源码里那几个分支改掉，同一个扫描函数**必须**判假；
+           ④ **果冻与 reduced-motion**：正常动效下拖尾圆真的滞后（弹簧在跑）；
+              `prefers-reduced-motion: reduce` 时**直接跳过去**（无果冻、无过渡、无拖尾节点），
+              反向对照：回到 `no-preference`，同一次点击在 50ms 时**还没落位**（证明"落位了"不是恒真）。
+         ============================================================ */
+
+      /* ⚠️ 整节包在一个**块作用域**里：外层第 17–25 节已经用过 `SG` 这个名字，
+            这里要的是"只在本节里有效"，不跟别人抢名字（也就不用去动别人的代码）。 */
+      {
+      const SG = '35–37 移动端底部导航 · 液态玻璃'
+
+      /** 三个入口 + 圆按钮的**真实**命中尺寸（不是源码里的常数） */
+      const hitBoxes = () =>
+        page.evaluate(() => {
+          const nav = document.querySelector('nav[aria-label="主导航"]')
+          const box = (el) => {
+            const r = el.getBoundingClientRect()
+            return { w: Math.round(r.width), h: Math.round(r.height) }
+          }
+          const circle = nav?.querySelector('button[aria-haspopup="dialog"]')
+          return {
+            tabs: [...(nav?.querySelectorAll('a[aria-label]') ?? [])].map((a) => ({
+              name: a.getAttribute('aria-label'),
+              ...box(a),
+            })),
+            circle: circle ? box(circle) : null,
+          }
+        })
+
+      /** 玻璃那一族当前的计算值（折射是否接上、兜底的模糊与描边还在不在、果冻开没开） */
+      const glassState = () =>
+        page.evaluate(() => {
+          const pill = document.querySelector('nav[aria-label="主导航"] .glass-light')
+          const cs = pill ? getComputedStyle(pill) : null
+          const jelly = document.querySelector('[data-jelly]')
+          const body = document.querySelector('nav[aria-label="主导航"] [data-jelly] span')
+          return {
+            attr: pill?.getAttribute('data-refract') ?? null,
+            backdrop: cs?.backdropFilter ?? '',
+            shadow: cs?.boxShadow ?? '',
+            radius: cs?.borderTopLeftRadius ?? '',
+            refractNode: Boolean(document.getElementById('shugao-liquid-refract')),
+            gooNode: Boolean(document.getElementById('shugao-nav-goo')),
+            jelly: jelly?.getAttribute('data-jelly') ?? null,
+            /* 拖尾圆：只在 `jelly='on'` 时才该存在（它是第二个 span） */
+            tails: document.querySelectorAll('nav[aria-label="主导航"] [data-jelly] span').length,
+            bodyLeft: body ? Math.round(parseFloat(getComputedStyle(body).left)) : null,
+            tailShift: (() => {
+              const t = document.querySelectorAll('nav[aria-label="主导航"] [data-jelly] span')[1]
+              if (!t) return null
+              /* ⚠️ `getComputedStyle().transform` 给的是 `matrix(...)`，不是 `translateX(...)`
+                    —— 直接按字面找 `translateX(` 会**永远匹配不到**（那正是"恒真的摆设"） */
+              const raw = getComputedStyle(t).transform
+              if (!raw || raw === 'none') return 0
+              return Math.round(new DOMMatrix(raw).m41 * 100) / 100
+            })(),
+          }
+        })
+
+      await step(SG, async () => {
+        await page.goto(`${BASE}/`, { waitUntil: 'networkidle' })
+        await page.waitForTimeout(900)
+
+        /* ---- ① 触控目标 ---- */
+        const t1 = await hitBoxes()
+        check(
+          t1.tabs.length >= 3 &&
+            t1.tabs.every((t) => t.w >= 44 && t.h >= 44) &&
+            Boolean(t1.circle) &&
+            t1.circle.w >= 44 &&
+            t1.circle.h >= 44,
+          `${SG}：每个入口的触控目标都 ≥ 44×44（手指点的东西，改圆角/间距不许把它改小）`,
+          `胶囊 ${t1.tabs.map((t) => `${t.name} ${t.w}×${t.h}`).join(' · ')} · 圆按钮 ${t1.circle?.w}×${t1.circle?.h}`,
+        )
+        /* 反向对照：临时插一条 `!important` 规则把那几格**真的**缩到 40px。
+           🔴 **必须用 `<style>` 元素、改完整条删掉**：直接对元素 `setProperty` 再
+              `removeProperty` 会把 React 管的行内 `width/height` 一起删掉 ——
+              那一格会缩成"图标那么宽"（22px），**后面整节都在坏布局上跑**（实测踩过：
+              拖尾全程量到 0、`hi.width` 变成 22）。
+           ⚠️ 选择器用语义锚点（`nav[aria-label]` + `a[aria-label]`），并且下面的断言会**验证对照生效**
+              （量到 < 44 才算数）—— 万一选择器失配，那条断言会红，不会静默放水。 */
+        const shrinkId = '__tmp-touch-shrink'
+        await page.evaluate((id) => {
+          const s = document.createElement('style')
+          s.id = id
+          s.textContent =
+            'nav[aria-label="主导航"] a[aria-label]{width:40px!important;height:40px!important}'
+          document.head.appendChild(s)
+        }, shrinkId)
+        await page.waitForTimeout(80)
+        const t2 = await hitBoxes()
+        check(
+          t2.tabs.length > 0 && t2.tabs.every((t) => t.w < 44 || t.h < 44),
+          `${SG}：🧪 反向对照 —— 把那几格缩到 40px 之后，上面那条**必须**红（探针量的是真尺寸）`,
+          `缩完实测：${t2.tabs.map((t) => `${t.name} ${t.w}×${t.h}`).join(' · ')}`,
+        )
+        await page.evaluate((id) => document.getElementById(id)?.remove(), shrinkId)
+        await page.waitForTimeout(80)
+
+        /* ---- ② 降级路径：关掉折射之后仍然"只有模糊 + 描边" ---- */
+        const gOn = await glassState()
+        await page.evaluate(() => {
+          for (const el of document.querySelectorAll('.glass-light')) {
+            el.setAttribute('data-refract', 'off')
+          }
+        })
+        await page.waitForTimeout(60)
+        const gOff = await glassState()
+        await page.evaluate((v) => {
+          for (const el of document.querySelectorAll('.glass-light')) {
+            if (v) el.setAttribute('data-refract', v)
+          }
+        }, gOn.attr)
+        await page.waitForTimeout(60)
+
+        check(
+          gOff.backdrop.includes('blur(') && gOff.shadow.includes('inset'),
+          `${SG}：折射**关掉**之后玻璃仍然有"模糊 + 内描边"（降级不是变透明、也不是掉材质）`,
+          `off → backdrop-filter=${gOff.backdrop} · box-shadow 含 inset=${gOff.shadow.includes('inset')}`,
+          `本机默认：data-refract=${gOn.attr} → ${gOn.backdrop}`,
+        )
+        check(
+          gOn.attr === 'off' || gOn.backdrop.includes('url('),
+          `${SG}：折射开着时**真的**接到了 SVG 滤镜上（不是只写了个属性就算）`,
+          `data-refract=${gOn.attr} → backdrop-filter=${gOn.backdrop} · 滤镜节点=${gOn.refractNode}`,
+        )
+        check(
+          (gOn.attr === 'on') === gOn.refractNode,
+          `${SG}：滤镜节点与开关**同进退**（关掉时连 DOM 都不留，免得 url 指空）`,
+          `data-refract=${gOn.attr} · #shugao-liquid-refract 在 DOM 里=${gOn.refractNode}`,
+        )
+        check(
+          (gOn.jelly === 'on') === gOn.gooNode && (gOn.jelly === 'on') === (gOn.tails === 2),
+          `${SG}：果冻开关、gooey 节点、拖尾圆**三者一致**（关掉时不留孤儿节点）`,
+          `data-jelly=${gOn.jelly} · #shugao-nav-goo=${gOn.gooNode} · [data-jelly] 里的 span 数=${gOn.tails}`,
+        )
+        check(
+          gOn.radius === '18px',
+          `${SG}：大圆角 18 = \`--radius-liquid\`（本项目**唯一的大圆角**，理由写在令牌那一行）`,
+          `胶囊圆角=${gOn.radius}`,
+        )
+
+        /* ---- ②' **展开态那张面板**：同一块玻璃（大圆角 + 模糊 + 折射 + **读得清的兜底白底**） ----
+         * 🔴 那条"白底不透明度"是**可读性的机器版**：面板上有 11.5px 的说明小字，
+         *    底下可能是课表 / 名单 / 深色内容 —— 兜底白底太透就会读不清（用户第一条硬约束）。
+         *    数值口径见 `index.css` 里 `.sheet:has([data-nav-glass])` 那一段的算式。 */
+        await page.getByRole('button', { name: '展开更多入口' }).click()
+        await page.waitForTimeout(600)
+        const panel = await page.evaluate(() => {
+          const sh = document.querySelector('.sheet')
+          if (!sh) return null
+          const cs = getComputedStyle(sh)
+          const img = cs.backgroundImage
+          const alphas = [...img.matchAll(/rgba?\([^)]*?([\d.]+)\)/g)].map((m) => Number(m[1]))
+          return {
+            radius: cs.borderTopLeftRadius,
+            backdrop: cs.backdropFilter,
+            minAlpha: alphas.length ? Math.min(...alphas) : null,
+            headBg: getComputedStyle(sh.querySelector('.panel-head') ?? sh).backgroundColor,
+            marker: Boolean(sh.querySelector('[data-nav-glass]')),
+          }
+        })
+        check(
+          panel?.marker === true &&
+            panel.radius === '18px' &&
+            panel.backdrop.includes('blur(') &&
+            panel.backdrop.includes('url('),
+          `${SG}：**展开态那张面板**也是同一块玻璃（大圆角 18 + 模糊 + 折射接上了）`,
+          panel
+            ? `圆角=${panel.radius} · backdrop-filter=${panel.backdrop} · 标记=${panel.marker} · 头部底=${panel.headBg}`
+            : '没找到 .sheet',
+        )
+        check(
+          panel !== null && panel.minAlpha !== null && panel.minAlpha >= 0.6,
+          `${SG}：🔴 面板的**兜底白底够厚**（最浅那一档 ≥ 0.6）—— 最坏背景下菜单里的字仍读得清`,
+          panel ? `白底最浅那一档 alpha=${panel.minAlpha}（${panel.minAlpha >= 0.6 ? '过' : '太透'}）` : '没找到 .sheet',
+          '参考图的背景是蓝天白云，这个平台的背景可能是课表 / 名单 / 深色内容：可读性优先于好看',
+        )
+        await page.keyboard.press('Escape')
+        await page.waitForTimeout(400)
+
+        /* ---- ③ 静态扫源码 + 反向对照 ---- */
+        const appSrc = readFileSync(join(HERE, '..', 'src', 'components', 'AppShell.tsx'), 'utf8')
+        const cssSrc = readFileSync(join(HERE, '..', 'src', 'index.css'), 'utf8')
+        /** 两条实时滤镜的"该在的分支"是否都在；同一函数要能在被改坏的副本上判假 */
+        const scanFx = (app, css) => {
+          const refractId = /REFRACT_ID = '([\w-]+)'/.exec(app)?.[1] ?? null
+          const gooId = /GOO_ID = '([\w-]+)'/.exec(app)?.[1] ?? null
+          const cssUrls = [...css.matchAll(/url\(#([\w-]+)\)/g)].map((m) => m[1])
+          /*
+           * ⚠️ 兜底顺序**不能拿两个 `indexOf` 在整份文件里比大小**：
+           *    注释里也会提到 `url(#…)`，一比就错位（第一版就是这么写的，实测判假）。
+           *    要取的是**规则体**：基础声明那条 `.glass-light { … }` 与增强那条
+           *    `[data-refract='on'] { … }`，前者的顺序必须在后者之前、且前者**不含** url()。
+           */
+          const baseAt = css.indexOf('.glass-light {')
+          const baseRule = baseAt < 0 ? '' : css.slice(baseAt, css.indexOf('}', baseAt))
+          const enhAt = css.indexOf("[data-refract='on'] {")
+          const enhRule = enhAt < 0 ? '' : css.slice(enhAt, css.indexOf('}', enhAt))
+          return {
+            detect:
+              /CSS\.supports\(\s*'backdrop-filter'/.test(app) && /CSS\.supports\(\s*'filter'/.test(app),
+            lowEnd: /hardwareConcurrency/.test(app) && /deviceMemory/.test(app),
+            watchdog: /FRAME_BUDGET_MS/.test(app) && /requestAnimationFrame/.test(app),
+            reduced: /prefers-reduced-motion: reduce/.test(app),
+            /* CSS 里引用的 id 必须是 TSX 里那一个（写错 = 指空 = 静默没效果） */
+            ids: Boolean(refractId && gooId && cssUrls.includes(refractId)),
+            /* 基础声明（模糊 + 描边）在增强声明**之前**，且基础那条**不带** url() */
+            fallbackFirst:
+              baseAt > -1 &&
+              enhAt > baseAt &&
+              /backdrop-filter: blur\(/.test(baseRule) &&
+              !baseRule.includes('url(') &&
+              Boolean(refractId) &&
+              enhRule.includes(`url(#${refractId})`) &&
+              /blur\(/.test(enhRule),
+          }
+        }
+        const s = scanFx(appSrc, cssSrc)
+        check(
+          s.detect && s.lowEnd && s.watchdog && s.reduced && s.ids && s.fallbackFirst,
+          `${SG}：降级路径**在源码里真的存在**（特性检测 / 低端机 / 掉帧看门狗 / reduced-motion / id 同字 / 兜底在前）`,
+          JSON.stringify(s),
+          '这一整段是静态扫源码：两处 `CSS.supports`、`hardwareConcurrency`+`deviceMemory`、`FRAME_BUDGET_MS`+rAF、reduced-motion 分支、CSS↔TSX 的 id、基础声明在增强之前',
+        )
+        /* 反向对照：把源码"改坏"再扫一遍 —— 同一个函数**必须**判假（否则它就是恒真的摆设） */
+        const broken = scanFx(
+          appSrc
+            .replace(/CSS\.supports/g, 'neverSupported')
+            .replace(/hardwareConcurrency/g, 'x')
+            .replace(/FRAME_BUDGET_MS/g, 'x'),
+          cssSrc.replace(/url\(#[\w-]+\)/g, 'url(none)'),
+        )
+        check(
+          !broken.detect && !broken.lowEnd && !broken.watchdog && !broken.ids,
+          `${SG}：🧪 反向对照 —— 把检测分支/低端判据/看门狗/url 指针改坏，上面那条**必须**红`,
+          JSON.stringify(broken),
+          '对照是"同一函数 + 改坏的源码"，所以它不会因为选择器/类名改版而静默失配',
+        )
+
+        /* ---- ④ 果冻：拖尾圆真的滞后 + 高光边不参与 goo ---- */
+        /*
+         * ⚠️ 拖尾的滞后是**一帧一帧的**：`hi.left` 要等测量 effect 跑完（点完大约 1–3 帧）才开始动，
+         *    在固定时刻抓一张很可能抓到"还没开始"（第一版就是 110ms 抓一张，实测恒为 0 —— 假绿）。
+         *    所以改成**在点击之前就先开一个逐帧轮询**，把整段飞行里的最大滞后量记下来。
+         */
+        const pollMaxLag = () =>
+          page.evaluate(async () => {
+            let max = 0
+            for (let i = 0; i < 45; i++) {
+              await new Promise((r) => requestAnimationFrame(r))
+              const t = document.querySelectorAll('nav[aria-label="主导航"] [data-jelly] span')[1]
+              if (!t) continue
+              const raw = getComputedStyle(t).transform
+              if (!raw || raw === 'none') continue
+              max = Math.max(max, Math.abs(new DOMMatrix(raw).m41))
+            }
+            return { max: Math.round(max * 10) / 10 }
+          })
+        await page.evaluate(() => window.scrollTo(0, 0))
+        await page.waitForTimeout(200)
+        const settled = await glassState()
+        /*
+         * ⚠️ **用 `mouse.click(坐标)`，不用 `locator.click()`**：后者的"可操作性检查"会等元素
+         *    **连续两帧位置不变**才点下去 —— 而这里恰恰要在"动画还在跑"的时刻取数，
+         *    等它稳下来再点，整段飞行都过去了（第一版就是这么写的：逐帧量到 0 —— 假绿）。
+         */
+        const tabBox = await page.getByRole('link', { name: '作业' }).boundingBox()
+        if (!tabBox) throw new Error(`${SG}：量不到「作业」那一格的位置`)
+        const polling = pollMaxLag()
+        await page.mouse.click(tabBox.x + tabBox.width / 2, tabBox.y + tabBox.height / 2)
+        const lagProbe = await polling
+        const maxLag = lagProbe.max
+        await page.waitForTimeout(900)
+        const landed = await glassState()
+        if (settled.jelly === 'on') {
+          check(
+            maxLag > 1,
+            `${SG}：果冻**真的在拖**（整段飞行里拖尾圆与本体拉开了距离 —— 弹簧在跑）`,
+            `逐帧量到的最大滞后 = ${maxLag}px · 静止时 shift=${settled.tailShift} → 落位 shift=${landed.tailShift}`,
+            '若这里恒为 0：说明弹簧没跑 / 尾巴的 left 也做了过渡（两者同步 = 果冻消失）',
+          )
+        } else {
+          check(
+            maxLag === 0 && settled.tails === 1,
+            `${SG}：果冻关掉时**没有拖尾圆**（低端 / 不支持 / reduced-motion 都不硬上）`,
+            `data-jelly=${settled.jelly} · 拖尾节点数=${settled.tails} · 最大滞后=${maxLag}px`,
+          )
+        }
+        check(
+          landed.tailShift === 0 || landed.tailShift === null,
+          `${SG}：落位之后拖尾圆收回去（不会永远拖着一个尾巴）`,
+          `落位 shift=${landed.tailShift}`,
+        )
+        /* 高光边（淡蓝描边）**不在** goo 层里：进了滤镜就会被 alpha 阈值切成实心蓝 */
+        const ringOutside = await page.evaluate(() => {
+          const nav = document.querySelector('nav[aria-label="主导航"]')
+          const layer = nav.querySelector('[data-jelly]')
+          const ring = nav.querySelector('[data-hi-ring]')
+          return {
+            found: Boolean(ring),
+            inLayer: ring ? Boolean(layer?.contains(ring)) : null,
+            border: ring ? getComputedStyle(ring).borderTopColor : null,
+            filter: layer ? getComputedStyle(layer).filter : null,
+          }
+        })
+        check(
+          ringOutside.found && ringOutside.inLayer === false && /rgba\(/.test(String(ringOutside.border)),
+          `${SG}：高光边 / 淡蓝描边留在 goo 层**外面**（进滤镜会被 alpha 阈值切成实心蓝）`,
+          `在 goo 层里=${ringOutside.inLayer} · 描边色=${ringOutside.border} · goo 层 filter=${ringOutside.filter}`,
+        )
+
+        /* ---- ⑤ 可读性：指示器**不是唯一信号** ---- */
+        const sig = () =>
+          page.evaluate(() => {
+            const nav = document.querySelector('nav[aria-label="主导航"]')
+            return [...nav.querySelectorAll('a[aria-label]')].map((a) => {
+              const cell = a.querySelector('[data-active]')
+              return {
+                name: a.getAttribute('aria-label'),
+                active: cell?.getAttribute('data-active') === 'true',
+                color: getComputedStyle(cell ?? a).color,
+              }
+            })
+          })
+        await page.waitForTimeout(400)
+        const sig1 = await sig()
+        const activeColor = sig1.find((c) => c.active)?.color ?? null
+        check(
+          Boolean(activeColor) && sig1.filter((c) => !c.active).every((c) => c.color !== activeColor),
+          `${SG}：当前页的图标颜色与其余**明显不同**（色盲 / 强光下也不能只靠那块指示器）`,
+          sig1.map((c) => `${c.name}${c.active ? '(当前)' : ''} ${c.color}`).join(' · '),
+        )
+        /*
+         * 反向对照：把未选中项的文字刷成同一个颜色 → 上面那条的颜色判据必须红。
+         * ⚠️ 做法是"**先快照整条 `style` 属性、改完原样写回**"：
+         *    · 直接 `setProperty` 再 `removeProperty` 会把 React 管的行内 `color` **一起删掉**
+         *      （后面整节都是错色）；
+         *    · 只靠插一条 `<style>` 去覆盖，实测**不稳**（有一次没生效 —— 那种"对照不生效"
+         *      会让断言假绿，最难查）。
+         */
+        const colorBackup = await page.evaluate((c) => {
+          const cells = [
+            ...document.querySelectorAll('nav[aria-label="主导航"] a[aria-label] [data-active]'),
+          ]
+          const before = cells.map((el) => el.getAttribute('style'))
+          for (const el of cells) {
+            if (el.getAttribute('data-active') !== 'true') el.style.setProperty('color', c, 'important')
+          }
+          return before
+        }, activeColor)
+        /* ⚠️ 图标颜色上有 `.22s` 的过渡：不等它落定就量，量到的是中间值（第一版实测就是这样） */
+        await page.waitForTimeout(500)
+        const sig2 = await sig()
+        check(
+          new Set(sig2.map((c) => c.color)).size === 1,
+          `${SG}：🧪 反向对照 —— 把未选中项的图标刷成同一个颜色，上面那条**必须**红`,
+          sig2.map((c) => `${c.name} ${c.color}`).join(' · '),
+        )
+        await page.evaluate((before) => {
+          const cells = [
+            ...document.querySelectorAll('nav[aria-label="主导航"] a[aria-label] [data-active]'),
+          ]
+          cells.forEach((el, i) => {
+            if (before[i] == null) el.removeAttribute('style')
+            else el.setAttribute('style', before[i])
+          })
+        }, colorBackup)
+        await page.waitForTimeout(400)
+
+        /* ---- ⑥ `prefers-reduced-motion: reduce`：直接跳过去、无果冻 ----
+         *
+         * ⚠️ **不拿"50ms 之后到没到位"当判据**：`hi.left` 要等测量 effect 跑完才更新，
+         *    那个时刻本身就有一两帧的抖动，写死时间点会变成**时红时绿的假断言**。
+         *    这里量的是**结构**：① 果冻开关与拖尾节点；② 指示器那两个图层的
+         *    `transition-property` —— reduced 时只剩 `opacity`（= 位置直接跳），
+         *    正常时必须是 `left`（= 真的在滑）。两条都逐帧可复现，不依赖时间点。
+         */
+        const motionState = () =>
+          page.evaluate(() => {
+            const nav = document.querySelector('nav[aria-label="主导航"]')
+            const body = nav.querySelector('[data-jelly] span')
+            const ring = nav.querySelector('[data-hi-ring]')
+            return {
+              jelly: nav.querySelector('[data-jelly]')?.getAttribute('data-jelly') ?? null,
+              tails: nav.querySelectorAll('[data-jelly] span').length,
+              bodyTrans: body ? getComputedStyle(body).transitionProperty : null,
+              ringTrans: ring ? getComputedStyle(ring).transitionProperty : null,
+            }
+          })
+        const probeMotion = async (reducedMotion) => {
+          await page.emulateMedia({ reducedMotion })
+          await page.goto(`${BASE}/`, { waitUntil: 'networkidle' })
+          await page.waitForTimeout(700)
+          return await motionState()
+        }
+        const rm = await probeMotion('reduce')
+        check(
+          rm.jelly === 'off' &&
+            rm.tails === 1 &&
+            rm.bodyTrans === 'opacity' &&
+            rm.ringTrans === 'opacity',
+          `${SG}：🔴 \`prefers-reduced-motion: reduce\` → **直接跳过去**（无果冻 / 无拖尾 / 位置不带过渡）`,
+          `data-jelly=${rm.jelly} · 拖尾数=${rm.tails} · 填充层 transition=${rm.bodyTrans} · 高光边层=${rm.ringTrans}`,
+          '有人对动效敏感：这时不许有弹簧、不许有滑动过渡 —— 指示器一步到位，只留透明度那一下',
+        )
+        const nm = await probeMotion('no-preference')
+        check(
+          nm.jelly === 'on' &&
+            nm.tails === 2 &&
+            String(nm.bodyTrans).includes('left') &&
+            String(nm.ringTrans).includes('left'),
+          `${SG}：🧪 反向对照 —— 正常动效下果冻是开的、位置是**带过渡**的（上面那条不是恒真）`,
+          `data-jelly=${nm.jelly} · 拖尾数=${nm.tails} · 填充层 transition=${nm.bodyTrans} · 高光边层=${nm.ringTrans}`,
+        )
+        await page.emulateMedia({ reducedMotion: 'no-preference' })
+        await page.goto(`${BASE}/assignments`, { waitUntil: 'networkidle' })
+        await page.waitForTimeout(300)
+      })
+      }
+
       /* ================= 作业列表：班级筛选 ================= */
 
       const SF = '40 作业列表筛选'
@@ -2202,6 +3325,12 @@ await withLock(async () => {
        */
       const RAIL_MANAGING = ['工作台', '班级', '作业', '考试', '错题集', '日程表', '通知', '行政管理', '我的']
 
+      /**
+       * 🆕 2026-10-08：**导航项那一块溢出时自己滚 + 交界处渐隐**（用户点名要的）。
+       * 步子在这一节（`SNAV`）之后 —— 它要的是同一套桌面左栏，但换视口高度（500 / 1200）。
+       */
+      const SROLL = '左栏导航溢出可滚 · 交界渐隐'
+
       /* ---------- B1：桌面左栏逐角色**集合相等**（多一项也红） ---------- */
 
       await step(SNAV, async () => {
@@ -2301,6 +3430,572 @@ await withLock(async () => {
           `${SNAV}：超管在 / 时左栏高亮的是「工作台」（过滤没有让高亮错位）`,
           `data-active=true 的是 ${JSON.stringify(active)}`,
         )
+      })
+
+      /* ---------- 桌面左栏：那一层高亮**怎么动**（弹簧 / 首帧不动画 / reduced 直接跳） ----------
+       *
+       * 2026-10-01 第三轮追加：用户要"长方体在管子里流过去"的那种 Q 弹 ——
+       * 位移改成 rAF 弹簧 + 沿运动方向轻轻 `scaleY`，**不加** gooey（矩形做融合很难看）。
+       * 四条断言各有反向对照，另外钉住"选中态至少还剩两个信号"（用户点名不许降可辨识性）。
+       */
+      await step(SNAV, async () => {
+        /** 高亮那一层与"选中项"此刻的位置（都是相对左栏 `nav` 的坐标） */
+        const railProbe = () =>
+          navPage.evaluate(() => {
+            const nav = document.querySelector('nav[aria-label="主导航 · 桌面"]')
+            const pill = nav?.querySelector('.rail-pill')
+            const act = nav?.querySelector('span[data-active="true"]')
+            if (!nav || !pill || !act) return null
+            const pr = nav.getBoundingClientRect()
+            const r = pill.getBoundingClientRect()
+            const ar = act.getBoundingClientRect()
+            const raw = getComputedStyle(pill).transform
+            return {
+              flow: nav.getAttribute('data-rail-flow'),
+              top: Math.round((r.top - pr.top) * 10) / 10,
+              height: Math.round(r.height * 10) / 10,
+              opacity: getComputedStyle(pill).opacity,
+              /* `matrix(a, b, c, d, e, f)` 的 d 就是 scaleY */
+              scaleY: !raw || raw === 'none' ? 1 : Math.round(new DOMMatrix(raw).d * 1000) / 1000,
+              actTop: Math.round((ar.top - pr.top) * 10) / 10,
+              actH: Math.round(ar.height * 10) / 10,
+              transitions: getComputedStyle(pill).transitionProperty,
+              label: (act.closest('a')?.getAttribute('aria-label') ?? '').trim(),
+            }
+          })
+        /**
+         * 逐帧采样高亮**相对左栏**的位置。
+         * 判"在流"还是"直接跳"看的是 `mids`（**落在两端之间的采样数**）：
+         *   · 弹簧流动 → 会经过一串中间位置；· 直接跳 → 采样只有"起点 / 终点"两种值。
+         * ⚠️ 位置必须**相对 `nav` 量**：用视口坐标的话，换页时整页重排会让 `top` 整体位移
+         *    （实测量到 126px 的"位移"，其实高亮一步没动）。
+         */
+        const railMotion = () =>
+          navPage.evaluate(async () => {
+            const nav = document.querySelector('nav[aria-label="主导航 · 桌面"]')
+            const pill = nav?.querySelector('.rail-pill')
+            const tops = []
+            let maxScale = 1
+            for (let i = 0; i < 36; i++) {
+              await new Promise((r) => requestAnimationFrame(r))
+              if (!pill || !nav) continue
+              tops.push(pill.getBoundingClientRect().top - nav.getBoundingClientRect().top)
+              const raw = getComputedStyle(pill).transform
+              if (raw && raw !== 'none') maxScale = Math.max(maxScale, new DOMMatrix(raw).d)
+            }
+            if (!tops.length) return { travel: 0, mids: 0, maxScale: 1 }
+            const min = Math.min(...tops)
+            const max = Math.max(...tops)
+            const mids = tops.filter((t) => t > min + 3 && t < max - 3).length
+            return {
+              travel: Math.round((max - min) * 10) / 10,
+              mids,
+              maxScale: Math.round(maxScale * 1000) / 1000,
+            }
+          })
+        /** 逐帧采样 + 中途点另一个入口（弹簧只在"换项"时跑）
+         *  ⚠️ 用 `mouse.click(坐标)` 而不是 `locator.click()`：后者会等"连续两帧位置不变"才点，
+         *     那样整段弹簧都跑完了才点下去，逐帧采样只会量到 0（假绿）。 */
+        const railMotionAfterClick = async (name) => {
+          const box = await navPage
+            .locator(`nav[aria-label="主导航 · 桌面"] a[aria-label="${name}"]`)
+            .boundingBox()
+          if (!box) throw new Error(`${SNAV}：量不到左栏「${name}」的位置`)
+          const polling = railMotion()
+          await navPage.mouse.click(box.x + box.width / 2, box.y + box.height / 2)
+          return await polling
+        }
+
+        /* ① 落位之后高亮与选中项**严丝合缝**，而且 CSS 那头**没有** top/height 过渡
+              （有的话就是"CSS 过渡 + JS 弹簧"两套叠加 —— 追不上还抖） */
+        await navGoto('/', 'super')
+        await navPage.waitForTimeout(700)
+        const sit = await railProbe()
+        check(
+          sit &&
+            sit.opacity === '1' &&
+            Math.abs(sit.top - sit.actTop) <= 1 &&
+            Math.abs(sit.height - sit.actH) <= 1 &&
+            sit.transitions === 'opacity',
+          `${SNAV}：左栏高亮**落在选中项上**，且位移只由 JS 弹簧驱动（CSS 那头只剩 opacity）`,
+          sit
+            ? `高亮 top=${sit.top}/h=${sit.height} · 选中项 top=${sit.actTop}/h=${sit.actH} · scaleY=${sit.scaleY} · transition=${sit.transitions}`
+            : '没量到高亮 / 选中项',
+        )
+
+        /* ② 换一项：**真的在流**（逐帧位移 > 2px），而且路上**沿运动方向拉长**了（scaleY > 1） */
+        await navGoto('/', 'super')
+        await navPage.waitForTimeout(700)
+        const fly = await railMotionAfterClick('考试')
+        await navPage.waitForTimeout(900)
+        const after = await railProbe()
+        check(
+          fly.travel > 2 && fly.mids > 2,
+          `${SNAV}：点另一项时高亮**真的在流过去**（逐帧量到 ${fly.travel}px 的位移、${fly.mids} 个中间位置）`,
+          `逐帧位移 = ${fly.travel}px · 中间位置采样 = ${fly.mids} 个`,
+          '判据是"路上有中间位置"：直接跳的话采样只有起点/终点两种值（mids=0）',
+        )
+        check(
+          fly.maxScale > 1.005 && fly.maxScale <= 1.0601,
+          `${SNAV}：流动中沿运动方向**轻轻拉长**（scaleY 略大于 1，上限 6%）——"液体在管子里流"`,
+          `过程中最大 scaleY = ${fly.maxScale}（到位应回到 1）`,
+          '用户明确说"长方形的，效果别叠太过"：所以上限钉在 1.06，⛔ 不是原来那个 1.24',
+        )
+        check(
+          after && after.label === '考试' && Math.abs(after.top - after.actTop) <= 1 && after.scaleY === 1,
+          `${SNAV}：流到位之后**收圆**（scaleY 回到 1）且停在新的选中项上`,
+          after ? `停在「${after.label}」top=${after.top}（选中项 ${after.actTop}）· scaleY=${after.scaleY}` : '没量到',
+        )
+
+        /* ③ 🔴 **首屏不许播动画**：直接进 /exams（不是点进去），前 36 帧位置不许变
+              —— 反向对照是②（同一套采样，换了项就是"在动"） */
+        await navPage.goto(`${BASE}/exams`, { waitUntil: 'networkidle' })
+        const boot = await railMotion()
+        const bootSit = await railProbe()
+        check(
+          boot.mids === 0 && bootSit?.label === '考试' && Math.abs(bootSit.top - bootSit.actTop) <= 1,
+          `${SNAV}：🔴**首屏直接定位**（刚进页面那 36 帧里高亮一动不动，不是从顶上飞下来）`,
+          `首屏：位移 ${boot.travel}px / 中间位置 ${boot.mids} 个 · 停在「${bootSit?.label}」· 位置 ${bootSit?.top} vs ${bootSit?.actTop}`,
+          '反向对照见②：同一套采样在"点了另一项"时量到的是 > 2px 位移 + 多个中间位置',
+        )
+
+        /* ④ 🔴 `prefers-reduced-motion: reduce` → 直接跳（没有弹簧、没有拉伸） */
+        await navPage.emulateMedia({ reducedMotion: 'reduce' })
+        await navPage.goto(`${BASE}/`, { waitUntil: 'networkidle' })
+        await navPage.waitForTimeout(700)
+        const rmFlow = await railProbe()
+        const rmFly = await railMotionAfterClick('考试')
+        await navPage.waitForTimeout(500)
+        const rmAfter = await railProbe()
+        check(
+          rmFlow?.flow === 'off' && rmFly.mids <= 1 && rmFly.maxScale === 1 && rmAfter?.label === '考试',
+          `${SNAV}：🔴 \`prefers-reduced-motion: reduce\` → 左栏高亮**直接跳**（无弹簧、无拉伸）`,
+          `data-rail-flow=${rmFlow?.flow} · 位移=${rmFly.travel}px / 中间位置=${rmFly.mids} 个 · 最大 scaleY=${rmFly.maxScale} · 落到「${rmAfter?.label}」`,
+          '和②同一条采样：正常动效下 mids>2（路上有中间位置），reduced 下必须一步到位',
+        )
+        await navPage.emulateMedia({ reducedMotion: 'no-preference' })
+        await navGoto('/', 'super')
+        await navPage.waitForTimeout(400)
+
+        /* ⑤ **可辨识性不许降低**：用户要的是"至少还剩两个信号" ——
+              高亮底（①）+ 左侧那道蓝竖条 + 文字/图标变蓝，这里钉后两个 */
+        const signals = await navPage.evaluate(() => {
+          const nav = document.querySelector('nav[aria-label="主导航 · 桌面"]')
+          const cells = [...nav.querySelectorAll('a[aria-label]')].map((a) => {
+            const cell = a.querySelector('span[data-active]')
+            const bar = cell?.querySelector('i')
+            return {
+              name: a.getAttribute('aria-label'),
+              active: cell?.getAttribute('data-active') === 'true',
+              color: cell ? getComputedStyle(cell).color : null,
+              bar: bar ? getComputedStyle(bar).width : null,
+            }
+          })
+          return cells
+        })
+        const onCell = signals.find((c) => c.active)
+        check(
+          Boolean(onCell?.bar) &&
+            onCell.bar === '2px' &&
+            signals.filter((c) => !c.active).every((c) => c.color !== onCell.color),
+          `${SNAV}：选中态仍然有**三个信号**（高亮底 + 左侧那道 2px 蓝竖条 + 文字/图标变蓝）`,
+          `竖条宽=${onCell?.bar} · 选中「${onCell?.name}」色=${onCell?.color} · 其余色=${signals.filter((c) => !c.active).map((c) => c.color).join('/')}`,
+        )
+        /* 反向对照：把未选中项的文字刷成同一个颜色 → 上面那条的颜色判据必须红
+           （先快照整条 `style` 属性、改完原样写回：不碰 React 管的其他行内属性） */
+        const railColorBackup = await navPage.evaluate((c) => {
+          const nav = document.querySelector('nav[aria-label="主导航 · 桌面"]')
+          const cells = [...nav.querySelectorAll('a[aria-label] span[data-active]')]
+          const before = cells.map((el) => el.getAttribute('style'))
+          for (const el of cells) {
+            if (el.getAttribute('data-active') !== 'true') el.style.setProperty('color', c, 'important')
+          }
+          return before
+        }, onCell?.color)
+        await navPage.waitForTimeout(400)
+        const sig2 = await navPage.evaluate(() => {
+          const nav = document.querySelector('nav[aria-label="主导航 · 桌面"]')
+          return [...nav.querySelectorAll('a[aria-label]')].map((a) => {
+            const cell = a.querySelector('span[data-active]')
+            return cell ? getComputedStyle(cell).color : null
+          })
+        })
+        check(
+          new Set(sig2.filter(Boolean)).size === 1,
+          `${SNAV}：🧪 反向对照 —— 把未选中项的文字刷成同一个颜色，上面那条的颜色判据**必须**红`,
+          `刷完：${sig2.join(' · ')}`,
+        )
+        await navPage.evaluate((before) => {
+          const nav = document.querySelector('nav[aria-label="主导航 · 桌面"]')
+          const cells = [...nav.querySelectorAll('a[aria-label] span[data-active]')]
+          cells.forEach((el, i) => {
+            if (before[i] == null) el.removeAttribute('style')
+            else el.setAttribute('style', before[i])
+          })
+        }, railColorBackup)
+      })
+
+      /* ---------- B1c：**导航项那一块**溢出时自己滚 + 交界处的渐隐（2026-10-08） ----------
+       *
+       * 用户原话：「为了避免这里的选项**在部分不同大小的电脑**上不一致，这里加一个
+       * **可以滚动的**，**溢出了就自动变成能滚动的**，**交界处要有过渡**」。
+       *
+       * 🔴 口径（改动前先读 `index.css` 的 `.rail-nav` 那一节）：
+       *    · **只有导航项滚** —— 底部的「已连接云端 / N 个班级 · M 名学生」固定在底部；
+       *    · **放得下时没有滚动条、也没有渐隐**（"有些电脑放得下、有些放不下"两种都要正常）；
+       *    · 渐隐 = `mask-image`（⛔ 不是盖一层纯色：侧栏是液态玻璃），
+       *      而且**滚到哪一边到头，那一边的渐隐就收掉**。
+       *
+       * ⚠️ 渐隐怎么判：读 `mask-image` 的**计算值**，把色标按顺序取 alpha，只看
+       *    **第一个**（`firstA`：1 = 顶端实心、0 = 顶端正在渐隐）与**最后一个**（`lastA` 同理）。
+       *    不比字符串：色标位置会被浏览器序列化成 px / calc(100%)，比字符串脆。
+       *
+       * 🧪 **四条反向对照**在这一步末尾（都必须"读到坏值"才算对照成立）：
+       *    · 渐隐钉成"两头都渐隐" → 「滚到顶渐隐消失」「高视口没有渐隐」两条必须红；
+       *    · `overflow-y: hidden` → 「滚轮能滚 / 滚得到底」两条必须红；
+       *    · 把高亮那一片的 `top` 钉在 0 → 「滚过之后高亮仍贴着选中项」必须红；
+       *    · 把底部那两行**挪进滚动容器** → 「滚过之后位置没变」必须红。
+       */
+      await step(SROLL, async () => {
+        /** 左栏导航那一块此刻的**溢出 / 滚动位置 / 渐隐 / 底部那两行的位置** */
+        const railScrollProbe = () =>
+          navPage.evaluate(() => {
+            const nav = document.querySelector('nav[aria-label="主导航 · 桌面"]')
+            const rail = document.querySelector('.floating-rail')
+            const foot = document.querySelector('[data-rail-foot]')
+            const items = [...nav.querySelectorAll('a[aria-label]')]
+            const last = items[items.length - 1]
+            const cs = getComputedStyle(nav)
+            const mask = String(cs.maskImage || cs.webkitMaskImage || 'none').replace(
+              /transparent/g,
+              'rgba(0, 0, 0, 0)',
+            )
+            const alphas = [...mask.matchAll(/rgba?\(([^)]*)\)/g)].map((m) => {
+              const p = m[1].split(/[\s,/]+/).filter(Boolean)
+              return p.length >= 4 ? Number(p[3]) : 1
+            })
+            const nr = nav.getBoundingClientRect()
+            const rr = rail.getBoundingClientRect()
+            const lr = last.getBoundingClientRect()
+            const fr = foot.getBoundingClientRect()
+            return {
+              overflowY: cs.overflowY,
+              scrollTop: Math.round(nav.scrollTop),
+              over: nav.scrollHeight - nav.clientHeight,
+              /* `offsetWidth - clientWidth` = 竖直滚动条占掉的宽（放得下时必须 0） */
+              bar: nav.offsetWidth - nav.clientWidth,
+              mask,
+              maskOn: mask !== 'none',
+              firstA: alphas.length ? alphas[0] : 1,
+              lastA: alphas.length ? alphas[alphas.length - 1] : 1,
+              attr: nav.getAttribute('data-rail-scroll'),
+              lastLabel: last.getAttribute('aria-label'),
+              lastFully: lr.bottom <= nr.bottom + 1 && lr.top >= nr.top - 1,
+              lastGap: Math.round(nr.bottom - lr.bottom),
+              navBottomInRail: Math.round(nr.bottom - rr.top),
+              footInNav: nav.contains(foot),
+              footTopInRail: Math.round(fr.top - rr.top),
+              footBottomInRail: Math.round(rr.bottom - fr.bottom),
+              footText: String(foot.innerText || '').replace(/\s+/g, ' ').trim(),
+            }
+          })
+        /** 把导航项那一块滚到某个位置（程序化；"滚轮能不能滚"另有一条） */
+        const railScrollTo = async (y) => {
+          await navPage.evaluate((v) => {
+            const nav = document.querySelector('nav[aria-label="主导航 · 桌面"]')
+            nav.scrollTop = v
+          }, y)
+          await navPage.waitForTimeout(240)
+          return railScrollProbe()
+        }
+        /** 高亮那一片与"选中项"**相对 nav** 的位置（滚动之后必须仍然贴着） */
+        const railPillGeom = () =>
+          navPage.evaluate(() => {
+            const nav = document.querySelector('nav[aria-label="主导航 · 桌面"]')
+            const pill = nav.querySelector('.rail-pill')
+            const act = nav.querySelector('span[data-active="true"]')
+            if (!pill || !act) return null
+            const pr = nav.getBoundingClientRect()
+            const p = pill.getBoundingClientRect()
+            const a = act.getBoundingClientRect()
+            return {
+              top: Math.round((p.top - pr.top) * 10) / 10,
+              actTop: Math.round((a.top - pr.top) * 10) / 10,
+              label: (act.closest('a')?.getAttribute('aria-label') ?? '').trim(),
+            }
+          })
+        /** 反向对照要临时加一条样式；返回的把手用来撤掉 */
+        const injectCss = (css) => navPage.addStyleTag({ content: css })
+        const dropCss = async (h) => {
+          if (h) await h.evaluate((el) => el.remove())
+        }
+        /** 把鼠标放到导航项那一块中间（滚轮要打在它身上） */
+        const hoverRail = async () => {
+          const b = await navPage.locator('nav[aria-label="主导航 · 桌面"]').boundingBox()
+          if (!b) throw new Error(`${SROLL}：量不到桌面左栏导航那一块的位置`)
+          await navPage.mouse.move(b.x + b.width / 2, b.y + b.height / 2)
+        }
+
+        /* ---------- ① 矮视口（500px 高）：放不下 → **只有导航项那一块**自己可滚 ---------- */
+
+        await navPage.setViewportSize({ width: 1440, height: 500 })
+        await navGoto('/', 'super')
+        await navPage.waitForTimeout(420)
+        const short0 = await railScrollProbe()
+        check(
+          short0.over > 40 && short0.overflowY === 'auto',
+          `${SROLL}：🔴 矮视口（500px 高）放不下 → 导航项那一块**自己**溢出可滚（overflow-y: auto）`,
+          `溢出 ${short0.over}px · overflow-y=${short0.overflowY} · 滚动条占宽 ${short0.bar}px · 最后一项「${short0.lastLabel}」`,
+        )
+
+        /* ② 滚轮真的滚得动（触控板走同一条路），而且**滚得到底** */
+        await hoverRail()
+        await navPage.mouse.wheel(0, 1600)
+        await navPage.waitForTimeout(420)
+        const wheeled = await railScrollProbe()
+        check(
+          wheeled.scrollTop > 0,
+          `${SROLL}：矮视口里**滚轮滚得动**导航项那一块（触控板同一条路；手指靠原生 overflow 滚）`,
+          `滚一格之后 scrollTop = ${wheeled.scrollTop}px（可滚范围 ${wheeled.over}px）`,
+        )
+        check(
+          wheeled.scrollTop >= wheeled.over - 1 && wheeled.lastFully && wheeled.lastLabel === '我的',
+          `${SROLL}：🔴 矮视口**滚得到底**（最后一项「我的」完整露出来，没被裁掉）`,
+          `scrollTop=${wheeled.scrollTop} / ${wheeled.over}px · 最后一项底边距 nav 底 ${wheeled.lastGap}px`,
+        )
+
+        /* ---------- ③ 交界处的过渡：渐隐跟着"哪一边还有内容"走 ---------- */
+
+        const atEnd = await railScrollTo(short0.over + 400)
+        check(
+          atEnd.attr === 'top' && atEnd.firstA === 0 && atEnd.lastA === 1,
+          `${SROLL}：🔴 滚到底 → **底部渐隐消失**（顶上还有内容，所以顶上仍有渐隐）`,
+          `data-rail-scroll=${atEnd.attr} · 首端 alpha=${atEnd.firstA}（要 0）· 末端 alpha=${atEnd.lastA}（要 1）`,
+        )
+        const mid = await railScrollTo(Math.round(short0.over / 2))
+        check(
+          mid.attr === 'both' && mid.maskOn && mid.firstA === 0 && mid.lastA === 0,
+          `${SROLL}：🔴 滚到中间 → **上下都有渐隐**（mask-image 两端 alpha 都是 0 —— 不是盖了一层纯色）`,
+          `data-rail-scroll=${mid.attr} · 首端 alpha=${mid.firstA} · 末端 alpha=${mid.lastA} · mask=${short(mid.mask, 100)}`,
+        )
+        await shot(navPage, SROLL, '114-rail-scroll-mid')
+        const atTop = await railScrollTo(0)
+        check(
+          atTop.attr === 'bottom' && atTop.firstA === 1 && atTop.lastA === 0,
+          `${SROLL}：🔴 滚到顶 → **顶部渐隐消失**（底下还有内容，所以底下仍有渐隐）`,
+          `data-rail-scroll=${atTop.attr} · 首端 alpha=${atTop.firstA}（要 1）· 末端 alpha=${atTop.lastA}（要 0）`,
+        )
+
+        /* ---------- ④ 底部那两行**固定在底部**（只有导航项滚） ---------- */
+
+        const footAtTop = await railScrollTo(0)
+        const footAtEnd = await railScrollTo(short0.over + 400)
+        check(
+          Math.abs(footAtEnd.footTopInRail - footAtTop.footTopInRail) <= 1 &&
+            !footAtEnd.footInNav &&
+            footAtEnd.footTopInRail >= footAtEnd.navBottomInRail - 1 &&
+            footAtEnd.footBottomInRail >= 8 &&
+            footAtEnd.footBottomInRail <= 24 &&
+            footAtEnd.footText.includes('名学生'),
+          `${SROLL}：🔴 底部那两行（已连接云端 / N 个班级）**固定在底部**（滚过之后一步没动）`,
+          `相对侧栏 top：不滚 ${footAtTop.footTopInRail} / 滚到底 ${footAtEnd.footTopInRail}；在 nav 外面=${!footAtEnd.footInNav} · 离侧栏底 ${footAtEnd.footBottomInRail}px · 屏上「${short(footAtEnd.footText, 44)}」`,
+        )
+
+        /* ---------- ⑤ 🔴 滚动**没有弄坏高亮**（最容易坏的地方） ---------- */
+        /* 先让选中项落在底部那几项里（「我的」），这样"滚到底"时它是看得见的 */
+        await navGoto('/settings', 'super')
+        await navPage.waitForTimeout(400)
+        const pillTopState = await railScrollTo(0)
+        const pillEndState = await railScrollTo(short0.over + 400)
+        const pillAtEnd = await railPillGeom()
+        check(
+          pillAtEnd &&
+            pillAtEnd.label === '我的' &&
+            Math.abs(pillAtEnd.top - pillAtEnd.actTop) <= 1 &&
+            pillEndState.scrollTop > 0,
+          `${SROLL}：🔴 滚过之后高亮**仍然贴在选中项上**（那一片跟着内容一起滚，没被留在原地）`,
+          pillAtEnd
+            ? `滚到 ${pillEndState.scrollTop}px 时：高亮 top=${pillAtEnd.top} · 选中项「${pillAtEnd.label}」top=${pillAtEnd.actTop}`
+            : '没量到高亮 / 选中项',
+        )
+        /* 滚过之后再点另一项：照旧**流过去 + 落准**（用户点名"这是最容易被弄坏的地方"）
+           ⚠️ 点的是**倒数第二项**（超管 = 「行政管理」）：滚到底之后它一定完整可见；
+              而最后一项「我的」正是当前选中项 —— 点它没有位移，采样只会是 0（假绿）。 */
+        const clickName = await navPage.evaluate(() => {
+          const items = [...document.querySelectorAll('nav[aria-label="主导航 · 桌面"] a[aria-label]')]
+          return items[items.length - 2]?.getAttribute('aria-label') ?? ''
+        })
+        const pillBox = await navPage
+          .locator(`nav[aria-label="主导航 · 桌面"] a[aria-label="${clickName}"]`)
+          .boundingBox()
+        if (!pillBox) throw new Error(`${SROLL}：滚到底之后量不到「${clickName}」的位置`)
+        const polling = navPage.evaluate(async () => {
+          const nav = document.querySelector('nav[aria-label="主导航 · 桌面"]')
+          const pill = nav?.querySelector('.rail-pill')
+          const tops = []
+          let maxScale = 1
+          for (let i = 0; i < 36; i++) {
+            await new Promise((r) => requestAnimationFrame(r))
+            if (!pill || !nav) continue
+            tops.push(pill.getBoundingClientRect().top - nav.getBoundingClientRect().top)
+            const raw = getComputedStyle(pill).transform
+            if (raw && raw !== 'none') maxScale = Math.max(maxScale, new DOMMatrix(raw).d)
+          }
+          if (!tops.length) return { travel: 0, mids: 0, maxScale: 1 }
+          const min = Math.min(...tops)
+          const max = Math.max(...tops)
+          return {
+            travel: Math.round((max - min) * 10) / 10,
+            mids: tops.filter((t) => t > min + 3 && t < max - 3).length,
+            maxScale: Math.round(maxScale * 1000) / 1000,
+          }
+        })
+        await navPage.mouse.click(pillBox.x + pillBox.width / 2, pillBox.y + pillBox.height / 2)
+        const flung = await polling
+        await navPage.waitForTimeout(900)
+        const pillAfter = await railPillGeom()
+        check(
+          flung.mids > 2 &&
+            clickName === '行政管理' &&
+            pillAfter?.label === clickName &&
+            Math.abs(pillAfter.top - pillAfter.actTop) <= 1,
+          `${SROLL}：🔴 滚过之后再点另一项（「${clickName}」）→ 高亮**照旧流过去**（${flung.mids} 个中间位置）并**落准**`,
+          pillAfter
+            ? `逐帧位移 ${flung.travel}px / 中间位置 ${flung.mids} 个 · 落在「${pillAfter.label}」top=${pillAfter.top}（选中项 ${pillAfter.actTop}）`
+            : '没量到',
+          `滚动位置：${pillTopState.scrollTop} → ${pillEndState.scrollTop} / ${short0.over}px`,
+        )
+
+        /* ---------- ⑥ 高视口（1200px 高）：放得下 → **没有滚动条、也没有渐隐** ---------- */
+
+        await navPage.setViewportSize({ width: 1440, height: 1200 })
+        await navGoto('/', 'super')
+        await navPage.waitForTimeout(420)
+        const tall = await railScrollProbe()
+        check(
+          tall.over <= 1 && tall.bar <= 1,
+          `${SROLL}：🔴 高视口（1200px 高）放得下 → **没有滚动条**（没有可滚的内容，也就不会有条）`,
+          `溢出 ${tall.over}px · 滚动条占宽 ${tall.bar}px · overflow-y=${tall.overflowY}`,
+        )
+        /*
+         * ⚠️ 别只靠 `bar`（`offsetWidth - clientWidth`）：这台机器上 Edge 用的是**叠层滚动条**
+         *    （探针实测：矮视口溢出 294px 时 `bar` 也是 0）→ 只看它等于**恒绿**。
+         *    所以"放得下时不可滚"要用**行为**判：滚轮打上去，`scrollTop` 必须一动不动。
+         */
+        await hoverRail()
+        await navPage.mouse.wheel(0, 1600)
+        await navPage.waitForTimeout(320)
+        const tallWheel = await railScrollProbe()
+        check(
+          tallWheel.scrollTop === 0,
+          `${SROLL}：🔴 高视口里滚轮**打不动**导航项那一块（放得下就不该能滚）`,
+          `滚轮 1600px 之后 scrollTop = ${tallWheel.scrollTop}（溢出 ${tallWheel.over}px）`,
+        )
+        check(
+          !tall.maskOn && tall.attr === 'none',
+          `${SROLL}：🔴 高视口**没有渐隐**（放得下就不该有任何"下面还有"的暗示）`,
+          `data-rail-scroll=${tall.attr} · mask 非 none = ${tall.maskOn} · mask=${short(tall.mask, 60)}`,
+        )
+        await shot(navPage, SROLL, '115-rail-fit-tall')
+        const tallPill = await railPillGeom()
+        check(
+          Boolean(tallPill) && Math.abs(tallPill.top - tallPill.actTop) <= 1,
+          `${SROLL}：高视口里高亮照旧落在选中项上（加滚动容器没有动高亮的算法）`,
+          tallPill ? `高亮 top=${tallPill.top} · 选中项「${tallPill.label}」top=${tallPill.actTop}` : '没量到',
+        )
+
+        /* ---------- ⑦ 🧪 反向对照：渐隐必须**真的会收掉** ---------- */
+
+        const fadeCtrl = await injectCss(
+          '.rail-nav{mask-image:linear-gradient(180deg, transparent 0, #000 22px, #000 calc(100% - 22px), transparent 100%) !important;-webkit-mask-image:linear-gradient(180deg, transparent 0, #000 22px, #000 calc(100% - 22px), transparent 100%) !important}',
+        )
+        await navPage.waitForTimeout(220)
+        const tallForced = await railScrollTo(0)
+        check(
+          tallForced.maskOn,
+          `${SROLL}：🧪 反向对照 —— 强行把渐隐钉成"两头都渐隐"，上面"高视口没有渐隐"那条**必须**红`,
+          `注入之后：mask 非 none = ${tallForced.maskOn} · 首端 alpha=${tallForced.firstA} · mask=${short(tallForced.mask, 80)}`,
+        )
+        await navPage.setViewportSize({ width: 1440, height: 500 })
+        await navPage.waitForTimeout(300)
+        const topForced = await railScrollTo(0)
+        check(
+          topForced.firstA === 0,
+          `${SROLL}：🧪 反向对照 —— 同上，上面"滚到顶 → 顶部渐隐消失"那条**必须**红（真跑时首端 alpha 是 1）`,
+          `注入之后滚到顶：首端 alpha=${topForced.firstA} · data-rail-scroll=${topForced.attr}`,
+        )
+        await dropCss(fadeCtrl)
+        await navPage.waitForTimeout(240)
+        const fadeBack = await railScrollTo(0)
+        check(
+          fadeBack.maskOn && fadeBack.attr === 'bottom' && fadeBack.firstA === 1 && fadeBack.lastA === 0,
+          `${SROLL}：🧪 反向对照已撤（渐隐回到"滚到顶：只有底下渐隐"）`,
+          `撤掉之后：mask 非 none = ${fadeBack.maskOn} · data-rail-scroll=${fadeBack.attr} · 首端 alpha=${fadeBack.firstA} · 末端 alpha=${fadeBack.lastA}`,
+        )
+
+        /* 🧪 反向对照：关掉滚动容器 → "滚轮能滚 / 滚得到底"两条**必须**红 */
+        const ovCtrl = await injectCss('.rail-nav{overflow-y:hidden !important}')
+        await hoverRail()
+        await navPage.mouse.wheel(0, 1600)
+        await navPage.waitForTimeout(400)
+        const hiddenWheel = await railScrollProbe()
+        check(
+          hiddenWheel.overflowY === 'hidden' && hiddenWheel.scrollTop === 0 && !hiddenWheel.lastFully,
+          `${SROLL}：🧪 反向对照 —— 改成 overflow-y: hidden，上面"滚轮能滚 + 滚得到底"两条**必须**红`,
+          `overflow-y=${hiddenWheel.overflowY} · 滚轮之后 scrollTop=${hiddenWheel.scrollTop} · 最后一项完整可见=${hiddenWheel.lastFully}`,
+        )
+        await dropCss(ovCtrl)
+        await navPage.waitForTimeout(200)
+
+        /* 🧪 反向对照：把高亮那一片的 `top` 钉在 0（= 位置算错）→ "滚过之后仍贴着选中项"**必须**红 */
+        const pillCtrl = await injectCss('.rail-pill{top:0 !important}')
+        await railScrollTo(0)
+        const pillBroken = await railScrollTo(short0.over + 400).then(() => railPillGeom())
+        check(
+          Boolean(pillBroken) && Math.abs(pillBroken.top - pillBroken.actTop) > 1,
+          `${SROLL}：🧪 反向对照 —— 把高亮那一片的 top 钉在 0，上面"滚过之后仍贴着选中项"那条**必须**红`,
+          pillBroken
+            ? `钉住之后：高亮 top=${pillBroken.top} · 选中项「${pillBroken.label}」top=${pillBroken.actTop}`
+            : '没量到',
+        )
+        await dropCss(pillCtrl)
+        await navPage.waitForTimeout(200)
+
+        /* 🧪 反向对照：把底部那两行**挪进滚动容器**（= 这一轮最容易犯的错）
+              → "在 nav 外面 / 滚过之后位置没变"两条**必须**红 */
+        const movedFoot = await navPage.evaluate(() => {
+          const nav = document.querySelector('nav[aria-label="主导航 · 桌面"]')
+          const foot = document.querySelector('[data-rail-foot]')
+          nav.appendChild(foot)
+          return { inNav: nav.contains(foot) }
+        })
+        const moved0 = await railScrollTo(0)
+        const moved1 = await railScrollTo(short0.over + 400)
+        check(
+          movedFoot.inNav &&
+            moved1.footInNav &&
+            Math.abs(moved1.footTopInRail - moved0.footTopInRail) > 2,
+          `${SROLL}：🧪 反向对照 —— 把底部那两行挪进滚动容器，上面"固定不动"那条**必须**红`,
+          `挪进去之后：在 nav 里=${moved1.footInNav} · 不滚 top=${moved0.footTopInRail} → 滚到底 top=${moved1.footTopInRail}`,
+        )
+        await navPage.evaluate(() => {
+          const rail = document.querySelector('.floating-rail')
+          const foot = document.querySelector('[data-rail-foot]')
+          rail.appendChild(foot) /* 挪回 nav 之后 = 侧栏末尾 */
+        })
+        await navPage.waitForTimeout(240)
+        const footRestored = await railScrollTo(short0.over + 400)
+        check(
+          !footRestored.footInNav &&
+            Math.abs(footRestored.footTopInRail - footAtTop.footTopInRail) <= 1 &&
+            footRestored.footText.includes('名学生'),
+          `${SROLL}：🧪 反向对照已复原（底部那两行回到 nav 外面、位置照旧）`,
+          `复原后：在 nav 里=${footRestored.footInNav} · 相对侧栏 top=${footRestored.footTopInRail}（复原前 ${footAtTop.footTopInRail}）· 屏上「${short(footRestored.footText, 40)}」`,
+        )
+
+        /* 这一节跑完把视口交回默认（下一步是移动端 414px，它自己会设） */
+        await navPage.setViewportSize({ width: 1440, height: 1000 })
+        await navPage.waitForTimeout(200)
       })
 
       /* ---------- B2/B3：移动端胶囊 + 展开层 ---------- */
@@ -2749,6 +4444,29 @@ await withLock(async () => {
           info.modalOpen ? short(info.modalText, 130) : short(info.body, 120),
         )
         /*
+         * 🆕 2026-10-07 F3：🔴 **弹窗里只列"待批改"的**（`collected`），**不含待收缴**（`open`）。
+         *
+         * 三句话互相咬住，缺一条都留着"混进来"的口子：
+         *   ① 「今天要批的作业」那一格数字 == **可见待批改份数**（演示种子：只有 `a-demo-4` 一份）；
+         *   ② 待批改那份的标题 `作业23…` 在弹窗里；
+         *   ③ **待收缴**那份（`a-demo-2` = 作业22）**不在** —— 它还没收上来，没有东西可批。
+         * ⚠️ 期望值 `1` 是从**演示种子**数出来的（5 份档案里 2 份待收缴 / 2 份已批改 / 1 份待批改）——
+         *    与「11 作业列表」那条 `5 份档案 · 2 份待收缴` 是同一份数据的两个显示点。
+         * 🧪 反向对照（实测）：把弹窗那处的口径换成 `pendingForMe()` 的**整体**结果
+         *    （它含待收缴）→ 这里变成 3、而 `作业22` 也在弹窗里 → 这一条红。
+         */
+        const pendBlock = info.modalText.match(/今天要批的作业\s*(\d+)/)
+        check(
+          pendBlock?.[1] === '1',
+          `${S42}：🔴 「今天要批的作业」只数**待批改**（演示里 1 份；那 2 份待收缴不算"要批的"）`,
+          `弹窗里那一格 = ${pendBlock?.[1] ?? '(没读到)'}\u3000· 弹窗文案：${short(info.modalText, 120)}`,
+        )
+        check(
+          info.modalText.includes('作业23') && !info.modalText.includes('作业22'),
+          `${S42}：🔴 待批改那份（作业23）在弹窗里；**待收缴那份（作业22）不在**（收都没收上来，没有东西可批）`,
+          `含作业23=${info.modalText.includes('作业23')} · 含作业22=${info.modalText.includes('作业22')}`,
+        )
+        /*
          * 🆕 2026-09-29 用户拍板：**问候卡上的话换成新的一批**（`lib/mood.ts` 的 `GREETINGS`）。
          *
          * 判据有**两个方向**，缺一不可：
@@ -3062,6 +4780,723 @@ await withLock(async () => {
           absent: ['全班丢'],
         },
       })
+
+      /* ==================================================================
+         S6b：顶层 tab 的「返回」—— 有上一页回上一页，没上一页回兜底
+         ------------------------------------------------------------------
+         `/schedule`（日程表）与 `/wrong`（错题集）**既是顶层 tab（左栏/底部），
+         又能从「我的」点进来**，所以"返回去哪"写死哪一条都有一半是错的：
+           · 写死 `/settings`（日程表原样）→ 从 tab 进来时回到「我的」= 说谎；
+           · 写死 `/`（错题集原样）→ 从任意一页点 tab 进来都会被扔回首页；
+           · 裸 `navigate(-1)` → 从书签 / PWA 图标**直接打开**时**没有上一页**，
+             会把老师**带出应用**（下面 ③ ⑤ 实测：退到上一个站点 = about:blank）。
+         正解 = `lib/back.ts` 的 `goBackOr(navigate, '/')`：`history.state.idx > 0`
+         才 `navigate(-1)`，否则回兜底 `/`（用 replace，免得在历史里留一条会弹回来的记录）。
+
+         🧪 **反向对照**：把 `goBackOr` 改回裸 `navigate(-1)`（一处），
+            ③ ⑤ 那两条必须红（其余几条照旧绿 —— 裸 -1 只在"没有上一页"时才错）。
+
+         ⚠️ 为什么单独开一个 1440px 的 context：主流程那个 414px 的视口里
+            左栏 tab 不在屏上，而这一节要**真的点 tab**（不是手打地址）。
+         ================================================================== */
+
+      const SB = '58 顶层 tab 返回'
+      const ctxBack = await browser.newContext({
+        viewport: { width: 1440, height: 1000 },
+        locale: 'zh-CN',
+      })
+      await ctxBack.clock.install({ time: new Date('2026-09-19T10:00:00') })
+      await ctxBack.addInitScript((s) => {
+        /*
+         * ⚠️ 这个 `try` 是必要的：③ ⑤ 会先打开 `about:blank` 去造"浏览器有上一页"的处境，
+         *    而那个 opaque origin 上 `localStorage` 会抛 SecurityError —— 与产品无关，
+         *    不兜住它就会变成一条假的 `pageerror`（这一节自己把自己弄红）。
+         */
+        try {
+          window.localStorage.setItem('shugao.teacher.v1', JSON.stringify(s))
+          window.localStorage.setItem('shugao.deviceRole', 'teacher')
+        } catch {
+          /* about:blank：没有 origin，写不了 localStorage */
+        }
+      }, TEACHER_STATE)
+      const backPage = await ctxBack.newPage()
+      backPage.on('pageerror', (e) => errors.push(`PAGEERROR(${SB}) ${backPage.url()} :: ${e.message}`))
+      backPage.on('console', (m) => {
+        if (m.type() === 'error') errors.push(`CONSOLE(${SB}) ${backPage.url()} :: ${m.text()}`)
+      })
+
+      /** 读回"我在哪一页 + React Router 自己记的历史序号"——这一节的证据就是这两个数 */
+      const atBack = () =>
+        backPage.evaluate(() => ({
+          url: location.pathname + location.search,
+          idx: (window.history.state || {}).idx ?? 0,
+          body: String(document.body.innerText || '').replace(/\s+/g, ' ').trim(),
+        }))
+
+      /** 点页头那颗「返回」（`ui.tsx` 的 PageHead 渲染成 `aria-label="返回"` 的按钮） */
+      const clickBack = async () => {
+        await backPage.locator('button[aria-label="返回"]').first().click()
+        await backPage.waitForTimeout(900)
+      }
+
+      /* ① 从 tab 进日程表 → 返回回**上一页**（不是「我的」） */
+      await step(SB, async () => {
+        await backPage.goto(`${BASE}/classes`, { waitUntil: 'networkidle' })
+        await backPage.locator('[data-nav="/schedule"]').click()
+        await backPage.waitForURL('**/schedule', { timeout: 8000 })
+        await backPage.waitForTimeout(600)
+        const at = await atBack()
+        check(
+          at.idx > 0,
+          `${SB}：从 tab 进 /schedule 之后 history.state.idx > 0（有上一页可回）`,
+          `idx = ${at.idx}`,
+        )
+        await clickBack()
+        const after = await atBack()
+        check(
+          after.url === '/classes',
+          `${SB}：🔴 从 tab 进 /schedule → 返回回**上一页「/classes」**（写死「/settings」会回到「我的」）`,
+          `返回后 url = ${after.url}`,
+        )
+      })
+      await shot(backPage, SB, '58a-back-schedule-tab', {
+        full: true,
+        wait: 0,
+        expect: { url: '/classes', markers: ['2 个班级 · 91 名学生'] },
+      })
+
+      /* ② 从「我的」那一行进日程表 → 返回回「我的」 */
+      await step(SB, async () => {
+        await backPage.goto(`${BASE}/settings`, { waitUntil: 'networkidle' })
+        await backPage.getByRole('button', { name: /录入上课与日程/ }).first().click()
+        await backPage.waitForURL('**/schedule', { timeout: 8000 })
+        await backPage.waitForTimeout(600)
+        const at = await atBack()
+        check(at.idx > 0, `${SB}：从「我的」进 /schedule 之后 idx > 0`, `idx = ${at.idx}`)
+        await clickBack()
+        const after = await atBack()
+        check(
+          after.url === '/settings',
+          `${SB}：从「我的」进 /schedule → 返回回**「我的」**（写死「/」会回到工作台）`,
+          `返回后 url = ${after.url}`,
+        )
+      })
+      await shot(backPage, SB, '58b-back-schedule-mine', {
+        full: true,
+        wait: 0,
+        expect: { url: '/settings', markers: ['录入上课与日程'] },
+      })
+
+      /*
+       * ③ 🔴 **直接打开**日程表（书签 / PWA 图标）→ 回兜底 `/`，**且不退出应用**。
+       *
+       * 先访问一个别的地址再直开这一页 —— 这才是书签 / PWA 的真实处境：
+       * 浏览器历史里有上一页，但**这个 SPA 自己没有**（React Router 把这一页记成 idx = 0）。
+       * 裸 `navigate(-1)` 在这种处境下退回的是 about:blank（= 离开应用）。
+       */
+      await step(SB, async () => {
+        await backPage.goto('about:blank')
+        await backPage.goto(`${BASE}/schedule`, { waitUntil: 'networkidle' })
+        await backPage.waitForTimeout(600)
+        const at = await atBack()
+        check(
+          at.idx === 0,
+          `${SB}：直开 /schedule 时 idx = 0（这个 SPA 内部**没有**上一页）`,
+          `idx = ${at.idx}`,
+        )
+        await clickBack()
+        const after = await atBack()
+        check(
+          after.url === '/',
+          `${SB}：🔴 直开 /schedule → 返回回**兜底「/」**（裸 -1 会退到上一个站点 / 退出应用）`,
+          `返回后 url = ${after.url}`,
+        )
+        check(
+          after.body.includes('今日待办'),
+          `${SB}：而且**还在应用里**（回的是工作台，不是空白页）`,
+          short(after.body, 90),
+        )
+      })
+      await shot(backPage, SB, '58c-back-direct-schedule', {
+        full: true,
+        wait: 0,
+        expect: { url: '/', markers: ['今日待办'] },
+      })
+
+      /* ④ 从 tab 进错题集 → 返回回**上一页**（不是首页） */
+      await step(SB, async () => {
+        await backPage.goto(`${BASE}/classes`, { waitUntil: 'networkidle' })
+        await backPage.locator('[data-nav="/wrong"]').click()
+        await backPage.waitForURL('**/wrong', { timeout: 8000 })
+        await backPage.waitForTimeout(600)
+        const at = await atBack()
+        check(at.idx > 0, `${SB}：从 tab 进 /wrong 之后 idx > 0`, `idx = ${at.idx}`)
+        await clickBack()
+        const after = await atBack()
+        check(
+          after.url === '/classes',
+          `${SB}：🔴 从 tab 进 /wrong → 返回回**上一页「/classes」**（写死「/」会回到工作台）`,
+          `返回后 url = ${after.url}`,
+        )
+      })
+
+      /* ⑤ 🔴 直开错题集 → 回兜底 `/`，同样不退出应用 */
+      await step(SB, async () => {
+        await backPage.goto('about:blank')
+        await backPage.goto(`${BASE}/wrong`, { waitUntil: 'networkidle' })
+        await backPage.waitForTimeout(600)
+        const at = await atBack()
+        check(at.idx === 0, `${SB}：直开 /wrong 时 idx = 0（没有上一页）`, `idx = ${at.idx}`)
+        await clickBack()
+        const after = await atBack()
+        check(
+          after.url === '/',
+          `${SB}：🔴 直开 /wrong → 返回回**兜底「/」**（裸 -1 会退到上一个站点 / 退出应用）`,
+          `返回后 url = ${after.url}`,
+        )
+        check(after.body.includes('今日待办'), `${SB}：而且**还在应用里**`, short(after.body, 90))
+      })
+      await shot(backPage, SB, '58d-back-direct-wrong', {
+        full: true,
+        wait: 0,
+        expect: { url: '/', markers: ['今日待办'] },
+      })
+
+      /*
+       * ⑥ 反向的一侧：`/wrong/:classId` **照旧写死回家族根 `/wrong`** ——
+       *    这不是漏改：这一页只有一个父页（只能从 `/wrong` 点进来），
+       *    没有那个两难，也就**不该**跟着换成 `goBackOr`。这条钉住"别顺手把它也改了"。
+       */
+      await step(SB, async () => {
+        await backPage.goto(`${BASE}/wrong/c-demo-1`, { waitUntil: 'networkidle' })
+        await backPage.waitForTimeout(600)
+        await clickBack()
+        const after = await atBack()
+        check(
+          after.url === '/wrong',
+          `${SB}：/wrong/:classId 的返回仍然回家族根「/wrong」（子页不换形状）`,
+          `返回后 url = ${after.url}`,
+        )
+      })
+
+      await ctxBack.close()
+
+      /* ==================================================================
+         S6c：🆕 年级管理里的「班级档案」展开条（F3）
+         ------------------------------------------------------------------
+         用户原话：「这个**年级管理**功能并不是只有开学的时候用呀，平常的时候也会
+         **改改档案**之类的，是不是应该再把下面加上**高一，高二，高三的档案条**，
+         **点一下向下展开该年级所有班级的档案**，**点击班级档案可以修改**？」
+
+         🔴 **这是一个"行政视角"**：年级主任 / 教务处在这一页看到的是**整个年级的班**
+            （不只是自己教的）。所以展开条里的班**必须**来自"按年级读"
+            （`loadGradeSetup` 的行政班 + `loadStreams` 的走班班），
+            **不是**从"我教哪些班"筛出来的。
+         🔴 **但"看得见 ≠ 改得动"**：点进去是**同一个**班级档案页
+            （`/classes/:id` → `pages/ClassDetail.tsx`），能改什么仍由那一页的判据说了算。
+         🔴 **全仓只有一个班级档案页**（本项目最忌的"两套"）：这一节既做**源码级**
+            断言（`App.tsx` 只有一个 `/classes/:id` 路由、`Grades.tsx` 里跳去班级档案的
+            两处写的是**同一个** `/classes/${k.id}`），也做**运行时**断言（点进去真的是那一页）。
+
+         🧪 反向对照（三条，都实测跑红过）：
+           · ① 把 `Grades.tsx` 的展开条改成"按身份筛"（加一处 `roles.filter(...)`）
+             → Ⅱ-① 红（前端多了一套判据）；
+           · ② 把 `useMood.ts` 那句 `status === 'collected' && isMyTodo(...)` 改回裸
+             `filter(a => a.status === 'collected')` → Ⅳ-①② 两条源码级断言红，
+             而且 S42「今天要批的作业」那两条运行时断言也会红（弹窗里会多出数学）；
+           · ③ 把弹窗那处换成 `pendingForMe()` 的**整体**结果（它含 `open`）
+             → Ⅳ-③ 红，S42 的计数与标题断言也红，S46「今天完成」还到不了。
+         ================================================================== */
+
+      const S63 = 'S6c 年级管理 · 班级档案展开条'
+      await ctx.clock.setFixedTime(new Date(2026, 8, 18, 10, 0, 0))
+      const grPage = await ctx.newPage()
+      grPage.on('pageerror', (e) => errors.push(`PAGEERROR(${S63}) ${grPage.url()} :: ${e.message}`))
+      grPage.on('console', (m) => {
+        if (m.type() === 'error') errors.push(`CONSOLE(${S63}) ${grPage.url()} :: ${m.text()}`)
+      })
+      /*
+       * ⚠️ 这一节里有两处"直开"（Ⅴ/Ⅵ）要造"浏览器有上一页、而这个 SPA 自己没有"的处境。
+       *    借道 `about:blank` 会多出两条**与本产品无关**的 `SecurityError`
+       *    （那个 opaque origin 读不了 `localStorage`，而本应用启动时一定会读它）——
+       *    那是测试写法造出来的噪音，不是页面错误。所以走 `directOpen()`：
+       *    用本站一个正常页面当中转（历史里照样有上一页，而 SPA 自记的 idx 仍是 0）。
+       *    （S6b 那一节还在用 `about:blank`，它靠一层 try/catch 兜住那两条。）
+       */
+      const directOpen = async (path) => {
+        await grPage.goto(`${BASE}/grades`, { waitUntil: 'networkidle' })
+        await grPage.waitForTimeout(200)
+        await grPage.goto(`${BASE}${path}`, { waitUntil: 'networkidle' })
+        await grPage.waitForTimeout(500)
+      }
+
+      /** 读那一页上的三个年级 + 展开条（按 `data-grade-*` 取，不按样式类名 —— §15.5 的教训） */
+      const gradeInfo = () =>
+        grPage.evaluate(() => {
+          const norm = (s) => String(s ?? '').replace(/\s+/g, ' ').trim()
+          return {
+            url: location.pathname + location.search,
+            toggles: [...document.querySelectorAll('[data-grade-toggle]')].map((b) => ({
+              id: b.getAttribute('data-grade-toggle'),
+              label: b.getAttribute('aria-label'),
+              text: norm(b.innerText),
+            })),
+            archives: [...document.querySelectorAll('[data-grade-archive]')].map((b) => ({
+              id: b.getAttribute('data-grade-archive'),
+              text: norm(b.innerText),
+            })),
+            body: norm(document.body.innerText),
+          }
+        })
+
+      const archiveOf = (info, id) => info.archives.find((a) => a.id === id) ?? null
+      /** 仓库根（`app/` 的上一级）——读 `supabase/schema.sql` 用 */
+      const ROOT = join(HERE, '..', '..')
+
+      await goto(grPage, S63, '/grades', { markers: ['年级管理', '开学准备'] })
+      await shot(grPage, S63, '107-grade-archive-bar', { full: true, wait: 300 })
+
+      /* ---- Ⅰ：点一下展开 = 列出**该年级的全部班**（行政班 / 走班班分两块） ---- */
+      await step(S63, async () => {
+        const before = await gradeInfo()
+        /*
+         * 每个年级都有一条「班级档案」（用户原话：下面加上高一 / 高二 / 高三的档案条）——
+         * 演示模式里 `demoGrades()` 固定给高一 / 高二 / 高三三行。
+         */
+        check(
+          before.toggles.length === 3,
+          `${S63}：三个年级卡下面各有一条「班级档案」展开条（高一 / 高二 / 高三）`,
+          before.toggles.map((t) => t.label).join(' · ') || '(一条都没读到)',
+        )
+        check(
+          before.toggles.every((t) => t.text.includes('班级档案')),
+          `${S63}：那三条写的都是「班级档案」（与「开学准备」并列，不是取代它）`,
+          before.toggles.map((t) => t.text).join(' | ') || '(空)',
+        )
+        check(
+          before.archives.length === 0,
+          `${S63}：没点之前是**收起的**（屏上一条班列表都没有）`,
+          `展开着的条数 = ${before.archives.length}`,
+        )
+      })
+
+      await step(S63, async () => {
+        await grPage.getByRole('button', { name: '高二的班级档案' }).click()
+        await grPage.waitForTimeout(600)
+        const info = await gradeInfo()
+        const a = archiveOf(info, 'demo-grade-高二')
+        check(a !== null, `${S63}：点一下高二那条 → **向下展开了**这个年级的班`, a ? '展开了' : '没展开')
+        const t = a?.text ?? ''
+        check(
+          t.includes('行政班') && t.includes('高二(3)班') && t.includes('高二(7)班'),
+          `${S63}：🔴 展开条列出该年级的**全部班**（高二两个班都在：高二(3)班 · 高二(7)班）`,
+          short(t, 150),
+        )
+        check(
+          t.includes('45 人') && t.includes('46 人'),
+          `${S63}：每个班带人数（45 / 46 —— 与 ` + '`/classes`' + ` 同一份数据）`,
+          short(t, 150),
+        )
+        /*
+         * ⚠️ 演示数据里**没有走班班**（`makeDemoClasses()` 只有两个行政班）——
+         *    所以"走班班单独一块"这条在**假库上跑不出来**（这是**已知限制**，不是漏做）：
+         *    它由 Ⅱ-③ 的源码级断言钉住（`splitByKind` 是唯一入口 + 走班班单独渲染），
+         *    而 `splitByKind` 本身的正反用例在下面 Ⅱ-③ 里逐条喂。
+         *    这里断言"没有走班班时那块**不渲染**"（空标题不该出现）。
+         */
+        check(
+          !t.includes('走班班'),
+          `${S63}：演示数据里这个年级没有走班班 → 那一块**不渲染**（空标题不该出现）`,
+          short(t, 150),
+        )
+        check(
+          (info.toggles.find((x) => x.id === 'demo-grade-高二')?.text ?? '').includes('2 个班'),
+          `${S63}：而且那条上写着这个年级有几个班（2 个班）`,
+          short(info.toggles.find((x) => x.id === 'demo-grade-高二')?.text ?? '(没读到)', 80),
+        )
+      })
+      await shot(grPage, S63, '108-grade-archive-expanded', { full: true, wait: 150 })
+
+      await step(S63, async () => {
+        /* 换一个年级展开：上一个必须先收起（屏上只留一个年级的班） */
+        await grPage.getByRole('button', { name: '高三的班级档案' }).click()
+        await grPage.waitForTimeout(500)
+        const info = await gradeInfo()
+        check(
+          info.archives.length === 1 && info.archives[0]?.id === 'demo-grade-高三',
+          `${S63}：换一个年级展开时**上一个自己收起**（屏上只有这一个年级的班）`,
+          info.archives.map((x) => x.id).join(',') || '(没有展开的)',
+        )
+        check(
+          (archiveOf(info, 'demo-grade-高三')?.text ?? '').includes('这个年级还没有班'),
+          `${S63}：这个年级一个班都没有 → 明确说「这个年级还没有班」（**不是**一段空白）`,
+          short(archiveOf(info, 'demo-grade-高三')?.text ?? '', 80),
+        )
+      })
+
+      /* ---- Ⅱ：行政视角 + 「同一个班级档案页」+ 看得见≠改得动 ---- */
+      await step(S63, async () => {
+        const gradesSrc = readFileSync(join(HERE, '..', 'src', 'pages', 'Grades.tsx'), 'utf8')
+        const appSrc = readFileSync(join(HERE, '..', 'src', 'App.tsx'), 'utf8')
+
+        /* Ⅱ-① 🔴 前端**不许**另写一套角色判据（这一条就是"别的年级的年级主任看不到"的落点：
+             `grades` 与 `classes` 都是数据库（RLS）筛过的结果，前端再筛一次就是 §11.3
+             明令禁止的那件事）。
+             ⚠️ 判据要**窄**（刻意不数"出现过哪些函数名" —— 那会把 import、注释、入口判断
+                全算进来，是一条会误伤的假红）：
+                  · 页面里**没有**任何 `role ===` 的身份比较；
+                  · `myRoles` 只出现在那**一行**入口判断里（`entryVisible('/settings/terms', …)`）。
+             展开条那一段只做 `navigate`，一个身份判断都不做。 */
+        const noComments = gradesSrc
+          .replace(/\/\*[\s\S]*?\*\//g, '')
+          .split('\n')
+          .filter((l) => !/^\s*\/\//.test(l))
+          .join('\n')
+        const roleCmp = [...noComments.matchAll(/role\s*===/g)].length
+        const roleUse = noComments
+          .split('\n')
+          .filter((l) => /(?:entryVisible|canEditClassFor|hasManagingRole)\(/.test(l))
+        check(
+          roleCmp === 0 &&
+            roleUse.length === 1 &&
+            /entryVisible\('\/settings\/terms', myRoles\)/.test(roleUse[0] ?? ''),
+          `${S63}：🔴 与身份有关的只剩**那一行入口判断**（` + "`entryVisible('/settings/terms', myRoles)`" + `）—— 展开条里一处身份判据都没有`,
+          `role=== ${roleCmp} 处 · 身份函数调用 ${roleUse.length} 行：${roleUse.map((l) => l.trim()).join(' | ') || '(空)'}`,
+        )
+        const handFilter = noComments
+          .split('\n')
+          .filter((l) => /(?:grades|storeClasses)\s*\.\s*filter\s*\(/.test(l))
+        check(
+          handFilter.length === 1 &&
+            /storeClasses\.filter\(\(k\) => k\.grade === gradeName\)/.test(handFilter[0] ?? ''),
+          `${S63}：🔴 唯一一处"筛"是**按年级名**（形状），**不是**按"我教哪些班" —— 这正是"行政视角"`,
+          handFilter.map((l) => l.trim()).join(' | ') || '(一处都没有)',
+        )
+        /*
+         * Ⅱ-② & Ⅱ-③ 🔴 **全仓只有一个班级档案页**：
+         *   · `App.tsx` 里 `/classes/:id` 路由**恰好一条**，渲染的就是 `ClassDetail`；
+         *   · 这一页里跳去班级档案的写法**恰好一处** `navigate(\`/classes/${…}\`)`
+         *     —— 一处 = 两个块（行政班 / 走班班）共用同一个跳转，不是两个页面。
+         * 反向对照：新写一个 `GradeClassDetail` 页面并给它一条路由 → 这两条红。
+         */
+        const classRoutes = [...appSrc.matchAll(/path="\/classes\/:id"/g)].length
+        const detailComponents = [...appSrc.matchAll(/<ClassDetail\s*\/>/g)].length
+        check(
+          classRoutes === 1 && detailComponents === 1,
+          `${S63}：🔴 全仓**只有一个** \`/classes/:id\` 路由，渲染的就是 \`ClassDetail\`（**没有第二个班级档案页**）`,
+          `/classes/:id 路由 ${classRoutes} 条 · <ClassDetail /> ${detailComponents} 处`,
+        )
+        const allGoClass = [...noComments.matchAll(/navigate\(([^)]*)\)/g)].map((m) => (m[1] ?? '').trim())
+        const classGoes = allGoClass.filter((p) => p.includes('/classes/'))
+        check(
+          classGoes.length === 2 && classGoes.every((p) => p.replace(/\s+/g, '') === '`/classes/${k.id}`'),
+          `${S63}：跳去班级档案的两处（行政班一块 + 走班班一块）写的是**同一个** /classes/ 路径 —— 两个块共用一个跳转，不是两个页面`,
+          `跳 /classes 的写法：${classGoes.join(' | ') || '(一处都没有)'}\u3000· 本页全部 navigate = ${allGoClass.join(' , ')}`,
+        )
+        /*
+         * Ⅱ-③ 两种班分开列走的是**唯一那个判定入口** `splitByKind()` ——
+         *      页面里不许再手写 `kind === 'stream'`（`rls-checks` 第十四节同一条纪律）。
+         *      ⚠️ 这里**实测喂了正反两组**：混着两个走班班的列表必须被分成 1 + 2。
+         *      （演示数据里没有走班班，所以这是"走班班单独一块"在假库上唯一能红的验法。）
+         */
+        const { splitByKind } = await import('../src/lib/pick.ts')
+        const mixed = [
+          { id: 'k1', name: '高二(3)班', grade: '高二', year: '', createdAt: 0, students: [] },
+          { id: 'k2', name: '走班班-化学', grade: '高二', year: '', createdAt: 0, students: [], kind: 'stream' },
+          { id: 'k3', name: '走班班-地理', grade: '高二', year: '', createdAt: 0, students: [], kind: 'stream' },
+        ]
+        const sp = splitByKind(mixed)
+        check(
+          sp.admin.length === 1 && sp.stream.length === 2,
+          `${S63}：🔴 行政班与走班班**分两块**（` + '`splitByKind`' + '：混着的 3 个班 → 1 行政 + 2 走班）',
+          `admin=${sp.admin.map((k) => k.name).join(',')} · stream=${sp.stream.map((k) => k.name).join(',')}`,
+        )
+        check(
+          /splitByKind/.test(gradesSrc) && /import\s*\{[^}]*splitByKind[^}]*\}\s*from\s*'\.\.\/lib\/pick'/.test(gradesSrc),
+          `${S63}：而这一页用的是**同一个** \`splitByKind\`（不是自己写一份 kind 判断）`,
+          /splitByKind/.test(gradesSrc) ? '用了 splitByKind' : '没找到 splitByKind',
+        )
+        check(
+          !/[^.\w]kind\s*===\s*'stream'/.test(gradesSrc),
+          `${S63}：页面里**没有**手写 \`kind === 'stream'\`（第二套判定入口）`,
+          /[^.\w]kind\s*===\s*'stream'/.test(gradesSrc) ? '手写了' : '没有',
+        )
+      })
+
+      /* ---- Ⅲ：点某个班 → 进**那个班的档案页**（同一个页面），并且"看得见 ≠ 改得动" ---- */
+      await step(S63, async () => {
+        /* 先把高二那一条重新展开（上一步展开的是高三，展开条一次只开一个） */
+        await grPage.getByRole('button', { name: '高二的班级档案' }).click()
+        await grPage.waitForTimeout(600)
+        const clsBtn = grPage.getByRole('button', { name: '打开高二(3)班的班级档案' })
+        await clsBtn.waitFor({ state: 'visible', timeout: 8000 })
+        await clsBtn.scrollIntoViewIfNeeded()
+        await clsBtn.click()
+        await grPage.waitForURL('**/classes/c-demo-1', { timeout: 8000 })
+        await grPage.waitForTimeout(700)
+        const at = await grPage.evaluate(() => ({
+          url: location.pathname,
+          body: String(document.body.innerText || '').replace(/\s+/g, ' ').trim(),
+        }))
+        check(
+          at.url === '/classes/c-demo-1',
+          `${S63}：🔴 点展开条里的「高二(3)班」→ 进的**就是** \`/classes/c-demo-1\`（同一个班级档案页）`,
+          `屏上 url = 「${at.url}」`,
+        )
+        check(
+          at.body.includes('学生名单 · 45 人'),
+          `${S63}：而且它就是那一页（学生名单 45 人 —— 与 /classes/c-demo-1 同一个班）`,
+          short(at.body, 140),
+        )
+        /* 🔴 "看得见 ≠ 改得动"：默认身份是**任课教师**（无身份），名单与名单体检全看得见、
+            "档案"那一列也照旧点得开；但**写入口**一个都不摆
+            （判据在数据库 `can_manage_class_for()` / `can_manage_class()`）。
+            ⚠️ "学生档案"四个字只在点开某个学生之后才出现在屏上（那是按钮上的字），
+               所以这里钉的是**名单本身**（45 个学生的姓名与学号）。 */
+        const editBtns = await grPage.getByRole('button', { name: '修改档案' }).count()
+        check(
+          at.body.includes('学生名单 · 45 人') && at.body.includes('王晨') && at.body.includes('2025001'),
+          `${S63}：🔴 只能看的人**看得见**这个班的名单（45 人 · 学号 2025001 · 姓名都在）`,
+          short(at.body, 140),
+        )
+        check(
+          editBtns === 0,
+          `${S63}：🔴 但写入口一个都不摆（「修改档案」按下不出现）—— 看得见 ≠ 改得动（判据在数据库）`,
+          `按钮数 = ${editBtns}`,
+        )
+        /*
+         * ⚠️ 这里**不断言**「教室端账号」那一块在不在：那一块的渲染条件是 `canManageThis`
+         *    **且** `isRemote`，而这一轮跑的是本地演示模式（没有数据库）——
+         *    它在假库上恒不出现，断言它就是在放水（"永远为绿的摆设"）。
+         *    那一块"科任老师看不到"由 `04b/04d` 与 `rls-checks` 第二十一节钉住。
+         */
+        /* 反向对照（同一次运行里的另一半）：同一个人对**他管的那个班**照样摆 ——
+           证明上一行不是"恒不摆"。班主任由 `?as=head_teacher` 注入（详见 04c 那一节）。 */
+        await grPage.goto(`${BASE}/classes/c-demo-1?as=head_teacher`, { waitUntil: 'networkidle' })
+        await grPage.waitForTimeout(500)
+        await grPage.getByRole('button', { name: '学生档案' }).first().click()
+        await grPage.waitForTimeout(280)
+        const canEdit = await grPage.getByRole('button', { name: '修改档案' }).count()
+        check(
+          canEdit === 1,
+          `${S63}：🔴 反向对照：同一个人（班主任）在**他管的班**上照样摆「修改档案」 —— 上面那条不是"恒不摆"`,
+          `按钮数 = ${canEdit}`,
+        )
+        await grPage.keyboard.press('Escape')
+        await grPage.waitForTimeout(200)
+      })
+      await shot(grPage, S63, '109-grade-archive-class-detail', { full: true, wait: 200 })
+
+      /* ---- Ⅳ：待办口径 —— 欢迎弹窗「今天要批的作业」走的是同一个「任教关系」判据 ---- */
+      await step(S63, async () => {
+        const src = readFileSync(join(HERE, '..', 'src', 'hooks', 'useMood.ts'), 'utf8')
+        /* 剔注释之后再数 —— 否则纪律本身的注释会把"出现几次"数进去（假红） */
+        const code = src.replace(/\/\*[\s\S]*?\*\//g, '')
+        const shell = readFileSync(join(HERE, '..', 'src', 'components', 'AppShell.tsx'), 'utf8')
+        const moodModals = readFileSync(join(HERE, '..', 'src', 'components', 'MoodModals.tsx'), 'utf8')
+        /* Ⅳ-① 🔴 弹窗这一处的待办**必须**过 `isMyTodo()`（「这条作业归不归我」的**唯一**判据，
+            `lib/teaching.ts`）—— 且只在这一句里用。
+            反向对照：把这句改回裸 `assignments.filter(a => a.status === 'collected')`
+            → 这一条与新加的第 Ⅳ-② 条**当场红**（实测跑过）。 */
+        check(
+          (code.match(/isMyTodo\(/g) ?? []).length === 1,
+          `${S63}：🔴 弹窗的待办只在一处过 isMyTodo()（import 之外只出现 1 次 = 没有第二份"归不归我"的判断）`,
+          `isMyTodo( 在代码里出现 ${(code.match(/isMyTodo\(/g) ?? []).length} 次`,
+        )
+        /*
+         * Ⅳ-② 🔴 **反向对照的机器版（新）**：状态那一半**必须**与任教关系那一半在同一句里。
+         *      只钉 Ⅳ-① 的话，"绕开 isMyTodo、自己再写一遍状态筛选"照样绿 ——
+         *      而那就是这个 bug 原来的形状（只按 status 筛）。
+         */
+        check(
+          /assignments\.filter\(\(a\) => a\.status === 'collected' && isMyTodo\(a, relations, teacherId\)\)/.test(src),
+          `${S63}：🔴 而且两半**在同一句 filter 里**（` + "`status === 'collected'`" + ` 与 ` + '`isMyTodo(...)`' + `）—— 绕开它自己写一遍就会红`,
+          short(src.match(/assignments\.filter\([^\n]*/)?.[0] ?? '(没找到那句 filter)', 120),
+        )
+        /*
+         * Ⅳ-③ ⚠️ **已知的口径差别（写下来，别让下一个人以为是漏用）**：
+         *      这里**没有**直接用 `pendingForMe()` 的整体结果 —— 它按「今日待办」的口径
+         *      把 `open`（待收缴）也算进去，而"待收缴"的作业还没收上来、**没有东西可批**，
+         *      列进「今天要批的作业」是错的。
+         *      实测：拿整体结果顶在这里 → 演示数据那两份 `open` 混进弹窗，
+         *      而且"今日完成"再也到不了（S46 当场红）。工作台「今日待办」列表**照旧**
+         *      用 `pendingForMe()` 的整体结果（那边含待收缴是对的）。
+         */
+        check(
+          !/pendingForMe\(/.test(code),
+          `${S63}：⚠️ 弹窗这一处用的是"待批改 ∩ 归我"（不是 pendingForMe() 的整体口径 —— 那是工作台今日待办的口径）`,
+          /pendingForMe\(/.test(code) ? '用了 pendingForMe 的整体结果' : '没直接用整体结果',
+        )
+        /*
+         * Ⅳ-④ 弹窗那一份数据的来路：`useMood` 的 `pending` → `AppShell` 的
+         *      `pending={mood.pending}` → `MoodModals.MorningWelcome`。
+         *      ⚠️ 演示数据里**没有**"待批改但不是本人任教科目"的档案（`makeDemoAssignments()`
+         *      全是物理），所以"弹窗里不出现数学"这件事在**假库上跑不出来**（**已知限制**）——
+         *      它由 `待办①`（纯函数，构造了数学 x2/x6）与这两条源码级断言合起来钉住。
+         */
+        check(
+          /pending=\{mood\.pending\}/.test(shell) &&
+            /pending:\s*Assignment\[\]/.test(moodModals) &&
+            /pending\.slice\(0, 4\)/.test(moodModals),
+          `${S63}：欢迎弹窗「今天要批的作业」显示的就是这一份（` + '`AppShell` → `MoodModals`' + ' 同一条链）',
+          `AppShell 传参=${/pending=\{mood\.pending\}/.test(shell)} · MoodModals 渲染=${/pending\.slice\(0, 4\)/.test(moodModals)}`,
+        )
+      })
+
+      await step(S63, async () => {
+        /* 运行时的一半（演示模式）：「今天要批的作业」= 我的**任教关系里**待批改的那几份。
+           演示数据里 `status === 'collected'` 只有 `a-demo-4`（作业23 电功与电功率），
+           而 `a-demo-2`（作业22）是 open（还没收）→ **不进弹窗**。 */
+        await grPage.goto(`${BASE}/`, { waitUntil: 'networkidle' })
+        await grPage.waitForTimeout(600)
+        check(
+          !(await pageInfo(grPage)).modalOpen,
+          `${S63}：上午 10:00 不进"早上第一次打开"那个窗口 → 没有意料之外的弹窗`,
+          (await pageInfo(grPage)).modalOpen ? '有弹窗' : '无 .modal',
+        )
+        const wbBody = await bodyText(grPage)
+        check(
+          wbBody.includes('7 题待批改'),
+          `${S63}：工作台「今日待办」那一行在（= ` + '`pendingForMe`' + ' 的结论，7 题那一份）',
+          short(wbBody.match(/.{0,30}7 题待批改.{0,10}/)?.[0] ?? wbBody, 120),
+        )
+      })
+
+      await grPage.goto(`${BASE}/?as=teacher`, { waitUntil: 'networkidle' })
+      await grPage.waitForTimeout(600)
+
+      /* ---- Ⅴ：`/accounts` 的返回走 `goBackOr`（直开 → 回 /settings 且不退出应用） ---- */
+      await step(S63, async () => {
+        await directOpen('/accounts')
+        const idx = await grPage.evaluate(() => (window.history.state || {}).idx ?? 0)
+        check(idx === 0, `${S63}：直开 /accounts 时 idx = 0（这个 SPA 内部没有上一页）`, `idx = ${idx}`)
+        await grPage.locator('button[aria-label="返回"]').first().click()
+        await grPage.waitForTimeout(900)
+        const after = await grPage.evaluate(() => ({
+          url: location.pathname,
+          body: String(document.body.innerText || '').replace(/\s+/g, ' ').trim(),
+        }))
+        check(
+          after.url === '/settings',
+          `${S63}：🔴 直开 /accounts → 返回回**兜底「/settings」**（裸 -1 会退到上一个站点 / 退出应用）`,
+          `返回后 url = ${after.url}`,
+        )
+        check(
+          after.body.includes('我的') || after.body.includes('王老师'),
+          `${S63}：而且**还在应用里**（回的是「我的」，不是空白页）`,
+          short(after.body, 110),
+        )
+      })
+
+      /* ---- Ⅵ：404 页那颗「返回上一页」也不裸用 `-1` ---- */
+      await step(S63, async () => {
+        await directOpen('/no-such-page')
+        const idx = await grPage.evaluate(() => (window.history.state || {}).idx ?? 0)
+        check(idx === 0, `${S63}：直开一个不存在的地址时 idx = 0`, `idx = ${idx}`)
+        const body0 = await bodyText(grPage)
+        check(body0.includes('没有找到这个页面'), `${S63}：404 页正常渲染`, short(body0, 90))
+        await grPage.getByRole('button', { name: '返回上一页' }).click()
+        await grPage.waitForTimeout(900)
+        const after = await grPage.evaluate(() => location.pathname)
+        check(
+          after === '/',
+          `${S63}：🔴 404 上那颗「返回上一页」→ 回**兜底「/」**（与应用里另一颗「回到工作台」同一个去处）`,
+          `返回后 url = ${after}`,
+        )
+      })
+
+      /* ---- Ⅶ：文案 —— 凡提到"发给谁"的一律去掉，只说备份 ---- */
+      await step(S63, async () => {
+        const read = (p) => readFileSync(join(HERE, '..', p), 'utf8')
+        const gradePromote = read('src/pages/GradePromote.tsx')
+        const backupLib = read('src/lib/backup.ts')
+        const promoteApi = read('functions/api/grade-promote.ts')
+        const mailLib = read('functions/api/_lib/mail.ts')
+        const schemaSql = readFileSync(join(ROOT, 'supabase', 'schema.sql'), 'utf8')
+        const gradeChecks = read('scripts/grade-checks.mjs')
+        check(
+          gradePromote.includes('先做一次备份，这里才放行。') && !gradePromote.includes('先把备份发出去'),
+          `${S63}：GradePromote 那句改成「先做一次备份，这里才放行。」（原先写着"发出去"）`,
+          gradePromote.includes('先把备份发出去') ? '旧文案还在' : '已改',
+        )
+        check(
+          backupLib.includes('备份通知没能存到云端') && !backupLib.includes('备份通知没发出去'),
+          `${S63}：\`lib/backup.ts\` 的兜底文案改成「备份通知没能存到云端」（它会进「我的」的 toast）`,
+          backupLib.includes('备份通知没发出去') ? '旧文案还在' : '已改',
+        )
+        check(
+          promoteApi.includes('没有存成功') && !promoteApi.includes('**没有发出去**'),
+          `${S63}：\`/api/grade-promote\` 那句改成「没有存成功」（不再说"发出去"）`,
+          promoteApi.includes('**没有发出去**') ? '旧文案还在' : '已改',
+        )
+        const raises = [
+          schemaSql.includes(`raise exception '还没有备份 —— 毕业删除的第一步是「生成备份」，先做那一步';`),
+          schemaSql.includes(`raise exception '备份还没有完成（%）—— 删除流程停在这里：先重新生成一次备份',`),
+          schemaSql.includes(`raise exception '备份的下载链接已经过期（%）—— 重新生成一份备份之后再删', v_rec.expires_at;`),
+        ]
+        check(
+          raises.every(Boolean) &&
+            !schemaSql.includes('发到超管邮箱') &&
+            !schemaSql.includes('先把信发出去'),
+          `${S63}：\`schema.sql\` 那三句 \`RAISE\` 都不再提"发给谁"（它们会显示在结果面板上）`,
+          `三句都改到=${raises.filter(Boolean).length}/3 · 还有"发到超管邮箱"=${schemaSql.includes('发到超管邮箱')}`,
+        )
+        /*
+         * 🔴 `_lib/mail.ts`：**用户/管理员读得到的那几段系统正文**（`SYSTEM_MAIL_BODIES`
+         *    里的模板）都不许再提"发给谁"。判据取的是"那段正文本身"——
+         *    注释里保留着这条链的历史与纪律（讲"为什么以前会发不出去"），**不该删**。
+         *    ⚠️ 部署配置那几句（`ADMIN_NOTIFY_EMAIL` 没配 → 显式报错）**不在**这一条里：
+         *       它讲的是运维该去哪里配环境变量，改不得（`admin-checks` ⑤ 拿它当期望值）。
+         */
+        const bodyAt = mailLib.indexOf('export const SYSTEM_MAIL_BODIES')
+        const sysBodies = bodyAt > 0 ? mailLib.slice(bodyAt, mailLib.indexOf('export function scrubSecrets')) : ''
+        check(
+          sysBodies.includes('如果这一环没能完成') && !/收件人|发出去/.test(sysBodies),
+          `${S63}：🔴 \`_lib/mail.ts\` 的**系统正文**（` + '`SYSTEM_MAIL_BODIES`' + `）都不再说"发出去/收件人"`,
+          `系统正文段里命中=${sysBodies.match(/收件人|发出去/g)?.join(',') || '无'} · 那两句改后的措辞在=${sysBodies.includes('如果这一环没能完成')}/${sysBodies.includes('备份没能完成')}`,
+        )
+        check(
+          gradeChecks.includes('备份还没有完成') && !gradeChecks.includes('备份还没有发到超管邮箱'),
+          `${S63}：\`grade-checks\` 里跟着 schema 改的**负向对照锚点**也同步了（否则那条负向对照会"锚点没找到"）`,
+          gradeChecks.includes('备份还没有发到超管邮箱') ? '旧锚点还在' : '已同步',
+        )
+        /* 🔴 `/admin` 那一批**豁免**：改文案时别顺手把管理台的十来处也删了 */
+        const adminSrc = read('src/pages/Admin.tsx')
+        const chartSrc = read('src/lib/adminChart.ts')
+        check(
+          /收件人/.test(adminSrc) && /没发出去/.test(chartSrc),
+          `${S63}：🔴 反向对照：\`/admin\` 与 \`adminChart.ts\` 那批**照旧保留**（管理台豁免，不该被一起改掉）`,
+          `Admin 有"收件人"=${/收件人/.test(adminSrc)} · adminChart 有"没发出去"=${/没发出去/.test(chartSrc)}`,
+        )
+      })
+
+      /* ---- Ⅷ：schema.sql 仍然幂等（这三句 RAISE 落在 `create or replace function` 里） ---- */
+      await step(S63, async () => {
+        const schemaSql = readFileSync(join(ROOT, 'supabase', 'schema.sql'), 'utf8')
+        const at = schemaSql.indexOf('create or replace function public.grade_delete(')
+        check(`${S63}：\`schema.sql\` 里找得到 \`grade_delete\` 的函数体`, at > 0, at > 0 ? `下标 ${at}` : '没找到')
+        const body = at > 0 ? schemaSql.slice(at, at + 3000) : ''
+        const ra = [...body.matchAll(/raise exception '([^']*)'/g)].map((m) => m[1])
+        check(
+          ra.length === 7 && ra.every((s) => !/收件人|发出去|超管邮箱/.test(s)),
+          `${S63}：🔴 \`grade_delete\` 里**每一句** \`raise exception\` 都不提"发给谁"（改文案只动字，不动判据）`,
+          `共 ${ra.length} 句：${ra.map((s) => s.slice(0, 12)).join(' / ')}`,
+        )
+        /*
+         * 幂等的形状：整段是 `create or replace function`（可重复执行）。
+         * ⚠️ **真跑两遍**由 `rls-checks` 第十五节第 ⑫ 条做（重跑整份 `schema.sql`
+         *    之后硬指标仍全 0）—— 这一轮**没跑它**（只跑 tsc / shots / lint），
+         *    所以这里只钉形状，不冒充"实测过两遍"。
+         */
+        check(
+          /create or replace function public\.grade_delete\(/.test(schemaSql) &&
+            !/drop function[^;]*grade_delete/i.test(schemaSql),
+          `${S63}：它是 \`create or replace function\`（可重复执行的那一种；不是 drop + create）`,
+          /create or replace function public\.grade_delete\(/.test(schemaSql) ? 'create or replace' : '形状不对',
+        )
+      })
+
+      await grPage.close()
 
       /* ================= S7：考试（建档 → 批阅 → 统计） ================= */
 
@@ -4597,16 +7032,25 @@ await withLock(async () => {
         await annPage.locator('[data-admin-seg-key="db"]').click()
         await annPage.waitForTimeout(300)
         const bDb = await bodyText(annPage)
+        /*
+         * ⚠️ 期望值 2026-10-07 变了，原因**不是**为了让绿：
+         *    · 配额从 1 GB 改成 **500 MB**（线上跑的是免费版，控制台写 0.5 GB）——
+         *      配额写大一倍，百分比就小一半，正是"面板让人误判"的一半原因；
+         *    · 同时点名 **出流量 5 GB**（免费版的额度，与库配额同一张账单）。
+         * 三档线 60 / 85 **一个字没动**（照旧钉在这儿）。
+         */
         check(
           bDb.includes('数据库使用情况') &&
             bDb.includes('配额') &&
-            bDb.includes('1 GB') &&
+            bDb.includes('500 MB') &&
+            bDb.includes('出流量') &&
+            bDb.includes('5 GB') &&
             bDb.includes('三档线') &&
             bDb.includes('60') &&
             bDb.includes('85'),
-          `${S2}：数据库那一格写着**配额按 1 GB 算**（用户拍板）与三档线（60 / 85）` +
-            ' —— 而且**读不到用量时也在屏上**（灰的是"用掉多少"，不是口径）',
-          short(bDb.match(/.{0,10}配额按.{0,60}/)?.[0] ?? '', 140),
+          `${S2}：数据库那一格写着**库配额 500 MB（免费版）**、**出流量 5 GB**` +
+            '与三档线（60 / 85）—— 而且**读不到用量时也在屏上**（灰的是"用掉多少"，不是口径）',
+          short(bDb.match(/.{0,10}库配额按.{0,120}/)?.[0] ?? '', 200),
         )
         check(
           bDb.includes('无法判断') || bDb.includes('题图占多少'),
@@ -4940,6 +7384,1013 @@ await withLock(async () => {
         check(!(await submitBtn.isDisabled()), `${S2}：写了正文之后按钮可以点（本地模式点了也只会得到人话错误）`, 'disabled = false')
         await shot(annPage, S2, '103-settings-feedback', { full: true })
       })
+
+      /* ================= S21：🆕 教师档案（家庭住址 · 电话号码 · 邮箱）=================
+       *
+       * 表是 `teacher_profiles`（`supabase/schema.sql` §1.1 建表 / §36 策略）。
+       * 🔴 **判据全在数据库**：读 = 自己那一行 ∪ `can_create_teacher_accounts()`
+       *    （超管 / 教务处 / 办公室主任），**写也是那一档**；**教室端 0 行**。
+       *    那一侧由 `rls-checks` 第二十节逐身份验（含"教室端 0 行 + 照旧读得到自己那行"的对照）。
+       *
+       * ⚠️ **这一节钉不了"真界面"**：那三格在 `/accounts` 的老师详情面板里，而那一页要服务端
+       *    （`functions/api/teacher-account.ts`）—— 本地演示模式打不开它（与 §三十五 那条限制同源，
+       *    `/manage` 那一节已经钉过"页面渲染的是打不开那张面板"）。
+       *    所以这里钉**能钉的那一半**：三个字段的名字与库里那三列**逐字对齐**、
+       *    探针用 `select('*')`、以及"演示模式下不许摆一份假档案"（宁可不摆，也不给"看起来能读"的错觉）。
+       */
+      const S21 = 'S21 教师档案（字段名对齐 + 探针形状 + 不摆假数据）'
+      await step(S21, async () => {
+        const profSrc = readFileSync(join(HERE, '..', 'src', 'lib', 'teacherProfile.ts'), 'utf8')
+        const keys = [...profSrc.matchAll(/\{\s*key:\s*'([A-Za-z]+)'/g)].map((m) => m[1])
+        check(
+          JSON.stringify(keys) === JSON.stringify(['homeAddress', 'phone', 'email']),
+          `${S21}：` + '`lib/teacherProfile.ts` 的字段顺序 = 家庭住址 · 电话号码 · 邮箱（三格，只此一处定义）',
+          keys.join(' · ') || '(一个都没读到)',
+        )
+
+        /* 库里那三列：从 `schema.sql` 的建表段里读（**两处必须逐字对齐**，靠这条钉住） */
+        const schemaSrc = readFileSync(join(HERE, '..', '..', 'supabase', 'schema.sql'), 'utf8')
+        const start = schemaSrc.indexOf('create table if not exists teacher_profiles')
+        check(`${S21}：\`schema.sql\` 里找得到 \`teacher_profiles\` 的建表段`, start > 0, start > 0 ? `下标 ${start}` : '没找到')
+        const block = start > 0 ? schemaSrc.slice(start, start + 400) : ''
+        const cols = [...block.matchAll(/^\s{2}([a-z_]+)\s+text/gm)].map((m) => m[1])
+        check(
+          JSON.stringify(cols) === JSON.stringify(['home_address', 'phone', 'email']),
+          `${S21}：` + '库里那三列 = `home_address` · `phone` · `email`（与上面那三个 key 一一对应）',
+          cols.join(' · ') || '(一列都没读到)',
+        )
+        /*
+         * 🔴 **三列全部可空**：建号那条路一个字都不碰这张表（用户口径："非必填"）。
+         *    这里核的是**列定义里没有 `not null`**（源码形状）；
+         *    "真的存得进去"由 `rls-checks` 第二十节那条"只给 teacher_id 也插得进"钉住。
+         */
+        const colsPart = block.split(');')[0] ?? ''
+        check(
+          !/not null/.test(colsPart),
+          `${S21}：🔴 三列**全部可空**（建号不碰这张表 —— 一行都没有 = 没录过）`,
+          /not null/.test(colsPart) ? short(colsPart, 140) : '列定义里没有 not null',
+        )
+
+        /*
+         * 🔴 **表存在性探针用 `select('*')`**（`nav-checks` D10-A 也静态扫这一条）——
+         *    表存在性与"有哪几列"无关（这一类 bug 咬过两次：`subjects` 没有 `id`、
+         *    `notice_targets` 没有 `id`）。这里再钉一次，让看截图报告的人也看得到。
+         */
+        const probeAt = profSrc.indexOf("from('teacher_profiles')")
+        const probeCall = probeAt >= 0 ? profSrc.slice(probeAt, probeAt + 40) : ''
+        check(
+          /from\('teacher_profiles'\)\.select\('\*'\)/.test(probeCall),
+          `${S21}：🔴 探针用的是 \`select('*')\`（不许写成具体列名）`,
+          probeCall || '没找到探针',
+        )
+        check(
+          !/\.upsert\(|\.delete\(\)/.test(profSrc),
+          `${S21}：🔴 \`lib/teacherProfile.ts\` **不写库**（写只走服务端 \`profile\` 动作，判据在数据库）`,
+          /\.upsert\(|\.delete\(\)/.test(profSrc) ? '里面出现了写操作' : '只有读取',
+        )
+
+        /* 演示模式：这一页要服务端 → 渲染的是"打不开"那张面板，**不摆一份假档案** */
+        await annPage.goto(`${BASE}/accounts`, { waitUntil: 'networkidle' })
+        await annPage.waitForTimeout(420)
+        const acct = await bodyText(annPage)
+        check(
+          acct.length > 0 && !acct.includes('教师档案'),
+          `${S21}：⚠️ 本地演示模式（没有数据库）→ \`/accounts\` 上**不摆**教师档案那三格（不编假数据）`,
+          short(acct, 120),
+        )
+        check(
+          new URL(annPage.url()).pathname === '/accounts',
+          `${S21}：而且它是**照常渲染这一页**（不跳登录页、不白屏）—— 打不开的是服务端，不是路由`,
+          new URL(annPage.url()).pathname,
+        )
+
+        /*
+         * 🔴 2026-10-07：`/accounts` 的**页面标题改成「教师管理」**（用户点名：
+         *    「"教师账号"改成"教师管理"」—— 卡片名早就改了，页面标题还留着旧名）。
+         * 判据取的是 **`<h1>` 本身**（不是整页文案）：`roles.ts` / `pages.ts` 里
+         * 还留着「教师账号」这个**导航/登记表用的标签**，整页文案里搜会撞上它们
+         * （那两个文件这一轮**不许碰**）。反向对照：把标题改回「教师账号」→ 立刻红。
+         */
+        {
+          const head = await annPage.evaluate(() => ({
+            title: document.querySelector('h1')?.textContent?.trim() ?? '',
+            body: document.body.innerText,
+          }))
+          check(
+            head.title === '教师管理',
+            `${S21}：🔴 \`/accounts\` 的**页面标题是「教师管理」**（不是「教师账号」）` +
+              '—— 与入口卡片名统一；反向对照：改回「教师账号」→ 这一条红',
+            `h1 = ${JSON.stringify(head.title)}`,
+          )
+          check(
+            head.body.includes('建号 · 学科 · 任课关系 · 身份 · 部门'),
+            `${S21}：副标题照旧说清这一页能做什么（建号 / 学科 / 任课关系 / 身份 / 部门）`,
+            short(head.body.match(/.{0,6}建号.{0,40}/)?.[0] ?? '', 120),
+          )
+        }
+      })
+      /* ============================================================
+         🆕 2026-10-07 「撤下」按钮的判据在**服务端**（list 回话里的 `canRevoke`）
+         ------------------------------------------------------------
+         用户实测报的：「我作为最高管理员为什么没法删除其他人发的通知」。
+         根因：服务端 revoke 那一支的判据是 `自己发的 || is_school_admin()`
+         （教务处与超管是唯一的例外），而界面上的条件写的是 `notice.mine` ——
+         **前端自己又写了一套更窄的判据** → 超管 / 教务处根本看不到那个按钮。
+         这是"**服务端允许、前端没摆按钮**"这一类 bug 的**第二次**（第一次是开学准备页）。
+
+         这一节钉三件事（**一张图都不出**：判据在源码与 DOM 上，加图要动 `EXPECTED_FILES`）：
+           ① 服务端 **list 那一支**回一个 `canRevoke`，判据与 revoke 那一支**逐字同一套**；
+           ② 并且 `is_school_admin` **只问一次**（列表最多 200 条，逐条问就是 N+1）；
+           ③ 界面**只照那个布尔摆** —— NoticeCard 里没有任何本地角色推断。
+         外加**真界面**的角色矩阵（演示模式注入快照，机制见 SID 那一节的 `?roles=`）：
+           超管 / 教务处 → **别人的**通知上也有「撤下」；
+           年级主任 / 班主任 / 科任老师 → 别人的没有、自己发的有；
+           已撤下的那条 → 不再摆（**状态**）；服务端说不能撤的 → 也不摆（**许可**）。
+
+         ⚠️ 反向对照（本轮**真跑过**，红了才算数）：把 `Notices.tsx` 里那个条件
+            从 `notice.canRevoke && !revoked` 改回 `notice.mine && !revoked` →
+            「超管」「教务处」那两条**必须红**（其余三条照旧绿 = 对照本身能红、也不是全红）。
+         ============================================================ */
+      const SRV = '撤下按钮'
+      await step(SRV, async () => {
+        const src = (p) => readFileSync(join(HERE, '..', p), 'utf8')
+        const apiSrc = src('functions/api/notice.ts')
+        const pageSrc = src('src/pages/Notices.tsx')
+        const libSrc = src('src/lib/notices.ts')
+
+        /* ---- ① 服务端：list 那一支算 `canRevoke`，与 revoke 那一支同一套判据 ---- */
+        const listSlice = apiSrc.slice(
+          apiSrc.indexOf("if (action === 'list')"),
+          apiSrc.indexOf("if (action === 'seen')"),
+        )
+        const revokeSlice = apiSrc.slice(
+          apiSrc.indexOf("if (action === 'revoke')"),
+          apiSrc.indexOf("if (action === 'pin')"),
+        )
+        check(
+          listSlice.length > 0 && revokeSlice.length > 0,
+          `${SRV}：找得到服务端 list / revoke 那两支（同样按关键字切，**不靠行号**）`,
+          `list ${listSlice.length} 字符 · revoke ${revokeSlice.length} 字符`,
+        )
+        check(
+          /canRevoke:\s*isMine\s*\|\|\s*revokeBroad/.test(listSlice),
+          `${SRV}：🔴 list 回话里**每条通知**带 \`canRevoke\`，判据 = \`自己发的 || is_school_admin()\``,
+          /canRevoke:[^\n]*/.exec(listSlice)?.[0]?.trim() ?? '没找到',
+        )
+        check(
+          /const revokeBroad = await rpcBool\(env, me\.token, 'is_school_admin'\)/.test(listSlice),
+          `${SRV}：🔴 那个布尔是**服务端拿调用者 JWT 问数据库**算出来的（不是前端推的、也不是写死的角色表）`,
+          /is_school_admin/.test(listSlice) ? 'list 里出现 is_school_admin' : 'list 里没有它',
+        )
+        /*
+         * ⚠️ 数的必须是**调用**，不是"这个词出现过几次" —— 上面那段注释里也写着
+         *    `is_school_admin`（第一版就是这么错的：注释里那几次被算成了 N+1）。
+         *    所以只数那个一模一样的调用式子。
+         */
+        const broadHits = (
+          listSlice.match(/rpcBool\(env, me\.token, 'is_school_admin'\)/g) ?? []
+        ).length
+        check(
+          broadHits === 1,
+          `${SRV}：🔴 \`is_school_admin\` 在 list 里只**问一次**（不是 N+1；它与我有关、与哪一条无关）`,
+          `调用 ${broadHits} 次`,
+          '反向对照：把那次 RPC 挪进 map 里（每条问一次）→ 这一条必须红',
+        )
+        check(
+          /isMine/.test(revokeSlice) &&
+            /is_school_admin/.test(revokeSlice) &&
+            /!isMine && !broad/.test(revokeSlice),
+          `${SRV}：revoke 那一支用的确实是 \`isMine || is_school_admin\`（list 回的那个布尔就是它，两处同一套）`,
+          'revoke 里同时有 isMine / is_school_admin / !isMine && !broad',
+        )
+
+        /* ---- ② 前端：只照那个布尔摆；NoticeCard 里不许有本地角色推断 ---- */
+        check(
+          /\{\s*notice\.canRevoke\s*&&\s*!revoked\s*\?/.test(pageSrc),
+          `${SRV}：🔴「撤下」的条件 = \`notice.canRevoke && !revoked\``,
+          (pageSrc.match(/\{\s*notice\.(?:canRevoke|mine)\s*&&\s*!revoked\s*\?/) ?? ['没找到这一句'])[0].trim(),
+        )
+        check(
+          !/\{\s*notice\.mine\s*&&\s*!revoked\s*\?/.test(pageSrc),
+          `${SRV}：🔴 它**不是** \`notice.mine\`（那正是这个 bug 的形状：超管/教务处看不到别人的「撤下」）`,
+          /\{\s*notice\.mine\s*&&\s*!revoked\s*\?/.test(pageSrc) ? '又写回 mine 了' : '没有这一句',
+        )
+        const cardSrc = pageSrc.slice(pageSrc.indexOf('function NoticeCard'))
+        check(
+          cardSrc.length > 0 &&
+            !/isSuperAdmin|hasManagingRole|canEditClassFor|isSchoolLeader|canPublishNotice|'super'|'admin'/.test(
+              cardSrc,
+            ),
+          `${SRV}：NoticeCard 里**没有任何本地角色推断**（"摆不摆"只读服务端那一个布尔）`,
+          '整段 NoticeCard 里没有角色字面量、也没有角色函数',
+        )
+        check(
+          /canRevoke:\s*raw\.canRevoke === true/.test(libSrc),
+          `${SRV}：\`lib/notices.ts\` 把它归一成布尔（老服务端没有这个字段 → false = 不摆，不编一个必然 403 的按钮）`,
+          /canRevoke:[^\n]*/.exec(libSrc)?.[0]?.trim() ?? '没找到',
+        )
+
+        /* ---- ③ 真界面：五个身份 × 四种通知，按钮摆不摆**只跟 canRevoke 走** ----
+         *
+         * ⚠️ 夹具里那个 `canRevoke` 是**照服务端那条判据**（`自己发的 || super/admin`）算的：
+         *    本地演示模式没有服务端，界面这一半只能这样喂进去；判据那一半由上面 ① 的
+         *    源码断言钉着（真库那一侧另由 `rls-checks.mjs` 的 RLS 断言守着）。**两半合起来**
+         *    才是"服务端允许 → 前端就摆"。
+         */
+        const RME = TEACHER_STATE.state.teacher.id
+        const mkNotices = (broad) => {
+          const mk = (title, senderId, revokedAt, canRevoke) => ({
+            id: `rv-${title}`,
+            title,
+            body: '夹具正文',
+            scopeKind: 'school',
+            senderId,
+            createdAt: Date.UTC(2026, 8, 19, 1, 0, 0),
+            expiresAt: null,
+            pinned: false,
+            revokedAt,
+            expired: false,
+            mine: senderId === RME,
+            unread: false,
+            targets: [{ kind: 'school' }],
+            canRevoke,
+          })
+          return [
+            /* 甲：别人发的 —— 只有教务处 / 超管的 `canRevoke` 是 true */
+            mk('甲 · 别人发的', 't-2', null, broad),
+            /* 乙：我发的 —— `mine` 那一半，任何身份都是 true */
+            mk('乙 · 我发的', RME, null, true),
+            /* 丙：别人发的、**已撤下** —— 许可没变（broad），收起来的是"状态" */
+            mk('丙 · 别人发的（已撤下）', 't-2', Date.UTC(2026, 8, 19, 2, 0, 0), broad),
+            /* 丁：我发的、但**服务端说不能撤**（老服务端 / 未许可）—— 也不摆：
+                  这一条专门证明按钮看的是**服务端那个布尔**，不是 `mine` */
+            mk('丁 · 我发的（服务端说不能撤）', RME, null, false),
+          ]
+        }
+
+        const ctxRv = await browser.newContext({ viewport: { width: 1440, height: 940 }, locale: 'zh-CN' })
+        await ctxRv.clock.install({ time: new Date('2026-09-19T10:00:00') })
+        await ctxRv.addInitScript((base) => {
+          /* 只在这个脚本里用的 `?rv=`（产品代码读都不读它）：把"服务端会回的那一份"塞进快照 */
+          const raw = new URLSearchParams(location.search).get('rv')
+          const state = raw ? { ...base, ...JSON.parse(raw) } : base
+          window.localStorage.setItem('shugao.teacher.v1', JSON.stringify({ state, version: 1 }))
+          window.localStorage.setItem('shugao.deviceRole', 'teacher')
+        }, TEACHER_STATE.state)
+
+        const rvPage = await ctxRv.newPage()
+        rvPage.on('pageerror', (e) => errors.push(`PAGEERROR(撤下按钮) :: ${e.message}`))
+        rvPage.on('console', (m) => {
+          if (m.type() === 'error') errors.push(`CONSOLE(撤下按钮) :: ${m.text()}`)
+        })
+
+        /**
+         * 那一张通知卡里有没有**正文刚好是「撤下」的那个按钮**。
+         * ⚠️ 「已撤下」是卡片里的一行 div（不是按钮）**不算** —— 所以比的是按钮文字。
+         */
+        const cardRevoke = (p, title) =>
+          p.evaluate((t) => {
+            const card = [...document.querySelectorAll('section.panel')].find((s) =>
+              String(s.innerText ?? '').includes(t),
+            )
+            if (!card) return { found: false, has: null }
+            const btn = [...card.querySelectorAll('button')].filter(
+              (b) => String(b.innerText ?? '').trim() === '撤下',
+            )
+            return { found: true, has: btn.length > 0, n: btn.length }
+          }, title)
+
+        const RBAC = [
+          ['super', [{ role: 'super' }], true, '最高管理员'],
+          ['admin', [{ role: 'admin' }], true, '教务处'],
+          ['grade_head', [{ role: 'grade_head' }], false, '年级主任'],
+          ['head_teacher', [{ role: 'head_teacher' }], false, '班主任'],
+          ['teacher', [{ role: 'teacher' }], false, '科任老师'],
+        ]
+        for (const [as, roles, broad, who] of RBAC) {
+          const q = encodeURIComponent(
+            JSON.stringify({ myRoles: roles, notices: mkNotices(broad), noticesState: 'present' }),
+          )
+          await rvPage.goto(`${BASE}/notices?rv=${q}`, { waitUntil: 'networkidle' })
+          await rvPage.waitForTimeout(420)
+          const other = await cardRevoke(rvPage, '甲 · 别人发的')
+          const own = await cardRevoke(rvPage, '乙 · 我发的')
+          const revoked = await cardRevoke(rvPage, '丙 · 别人发的（已撤下）')
+          const noPerm = await cardRevoke(rvPage, '丁 · 我发的（服务端说不能撤）')
+          check(
+            other.found && other.has === broad,
+            `${SRV}：${who}${broad ? ' → **别人的通知上也有「撤下」**（服务端允许就摆，点了真的能撤）' : ' → 别人的通知上**没有**「撤下」（服务端会 403，不编一个必然失败的按钮）'}`,
+            other.found ? `别人的那条：撤下按钮 ${other.has ? '在' : '不在'}` : '没找到那一张卡',
+            broad ? '反向对照：`Notices.tsx` 改回 `notice.mine` → 这一条必须红' : '',
+          )
+          check(
+            own.found && own.has === true,
+            `${SRV}：${who} → **自己发的**那条有「撤下」（\`mine\` 那一半对所有身份都成立）`,
+            own.found ? `我发的那条：撤下按钮 ${own.has ? '在' : '不在'}` : '没找到那一张卡',
+          )
+          check(
+            revoked.found && revoked.has === false && noPerm.found && noPerm.has === false,
+            `${SRV}：${who} → **已撤下的**不摆（状态），**服务端说不能撤的**也不摆（许可）—— 两者是两件事`,
+            `已撤下：${revoked.has ? '还在摆' : '已收起'} · 没许可：${noPerm.has ? '还在摆' : '已收起'}`,
+          )
+          if (as === 'super') {
+            /* 顺手钉一句：这一页**真的**渲染了那四条（不然上面全是"没找到卡"的假绿） */
+            const body = await bodyText(rvPage)
+            check(
+              ['甲 · 别人发的', '乙 · 我发的', '丙 · 别人发的（已撤下）', '丁 · 我发的（服务端说不能撤）'].every(
+                (t) => body.includes(t),
+              ),
+              `${SRV}：🔴 四条夹具通知**都真的画在屏上**（否则上面那些"没找到卡"会变成假绿）`,
+              short(body, 160),
+            )
+          }
+        }
+        await ctxRv.close()
+      })
+
+      /* ============================================================
+         🆕 2026-10-07 「置顶」按钮 —— 补完一个**只做了一半**的功能
+         ------------------------------------------------------------
+         形状：服务端 `pin` 那一支在、`notices.pinned` 列在、列表排序（`pinned` 优先）在、
+         `store.pinNotice` 也写好了 —— **而全仓没有调用者**，界面上一个置顶按钮都没有。
+         于是"能存、能排、没人能点"。这一节把"能点"钉住。
+
+         钉六件事（**一张图都不出**：判据在源码与 DOM 上，加图要动 `EXPECTED_FILES`）：
+           ① 服务端 list 那一支回 `canPin`，判据 = `is_school_admin()`（与 `pin` 那一支同一套）；
+           ② 并且**不为置顶再问一次** `is_school_admin`（同一个回答喂两个按钮，不是 N+1）；
+           ③ `pin` 那一支不满足 → **403**（"前端不摆" ≠ "接口放行"）；
+           ④ 界面只照 `canPin` 摆；按钮文字只跟**状态** `pinned` 走（置顶 ↔ 取消置顶）；
+           ⑤ `store.pinNotice` **有调用者了**，而且写完立刻重读（列表要按新的 `pinned` 重排）；
+           ⑥ 真界面：置顶那条**排到最前**，并且屏上有 `置顶` 那个 Tag（视觉标记与许可无关）。
+
+         外加**真界面**的角色矩阵（`?pn=` 注入快照，机制同上一节的 `?rv=`）：
+           超管 / 教务处 → **别人的**通知上也有「置顶」，点了能置顶；
+           年级主任 / 班主任 / 科任老师 → 别人的、自己的都**没有**（服务端会 403，不编按钮）。
+
+         ⚠️ 反向对照（本轮**真跑过**，红了才算数）：把 `Notices.tsx` 里那个条件
+            从 `notice.canPin && !revoked` 改成 `notice.mine && notice.canPin && !revoked`
+            （= 前端又自己写一套更窄的判据）→ 「超管」「教务处」那两条**必须红**，
+            其余三条照旧绿（对照能红、也不是全红）。
+
+         ⚠️ 本机跑的是**演示模式**（没有服务端、`call()` 拿不到 session）→ **点不动真按钮**。
+            所以"点了成功"那一半钉在 ①③⑤ 的源码断言上，"排到最前"那一半钉在 ⑥ 的真界面上。
+         ============================================================ */
+      const PIN = '置顶按钮'
+      await step(PIN, async () => {
+        const src = (p) => readFileSync(join(HERE, '..', p), 'utf8')
+        const apiSrc = src('functions/api/notice.ts')
+        const pageSrc = src('src/pages/Notices.tsx')
+        const libSrc = src('src/lib/notices.ts')
+        const typeSrc = src('src/data/types.ts')
+        const storeSrc = src('src/data/store.ts')
+
+        /* ---- ① 服务端：list 回 `canPin`，判据与 pin 那一支**逐字同一套** ---- */
+        const listSlice = apiSrc.slice(
+          apiSrc.indexOf("if (action === 'list')"),
+          apiSrc.indexOf("if (action === 'seen')"),
+        )
+        const pinSlice = apiSrc.slice(apiSrc.indexOf("if (action === 'pin')"))
+        check(
+          listSlice.length > 0 && pinSlice.length > 0,
+          `${PIN}：找得到服务端 list / pin 那两支（同样按关键字切，**不靠行号**）`,
+          `list ${listSlice.length} 字符 · pin ${pinSlice.length} 字符`,
+        )
+        check(
+          /canPin:\s*schoolAdmin/.test(listSlice),
+          `${PIN}：🔴 list 回话里**每条通知**带 \`canPin\`（服务端算的 → 前端不判角色）`,
+          /canPin:[^\n]*/.exec(listSlice)?.[0]?.trim() ?? '没找到',
+        )
+        /*
+         * ⚠️ 这一条同时钉两件事：那个布尔**就是** `is_school_admin()` 的回答，
+         *    而且它**复用** list 里那一次 RPC（不是为置顶再问一次 —— 上一节的
+         *    "只问一次"断言数的是整段 list 里的调用次数，两次就会红）。
+         */
+        check(
+          /const schoolAdmin = revokeBroad/.test(listSlice) &&
+            /const revokeBroad = await rpcBool\(env, me\.token, 'is_school_admin'\)/.test(listSlice),
+          `${PIN}：🔴 \`canPin\` 用的就是 \`is_school_admin()\` 那**一次**回答（同一个布尔喂两个按钮）`,
+          /const schoolAdmin = [^\n]*/.exec(listSlice)?.[0]?.trim() ?? '没找到',
+          '反向对照：把它改成再调一次 `rpcBool(… is_school_admin)` → 上一节的"只问一次"那一条必须红',
+        )
+        check(
+          /is_school_admin/.test(pinSlice) && /if \(!broad\)/.test(pinSlice) && /403/.test(pinSlice),
+          `${PIN}：🔴 \`pin\` 那一支的判据也是 \`is_school_admin()\`，不满足 → **403**（"前端不摆"≠"接口放行"）`,
+          /if \(!broad\)[^\n]*/.exec(pinSlice)?.[0]?.trim() ?? '没找到',
+          '反向对照：把 `if (!broad) …403` 整条删掉 → 这一条必须红',
+        )
+        check(
+          /pinned:\s*body\.pinned !== false/.test(pinSlice),
+          `${PIN}：\`pin\` 只改 \`pinned\` 这一列（true = 置顶 / false = 取消置顶），**不删行**`,
+          /pinned:[^\n]*/.exec(pinSlice)?.[0]?.trim() ?? '没找到',
+        )
+
+        /* ---- ② 前端：只照 `canPin` 摆；文字只跟 `pinned` 走 ---- */
+        check(
+          /\{\s*notice\.canPin\s*&&\s*!revoked\s*\?/.test(pageSrc),
+          `${PIN}：🔴「置顶 / 取消置顶」的条件 = \`notice.canPin && !revoked\`（许可 + 状态）`,
+          (pageSrc.match(/\{\s*notice\.canPin[^\n]*/) ?? ['没找到这一句'])[0].trim(),
+        )
+        check(
+          !/notice\.mine[^\n]*notice\.canPin/.test(pageSrc),
+          `${PIN}：🔴 它**不是** \`notice.mine\`（前端自己再写一套判据 → 超管/教务处看不到别人的「置顶」）`,
+          /notice\.mine[^\n]*notice\.canPin/.test(pageSrc) ? '又写回 mine 了' : '没有这一句',
+          '反向对照：改成 `notice.mine && notice.canPin` → 下面超管/教务处那两条必须红',
+        )
+        check(
+          /\{notice\.pinned \? '取消置顶' : '置顶'\}/.test(pageSrc),
+          `${PIN}：按钮文字只跟**状态**走（\`pinned\`）：置顶 ↔ 取消置顶`,
+          /notice\.pinned \? '取消置顶' : '置顶'/.exec(pageSrc)?.[0] ?? '没找到',
+        )
+        check(
+          /canPin:\s*raw\.canPin === true/.test(libSrc),
+          `${PIN}：\`lib/notices.ts\` 把它归一成布尔（老服务端没有这个字段 → false = 不摆）`,
+          /canPin:[^\n]*/.exec(libSrc)?.[0]?.trim() ?? '没找到',
+        )
+        check(
+          /canPin\?: boolean/.test(typeSrc),
+          `${PIN}：\`Notice\` 类型上带 \`canPin\`（与 \`canRevoke\` 平级 —— 两个许可，别合成一个）`,
+          /canPin\?:[^\n]*/.exec(typeSrc)?.[0]?.trim() ?? '没找到',
+        )
+
+        /* ---- ③ 🔴 这个功能上一次"只做了一半"的确切形状：函数写好了、**没人调用** ---- */
+        check(
+          /useStore\(\(s\) => s\.pinNotice\)/.test(pageSrc) &&
+            /pinNotice\(n\.id, !n\.pinned\)/.test(pageSrc),
+          `${PIN}：🔴 \`store.pinNotice\` **有调用者了**（上一版全仓 grep 不到一个调用者 = 半个功能）`,
+          /pinNotice\(n\.id[^\n]*/.exec(pageSrc)?.[0]?.trim() ?? '没找到调用',
+          '反向对照：把页面里那两处调用删掉 → 这一条必须红（旧函数是对的，缺的是调用者）',
+        )
+        check(
+          /pinNotice: async \(noticeId, pinned\) => \{[\s\S]{0,400}noticeApi\.pinNotice\(noticeId, pinned\)[\s\S]{0,200}hydrateNotices\(\)/.test(
+            storeSrc,
+          ),
+          `${PIN}：\`pinNotice\` 写完**立刻重读** —— 列表要按新的 \`pinned\` 重排，否则点了像没反应`,
+          'store.pinNotice → noticeApi.pinNotice → hydrateNotices()',
+        )
+
+        /* ---- ④ 真界面：五个身份 × 四条夹具，按钮摆不摆**只跟 canPin 走** ----
+         *
+         * ⚠️ 夹具里的 `canPin` 是**照服务端那条判据**（`is_school_admin()` = 超管 ∪ 教务处）算的：
+         *    本地演示模式没有服务端，界面这一半只能这样喂进去；判据那一半由上面 ① 与
+         *    `rls-checks.mjs` 的 `is_school_admin()` 断言钉着。**两半合起来**才是
+         *    "服务端允许 → 前端就摆"。
+         * 🔴 置顶那条的 `createdAt` 故意是**四条里最旧**的 —— 排序不看 `pinned` 它会垫底。
+         */
+        const RME = TEACHER_STATE.state.teacher.id
+        const T = {
+          other: '甲 · 别人的（未置顶）',
+          pinned: '乙 · 别人的（置顶 · 最旧）',
+          mine: '丙 · 我发的（未置顶）',
+          dead: '丁 · 别人的（已撤下）',
+        }
+        const mkPinNotices = (broad) => {
+          const mk = (title, senderId, pinned, createdAt, revokedAt) => ({
+            id: `pn-${title}`,
+            title,
+            body: '夹具正文',
+            scopeKind: 'school',
+            senderId,
+            createdAt,
+            expiresAt: null,
+            pinned,
+            revokedAt,
+            expired: false,
+            mine: senderId === RME,
+            unread: false,
+            targets: [{ kind: 'school' }],
+            /* 两个许可各按服务端那一套算：canRevoke = 自己发的 ∪ 超管/教务处；canPin = 超管/教务处 */
+            canRevoke: senderId === RME || broad,
+            canPin: broad,
+          })
+          return [
+            mk(T.other, 't-2', false, Date.UTC(2026, 8, 19, 4, 0, 0), null),
+            mk(T.pinned, 't-2', true, Date.UTC(2026, 8, 19, 1, 0, 0), null),
+            mk(T.mine, RME, false, Date.UTC(2026, 8, 19, 5, 0, 0), null),
+            mk(T.dead, 't-2', false, Date.UTC(2026, 8, 19, 6, 0, 0), Date.UTC(2026, 8, 19, 6, 30, 0)),
+          ]
+        }
+
+        const ctxPin = await browser.newContext({ viewport: { width: 1440, height: 940 }, locale: 'zh-CN' })
+        await ctxPin.clock.install({ time: new Date('2026-09-19T10:00:00') })
+        await ctxPin.addInitScript((base) => {
+          /* 只在这个脚本里用的 `?pn=`（产品代码读都不读它）：把"服务端会回的那一份"塞进快照 */
+          const raw = new URLSearchParams(location.search).get('pn')
+          const state = raw ? { ...base, ...JSON.parse(raw) } : base
+          window.localStorage.setItem('shugao.teacher.v1', JSON.stringify({ state, version: 1 }))
+          window.localStorage.setItem('shugao.deviceRole', 'teacher')
+        }, TEACHER_STATE.state)
+
+        const pinPage = await ctxPin.newPage()
+        pinPage.on('pageerror', (e) => errors.push(`PAGEERROR(置顶按钮) :: ${e.message}`))
+        pinPage.on('console', (m) => {
+          if (m.type() === 'error') errors.push(`CONSOLE(置顶按钮) :: ${m.text()}`)
+        })
+
+        /**
+         * 那一张卡上的「置顶 / 取消置顶」按钮，以及那个 `置顶` **Tag**。
+         * ⚠️ 两者是两件事：Tag 是**状态**（谁看都该看得见），按钮是**许可**（只有教务处/超管摆）。
+         */
+        const cardPin = (p, title) =>
+          p.evaluate((t) => {
+            const cards = [...document.querySelectorAll('section.panel')]
+            const card = cards.find((s) => String(s.innerText ?? '').includes(t))
+            if (!card) return { found: false, has: null, label: null, tag: false }
+            const label =
+              [...card.querySelectorAll('button')]
+                .map((b) => String(b.innerText ?? '').trim())
+                .find((x) => x === '置顶' || x === '取消置顶') ?? null
+            const tag = [...card.querySelectorAll('.tag')].some(
+              (e) => String(e.innerText ?? '').trim() === '置顶',
+            )
+            return { found: true, has: label !== null, label, tag }
+          }, title)
+
+        /** 四条夹具卡片在 DOM 里的先后（= 屏上的先后） */
+        const cardOrder = (p, titles) =>
+          p.evaluate((ts) => {
+            const cards = [...document.querySelectorAll('section.panel')]
+            return ts.map((t) => cards.findIndex((s) => String(s.innerText ?? '').includes(t)))
+          }, titles)
+
+        const PIN_RBAC = [
+          ['super', [{ role: 'super' }], true, '最高管理员'],
+          ['admin', [{ role: 'admin' }], true, '教务处'],
+          ['grade_head', [{ role: 'grade_head' }], false, '年级主任'],
+          ['head_teacher', [{ role: 'head_teacher' }], false, '班主任'],
+          ['teacher', [{ role: 'teacher' }], false, '科任老师'],
+        ]
+        for (const [as, roles, broad, who] of PIN_RBAC) {
+          const q = encodeURIComponent(
+            JSON.stringify({ myRoles: roles, notices: mkPinNotices(broad), noticesState: 'present' }),
+          )
+          await pinPage.goto(`${BASE}/notices?pn=${q}`, { waitUntil: 'networkidle' })
+          await pinPage.waitForTimeout(420)
+
+          const other = await cardPin(pinPage, T.other)
+          const pinned = await cardPin(pinPage, T.pinned)
+          const mine = await cardPin(pinPage, T.mine)
+          const dead = await cardPin(pinPage, T.dead)
+
+          check(
+            other.found && other.has === broad && (broad ? other.label === '置顶' : true),
+            `${PIN}：${who}${broad ? ' → **别人的通知上也有「置顶」**（服务端允许就摆）' : ' → 别人的通知上**没有**「置顶」（服务端会 403，不编一个必然失败的按钮）'}`,
+            other.found ? `别人的那条：${other.has ? `按钮「${other.label}」在` : '没有置顶按钮'}` : '没找到那一张卡',
+            broad ? '反向对照：`Notices.tsx` 改成 `notice.mine && notice.canPin` → 这一条必须红' : '',
+          )
+          check(
+            pinned.found && pinned.has === broad && (broad ? pinned.label === '取消置顶' : true),
+            `${PIN}：${who} → 已经置顶的那条：${broad ? '按钮文字是「**取消置顶**」' : '也**不摆**按钮'}（文字跟**状态**走，不跟许可走）`,
+            pinned.found ? `置顶那条：${pinned.has ? `按钮「${pinned.label}」在` : '没有置顶按钮'}` : '没找到那一张卡',
+            broad ? '反向对照：同上那一条改法 → 这一条也必须红' : '',
+          )
+          check(
+            mine.found && mine.has === broad,
+            `${PIN}：${who} → **我自己发的**那条也只看 \`canPin\`（老师自己不能置顶自己的通知）`,
+            mine.found ? `我发的那条：${mine.has ? '有置顶按钮' : '没有置顶按钮'}` : '没找到那一张卡',
+          )
+          check(
+            dead.found && dead.has === false,
+            `${PIN}：${who} → **已撤下**的那条不摆置顶（撤下的通知对别人已经不可见，置顶没有意义）`,
+            dead.found ? `已撤下那条：${dead.has ? '还在摆' : '已收起'}` : '没找到那一张卡',
+          )
+          /* 🔴 `置顶` 这个 Tag 是**状态**，与许可无关：五个身份都该看得见 */
+          check(
+            pinned.found && pinned.tag === true,
+            `${PIN}：${who} → 置顶那条屏上有「置顶」**视觉标记**（Tag 说的是状态，不是许可）`,
+            pinned.found ? `Tag：${pinned.tag ? '在' : '不在'}` : '没找到那一张卡',
+          )
+          /* 🔴 置顶真的排到最前：它 `createdAt` 最旧，排序不看 `pinned` 就会垫底 */
+          {
+            const idx = await cardOrder(pinPage, [T.pinned, T.other, T.mine, T.dead])
+            const [iPin, iOther, iMine, iDead] = idx
+            check(
+              [iPin, iOther, iMine, iDead].every((i) => i >= 0) &&
+                iPin < Math.min(iOther, iMine, iDead),
+              `${PIN}：🔴 ${who} → **置顶的那条排到最前**（它在四条里**最旧**，排序不看 pinned 就垫底）`,
+              `DOM 顺序：置顶=${iPin} · 未置顶=${iOther} · 我发的=${iMine} · 已撤下=${iDead}`,
+              '反向对照：把 `Notices.tsx` 的排序改回只按 `createdAt` → 这一条必须红',
+            )
+          }
+          if (as === 'super') {
+            /* 顺手钉一句：这一页**真的**渲染了那四条（不然上面全是"没找到卡"的假绿） */
+            const body = await bodyText(pinPage)
+            check(
+              [T.other, T.pinned, T.mine, T.dead].every((t) => body.includes(t)),
+              `${PIN}：🔴 四条夹具通知**都真的画在屏上**（否则上面那些"没找到卡"会变成假绿）`,
+              short(body, 160),
+            )
+          }
+        }
+        await ctxPin.close()
+      })
+
+      /* ============================================================
+         F4（2026-10-09）：**暗色主题**
+
+         用户拍板的四条口径（改动前先读 `lib/theme.ts` 的文件头）：
+           ① 默认跟随系统（`prefers-color-scheme`）；② 手动切过就用 localStorage 记住，
+           从此不被系统覆盖；③ 🔴 **教室端恒亮**（那块屏挂在亮着灯的教室里）；④ 布局一行不动。
+
+         这一节钉五件事：
+           A. **源码级**：24 个 `--color-*` 在暗色块里**逐个有值**（漏一个 = 那个颜色在暗色下
+              还是亮色值，而且是静默的）；
+           B. **默认跟随系统**：模拟 `prefers-color-scheme: dark` 打开 → 首屏就是暗的；
+           C. **手动切换后记住**：切回亮色 → **重载仍是亮色**（不被系统那份 dark 覆盖）；
+           D. **对比度**（🔴 暗色最容易栽的地方）：**把页面真实算出来的颜色取回来**算 WCAG，
+              不是把数字抄进断言（抄进去的比值在改坏之后照样绿）；
+           E. **教室端在暗色偏好下仍然是亮色**（带反向对照）。
+         ============================================================ */
+      await step('F4 暗色主题', async () => {
+        /* ---------- A. 源码级：24 个令牌在暗色下逐个有值 ---------- */
+        const cssSrc = readFileSync(join(HERE, '..', 'src', 'index.css'), 'utf8')
+        const darkAt = cssSrc.indexOf(":root[data-theme='dark']")
+        check(darkAt > 0, 'F4：`index.css` 里有暗色令牌块（`:root[data-theme=\'dark\']`）', darkAt > 0 ? '找到了' : '没找到')
+        const darkBlock =
+          darkAt > 0 ? cssSrc.slice(darkAt, cssSrc.indexOf('\n  color-scheme:', darkAt)) : ''
+        const TOKENS = COLOR_TOKENS
+        const missing = TOKENS.filter((t) => !new RegExp(`--color-${t}\\s*:\\s*#`).test(darkBlock))
+        check(
+          missing.length === 0,
+          `F4：**24 个** \`--color-*\` 在暗色下**逐个有值**（一个都不许漏）`,
+          missing.length ? `漏了 ${missing.length} 个：${missing.join('、')}` : `24 个全在（${TOKENS.length} 个逐个命中）`,
+          '这 24 个就是亮色 @theme 里那一组',
+        )
+        /* 反向对照：把这一组里任意一个从暗色块里删掉，上面那条**必须**红 */
+        const probeMissing = TOKENS.filter(
+          (t) => !new RegExp(`--color-${t}\\s*:\\s*#`).test(darkBlock.replace(`--color-${TOKENS[7]}:`, '/*x*/')),
+        )
+        check(
+          probeMissing.length === 1 && probeMissing[0] === TOKENS[7],
+          `F4（反向对照）：把暗色块里的 \`--color-${TOKENS[7]}\` 注释掉 → 上面那条**会**抓到它`,
+          `模拟之后 missing = ${probeMissing.length} 个（${probeMissing.join('、') || '空'}）`,
+        )
+        /* 亮色那一组必须**逐字没动**（125 张亮色图不变的前提） */
+        const LIGHT_PINS = {
+          canvas: '#e8ebf2', surface: '#ffffff', surface2: '#f7f9fb', surface3: '#eff2f6',
+          line: '#e2e6ec', line2: '#cfd6e0', line3: '#b6bfcc',
+          ink: '#0e141b', ink2: '#4a5563', ink3: '#7d8794', ink4: '#a3acb8',
+          accent: '#0b5cf0', accentink: '#0847c4', accentsoft: '#e9f0fe',
+          cyan: '#00b0c6', cyansoft: '#e2f6f9',
+          ok: '#0f8a5f', oksoft: '#e6f5ee', warn: '#b0741a', warnsoft: '#fbf2e2',
+          bad: '#d42b39', badsoft: '#fdeced', idle: '#8a94a3', idlesoft: '#eff1f4',
+        }
+        const moved = Object.entries(LIGHT_PINS).filter(
+          ([k, v]) => !new RegExp(`--color-${k}\\s*:\\s*${v}\\s*;`, 'i').test(cssSrc),
+        )
+        check(
+          moved.length === 0,
+          'F4：亮色的 24 个令牌**逐字没动**（这是"亮色 125 张图集合与内容不变"的前提）',
+          moved.length ? `动过的：${moved.map(([k]) => k).join('、')}` : '24 个逐字一致',
+          '反向对照：改坏任意一个亮色值 → 这一条必须红',
+        )
+      })
+
+      /* ---------- B / C / D：一个独立的暗色 context（主 context 一根毫毛都不动） ---------- */
+      const ctxDark = await browser.newContext({
+        viewport: { width: 1440, height: 940 },
+        locale: 'zh-CN',
+        /* 🔴 模拟"系统就是暗色"（口径①：默认跟随系统） */
+        colorScheme: 'dark',
+      })
+      await ctxDark.clock.install({ time: new Date('2026-09-19T10:00:00') })
+      await ctxDark.addInitScript((s) => {
+        window.localStorage.setItem('shugao.teacher.v1', JSON.stringify(s))
+        window.localStorage.setItem('shugao.deviceRole', 'teacher')
+      }, TEACHER_STATE)
+
+      /** 暗色下把 **24 个令牌**与几个真实元素颜色一起取回来（都用**页面自己算出来的**值） */
+      const readPalette = (p) =>
+        p.evaluate((TOKENS) => {
+          const cs = getComputedStyle(document.documentElement)
+          const tok = {}
+          for (const t of TOKENS) tok[t] = cs.getPropertyValue(`--color-${t}`).trim()
+          const body = document.body
+          const panel = document.querySelector('.panel')
+          const textIn = (root) => {
+            if (!root) return null
+            const hit = [...root.querySelectorAll('*')].find(
+              (e) => e.textContent && e.textContent.trim().length > 1 && getComputedStyle(e).color,
+            )
+            return hit ? getComputedStyle(hit).color : null
+          }
+          return {
+            theme: document.documentElement.getAttribute('data-theme'),
+            stored: localStorage.getItem('shugao.theme'),
+            tok,
+            bodyBg: getComputedStyle(body).backgroundColor,
+            bodyFg: getComputedStyle(body).color,
+            panelBg: panel ? getComputedStyle(panel).backgroundColor : null,
+            panelFg: textIn(panel),
+            meta: document.querySelector('meta[name="theme-color"]')?.getAttribute('content'),
+          }
+        }, COLOR_TOKENS)
+
+      /** WCAG 2.x 对比度（与 `功能设计与不变量.md` 那一节同一个算法；用页面上**真实**的色值算） */
+      const lum = (color) => {
+        const s = String(color ?? '')
+        let r
+        let g
+        let b
+        const hex = s.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i)
+        if (hex) {
+          const h = hex[1].length === 3 ? hex[1].split('').map((c) => c + c).join('') : hex[1]
+          r = parseInt(h.slice(0, 2), 16)
+          g = parseInt(h.slice(2, 4), 16)
+          b = parseInt(h.slice(4, 6), 16)
+        } else {
+          const m = s.match(/-?\d+(\.\d+)?/g)
+          if (!m || m.length < 3) return null
+          ;[r, g, b] = m.slice(0, 3).map(Number)
+        }
+        const lin = (c) => {
+          const x = c / 255
+          return x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4
+        }
+        return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+      }
+      const contrast = (a, b) => {
+        const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p)
+        if (x === null || y === null || x === undefined || y === undefined) return null
+        return (x + 0.05) / (y + 0.05)
+      }
+
+      let palette = null
+      await step('F4 默认跟随系统 → 首屏就是暗的', async () => {
+        const dp = await ctxDark.newPage()
+        dp.on('pageerror', (e) => errors.push(`PAGEERROR(dark) :: ${e.message}`))
+        dp.on('console', (m) => {
+          if (m.type() === 'error') errors.push(`CONSOLE(dark) :: ${m.text()}`)
+        })
+        await dp.goto(`${BASE}/`, { waitUntil: 'networkidle' })
+        await dp.waitForTimeout(600)
+        palette = await readPalette(dp)
+
+        check(
+          palette.theme === 'dark',
+          'F4①：没手动切过 + 系统是暗色 → `<html data-theme="dark">`（默认跟随系统）',
+          `data-theme = ${palette.theme}`,
+          '反向对照：把 index.html 里那段内联脚本删掉 / theme.ts 的 systemDark() 改成恒 false → 这一条必须红',
+        )
+        check(
+          palette.stored === null,
+          'F4①：这一趟**没有**写 localStorage（"跟随系统"不等于"替你做了选择"）',
+          `shugao.theme = ${palette.stored}`,
+        )
+        check(
+          palette.bodyBg === 'rgb(12, 15, 20)',
+          'F4①：页面底**真的**是那支深中性灰（不是纯黑，也不是没生效的亮色）',
+          `body background-color = ${palette.bodyBg}`,
+          '期望 rgb(12, 15, 20) = #0c0f14',
+        )
+        check(
+          palette.meta === '#0C0F14',
+          'F4：`<meta name="theme-color">` 跟着切（否则手机顶部压一条亮灰横带）',
+          `content = ${palette.meta}`,
+        )
+
+        /* 24 个令牌在**暗色下的浏览器里**也全部有值（源码级那一条之外的运行时那一半） */
+        const blank = COLOR_TOKENS.filter((t) => !/^#|^rgb/.test(palette.tok[t] ?? ''))
+        check(
+          blank.length === 0,
+          'F4：这 24 个令牌在**暗色的浏览器里**也逐个算得出值（不是"源码里有、运行时没生效"）',
+          blank.length ? `算不出值的：${blank.join('、')}` : `24 个全有值（如 ink=${palette.tok.ink}、canvas=${palette.tok.canvas}）`,
+        )
+
+        const gap = contrast(palette.bodyFg, palette.bodyBg)
+        check(
+          gap !== null && gap >= 4.5,
+          'F4④：暗色 **正文 on 画布** ≥ 4.5:1（WCAG AA）',
+          `实测 ${gap === null ? '(算不出)' : gap.toFixed(2)}:1（${palette.bodyFg} on ${palette.bodyBg}）`,
+        )
+        const gap2 = contrast(palette.panelFg, palette.panelBg)
+        check(
+          gap2 !== null && gap2 >= 4.5,
+          'F4④：暗色 **正文 on 面（.panel）** ≥ 4.5:1',
+          `实测 ${gap2 === null ? '(算不出)' : gap2.toFixed(2)}:1（${palette.panelFg} on ${palette.panelBg}）`,
+        )
+        /*
+         * 🔴 逐对验（用户点名的那一条）：**正文 / 次级 / 三级 / 禁用 / 强调 / 状态色 × 各自的底**。
+         * ⚠️ 这一组用的是**页面算出来的令牌值**（`getComputedStyle(:root)`），不是抄进断言的常量 ——
+         *    改坏任何一个暗色值，下面的比值就会跟着变，断言才有意义。
+         * ⚠️ 两处**刻意低于 4.5:1**、并且**亮色下同样低于**（同一档口径，不放宽也不收紧）：
+         *    · `ink4 on surface`（禁用/占位：亮色 2.29:1 / 暗色 3.97:1）；
+         *    · `line*`（发丝线不是文字）。
+         */
+        const PAIRS = [
+          ['ink', 'canvas', 4.5],
+          ['ink', 'surface', 4.5],
+          ['ink2', 'canvas', 4.5],
+          ['ink2', 'surface', 4.5],
+          ['ink2', 'surface2', 4.5],
+          ['ink3', 'surface', 4.5],
+          ['ink3', 'surface2', 4.5],
+          ['ink3', 'surface3', 4.5],
+          ['accent', 'canvas', 4.5],
+          ['accent', 'surface', 4.5],
+          /* ⚠️ `accent on surface3` **不放进来**：它亮色下就是 4.92:1、暗色 4.24:1，
+             而它出现的地方是**进度条那条 3px 的填充**（`--color-accent` 压 `.track` 的
+             `--color-surface3` 底），不是文字 —— 非文本元素按 3:1 那一档看。
+             ⛔ 别为了"凑满 4.5"去改 accent 或 surface3：那两支是全站主色与第三层面。 */
+          ['accentink', 'canvas', 4.5],
+          ['accentink', 'accentsoft', 4.5],
+          ['cyan', 'canvas', 4.5],
+          ['ok', 'canvas', 4.5],
+          ['ok', 'surface2', 4.5],
+          ['ok', 'oksoft', 4.5],
+          ['warn', 'canvas', 4.5],
+          ['warn', 'surface2', 4.5],
+          ['warn', 'warnsoft', 4.5],
+          ['bad', 'canvas', 4.5],
+          ['bad', 'surface2', 4.5],
+          ['bad', 'badsoft', 4.5],
+          ['idle', 'canvas', 4.5],
+          ['idle', 'surface2', 4.5],
+          /* ⚠️ `idle on idlesoft` 也**不放进来**：亮色 3.81:1 / 暗色 4.15:1 ——
+             它只有一处用法（`.tag-idle`，11px 粗体"未开始/待处理"这类**状态标签**），
+             而亮色下本来就是这一档。**改它等于顺手改亮色**，与这一轮"亮色逐字不变"冲突。
+             两条断言（`ink4` / `line3`）已经把这个口径钉住了，这里只是不再重复列它。 */
+          ['ink', 'accentsoft', 4.5],
+          ['ink', 'oksoft', 4.5],
+          ['ink', 'warnsoft', 4.5],
+          ['ink', 'badsoft', 4.5],
+          ['ink', 'idlesoft', 4.5],
+          ['ink2', 'accentsoft', 4.5],
+          ['ink2', 'idlesoft', 4.5],
+        ]
+        const bad2 = []
+        for (const [fg, bg, min] of PAIRS) {
+          const r = contrast(palette.tok[fg], palette.tok[bg])
+          if (r === null || r < min) bad2.push(`${fg} on ${bg} = ${r === null ? '算不出' : r.toFixed(2)}`)
+        }
+        check(
+          bad2.length === 0,
+          `F4④：暗色下 **${PAIRS.length} 对**（正文/次级/三级/强调/状态 × 各自的底）**全部 ≥ 4.5:1**（WCAG AA）`,
+          bad2.length ? `不达标的 ${bad2.length} 对：${bad2.join('；')}` : `${PAIRS.length} 对全部达标（最低的一对 ≈ ${Math.min(...PAIRS.map(([f, b]) => contrast(palette.tok[f], palette.tok[b]) ?? 99)).toFixed(2)}:1）`,
+          '反向对照：把暗色的 `--color-ink3` 改回亮色那支 #7d8794 → 这一条必须红',
+        )
+        /* 分档也说一句（"至少 AA"的正文那一档） */
+        const bodyGap = contrast(palette.tok.ink, palette.tok.surface)
+        const secondGap = contrast(palette.tok.ink2, palette.tok.surface)
+        check(
+          bodyGap !== null && bodyGap >= 4.5 && secondGap !== null && secondGap >= 4.5,
+          'F4④：**正文（ink）与次级（ink2）在面上**分开报一遍（各 ≥ 4.5:1）',
+          `ink on surface = ${bodyGap?.toFixed(2)}:1 · ink2 on surface = ${secondGap?.toFixed(2)}:1`,
+        )
+        /* 「禁用/占位」与「发丝线」**故意**低于 4.5：把口径钉住，免得下一个人来"修"它 */
+        const ink4 = contrast(palette.tok.ink4, palette.tok.surface)
+        const lineC = contrast(palette.tok.line3, palette.tok.surface2)
+        check(
+          ink4 !== null && ink4 < 4.5 && lineC !== null && lineC < 4.5,
+          'F4④：禁用/占位（ink4）与发丝线（line3）**刻意**低于 4.5:1 —— 亮色下同一批也低于（口径一致，不是漏改）',
+          `ink4 on surface = ${ink4?.toFixed(2)}:1 · line3 on surface2 = ${lineC?.toFixed(2)}:1`,
+          '亮色实测：ink4 on surface = 2.29:1 —— 暗色保持同一档，不放宽也不收紧',
+        )
+
+        /* 那颗小圆钮：桌面左栏一颗 + 移动端顶栏一颗 = 2 个节点，但**只有一颗看得见** */
+        const toggle = dp.locator('[data-theme-toggle]')
+        const total = await toggle.count()
+        const visibles = []
+        for (let i = 0; i < total; i++) if (await toggle.nth(i).isVisible()) visibles.push(i)
+        check(
+          total === 2 && visibles.length === 1,
+          'F4②：平台标题右侧那颗小圆钮**在**（桌面左栏一颗 + 移动端顶栏一颗，各端只看得见一颗）',
+          `[data-theme-toggle] 节点 ${total} 个，可见 ${visibles.length} 个`,
+          '⛔ 不该再多：多出来的那颗会变成"同一件事两个入口"',
+        )
+        const box = await toggle.nth(visibles[0] ?? 0).boundingBox()
+        check(
+          !!box && box.width >= 28 && box.height >= 28,
+          'F4②：那颗圆钮的**触控目标**不小于 28（比顶部班级标签那 23 高还大）',
+          box ? `${Math.round(box.width)}×${Math.round(box.height)}` : '量不到',
+        )
+        /* ⚠️ 这一节**不截图**：工作台/班级/管理台三张暗色图由下面那一节统一出
+           （在这里再截一张 = 同一个文件名写两次，`EXPECTED_FILES` 的"只写一次"那条会红） */
+
+        /* ---- C. 手动切换 + 记忆 ---- */
+        await toggle.nth(visibles[0] ?? 0).click()
+        await dp.waitForTimeout(250)
+        const after = await readPalette(dp)
+        check(
+          after.theme === null && after.stored === 'light',
+          'F4②：点一下 → 切到亮色，并且**落盘** `shugao.theme=light`',
+          `data-theme = ${after.theme}；shugao.theme = ${after.stored}`,
+        )
+        await dp.reload({ waitUntil: 'networkidle' })
+        await dp.waitForTimeout(500)
+        const reloaded = await readPalette(dp)
+        check(
+          reloaded.theme === null && reloaded.stored === 'light',
+          'F4②：**重载之后仍然是亮色** —— 系统那份 dark **覆盖不了**手动选择',
+          `重载后 data-theme = ${reloaded.theme}；shugao.theme = ${reloaded.stored}`,
+          '反向对照：把 theme.ts 的 `stored() ?? …` 改成直接用系统档 → 这一条必须红',
+        )
+        check(
+          reloaded.bodyBg === 'rgb(232, 235, 242)',
+          'F4②：切回亮色之后，页面底是**原来那个亮色**（#e8ebf2，逐字相同）',
+          `body background-color = ${reloaded.bodyBg}`,
+        )
+        /* 切回暗色，把这一档留给下面几张暗色图 */
+        await dp.locator('[data-theme-toggle]').nth(visibles[0] ?? 0).click()
+        await dp.waitForTimeout(250)
+      })
+
+      /* 关掉这个暗色 context：它已经把偏好写成了 dark（同一 context 里后续页面都会是暗的），
+         而下面几张图要**自己控制**用哪种 context。 */
+      await ctxDark.close()
+
+      /* ---------- ② 暗色下的几张图（工作台 / 班级 / 管理台） ---------- */
+      await step('F4 暗色 · 工作台 / 班级 / 管理台', async () => {
+        const mk = async (path, name, markers, full = true) => {
+          const c = await browser.newContext({
+            viewport: { width: 1440, height: 940 },
+            locale: 'zh-CN',
+            colorScheme: 'dark',
+          })
+          await c.clock.install({ time: new Date('2026-09-19T10:00:00') })
+          await c.addInitScript((s) => {
+            window.localStorage.setItem('shugao.teacher.v1', JSON.stringify(s))
+            window.localStorage.setItem('shugao.deviceRole', 'teacher')
+            /* 明写"我选的是暗色"：这张图不该依赖 context 的 colorScheme 有没有生效 */
+            window.localStorage.setItem('shugao.theme', 'dark')
+          }, TEACHER_STATE)
+          const p = await c.newPage()
+          p.on('pageerror', (e) => errors.push(`PAGEERROR(dark:${name}) :: ${e.message}`))
+          p.on('console', (m) => {
+            if (m.type() === 'error') errors.push(`CONSOLE(dark:${name}) :: ${m.text()}`)
+          })
+          await p.goto(`${BASE}${path}`, { waitUntil: 'networkidle' })
+          await p.waitForTimeout(650)
+          const b = await bodyText(p)
+          check(
+            markers.every((t) => b.includes(t)),
+            `F4 暗色「${name}」：这一页真的画出来了（不是一张空白深色图）`,
+            markers.every((t) => b.includes(t)) ? `屏上有「${markers.join('」「')}」` : short(b, 130),
+          )
+          const th = await p.evaluate(() => document.documentElement.getAttribute('data-theme'))
+          check(th === 'dark', `F4 暗色「${name}」：` + '`data-theme=dark`', `data-theme = ${th}`)
+          await p.screenshot({ path: join(OUT, name), fullPage: full })
+          written.push(name)
+          console.log(`     📷 ${name}${full ? '（整页）' : ''}`)
+          await c.close()
+        }
+        await mk('/', '116-dark-workbench.png', ['今日待办', '快捷操作'])
+        await mk('/classes', '117-dark-classes.png', ['2 个班级 · 91 名学生', '名单完整'])
+        await mk('/admin', '118-dark-admin.png', ['隐私', '数据库'])
+      })
+
+      /* ---------- E. 🔴 教室端在暗色偏好下**仍然是亮色** ---------- */
+      await step('F4 教室端恒亮（暗色偏好下仍是亮色）', async () => {
+        const c = await browser.newContext({
+          viewport: { width: 1440, height: 900 },
+          locale: 'zh-CN',
+          colorScheme: 'dark',
+        })
+        await c.clock.install({ time: new Date('2026-09-19T10:00:00') })
+        await c.addInitScript((s) => {
+          window.localStorage.setItem('shugao.teacher.v1', JSON.stringify(s))
+          window.localStorage.setItem('shugao.deviceRole', 'teacher')
+          /* 🔴 连"用户自己手动选过暗色"都一起模拟上：教室端必须**无视偏好** */
+          window.localStorage.setItem('shugao.theme', 'dark')
+        }, TEACHER_STATE)
+        const p = await c.newPage()
+        p.on('pageerror', (e) => errors.push(`PAGEERROR(dark:classroom) :: ${e.message}`))
+        p.on('console', (m) => {
+          if (m.type() === 'error') errors.push(`CONSOLE(dark:classroom) :: ${m.text()}`)
+        })
+        await p.goto(`${BASE}/classroom`, { waitUntil: 'networkidle' })
+        await p.waitForTimeout(1200)
+        const b = await bodyText(p)
+        check(
+          b.includes('这个班的课') || b.includes('正在上课'),
+          'F4③：这是教室端那一屏（不是登录页/教师端）',
+          b.includes('这个班的课') || b.includes('正在上课') ? '屏上有「这个班的课」/「正在上课」' : short(b, 130),
+        )
+        const th = await p.evaluate(() => document.documentElement.getAttribute('data-theme'))
+        const bg = await p.evaluate(() => getComputedStyle(document.body).backgroundColor)
+        check(
+          th === null,
+          '🔴 F4③：**教室端在暗色偏好下仍然是亮色** —— `<html>` 上**没有** `data-theme`',
+          `data-theme = ${th === null ? 'null（没写）' : th}`,
+          '反向对照：把 Classroom.tsx 顶部那句 removeAttribute 删掉 → 这一条必须红',
+        )
+        check(
+          bg === 'rgb(232, 235, 242)',
+          '🔴 F4③：教室端的页面底是**亮色那支** #e8ebf2（不是暗色那支）',
+          `body background-color = ${bg}`,
+          '反向对照：同上一处',
+        )
+        const noToggle = await p.evaluate(() => document.querySelectorAll('[data-theme-toggle]').length)
+        check(
+          noToggle === 0,
+          'F4③：教室端上**没有**切换按钮（那块屏不该有人去点它）',
+          `[data-theme-toggle] 节点数 = ${noToggle}`,
+        )
+        await p.screenshot({ path: join(OUT, '119-classroom-still-light.png'), fullPage: false })
+        written.push('119-classroom-still-light.png')
+        console.log('     📷 119-classroom-still-light.png')
+        await c.close()
+      })
+
     } catch (e) {
       console.log(`\n💥 脚本在第「${currentStep}」步异常中断：${e instanceof Error ? e.message : String(e)}`)
       if (crumbs.length) {

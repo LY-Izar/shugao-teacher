@@ -47,7 +47,7 @@ import {
   serviceKey,
   svc,
 } from './_lib/supa'
-import { beijingStamp, sendAuditedMail } from './_lib/mail'
+import { SYSTEM_MAIL_BODIES, beijingStamp, sendAuditedMail } from './_lib/mail'
 
 const NEED_STAGE13 =
   '数据库还没跑权限函数（仓库里 supabase/schema.sql 第 13 段：is_super_admin）。' +
@@ -219,27 +219,23 @@ export async function onRequestPost(context: { request: Request; env: Env }): Pr
     }
     const id = String(ins.rows[0].id)
 
-    /* ③ 发信（**服务端构造的正文** + 用户正文；`sendMail` 里还有一道 PII 体检） */
+    /* ③ 发信（**服务端构造的正文** + 用户正文；`sendMail` 里还有一道 PII 体检）
+     *    正文从 `SYSTEM_MAIL_BODIES.feedback` 来（唯一一处构造；自测逐条喂它） */
     const mail = await sendAuditedMail(env, {
       action: 'mail.feedback',
       actorId: me.id,
       actorName: authorName,
       subject: `【树高反馈】${String(body.authorRoles ?? '').slice(0, 40) || authorName || '教师'} · ${beijingStamp()}`,
-      text: [
-        '有人从「我的 → 反馈」提了一条。',
-        '',
-        `时间：${beijingStamp()}`,
-        `账号：${authorName || me.id}`,
-        `身份：${String(body.authorRoles ?? '').slice(0, 60) || '(未提供)'}`,
-        `页面：${String(body.page ?? '').slice(0, 120) || '(未提供)'}`,
-        `环境：${String(body.env ?? '').slice(0, 20) || '(未提供)'}`,
-        contact ? `联系方式：${contact}` : '联系方式：(没留)',
-        '',
-        '正文：',
+      text: SYSTEM_MAIL_BODIES.feedback({
+        stamp: beijingStamp(),
+        authorName,
+        authorId: me.id,
+        authorRoles: String(body.authorRoles ?? '').slice(0, 60),
+        page: String(body.page ?? '').slice(0, 120),
+        env: String(body.env ?? '').slice(0, 20),
+        contact,
         text,
-        '',
-        '—— 这一条已经落库（数据库里有底），这封邮件只是提醒。',
-      ].join('\n'),
+      }),
     })
 
     /* ④ 把发信结果写回那一行（**这一步失败不影响"已送到"**，但要在库里看得出来） */

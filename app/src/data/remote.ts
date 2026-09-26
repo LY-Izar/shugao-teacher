@@ -1,8 +1,9 @@
-import { getSupabase } from '../lib/supabase'
+import { getSupabase, isRemote } from '../lib/supabase'
 import { apiMessage, postApi } from '../lib/api'
 import { asSubjectCode, subjectCodeOfName } from '../lib/subjects'
 import { compareRoster } from '../lib/roster'
 import { classKindOf } from '../lib/pick'
+import { normalizeStudentStatus } from './types'
 import { isUnassigned } from '../lib/assignments'
 import {
   currentTermId,
@@ -12,6 +13,9 @@ import {
   type Term,
 } from '../lib/terms'
 import type { Exam, ExamScore } from './examTypes'
+/* ⚠️ 只 import 类型：两张档案表的前端形状定义在 lib 里（判据在数据库），这里只做行映射 */
+import type { StudentProfile } from '../lib/studentProfile'
+import type { TeacherProfile } from '../lib/teacherProfile'
 import type {
   Assignment,
   AssignmentStatus,
@@ -1231,6 +1235,46 @@ export const callToRow = (c: CallRecord, teacherId: string): CallRow => ({
   states: c.states,
 })
 
+/**
+ * 🆕 学生档案 → `student_profiles` 行（2026-10 · 备份缺口）。
+ *
+ * ⚠️ 与 `lib/studentProfile.ts` 里那份 `profileToRow` **同一条口径**（trim；民族 / 电话 /
+ *    住址空着就写空串 —— 那三列没有 check）。
+ *    为什么这里要再来一份：备份的"回推云端"是从 `lib/backup.ts` 走的（与页面那条路
+ *    不同的调用点），而 lib 不该反向依赖页面；两份都只做"形状映射"，判据仍在数据库。
+ *
+ * 🔴 **`birth_month` 只有形状对（`YYYY-MM`）时才放进载荷**（`schema.sql` §2.1 那条 check
+ *    只收 `YYYY-MM` 或 null）。空着 / 写着「2010年5月」这类原文时**整列不出现**：
+ *    写空串会**当场被 check 拒**（整批 upsert 失败 = 刷新即丢），写 null 又会把
+ *    云端已有的出生年月抹掉 —— 与 `assignmentWriteRow` 的"认不出就不带"同一条纪律。
+ */
+export const studentProfileToRow = (p: StudentProfile): Record<string, string> => {
+  const row: Record<string, string> = {
+    student_id: p.studentId,
+    ethnicity: String(p.ethnicity ?? '').trim(),
+    guardian_phone: String(p.guardianPhone ?? '').trim(),
+    home_address: String(p.homeAddress ?? '').trim(),
+  }
+  const birth = String(p.birthMonth ?? '').trim()
+  if (/^\d{4}-\d{2}$/.test(birth)) row.birth_month = birth
+  return row
+}
+
+/**
+ * 🆕 教师档案 → `teacher_profiles` 行（2026-10 · 备份缺口）。
+ *
+ * ⚠️ 前端**不直连**这张表 upsert（见 `lib/teacherProfile.ts` 的说明：对老师本人
+ *    那条路会静默失败）。这里这份只给"从备份恢复"用，而恢复走的是
+ *    `can_create_teacher_accounts()` 那一档的判据 —— 挡下时 `pushBackupToCloud`
+ *    会因为数回 0 行而**显式报错**，不会假装成功。
+ */
+export const teacherProfileToRow = (p: TeacherProfile): Record<string, string> => ({
+  teacher_id: p.teacherId,
+  home_address: String(p.homeAddress ?? '').trim(),
+  phone: String(p.phone ?? '').trim(),
+  email: String(p.email ?? '').trim(),
+})
+
 /* ---------------- 行 → 本地 ---------------- */
 
 const rowToStudent = (r: StudentRow): Student => ({
@@ -1770,6 +1814,175 @@ export async function loadClassMembers(classIds: string[]): Promise<Record<strin
     return out
   } catch {
     return null
+  }
+}
+
+/* ---------------- 走班班成员 · **带人**的那一份（班级档案页 / 班级列表那两处要人数） ----------------
+
+   🔴 为什么必须有它（2026-10-08 修的那条链）：
+      `loadClassMembers()` 只回**学生 id**，而班级档案页与班级列表要的是**人数与姓名** ——
+      那两处原来读的是 `klass.students`（= `students.class_id`），而走班班的人
+      **永远不在 `class_id` 上**（多对多，§27.5）→ 屏上恒为「0 人」，
+      而 `analyzeRoster([])` 又把它判成「名单完整」（0 人没有缺号、没有重号）。
+      「同一份数据、两个页面自相矛盾」（开学准备说 2 人、班级页说 0 人）就是这么来的。
+
+   ⚠️ 读不到回 `known: false`（"不知道"），**不回空数组** —— 空数组在界面上是
+      "这个走班班一个人都没有"，与"没读到"是两回事（§三.4 的三态纪律）。 */
+
+export type ClassMemberPerson = {
+  id: string
+  name: string
+  studentNo: string
+  status: StudentStatus
+}
+
+export type ClassMembersResult = {
+  /** `classId → 成员行`（**读到了**才填；没读到就是 `{}`） */
+  by: Record<string, ClassMemberPerson[]>
+  /** 这一次到底读到了没有；`false` = 老库没有 `class_members` / 断网 → 界面必须写"没读到" */
+  known: boolean
+}
+
+/** 成员那一层探针（与 `ensureClassMembers()` 同一个结论，只是这里要顺手探 `students`） */
+let studentsProbe: Promise<boolean> | null = null
+
+async function probeStudents(): Promise<boolean> {
+  const sb = getSupabase()
+  if (!sb) return false
+  try {
+    const { error } = await sb.from('students').select('*').limit(1)
+    if (!error) return true
+    const code = String((error as { code?: string }).code ?? '')
+    const msg = String(error.message ?? '')
+    return !(code === '42P01' || code === '42703' || /does not exist/i.test(msg))
+  } catch {
+    return true
+  }
+}
+
+function ensureStudents(): Promise<boolean> {
+  if (!studentsProbe) studentsProbe = watchProbe('students', probeStudents(), (v) => (v ? 'present' : 'missing'))
+  return studentsProbe
+}
+
+/** 姓名的兜底：认不出的行**不猜名字**（空串比假名字好） */
+function asMemberPerson(row: Record<string, unknown>): ClassMemberPerson {
+  return {
+    id: String(row.id ?? ''),
+    name: String(row.name ?? ''),
+    studentNo: String(row.student_no ?? ''),
+    status: normalizeStudentStatus(row.status),
+  }
+}
+
+/**
+ * 一次把若干个班的成员（**带姓名 / 学号 / 状态**）读出来。
+ * 只读两张表：`class_members`（成员关系）+ `students`（姓名那一列）。
+ */
+export async function loadClassMembersFull(classIds: string[]): Promise<ClassMembersResult> {
+  const sb = getSupabase()
+  if (!sb || !classIds.length) return { by: {}, known: Boolean(sb) && !classIds.length }
+  const cols = await ensureClassMembers()
+  if (!cols.ok) return { by: {}, known: false }
+  try {
+    const m = await sb.from('class_members').select('*').in('class_id', classIds)
+    if (m.error) return { by: {}, known: false }
+    const rows = (m.data ?? []) as Array<{ class_id?: unknown; student_id?: unknown }>
+    const by: Record<string, ClassMemberPerson[]> = {}
+    for (const id of classIds) by[id] = []
+    for (const r of rows) {
+      const k = String(r.class_id ?? '')
+      const sid = String(r.student_id ?? '')
+      if (!k || !sid) continue
+      ;(by[k] ??= []).push({ id: sid, name: '', studentNo: '', status: 'active' })
+    }
+    const ids = [...new Set(rows.map((r) => String(r.student_id ?? '')).filter(Boolean))]
+    if (ids.length && (await ensureStudents())) {
+      const s = await sb.from('students').select('*').in('id', ids)
+      if (s.error) return { by: {}, known: false }
+      const info = new Map<string, ClassMemberPerson>()
+      for (const row of (s.data ?? []) as Record<string, unknown>[]) {
+        const p = asMemberPerson(row)
+        if (p.id) info.set(p.id, p)
+      }
+      for (const k of Object.keys(by)) {
+        by[k] = by[k].map((p) => info.get(p.id) ?? p).sort(compareRoster)
+      }
+    }
+    return { by, known: true }
+  } catch {
+    return { by: {}, known: false }
+  }
+}
+
+/* ---------------- 走班班的**改名 / 改成员**（2026-10-08：内测「走班班没有编辑键」）----------------
+
+   🔴 改名走 `classes_update`（`can_manage_class_for`）—— 走班班也是 `classes` 的一行，
+      所以**复用 `saveClass` 那一条路**（`classToRow` 把 kind / stream_key 原样带上，
+      不会把走班班存成行政班），**不另写一套**。
+   🔴 成员写的是 `class_members`（多对多），**不是 `students.class_id`** ——
+      走班班的人永远不在 `class_id` 上（§27.5），写错源就是恒为 0 人。
+   ⚠️ 换老师**不在这里**：那一条会同时补 `class_subjects`（§32.3），
+      走的是服务端的 `classSubjectAssign`（`lib/gradeSetup.ts` 的 `apiAssignStreamTeacher`），
+      在这里再写一次 `classes.teacher_id` 就是同一件事的第二个入口。 */
+
+/**
+ * 保存走班班这一行（**只动 `classes`**）。
+ *
+ * 返回值是"到底成没成"：`upsert` 失败时**必须上屏**（"不报错但就是不对"是这个项目最忌的形状）。
+ */
+export async function saveStreamName(k: Klass, teacherId: string): Promise<boolean> {
+  try {
+    await saveClass(k, teacherId)
+    return true
+  } catch (e) {
+    console.warn('[stream] 保存走班班失败', e, k.id)
+    return false
+  }
+}
+
+/**
+ * 手工增删走班班的成员（**整份替换**，写 `class_members`）。
+ *
+ * 走数据库的 `write_stream_members()`（`schema.sql` §37.1）—— `class_members`
+ * 对 `authenticated` 是**零写权限**的表（§27.8），所以只有函数这一条路。
+ * 判据在函数里（`can_manage_class()`）；前端**一个判据都不写**，只把失败显式带回来。
+ *
+ * ⚠️ 线上库还没跑 §37 时这个函数不存在 —— 那种情况**显式报错**（"数据库还没跑那一段"），
+ *    绝不当成"改成功了"（探针那一套纪律的另一半：`nav-checks` D10 / §三.4）。
+ */
+export type StreamMembersResult = { ok: boolean; message: string; members: number }
+
+export async function saveStreamMembers(
+  classId: string,
+  studentIds: string[],
+): Promise<StreamMembersResult> {
+  const sb = getSupabase()
+  if (!isRemote || !sb) {
+    return { ok: false, message: '本地演示模式没有数据库，成员改动不会保存。', members: 0 }
+  }
+  try {
+    const { data, error } = await sb.rpc(
+      'write_stream_members' as never,
+      { p_class_id: classId, p_student_ids: studentIds } as never,
+    )
+    if (error) {
+      const msg = String(error.message ?? '')
+      const code = String((error as { code?: string }).code ?? '')
+      /* 42883 = `undefined_function`（库还没跑 §37）· PGRST202 = PostgREST 找不到这个 RPC */
+      if (code === '42883' || code === 'PGRST202' || /could not find the function/i.test(msg)) {
+        return {
+          ok: false,
+          message: '数据库还没跑 supabase/schema.sql 第 37 段（走班班成员编辑），这一段没法保存。',
+          members: 0,
+        }
+      }
+      return { ok: false, message: msg || '成员没能保存', members: 0 }
+    }
+    const v = (data ?? {}) as Record<string, unknown>
+    return { ok: true, message: '', members: Number(v.members ?? studentIds.length) }
+  } catch (e) {
+    return { ok: false, message: e instanceof Error ? e.message : '成员没能保存', members: 0 }
   }
 }
 

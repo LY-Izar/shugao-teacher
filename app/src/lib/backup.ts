@@ -19,8 +19,12 @@ import {
   classroomToRow,
   ensureSubjectCols,
   scheduleToRow,
+  studentProfileToRow,
   studentToRow,
+  teacherProfileToRow,
 } from '../data/remote'
+import { loadStudentProfiles, ensureStudentProfiles, type StudentProfile } from './studentProfile'
+import { loadTeacherProfiles, ensureTeacherProfiles, type TeacherProfile } from './teacherProfile'
 import type {
   Assignment,
   AssignmentStatus,
@@ -56,15 +60,25 @@ import { normalizeStudentStatus } from '../data/types'
  * · **v2**（2026-09-25）：带上它们，恢复时才能把"判据"一起搬回去。
  * · **v3**（2026-09-25 · P1 序列号键迁移）：`students[].serial` 进备份，
  *   而**那 10 个字段的键的含义从"班内学号"变成"序列号"**（`schema.sql` §20 / I40）。
+ * · **v4**（2026-10 · 档案缺口）：带上 **`studentProfiles`（民族 / 出生年月 / 家长电话 /
+ *   家庭住址）** 与 **`teacherProfiles`（家庭住址 / 电话 / 邮箱）** 两张档案表。
+ *   ⚠️ **为什么升版本**（不是"顺手加的"）：v4 的文件比 v3 **多带 PII**。
+ *      若不升版本，一台还没更新的客户端会**静默接受**这份文件、**把两张档案表丢掉** ——
+ *      正是这一轮要修的"不报错但就是不对"。升到 v4 之后，老客户端会**明确报错**
+ *      （`备份版本不认识（v4）`）而不是悄悄丢档案：让老师换回新版本再导，比默默丢好。
+ *      ⚠️ 代价（认下来）：**新的 v4 文件在老客户端上导不进去** —— 这是可接受的，因为
+ *      "导进去但丢了家长电话"比"当场报错"危险得多（见 功能设计与不变量.md 的三态纪律）。
  *
- * 🔴 **v1 / v2 老备份必须永远能导入**，不许因为"淘汰了"就删掉兼容分支：
+ * 🔴 **v1 / v2 / v3 老备份必须永远能导入**，不许因为"淘汰了"就删掉兼容分支：
  *    v1 按**显示名反查字典**把学科 code 补回来（`subjectCodeOfName`），反查不出来
  *    （老师写的是「物理竞赛」这种字典外显示名）就留 `undefined`，**绝不写 `null`、也绝不猜**（I14）；
  *    v1/v2 的**档案键**按"班内学号 → 该生的序列号"反查着补（见 `upgradeKeysToSerial`），
  *    **补不到的留原键，并把条数报给用户**（"绝不静默丢弃"）。理由见 功能设计与不变量.md §12.7。
+ *    🔴 **v1/v2/v3 里没有 `studentProfiles` / `teacherProfiles` → 一律当空数组**，
+ *       **绝不许因为缺这两项就让整份备份失败**（缺 = 老文件，不是坏文件）。
  */
 export type Backup = {
-  v: 3
+  v: 4
   at: number
   teacher?: Teacher | null
   classes: Klass[]
@@ -72,6 +86,13 @@ export type Backup = {
   schedule: ScheduleItem[]
   calls: CallRecord[]
   classrooms: ClassroomClient[]
+  /**
+   * 🆕 学生档案（`student_profiles`）。**键是学生的 uuid**（与 `classes[].students[].id` 对齐），
+   * 不是序列号/学号 —— 表的主键就是 `student_id`，这一路不做第二套映射。
+   */
+  studentProfiles: StudentProfile[]
+  /** 🆕 教师档案（`teacher_profiles`）：**只有自己那一行**（读策略 = 自己 ∪ 建号那一档，别人那几行不该被卷进备份文件） */
+  teacherProfiles: TeacherProfile[]
 }
 
 export function makeBackup(s: {
@@ -81,9 +102,16 @@ export function makeBackup(s: {
   schedule: ScheduleItem[]
   calls: CallRecord[]
   classrooms: ClassroomClient[]
+  /*
+   * ⚠️ 这两项**可选**是刻意的：`Classroom.tsx` 的自动备份也是 `makeBackup(useStore.getState())`，
+   *    那台教室机读不到任何档案（它连学生档案都读不到，见 `student_profiles_visible` 的教室端守卫）
+   *    —— 它有就带、没有就空，不该让它编译不过、也不该让它编一份假档案。
+   */
+  studentProfiles?: StudentProfile[]
+  teacherProfiles?: TeacherProfile[]
 }): Backup {
   return {
-    v: 3,
+    v: 4,
     at: Date.now(),
     teacher: s.teacher,
     classes: s.classes,
@@ -91,6 +119,8 @@ export function makeBackup(s: {
     schedule: s.schedule,
     calls: s.calls,
     classrooms: s.classrooms,
+    studentProfiles: s.studentProfiles ?? [],
+    teacherProfiles: s.teacherProfiles ?? [],
   }
 }
 
@@ -325,20 +355,76 @@ function normalizeTeacher(raw: unknown): Teacher | null {
   return alignTeacherPrimarySubject(item)
 }
 
+/* ---------------- 🆕 档案（2026-10）：外部文件里的两张档案表 ----------------
+ * 与上面的 normalize* 同一条纪律：**结构补齐、明显不对的值收回来**，
+ * 但**绝不编语义**（没录过就是空串，不是"猜一个民族"）。
+ * ⚠️ 字段名与 `lib/studentProfile.ts` 的 `PROFILE_FIELDS` / `lib/teacherProfile.ts`
+ *    的 `TEACHER_PROFILE_FIELDS` **成对**；新增字段时三处一起看。
+ * ============================================================ */
+
+function normalizeStudentProfile(raw: unknown): StudentProfile | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const p = raw as Record<string, unknown>
+  const studentId = asText(p.studentId).trim()
+  // 没有 student_id 的行 = 无主的行（表的主键就是它），丢掉而不是瞎填一个（I14）
+  if (!studentId) return undefined
+  const out: StudentProfile = {
+    studentId,
+    ethnicity: asText(p.ethnicity).trim(),
+    birthMonth: asText(p.birthMonth).trim(),
+    guardianPhone: asText(p.guardianPhone).trim(),
+    homeAddress: asText(p.homeAddress).trim(),
+  }
+  return out
+}
+function normalizeTeacherProfile(raw: unknown): TeacherProfile | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const p = raw as Record<string, unknown>
+  const teacherId = asText(p.teacherId).trim()
+  if (!teacherId) return undefined
+  return {
+    teacherId,
+    homeAddress: asText(p.homeAddress).trim(),
+    phone: asText(p.phone).trim(),
+    email: asText(p.email).trim(),
+  }
+}
+
+/**
+ * 去重（主键唯一）：同一个 `student_id` 出现两次的话，回推云端那一次 upsert 会被
+ * PostgREST 拒（`ON CONFLICT DO UPDATE command cannot affect row a second time`），
+ * **整批**都落不了库。**只留第一条**（文件里的顺序 = 老师看得见的顺序，不猜哪条更新）。
+ */
+function dedupeByKey<T extends object>(rows: T[], key: keyof T): T[] {
+  const seen = new Set<string>()
+  const out: T[] = []
+  for (const r of rows) {
+    const id = String(r[key] ?? '')
+    if (!id || seen.has(id)) continue
+    seen.add(id)
+    out.push(r)
+  }
+  return out
+}
+
 /**
  * 一份备份值不值得信 —— 恢复是不可逆的，宁可不恢复也不能恢复半份。
  *
- * 🔴 **版本判据：`v1` / `v2` / `v3` 都收**，收完一律按当前版本（v3）返回。
+ * 🔴 **版本判据：`v1` / `v2` / `v3` / `v4` 都收**，收完一律按当前版本（v4）返回。
  *    v1 没有 `subjectCode` / `primarySubjectCode`，由两个 normalize 按显示名反查字典兜住；
  *    v1/v2 的**档案键是班内学号**，由 `upgradeKeysToSerial()` 补成序列号
- *    （补不到的**留原键**并把条数报出来 —— 绝不静默丢弃）。
- *    版本比当前高（v4+）或没有 `v` 的**不认**：宁可报错，也不要猜一份看不懂的结构。
+ *    （补不到的**留原键**并把条数报出来 —— 绝不静默丢弃）；
+ *    🔴 **v1/v2/v3 没有两张档案表 → 当空数组**（**缺 = 老文件，不是坏文件**，
+ *       绝不许因此让整份备份失败 —— 这是本轮补的口子，断言在 `backup-checks.mjs` 第七节）。
+ *    版本比当前高（v5+）或没有 `v` 的**不认**：宁可报错，也不要猜一份看不懂的结构。
  */
 export function validateBackup(raw: unknown): { ok: true; data: Backup } | { ok: false; why: string } {
   if (!raw || typeof raw !== 'object') return { ok: false, why: '不是有效的备份文件' }
-  // `v` 单独按 number 读：Backup['v'] 是字面量 3，直接比较 1 会被 TS 判成"不可能相等"
+  // `v` 单独按 number 读：Backup['v'] 是字面量 4，直接比较 1 会被 TS 判成"不可能相等"
   const b = raw as Omit<Partial<Backup>, 'v'> & { v?: number }
-  if (b.v !== 1 && b.v !== 2 && b.v !== 3) return { ok: false, why: `备份版本不认识（v${String(b.v)}）` }
+  if (b.v !== 1 && b.v !== 2 && b.v !== 3 && b.v !== 4) {
+    return { ok: false, why: `备份版本不认识（v${String(b.v)}）` }
+  }
   if (!Array.isArray(b.classes)) return { ok: false, why: '缺少班级数据' }
   if (!Array.isArray(b.assignments)) return { ok: false, why: '缺少作业数据' }
   const classes = b.classes.map(normalizeKlass)
@@ -367,8 +453,8 @@ export function validateBackup(raw: unknown): { ok: true; data: Backup } | { ok:
   return {
     ok: true,
     data: {
-      // 收进来的是 v1 / v2 / v3 都好，**从这里往后一律是 v3**（归一化后的结构）
-      v: 3,
+      // 收进来的是 v1 / v2 / v3 / v4 都好，**从这里往后一律是 v4**（归一化后的结构）
+      v: 4,
       at: asNumber(b.at, 0),
       teacher: normalizeTeacher(b.teacher),
       classes: upgraded.classes,
@@ -376,6 +462,22 @@ export function validateBackup(raw: unknown): { ok: true; data: Backup } | { ok:
       schedule: (Array.isArray(b.schedule) ? b.schedule : []).map(normalizeSchedule),
       calls: upgraded.calls,
       classrooms: [...roomByClass.values()],
+      /*
+       * 🆕 两张档案表：**没有这个键（v1–v3 老备份）就是空数组**，
+       * 不是报错、也不是"清空云端那两张表"（见 store.restoreBackup 与 pushBackupToCloud）。
+       */
+      studentProfiles: dedupeByKey(
+        (Array.isArray(b.studentProfiles) ? b.studentProfiles : [])
+          .map(normalizeStudentProfile)
+          .filter((x): x is StudentProfile => x !== undefined),
+        'studentId',
+      ),
+      teacherProfiles: dedupeByKey(
+        (Array.isArray(b.teacherProfiles) ? b.teacherProfiles : [])
+          .map(normalizeTeacherProfile)
+          .filter((x): x is TeacherProfile => x !== undefined),
+        'teacherId',
+      ),
     },
   }
 }
@@ -508,6 +610,97 @@ export function backupSummary(b: Backup): string {
   return `${b.classes.length} 个班级 · ${students} 名学生 · ${b.assignments.length} 份作业档案`
 }
 
+/* ---------------- 🆕 导出时把两张档案表带上（2026-10 · 数据安全缺口） ----------------
+ *
+ * 🔴 这一轮修的 bug：老师点「导出备份文件」→ **学生档案 / 教师档案两张表静默丢掉**。
+ *    服务端那条链（AES pg_dump 全库 + 年级备份 payload）是全的，**只有客户端这一条漏了**，
+ *    而客户端这条正是"换设备 / 换账号把数据搬过去"用的。
+ *
+ * 🔴 **读不到必须显式说出来**（本仓库最贵的一条纪律：不许"不报错但就是不对"）：
+ *    这两张表各有三种情形 —— 表没跑（`missing`）/ 网络抖了（`indeterminate`）/
+ *    本地演示模式（`isRemote` 构建期常量 false，两张表都读不出来）。
+ *    这些情形下导出的是**一份缺档案的备份**，老师必须知道，否则他会以为"搬过去了"。
+ *    所以这里把原因**收集起来**交给界面（`Settings.tsx` 追加一句提示），
+ *    **绝不**因此让导出失败 —— 少两张表还是比"什么都没导出"强。
+ * ============================================================ */
+
+/** 收集导出的备份里应带的档案（读不到 → 空 + 一句原因；**不抛错**） */
+async function collectProfiles(
+  teacherId: string,
+  studentIds: string[],
+): Promise<{ studentProfiles: StudentProfile[]; teacherProfiles: TeacherProfile[]; issues: string[] }> {
+  const issues: string[] = []
+
+  let studentProfiles: StudentProfile[] = []
+  try {
+    const r = await loadStudentProfiles(studentIds)
+    if (r.ok) studentProfiles = [...r.profiles.values()]
+    else issues.push(r.message)
+  } catch (e) {
+    issues.push(`读不到学生档案：${e instanceof Error ? e.message : String(e)}`)
+  }
+
+  /*
+   * 教师档案：**只带自己那一行**。
+   * `teacher_profiles_visible` = 自己 ∪ 建号那一档（超管 / 教务处 / 办公室主任），
+   * 也就是说管理员**读得到所有老师**的家庭住址 —— 但一份"换设备用"的备份文件
+   * 不该把别人的住址电话卷进来（那是把 PII 的暴露面从"一张表"放大到"一个可下载的文件"）。
+   * 所以这里传**只有一个 id** 的清单。
+   */
+  let teacherProfiles: TeacherProfile[] = []
+  if (teacherId) {
+    try {
+      const t = await loadTeacherProfiles([teacherId])
+      if (t.ok) teacherProfiles = [...t.profiles.values()]
+      else issues.push(t.message)
+    } catch (e) {
+      issues.push(`读不到教师档案：${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
+  return { studentProfiles, teacherProfiles, issues }
+}
+
+export type BackupExport = {
+  data: Backup
+  /** 读不到档案的原因（空 = 两张表都读到了）。调用方**必须**把它显式显示给老师 */
+  issues: string[]
+}
+
+/**
+ * **「导出备份文件」唯一的入口** —— 收集档案 → `makeBackup()` 一起打包。
+ *
+ * 🔴 为什么要这个包装：两张档案表在**独立的表**里、只能异步读（`student_profiles` /
+ *    `teacher_profiles`），而 `makeBackup` 是同步的。
+ *
+ * 🔴 **"往返逐字相等"这条验收怎么成立的**（本项目对导入导出的既有口径）：
+ *    导出走"**库**里的档案 + 传进来的那份快照"，而"从备份恢复后再导出"走
+ *    "**state 里那份档案**（`restoreBackup` 放进去的） + 同一份快照"。
+ *    两条路要把同一份东西读出来，前提是**库和 state 说的是同一件事** ——
+ *    这在"刚导出、刚恢复"的正常流程里成立；日常使用中库是权威，
+ *    state 里那份档案只在"刚从备份恢复过来"这一刻是权威。
+ *    ⚠️ 所以**导出前不要再去补齐 state 里的档案**（那是把两份真相混起来）：
+ *    以库为准，库读不到就照 §「读不到必须说出来」那条报在 `issues` 里。
+ */
+export async function exportWithProfiles(s: {
+  teacher: Teacher | null
+  classes: Klass[]
+  assignments: Assignment[]
+  schedule: ScheduleItem[]
+  calls: CallRecord[]
+  classrooms: ClassroomClient[]
+}): Promise<BackupExport> {
+  const studentIds = s.classes.flatMap((c) => c.students.map((x) => x.id))
+  const { studentProfiles, teacherProfiles, issues } = await collectProfiles(
+    s.teacher?.id ?? '',
+    studentIds,
+  )
+  return {
+    data: makeBackup({ ...s, studentProfiles, teacherProfiles }),
+    issues,
+  }
+}
+
 /* ---------------- ① 导出 / 导入 ---------------- */
 
 /* ============================================================
@@ -535,7 +728,7 @@ export async function notifyBackupDone(
     summary: summary.slice(0, 200),
     detail: detail.slice(0, 400),
   })
-  if (!r.ok) return { ok: false, message: apiMessage(r, '备份通知没发出去') }
+  if (!r.ok) return { ok: false, message: apiMessage(r, '备份通知没能存到云端') }
   return { ok: true }
 }
 
@@ -738,7 +931,8 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  * 一刷新 `hydrate()` 从云端重建，作业 / 课表 / 呼叫全没了 —— 静默丢数据。
  *
  * 现在按外键依赖的顺序把每一类都推上去：
- *   teachers → classes → students → assignments → schedule_items → classrooms → calls
+ *   teachers → classes → students → **student_profiles** → assignments → schedule_items
+ *   → classrooms → calls → **teacher_profiles**
  * 并且四点必须做到，否则"已恢复"就是句谎话：
  *  ① **每一批都看 error**（以前只 await，Supabase 不抛异常，错就咽掉了）；
  *  ② 用 `.select('id')` 数回真正落库的行数 —— 被 RLS 挡下的更新是 **0 行且不报错**；
@@ -747,10 +941,27 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  *  ④ **学科那两列（`subject_code` / `primary_subject_code`）认得出才带、认不出就不带**
  *     （列不存在也不带）—— 绝不写 `null`：这里写一次 null 就把云端历史数据的判据抹掉了，
  *     而且不可逆（见 §12.7）。
+ *
+ * 🆕 2026-10（档案缺口）：两张**档案**表也走这里。三条口径：
+ *   · 档案行引用不存在的学生 / 老师 → **跳过并计数**（与 ③ 同一条纪律）；
+ *   · `teacher_profiles` **只推自己那一行**（别人那几行数据库那侧本来也写不动，
+ *     而把别人的住址卷进"恢复"这个动作没有道理）；
+ *   · 表还没跑（`schema.sql` §35 / §36）→ **不试**，写进结果里说清楚。
+ *     绝不因为这两张表没跑就让"班级/学生/作业"整批恢复失败（缺表 ≠ 坏备份）。
  */
 export async function pushBackupToCloud(b: Backup, teacherId: string): Promise<string> {
   const sb = getSupabase()
   if (!sb) return '本地模式：只恢复到本机'
+  /*
+   * 🔴 **形状不对的备份在这里显式报错，不许静默**（第三节第 5 条：不可写的路径要
+   *    显式报错）。这一句是本轮加断言时被绊出来的：一份"没有 `classes`"的东西传进来，
+   *    下面 `b.classes.map` 会**抛异常**，而调用方（`Settings.tsx` 的 onClick）是
+   *    async —— 抛出去就成了一条没人接的 unhandled rejection，界面上什么都不显示，
+   *    老师会以为"恢复好了"。宁可回一句人话。
+   */
+  if (!b || !Array.isArray(b.classes) || !Array.isArray(b.assignments)) {
+    return '⚠️ 这份备份读不出班级/作业，什么都没推到云端（文件可能坏了）'
+  }
   if (!UUID_RE.test(teacherId)) {
     return '已恢复到本机，但还没登录 —— 刷新就会丢，请先登录再恢复一次'
   }
@@ -778,13 +989,19 @@ export async function pushBackupToCloud(b: Backup, teacherId: string): Promise<s
     ((b.classrooms?.length ?? 0) - keepRooms.length) +
     ((b.calls?.length ?? 0) - keepCalls.length)
 
-  const push = async (table: string, rows: object[]): Promise<{ why?: string }> => {
+  const push = async (
+    table: string,
+    rows: object[],
+    /* ⚠️ 两张档案表的主键**不是 `id`**（是 `student_id` / `teacher_id`）：数回落库行数的那一列要能指定，
+       否则 `.select('id')` 会直接报"列不存在"，看起来像"整批没落库" */
+    key = 'id',
+  ): Promise<{ why?: string }> => {
     for (let i = 0; i < rows.length; i += PUSH_BATCH) {
       const chunk = rows.slice(i, i + PUSH_BATCH)
       const { data, error } = await sb
         .from(table)
-        .upsert(chunk as never, { onConflict: 'id' })
-        .select('id')
+        .upsert(chunk as never, { onConflict: key })
+        .select(key)
       if (error) return { why: error.message }
       const got = data?.length ?? 0
       if (got < chunk.length) {
@@ -795,7 +1012,39 @@ export async function pushBackupToCloud(b: Backup, teacherId: string): Promise<s
   }
 
   const errors: string[] = []
-  const counts = { classes: 0, students: 0, assignments: 0, schedule: 0, classrooms: 0, calls: 0 }
+  const counts = {
+    classes: 0,
+    students: 0,
+    studentProfiles: 0,
+    assignments: 0,
+    schedule: 0,
+    classrooms: 0,
+    calls: 0,
+    teacherProfiles: 0,
+  }
+
+  /*
+   * 🆕 两张档案表：先按"引用的学生 / 老师在这份备份里存在吗"筛一遍。
+   * ⚠️ 学生 id 的清单来自 `b.classes`（**这才是这份备份真正会写上去的那些学生**）——
+   *    档案行挂在一个备份里没有的学生上，就是本地删学生留下的孤儿（与 ③ 同理）。
+   */
+  const studentIds = new Set(b.classes.flatMap((c) => c.students.map((s) => s.id)))
+  const keepStudentProfiles = dedupeByKey(
+    (b.studentProfiles ?? []).filter((p) => studentIds.has(p.studentId)),
+    'studentId',
+  )
+  const keepTeacherProfiles = dedupeByKey(
+    (b.teacherProfiles ?? []).filter((p) => p.teacherId === teacherId),
+    'teacherId',
+  )
+  const droppedProfiles =
+    (b.studentProfiles?.length ?? 0) -
+    keepStudentProfiles.length +
+    ((b.teacherProfiles?.length ?? 0) - keepTeacherProfiles.length)
+
+  // 表在不在（`schema.sql` §35 / §36）。`missing` = 还没跑，**不试**（试了整批 upsert 会被拒）
+  const stuProfileState = await ensureStudentProfiles()
+  const teaProfileState = await ensureTeacherProfiles()
 
   /*
    * 学科那两列在不在（与 `remote.saveAssignment` 同一套探测纪律）：
@@ -830,6 +1079,8 @@ export async function pushBackupToCloud(b: Backup, teacherId: string): Promise<s
     key: keyof typeof counts
     table: string
     rows: object[]
+    /** 主键列名（`upsert` 的 onConflict 与"数回行数"都用它） */
+    pk?: string
     /** 后面几张表都靠它的外键，没推上去就别接着推了 */
     fatal: boolean
   }> = [
@@ -851,6 +1102,18 @@ export async function pushBackupToCloud(b: Backup, teacherId: string): Promise<s
       table: 'students',
       rows: b.classes.flatMap((c) => c.students.map((s) => studentToRow(s, c.id))),
       fatal: true,
+    },
+    /*
+     * 🆕 学生档案：**紧跟学生**（外键依赖 `students.id`），且**非致命** ——
+     *    这张表没跑（§35）或这个班不归我管都不能让"班级/作业"整批恢复失败。
+     */
+    {
+      label: '学生档案',
+      key: 'studentProfiles',
+      table: 'student_profiles',
+      pk: 'student_id',
+      rows: keepStudentProfiles.map(studentProfileToRow),
+      fatal: false,
     },
     {
       label: '作业档案',
@@ -888,10 +1151,35 @@ export async function pushBackupToCloud(b: Backup, teacherId: string): Promise<s
       rows: keepCalls.map((c) => callToRow(c, teacherId)),
       fatal: false,
     },
+    /*
+     * 🆕 教师档案：放最后 —— 它挂在 `teachers` 那一行（auth 用户）上。
+     *    ⚠️ 走服务端那条路写（`lib/teacherProfile.ts` 的说明：前端直连 upsert 对自己那行
+     *    看着像存上了其实不落库），所以这一支**只在"恢复了备份的那位老师本人"这一行**有意义；
+     *    备份里的别人那几行在筛选时已经跳掉（并计入 `droppedProfiles`）。
+     *    ⚠️ 如果这里被 RLS 挡下（0 行），**会显式报错**（`push` 的第二条纪律），不静默。
+     */
+    {
+      label: '教师档案',
+      key: 'teacherProfiles',
+      table: 'teacher_profiles',
+      pk: 'teacher_id',
+      rows: keepTeacherProfiles.map(teacherProfileToRow),
+      fatal: false,
+    },
   ]
 
   for (const step of steps) {
-    const r = await push(step.table, step.rows)
+    if (step.rows.length === 0) continue
+    /* 两张档案表：表还没跑时**不试**（试了整批 upsert 会被拒），但要写进结果里说清楚 */
+    if (step.key === 'studentProfiles' && stuProfileState === 'missing') {
+      errors.push('学生档案：数据库还没跑 supabase/schema.sql 第 35 段（学生档案那一张表）')
+      continue
+    }
+    if (step.key === 'teacherProfiles' && teaProfileState === 'missing') {
+      errors.push('教师档案：数据库还没跑 supabase/schema.sql 第 36 段（教师档案那一张表）')
+      continue
+    }
+    const r = await push(step.table, step.rows, step.pk ?? 'id')
     if (r.why) {
       errors.push(`${step.label}：${r.why}`)
       if (step.fatal) break
@@ -903,15 +1191,21 @@ export async function pushBackupToCloud(b: Backup, teacherId: string): Promise<s
   const parts = [
     `${counts.classes} 个班级`,
     `${counts.students} 名学生`,
+    counts.studentProfiles ? `${counts.studentProfiles} 份学生档案` : '',
     `${counts.assignments} 份作业档案`,
     counts.schedule ? `${counts.schedule} 条课表` : '',
     counts.classrooms ? `${counts.classrooms} 台教室端` : '',
     counts.calls ? `${counts.calls} 条呼叫` : '',
+    counts.teacherProfiles ? `${counts.teacherProfiles} 份教师档案` : '',
   ].filter(Boolean)
   const tail = dropped ? `（另有 ${dropped} 条挂在备份里没有的班级/档案上，已跳过）` : ''
+  /* 🆕 孤儿档案（引用了备份里没有的学生 / 别人那几行）也照同一条口径报出来，不静默 */
+  const tailProfiles = droppedProfiles
+    ? `（另有 ${droppedProfiles} 份档案挂在备份里没有的学生/老师上，已跳过）`
+    : ''
 
   if (errors.length) {
-    return `⚠️ 本地已恢复，但回推云端没完成（现在刷新就会丢）：${errors.join('；')}｜已推上：${parts.join(' / ')}${tail}`
+    return `⚠️ 本地已恢复，但回推云端没完成（现在刷新就会丢）：${errors.join('；')}｜已推上：${parts.join(' / ')}${tail}${tailProfiles}`
   }
-  return `已恢复到云端：${parts.join(' / ')}${tail}`
+  return `已恢复到云端：${parts.join(' / ')}${tail}${tailProfiles}`
 }

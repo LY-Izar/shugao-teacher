@@ -116,7 +116,9 @@ export default function GradePromote() {
 
   return (
     <>
-      <PageHead title="提档与毕业" onBack={() => navigate('/grades')} />
+      {/* 返回「行政管理」(`/manage`)：这一页的入口是 `/manage` 那张「档案管理」卡，
+          不是「年级管理」页（写死 `/grades` 是「行政管理」页存在之前的旧世界） */}
+      <PageHead title="提档与毕业" onBack={() => navigate('/manage')} />
       <Page>
         {state === null ? (
           <Panel bodyClass="p-6 text-center">
@@ -136,7 +138,7 @@ export default function GradePromote() {
                   <div className="min-w-0 flex-1" style={{ fontSize: 13 }}>
                     {pending.map((g) => (
                       <div key={g.id}>
-                        {g.fullName}：备份已经发到超管邮箱
+                        {g.fullName}：备份已经生成
                         {g.mailAt ? `（${g.mailAt.slice(0, 10)}）` : ''}，等最高管理员确认删除。
                       </div>
                     ))}
@@ -244,9 +246,9 @@ export default function GradePromote() {
                         {g.mailOk
                           ? `备份已在 ${
                               g.mailAt ? g.mailAt.slice(0, 16).replace('T', ' ') : ''
-                            } 发到超管邮箱。`
+                            } 已完成备份。`
                           : g.backupAt
-                            ? `备份生成过，但没有发出去${g.mailReason ? `（${g.mailReason}）` : ''}。`
+                            ? `备份生成过，但没能存到云端${g.mailReason ? `（${g.mailReason}）` : ''}。`
                             : '还没有备份。'}
                       </div>
                       <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -254,8 +256,8 @@ export default function GradePromote() {
                           {busy === `backup:${g.id}`
                             ? '正在备份…'
                             : g.mailOk || g.backupAt
-                              ? '重新备份并再发一次'
-                              : '生成备份并发到超管邮箱'}
+                              ? '重新备份'
+                              : '生成备份'}
                         </Button>
                         {g.removalId ? (
                           <Button
@@ -296,7 +298,7 @@ export default function GradePromote() {
                             </div>
                             {!g.canDelete ? (
                               <div className="mt-2" style={{ fontSize: 12, color: 'var(--color-ink3)' }}>
-                                先把备份发出去，这里才放行。
+                                先做一次备份，这里才放行。
                               </div>
                             ) : null}
                             <div className="mt-2">

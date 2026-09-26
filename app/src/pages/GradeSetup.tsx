@@ -47,7 +47,7 @@ import {
   type StreamGroupRow,
   type SubjectWriteRow,
 } from '../lib/gradeSetup'
-import { listTeachers, setRole, type DirTeacher } from '../lib/accounts'
+import { listTeachers, setRole, teachableOnly, type DirTeacher } from '../lib/accounts'
 
 /* ============================================================
    「开学准备」页 `/grades/:id/setup`（`年级管理与选科走班方案.md` §4.3.2）
@@ -1471,7 +1471,7 @@ function RolesSheet({
       <div className="mt-2 flex gap-2">
         <select className="input" value={gradeHead} onChange={(e) => setGradeHead(e.target.value)}>
           <option value="">选一位老师…</option>
-          {teachers.map((t) => (
+          {teachableOnly(teachers).map((t) => (
             <option key={t.id} value={t.id}>
               {t.name}
             </option>
@@ -1495,7 +1495,7 @@ function RolesSheet({
         <div className="flex gap-2">
           <select className="input" value={headTeacher} onChange={(e) => setHeadTeacher(e.target.value)}>
             <option value="">选一位老师…</option>
-            {teachers.map((t) => (
+            {teachableOnly(teachers).map((t) => (
               <option key={t.id} value={t.id}>
                 {t.name}
               </option>
@@ -1594,7 +1594,7 @@ function RolesSheet({
         <div className="mt-2 flex flex-wrap gap-2">
           <select className="input" value={bulkTeacher} onChange={(e) => setBulkTeacher(e.target.value)}>
             <option value="">选老师…</option>
-            {teachers.map((t) => (
+            {teachableOnly(teachers).map((t) => (
               <option key={t.id} value={t.id}>
                 {t.name}
               </option>
@@ -1810,7 +1810,7 @@ function StreamPanel({
                   }}
                 >
                   <option value="">选老师…</option>
-                  {teachers.map((t) => (
+                  {teachableOnly(teachers).map((t) => (
                     <option key={t.id} value={t.id}>
                       {t.name}
                       {t.subject ? `（${t.subject}）` : ''}

@@ -42,8 +42,7 @@
  */
 
 import {
-  MAIL_DAILY_CAP,
-  MAIL_FROM,
+  SYSTEM_MAIL_BODIES,
   beijingStamp,
   mailConfigured,
   sendAuditedMail,
@@ -373,25 +372,23 @@ export async function onRequestPost(context: {
         action: 'mail.announcement',
         actorId: me.id,
         subject: `【树高公告】${f.title.slice(0, 60)} · ${beijingStamp()}`,
-        text: [
-          '你在管理台发布了一条全站公告。',
-          '',
-          `标题：${f.title}`,
-          `等级：${f.level} · 弹窗：${f.popup} · 置顶：${f.pin ? '是' : '否'}`,
-          `生效：${f.from ?? '立即'} → ${f.to ?? '不过期'}`,
-          `时间：${beijingStamp()}`,
-          '',
-          '正文：',
-          f.text,
-          '',
-          '⚠️ 这封邮件是**给管理员的一封留档**，不是群发：',
-          `   Resend 未验域名时发件人只能是 ${MAIL_FROM}，且只能发给账号所有者本人。`,
-          `   今天的邮件配额上限是 ${MAIL_DAILY_CAP} 封/天（Resend 免费额度 100 封/天）。`,
-          /* ⚠️ 措辞避开那四个触发词（成绩 / 分数 / 得分 / 排名 / 名次）——
-             它们会让 `looksLikeStudentData()` 把**这句免责声明自己**拦下来
-             （`admin-checks` ⑤ 的反向对照抓到过同一个形状）。 */
-          '⚠️ 本邮件正文里**没有学生个人信息**（发信助手发出前会体检一遍，命中就不发）。',
-        ].join('\n'),
+        /*
+         * 🔴 正文从 `SYSTEM_MAIL_BODIES.announcement` 来（**唯一一处构造**）。
+         *    ⚠️ 这里原来在正文里印 `MAIL_FROM` 的值 —— 2026-10-06 逐条体检当场抓到：
+         *       它会被自己的"邮箱形状"判据拦下（`pii_blocked`），公告那一半永远发不出去。
+         *       地址只在服务端常量里，正文不复述（见 `_lib/mail.ts` 那段说明）。
+         */
+        text: SYSTEM_MAIL_BODIES.announcement({
+          stamp: beijingStamp(),
+          sentToday: null,
+          title: f.title,
+          level: f.level,
+          popup: f.popup,
+          pin: f.pin,
+          from: f.from,
+          to: f.to,
+          text: f.text,
+        }),
       })
       mail = { ok: r.ok, reason: r.ok ? '' : r.reason }
       /*

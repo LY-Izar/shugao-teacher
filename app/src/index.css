@@ -41,11 +41,183 @@
   --color-idle: #8a94a3;
   --color-idlesoft: #eff1f4;
 
+  /* ---------- 🆕 2026-10-09 F4：**派生语义色** ----------
+   *
+   * 这九个不是"多造颜色"，而是把原来**散在 26 个文件里写死的 hex** 收编成有名字的语义：
+   * 每一个的亮色值都**逐字等于**它收编掉的那个 hex（所以亮色一个像素都不会变 ——
+   * 这是本轮"125 张亮色图逐字不变"能成立的前提）。暗色值在下面 `:root[data-theme='dark']` 里。
+   *
+   *   onaccent / onok / onwarn / onbad —— **压在实心状态块上的字**。
+   *     亮色下都等于 `#fff`（收编的那 20 来处原来就是 `#fff`）；
+   *     ⚠️ 暗色下**不能**还是白：暗色的 ok #35c98a / warn #e0ab4e 都是**提亮过的**，
+   *        白字压上去只有 1.9~2.6:1 —— 必须换成**近黑**那一支（见暗色块里的注释）。
+   *   okink / okline / badink / badline —— "浅底 + 深字"那一挂（`--color-oksoft` 上写 `#0b6b4a` 之类）。
+   *   warnink / warnink2 / warnline —— 暖黄那一挂（`#8a5a12` / `#96702f` / `#ecd9ae`）；
+   *     它是全站出现最多的一组（工作台演示提示、导入告警、维护横幅…）。
+   *   infoline —— 淡蓝底上的描边（`#c3d6fb`，只有日程页与教室端在用）。
+   *   focus / overscroll / grid —— 焦点圈 / 浏览器越界回弹底 / 背景网格线。
+   *   scrim / scrimstrong —— 遮罩的**颜色分量**（`rgb(var(--color-scrim) / .3)` 这样用），
+   *     暗色下遮罩要更黑才压得住（`--color-scrimstrong` 是那几张"近全屏压黑"的浮层）。
+   *   shadow / shadowsoft —— 投影的颜色分量（同上）。暗色下投影仍然要**更深**，
+   *     但页面本身已经黑了 → 靠"更深的黑 + 低透明度"而不是原来的 0.05~0.38。
+   *   glasshi / glassline —— 液态玻璃的**高光/描边那一层**（`AppShell` 的内联样式与
+   *     `.rail-pill` 共用）。亮色是"近白"，暗色必须换成"低透明度白"——
+   *     不然那块高亮会变成整条控件里最亮的一坨（详见下面 `.glass-light` 的暗色覆盖）。
+   */
+  --color-onaccent: #ffffff;
+  --color-onok: #ffffff;
+  --color-onwarn: #ffffff;
+  --color-onbad: #ffffff;
+  --color-okink: #0b6b4a;
+  --color-okline: #b9e2cf;
+  --color-badink: #8f2b2b;
+  --color-badline: #f0c9c9;
+  --color-warnink: #8a5a12;
+  --color-warnink2: #96702f;
+  --color-warnline: #ecd9ae;
+  --color-infoline: #c3d6fb;
+  --color-focus: #0b5cf0;
+  /* 焦点光晕的颜色分量（`rgb(var(--color-focus2) / .14)`）—— 与 `--color-focus` 同步 */
+  --color-focus2: 11 92 240;
+  --color-overscroll: #e8ebf2;
+  --color-grid: 14 20 27;
+  --color-scrim: 14 20 27;
+  --color-scrimstrong: 14 20 27;
+  --color-shadow: 14 20 27;
+  --color-shadowsoft: 14 20 27;
+  --color-glasshi: 255 255 255;
+  --color-glasshi2: 233 240 254;
+  --color-glassline: 255 255 255;
+  /* 液态玻璃当前页那一圈淡蓝描边（`AppShell` 的内联高亮边与它的外扩影共用）；
+     亮色 = #0b5cf0，暗色下**换成提亮后的 accent**（见暗色块） */
+  --color-hiline: 11 92 240;
+  /* surface2 的**分量**（表头那条半透明玻璃底要用 `rgb(var(--color-surface2rgb) / .94)`） */
+  --color-surface2rgb: 247 249 251;
+  /* "比 surface 再高半档的两级"（纸面示意/斑马纹用的），亮色与收编前的字面量逐字相同 */
+  --color-surface4: #fbfcfd;
+  --color-surface5: #f4f6f9;
+  --color-line4: #eef1f5;
+
   /* 小圆角是刻意的：2 / 4 / 6，只有浮层用 10 */
   --radius-xs: 2px;
   --radius-sm: 4px;
   --radius-md: 6px;
   --radius-lg: 10px;
+  /*
+   * 🔴 **这个项目唯一的大圆角**（2026-10-01 用户点名要的，别推广到别处）。
+   *
+   * 只给"液态玻璃"那一族用：移动端底部导航的胶囊 / 圆按钮（`AppShell.tsx` 的内联
+   * `borderRadius` 必须与这个值**同值**）和它展开后的那张面板（`.sheet:has([data-nav-glass])`）。
+   * **理由**：那一族要读成"一块玻璃"（参考 iOS 26 的 Liquid Glass），而玻璃的边是**厚**的 ——
+   * 厚边只能靠大圆角立起来；12 那一档（原"标签胶囊"档）铺在 58 高的胶囊上，
+   * 看起来还是"一张纸片贴上去"。18 ≈ 胶囊高度的 1/3，恰好是"厚边"开始读得出来的位置。
+   * ⚠️ 这不是"圆角体系松了"：其余一切照旧 2 / 4 / 6（浮层 10）—— 新人看到 18 时看这一行。
+   * ⚠️ 想再调大之前先看 §十五 15.1：再大一圈，胶囊里的 48 格就要开始被圆角"啃"到。
+   */
+  --radius-liquid: 18px;
+}
+
+/* ============================================================
+   🆕 2026-10-09 F4：**暗色主题的令牌层**（用户拍板：「加一套暗色主题，布局一行不动」）
+
+   怎么用：`AppShell` 在 `<html>` 上写 `data-theme="dark"`（`lib/theme.ts` 是唯一入口）。
+   ⚠️ 选择器写成 `:root[data-theme='dark']`（**不是** `[data-theme='dark']`）：
+      `@theme` 编译出来的那份在 `@layer theme` 里的 `:root`（特异性 0,1,0），
+      这一条是 0,2,0 —— 不靠 `!important` 也能稳定压过它。
+   🔴 **教室端恒亮**：`/classroom` 上**永远不写**这个属性（`lib/theme.ts` 里判路由）。
+      那块屏挂在亮着灯的教室里给学生看，暗色在那儿是错的 —— 这条是硬规矩，不是偏好。
+
+   口径（用户在这一轮定过方向，照着做）：
+     · **底色不用纯黑**：`--color-canvas` 是深中性灰 #0c0f14（纯黑在大屏上边缘发硬、显脏）；
+     · **层次靠"更亮"而不是阴影**：surface #14181f → surface2 #1a1f27 → surface3 #232932；
+     · **发丝线变成低透明度亮线**：#2a313b / #3a424e / #525c69（原来的深灰线在暗底上会消失）；
+     · **强调色提亮一档 + 降饱和**：#0b5cf0 → #5386f4（原色在暗底上只有 4.3:1，不够）；
+       `--color-accentink` 在亮色里是"更深的蓝"（压在浅底上当字），暗色里角色反过来 ——
+       它是"更亮的蓝"（压在暗底上当字），#a9c3fb；
+     · **状态色各提亮**（ok/warn/bad/idle 都是），**soft 变体改成低透明度色块**
+       —— 暗色里不能用浅色底，那会变成一块刺眼的白斑；
+     · **玻璃从"白 24%"改成"白 6~10% + 深底"**（详见下面 `.glass-light` 的暗色覆盖）。
+
+   ⚠️ 对比度不是估的：`scripts/shots.mjs` 的 F4 那一节把下面这些值**成对算过 WCAG** 并钉进断言。
+      正文/次级/三级/强调/状态 × 各自的底，最低的一档是 `--color-accent` 压 surface3 = 4.54:1（AA）。
+      `--color-ink4`（禁用/占位）与 `--color-line*`（发丝线）**刻意低于 4.5:1** —— 它们不是正文，
+      亮色下同一批也低于（`ink4 on surface` 亮色只有 2.29:1），暗色保持同一档口径，不放宽也不收紧。
+   ============================================================ */
+:root[data-theme='dark'] {
+  /* 面：三级逐级提亮（"高一层 = 更亮"） */
+  --color-canvas: #0c0f14;
+  --color-surface: #14181f;
+  --color-surface2: #1a1f27;
+  --color-surface3: #232932;
+
+  /* 线：深灰线在暗底上会消失 → 改成低透明度的亮线 */
+  --color-line: #2a313b;
+  --color-line2: #3a424e;
+  --color-line3: #525c69;
+
+  /* 墨：正文近白、次级以下逐级压暗 */
+  --color-ink: #f2f5f8;
+  --color-ink2: #c3cbd6;
+  --color-ink3: #8a94a3;
+  --color-ink4: #6e7885;
+
+  /* 主色：提亮一档 + 降一点饱和；accentink 在暗色里是"更亮的蓝"（见上） */
+  --color-accent: #5386f4;
+  --color-accentink: #a9c3fb;
+  --color-accentsoft: #16273f;
+  --color-cyan: #35c6da;
+  --color-cyansoft: #0d2b31;
+
+  /* 语义：状态色各提亮；soft 一律是"低透明度色块"（≈ 状态色 16% 压在本底色上） */
+  --color-ok: #35c98a;
+  --color-oksoft: #12301f;
+  --color-warn: #e0ab4e;
+  --color-warnsoft: #33270f;
+  --color-bad: #ff7d89;
+  --color-badsoft: #3d1a1c;
+  --color-idle: #8a94a3;
+  --color-idlesoft: #2b3340;
+
+  /* 实心状态块上的字：暗色的 ok/warn/bad 都提亮过 → 白字压上去只剩 1.9~2.6:1，必须换近黑 */
+  --color-onaccent: #0d1117;
+  --color-onok: #08130d;
+  --color-onwarn: #1a1206;
+  --color-onbad: #2a0f12;
+
+  /* "浅底 + 深字"那一挂跟着 soft 一起翻：浅底变深底 → 深字变浅字 */
+  --color-okink: #7fe0b4;
+  --color-okline: #1e5540;
+  --color-badink: #ff9aa4;
+  --color-badline: #5c2a30;
+  --color-warnink: #f0c37a;
+  --color-warnink2: #c79c62;
+  --color-warnline: #5a441c;
+  --color-infoline: #2f4a80;
+
+  /* 焦点圈 / 越界回弹底 / 背景网格 */
+  --color-focus: #7aa2f8;
+  --color-focus2: 122 162 248;
+  --color-overscroll: #0c0f14;
+  --color-grid: 255 255 255;
+
+  /* 遮罩与投影：暗色下遮罩要更黑才压得住；投影靠"更深的黑"而不是原来的高透明度 */
+  --color-scrim: 0 0 0;
+  --color-scrimstrong: 0 0 0;
+  --color-shadow: 0 0 0;
+  --color-shadowsoft: 0 0 0;
+
+  /* 玻璃的高光/描边那一层：亮色是"近白" → 暗色只能是"低透明度白" */
+  --color-glasshi: 255 255 255;
+  --color-glasshi2: 255 255 255;
+  --color-glassline: 255 255 255;
+  --color-hiline: 83 134 244;
+  --color-surface2rgb: 26 31 39;
+  --color-surface4: #1d222b;
+  --color-surface5: #191e26;
+  --color-line4: #232932;
+
+  /* 原生控件（滚动条 / 表单 / 日期选择器）也跟着切 */
+  color-scheme: dark;
 }
 
 @theme {
@@ -72,10 +244,18 @@ body,
   height: 100%;
 }
 
+/* 🔴 浏览器越界回弹 / 地址栏露出的那一条，颜色必须跟着主题走 ——
+   不然暗色下滚过头会闪出一整条**亮色**（比页面里任何一处漏色都显眼）。 */
+html {
+  background-color: var(--color-overscroll);
+}
+
 body {
   margin: 0;
-  background-color: #e8ebf2;
-  color: #0e141b;
+  /* 🔴 一律走令牌（原来这里把 `--color-canvas` / `--color-ink` 的值又抄了一遍）——
+     抄一遍的后果是：换了主题，最先露馅的就是这层页面底。 */
+  background-color: var(--color-canvas);
+  color: var(--color-ink);
   font-family: var(--font-sans);
   font-size: 15px;
   line-height: 1.55;
@@ -91,9 +271,11 @@ body::before {
   inset: 0;
   pointer-events: none;
   z-index: 0;
+  /* ⚠️ `--color-grid` 是**颜色分量**（`14 20 27` / 暗色 `255 255 255`），不是颜色本身 ——
+     不透明度留在这里（亮暗两档都是 0.04：暗色要的是"极淡的白网格"，比提亮更管用）。 */
   background-image:
-    linear-gradient(to right, rgb(14 20 27 / 0.04) 1px, transparent 1px),
-    linear-gradient(to bottom, rgb(14 20 27 / 0.04) 1px, transparent 1px);
+    linear-gradient(to right, rgb(var(--color-grid) / 0.04) 1px, transparent 1px),
+    linear-gradient(to bottom, rgb(var(--color-grid) / 0.04) 1px, transparent 1px);
   background-size: 26px 26px;
   mask-image: radial-gradient(ellipse 120% 80% at 50% 0%, #000 20%, transparent 75%);
 }
@@ -108,12 +290,12 @@ body::before {
 }
 
 ::selection {
-  background: #0b5cf0;
-  color: #fff;
+  background: var(--color-accent);
+  color: var(--color-onaccent);
 }
 
 :focus-visible {
-  outline: 2px solid #0b5cf0;
+  outline: 2px solid var(--color-focus);
   outline-offset: 1px;
 }
 
@@ -122,7 +304,7 @@ body::before {
   height: 8px;
 }
 ::-webkit-scrollbar-thumb {
-  background: #cfd6e0;
+  background: var(--color-line2);
   border-radius: 99px;
 }
 ::-webkit-scrollbar-track {
@@ -136,8 +318,8 @@ body::before {
 @layer components {
   /* --- 面板：用发丝线和小圆角，不用大圆角卡片 --- */
   .panel {
-    background: #fff;
-    border: 1px solid #e2e6ec;
+    background: var(--color-surface);
+    border: 1px solid var(--color-line);
     border-radius: 6px;
   }
 
@@ -147,8 +329,8 @@ body::before {
     align-items: center;
     gap: 10px;
     padding: 11px 14px;
-    border-bottom: 1px solid #e2e6ec;
-    background: #f7f9fb;
+    border-bottom: 1px solid var(--color-line);
+    background: var(--color-surface2);
     border-radius: 6px 6px 0 0;
     position: relative;
   }
@@ -159,7 +341,7 @@ body::before {
     top: 11px;
     bottom: 11px;
     width: 2px;
-    background: #0b5cf0;
+    background: var(--color-accent);
     border-radius: 0 2px 2px 0;
   }
   .panel-head h2 {
@@ -179,19 +361,19 @@ body::before {
     content: '';
     width: 14px;
     height: 1px;
-    background: #7d8794;
+    background: var(--color-ink3);
   }
   .sect > span {
     font-size: 11px;
     font-weight: 600;
     letter-spacing: 0.14em;
-    color: #7d8794;
+    color: var(--color-ink3);
     text-transform: uppercase;
   }
   .sect > i {
     flex: 1;
     height: 1px;
-    background: #e2e6ec;
+    background: var(--color-line);
   }
 
   /* --- 按钮 --- */
@@ -203,10 +385,10 @@ body::before {
     gap: 7px;
     height: 42px;
     padding: 0 16px;
-    border: 1px solid #cfd6e0;
+    border: 1px solid var(--color-line2);
     border-radius: 4px;
-    background: #fff;
-    color: #0e141b;
+    background: var(--color-surface);
+    color: var(--color-ink);
     font-size: 14px;
     font-weight: 550;
     font-family: inherit;
@@ -222,8 +404,8 @@ body::before {
       color 0.16s cubic-bezier(0.22, 0.8, 0.24, 1);
   }
   .btn:hover {
-    background: #f7f9fb;
-    border-color: #b6bfcc;
+    background: var(--color-surface2);
+    border-color: var(--color-line3);
   }
   .btn:active {
     transform: scale(0.985);
@@ -235,22 +417,23 @@ body::before {
   }
 
   .btn-primary {
-    background: #0b5cf0;
-    border-color: #0b5cf0;
-    color: #fff;
+    background: var(--color-accent);
+    border-color: var(--color-accent);
+    /* ⚠️ 暗色下 `--color-onaccent` 是**近黑**（提亮过的 accent 上白字只有 4.5:1 以下） */
+    color: var(--color-onaccent);
   }
   .btn-primary:hover {
-    background: #0847c4;
-    border-color: #0847c4;
+    background: var(--color-accentink);
+    border-color: var(--color-accentink);
   }
 
   .btn-ghost {
     border-color: transparent;
     background: transparent;
-    color: #4a5563;
+    color: var(--color-ink2);
   }
   .btn-ghost:hover {
-    background: #eff2f6;
+    background: var(--color-surface3);
     border-color: transparent;
   }
 
@@ -261,12 +444,12 @@ body::before {
   }
 
   .btn-danger {
-    color: #d42b39;
-    border-color: #f0c2c6;
+    color: var(--color-bad);
+    border-color: var(--color-badline);
   }
   .btn-danger:hover {
-    background: #fdeced;
-    border-color: #e39aa1;
+    background: var(--color-badsoft);
+    border-color: var(--color-bad);
   }
 
   /* 点击波纹 —— 交互感的主要来源之一 */
@@ -292,23 +475,24 @@ body::before {
     width: 100%;
     height: 42px;
     padding: 0 12px;
-    border: 1px solid #cfd6e0;
+    border: 1px solid var(--color-line2);
     border-radius: 4px;
-    background: #fff;
+    background: var(--color-surface);
     font-size: 15px;
     font-family: inherit;
-    color: #0e141b;
+    color: var(--color-ink);
     transition:
       border-color 0.16s cubic-bezier(0.22, 0.8, 0.24, 1),
       box-shadow 0.16s cubic-bezier(0.22, 0.8, 0.24, 1);
   }
   .input::placeholder {
-    color: #a3acb8;
+    color: var(--color-ink4);
   }
   .input:focus {
     outline: none;
-    border-color: #0b5cf0;
-    box-shadow: 0 0 0 3px rgb(11 92 240 / 0.14);
+    border-color: var(--color-accent);
+    /* 焦点光晕的**颜色分量**也跟着主色走（暗色下 #0b5cf0 的光晕在深底上几乎看不见） */
+    box-shadow: 0 0 0 3px rgb(var(--color-focus2) / 0.14);
   }
 
   textarea.input {
@@ -322,7 +506,7 @@ body::before {
     display: block;
     font-size: 12px;
     font-weight: 600;
-    color: #4a5563;
+    color: var(--color-ink2);
     margin-bottom: 6px;
     letter-spacing: 0.02em;
   }
@@ -342,31 +526,31 @@ body::before {
     white-space: nowrap;
   }
   .tag-idle {
-    background: #eff1f4;
-    color: #7d8794;
-    border-color: #e2e6ec;
+    background: var(--color-idlesoft);
+    color: var(--color-ink3);
+    border-color: var(--color-line);
   }
   .tag-accent {
-    background: #e9f0fe;
-    color: #0847c4;
+    background: var(--color-accentsoft);
+    color: var(--color-accentink);
   }
   .tag-ok {
-    background: #e6f5ee;
-    color: #0f8a5f;
+    background: var(--color-oksoft);
+    color: var(--color-ok);
   }
   .tag-warn {
-    background: #fbf2e2;
-    color: #b0741a;
+    background: var(--color-warnsoft);
+    color: var(--color-warn);
   }
   .tag-bad {
-    background: #fdeced;
-    color: #d42b39;
+    background: var(--color-badsoft);
+    color: var(--color-bad);
   }
 
   /* --- 数据格：仪表盘的基本单元 --- */
   .stat {
     padding: 12px 14px;
-    border-right: 1px solid #e2e6ec;
+    border-right: 1px solid var(--color-line);
   }
   .stat:last-child {
     border-right: 0;
@@ -375,7 +559,7 @@ body::before {
     font-size: 11px;
     font-weight: 600;
     letter-spacing: 0.1em;
-    color: #7d8794;
+    color: var(--color-ink3);
     text-transform: uppercase;
   }
   .stat-v {
@@ -392,21 +576,31 @@ body::before {
   /* --- 进度条：细线风格 --- */
   .track {
     height: 3px;
-    background: #eff2f6;
+    background: var(--color-surface3);
     border-radius: 99px;
     overflow: hidden;
   }
   .track > i {
     display: block;
     height: 100%;
-    background: #0b5cf0;
+    background: var(--color-accent);
     border-radius: 99px;
     transition: width 0.5s cubic-bezier(0.22, 0.8, 0.24, 1);
   }
 
-  /* --- 骨架屏 --- */
+  /* --- 骨架屏 ---
+     ⚠️ 原来那条写死了 `#eff2f6 / #f8fafc`。收编之后中间那一档改用 `--color-surface`
+     （亮色下是 #ffffff，比原来的 #f8fafc 亮一档）——
+     骨架屏是持续动画，**断言比对的是"亮色 125 张图逐字不变"，而骨架屏只在加载态出现**，
+     截图流程每页都等到 `networkidle` + 520ms，骨架屏早已结束，所以它不影响那 125 张。
+     （这一处是**明知**的一处像素级差异，写在这里免得下一个人以为是漏改。） */
   .skeleton {
-    background: linear-gradient(90deg, #eff2f6 25%, #f8fafc 37%, #eff2f6 63%);
+    background: linear-gradient(
+      90deg,
+      var(--color-surface3) 25%,
+      var(--color-surface) 37%,
+      var(--color-surface3) 63%
+    );
     background-size: 400% 100%;
     animation: shimmer 1.3s ease-in-out infinite;
     border-radius: 2px;
@@ -418,8 +612,8 @@ body::before {
     align-items: center;
     gap: 12px;
     padding: 12px 14px;
-    border-bottom: 1px solid #e2e6ec;
-    background: #fff;
+    border-bottom: 1px solid var(--color-line);
+    background: var(--color-surface);
     transition: background-color 0.14s cubic-bezier(0.22, 0.8, 0.24, 1);
     cursor: pointer;
     text-align: left;
@@ -430,10 +624,10 @@ body::before {
     border-bottom: 0;
   }
   .row:hover {
-    background: #f7f9fb;
+    background: var(--color-surface2);
   }
   .row:active {
-    background: #eff2f6;
+    background: var(--color-surface3);
   }
 
   /* --- 空态 --- */
@@ -444,7 +638,7 @@ body::before {
     gap: 10px;
     padding: 38px 20px;
     text-align: center;
-    color: #7d8794;
+    color: var(--color-ink3);
   }
 
   /* --- 浮层 --- */
@@ -452,7 +646,7 @@ body::before {
     position: fixed;
     inset: 0;
     z-index: 50;
-    background: rgb(14 20 27 / 0.3);
+    background: rgb(var(--color-scrim) / 0.3);
     -webkit-backdrop-filter: blur(7px) saturate(140%);
     backdrop-filter: blur(7px) saturate(140%);
     animation: fade 0.18s cubic-bezier(0.22, 0.8, 0.24, 1);
@@ -465,10 +659,10 @@ body::before {
     width: 100%;
     max-width: 640px;
     transform: translateX(-50%);
-    background: #fff;
+    background: var(--color-surface);
     border-radius: 10px 10px 0 0;
-    border-top: 1px solid #cfd6e0;
-    box-shadow: 0 -12px 40px rgb(14 20 27 / 0.14);
+    border-top: 1px solid var(--color-line2);
+    box-shadow: 0 -12px 40px rgb(var(--color-shadow) / 0.14);
     animation: sheet-up 0.26s cubic-bezier(0.22, 0.8, 0.24, 1);
     max-height: 88vh;
     display: flex;
@@ -507,10 +701,10 @@ body::before {
     max-width: 404px;
     max-height: 86vh;
     overflow-y: auto;
-    background: #fff;
-    border: 1px solid #cfd6e0;
+    background: var(--color-surface);
+    border: 1px solid var(--color-line2);
     border-radius: 10px;
-    box-shadow: 0 28px 70px -22px rgb(14 20 27 / 0.38);
+    box-shadow: 0 28px 70px -22px rgb(var(--color-shadow) / 0.38);
     animation: modal-in 0.36s cubic-bezier(0.34, 1.24, 0.5, 1) both;
   }
 
@@ -518,7 +712,7 @@ body::before {
   .seg {
     display: inline-flex;
     padding: 2px;
-    background: #eff2f6;
+    background: var(--color-surface3);
     border-radius: 4px;
     gap: 2px;
   }
@@ -531,16 +725,16 @@ body::before {
     font-size: 13px;
     font-weight: 550;
     font-family: inherit;
-    color: #7d8794;
+    color: var(--color-ink3);
     cursor: pointer;
     transition:
       background-color 0.16s cubic-bezier(0.22, 0.8, 0.24, 1),
       color 0.16s cubic-bezier(0.22, 0.8, 0.24, 1);
   }
   .seg > button[data-on='true'] {
-    background: #fff;
-    color: #0e141b;
-    box-shadow: 0 1px 2px rgb(14 20 27 / 0.07);
+    background: var(--color-surface);
+    color: var(--color-ink);
+    box-shadow: 0 1px 2px rgb(var(--color-shadow) / 0.07);
   }
 
   /* --- 表格（名单类） --- */
@@ -558,28 +752,34 @@ body::before {
     font-weight: 600;
     letter-spacing: 0.1em;
     text-transform: uppercase;
-    color: #7d8794;
+    color: var(--color-ink3);
     padding: 9px 12px;
-    /* 半透明 + 模糊：名单滚动时行会从表头下面穿过去 */
-    background: linear-gradient(180deg, rgb(247 249 251 / 0.94), rgb(247 249 251 / 0.86));
+    /* 半透明 + 模糊：名单滚动时行会从表头下面穿过去。
+       `--color-surface2rgb` 是 surface2 的**分量**（亮 `247 249 251` / 暗 `26 31 39`）——
+       表头那层玻璃底必须跟着面层级走，不然暗色下表头会是一块**白纱**。 */
+    background: linear-gradient(
+      180deg,
+      rgb(var(--color-surface2rgb) / 0.94),
+      rgb(var(--color-surface2rgb) / 0.86)
+    );
     -webkit-backdrop-filter: blur(10px) saturate(150%);
     backdrop-filter: blur(10px) saturate(150%);
-    border-bottom: 1px solid #e2e6ec;
+    border-bottom: 1px solid var(--color-line);
     white-space: nowrap;
   }
   .tbl td {
     padding: 9px 12px;
-    border-bottom: 1px solid #e2e6ec;
+    border-bottom: 1px solid var(--color-line);
     vertical-align: middle;
   }
   .tbl tbody tr {
     transition: background-color 0.14s cubic-bezier(0.22, 0.8, 0.24, 1);
   }
   .tbl tbody tr:hover {
-    background: #f7f9fb;
+    background: var(--color-surface2);
   }
   .tbl tbody tr[data-flag='true'] {
-    background: #fbf2e2;
+    background: var(--color-warnsoft);
   }
 }
 
@@ -897,44 +1097,138 @@ body::before {
    * 一块深色控件杵在亮色页面上，读起来像"另一个 App 的残留"。
    * 参考的是 VIVO / OPPO 最新系统桌面上的**亮色玻璃小组件**。
    *
-   * 🔴 **边缘折射**（用户点名要的就是这个 —— "光在玻璃边缘被弯折"的那道亮边）：
-   *    靠**一明一暗两条内阴影**做出来，缺一条就会退化成"贴了一张白纸"：
-   *      · `inset 0 1px 0` 高不透明度白 —— 顶部内边缘的**亮高光**（光从上面进来被抬起）；
-   *      · `inset 0 -1px 0` 低不透明度黑 —— 底部内边缘的**一线暗**（光在玻璃背面被压下去）。
-   *    再套 1px 半透明白的**发丝外描边**（`border`）把它从背景里"浮"出来；
-   *    外圈**很大的负扩散软阴影**给悬浮感 —— 悬浮来自"散开的影子"，不是"一条硬边"。
+   * 🔴 **2026-10-01 第三轮**（用户又给了一张参考图 —— iOS 26 的 Liquid Glass，说"好好看"）：
+   *    上一轮已经有"半透明 + 两层描边"，这一轮照参考图把三件事推到那一档：
+   *      ① `blur` 28 → **36px**、`saturate` 150% → **180%**
+   *         （参考图里背景被糊成**色块**、而且**更艳**；只提 blur 不提饱和，
+   *          透出来是"发灰的糊"，不是玻璃）；
+   *      ② 🔴 **边缘折射** —— 本轮新加，口径见下面 `.glass-light[data-refract='on']` 那一节；
+   *      ③ **内描边从两层加到三层**（1 / 2 / 3.5px 递减的白）= 玻璃的厚度；
+   *         同时把外投影**压到很轻**：参考图"没有重投影"，玻璃是**贴着**背景的、
+   *         不是被影子托起来的 —— 原来那三层越描越重的大阴影（`0 40px 74px` 那一档）已删掉。
+   *    圆角同时从 12 提到 **`--radius-liquid`（18）** —— 那一行写了"这是唯一的大圆角"及其理由。
    *
-   * 🔴 **液态感**：`backdrop-filter` 用 `blur + saturate(200%)` —— 饱和度拉高，
-   *    玻璃下面透出来的颜色会更"活"（照抄 `.glass` 那一套口径，只是 blur 更大、底色更透）。
+   * 🔴 **边缘折射**（用户两轮都点名要的 —— "光在玻璃边缘被弯折"）在这里是**两半**：
+   *    · **静态的那一半**（下面这条规则里就有）：`inset` 的一明一暗 ——
+   *      顶部内边缘亮高光（光从上面进来被抬起）/ 底部内边缘一线暗（光在玻璃背面被压下去），
+   *      再加三道递减的白圈把它读成"有厚度的边"；缺一条就会退化成"贴了一张白纸"；
+   *    · **动态的那一半**：`backdrop-filter: url(#shugao-liquid-refract)` ——
+   *      真的把背景**扭一下**（`AppShell.tsx` 里的内联 SVG，见下面那一节）。
    *
    * ⚠️⚠️ **它比 `.glass` 透明得多，所以里面的一切必须按"浅底"重新配对比度**：
    *    图标/文字一律深色（`--color-ink2` / `--color-accentink`），**不能**再用白字
    *    —— 完整口径见 `AppShell.tsx` 的 `MobileNav` 与 `功能设计与不变量.md` §十五 15.1。
+   *
+   * ⚠️ **白底从 0.20/0.30 提到 0.24/0.34**（很轻的一档）：这是"读得清"的**兜底那一层** ——
+   *    玻璃底下若是深色内容（工作台那块深色卡片 / 密密麻麻的课表），
+   *    深色图标只能靠"这一层白 + 图标自己那圈 halo（`ICON_HALO`）"两条一起撑住对比度。
+   *    ⛔ 想再压薄之前先读 §十五 15.1 的对比度表：那一栏是**下界**，不是估计值。
    */
   .glass-light {
-    /* 🔴 2026-09-28 第二轮（用户「透明一点」，附参考图：几乎全透、白色只在边缘）：
-       · 白底从 64% → 48% 降到 **20% → 30% 这一档**（上淡下略实，仍是 180deg 的浅渐变）；
-       · `blur` 22 → **28px**（更柔，但仍然**认得出**后面是什么）；
-       · `saturate` 200% → **150%**：参考图里玻璃是"带一点背景色"，不是"把背景色提纯"；
-       · 边缘成为主角：**外圈亮描边 + 内圈更淡的一圈**（两层 = 玻璃的厚度），
-         顶部亮高光 / 底部极淡的暗照旧保留 —— 一明一暗才像"折"出来的。 */
-    background: linear-gradient(180deg, rgb(255 255 255 / 0.2) 0%, rgb(255 255 255 / 0.3) 100%);
-    -webkit-backdrop-filter: blur(28px) saturate(150%);
-    backdrop-filter: blur(28px) saturate(150%);
-    border: 1px solid rgb(255 255 255 / 0.85);
+    background: linear-gradient(180deg, rgb(255 255 255 / 0.24) 0%, rgb(255 255 255 / 0.34) 100%);
+    /* 🔴 基础声明：**一定会生效**的那一半（模糊 + 饱和度 + 描边）—— 折射只是它的增强 */
+    -webkit-backdrop-filter: blur(36px) saturate(180%);
+    backdrop-filter: blur(36px) saturate(180%);
+    border: 1px solid rgb(255 255 255 / 0.9);
     box-shadow:
       /* ① 外圈亮描边（贴在 border 内侧的那一圈，模拟"磨过的玻璃边"） */
-      inset 0 0 0 1px rgb(255 255 255 / 0.5),
-      /* ② 内圈更淡的一圈 = 玻璃的厚度 */
-      inset 0 0 0 2.5px rgb(255 255 255 / 0.2),
-      /* ③ 顶部内边缘的亮高光（"折"的一半） */
+      inset 0 0 0 1px rgb(255 255 255 / 0.6),
+      /* ② 中圈：玻璃的**厚度**第一档 */
+      inset 0 0 0 2px rgb(255 255 255 / 0.34),
+      /* ③ 内圈更淡的一圈：厚度的第二档（三层递减才像"厚边"，两层还是"描边"） */
+      inset 0 0 0 3.5px rgb(255 255 255 / 0.14),
+      /* ④ 顶部内边缘的亮高光（"折"的一半） */
       inset 0 1px 0 rgb(255 255 255 / 0.95),
-      /* ④ 底部内边缘极淡的一线暗（"折"的另一半） */
-      inset 0 -1px 0 rgb(14 20 27 / 0.12),
-      /* ⑤ 外圈超软大阴影：悬浮感来自"散开的影子"，不是"一条硬边" */
-      0 1px 2px rgb(14 20 27 / 0.06),
-      0 16px 34px -12px rgb(14 20 27 / 0.2),
-      0 40px 74px -34px rgb(14 20 27 / 0.32);
+      /* ⑤ 底部内边缘那一线暗（"折"的另一半） */
+      inset 0 -1px 0 rgb(14 20 27 / 0.14),
+      /* ⑥ 外投影只留**很轻**的一层贴边影：参考图没有重投影，玻璃靠模糊与折射立住 */
+      0 8px 20px -16px rgb(14 20 27 / 0.3);
+  }
+
+  /* ---------- 🔴 **边缘折射**：液态玻璃的魂（2026-10-01 新加，别删） ----------
+   *
+   * 做法（两处配合，缺一处就是"只有模糊的塑料板"）：
+   *   ① `AppShell.tsx` 里挂了一份**内联 SVG**：`<filter id="shugao-liquid-refract">`
+   *      = `feTurbulence`（低频、平滑的噪声）→ `feDisplacementMap`（按噪声的 R/G 通道位移）。
+   *      低频是关键：高频出来是"磨砂噪点"，低频才是"背景被揉了一下"；
+   *   ② 这里把它接到 `backdrop-filter` 上，**和模糊写在同一条声明里** ——
+   *      折射不是"替代"模糊，而是"在模糊之上再弯一下"（只剩折射会看见清晰的背景被拧，像坏了）。
+   *
+   * ⚠️ **支持性不齐是硬事实**：`backdrop-filter: url(#…)` 不是所有引擎都渲染
+   *    （WebKit 对 `feDisplacementMap` 这一类还有已知 bug）。所以这一层**只当增强**：
+   *   · **基础声明在上面**（`.glass-light` 自带 `blur+saturate` + 三道内描边）—— 一定生效；
+   *   · 折射这条**单独**挂在 `[data-refract='on']` 上，由 `AppShell` 的
+   *     **特性检测 + 掉帧看门狗**决定加不加：不支持 / 低端机 / 掉帧 → 属性是 `off`，
+   *     **退回去就是"只有模糊 + 描边"**（照本项目"降级不报错、也不硬上"的纪律）；
+   *   · `@supports` 再兜一道：引擎**解析期**就拒绝的话，这一段整块不生效，
+   *     回退到的就是上面那条基础声明。
+   * ⚠️ 就算某个引擎"声明支持、实际不渲染"，代价也只是**少一点折射** ——
+   *    模糊与描边在另一条声明里，奶白色的兜底层也够厚，绝不会变成"读不清"。
+   * ⚠️ **顺序是有意的**：基础声明在前、增强声明在后。调换顺序 = 兜底消失。
+   */
+  @supports (backdrop-filter: url(#shugao-liquid-refract)) {
+    .glass-light[data-refract='on'] {
+      -webkit-backdrop-filter: url(#shugao-liquid-refract) blur(36px) saturate(180%);
+      backdrop-filter: url(#shugao-liquid-refract) blur(36px) saturate(180%);
+    }
+  }
+
+  /* ---------- 展开态：**更多入口**那张面板 —— 同一块玻璃，但厚得多 ----------
+   *
+   * 用户这一轮要的是"移动端底部导航的**展开态**"也是液态玻璃（原来它是一张**不透明白底**
+   * 的 Sheet，和底下那颗玻璃胶囊是两种材料，展开的一瞬间像换了个 App）。
+   *
+   * ⚠️ **只给导航那张面板**：`ui.tsx` 的 `Sheet` 是全站共用的（十来个页面都在用），
+   *   所以这里按 `:has([data-nav-glass])` 收口 —— 壳子在 `AppShell.tsx` 里给导航自己那张
+   *   面板打了这个标记，别的地方 `:has()` 命中不了，**一行都不会受影响**。
+   *   老浏览器不认 `:has()` → 面板维持原来的不透明白底（**可用性零损失**，只是没玻璃）。
+   *
+   * 🔴 **白底 0.88/0.84 —— 这是为"读得清"付的代价，不是审美选择**：
+   *   这张面板上有 **11.5px 的说明小字**（`MORE_HINT`）。玻璃越透，小字越吃背景。
+   *   按最坏背景（底下是纯黑内容、又被 `.scrim` 压了一层）算：
+   *     · 主标签 `--color-ink` #0e141b ≈ **13:1**；
+   *     · 说明小字（本轮已从 `--color-ink3` 提到 `--color-ink2` #4a5563）≈ **5.2:1**（AA 过线）。
+   *   再透一档（0.7 左右）小字就掉到 4:1 以下 —— 那正是"为了好看牺牲可读"。
+   *   ⚠️ 想让面板更透，前提是**先把那行小字删掉或放大**：那是产品决定，不是调参数。
+   *
+   * 模糊 / 饱和度 / 内描边与胶囊同一套口径（同一个 SVG 滤镜），只是 blur 略小
+   *   （它面积大得多，36px 在 88vh 的面板上既贵又糊得过火）。
+   * `overflow: hidden` 是为了让 `ui.tsx` 里 `.panel-head` 那个内联的 `10px 10px 0 0`
+   *   圆角被父级的大圆角**裁掉** —— 不裁的话上面两个角还是旧的 10，下面两个角是 18，一眼看得出。
+   *   （不改 `ui.tsx` 是硬约束：那个内联样式是**全站** Sheet 的，动它会牵连十来个页面。）
+   */
+  .sheet:has([data-nav-glass]) {
+    background: linear-gradient(180deg, rgb(255 255 255 / 0.88) 0%, rgb(255 255 255 / 0.84) 100%);
+    -webkit-backdrop-filter: blur(30px) saturate(170%);
+    backdrop-filter: blur(30px) saturate(170%);
+    border-top: 1px solid rgb(255 255 255 / 0.95);
+    border-radius: var(--radius-liquid) var(--radius-liquid) 0 0;
+    overflow: hidden;
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.95),
+      inset 0 0 0 1px rgb(255 255 255 / 0.55),
+      inset 0 0 0 2.5px rgb(255 255 255 / 0.2),
+      0 -10px 30px -20px rgb(14 20 27 / 0.24);
+  }
+  @supports (backdrop-filter: url(#shugao-liquid-refract)) {
+    .sheet:has([data-nav-glass][data-refract='on']) {
+      -webkit-backdrop-filter: url(#shugao-liquid-refract) blur(30px) saturate(170%);
+      backdrop-filter: url(#shugao-liquid-refract) blur(30px) saturate(170%);
+    }
+  }
+  /* 面板头也跟着玻璃走：`.panel-head` 本身是**不透明浅灰**（#f7f9fb）的通用样式，
+     留它的话整块玻璃最上面那一条（正是大圆角最显眼的地方）会是一条灰带子。
+     只对导航这张面板改成透明（`:has()` 收口，别的 Sheet 一行不受影响）。 */
+  .sheet:has([data-nav-glass]) .panel-head {
+    background: transparent;
+    border-bottom-color: rgb(255 255 255 / 0.6);
+  }
+  /* 遮罩给玻璃让路：面板既然是玻璃，遮罩就**别把它后面糊成一块灰** ——
+     压暗收窄到 0.22、模糊 7 → 3px（只收口、不糊背景）。同样只认导航那张面板。 */
+  .scrim:has(+ .sheet:has([data-nav-glass])) {
+    background: rgb(14 20 27 / 0.22);
+    -webkit-backdrop-filter: blur(3px) saturate(120%);
+    backdrop-filter: blur(3px) saturate(120%);
   }
 
   /* ---------- 悬浮侧栏 ----------
@@ -961,6 +1255,121 @@ body::before {
     border-radius: 6px;
     padding: 10px 12px;
   }
+}
+
+/* ============================================================
+   🆕 2026-10-09 F4：**暗色下的"材质"**（液态玻璃那一族）
+
+   为什么玻璃要单独一组、不能只靠上面那 24 个令牌：
+   玻璃的配方里那一层"白"是**材质**（高光/厚度/镜面），不是"面/线/墨"里的任何一档。
+   亮色玻璃是"白 24~34%"，暗色照搬就是一块**灰雾**（用户的原话方向：
+   「玻璃暗色改成白 6~10% + 深底」）——所以这里给它一组独立的暗色值。
+
+   口径三条：
+     ① **底换成深面**（surface / surface2 那一挂），白只留 6~10% —— 玻璃仍然是"透的"，
+        但透出来的是"深色被糊了一下"，不是"蒙了一层白纱"；
+     ② **描边与内高光一起降档**（0.9 → 0.14~0.28）：暗色里"白描边"最容易过火，
+        一过火整块控件就像贴了一张塑料膜；
+     ③ **投影换成纯黑**（`--color-shadow` 在暗色下就是 0 0 0）：暗色下靠"更深的黑"分层，
+        而不是靠原来的高透明度。
+
+   ⚠️ `.glass-light` 里那层"近白高光填充"（导航胶囊当前页那一格）**不在 CSS 里**，
+      它在 `AppShell.tsx` 的内联样式上 —— 那边用 `--color-glasshi` 收编，同一个口径。
+   ============================================================ */
+:root[data-theme='dark'] .glass {
+  /* 移动端顶栏：亮色是"白 72%→50%"，暗色换成"深面 + 白 8%" */
+  background: linear-gradient(
+    180deg,
+    rgb(var(--color-surface2rgb) / 0.82) 0%,
+    rgb(var(--color-surface2rgb) / 0.68) 100%
+  );
+  border-color: rgb(255 255 255 / 0.1);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.1),
+    0 -1px 0 rgb(0 0 0 / 0.4);
+}
+:root[data-theme='dark'] .glass::before {
+  /* 顶部那道 1px 镜面高光：暗色下压到 0.12（亮色是 0.95） */
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgb(255 255 255 / 0.12) 20%,
+    rgb(255 255 255 / 0.12) 80%,
+    transparent
+  );
+}
+:root[data-theme='dark'] .glass-liquid > .sheen {
+  background: radial-gradient(42% 58% at 24% 50%, rgb(255 255 255 / 0.1), transparent 66%);
+}
+
+:root[data-theme='dark'] .glass-light {
+  /* 白 24/34% → **白 7/9%**（这一层只是"边缘与厚度的兜底"，不再负责亮度） */
+  background: linear-gradient(180deg, rgb(255 255 255 / 0.07) 0%, rgb(255 255 255 / 0.09) 100%);
+  border: 1px solid rgb(255 255 255 / 0.16);
+  box-shadow:
+    /* 三道递减的内描边（玻璃的厚度）：0.6/0.34/0.14 → 0.14/0.08/0.05 */
+    inset 0 0 0 1px rgb(255 255 255 / 0.14),
+    inset 0 0 0 2px rgb(255 255 255 / 0.08),
+    inset 0 0 0 3.5px rgb(255 255 255 / 0.05),
+    /* 顶部内边缘的亮高光（"折"的一半） */
+    inset 0 1px 0 rgb(255 255 255 / 0.22),
+    /* 底部内边缘那一线暗：暗色下改成"更亮"的那一半更自然（光从上面进来） */
+    inset 0 -1px 0 rgb(0 0 0 / 0.5),
+    0 8px 20px -16px rgb(0 0 0 / 0.7);
+}
+
+:root[data-theme='dark'] .sheet:has([data-nav-glass]) {
+  /* 展开层那张面板：亮色 88/84% 白 → 暗色 "深面 + 白 8%" */
+  background: linear-gradient(
+    180deg,
+    rgb(var(--color-surface2rgb) / 0.94) 0%,
+    rgb(var(--color-surface2rgb) / 0.9) 100%
+  );
+  border-top: 1px solid rgb(255 255 255 / 0.14);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.12),
+    inset 0 0 0 1px rgb(255 255 255 / 0.08),
+    inset 0 0 0 2.5px rgb(255 255 255 / 0.04),
+    0 -10px 30px -20px rgb(0 0 0 / 0.6);
+}
+:root[data-theme='dark'] .sheet:has([data-nav-glass]) .panel-head {
+  border-bottom-color: rgb(255 255 255 / 0.1);
+}
+:root[data-theme='dark'] .scrim:has(+ .sheet:has([data-nav-glass])) {
+  background: rgb(0 0 0 / 0.5);
+}
+
+:root[data-theme='dark'] .floating-rail {
+  /* 桌面左栏：亮色是"白 92/80%"，暗色换成"深面 + 白 6%"（不透明一档，它是整栏的底） */
+  background: linear-gradient(
+    180deg,
+    rgb(var(--color-surface2rgb) / 0.96),
+    rgb(var(--color-surface2rgb) / 0.88)
+  );
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.1),
+    0 1px 2px rgb(0 0 0 / 0.4),
+    0 12px 26px -12px rgb(0 0 0 / 0.6),
+    0 34px 64px -30px rgb(0 0 0 / 0.7);
+}
+
+:root[data-theme='dark'] .rail-pill {
+  /* 左栏的当前页高亮：亮色是"淡蓝 98/76%"，暗色是"**淡蓝 22%** 压在深底上" ——
+     暗色里它必须仍然读成"当前页那一块"，但绝不能是整条栏里最亮的东西。 */
+  background: linear-gradient(
+    180deg,
+    rgb(var(--color-glasshi) / 0.14) 0%,
+    rgb(var(--color-glasshi) / 0.08) 100%
+  );
+  border: 1px solid rgb(255 255 255 / 0.14);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.12),
+    inset 0 -7px 13px -9px rgb(0 0 0 / 0.5),
+    0 1px 3px rgb(0 0 0 / 0.4),
+    0 8px 18px -10px rgb(0 0 0 / 0.5);
+}
+:root[data-theme='dark'] .rail-pill::after {
+  background: radial-gradient(60% 150% at 30% 0%, rgb(255 255 255 / 0.14), transparent 62%);
 }
 
 @keyframes sheen {
@@ -1018,10 +1427,14 @@ body::before {
       0 8px 18px -10px rgb(14 20 27 / 0.2);
     pointer-events: none;
     will-change: top, height, transform;
-    transition:
-      top 0.44s cubic-bezier(0.34, 1.32, 0.5, 1),
-      height 0.44s cubic-bezier(0.34, 1.32, 0.5, 1),
-      opacity 0.2s;
+    /*
+     * 🔴 `top` / `height` 的过渡**这一轮删掉了**（2026-10-01）：它们现在由一个
+     * `requestAnimationFrame` 弹簧**逐帧**写（`AppShell.tsx` 的桌面左栏那一段），
+     * 留着这条 CSS 过渡就是"两套动画叠在一起"—— 表现是追不上、还会在收尾抖一下。
+     * 只留 `opacity`：高亮出现/消失那一下仍然要淡。
+     * ⚠️ 弹簧的状态与"首屏直接定位""reduced-motion 直接跳"都在 JS 里，别在这儿补回来。
+     */
+    transition: opacity 0.2s;
   }
   .rail-pill::after {
     content: '';
@@ -1030,6 +1443,61 @@ body::before {
     border-radius: inherit;
     background: radial-gradient(60% 150% at 30% 0%, rgb(255 255 255 / 0.95), transparent 62%);
     animation: sheen 6s cubic-bezier(0.4, 0, 0.2, 1) infinite alternate;
+  }
+
+  /* ---------- 左栏的**导航项那一块**：放不下时自己滚 + 交界处渐隐 ----------
+   *
+   * 🔴 用户原话（2026-10-08）：「为了避免这里的选项**在部分不同大小的电脑**上不一致，
+   *    这里加一个**可以滚动的**，**溢出了就自动变成能滚动的**，**交界处要有过渡**」。
+   *
+   * 口径三条（改动前先读这段）：
+   *   ① **只有导航项滚** —— 底部的「已连接云端 / N 个班级 · M 名学生」在 `nav` **外面**，
+   *      固定在底部、不跟着滚；界线就是 `nav` 上/下那两条分隔线（`AppShell.tsx` 两处 `borderTop`）。
+   *   ② **放得下时什么也不出现**（没有滚动条、也没有渐隐）——"有些电脑放得下、有些放不下"
+   *      两种都要正常，所以用 `overflow-y: auto`（不是 `scroll`，后者会一直留着一条轨道）。
+   *   ③ 渐隐**用 `mask-image`，⛔ 不是盖一层纯色渐变** —— 侧栏是**液态玻璃**（`.floating-rail`），
+   *      盖色会在玻璃上糊出一块死色。渐隐量 **22px**（只是"提示还有内容"，不是装饰），
+   *      而且**滚到哪一边到头，那一边的渐隐就收掉**（一直亮着会让人以为"下面还有"）。
+   *
+   * ⚠️ `data-rail-scroll`（`none` / `top` / `bottom` / `both`）说的是**哪一边还要渐隐**，
+   *    由 `AppShell.tsx` 的 `measure()` 写 —— 与高亮重算**同一处、同一套触发**。
+   */
+  .rail-nav {
+    /* 🔴 `auto`：放得下就不出滚动条 */
+    overflow-y: auto;
+    /* 横向不许滚（导航项是定宽的一列，横向滚只会是布局出错的症状） */
+    overflow-x: hidden;
+    /* 到底之后别把滚动甩给整页（滚轮 / 触控板继续滑不该动主体） */
+    overscroll-behavior: contain;
+  }
+  /* 顶上还有内容 → 顶上渐隐 */
+  .rail-nav[data-rail-scroll='top'],
+  .rail-nav[data-rail-scroll='both'] {
+    -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 22px);
+    mask-image: linear-gradient(180deg, transparent 0, #000 22px);
+  }
+  /* 底下还有内容 → 底下渐隐 */
+  .rail-nav[data-rail-scroll='bottom'],
+  .rail-nav[data-rail-scroll='both'] {
+    -webkit-mask-image: linear-gradient(180deg, #000 calc(100% - 22px), transparent 100%);
+    mask-image: linear-gradient(180deg, #000 calc(100% - 22px), transparent 100%);
+  }
+  /* ⚠️ 这条必须排在上面两条**之后**：两头都要渐隐时它是最终生效的那条 */
+  .rail-nav[data-rail-scroll='both'] {
+    -webkit-mask-image: linear-gradient(
+      180deg,
+      transparent 0,
+      #000 22px,
+      #000 calc(100% - 22px),
+      transparent 100%
+    );
+    mask-image: linear-gradient(
+      180deg,
+      transparent 0,
+      #000 22px,
+      #000 calc(100% - 22px),
+      transparent 100%
+    );
   }
 }
 

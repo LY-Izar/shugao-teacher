@@ -13,6 +13,34 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <title>树高教师平台</title>
+    <script>
+      /*
+       * 主题的**门卫版**（2026-10-09 F4）。
+       *
+       * 为什么要有这一段：`src/lib/theme.ts` 是模块，跑起来时第一帧早就画完了 ——
+       * 暗色用户每次打开都会先白闪一下。这一段在**首帧之前**把 `data-theme` 写上，
+       * 于是首帧就是对的。三条口径与 `theme.ts` 逐条相同（口径写在那份文件的文件头）：
+       *   ① 默认跟随系统；② 手动切过就记住（localStorage）；③ 教室端恒亮。
+       * ⚠️ 键名 `shugao.theme` / 属性名 `data-theme` / `/classroom` 那一句 —— 三处都要同字。
+       */
+      ;(function () {
+        try {
+          if (/^\/classroom(\/|$)/.test(location.pathname)) return
+          var t
+          try {
+            t = localStorage.getItem('shugao.theme')
+          } catch (e) {
+            t = null
+          }
+          if (t !== 'light' && t !== 'dark') {
+            t = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+          }
+          if (t === 'dark') document.documentElement.setAttribute('data-theme', 'dark')
+        } catch (e) {
+          /* 读不到就当亮色（全站默认），绝不让它挡住页面 */
+        }
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>

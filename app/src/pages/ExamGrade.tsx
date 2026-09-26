@@ -224,7 +224,7 @@ function QRowEditor({
                   fontWeight: 700,
                   border: `1px solid ${on ? 'var(--color-accent)' : 'var(--color-line2)'}`,
                   background: on ? 'var(--color-accent)' : 'var(--color-surface)',
-                  color: on ? '#fff' : 'var(--color-ink2)',
+                  color: on ? 'var(--color-onaccent)' : 'var(--color-ink2)',
                   position: 'relative',
                 }}
               >
@@ -238,7 +238,10 @@ function QRowEditor({
                       width: 4,
                       height: 4,
                       borderRadius: 9,
-                      background: on ? '#fff' : 'var(--color-ok)',
+                      /* ⚠️ 这一颗是"正确答案"的提示点：它必须**永远是选中块底色/ok 色的反色** ——
+                         亮色下选中块是深蓝 → 白点；暗色下选中块是**提亮过的蓝** → 近黑点。
+                         写死 `#fff` 的话，暗色下这个点会消失（那是"这题答案是什么"的唯一提示）。 */
+                      background: on ? 'var(--color-onaccent)' : 'var(--color-ok)',
                     }}
                   />
                 ) : null}
@@ -287,7 +290,7 @@ function QRowEditor({
                   fontWeight: 700,
                   border: `1px solid ${on ? 'var(--color-accent)' : 'var(--color-line2)'}`,
                   background: on ? 'var(--color-accent)' : 'var(--color-surface)',
-                  color: on ? '#fff' : 'var(--color-ink2)',
+                  color: on ? 'var(--color-onaccent)' : 'var(--color-ink2)',
                 }}
               >
                 {v}

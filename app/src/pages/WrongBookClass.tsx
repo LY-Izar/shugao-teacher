@@ -13,6 +13,7 @@ import { Button, PageHead, Panel, Sect, Sheet, Tag } from '../components/ui'
 import { activeStudents, useStore, useToast } from '../data/store'
 import { downloadPracticeDocx } from '../lib/examDoc'
 import { buildClassWrongBook, buildWrongBook, rankedCountOf, type WrongItem } from '../lib/wrongbook'
+import { compareStudentNo } from '../lib/roster'
 
 /** 勾选：空集合表示"全选"。这样不用在打开时做状态同步，少一类 bug */
 function usePicked() {
@@ -58,20 +59,35 @@ export default function WrongBookClass() {
 
   const [openNo, setOpenNo] = useState<string | null>(null)
   const [sumOpen, setSumOpen] = useState(false)
+  /**
+   * 学生名单的排序方式。
+   * · `lost`（**默认**）—— 丢分多的排最前：错题集要看的是"谁最需要补"；
+   * · `studentNo`      —— 班内学号升序：老师拿着纸质名单照号找人时用。
+   * ⚠️ **不记住偏好**（用户没要求，也刻意不做）：这一页每次打开都该是同一个样子 ——
+   *    "上次切过"留下的状态会让人以为名单乱了。切换成本就是一次点击。
+   */
+  const [sortBy, setSortBy] = useState<'lost' | 'studentNo'>('lost')
   const pick = usePicked()
 
   const klass = classes.find((c) => c.id === classId)
 
   const students = useMemo(() => activeStudents(klass), [klass])
 
-  /** 学生名单：按丢分从多到少（同一分数按错题数）—— 排序语义与原「个人」tab 一致 */
-  const books = useMemo(
-    () =>
-      students
-        .map((s) => buildWrongBook(s, klass, assignments))
-        .sort((a, b) => b.totalLost - a.totalLost || b.totalWrong - a.totalWrong),
-    [students, klass, assignments],
-  )
+  /**
+   * 学生名单：默认按丢分从多到少（同一分数按错题数），可切成按班内学号升序。
+   * ⚠️ 两套都要**稳定**：最后一级拿班内学号（再是姓名）兜底 ——
+   *    不然同分的那几个人每次重算的先后都可能不一样，看起来像名单在乱跳。
+   * ⚠️ 班内学号按**数字**排（`compareStudentNo`）：直接比字符串会把 10 排到 2 前面。
+   */
+  const books = useMemo(() => {
+    const list = students.map((s) => buildWrongBook(s, klass, assignments))
+    return sortBy === 'studentNo'
+      ? list.sort(compareStudentNo)
+      : list.sort(
+          (a, b) =>
+            b.totalLost - a.totalLost || b.totalWrong - a.totalWrong || compareStudentNo(a, b),
+        )
+  }, [students, klass, assignments, sortBy])
 
   const cls = useMemo(() => buildClassWrongBook(klass, assignments), [klass, assignments])
 
@@ -144,7 +160,33 @@ export default function WrongBookClass() {
         ) : (
           <>
             <div className="mb-4">
-              <Sect>每个人的错题账 · 按丢分排序</Sect>
+              <div className="flex items-start gap-2">
+                <div className="min-w-0 flex-1">
+                  {/* 小标题跟着切换走（默认那一档的措辞与原来一字不差） */}
+                  <Sect>
+                    每个人的错题账 · {sortBy === 'studentNo' ? '按学号排序' : '按丢分排序'}
+                  </Sect>
+                </div>
+                {/* 排序切换：默认仍是按丢分（这个班谁最需要补）；照名单找人时切到按学号 */}
+                <div className="mb-2 flex shrink-0 items-center gap-1">
+                  <Button
+                    size="sm"
+                    variant={sortBy === 'lost' ? 'primary' : 'default'}
+                    data-wrong-sort="lost"
+                    onClick={() => setSortBy('lost')}
+                  >
+                    按丢分
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant={sortBy === 'studentNo' ? 'primary' : 'default'}
+                    data-wrong-sort="studentNo"
+                    onClick={() => setSortBy('studentNo')}
+                  >
+                    按学号
+                  </Button>
+                </div>
+              </div>
               <Panel className="overflow-hidden">
                 {books.every((b) => b.totalWrong === 0) ? (
                   <div
@@ -403,6 +445,7 @@ export default function WrongBookClass() {
                           objectFit: 'contain',
                           border: '1px solid var(--color-line2)',
                           borderRadius: 3,
+                          /* 🔴 错题原文截图（抠自试卷）的衬底：暗色下也偏白（理由同 WordImport） */
                           background: '#fff',
                           flexShrink: 0,
                         }}

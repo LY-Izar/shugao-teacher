@@ -47,7 +47,7 @@ export function MorningWelcome({
         style={{
           padding: '22px 20px 18px',
           background:
-            'linear-gradient(160deg, var(--color-accentsoft) 0%, rgb(255 255 255 / 0) 78%)',
+            'linear-gradient(160deg, var(--color-accentsoft) 0%, rgb(var(--color-glasshi) / 0) 78%)',
           borderBottom: '1px solid var(--color-line)',
         }}
       >
@@ -264,9 +264,9 @@ export function MoodBanner({
       className="anim-in mb-4 flex items-start gap-3 p-3.5"
       style={{
         background: festive
-          ? 'linear-gradient(140deg, #fdf2e6, rgb(255 255 255 / 0))'
-          : 'linear-gradient(140deg, var(--color-accentsoft), rgb(255 255 255 / 0))',
-        border: `1px solid ${festive ? '#ecd9ae' : '#c3d6fb'}`,
+          ? 'linear-gradient(140deg, var(--color-warnsoft), rgb(var(--color-glasshi) / 0))'
+          : 'linear-gradient(140deg, var(--color-accentsoft), rgb(var(--color-glasshi) / 0))',
+        border: `1px solid ${festive ? 'var(--color-warnline)' : 'var(--color-infoline)'}`,
         borderRadius: 6,
       }}
     >
@@ -288,7 +288,7 @@ export function MoodBanner({
           style={{
             fontSize: 14,
             fontWeight: 650,
-            color: festive ? '#8a5a12' : 'var(--color-accentink)',
+            color: festive ? 'var(--color-warnink)' : 'var(--color-accentink)',
           }}
         >
           {title}
@@ -296,7 +296,7 @@ export function MoodBanner({
         <div
           style={{
             fontSize: 12,
-            color: festive ? '#96702f' : '#2a5bb8',
+            color: festive ? 'var(--color-warnink2)' : 'var(--color-ink2)',
             marginTop: 2,
             lineHeight: 1.6,
           }}

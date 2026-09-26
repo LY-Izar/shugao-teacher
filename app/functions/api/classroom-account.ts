@@ -28,8 +28,11 @@ type Env = {
 }
 
 type Body = {
-  /** create = 建账号；reset = 换密码；disable / enable = 停用或恢复 */
-  action?: 'create' | 'reset' | 'disable' | 'enable'
+  /**
+   * create = 建账号；reset = 换密码；disable / enable = 停用或恢复；
+   * 🆕 status = **只看一眼**这个班有没有账号（**只回账号，不回密码** —— 密码是哈希存的，拿不回原文）。
+   */
+  action?: 'create' | 'reset' | 'disable' | 'enable' | 'status'
   classId?: string
 }
 
@@ -148,19 +151,37 @@ function makePassword(len = 12): string {
 
 type ClassRow = { id: string; name: string; grade_id: string | null; school_id: string | null }
 type RoleRow = { role: string; scope_type: string | null; scope_id: string | null }
+type AccountRow = { id: string; email: string; disabled: boolean }
 
 /**
  * 这个人能不能管这个班的教室端账号？
- * 规则（用户已确认）：最高管理员 / 年级主任（本年级）/ 班主任（本班）。
+ *
+ * 规则（用户已确认）：最高管理员 / 教务处 ∪ 年级主任（本年级）/ 班主任（本班）。
  * 任课教师不行 —— 任课关系是「能不能批改」的判据，不是「能不能建账号」的判据。
+ *
+ * 🔴 **走班班不需要另加一支**：它只是 `classes` 里 `kind='stream'` 的一行、**照样有 `grade_id`**，
+ *    于是"本年级的年级主任"这一支天然把它盖住 —— 这正是用户要的
+ *    「走班班没有班主任，由年级主任统一管」。**别为它再发明一个名字相近的判据**
+ *    （`can_manage_stream_class` 在 `schema.sql` §31.1 / §32 里被明确否掉，理由同上）。
  */
-function mayManage(roles: RoleRow[], cls: ClassRow): boolean {
+export function mayManage(roles: RoleRow[], cls: ClassRow): boolean {
   return roles.some((r) => {
     if (r.role === 'super' || r.role === 'admin') return true
     if (r.role === 'grade_head') return cls.grade_id != null && r.scope_id === cls.grade_id
     if (r.role === 'head_teacher') return r.scope_id === cls.id
     return false
   })
+}
+
+/** 回话里那一个 `account` 对象 —— **形状只有这一处**（三个动作各自拼一份就会漂） */
+function accountOf(cls: ClassRow, a: AccountRow, password?: string): Record<string, unknown> {
+  return {
+    classId: cls.id,
+    name: `${cls.name.replace(/班$/, '')}班教室`,
+    email: a.email,
+    disabled: a.disabled,
+    ...(password ? { password } : {}),
+  }
 }
 
 export async function onRequestPost(context: {
@@ -247,7 +268,8 @@ export async function onRequestPost(context: {
     return json(
       {
         status: 'error',
-        message: '只有班主任、年级主任或最高管理员能给这个班建教室端账号',
+        // 三个动作都能干，所以这一句里三件都写上（只提"建账号"会把重置密码的人指错）
+        message: '只有班主任、年级主任或最高管理员能管这个班的教室端账号',
       },
       403,
     )
@@ -264,11 +286,25 @@ export async function onRequestPost(context: {
   if (!existingRes.ok) {
     return json({ status: 'error', message: NEED_STAGE1, detail: existingText.slice(0, 200) }, 503)
   }
-  const existing = (JSON.parse(existingText || '[]') as {
-    id: string
-    email: string
-    disabled: boolean
-  }[])[0]
+  const existing = (JSON.parse(existingText || '[]') as AccountRow[])[0]
+
+  /*
+   * 🆕 status = **只看一眼**（班级档案里那一块「教室端账号」进门先问它）。
+   *
+   * 🔴 它**只回账号**：Supabase 的密码是**哈希**存的，服务端自己也拿不回原文 ——
+   *    所以"看一眼密码"这件事在原理上做不到，界面上必须写清"密码只在生成时显示这一次"。
+   *    要密码就点「重置密码」（`reset`），新密码在手边显示一次。
+   *
+   * ⚠️ 它是**只读动作**：不改库、不建号，所以它走的是同一个 `mayManage()` 那一刀
+   *    （上面刚判过）—— 不另设一套"看得到"与"改得动"的判据。
+   */
+  if (action === 'status') {
+    return json({
+      status: 'ok',
+      hasAccount: Boolean(existing),
+      ...(existing ? { account: accountOf(cls, existing) } : {}),
+    })
+  }
 
   if (action === 'disable' || action === 'enable') {
     if (!existing) return json({ status: 'error', message: '这个班还没有教室端账号' }, 404)
@@ -285,7 +321,7 @@ export async function onRequestPost(context: {
     }
     return json({
       status: 'ok',
-      account: { classId, name: displayName, email: existing.email, disabled: action === 'disable' },
+      account: accountOf(cls, { ...existing, disabled: action === 'disable' }),
     })
   }
 
@@ -320,7 +356,7 @@ export async function onRequestPost(context: {
     }
     return json({
       status: 'ok',
-      account: { classId, name: displayName, email: existing.email, password },
+      account: accountOf(cls, { ...existing, disabled: false }, password),
     })
   }
 
@@ -330,7 +366,7 @@ export async function onRequestPost(context: {
       {
         status: 'exists',
         message: '这个班已经有教室端账号了。要找回密码就点「重置密码」，会生成一串新的。',
-        account: { classId, name: displayName, email: existing.email, disabled: existing.disabled },
+        account: accountOf(cls, existing),
       },
       409,
     )
@@ -404,6 +440,6 @@ export async function onRequestPost(context: {
 
   return json({
     status: 'ok',
-    account: { classId, name: displayName, email, password },
+    account: accountOf(cls, { id: newUser.id, email, disabled: false }, password),
   })
 }

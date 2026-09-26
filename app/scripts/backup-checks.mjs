@@ -84,6 +84,65 @@ function section(t) {
   console.log(`\n${t}`)
 }
 
+/* ============================================================
+   🔴 反向对照开关（AGENTS.md 第三节第 2 条：**每条新断言都要有反向对照**）
+   ------------------------------------------------------------
+   这一轮新加的断言守的是"**导出/导入必须带上两张档案表**"。按纪律，"把修复改回去 →
+   必须红"这条对照要**真的跑过**，所以它不是嘴上说说，而是两个可执行的开关：
+
+     node scripts/backup-checks.mjs --drop-profile-tables      # 模拟"导出里没有这两张表"
+     node scripts/backup-checks.mjs --legacy-version-floor     # 模拟"老版本客户端只认到 v3"
+
+   ⚠️ 这两个分支**只在对照时开**，平时一个字都不生效（默认两个都是 false）。
+      它们模拟的正是"修复之前的那份代码"：一个把新表从导出里去掉，一个把 v4 判成不认识的版本。
+   ⚠️ 有它们才叫"反向对照真跑红了"；没有它们，那两条断言就只是**永远为绿的摆设**。
+   ============================================================ */
+const DROP_PROFILE_TABLES = process.argv.includes('--drop-profile-tables')
+const LEGACY_VERSION_FLOOR = process.argv.includes('--legacy-version-floor')
+
+/**
+ * 把"修复前"的那份行为盖回 `lib/backup.ts` 的导出结果上（**只用于反向对照**）。
+ * ① 老导出：`makeBackup` 里根本没有这两项；
+ * ② 老导入：`validateBackup` 只认到 v3（v4 报"版本不认识"）。
+ *
+ * ⚠️ ESM 的模块命名空间对象是**只读**的（`Cannot assign to read only property`），
+ *    所以这里**不改命名空间，而是给调用方一份可写的浅拷贝**（函数自己引用的是模块内部
+ *    的绑定，盖在拷贝上照样生效）。返回 undefined 表示"不开对照，用原样的命名空间"。
+ */
+function legacyShape(B) {
+  if (!DROP_PROFILE_TABLES && !LEGACY_VERSION_FLOOR) return undefined
+  /*
+   * 🔴 **`{ ...B }` 会把 ESM 的活绑定拍成快照** —— `lastKeyUpgrade` 是 `let` 导出，
+   *    展开之后读到的永远是"展开那一刻"的值（`undefined`），于是第六节三条**无关**的
+   *    断言会跟着红（本轮被这个坑绊过一次）。
+   *    所以只**按需重定义**要改的那一个函数，其余原样继承（活绑定照旧）。
+   *    ⚠️ 而且重定义必须**先删掉继承来的那个属性**（模块命名空间的描述符
+   *    `configurable: false`，不删就 `Cannot redefine property`）。
+   */
+  const M = {}
+  Object.setPrototypeOf(M, B)
+  const realValidate = B.validateBackup
+  const realExport = B.exportWithProfiles
+  if (LEGACY_VERSION_FLOOR) {
+    M.validateBackup = (raw) => {
+      const v = raw && typeof raw === 'object' ? raw.v : undefined
+      if (v === 4) return { ok: false, why: `备份版本不认识（v${String(v)}）` }
+      return realValidate(raw)
+    }
+  }
+  if (DROP_PROFILE_TABLES) {
+    M.exportWithProfiles = async (s) => {
+      const r = await realExport(s)
+      const data = { ...r.data }
+      // 修复前：`makeBackup` 里根本没有这两项
+      delete data.studentProfiles
+      delete data.teacherProfiles
+      return { data, issues: r.issues }
+    }
+  }
+  return M
+}
+
 await withLock(async () => {
     /* ============================================================
        假 PostgREST
@@ -106,7 +165,26 @@ await withLock(async () => {
       // 第 20 段（P1 序列号键迁移）：`students.serial` 列不在时**一个字都不许带**
       students: 'serial',
     }
-    const WRITE_TABLES = ['teachers', 'classes', 'students', 'assignments', 'schedule_items', 'classrooms', 'calls', 'shared_files']
+    const WRITE_TABLES = ['teachers', 'classes', 'students', 'assignments', 'schedule_items', 'classrooms', 'calls', 'shared_files',
+      /* 🆕 两张档案表（第七节）：不列进来的话会被上面那条 404 挡掉，
+         表现成"表不存在"（`ensureStudentProfiles()` 回 `missing`）—— 那是**假红**：
+         真库里这两张表跑过 §35/§36。 */
+      'student_profiles', 'teacher_profiles']
+
+    /**
+     * 两张档案表的读结果（第七节用）。按 `student_id` / `teacher_id` 的 `in.()` 过滤，
+     * 形状与 PostgREST 的 `select('*')` 一致（snake_case）。
+     */
+    const FAKE_UID_PROF = '11111111-1111-4111-8111-111111111111'
+    const STUDENT_ID_PROF = '44444444-4444-4444-8444-444444444444'
+    const STUDENT_ID_PROF2 = '44444444-4444-4444-8444-444444444445'
+    let STUDENT_PROFILE_ROWS = [
+      { student_id: STUDENT_ID_PROF, ethnicity: '汉族', birth_month: '2010-05', guardian_phone: '13800000001', home_address: '某小区1号楼2单元501' },
+      { student_id: STUDENT_ID_PROF2, ethnicity: '回族', birth_month: '2010-11', guardian_phone: '13800000002', home_address: '某小区3号楼1单元101' },
+    ]
+    let TEACHER_PROFILE_ROWS = [
+      { teacher_id: FAKE_UID_PROF, home_address: '教师公寓5号楼', phone: '010-12345678', email: 'wang@example.com' },
+    ]
 
     /**
      * `shared_files` 的读结果（第五节用）：`remote` 那一层读的是 `.select('*')`，
@@ -214,6 +292,17 @@ await withLock(async () => {
         }
 
         if (req.method === 'GET') {
+          // 🆕 两张档案表：按 `in.(...)` 的 id 清单滤一遍（与真 PostgREST 的形状一致）
+          if (table === 'student_profiles' || table === 'teacher_profiles') {
+            const key = table === 'student_profiles' ? 'student_id' : 'teacher_id'
+            const rowsAll = table === 'student_profiles' ? STUDENT_PROFILE_ROWS : TEACHER_PROFILE_ROWS
+            const filter = url.searchParams.get(key)
+            const want = filter ? filter.replace(/^in\.\(|\)$/g, '').split(',').map((s) => s.trim().replace(/^"|"$/g, '')) : null
+            const rows = want ? rowsAll.filter((r) => want.includes(r[key])) : rowsAll
+            res.writeHead(200, { 'content-type': 'application/json' })
+            res.end(JSON.stringify(rows))
+            return
+          }
           // 文件列表：喂 FILE_ROWS（第五节用它验"列不存在时读也不崩、classIds 兜底成空数组"）
           res.writeHead(200, { 'content-type': 'application/json' })
           res.end(JSON.stringify(table === 'shared_files' ? FILE_ROWS : []))
@@ -370,7 +459,28 @@ await withLock(async () => {
        ============================================================ */
 
     try {
-      const B = await import(mod('src/lib/backup.ts'))
+      const rawB = await import(mod('src/lib/backup.ts'))
+      // ↳ 反向对照开关接上去（默认两个开关都是 false，"修复后"的真实行为原样）
+      const B = legacyShape(rawB) ?? rawB
+      /**
+       * 反向对照 `--legacy-version-floor` 下 `validateBackup(v4文件)` 会是 `{ok:false}`，
+       * 于是 `r.data` 是 undefined。**每条断言自己会报红**，但脚本不该在这里崩掉
+       * （崩了后面的断言一条都跑不到，"哪条红了"就看不出来了）。
+       * ⚠️ 只给"读的是一个 v4 文件"的那几处垫一个空壳，别到处撒 —— 那会把真问题盖住。
+       * ⚠️ 空壳里也得有 `teacher` / `classes`（一份"最小形状"），否则后面的页面级代码
+       *    （`teacher.primarySubjectCode` 之类）会**崩**而不是**红** —— JS 不检查这些。
+       */
+      const emptyBackup = () => ({
+        classes: [],
+        assignments: [],
+        calls: [],
+        /* ⚠️ `teacher` 而不是 `null`：`restoreBackup` 对 null 会保留原来那位老师，
+           于是"老师的显示名没被改写"之类会**碰巧绿**（那是假绿，比红更糟）。 */
+        teacher: { id: 't-1', name: '老师', subject: '物理', school: '' },
+        studentProfiles: [],
+        teacherProfiles: [],
+      })
+      const vd = (r) => r.data ?? emptyBackup()
 
       /* ============================================================
          一、备份归一化（纯函数，不收服务）：v1 兼容 + 认不出留 undefined
@@ -380,7 +490,9 @@ await withLock(async () => {
       {
         const v1 = B.validateBackup(backupFile())
         eq('v1 老备份仍然能导入（向后兼容）', v1.ok, true)
-        eq('收进来的版本一律归一成 v3', v1.data.v, 3)
+        /* ⚠️ 期望值变了（不是因为代码红了才改）：**当前版本已经是 v4**（加了两张档案表），
+           "收进来一律归一成当前版本"这条判据本身没变，变的是"当前版本是几"。 */
+        eq('收进来的版本一律归一成 v4（当前版本）', v1.data.v, 4)
         eq('v1 的「物理」按显示名反查 → physics', v1.data.assignments[0].subjectCode, 'physics')
         eq('v1 的老师「物理」→ primarySubjectCode physics', v1.data.teacher.primarySubjectCode, 'physics')
 
@@ -441,7 +553,11 @@ await withLock(async () => {
           '化学竞赛',
         )
 
-        eq('v4 不认（宁可报错也不猜一份看不懂的结构）', B.validateBackup(backupFile({ v: 4 })).ok, false)
+        /* ⚠️ 这两条的形状变了：**v4 现在是"当前版本"**（加了两张档案表），
+           所以"新版本不接受"的那条判据挪到 v5 上（下一条）。这是期望值变，
+           不是"为了绿而改绿"：v4 从"未来版本"变成了"我们自己写出去的那个版本"。 */
+        eq('v4 收（它就是当前版本）', B.validateBackup(backupFile({ v: 4 })).ok, true)
+        eq('v5 不认（比当前版本高 → 宁可报错也不猜一份看不懂的结构）', B.validateBackup(backupFile({ v: 5 })).ok, false)
         eq('没有 v 也不认', B.validateBackup({ classes: [klass()], assignments: [] }).ok, false)
 
         const exported = B.makeBackup({
@@ -452,15 +568,17 @@ await withLock(async () => {
           calls: [],
           classrooms: [],
         })
-        eq('makeBackup 导出的是 v3', exported.v, 3)
+        eq('makeBackup 导出的是 v4', exported.v, 4)
         ok(
           '导出的文件里真的带着 subjectCode（不是靠 import 时反查）',
           exported.assignments[0].subjectCode === 'chemistry' &&
             exported.teacher.primarySubjectCode === 'chemistry',
         )
         const roundTrip = B.validateBackup(JSON.parse(JSON.stringify(exported)))
-        eq('导出 → 写文件 → 读回来：subjectCode 不丢', roundTrip.data.assignments[0].subjectCode, 'chemistry')
-        eq('同上：primarySubjectCode 不丢', roundTrip.data.teacher.primarySubjectCode, 'chemistry')
+        /* ⚠️ `?.` 是给反向对照留的：`--legacy-version-floor` 下 v4 会被判成不认识的版本，
+           `roundTrip.data` 是 undefined —— 别让脚本在这里崩掉（崩了就看不到"哪条红了"） */
+        eq('导出 → 写文件 → 读回来：subjectCode 不丢', roundTrip.data?.assignments?.[0]?.subjectCode, 'chemistry')
+        eq('同上：primarySubjectCode 不丢', roundTrip.data?.teacher?.primarySubjectCode, 'chemistry')
       }
 
       /* ============================================================
@@ -489,17 +607,17 @@ await withLock(async () => {
           ),
         )
         const parsed = B.validateBackup(file)
-        eq('导入这一步没丢 code', parsed.data.assignments[0].subjectCode, 'chemistry')
+        eq('导入这一步没丢 code', vd(parsed).assignments[0]?.subjectCode, 'chemistry')
 
-        useStore.getState().restoreBackup(parsed.data)
-        eq('恢复后本地档案带着 code', useStore.getState().assignments[0].subjectCode, 'chemistry')
+        useStore.getState().restoreBackup(vd(parsed))
+        eq('恢复后本地档案带着 code', useStore.getState().assignments[0]?.subjectCode, 'chemistry')
         eq(
           '恢复后老师的主学科还在（本地模式下新建作业就靠它预选）',
-          useStore.getState().teacher.primarySubjectCode,
+          useStore.getState().teacher?.primarySubjectCode,
           'chemistry',
         )
-        eq('恢复后老师的显示名没被改写', useStore.getState().teacher.subject, '化学竞赛')
-        eq('恢复后班级/名单照旧', useStore.getState().classes[0].students.length, 1)
+        eq('恢复后老师的显示名没被改写', useStore.getState().teacher?.subject, '化学竞赛')
+        eq('恢复后班级/名单照旧', useStore.getState().classes[0]?.students.length, 1)
 
         useStore.getState().setGrade(ASG_ID, {
           wrong: { 1: ['3'] },
@@ -522,7 +640,7 @@ await withLock(async () => {
         // ---- ② v1 老备份（没有 code，只有显示名）：靠反查兜住 ----
         requests.length = 0
         const oldOne = B.validateBackup(backupFile({ assignments: [asg({ subject: '语文' })] }))
-        useStore.getState().restoreBackup(oldOne.data)
+        useStore.getState().restoreBackup(vd(oldOne))
         eq('v1 老备份恢复后 code 由显示名反查补上', useStore.getState().assignments[0].subjectCode, 'chinese')
         useStore.getState().setGrade(ASG_ID, { confirmedNos: ['1'] })
         const putOld = await waitForPayload('assignments')
@@ -536,7 +654,7 @@ await withLock(async () => {
             assignments: [asg({ subject: '物理竞赛' })],
           }),
         )
-        useStore.getState().restoreBackup(oddOne.data)
+        useStore.getState().restoreBackup(vd(oddOne))
         eq('字典外：本地也不编一个 code', useStore.getState().assignments[0].subjectCode, undefined)
         useStore.getState().setGrade(ASG_ID, { confirmedNos: ['1'] })
         const putOdd = await waitForPayload('assignments')
@@ -552,7 +670,7 @@ await withLock(async () => {
 
         // ---- ④ 回推云端（换账号恢复那条路）也守同一条纪律 ----
         requests.length = 0
-        const msg = await B.pushBackupToCloud(B.validateBackup(file).data, FAKE_UID)
+        const msg = await B.pushBackupToCloud(vd(B.validateBackup(file)), FAKE_UID)
         ok('回推云端没报错', !msg.includes('⚠️'), msg)
         const tRow = lastPayload('teachers')
         eq('回推 teachers 带上了 primary_subject_code', tRow?.primary_subject_code, 'chemistry')
@@ -561,7 +679,7 @@ await withLock(async () => {
         eq('回推之后依然没有任何 null 学科列', nullSubjectWrites(), [])
 
         requests.length = 0
-        const msgOdd = await B.pushBackupToCloud(oddOne.data, FAKE_UID)
+        const msgOdd = await B.pushBackupToCloud(vd(oddOne), FAKE_UID)
         ok('字典外备份回推云端也不报错', !msgOdd.includes('⚠️'), msgOdd)
         const tRow2 = lastPayload('teachers')
         ok(
@@ -832,6 +950,28 @@ await withLock(async () => {
       section('六、序列号键（§20 / P1）：v3 导出不降级 · v1 老备份补成序列号 · 补不到留原键')
       {
         /*
+         * 🔴 **本节自己先把 store 置成"本机已经有这一届学生"的样子**（发号基数靠它）——
+         *    不能依赖上一节残留的 state：那样本节会随别人的改动忽绿忽红，
+         *    而且反向对照跑出来的红会跑到**无关的**断言上去（假红比真红更贵）。
+         *    ⚠️ 用与 `backup.ts` **同一个 store 实例**（无后缀那个模块）。
+         */
+        const store0 = (await import(mod('src/data/store.ts'))).useStore
+        store0.setState({
+          classes: [
+            {
+              id: '99999999-9999-4999-8999-999999999999',
+              name: '高二(9)班',
+              grade: '高二',
+              year: '2026',
+              createdAt: 1,
+              students: [
+                { id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1', studentNo: '1', serial: '2025001', name: '丙', status: 'active', createdAt: 1 },
+                { id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2', studentNo: '2', serial: '2025002', name: '丁', status: 'active', createdAt: 1 },
+              ],
+            },
+          ],
+        })
+        /*
          * 夹具：一份**迁移后**形状的备份（v3）：学生有序列号，档案键就是序列号。
          * ⚠️ 这份刻意用 `validateBackup` 走一遍再断言 —— 导出→写文件→读回来
          *    这条路才是真实发生的（`makeBackup` 的返回值不会被直接使用）。
@@ -867,55 +1007,47 @@ await withLock(async () => {
           calls: [],
           classrooms: [],
         })
-        eq('导出版本是 v3', exported3.v, 3)
+        /* ⚠️ 期望值变了：`makeBackup` 现在写出去的是 **v4**（加了两张档案表）。
+           这一节守的是"序列号键不降级"，与版本号无关 —— 版本号那两条在第一节。 */
+        eq('导出版本是 v4（当前版本）', exported3.v, 4)
         eq('v3 导出：学生的序列号进文件', exported3.classes[0].students[0].serial, '2025001')
 
         const back3 = B.validateBackup(JSON.parse(JSON.stringify(exported3)))
-        eq('v3 → 导入：版本仍是 v3', back3.data.v, 3)
-        eq('🔴 v3 → 导入：学生的序列号**不丢**', back3.data.classes[0].students[1].serial, '2025002')
+        /*
+         * ⚠️ `?.` 是给反向对照 `--legacy-version-floor` 留的：v4 会被整份拒绝，
+         *    `back3.data` 是 undefined。**让断言报红，别让脚本崩** ——
+         *    崩了本节后面的断言（含第七节那几条）一条都跑不到。
+         */
+        eq('v3 形状 → 导入：版本归一成 v4', back3.data?.v, 4)
+        eq('🔴 v3 → 导入：学生的序列号**不丢**', back3.data?.classes?.[0]?.students[1].serial, '2025002')
         eq(
           '🔴 v3 → 导入：档案键仍是序列号（不降级回班内学号）',
           [
-            back3.data.assignments[0].missingNos,
-            back3.data.assignments[0].lateNos,
-            back3.data.assignments[0].confirmedNos,
-            back3.data.assignments[0].focusNos,
-            back3.data.assignments[0].correctionNos,
-            back3.data.assignments[0].correctedNos,
+            back3.data?.assignments?.[0]?.missingNos,
+            back3.data?.assignments?.[0]?.lateNos,
+            back3.data?.assignments?.[0]?.confirmedNos,
+            back3.data?.assignments?.[0]?.focusNos,
+            back3.data?.assignments?.[0]?.correctionNos,
+            back3.data?.assignments?.[0]?.correctedNos,
           ],
           [['2025002'], ['2025001'], ['2025001'], ['2025002'], ['2025001'], ['2025002']],
         )
-        eq('🔴 v3 → 导入：wrong 的键仍是序列号', Object.keys(back3.data.assignments[0].wrong), ['2025001'])
-        eq('🔴 v3 → 导入：grades 的键仍是序列号', Object.keys(back3.data.assignments[0].grades), ['2025002'])
+        eq('🔴 v3 → 导入：wrong 的键仍是序列号', Object.keys(back3.data?.assignments?.[0]?.wrong ?? {}), ['2025001'])
+        eq('🔴 v3 → 导入：grades 的键仍是序列号', Object.keys(back3.data?.assignments?.[0]?.grades ?? {}), ['2025002'])
         eq('v3 → 导入时**没有发生升级**（本来就不用升）', B.lastKeyUpgrade, undefined)
 
         /*
          * v1 老备份：学生没有序列号、键是班内学号。
          * 届从哪来？本机/云端**已经**有这一届的学生（序列号 2025001…）→
          * `upgradeKeysToSerial` 拿它当编号基数，从 2025003 往后发，**不从 001 重来**。
+         *
+         * ⚠️ store 用的是**本节开头**那份（`store0`，与 `backup.ts` 同一个实例）——
+         *    这里不再重复 setState：本节中间没有任何东西动过 classes，重复设置只是噪声。
+         *    ⚠️ **不能**用带 `?xxx` 后缀 import 出来的那个实例：那是另一个模块
+         *    （本脚本故意用它模拟"刷新页面"），`backup.ts` 里的 `useStore` 指向没有后缀的那个，
+         *    拿错了就永远读到空状态，表现成"届认不出来、一个号都没发"。
          */
-        /*
-         * ⚠️ **必须用与 `backup.ts` 同一个 store 实例**：`?xxx` 后缀会 import 出一个
-         *    *新模块*（这是本脚本故意用来"刷新页面"的手法），而 `backup.ts` 里的
-         *    `useStore` 指向**没有后缀**的那个实例 —— 拿错了就永远读到空状态，
-         *    表现成"届认不出来、一个号都没发"。
-         */
-        const store = (await import(mod('src/data/store.ts'))).useStore
-        store.setState({
-          classes: [
-            {
-              id: '99999999-9999-4999-8999-999999999999',
-              name: '高二(9)班',
-              grade: '高二',
-              year: '2026',
-              createdAt: 1,
-              students: [
-                { id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1', studentNo: '1', serial: '2025001', name: '丙', status: 'active', createdAt: 1 },
-                { id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2', studentNo: '2', serial: '2025002', name: '丁', status: 'active', createdAt: 1 },
-              ],
-            },
-          ],
-        })
+        const store = store0
 
         const v1 = B.validateBackup(
           backupFile({
@@ -1061,7 +1193,256 @@ await withLock(async () => {
           B.lastKeyUpgrade && B.lastKeyUpgrade.assigned === 0 && B.lastKeyUpgrade.unresolved === 1,
           JSON.stringify(B.lastKeyUpgrade),
         )
-        store.setState({ classes: [] })
+      }
+
+      /* ============================================================
+         七、档案（2026-10 · 数据安全缺口）：两张表必须**进导出、出得来**
+         ------------------------------------------------------------
+         🔴 修的 bug：`app/src/lib/backup.ts` 的导出/导入**不含 `student_profiles`
+            （民族 / 出生年月 / 家长电话 / 家庭住址）与 `teacher_profiles`
+            （家庭住址 / 电话 / 邮箱）**。老师点「导出备份文件」（换设备 / 换账号搬数据用的
+            那一个）→ 两张表**静默丢掉**；而服务端那条链（AES pg_dump 全库 + 年级备份 payload）
+            是全的 —— **只有客户端这一条漏了**。
+
+         这一节守四件事（每条都有对应的反向对照开关，见文件开头的 `DROP_PROFILE_TABLES` /
+         `LEGACY_VERSION_FLOOR`）：
+          ① 导出真的带上两张表；② **导出 → 导入 → 再导出，两次逐字相等**（本项目对导入导出的
+          既有验收口径）；③ **v1/v2/v3 老备份（没有这两张表）导入不许报错**，缺就当空；
+          ④ 缺行 / 空表 / 引用了不存在的学生或老师 → **跳过并写进结果**（照 `backup.ts:745` 那带的口径）。
+         ============================================================ */
+
+      section('七、档案：导出带上两张表 · 往返逐字相等 · 老备份缺表当空 · 孤儿跳过并报出来')
+      {
+        const { useStore } = await import(mod('src/data/store.ts'))
+        const STUDENT2 = '44444444-4444-4444-8444-444444444445'
+        const klass2 = () => ({
+          id: CLASS_ID,
+          name: '高二(1)班',
+          grade: '高二',
+          year: '2026',
+          createdAt: 1,
+          students: [
+            { id: STUDENT_ID, studentNo: '1', serial: '2025001', name: '甲', status: 'active', createdAt: 1 },
+            { id: STUDENT2, studentNo: '2', serial: '2025002', name: '乙', status: 'active', createdAt: 1 },
+          ],
+        })
+        /** 两份学生档案 + 自己那份教师档案（**PII 就在这几个字段上**）
+         *  ⚠️ 这一份与假库里 `STUDENT_PROFILE_ROWS` / `TEACHER_PROFILE_ROWS` **故意逐字相同**：
+         *     `exportWithProfiles` 是从库那边读的，而 store 里那一份（恢复之后用的）必须一致，
+         *     否则"往返逐字相等"会拿两份不同的东西去比（那是夹具的错，不是代码的错）。 */
+        const studentProfiles = [
+          {
+            studentId: STUDENT_ID,
+            ethnicity: '汉族',
+            birthMonth: '2010-05',
+            guardianPhone: '13800000001',
+            homeAddress: '某小区1号楼2单元501',
+          },
+          {
+            studentId: STUDENT2,
+            ethnicity: '回族',
+            birthMonth: '2010-11',
+            guardianPhone: '13800000002',
+            homeAddress: '某小区3号楼1单元101',
+          },
+        ]
+        const teacherProfiles = [
+          {
+            teacherId: FAKE_UID,
+            homeAddress: '教师公寓5号楼',
+            phone: '010-12345678',
+            email: 'wang@example.com',
+          },
+        ]
+        /** 后面好几条断言都拿它当"导出时的 store 快照" */
+        const snapshot = () => ({
+          teacher: teacher(),
+          classes: [klass2()],
+          assignments: [asg()],
+          schedule: [],
+          calls: [],
+          classrooms: [],
+          studentProfiles,
+          teacherProfiles,
+        })
+
+        /*
+         * ⚠️ 本节**不碰全局 store**：`exportWithProfiles(s)`/`restoreBackup(b)` 里的
+         *    "导出"只读传进去的那一份快照，所以这两条断言与全局 store 无关。
+         *    这么做是为了不把状态漏给别的节（反向对照下漏出去的 state 会把**无关**断言弄红，
+         *    那种假红比真红更难查）。v3 老备份恢复后 store 里是空那一处，见本节最后一段。
+         */
+
+        // ---- ① 导出真的带上两张表（值就是那两个字段，不是"只有个空数组"） ----
+        requests.length = 0
+        const x1 = await B.exportWithProfiles(snapshot())
+        ok(
+          '🔴 导出的文件里带着**学生档案**（两行，连家长电话都在）',
+          x1.data.studentProfiles?.length === 2 &&
+            x1.data.studentProfiles[0].guardianPhone === '13800000001',
+          JSON.stringify(x1.data.studentProfiles?.[0]),
+        )
+        eq(
+          '🔴 导出的文件里带着**教师档案**（老师自己的那一行）',
+          x1.data.teacherProfiles?.map((p) => p.teacherId),
+          [FAKE_UID],
+        )
+        eq('导出版本 = v4（加了两张表就是新版本）', x1.data.v, 4)
+
+        // ---- ② 往返逐字相等：导出 → 导入 → 再导出 ----
+        /*
+         * ⚠️ 比的是**导入归一化之后**的两份内容（`validateBackup` 的产物）——
+         *    现实里"读文件"这一步就是走它（`Settings.tsx` 先 `validateBackup` 再 `restoreBackup`），
+         *    而且 v1–v3 的归一化本来就会**有意**补字段（subjectCode 等）。
+         *    若直接比两次 `makeBackup` 的原始返回，比的就成了"归一化补了哪些字段"，
+         *    而不是"档案丢没丢" —— 那样断言会**永远红**，等于没有。
+         *
+         * ⚠️ 反向对照 `--legacy-version-floor` 下这一步整段会失败（v4 进不来）。
+         *    那时**让后面的断言降级成红**、把这一节跑完，而不是抛异常 ——
+         *    否则"新版本文件在老客户端上会被整份拒绝"这件事在报告里只剩一句崩溃信息，
+         *    看不到"到底哪几条判据在守它"。
+         */
+        const strip = (o) => {
+          const c = JSON.parse(JSON.stringify(o))
+          delete c.at // 时间戳每份都不同，不是"内容"
+          return c
+        }
+        const v4 = B.validateBackup(JSON.parse(JSON.stringify(x1.data)))
+        const d1 = strip(v4.data ?? {})
+        eq('v4 文件导入成功', v4.ok, true)
+        if (v4.ok) {
+          useStore.getState().restoreBackup(v4.data)
+        } else {
+          // 降级：把"恢复"这一步的产物置空，让下面三条**照常报红**而不是崩
+          useStore.setState({ studentProfiles: [], teacherProfiles: [] })
+        }
+        eq('导入没丢学生档案', (v4.data?.studentProfiles ?? []).length, 2)
+        eq('导入没丢教师档案', (v4.data?.teacherProfiles ?? []).length, 1)
+        eq(
+          '恢复后本地就带着这两份档案（不是只进了返回对象）',
+          [
+            useStore.getState().studentProfiles.length,
+            useStore.getState().teacherProfiles.length,
+          ],
+          [2, 1],
+        )
+        const x2 = await B.exportWithProfiles(snapshot())
+        const d2 = strip(B.validateBackup(JSON.parse(JSON.stringify(x2.data))).data ?? {})
+        eq('🔴 往返逐字相等：导出 → 导入 → 再导出，两次内容一模一样', d2, d1)
+        ok(
+          '🔴 而且那两份内容里真的有四段 PII 的值（不是"两次都空"这种假相等）',
+          JSON.stringify(d1).includes('13800000001') &&
+            JSON.stringify(d2).includes('13800000001') &&
+            JSON.stringify(d2).includes('教师公寓5号楼') &&
+            JSON.stringify(d2).includes('010-12345678'),
+        )
+
+        // ---- ③ 向后兼容：v1/v2/v3 老备份里**没有**这两项 → 导入不许报错，缺就当空 ----
+        const legacy3 = backupFile({ v: 3 }) // ⚠️ 刻意**不带** studentProfiles / teacherProfiles 两个键
+        const l3 = B.validateBackup(legacy3)
+        ok('🔴 v3 老备份导入**成功**（没有那两张表也不许整份失败）', l3.ok, true, l3.ok ? '' : l3.why)
+        eq('v3 老备份：学生档案缺 → 空数组（不是报错）', l3.data.studentProfiles, [])
+        eq('v3 老备份：教师档案缺 → 空数组', l3.data.teacherProfiles, [])
+        const saveL3 = l3.data
+        /*
+         * ⚠️ 这里**不能**断言"恢复后再导出是空的"：`exportWithProfiles` 是从**库**里读档案的
+         *    （这正是它的职责），而假库里那两行还在 —— 那会变成一条**永远红**的断言。
+         *    要守的是"老备份缺表 → restore 之后 store 里就是空"，所以断言 store 那一份
+         *    （放到本节最后做，免得把 ② 已经恢复好的状态冲掉）。
+         */
+
+        // 显式 null / 乱结构也不许把整份备份搞坏（"别的数据不能丢"）
+        const junk = B.validateBackup(
+          backupFile({
+            v: 3,
+            studentProfiles: [
+              null,
+              'abc',
+              {},
+              { studentId: '', guardianPhone: '1' },
+              { studentId: STUDENT_ID, ethnicity: 123, guardianPhone: 13800000001, homeAddress: null },
+              { studentId: STUDENT_ID, ethnicity: '第二条' },
+            ],
+            teacherProfiles: [{ teacherId: FAKE_UID, phone: '  010-1  ' }],
+          }),
+        )
+        ok('乱结构的两张表不会让整份备份失败', junk.ok, true, junk.ok ? '' : junk.why)
+        eq('无主的行（没有 studentId）被丢掉', junk.data.studentProfiles.length, 1)
+        eq('同一个学生两条 → 只留第一条（撞主键会让整批 upsert 落不了库）', junk.data.studentProfiles[0].ethnicity, '123')
+        eq('字面 null / 非对象被丢掉', junk.data.studentProfiles[0].homeAddress, '')
+        eq('字符串两端的空白被收干净', junk.data.teacherProfiles[0].phone, '010-1')
+        eq('班级/作业照旧不受影响', junk.data.classes[0].students.length, 1)
+
+        // ---- ④ 回推云端：孤儿跳过并报出来 · 两张表走对主键 · 空表不发请求 ----
+        requests.length = 0
+        const pushMsg = await B.pushBackupToCloud(
+          // ⚠️ 反向对照下这份 v4 文件会被整份拒绝 → 用 `?.` 垫空，别让脚本崩（下面的断言照红）
+          B.validateBackup(
+            backupFile({
+              v: 4,
+              classes: [klass2()],
+              // 一行挂在不存在的学生上（本地删学生留下的孤儿）、一行挂在不存在的老师上
+              studentProfiles: [
+                { studentId: STUDENT_ID, ethnicity: '汉族', guardianPhone: '13800000001' },
+                { studentId: '99999999-9999-4999-8999-999999999999', ethnicity: '孤儿' },
+              ],
+              teacherProfiles: [
+                { teacherId: FAKE_UID, phone: '010-12345678' },
+                { teacherId: '88888888-8888-4888-8888-888888888888', phone: '别人的电话' },
+              ],
+            }),
+          ).data ?? {},
+          FAKE_UID,
+        )
+        ok('回推没报错', !pushMsg.includes('⚠️'), pushMsg)
+        const spReq = [...requests].reverse().find((r) => r.path.split('/')[0] === 'student_profiles')
+        ok('学生档案**发出去了**（不是被整段跳过）', Boolean(spReq))
+        eq(
+          '学生档案：孤儿行被跳过（只推备份里真有的那个学生）',
+          Array.isArray(spReq?.body) ? spReq.body.map((r) => r.student_id) : [],
+          [STUDENT_ID],
+        )
+        const tpReq = [...requests].reverse().find((r) => r.path.split('/')[0] === 'teacher_profiles')
+        eq(
+          '教师档案：只推自己那一行（别人那行不推）',
+          Array.isArray(tpReq?.body) ? tpReq.body.map((r) => r.teacher_id) : [],
+          [FAKE_UID],
+        )
+        ok(
+          '🔴 跳过的条数被**报出来**（不是静默丢弃）',
+          pushMsg.includes('已跳过') && pushMsg.includes('档案'),
+          pushMsg,
+        )
+        ok(
+          '回推结果里数得出两份档案',
+          pushMsg.includes('1 份学生档案') && pushMsg.includes('1 份教师档案'),
+          pushMsg,
+        )
+        eq('出生年月是 null/空 → 载荷里**不带** birth_month（数据库那条 check 只收 YYYY-MM）',
+          'birth_month' in (spReq?.body?.[0] ?? {}),
+          false,
+        )
+
+        // 空表：一个字节都不发（老备份里通常是空的）
+        requests.length = 0
+        const emptyMsg = await B.pushBackupToCloud(B.validateBackup(backupFile({ v: 3 })).data, FAKE_UID)
+        eq(
+          '两张表都空 → 连请求都不发',
+          requests.filter((r) => ['student_profiles', 'teacher_profiles'].includes(r.path.split('/')[0])).length,
+          0,
+        )
+        ok('而且结果里也不提这两张档案表（不报一个不存在的失败）',
+          !emptyMsg.includes('学生档案') && !emptyMsg.includes('教师档案'), emptyMsg)
+
+        // ---- ⑤ 收尾：v3 老备份恢复后 store 里就是空（缺 = 空，而不是"编一份出来"） ----
+        useStore.getState().restoreBackup(saveL3)
+        eq('v3 老备份恢复后：store 里的两张表是空的（没有凭空编出档案）', [
+          useStore.getState().studentProfiles.length,
+          useStore.getState().teacherProfiles.length,
+        ], [0, 0])
+        /* 收尾：这一节没有改过班级/老师，所以 restoreBackup 只动了"档案"两个字
+           —— 但为了不给下一节留隐性输入，这里还是把班级原样写回一份有学生的形状 */
+        useStore.setState({ classes: [klass2()] })
       }
     } catch (e) {
       failures.push(`脚本自身出错：${e?.stack ?? e}`)

@@ -61,6 +61,12 @@
  *                                             —— 🔴 Secret（同样只检查存在性）
  *   GITHUB_TOKEN                              —— 🔴 Secret，**细粒度 PAT，只给 Actions: Read**
  *   GITHUB_REPO                               —— 形如 `你的组织/这个仓库`（例：`your-org/your-repo`）
+ *   🆕 SUPABASE_PAT                           —— 🔴 Secret，Supabase **个人访问令牌（只读）**，
+ *        用来调 **Management API** 取出流量（免费版 5 GB/月，按**账单周期**）。
+ *        ⚠️ 与 `SUPABASE_SERVICE_ROLE_KEY` **不是一回事**：那把钥匙只开这个项目的
+ *        数据库（PostgREST/RPC），Management API 要的是**账号级**的 PAT。
+ *        🔴 没配 = **灰的"读不到"**（与 ③ 备份同款），**不是红**（三态纪律）。
+ *   🆕 SUPABASE_PROJECT_REF                   —— 项目 ref（20 位小写字母，控制台 URL 里那段）
  * ⚠️ **不要把 R2 的凭据塞进 GitHub 之外的任何前端位置**：本 Function 从头到尾
  *    **不读它们的值**，只用 `Boolean(env.X)` 判断在不在。
  */
@@ -79,6 +85,9 @@ type Env = {
   R2_BUCKET?: string
   GITHUB_TOKEN?: string
   GITHUB_REPO?: string
+  /** 🆕 2026-10-07：Management API 的只读 PAT + 项目 ref（出流量） */
+  SUPABASE_PAT?: string
+  SUPABASE_PROJECT_REF?: string
 }
 
 type Body = { action?: 'config' | 'backup' | 'db' | 'all' }
@@ -565,6 +574,239 @@ async function dbReport(env: Env): Promise<DbReport> {
 }
 
 /* ============================================================
+   🆕 2026-10-07 · 出流量（Supabase Management API，**只读 PAT**）
+   ------------------------------------------------------------
+   🔴 **为什么必须有这一格**：库大小和出流量是**同一张账单上的两个格子**，而且
+      出流量涨得更快（教室端大屏每次刷新都在下载）。原来面板只看库 —— 用户
+      实测那一轮就是"库 11%、出流量 <1%"，但两个都得看得见。
+
+   ⚠️ **为什么读不到不能是 0**：这张卡这次的毛病就是"数不对但看着正常"。
+      没配 → **灰**（"读不到"）；配了但取不回来 → **灰 + 把原因写出来**。
+      只有真的拿到了，才显示数字。
+
+   ⚠️ **端点是"候选表"**（见 `EGRESS_ENDPOINTS`）：Supabase 文档里公开的用量端点
+      只有**请求数**那两条（`analytics/endpoints/usage.api-counts`），**不给出流量字节数**。
+      所以这里按顺序试，**谁答就算谁的**，并把实际用的端点回报给界面（诊断用）。
+      真调不通时面板上是灰的 + 具体 HTTP 状态，不会静默。
+   ============================================================ */
+
+type EgressReport = {
+  /** `SUPABASE_PAT` + `SUPABASE_PROJECT_REF` 在不在（不在 = 灰，不是红） */
+  configured: boolean
+  /** 本账单周期已用出流量（字节）。读不到是 **null**（绝不掰成 0） */
+  bytes: number | null
+  /** Management API 顺手报的库大小（对账用；没给是 null） */
+  dbSizeBytes: number | null
+  /** 账单周期起止（端点给了才填；给界面说清"这是哪个周期"） */
+  periodStart: string | null
+  periodEnd: string | null
+  /** 读不到的原因（**显式**，`null` = 拿到了） */
+  reason: string | null
+  /** 实际取数的端点（**只有 URL，没有 token**） */
+  source: string
+}
+
+const EGRESS_ENDPOINTS = [
+  /* ① Management API v1 的项目用量汇总（首选口径） */
+  'https://api.supabase.com/v1/projects/{ref}/usage',
+  /* ② 控制台自己用的那个（v1 上没有时兜底） */
+  'https://api.supabase.com/platform/projects/{ref}/usage',
+] as const
+
+/** 把回话拍平成一串 `[键, 值]`（含嵌套对象与数组）—— 端点换字段位置也认得出 */
+function flattenJson(v: unknown, out: Array<[string, unknown]> = [], depth = 0): Array<[string, unknown]> {
+  if (depth > 6 || v === null || typeof v !== 'object') return out
+  if (Array.isArray(v)) {
+    for (const x of v) flattenJson(x, out, depth + 1)
+    return out
+  }
+  for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+    if (val !== null && typeof val === 'object') {
+      /* ⚠️ 对象本身也当一条（有些端点给 `{egress:{bytes:…}}`） */
+      if (typeof (val as Record<string, unknown>).bytes === 'number') out.push([`${k}.bytes`, (val as Record<string, unknown>).bytes])
+      flattenJson(val, out, depth + 1)
+    } else {
+      out.push([k, val])
+    }
+  }
+  return out
+}
+
+const GB_BYTES = 1024 ** 3
+/**
+ * 键名归一：**大小写不敏感 + 忽略分隔符**（`egress_gb` / `egressGB` / `egress.gb` 都归一成 `egressgb`）。
+ * 为什么这么宽松：我们拿不到可信的真回话（见 `EGRESS_ENDPOINTS` 上面那段），
+ * 只能按"常见的几种写法"认；**认不出就是灰**（`bytes:null` + 把见到的键名列出来），**绝不猜数**。
+ */
+const normKey = (k: string) => k.toLowerCase().replace(/[^a-z0-9]/g, '')
+const EGRESS_BYTES_KEYS = new Set(['egress', 'egressbytes', 'totalegress', 'unifiedegress', 'egresstotal'])
+const EGRESS_GB_KEYS = new Set(['egressgb', 'egressgbytes', 'egressgigabytes'])
+const DB_BYTES_KEYS = new Set([
+  'dbsize',
+  'dbbytes',
+  'dbsizebytes',
+  'databasesize',
+  'databasebytes',
+  'databasesizebytes',
+])
+const DB_GB_KEYS = new Set([
+  'dbsizegb',
+  'dbsizegbytes',
+  'dbsizegigabytes',
+  'databasesizegb',
+  'databasesizegbytes',
+  'databasesizegigabytes',
+])
+const PERIOD_START_KEYS = new Set(['periodstart', 'billingperiodstart', 'usageperiodstart'])
+const PERIOD_END_KEYS = new Set(['periodend', 'billingperiodend', 'usageperiodend'])
+
+/**
+ * 在一份平铺回话里找某个数（**字节**）。
+ *
+ * ⚠️ 两个真实存在的歧义，都在这里收口：
+ *   ① **GB 还是字节**：键名带 `gb` 一律按 GB 算；不带时按字节算 ——
+ *      **但 `0 < 值 < 1` 时按 GB 算**（"不到一个字节"不是人能写出来的数，
+ *      而控制台上写的就是 `0.006 GB` 这种）。
+ *   ② **多个候选键**（`egress` 与 `total_egress`）：**带 GB 的优先**，其余按出现顺序取第一个。
+ */
+function pickNumber(
+  flat: Array<[string, unknown]>,
+  bytesKeys: Set<string>,
+  gbKeys: Set<string>,
+): number | null {
+  for (const [k, v] of flat) {
+    if (gbKeys.has(normKey(k)) && typeof v === 'number' && Number.isFinite(v)) return Math.round(v * GB_BYTES)
+  }
+  for (const [k, v] of flat) {
+    if (bytesKeys.has(normKey(k)) && typeof v === 'number' && Number.isFinite(v)) {
+      return v > 0 && v < 1 ? Math.round(v * GB_BYTES) : Math.round(v)
+    }
+  }
+  return null
+}
+
+function pickString(flat: Array<[string, unknown]>, keys: Set<string>): string | null {
+  for (const [k, v] of flat) {
+    if (keys.has(normKey(k)) && typeof v === 'string' && v.trim()) return v.trim()
+  }
+  return null
+}
+
+async function egressReport(env: Env): Promise<EgressReport> {
+  const pat = (env.SUPABASE_PAT ?? '').trim()
+  const ref = (env.SUPABASE_PROJECT_REF ?? '').trim()
+  if (!pat || !ref) {
+    /* 🔴 没配 = **无法判断**（灰），绝不是"0 GB"、也绝不是红 */
+    return {
+      configured: false,
+      bytes: null,
+      dbSizeBytes: null,
+      periodStart: null,
+      periodEnd: null,
+      reason: '服务端还没有只读的 SUPABASE_PAT / SUPABASE_PROJECT_REF，出流量读不到',
+      source: '',
+    }
+  }
+  const tried: string[] = []
+  for (const tpl of EGRESS_ENDPOINTS) {
+    const url = tpl.replace('{ref}', encodeURIComponent(ref))
+    tried.push(url)
+    let res: Response
+    try {
+      res = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${pat}`,
+          Accept: 'application/json',
+          /* ⚠️ 只读取数：**不带任何写方法**，User-Agent 便于对方侧排查 */
+          'User-Agent': 'shugao-admin-panel',
+        },
+      })
+    } catch (e) {
+      /* 连不上就试下一个候选；两个都不行时下面会带上原因 */
+      if (tpl === EGRESS_ENDPOINTS[EGRESS_ENDPOINTS.length - 1]) {
+        const all = tried.join(' / ')
+        return {
+          configured: true,
+          bytes: null,
+          dbSizeBytes: null,
+          periodStart: null,
+          periodEnd: null,
+          reason: `连不上 Supabase Management API（${e instanceof Error ? e.message : String(e)}）—— 试过：${all}`,
+          source: all,
+        }
+      }
+      continue
+    }
+    const text = await res.text()
+    if (!res.ok) {
+      /* 404 = 这个候选端点不对 → 试下一个；别的码（401/403）是 PAT 的问题 → 直接说清 */
+      const last = tpl === EGRESS_ENDPOINTS[EGRESS_ENDPOINTS.length - 1]
+      if (res.status === 404 && !last) continue
+      return {
+        configured: true,
+        bytes: null,
+        dbSizeBytes: null,
+        periodStart: null,
+        periodEnd: null,
+        reason:
+          res.status === 401 || res.status === 403
+            ? `Supabase Management API 拒绝了这把 PAT（HTTP ${res.status}）—— 令牌过期了或权限不够（要能读用量）`
+            : `取用量失败（HTTP ${res.status}）：${text.slice(0, 160)}`,
+        source: url,
+      }
+    }
+    let raw: unknown
+    try {
+      raw = JSON.parse(text)
+    } catch {
+      return {
+        configured: true,
+        bytes: null,
+        dbSizeBytes: null,
+        periodStart: null,
+        periodEnd: null,
+        reason: `Management API 的回话解不开（不是 JSON）：${text.slice(0, 120)}`,
+        source: url,
+      }
+    }
+    const flat = flattenJson(raw)
+    const bytes = pickNumber(flat, EGRESS_BYTES_KEYS, EGRESS_GB_KEYS)
+    if (bytes === null) {
+      /* 🔴 **显式失败**：把见过的键名列出来 —— 这是端点换了字段名时唯一的线索 */
+      const keys = [...new Set(flat.map(([k]) => k))].slice(0, 24).join('、')
+      return {
+        configured: true,
+        bytes: null,
+        dbSizeBytes: null,
+        periodStart: null,
+        periodEnd: null,
+        reason: `Management API 答了（HTTP 200），但回话里没有出流量字段（见到的键：${keys || '（空回话）'}）`,
+        source: url,
+      }
+    }
+    return {
+      configured: true,
+      bytes,
+      dbSizeBytes: pickNumber(flat, DB_BYTES_KEYS, DB_GB_KEYS),
+      periodStart: pickString(flat, PERIOD_START_KEYS),
+      periodEnd: pickString(flat, PERIOD_END_KEYS),
+      reason: null,
+      source: url,
+    }
+  }
+  /* 理论上到不了（循环里最后一项都有 return） */
+  return {
+    configured: true,
+    bytes: null,
+    dbSizeBytes: null,
+    periodStart: null,
+    periodEnd: null,
+    reason: `两个候选端点都没答：${tried.join(' / ')}`,
+    source: tried.join(' / '),
+  }
+}
+
+/* ============================================================
    配置完整性：**只回答"在 / 不在"**
    ============================================================ */
 
@@ -579,6 +821,9 @@ const CONFIG_KEYS = [
   'R2_BUCKET',
   'GITHUB_TOKEN',
   'GITHUB_REPO',
+  /* 🆕 2026-10-07：出流量用（只读 PAT + 项目 ref）—— 同样只回报"在 / 不在" */
+  'SUPABASE_PAT',
+  'SUPABASE_PROJECT_REF',
 ] as const
 
 function configReport(env: Env): {
@@ -672,9 +917,12 @@ export async function onRequestPost(context: { request: Request; env: Env }): Pr
     return json({ status: 'ok', backup: r })
   }
 
-  /* 🆕 数据库用量（只读，只有超管；配额与阈值在前端 `adminChart.ts`） */
+  /* 🆕 数据库用量（只读，只有超管；配额与阈值在前端 `adminChart.ts`）
+     🆕 2026-10-07：**出流量**挂在同一块回话里（`db.egress`）——
+       它是**另一条来源**（Management API），与库大小各读各的：
+       一条挂了不影响另一条，两边各自有 `reason`（**不许静默**）。 */
   if (action === 'db') {
-    return json({ status: 'ok', db: await dbReport(env) })
+    return json({ status: 'ok', db: { ...(await dbReport(env)), egress: await egressReport(env) } })
   }
 
   const r = await backupReport(env)
@@ -682,7 +930,7 @@ export async function onRequestPost(context: { request: Request; env: Env }): Pr
     status: 'ok',
     config: cfg,
     backup: 'error' in r ? { configured: Boolean((env.GITHUB_TOKEN ?? '').trim() && (env.GITHUB_REPO ?? '').trim()), error: r.error } : r,
-    db: await dbReport(env),
+    db: { ...(await dbReport(env)), egress: await egressReport(env) },
   })
 }
 

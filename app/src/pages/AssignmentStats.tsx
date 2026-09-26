@@ -245,14 +245,14 @@ export default function AssignmentStats() {
             className="anim-in mb-3 flex items-start gap-2.5 p-3"
             style={{
               background: 'var(--color-warnsoft)',
-              border: '1px solid #ecd9ae',
+              border: '1px solid var(--color-warnline)',
               borderRadius: 6,
             }}
           >
             <span style={{ color: 'var(--color-warn)', marginTop: 1 }}>
               <IconAlert size={16} />
             </span>
-            <div style={{ fontSize: 12.5, color: '#8a5a12', lineHeight: 1.65 }}>
+            <div style={{ fontSize: 12.5, color: 'var(--color-warnink)', lineHeight: 1.65 }}>
               批改完整度 <b className="num">{Math.round(stats.completeness * 100)}%</b>：
               还有 <b className="num">{stats.total - stats.confirmedCount}</b> 人没打开过题号列表，
               下面的错误率可能偏低。
@@ -549,7 +549,7 @@ export default function AssignmentStats() {
                         height: 22,
                         borderRadius: 99,
                         background: i === 0 ? 'var(--color-bad)' : 'var(--color-surface3)',
-                        color: i === 0 ? '#fff' : 'var(--color-ink3)',
+                        color: i === 0 ? 'var(--color-onbad)' : 'var(--color-ink3)',
                         fontSize: 11,
                         fontWeight: 700,
                         marginTop: 2,

@@ -205,8 +205,8 @@ function ClassroomGate({ children }: { children: React.ReactNode }) {
             fontSize: 12.5,
             lineHeight: 1.5,
             background: 'var(--color-warnsoft)',
-            borderBottom: '1px solid #ecd9ae',
-            color: '#8a5a12',
+            borderBottom: '1px solid var(--color-warnline)',
+            color: 'var(--color-warnink)',
           }}
         >
           预览模式 —— 你用的是<b>教师账号</b>，显示的是你自己的班。
@@ -249,8 +249,8 @@ function SyncErrorBanner() {
       className="fixed inset-x-0 top-0 z-[70] flex items-start gap-2 px-3 py-2"
       style={{
         background: 'var(--color-badsoft)',
-        borderBottom: '1px solid #f3c9cd',
-        color: '#8f1c26',
+        borderBottom: '1px solid var(--color-badline)',
+        color: 'var(--color-badink)',
         fontSize: 12.5,
         lineHeight: 1.65,
       }}
@@ -264,7 +264,7 @@ function SyncErrorBanner() {
       <button
         type="button"
         onClick={clearSyncError}
-        style={{ flex: 'none', color: '#8f1c26', opacity: 0.75, fontSize: 12 }}
+        style={{ flex: 'none', color: 'var(--color-badink)', opacity: 0.75, fontSize: 12 }}
       >
         知道了
       </button>

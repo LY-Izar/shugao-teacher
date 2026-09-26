@@ -1,15 +1,18 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Page } from '../components/AppShell'
 import {
   IconAlert,
   IconCamera,
   IconCheck,
+  IconEye,
   IconHash,
+  IconInfo,
   IconMegaphone,
   IconPaste,
   IconPencil,
   IconPlus,
+  IconRefresh,
   IconSearch,
   IconSwap,
   IconUsers,
@@ -17,19 +20,42 @@ import {
 } from '../components/icons'
 import { Button, PageHead, Panel, Sect, Sheet, StatStrip, Tag } from '../components/ui'
 import { useStore, useToast } from '../data/store'
-import { STUDENT_STATUS_NAME, type StudentStatus } from '../data/types'
-import { analyzeRoster, compareRoster } from '../lib/roster'
+import { STUDENT_STATUS_NAME, type Student, type StudentStatus } from '../data/types'
+import { compareStudentNo, rosterStateOf } from '../lib/roster'
 import { CALL_LIMIT, CUSTOM_MAX, composeCallText } from '../lib/calls'
 import { archiveKeyOf } from '../lib/keys'
-import { hasManagingRole } from '../lib/roles'
+import { classKindOf } from '../lib/pick'
+import { canEditClassFor } from '../lib/roles'
 import { subjectName } from '../lib/subjects'
+import {
+  PROFILE_FIELDS,
+  emptyProfile,
+  loadStudentProfiles,
+  profileFilled,
+  saveStudentProfile,
+  type StudentProfile,
+} from '../lib/studentProfile'
 import {
   apiOldSubjectPreview,
   apiPurgeOldSubjectData,
+  apiClassCallable,
+  type CanCallState,
   type OldSubjectCounts,
 } from '../lib/gradeSetup'
 import { isRemote } from '../lib/supabase'
+import {
+  PASSWORD_SHOWN_ONCE,
+  apiClassroomAccountStatus,
+  apiCreateClassroomAccount,
+  apiResetClassroomPassword,
+  apiSetClassroomDisabled,
+  classroomAccountMessage,
+  readAccount,
+  readHasAccount,
+  type ClassroomAccount,
+} from '../lib/classroomAccount'
 import * as remote from '../data/remote'
+import { listTeachers } from '../lib/accounts'
 
 /** 一条选科快照 → 人话（`物化生`）；空快照 = "还没采过" */
 function comboText(snap: Record<string, unknown> | undefined): string {
@@ -39,6 +65,30 @@ function comboText(snap: Record<string, unknown> | undefined): string {
   const parts = [primary, ...second].filter(Boolean)
   if (!parts.length) return '还没采过'
   return parts.map((c) => subjectName(c, c)).join('')
+}
+
+/**
+ * 读一次某个班的教室端账号（**只回账号，不回密码**）。
+ *
+ * 为什么是**模块级**函数、而不是组件里的 `useCallback`：
+ *   `useCallback` 那一版会被 `react-hooks(exhaustive-deps)` 记成"每次渲染都变"，
+ *   而把这几个 setState 直接写进 `useEffect` 体里又会被 `react(set-state-in-effect)` 记一笔
+ *   （两者本轮都实测报过）。挪到模块级之后：**请求在模块里、状态在 effect 的 `then` 里**，
+ *   两条 lint 都干净，读起来也更直（这一页已有的 `loadStudentProfiles` 就是这个形状）。
+ *
+ * 🔴 走 `postApi`（它把当前会话的 JWT 放进去）—— 自己写 `fetch` 就会漏带令牌，
+ *    服务端回 401，而页面会把"没带令牌"显示成"你没权限"（`lib/gradeSetup.ts` 记过这个坑）。
+ * ⚠️ 读不到**不是"没有账号"**：两件事必须分开说（`readHasAccount` 回 `null` = 没结论）。
+ */
+async function fetchRoomAccount(
+  classId: string,
+): Promise<{ verdict: 'found'; account: ClassroomAccount | null } | { verdict: 'unknown'; message: string }> {
+  const r = await apiClassroomAccountStatus(classId)
+  const has = readHasAccount(r)
+  if (has === null) {
+    return { verdict: 'unknown', message: classroomAccountMessage(r, '读不到这个班的教室端账号。') }
+  }
+  return { verdict: 'found', account: has ? readAccount(r) : null }
 }
 
 export default function ClassDetail() {
@@ -55,15 +105,38 @@ export default function ClassDetail() {
   /*
    * 「从班级管理里直接呼叫学生」—— 摆不摆这个入口。
    *
-   * 🔴 这**只是"摆不摆入口"**（M1/M2 那条纪律），**不是判据**：
-   *    真正能不能发由数据库的 `can_call()` 说了算（`schema.sql` §33.2）——
-   *    事务性呼叫只给班级管理权那一档，**科任老师一定会被拒**。
-   *    这里用 `hasManagingRole()`（已有的那个粗档）只是免得科任老师看着一个
-   *    必然失败的按钮。⚠️ 它**不覆盖"本班班主任"**（那是 `teacher_roles` 的一行），
-   *    所以入口对班主任也是摆着的 —— 那正是要的（Q32 = C）。
+   * 🔴 **摆不摆由服务端回的那一个布尔说了算**（`canCall`，`/api/grade-setup` 的
+   *    `classCallable`）—— 前端**不自己推断角色**。形状与通知的「撤下」那个
+   *    `canRevoke`（`functions/api/notice.ts` → `lib/notices.ts`）**一模一样**。
+   *    服务端那一支的判据就是数据库的 `can_call(class_id, null)`，即
+   *    `can_call_for()` 的"**事务性呼叫**"那一支 = `can_manage_class_for()`
+   *    （超管 / 教务处 ∪ 本年级年级主任 ∪ **本班班主任** ∪ 行政班），见 `schema.sql` §33.2。
+   *    ⚠️ 刻意**不掺**"有作业的呼叫"那一支（那条还额外给科任老师，是另一档权力）。
+   *
+   * ⚠️ 2026-10-09 修的就是这里：原来前端写的是 `hasManagingRole(myRoles)`
+   *    —— 那是**粗档**（super / admin / 年级主任，**不含班主任**）→
+   *    **本班班主任服务端允许、界面上却不摆按钮**。这是"服务端允许、前端没摆"
+   *    这一类 bug 的**第三次**（前两次：开学准备页、通知的「撤下」）。
+   * ⚠️ 读不到（断网 / 第 33 段没跑）时**不摆** —— 读不到 ≠ 没权限，
+   *    所以结论里带着一句 `notice`（`readCanCall()` 分档），不把"没结论"说成"没权限"。
    */
+  const [callAuth, setCallAuth] = useState<CanCallState | null>(null)
+  /** 这份结论是**哪一个班**的（`''` = 还没读到任何结论；换班时两者不等 → 不摆） */
+  const [callAuthFor, setCallAuthFor] = useState('')
+  useEffect(() => {
+    if (!id) return
+    let alive = true
+    void apiClassCallable(id).then((s) => {
+      if (!alive) return
+      setCallAuth(s)
+      setCallAuthFor(id)
+    })
+    return () => {
+      alive = false
+    }
+  }, [id])
+  const canCall = callAuthFor !== '' && callAuthFor === id && callAuth?.canCall === true
   const myRoles = useStore((s) => s.myRoles)
-  const canManageClass = hasManagingRole(myRoles)
 
   /** 自由播报 / 呼叫学生：教师自己输要念的话，不针对某次作业 */
   const [callOpen, setCallOpen] = useState(false)
@@ -93,7 +166,199 @@ export default function ClassDetail() {
   const [addOpen, setAddOpen] = useState(false)
   const [addForm, setAddForm] = useState({ studentNo: '', name: '' })
 
-  const health = useMemo(() => analyzeRoster(klass?.students ?? []), [klass])
+  /* ---- 🆕 学生档案：民族 / 出生年月 / 家长电话 / 家庭住址 ----
+     表在 `supabase/schema.sql` §2.1，策略在 §35。判据一律在数据库：
+       · **看**（读得到哪些行）= `visible_class_ids()`（科任老师 = 自己任教的班）**且不是教室端**；
+       · **改** = `can_manage_class()`（最高管理员 / 教务处 ∪ 本年级年级主任 ∪ 本班班主任）。
+     这里只做两件事：**摆不摆"修改"入口**、**读不到时说出来**（不许说成"没录过"）。 */
+  const [profiles, setProfiles] = useState<Map<string, StudentProfile>>(new Map())
+  const [profilesErr, setProfilesErr] = useState('')
+  const [profileFor, setProfileFor] = useState<string | null>(null)
+  const [profileEdit, setProfileEdit] = useState(false)
+  const [profileForm, setProfileForm] = useState<StudentProfile>(emptyProfile(''))
+  const [profileSaving, setProfileSaving] = useState(false)
+  const [profileSaveErr, setProfileSaveErr] = useState('')
+
+  /*
+   * 🔴 **"这一个班归不归我管"只算一次**（`canEditClassFor` = 数据库 `can_manage_class_for()` 的前端影子：
+   *    超管 / 教务处 ∪ 本年级年级主任 ∪ 本班班主任）。
+   *    它管两处入口：**学生档案那个块**（教室端账号那块在上面已经读过了）——
+   *    各写一份就是"同一件事两个入口"（本项目最忌的那个形状）。
+   * ⚠️ **这只是"摆不摆入口"**：真正那一刀在数据库 / 服务端（`mayManage()`），前端藏了也拦不住手打接口的人。
+   * ⚠️ 它必须在下面那个 `if (!klass)` **之前**定义（那之前已有两处 effect 依赖它）。
+   */
+  const canManageThis = canEditClassFor(myRoles, klass?.id ?? '', klass?.gradeId)
+
+  /* ---- 🆕 教室端账号（`classroom_accounts`）：账号 + 重置密码 ----
+     一个班一个账号，登录名是 `g2-4@shugao.local` 那种短名，挂在教室里那台大屏上。
+     · **摆不摆**这个块 = `canManageThis`（与"改学生档案"同一个粗档）；**看不看得见**与
+       "重不重置得动"由服务端拿调用者 JWT 问数据库（`mayManage()`）说了算。
+     · 🔴 **这里给不出原密码**：Supabase 里密码是哈希存的，谁也算不回原文 ——
+       要密码就点「重置密码」，新密码当场显示一次（`PASSWORD_SHOWN_ONCE`）。 */
+  const [roomAccount, setRoomAccount] = useState<ClassroomAccount | null>(null)
+  /**
+   * 这份账号结论是**哪一个班**的（`''` = 还没读到任何结论）。
+   * 🔴 它回答的是"屏上这份数据是不是当前这个班的" —— 换班 / 按了「重试」时两者不相等，
+   *    界面就写"正在读…"，**不会把上一个班的账号当成这个班的**。
+   */
+  const [roomAccountFor, setRoomAccountFor] = useState('')
+  const [roomErr, setRoomErr] = useState('')
+  /** 刚生成的那一串（**只有这一回合有**，重进这一页就没有了） */
+  const [roomPwd, setRoomPwd] = useState('')
+  const [roomBusy, setRoomBusy] = useState(false)
+  /** 重置前的二次确认浮层 */
+  const [roomConfirmResetOpen, setRoomConfirmResetOpen] = useState(false)
+  /** 新密码那一张浮层（关掉还能用「看新密码」再打开一次；**重进这一页就没有了**） */
+  const [roomPwdOpen, setRoomPwdOpen] = useState(false)
+  /** 「为什么看不到原密码」那一页（块右上角那个 ⓘ） */
+  const [roomInfo, setRoomInfo] = useState(false)
+  /** 换了一个班就重读一次（底下的 `loadRoom` 依赖它） */
+  const [roomTick, setRoomTick] = useState(0)
+  /** 名单里那些 id（拼成串当依赖：学生一增一删就要重读一次） */
+  const profileIds = (klass?.students ?? []).map((s) => s.id).join(',')
+  /** 教室端账号那一块的班 id（`''` = 班还没读出来；换班时它变 → 下面那个 effect 重读） */
+  const roomId = klass?.id ?? ''
+
+  useEffect(() => {
+    if (!klass) return
+    let alive = true
+    void loadStudentProfiles(klass.students.map((s) => s.id)).then((r) => {
+      if (!alive) return
+      if (r.ok) {
+        setProfiles(r.profiles)
+        setProfilesErr('')
+        return
+      }
+      // 🔴 读不到 ≠ 没录过：清空缓存 + 显式留一句话
+      setProfiles(new Map())
+      setProfilesErr(r.message)
+    })
+    return () => {
+      alive = false
+    }
+  }, [klass, profileIds])
+
+  /*
+   * 教室端账号那一块：进这一页先问一次"这个班有没有账号"（只回账号，不回密码）。
+   * `canManageThis` 已经算过了（见上面那一处）—— 这里不再算第二遍。
+   * ⚠️ 真正的闸门不在这里：服务端会拿 JWT 再问一次数据库（`mayManage()`）。
+   */
+  useEffect(() => {
+    if (!canManageThis || !isRemote || !roomId) return
+    let alive = true
+    void fetchRoomAccount(roomId).then((r) => {
+      /* ⚠️ 这些 setState **只在 `then` 里调**（不在 effect 体里同步调）：
+         effect 体里同步 setState 会让 React 多渲染一轮 —— oxlint 的
+         `react(set-state-in-effect)` 会当场报出来。所以"正在读"这件事**推导出来**，
+         不靠 effect 体里那句 `setRoomLoaded(false)`：
+         `roomAccountFor` 只在读到结论时才写上班级 id，两者不等就是"还没读到"。 */
+      if (!alive) return
+      setRoomAccountFor(roomId)
+      if (r.verdict === 'unknown') {
+        setRoomAccount(null)
+        setRoomErr(r.message)
+      } else {
+        setRoomErr('')
+        setRoomAccount(r.account)
+      }
+      setRoomPwd('')
+      setRoomConfirmResetOpen(false)
+      setRoomPwdOpen(false)
+    })
+    return () => {
+      alive = false
+    }
+    /* `roomTick` 只用来让「重试」能再打一次（不靠任何函数身份变化），所以它必须进依赖 */
+  }, [canManageThis, roomId, roomTick])
+
+  /** 读到结论之前（或刚按了「重试」）—— 屏上写"正在读…"，**不写成"没有账号"** */
+  const roomReading = roomAccountFor !== roomId && !roomErr
+
+  /*
+   * 🔴 走班班的名单从 `class_members`（多对多）读，**不是** `klass.students`。
+   *
+   * 原来这一页对走班班也算 `analyzeRoster(klass.students ?? [])`，而走班班的人
+   * **永远不在 `students.class_id` 上**（§27.5）→ 恒为「0 人」，
+   * 而 0 人又恰好"没有缺号、没有重号" → 体检写「学号 1–0 连续无缺号」、写「名单完整」。
+   * 同一份数据在「开学准备 ⑥」说 2 人、在这一页说 0 人 —— 两个页面自相矛盾。
+   */
+  const isStream = classKindOf(klass) === 'stream'
+  const [members, setMembers] = useState<Student[]>([])
+  const [membersKnown, setMembersKnown] = useState(true)
+  const [membersErr, setMembersErr] = useState('')
+  useEffect(() => {
+    if (!id || !isStream) return
+    let alive = true
+    void remote.loadClassMembersFull([id]).then((r) => {
+      if (!alive) return
+      setMembersKnown(r.known)
+      setMembersErr(r.known ? '' : '读不到这个走班班的成员。数据库可能还没跑 supabase/schema.sql 第 27 段（走班班成员那一张表）。')
+      const list = r.by[id] ?? []
+      setMembers(
+        list.map((p, i) => ({
+          id: p.id,
+          name: p.name,
+          studentNo: p.studentNo,
+          status: p.status,
+          createdAt: i,
+        })),
+      )
+    })
+    return () => {
+      alive = false
+    }
+  }, [id, isStream])
+
+  /**
+   * 名单这件事的**四态**（读不到 / 还没有名单 / 完整 / 待核对）。
+   * 🔴 判据只有一处：`lib/roster.ts` 的 `rosterStateOf()` —— 这一页不许自己写 `count === 0`。
+   *    走班班那一支传 `members`（`class_members` 来的），行政班那一支传 `klass.students`。
+   */
+  const rosterState = useMemo(
+    () =>
+      isStream
+        ? rosterStateOf(members, 'members', membersKnown)
+        : rosterStateOf(klass?.students ?? [], 'class'),
+    [isStream, members, membersKnown, klass],
+  )
+  const health = rosterState.health
+
+  /*
+   * 🆕 走班班的**老师**（`class_subjects`，§32.3 里 `assign_stream_teacher()` 补的那几行）。
+   *
+   * 🔴 为什么这一页也要读它：老师在「开学准备 ⑥」选完，**刷新之后没有任何地方看得到**
+   *    —— 而"分配了没落库"与"落库了没读出来"在界面上长得一模一样。
+   *    这一块就是那个**读**的那一侧（写的那一侧在 §32.3，两边同一张表 `class_subjects`）。
+   * ⚠️ 读不到 ≠ 没分配：`state: 'unknown'` 写"没读到"，不写"还没分配"。
+   */
+  const [teacherName, setTeacherName] = useState('')
+  const [teacherUnknown, setTeacherUnknown] = useState(false)
+  useEffect(() => {
+    if (!id || !isStream) return
+    let alive = true
+    void (async () => {
+      const rows = await remote.loadClassSubjects([id])
+      if (!alive) return
+      if (rows === null) {
+        setTeacherUnknown(true)
+        return
+      }
+      setTeacherUnknown(false)
+      if (!rows.length) {
+        setTeacherName('')
+        return
+      }
+      const tid = rows[0].teacherId
+      const r = await listTeachers()
+      if (!alive) return
+      const t = r.ok ? r.data.teachers.find((x) => x.id === tid) : undefined
+      /* ⚠️ 认不出名字时**显示 id 而不是空白**：空白会被读成"没分配"（这个项目最忌的形状） */
+      setTeacherName(t?.name ?? tid)
+    })()
+    return () => {
+      alive = false
+    }
+  }, [id, isStream])
 
   if (!klass) {
     return (
@@ -108,15 +373,30 @@ export default function ClassDetail() {
     )
   }
 
-  const list = klass.students
+  /*
+   * 屏上那一份名单 = **这一页唯一的名单**：
+   *   · 行政班 → `klass.students`（`students.class_id`）；
+   *   · 走班班 → `members`（`class_members`，多对多）。
+   * 其余（搜索 / 人数 / 空态）全部从它算 —— 两边各写一套就是第二个判定入口。
+   */
+  const roster = isStream ? members : klass.students
+  const list = roster
     .filter((s) => {
       if (!q.trim()) return true
       const k = q.trim()
       // 搜学号时**序列号也认**（老师手上可能是导出表里的那一列）
       return s.name.includes(k) || s.studentNo.includes(k) || (s.serial ?? '').includes(k)
     })
-    // 统一排序只有一处（`compareRoster`）：有序列号按序列号，没有才按班内学号
-    .sort(compareRoster)
+    /*
+     * 名单顺序 = **班级内学号**升序（`compareStudentNo`，按数字排：10 排在 2 后面）。
+     *
+     * 🔴 用户 2026-09-26 拍板：**新增学生后要落进他该在的位置**，不许追加在末尾
+     *    ——「新增了学生后也要按学号排序，不然全乱了」。
+     *    这里按屏上显示的那一列（`studentNo`）排，而不是序列号：
+     *    序列号是内部键、与班内学号不同序，按它排看起来就是乱的（44·32·38·5…）。
+     *    找人的需求由上面的搜索框覆盖（它同时认班内学号与序列号）。
+     */
+    .sort(compareStudentNo)
 
   const openEdit = (sid: string) => {
     const s = klass.students.find((x) => x.id === sid)
@@ -152,7 +432,104 @@ export default function ClassDetail() {
   /** 正在编辑的那个学生 —— 编辑面板上要显示他的**序列号（只读）** */
   const editingStudent = klass.students.find((x) => x.id === editing)
 
-  const problems = health.gaps.length + health.dupNos.length + health.dupNames.length
+  /* ---- 学生档案 ------------------------------------------------------------------
+     ⚠️ "摆不摆修改入口"用的就是上面那一个 `canManageThis`（判据只有一处）——
+        这里不再算第二遍，也不再另起一个名字。 */
+  const profileStudent = klass.students.find((x) => x.id === profileFor)
+  const shownProfile = profileFor ? (profiles.get(profileFor) ?? emptyProfile(profileFor)) : null
+
+  const openProfile = (sid: string) => {
+    setProfileFor(sid)
+    setProfileEdit(false)
+    setProfileSaveErr('')
+    setProfileForm(profiles.get(sid) ?? emptyProfile(sid))
+  }
+
+  const saveProfile = async () => {
+    if (!profileFor) return
+    setProfileSaving(true)
+    setProfileSaveErr('')
+    const next = { ...profileForm, studentId: profileFor }
+    const r = await saveStudentProfile(next)
+    setProfileSaving(false)
+    if (!r.ok) {
+      // 🔴 失败**显式报错**（被策略挡下是"0 行且不报错"，绝不能静默当"已保存"）
+      setProfileSaveErr(r.message)
+      return
+    }
+    setProfiles((m) => new Map(m).set(profileFor, next))
+    setProfileEdit(false)
+    push({ text: '已保存', tone: 'ok' })
+  }
+
+  /** 改档案里的一个字段（四个字段的 key 是联合字面量，这里收口成一处） */
+  const setField = (k: (typeof PROFILE_FIELDS)[number]['key'], v: string) => {
+    setProfileForm((p) => ({ ...p, [k]: v }) as StudentProfile)
+  }
+
+  /* ---- 教室端账号：建号 / 重置密码 / 停用（三个动作各一个函数，失败一律显式说出来）----
+     🔴 三个都要"失败了有人知道"：成功了就重读一次（**以服务端回话为准，不本地拼**），
+        失败了把服务端那句话原样摆出来（`classroomAccountMessage` 分档翻译）。 */
+
+  const applyRoomResult = (r: { ok: boolean; status: number; data: Record<string, unknown> }): boolean => {
+    if (!r.ok) {
+      setRoomErr(classroomAccountMessage(r, '这次操作没成功。'))
+      return false
+    }
+    const acc = readAccount(r)
+    if (acc) setRoomAccount(acc)
+    setRoomErr('')
+    /* 成功了再问一次服务端（**库里的状态以它为准，不拿回话本地拼**） */
+    void fetchRoomAccount(roomId).then((next) => {
+      if (next.verdict === 'unknown') return
+      setRoomAccount(next.account)
+      setRoomAccountFor(roomId)
+    })
+    return true
+  }
+
+  /** 建号（一班一个；已经有就按"已经有"处理，不重复建） */
+  const createRoomAccount = async () => {
+    setRoomBusy(true)
+    setRoomPwd('')
+    const r = await apiCreateClassroomAccount(roomId)
+    setRoomBusy(false)
+    if (!applyRoomResult(r)) return
+    setRoomPwd(readAccount(r)?.password ?? '')
+    setRoomPwdOpen(true)
+    push({ text: '教室端账号已建好', tone: 'ok' })
+  }
+
+  /**
+   * 重置密码：**先把代价说清再动手**（旧密码立刻失效 —— 教室那台机器下次登录要用新的）。
+   * 🔴 新密码只在这一回合的回话里，**再查一次也拿不到**（库里是哈希），所以浮层上写死那句话。
+   */
+  const resetRoomPassword = async () => {
+    setRoomConfirmResetOpen(false)
+    setRoomBusy(true)
+    setRoomPwd('')
+    const r = await apiResetClassroomPassword(roomId)
+    setRoomBusy(false)
+    if (!applyRoomResult(r)) return
+    setRoomPwd(readAccount(r)?.password ?? '')
+    setRoomPwdOpen(true)
+    push({ text: '密码已重置', tone: 'warn', desc: '旧密码立刻失效' })
+  }
+
+  const toggleRoomDisabled = async () => {
+    const next = !roomAccount?.disabled
+    setRoomBusy(true)
+    const r = await apiSetClassroomDisabled(roomId, next)
+    setRoomBusy(false)
+    if (!applyRoomResult(r)) return
+    push({ text: next ? '已停用这个班的教室端' : '已恢复这个班的教室端', tone: next ? 'warn' : 'ok' })
+  }
+
+  /* 🔴 `problems` 只在**真有名单**时才算 —— 0 人的班"没有问题"不等于"正常"，
+     那一档由 `rosterState.kind` 单独说（`nobody` / `unknown`），见下面体检那一块。 */
+  const problems = health ? health.gaps.length + health.dupNos.length + health.dupNames.length : 0
+  /** 体检这一块的四态；`ok` 才是"通过" */
+  const okRoster = rosterState.kind === 'ok'
 
   return (
     <>
@@ -163,10 +540,12 @@ export default function ClassDetail() {
         right={
           <div className="flex items-center gap-2">
             {/*
-              事务性呼叫的入口（Q32 = C）。**摆不摆**用 `hasManagingRole()` 这个粗档；
-              能不能发由数据库的 `can_call()` 说了算（科任老师一定被拒，见 §33.2）。
+              事务性呼叫的入口（Q32 = C）。🔴 **摆不摆只看服务端回的那一个布尔**
+              （`canCall`）—— 前端**不在这里判角色**（见上面那一处注释）。
+              ⚠️ 能不能发最终仍由数据库的 `can_call()` 说了算：就算把请求手打进来，
+              科任老师一样会被拒（§33.2）。
             */}
-            {canManageClass ? (
+            {canCall ? (
               <Button
                 size="sm"
                 variant="ghost"
@@ -198,16 +577,48 @@ export default function ClassDetail() {
       />
 
       <Page>
-        {/* 体检 */}
+        {/* 走班班的老师（`class_subjects` 那一行）—— 老师分配完刷新之后，这一块必须还在。
+            行政班不显示这一块（它的任课关系在「开学准备」那一步批量写，与走班班不是一条链）。 */}
+        {isStream ? (
+          <div
+            className="mb-3 flex items-center gap-2"
+            style={{ fontSize: 12.5, color: 'var(--color-ink2)' }}
+          >
+            <span style={{ color: 'var(--color-ink3)' }}>走班班老师</span>
+            <span style={{ fontWeight: 600 }}>
+              {teacherUnknown ? '没读到' : teacherName || '还没分配'}
+            </span>
+            {teacherUnknown ? (
+              <span style={{ color: 'var(--color-ink3)' }}>（网络或权限 —— 不代表还没分配）</span>
+            ) : null}
+          </div>
+        ) : null}
+
+        {/* 体检
+            🔴 **"还没有名单"与"名单没读到"都不许写成"通过 / 正常"**（2026-10-08）。
+               一个 0 人的班是"没有缺号"的，但那是**没有数据**，不是"名单完整" ——
+               这个项目栽过最多次的就是"没有数据被当成一切正常"。 */}
         <Panel className="anim-in mb-4 overflow-hidden">
           <StatStrip
             items={[
-              { k: '学生', v: health.count },
-              { k: '学号区间', v: `1–${health.maxNo || 0}` },
+              { k: isStream ? '走班成员' : '学生', v: rosterState.kind === 'unknown' ? '—' : rosterState.count },
+              isStream
+                ? { k: '名单来源', v: '选科自动生成' }
+                : { k: '学号区间', v: rosterState.kind === 'unknown' ? '—' : `1–${health?.maxNo || 0}` },
               {
                 k: '待核对',
-                v: problems === 0 ? '正常' : problems,
-                tone: problems === 0 ? 'var(--color-ok)' : 'var(--color-warn)',
+                v:
+                  rosterState.kind === 'unknown'
+                    ? '没读到'
+                    : rosterState.kind === 'nobody'
+                      ? '还没有名单'
+                      : okRoster
+                        ? '正常'
+                        : problems,
+                tone:
+                  (health && !okRoster) || rosterState.kind === 'nobody'
+                    ? 'var(--color-warn)'
+                    : 'var(--color-ink3)',
               },
             ]}
           />
@@ -215,32 +626,55 @@ export default function ClassDetail() {
             className="flex items-start gap-2.5 p-3"
             style={{
               borderTop: '1px solid var(--color-line)',
-              background: problems === 0 ? 'var(--color-oksoft)' : 'var(--color-warnsoft)',
+              background: okRoster ? 'var(--color-oksoft)' : rosterState.kind === 'warn' ? 'var(--color-warnsoft)' : 'var(--color-surface2)',
             }}
           >
             <span
-              style={{ color: problems === 0 ? 'var(--color-ok)' : 'var(--color-warn)', marginTop: 1 }}
+              style={{
+                color: okRoster ? 'var(--color-ok)' : health && !okRoster ? 'var(--color-warn)' : 'var(--color-ink3)',
+                marginTop: 1,
+              }}
             >
-              {problems === 0 ? <IconCheck size={16} /> : <IconAlert size={16} />}
+              {okRoster ? <IconCheck size={16} /> : health && !okRoster ? <IconAlert size={16} /> : <IconUsers size={16} />}
             </span>
             <div className="flex-1" style={{ fontSize: 12.5, lineHeight: 1.6 }}>
-              {problems === 0 ? (
-                <span style={{ color: '#0b6b4a' }}>
-                  名单体检通过：学号 1–{health.maxNo} 连续无缺号，无重号重名。
-                </span>
-              ) : (
-                <span style={{ color: '#8a5a12' }}>
+              {okRoster && health ? (
+                isStream ? (
+                  <span style={{ color: 'var(--color-okink)' }}>
+                    名单完整：{health.count} 人（来自选科，跟着选科走）。
+                  </span>
+                ) : (
+                  <span style={{ color: 'var(--color-okink)' }}>
+                    名单体检通过：学号 1–{health.maxNo} 连续无缺号，无重号重名。
+                  </span>
+                )
+              ) : health && !okRoster ? (
+                <span style={{ color: 'var(--color-warnink)' }}>
                   {health.gaps.length ? `缺号 ${health.gaps.join('、')}； ` : ''}
                   {health.dupNos.length ? `学号重复 ${health.dupNos.join('、')}； ` : ''}
                   {health.dupNames.length ? `重名 ${health.dupNames.join('、')}； ` : ''}
                   {health.noNumber ? `另有 ${health.noNumber} 人学号非数字` : ''}
+                </span>
+              ) : rosterState.kind === 'unknown' ? (
+                <span style={{ color: 'var(--color-ink2)' }}>
+                  {membersErr || '没读到这个班的名单 —— 不代表它没有人。'}
+                </span>
+              ) : isStream ? (
+                <span style={{ color: 'var(--color-ink2)' }}>
+                  这个走班班还没有成员。在「开学准备 · 选科与走班」里选科之后生成。
+                </span>
+              ) : (
+                <span style={{ color: 'var(--color-ink2)' }}>
+                  还没有名单（0 人）—— 体检无从谈起。拍照或粘贴导入之后再来看这一块。
                 </span>
               )}
             </div>
           </div>
         </Panel>
 
-        {/* 操作 */}
+        {/* 操作 —— 🔴 **走班班不摆"录名单"那三个入口**：它的人来自选科（`class_members`），
+            在这一页手工加/导都不该有路（摆着就是骗人）。 */}
+        {!isStream ? (
         <div className="mb-3 flex gap-2">
           <Button
             size="sm"
@@ -262,17 +696,21 @@ export default function ClassDetail() {
             variant="primary"
             icon={<IconPlus size={15} />}
             onClick={() => {
-              setAddForm({ studentNo: String(health.maxNo + 1), name: '' })
+              setAddForm({ studentNo: String((health?.maxNo ?? 0) + 1), name: '' })
               setAddOpen(true)
             }}
           >
             加学生
           </Button>
         </div>
+        ) : null}
 
         {/* 名单 */}
         <div>
-          <Sect>学生名单 · {klass.students.length} 人</Sect>
+          <Sect>
+            {isStream ? '走班成员' : '学生名单'} ·{' '}
+            {rosterState.kind === 'unknown' ? '人数没读到' : `${rosterState.count} 人`}
+          </Sect>
           <Panel className="overflow-hidden">
             <div
               className="flex items-center gap-2 px-3 py-2"
@@ -299,9 +737,9 @@ export default function ClassDetail() {
               <div className="empty">
                 <IconUsers size={24} />
                 <div style={{ fontWeight: 600, color: 'var(--color-ink)' }}>
-                  {klass.students.length === 0 ? '名单还是空的' : '没有匹配的学生'}
+                  {roster.length === 0 ? (isStream ? '还没有成员' : '名单还是空的') : '没有匹配的学生'}
                 </div>
-                {klass.students.length === 0 ? (
+                {roster.length === 0 && !isStream ? (
                   <div className="flex gap-2">
                     <Button
                       size="sm"
@@ -335,6 +773,7 @@ export default function ClassDetail() {
                       <th style={{ width: 86 }}>序列号</th>
                       <th>姓名</th>
                       <th style={{ width: 74 }}>状态</th>
+                      <th style={{ width: 52 }}>档案</th>
                       <th style={{ width: 46 }} />
                     </tr>
                   </thead>
@@ -364,6 +803,26 @@ export default function ClassDetail() {
                           </Tag>
                         </td>
                         <td>
+                          {/*
+                            学生档案（民族 / 出生年月 / 家长电话 / 家庭住址）。
+                            ⚠️ 这里**不判"我看不看得到"**：名单本身就是数据库 RLS 筛过的
+                               （`students_visible` → `visible_class_ids()`），看得见这一行就看得见它。
+                          */}
+                          <button
+                            type="button"
+                            onClick={() => openProfile(s.id)}
+                            aria-label="学生档案"
+                            style={{
+                              color: profileFilled(profiles.get(s.id))
+                                ? 'var(--color-accent)'
+                                : 'var(--color-ink3)',
+                              fontSize: 12,
+                            }}
+                          >
+                            档案
+                          </button>
+                        </td>
+                        <td>
                           <button
                             type="button"
                             onClick={() => openEdit(s.id)}
@@ -385,7 +844,166 @@ export default function ClassDetail() {
         <div className="mt-3 px-1" style={{ fontSize: 11.5, color: 'var(--color-ink4)', lineHeight: 1.7 }}>
           转班学生请使用「设为已转出」而非删除，历史作业数据会随之保留。
         </div>
+
+        {/*
+          🆕 教室端账号（用户点名：把"班主任能管教室端账号"这个入口放进**班级档案**）。
+          🔴 **只对管得着这个班的人摆**（超管 / 教务处 ∪ 本年级年级主任 ∪ 本班班主任）——
+             与"改学生档案"同一个粗档（`canEditClassFor`），科任老师**看不到这一块**。
+             ⚠️ 摆不摆只是"少点几下"：真正那一刀在服务端（`mayManage()`）。
+          🔴 **这里给不出原密码** —— Supabase 里密码是哈希存的，谁也算不回原文；
+             要密码只有一条路：「重置密码」，新密码当场显示一次。
+        */}
+        {canManageThis ? (
+          <div className="mt-6">
+            <Sect>教室端账号</Sect>
+            <Panel bodyClass="p-3">
+              {!isRemote ? (
+                <div style={{ fontSize: 12.5, color: 'var(--color-ink3)', lineHeight: 1.8 }}>
+                  教室端账号要连上服务器才能管理。
+                </div>
+              ) : roomReading ? (
+                <div style={{ fontSize: 12.5, color: 'var(--color-ink3)' }}>正在读…</div>
+              ) : roomErr ? (
+                <div className="flex items-start gap-2">
+                  <span style={{ color: 'var(--color-warn)', marginTop: 1 }}>
+                    <IconAlert size={16} />
+                  </span>
+                  <div className="flex-1" style={{ fontSize: 12.5, color: 'var(--color-warn)', lineHeight: 1.8 }}>
+                    {roomErr.includes('显示这一次') ? roomErr : `${roomErr} ${PASSWORD_SHOWN_ONCE}`}
+                  </div>
+                  <Button size="sm" disabled={roomBusy} onClick={() => setRoomTick((t) => t + 1)}>
+                    重试
+                  </Button>
+                </div>
+              ) : roomAccount ? (
+                <div className="flex flex-col gap-2.5">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span style={{ fontSize: 12, color: 'var(--color-ink3)' }}>登录账号</span>
+                    <code
+                      className="num"
+                      style={{ fontSize: 13, fontFamily: 'var(--font-mono)', fontWeight: 600 }}
+                    >
+                      {roomAccount.email}
+                    </code>
+                    <Tag tone={roomAccount.disabled ? 'idle' : 'ok'}>
+                      {roomAccount.disabled ? '已停用' : '在用'}
+                    </Tag>
+                    <span className="flex-1" />
+                    {/*
+                      ⓘ 只回答一件事："密码去哪了？" —— 摆在这里是因为**每个人第一次
+                      看这一块都会问它**（用户原话就是"能看见账号和密码"）。
+                    */}
+                    <button
+                      type="button"
+                      onClick={() => setRoomInfo(true)}
+                      aria-label="密码怎么拿"
+                      style={{ color: 'var(--color-ink3)' }}
+                    >
+                      <IconInfo size={16} />
+                    </button>
+                  </div>
+                  <div style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.7 }}>
+                    挂在教室里那台大屏上。
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      size="sm"
+                      icon={<IconRefresh size={14} />}
+                      disabled={roomBusy}
+                      onClick={() => setRoomConfirmResetOpen(true)}
+                    >
+                      重置密码
+                    </Button>
+                    <Button size="sm" variant="ghost" disabled={roomBusy} onClick={() => void toggleRoomDisabled()}>
+                      {roomAccount.disabled ? '恢复使用' : '停用'}
+                    </Button>
+                    {roomPwd ? (
+                      <Button size="sm" variant="ghost" icon={<IconEye size={14} />} onClick={() => setRoomPwdOpen(true)}>
+                        看新密码
+                      </Button>
+                    ) : null}
+                  </div>
+                </div>
+              ) : (
+                <div className="flex flex-col gap-2.5">
+                  <div style={{ fontSize: 12.5, color: 'var(--color-ink2)', lineHeight: 1.8 }}>
+                    这个班还没有教室端账号 —— 建好之后，教室里那台大屏就能登录了。
+                  </div>
+                  <div>
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      icon={<IconPlus size={14} />}
+                      disabled={roomBusy}
+                      onClick={() => void createRoomAccount()}
+                    >
+                      建教室端账号
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </Panel>
+          </div>
+        ) : null}
       </Page>
+
+      {/*
+        「为什么看不到原密码」的那一页（教室端账号块右上角那个 ⓘ）。
+        写得短：这里只回答"密码去哪了 / 要密码怎么办"。
+      */}
+      <Sheet open={roomInfo} onClose={() => setRoomInfo(false)} title="教室端账号">
+        <div style={{ fontSize: 12.5, color: 'var(--color-ink2)', lineHeight: 1.85 }}>
+          <p>这个班的大屏用一个账号登录，学生能碰到那台机器。</p>
+          <p className="mt-2">
+            密码存进去就取不出原文了，所以这里看不到。要密码就点「重置密码」——
+            会生成一串新的、当场显示一次，旧密码立刻失效。
+          </p>
+        </div>
+      </Sheet>
+
+      {/* 重置密码：**先把代价说清再动手**（它会让教室那台机器下次登录要用新密码） */}
+      <Sheet
+        open={roomConfirmResetOpen}
+        onClose={() => setRoomConfirmResetOpen(false)}
+        title="重置密码"
+        footer={
+          <div className="flex gap-2">
+            <Button block onClick={() => setRoomConfirmResetOpen(false)}>
+              取消
+            </Button>
+            <Button block variant="primary" disabled={roomBusy} onClick={() => void resetRoomPassword()}>
+              确认重置
+            </Button>
+          </div>
+        }
+      >
+        <div style={{ fontSize: 12.5, color: 'var(--color-ink2)', lineHeight: 1.85 }}>
+          <p>旧密码立刻失效，教室那台大屏下次登录要用新密码。</p>
+          <p className="mt-2">新密码只显示一次，请当场抄下来。</p>
+        </div>
+      </Sheet>
+
+      {/* 重置结果：新密码**只在这里一次**（关掉就看不到了 —— 库里存的不是原文） */}
+      <Sheet
+        open={roomPwdOpen && !!roomPwd}
+        onClose={() => setRoomPwdOpen(false)}
+        title="新密码"
+        footer={
+          <Button block variant="primary" icon={<IconCheck size={16} />} onClick={() => setRoomPwdOpen(false)}>
+            我知道了
+          </Button>
+        }
+      >
+        {roomPwd ? (
+          <div className="flex flex-col gap-2">
+            <div style={{ fontSize: 12.5, color: 'var(--color-ink2)', lineHeight: 1.75 }}>
+              {PASSWORD_SHOWN_ONCE}抄给管那台机器的人。
+            </div>
+            <RoomRow label="登录账号" value={roomAccount?.email ?? ''} onCopy={push} />
+            <RoomRow label="新密码" value={roomPwd} onCopy={push} />
+          </div>
+        ) : null}
+      </Sheet>
 
       {/* 编辑学生 */}
       <Sheet
@@ -525,7 +1143,7 @@ export default function ClassDetail() {
                 <div
                   className="mt-2"
                   style={{
-                    border: '1px solid #ecd9ae',
+                    border: '1px solid var(--color-warnline)',
                     background: 'var(--color-warnsoft)',
                     borderRadius: 4,
                     padding: '8px 10px',
@@ -533,10 +1151,10 @@ export default function ClassDetail() {
                     lineHeight: 1.8,
                   }}
                 >
-                  <div style={{ color: '#8a5a12', fontWeight: 600 }}>
+                  <div style={{ color: 'var(--color-warnink)', fontWeight: 600 }}>
                     将删除 {purgeCounts.total} 条记录（无可恢复）
                   </div>
-                  <div style={{ color: '#8a5a12' }}>
+                  <div style={{ color: 'var(--color-warnink)' }}>
                     被放弃的科目：{purgeCounts.oldSubjects.map((c) => subjectName(c, c)).join('、') || '（无）'}
                     <br />
                     考试成绩 {purgeCounts.scores} 条 · 走班班成员 {purgeCounts.members} 条
@@ -692,6 +1310,87 @@ export default function ClassDetail() {
       </Sheet>
 
       {/*
+        学生档案：民族 / 出生年月 / 家长电话 / 家庭住址（表 `student_profiles`，schema.sql §35）。
+        🔴 **"修改档案"这个入口只对管得着这个班的人摆**（超管 / 教务处 ∪ 本年级年级主任 ∪
+           本班班主任 = 数据库的 `can_manage_class()`）；科任老师照样**看得见**这几个字段。
+           ⚠️ 前端只决定"摆不摆"，真正能不能写由数据库那条策略说了算 —— 所以保存失败
+              必须**显式说出来**（被策略挡下是"0 行且不报错"，见 `lib/studentProfile.ts`）。
+      */}
+      <Sheet
+        open={!!profileFor}
+        onClose={() => {
+          setProfileFor(null)
+          setProfileEdit(false)
+        }}
+        title={profileStudent ? `学生档案 · ${profileStudent.name || '（无姓名）'}` : '学生档案'}
+        footer={
+          profileEdit ? (
+            <div className="flex gap-2">
+              <Button
+                block
+                onClick={() => {
+                  setProfileEdit(false)
+                  setProfileSaveErr('')
+                }}
+              >
+                取消
+              </Button>
+              <Button block variant="primary" disabled={profileSaving} onClick={() => void saveProfile()}>
+                {profileSaving ? '保存中…' : '保存'}
+              </Button>
+            </div>
+          ) : canManageThis && !profilesErr ? (
+            <Button
+              block
+              variant="primary"
+              onClick={() => {
+                setProfileForm(shownProfile ?? emptyProfile(profileFor ?? ''))
+                setProfileSaveErr('')
+                setProfileEdit(true)
+              }}
+            >
+              修改档案
+            </Button>
+          ) : undefined
+        }
+      >
+        {profilesErr ? (
+          <div style={{ fontSize: 12.5, color: 'var(--color-ink3)', lineHeight: 1.8 }}>{profilesErr}</div>
+        ) : (
+          <div className="flex flex-col gap-3">
+            {PROFILE_FIELDS.map((f) => (
+              <div key={f.key}>
+                <span className="label">{f.label}</span>
+                {profileEdit ? (
+                  <input
+                    className="input"
+                    placeholder={f.hint}
+                    value={profileForm[f.key]}
+                    onChange={(e) => setField(f.key, e.target.value)}
+                  />
+                ) : (
+                  <div
+                    style={{
+                      fontSize: 13.5,
+                      lineHeight: 1.7,
+                      color: String(shownProfile?.[f.key] ?? '').trim()
+                        ? 'var(--color-ink)'
+                        : 'var(--color-ink4)',
+                    }}
+                  >
+                    {String(shownProfile?.[f.key] ?? '').trim() || '未录入'}
+                  </div>
+                )}
+              </div>
+            ))}
+            {profileSaveErr ? (
+              <div style={{ fontSize: 12, color: 'var(--color-bad)', lineHeight: 1.7 }}>{profileSaveErr}</div>
+            ) : null}
+          </div>
+        )}
+      </Sheet>
+
+      {/*
         🆕 P9 / Q32 = C：**事务性呼叫** —— 班主任 / 教导处从班级管理里直接叫学生，
         **不挂任何作业档案**（`calls.assignment_id` 是空的，`schema.sql` §33.1 把它放开了）。
         ⚠️ 它落在**这个行政班**的教室端（走班班的屏不接呼叫 —— Q17）。
@@ -764,7 +1463,8 @@ export default function ClassDetail() {
           <div className="max-h-[28vh] overflow-y-auto" style={{ border: '1px solid var(--color-line2)', borderRadius: 4 }}>
             {klass.students
               .filter((s) => s.status !== 'left')
-              .sort(compareRoster)
+              /* 与上面的名单同一套顺序（屏上都是班内学号，别一个按序列号一个按班内学号） */
+              .sort(compareStudentNo)
               .map((s) => {
                 const on = callPicked.includes(s.id)
                 return (
@@ -809,5 +1509,48 @@ export default function ClassDetail() {
         </div>
       </Sheet>
     </>
+  )
+}
+
+/**
+ * 一行「值 + 复制」（教室端账号那一块用）。
+ * ⚠️ 与教师账号页那个同名组件是**同一套 markup**（那一个是页面私有的 `CopyRow`，
+ *    没有导出）。这一份刻意写得一样：两处的读者都要"抄一串字符过去"。
+ */
+function RoomRow({
+  label,
+  value,
+  onCopy,
+}: {
+  label: string
+  value: string
+  onCopy: (t: { text: string; tone: 'ok' }) => void
+}) {
+  return (
+    <div
+      className="flex items-center gap-2 p-2.5"
+      style={{
+        background: 'var(--color-surface2)',
+        border: '1px solid var(--color-line)',
+        borderRadius: 4,
+      }}
+    >
+      <span style={{ fontSize: 12, color: 'var(--color-ink3)', width: 58 }}>{label}</span>
+      <code
+        className="min-w-0 flex-1 truncate"
+        style={{ fontSize: 12.5, fontFamily: 'var(--font-mono)' }}
+      >
+        {value}
+      </code>
+      <Button
+        size="sm"
+        onClick={() => {
+          void navigator.clipboard?.writeText(value)
+          onCopy({ text: `已复制${label}`, tone: 'ok' })
+        }}
+      >
+        复制
+      </Button>
+    </div>
   )
 }

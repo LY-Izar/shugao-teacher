@@ -1761,11 +1761,21 @@ section('第九节 · D3/D4/D5：判据白名单 · myRoles 读取点白名单 �
       ['src/lib/roles.ts', '入口表与判据的定义处（不是读取处）'],
       [
         'src/pages/ClassDetail.tsx',
-        '🆕 教室端两块能力（P9）：「呼叫学生」那个按钮的**显隐**（`hasManagingRole(myRoles)`）—— ' +
-          '与 `/settings/terms` 同一档的那个粗判据，**只决定摆不摆入口、不读任何数据行**。' +
-          '⚠️ 它**故意覆盖不到"本班班主任"**（那是 `teacher_roles` 的一行），所以那个入口对班主任也是摆着的。' +
-          '真正的闸门是数据库的 `can_call()`（`schema.sql` §33.2）：事务性呼叫只给班级管理权那一档，' +
-          '科任老师即使把请求打进来也会被拒（`rls-checks` 第十七节有一条反向对照钉着它）',
+        '教室端两块能力（P9）· 2026-10-09：「呼叫学生」那个按钮的**显隐**已改成' +
+          '**服务端回的那一个布尔**（`canCall`，`/api/grade-setup` 的 `classCallable`）—— ' +
+          '这一页**不再拿角色推断它**；`myRoles` 在这里只剩"学生档案 / 教室端账号那一块摆不摆"' +
+          '（`canEditClassFor(myRoles, …)`，与 `Classes.tsx` 同一款前端影子）。' +
+          '**只决定摆不摆入口、不读任何数据行**。真正的闸门是数据库的 `can_call()`' +
+          '（`schema.sql` §33.2）：事务性呼叫只给班级管理权那一档，科任老师即使把请求打进来也会被拒' +
+          '（`rls-checks` 第十七节有一条反向对照钉着它）',
+      ],
+      [
+        'src/pages/Classes.tsx',
+        '🆕 走班班的编辑 / 删除（2026-10-08）：**只决定摆不摆那两个入口**' +
+          '（`canEditClassFor(myRoles, c.id, c.gradeId)` —— `lib/roles.ts` 里那条判据的前端影子，' +
+          '逐支照抄 `can_manage_class_for()`）；**不读任何数据行**（`classes` 是 RLS 筛过的结果，不再筛第二遍）。' +
+          '真正的闸门是数据库：改 / 删走 `classes_update` / `classes_delete`（同一条判据），' +
+          '加删成员走 §37.1 的函数（函数体内第一句就是 `can_manage_class()`）',
       ],
     ])
   const hits = []
@@ -1829,8 +1839,15 @@ section('第九节 · D3/D4/D5：判据白名单 · myRoles 读取点白名单 �
     [
       'src/pages/ClassDetail.tsx',
       '🆕 教室端两块能力（P9）：4 处 `.filter` **没有一处与角色有关** —— 滤的是搜索命中的学生、' +
-        '转班时的候选班、以及呼叫面板里"没转出的学生"；`myRoles` 单独出现在那个按钮的显隐上' +
-        '（`hasManagingRole(myRoles)`，见 D4 的白名单理由）',
+        '转班时的候选班、以及呼叫面板里"没转出的学生"；`myRoles` 单独出现在' +
+        '"学生档案 / 教室端账号"那一块的显隐上（`canEditClassFor(myRoles, …)`，见 D4 的白名单理由）' +
+        '—— 「呼叫学生」那个按钮**已经不在这里**（它看服务端回的 `canCall`）',
+    ],
+    [
+      'src/pages/Classes.tsx',
+      '🆕 走班班的编辑 / 删除（2026-10-08）：4 处 `.filter` **没有一处与角色有关** —— ' +
+        '滤的是行政班 / 走班班（`splitByKind`）、名单里的搜索命中、以及全年级在册学生；' +
+        '`myRoles` 单独出现在那两个入口的显隐上（`canEditClassFor(myRoles, …)`，见 D4 的白名单理由）',
     ],
   ])
   const SUSPECT = []
@@ -2909,8 +2926,186 @@ section("第十三节 · D10：表存在性探针不许假设列存在（select(
   }
 }
 
-/* ---------------- 结果 ---------------- */
+/* ============================================================
+   第十三节 · D11：**"摆不摆入口"由服务端给的那一位布尔决定**
+   ============================================================
+   两件事（2026-10-09）都是同一个形状 —— 与通知的 `canRevoke`
+   （`functions/api/notice.ts` → `lib/notices.ts`）逐字同一套：
 
+     ① 「呼叫学生」那个按钮 —— 判据是数据库的 `can_call(class_id, null)`
+        （= `can_call_for()` 的**事务性呼叫**那一支 = `can_manage_class_for()`，§33.2）。
+        ⚠️ 前端原来写 `hasManagingRole(myRoles)`（粗档，**不含班主任**）→
+        **本班班主任服务端允许、界面上不摆按钮**（这一类 bug 的第三次）。
+     ② `teachable` —— 名录里每一行由服务端标"能不能被选去教书"：
+        `super`（平台主人）不能，⚠️ **教务处 `admin` 照旧能**（别把真老师筛掉）。
+
+   🔴 这一节要钉住的**不是**"某一行代码长什么样"，而是**判据的位置**：
+      前端只读服务端回的那一个布尔，**一个字都不判角色**。
+   ============================================================ */
+{
+  section('第十三节 · D11：入口显隐由服务端的一位布尔定（呼叫学生 / teachable）')
+
+  /* ---- ①-服务端：`classCallable` 那一支问的是裸版 `can_call(…, null)` ---- */
+  const callSiteOf = (src) => {
+    const at = src.indexOf("action === 'classCallable'")
+    return at < 0 ? null : src.slice(at, at + 1600)
+  }
+  const lookCallSite = (src) => {
+    const text = callSiteOf(src)
+    if (text === null) return { anchor: false }
+    return {
+      anchor: true,
+      bare: /rpcBool\(\s*env,\s*me\.token,\s*'can_call'\s*,/.test(text),
+      noAssignment: /p_assignment_id:\s*null/.test(text),
+      returnsBool: /canCall:\s*can\b/.test(text),
+      missing: /===\s*'missing'/.test(text),
+      /* ⚠️ 不许把 `_for` 变体端给前端（它在 schema 里是 revoke 给 authenticated 的，§16.2） */
+      forVariant: /'can_call_for'/.test(text),
+    }
+  }
+  const gradeSrv = readApp('functions/api/grade-setup.ts')
+  const c1 = lookCallSite(gradeSrv)
+  check(c1.anchor, 'D11-A 锚点自证：服务端有 `action === \'classCallable\'` 那一支', c1.anchor ? '找到了' : '没找到（改名了？那就得改这一节）')
+  check(
+    c1.bare === true && c1.noAssignment === true,
+    'D11-A ① 服务端问的是**裸版 `can_call`**，而且 `p_assignment_id` 传 `null`（= 事务性呼叫那一支，不是"有作业的呼叫"那一支）',
+    `can_call=${c1.bare} · 无作业支=${c1.noAssignment}`,
+  )
+  check(c1.returnsBool === true, 'D11-A ② 服务端回话里带那一位布尔 `canCall`（前端照它摆）', `canCall: can → ${c1.returnsBool}`)
+  check(c1.missing === true, 'D11-A ③ 函数不在（第 33 段没跑）时**显式报错**，不静默当 false（否则又冤枉一位班主任）', `处理了 missing → ${c1.missing}`)
+  check(c1.forVariant === false, 'D11-A ④ 端给前端的**不是** `_for` 变体（那个在 schema 里 revoke 给 authenticated，端上去线上必 42501）', `出现 'can_call_for' → ${c1.forVariant}`)
+  /* 反向对照①：掺进"有作业的呼叫"那一支（`p_assignment_id` 不给 null）→ 判据必须变 */
+  const c1poison = lookCallSite(gradeSrv.replace('p_assignment_id: null', 'p_assignment_id: assignmentId'))
+  check(
+    c1poison.anchor === true && c1poison.noAssignment === false,
+    'D11-A 反向对照①：把 `p_assignment_id: null` 改成给一个作业 id → "事务性呼叫那一支"这条**当场红**',
+    `无作业支 = ${c1poison.noAssignment}（期望 false）`,
+  )
+  /* 反向对照②：换成 `_for` 变体 → ④ 必须红 */
+  const c1poison2 = lookCallSite(gradeSrv.replace("'can_call'", "'can_call_for'"))
+  check(
+    c1poison2.bare === false && c1poison2.forVariant === true,
+    'D11-A 反向对照②：把 `\'can_call\'` 换成 `\'can_call_for\'` → 上面 ① 与 ④ 一起红',
+    `bare=${c1poison2.bare} · forVariant=${c1poison2.forVariant}`,
+  )
+
+  /* ---- ①-前端：ClassDetail 一个字都不判角色 ---- */
+  /* ⚠️ 判之前**先把注释剔掉**：这一页的注释里刻意留着旧写法（`hasManagingRole(myRoles)`）当留档，
+     不剔就会假红（shots.mjs 第 Ⅳ 组同款做法）。 */
+  const stripComments = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+  const lookCallPage = (src) => {
+    const code = stripComments(src)
+    return {
+      roleFree: !/\bhasManagingRole\b/.test(code),
+      booleanDriven: /\{\s*canCall\s*\?\s*\(/.test(code),
+      fromServer: /const canCall = [^\n]*canCall === true/.test(code),
+      perClass: /callAuthFor === id/.test(code),
+    }
+  }
+  const classPage = readApp('src/pages/ClassDetail.tsx')
+  const p1 = lookCallPage(classPage)
+  check(p1.roleFree, 'D11-B ① `ClassDetail.tsx` 的**代码里**一个字都不提 `hasManagingRole`（前端不许自己推断角色；注释里留档不算）', `出现 → ${!p1.roleFree}`)
+  check(p1.booleanDriven, 'D11-B ② 「呼叫学生」那个按钮的条件**就是** `canCall`（服务端回的那一位布尔）', `{ canCall ? ( → ${p1.booleanDriven}`)
+  check(p1.fromServer, 'D11-B ③ `canCall` 由 `readCanCall()` 的结论算出来（`canCall === true`），不是本地拼的', `→ ${p1.fromServer}`)
+  check(p1.perClass, 'D11-B ④ 结论认**班级 id**（换班时不把上一个班的结论当成这个班的）', `→ ${p1.perClass}`)
+  /* 反向对照③：改回原来那种写法（前端判角色）→ ① 与 ② 一起红 */
+  const p1poison = lookCallPage(classPage.replace('{canCall ? (', '{hasManagingRole(myRoles) ? ('))
+  check(
+    p1poison.roleFree === false && p1poison.booleanDriven === false,
+    'D11-B 反向对照③：把按钮改回 `hasManagingRole(myRoles)`（**这就是那个 bug 的形状**）→ ① 与 ② 一起红',
+    `roleFree=${p1poison.roleFree} · booleanDriven=${p1poison.booleanDriven}`,
+  )
+
+  /* ---- ②-服务端：`teachable` 只排除 `super` ---- */
+  const dirSrv = readApp('functions/api/teacher-account.ts')
+  const lookTeachable = (src) => {
+    const at = src.indexOf('teachable:')
+    if (at < 0) return { anchor: false }
+    const own = src.slice(at, at + 220)
+    return {
+      anchor: true,
+      own,
+      onlySuper: /x\.role === 'super'/.test(own),
+      /* ⚠️ 判据里**不许出现 admin** —— 教务处（唐友余那一档）要照旧能选 */
+      notAdmin: !/'admin'/.test(own),
+      roomFiltered: /\.filter\(\(t\) => !roomIds\.has\(t\.id\)\)/.test(src),
+    }
+  }
+  const t1 = lookTeachable(dirSrv)
+  check(t1.anchor, 'D11-C 锚点自证：名录里每一行带 `teachable` 那一位布尔', t1.anchor ? '找到了' : '没找到')
+  check(t1.onlySuper, 'D11-C ① 判据 = **有 `super` 身份就不 teachable**（平台主人不该被选去教书）', `→ ${t1.onlySuper}`)
+  check(t1.notAdmin, 'D11-C ② 这一支里**没有 `admin`** —— 教务处照旧能选（别把真老师筛掉）', `出现 'admin' → ${!t1.notAdmin}`)
+  check(t1.roomFiltered, 'D11-C ③ 教室端账号在名录里**先被剔掉**（`classroom_accounts` 那几行根本不进列表）', `→ ${t1.roomFiltered}`)
+  /* 反向对照④：判据顺手加上 admin → ② 必须红（正是"把真老师筛掉"那一种坏法） */
+  const t1poison = lookTeachable(dirSrv.replace("x.role === 'super'", "x.role === 'super' || x.role === 'admin'"))
+  check(
+    t1poison.notAdmin === false,
+    'D11-C 反向对照④：判据顺手把 `admin` 也排除 → ② **当场红**（教务处被当成了不该教书的人）',
+    `出现 'admin' → ${!t1poison.notAdmin}`,
+  )
+  /* 反向对照⑤：删掉教室端过滤 → ③ 必须红 */
+  const t1poison2 = lookTeachable(dirSrv.replace('    .filter((t) => !roomIds.has(t.id))\n', ''))
+  check(
+    t1poison2.roomFiltered === false,
+    'D11-C 反向对照⑤：删掉"剔掉教室端账号"那一句 → ③ **当场红**',
+    `→ ${t1poison2.roomFiltered}`,
+  )
+
+  /* ---- ②-前端：名录那一份布尔只用来**筛下拉**，「教师管理」不筛 ---- */
+  const accountsLib = readApp('src/lib/accounts.ts')
+  check(
+    /export function teachableOnly\(list: readonly DirTeacher\[\]\): DirTeacher\[\] \{\s*return list\.filter\(\(t\) => t\.teachable\)/.test(accountsLib),
+    'D11-D ① 筛的口子只有一处（`lib/accounts.ts` 的 `teachableOnly()`，判据就是服务端那一位布尔）',
+    '`teachableOnly()` 的形状对',
+  )
+  const gsPage = readApp('src/pages/GradeSetup.tsx')
+  eq(
+    'D11-D ② 「开学准备」四处"选老师教书"的下拉全走 `teachableOnly()`（年级主任 / 班主任 / 批量任教关系 / 走班班老师）',
+    (gsPage.match(/teachableOnly\(teachers\)/g) ?? []).length,
+    4,
+  )
+  eq(
+    'D11-D ③ 那四处**没有**漏网的 `teachers.map(`（漏一处 = 平台主人又出现在某个下拉里）',
+    (gsPage.match(/\{teachers\.map\(/g) ?? []).length,
+    0,
+  )
+  const classesPage = readApp('src/pages/Classes.tsx')
+  eq(
+    'D11-D ④ 走班班的「走班老师」也走 `teachableOnly()`',
+    (classesPage.match(/teachableOnly\(teachers\)\.map\(/g) ?? []).length,
+    1,
+  )
+  eq(
+    'D11-D ⑤ 那里也没有漏网的 `{teachers.map(`',
+    (classesPage.match(/\{teachers\.map\(/g) ?? []).length,
+    0,
+  )
+  const taPage = readApp('src/pages/TeacherAccounts.tsx')
+  eq(
+    'D11-D ⑥ 「教师管理」**不筛**（管理名单要看见所有人）—— 三处名录照旧列全部',
+    (taPage.match(/dir\.teachers\.map\(/g) ?? []).length,
+    3,
+  )
+  check(
+    !/teachableOnly/.test(taPage),
+    'D11-D ⑦ 「教师管理」里读标记但**不用它筛**（`teachable` 只用来写一个标签）',
+    `出现 teachableOnly → ${/teachableOnly/.test(taPage)}`,
+  )
+  check(
+    /!\s*t\.teachable\s*\?/.test(taPage),
+    'D11-D ⑧ 「教师管理」那一行真的**读了**标记（`!t.teachable` → 一个标签）—— 否则 ⑥ 就是"白不筛"',
+    `读到 → ${/!\s*t\.teachable\s*\?/.test(taPage)}`,
+  )
+  /* 反向对照⑥：把「教师管理」的主名单也筛一遍 → ⑥ 必须红（3 → 2） */
+  const taPoison = taPage.replace('dir.teachers.map((t) => (', 'teachableOnly(dir.teachers).map((t) => (')
+  check(
+    (taPoison.match(/dir\.teachers\.map\(/g) ?? []).length !== 3,
+    'D11-D 反向对照⑥：把「教师管理」也按 `teachable` 筛 → ⑥ **当场红**（那正是"把 super 从名单里删掉"）',
+    `改后 = ${(taPoison.match(/dir\.teachers\.map\(/g) ?? []).length}（期望 ≠ 3）`,
+  )
+}
+
+/* ---------------- 结果 ---------------- */
 console.log(`\n================ 结果 ================`)
 console.log(`  断言：通过 ${passed} 条，失败 ${failures.length} 条`)
 for (const f of failures) console.log(`  ❌ ${f}`)
@@ -2918,6 +3113,6 @@ if (failures.length) {
   console.log('\n  ⛔ 有断言没过（上面每一条都写了实测值）')
   process.exitCode = 1
 } else {
-  console.log('  全部通过 ✅（纯函数 A1–A10 / 静态 D1–D7 · D9 · D10 / 编码 + 不可见字符 D8）')
+  console.log('  全部通过 ✅（纯函数 A1–A10 / 静态 D1–D7 · D9 · D10 · D11 / 编码 + 不可见字符 D8）')
 }
 }, { script: 'nav-checks.mjs' })

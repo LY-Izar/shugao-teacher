@@ -186,7 +186,7 @@ function QButton({
                   border: 0,
                   borderRight: '1px solid var(--color-line)',
                   background: on ? 'var(--color-bad)' : 'transparent',
-                  color: on ? '#fff' : 'var(--color-ink3)',
+                  color: on ? 'var(--color-onbad)' : 'var(--color-ink3)',
                   cursor: 'pointer',
                 }}
                 aria-label={`第 ${seq} 题第 ${sub} 小题`}
@@ -972,7 +972,7 @@ function GradeSession({
                             padding: '0 3px',
                             borderRadius: 99,
                             background: 'var(--color-bad)',
-                            color: '#fff',
+                            color: 'var(--color-onbad)',
                             fontSize: 9.5,
                             lineHeight: '15px',
                             fontWeight: 700,
@@ -1094,7 +1094,11 @@ function GradeSession({
                                 padding: '0 3px',
                                 borderRadius: 99,
                                 background: tone,
-                                color: '#fff',
+                                /* ⚠️ `tone` 是 `gradeTone()` 给的**三档之一**（ok / warn / bad），
+                                   所以这里不能用 `--color-onbad` 那一个 —— 它在 ok/warn 上会偏色。
+                                   `--color-onwarn` 的暗色值 #1a1206 在这三档上的实测都 ≥6.2:1（AA），
+                                   而且是"暖档"，与等级徽章同一挂。 */
+                                color: 'var(--color-onwarn)',
                                 fontSize: 10,
                                 lineHeight: '16px',
                                 fontWeight: 700,
@@ -1127,7 +1131,7 @@ function GradeSession({
                               padding: '0 3px',
                               borderRadius: 99,
                               background: 'var(--color-bad)',
-                              color: '#fff',
+                              color: 'var(--color-onbad)',
                               fontSize: 10,
                               lineHeight: '16px',
                               fontWeight: 700,

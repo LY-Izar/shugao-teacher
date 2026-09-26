@@ -39,7 +39,7 @@ import {
   serviceKey,
   svcRpc as svcRpcLib,
 } from './_lib/supa'
-import { beijingStamp, sendAuditedMail } from './_lib/mail'
+import { SYSTEM_MAIL_BODIES, beijingStamp, sendAuditedMail } from './_lib/mail'
 
 const NEED_STAGE29 = needStage('29', '提档与毕业删除（`promote_grades` / `grade_delete` 就在那一段）')
 
@@ -314,21 +314,16 @@ export async function onRequestPost(context: { request: Request; env: Env }): Pr
       action: 'mail.gradeBackup',
       actorId: me.id,
       subject: `【树高平台】${name} 毕业备份 · ${beijingStamp()}`,
-      text: [
-        `${name}的毕业备份已经生成。`,
-        '',
-        `这一届的数据：${countLines(counts)}`,
-        `备份大小：${sizeText(Number(v.byteSize ?? 0))}`,
-        `校验和（md5）：${checksumText(String(v.checksum ?? ''))}`,
-        '',
-        '下载备份（90 天内有效）：',
-        '  ① 在平台上打开「提档与毕业」→「下载备份」（推荐，走登录态）',
-        `  ② 或把下面这一串接到本站地址后面：${path}`,
-        '',
-        '⚠️ 这是「毕业删除」的第一道保护：**备份没发出去，这个年级就删不掉**。',
-        '⚠️ 删除只有最高管理员能做，而且要逐字输入年级全名。',
-        '⚠️ 本邮件正文不含任何学生个人信息。',
-      ].join('\n'),
+      /* 正文在 `SYSTEM_MAIL_BODIES.gradeBackup`（唯一一处构造；自测逐条喂它） */
+      text: SYSTEM_MAIL_BODIES.gradeBackup({
+        stamp: beijingStamp(),
+        gradeName: name,
+        /* ⚠️ 下面三行都是**已经处理过形状**的（`sizeText()` 防 7 位连号、`checksumText()` 每 4 位断开） */
+        countsLine: countLines(counts),
+        sizeLine: sizeText(Number(v.byteSize ?? 0)),
+        checksumLine: checksumText(String(v.checksum ?? '')),
+        tokenPath: path,
+      }),
       affected: 1,
     })
 
@@ -347,8 +342,8 @@ export async function onRequestPost(context: { request: Request; env: Env }): Pr
           status: 'error',
           reason: mail.reason,
           message:
-            `备份已经生成，但**没有发出去**（${mail.message}）—— 按规矩这个年级现在删不掉。` +
-            '把邮件通道修好（或稍后重试）再走一遍备份。',
+            `备份已经生成，但**没有存成功**（${mail.message}）—— 按规矩这个年级现在删不掉。` +
+            '把通道修好（或稍后重试）再走一遍备份。',
           removalId,
           counts,
         },

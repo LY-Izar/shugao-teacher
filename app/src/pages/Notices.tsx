@@ -33,6 +33,7 @@ export default function Notices() {
   const myRoles = useStore((s) => s.myRoles)
   const markNoticesSeen = useStore((s) => s.markNoticesSeen)
   const revokeNotice = useStore((s) => s.revokeNotice)
+  const pinNotice = useStore((s) => s.pinNotice)
   const navigate = useNavigate()
   const push = useToast((s) => s.push)
   const [busy, setBusy] = useState<string | null>(null)
@@ -52,6 +53,8 @@ export default function Notices() {
    * 排序：**置顶 → 时间倒序**。
    * ⚠️ **撤下的那些不在这里筛掉** —— 自己发的那条撤下之后仍然看得见（I25 的同一条纪律），
    *    它带着"已撤下"的标记，让人知道"这条我发过、而且我撤了"。
+   * 🔴 **`pinned` 的意义全在这个排序上**：置顶 = 排到最前（`Workbench.tsx` 那一块同一条口径）。
+   *    改这里之前先想清楚"置顶"这个词是不是就不成立了。
    */
   const rows = useMemo(
     () =>
@@ -134,6 +137,17 @@ export default function Notices() {
                         : { text: res.message, tone: 'bad' },
                     )
                   }}
+                  onTogglePin={async () => {
+                    setBusy(n.id)
+                    /* 目标是**反过来**（置顶 ↔ 取消置顶）：状态由 `pinned` 说，动作由点击说 */
+                    const res = await pinNotice(n.id, !n.pinned)
+                    setBusy(null)
+                    push(
+                      res.ok
+                        ? { text: n.pinned ? '已取消置顶' : '已置顶', tone: 'ok' }
+                        : { text: res.message, tone: 'bad' },
+                    )
+                  }}
                 />
               ))}
             </div>
@@ -149,10 +163,12 @@ function NoticeCard({
   notice,
   busy,
   onRevoke,
+  onTogglePin,
 }: {
   notice: Notice
   busy: boolean
   onRevoke: () => void
+  onTogglePin: () => void
 }) {
   const revoked = notice.revokedAt !== null
   const dead = revoked || notice.expired
@@ -210,11 +226,34 @@ function NoticeCard({
               <span>有效期至 {new Date(notice.expiresAt).toLocaleDateString('zh-CN')}</span>
             ) : null}
           </div>
-          {notice.mine && !revoked ? (
-            <div className="mt-2">
-              <Button size="sm" variant="ghost" icon={<IconTrash size={15} />} disabled={busy} onClick={onRevoke}>
-                撤下
-              </Button>
+          {/*
+            🔴 「撤下」摆不摆**看服务端回的那一个布尔**（`canRevoke`），**不在这里判角色**。
+            判据（`自己发的 || 教务处/超管`）在 `functions/api/notice.ts` 的 list 分支里算，
+            与真正的 revoke 那一支**同一套**。
+            ⚠️ 改回 `notice.mine` 就会退回 2026-10-07 那个 bug：最高管理员与教务处
+               **看不到别人的通知上的「撤下」**（而服务端允许）——
+               `scripts/shots.mjs` 那一节的反向对照就是照这个改法做的。
+            `!revoked` 是**状态**（撤过的不再摆），与"许可"是两件事。
+
+            🔴 「置顶 / 取消置顶」同理：摆不摆只看服务端回的 `canPin`
+            （判据 = `is_school_admin()`，与 `pin` 那一支**同一套**）——
+            **同样不许在这里判角色**。它与「撤下」是**两个**许可，只是恰好并排在一起：
+            ⚠️ 千万别合成一个布尔（"能撤下" ≠ "能置顶"），也别用 `notice.pinned` 决定**摆不摆**
+               —— `pinned` 只决定**按钮文字**（置顶 ↔ 取消置顶），那是"状态"，不是"许可"。
+            外层这一行只是**布局**：任何一个动作可做，就把这一行摆出来（两个按钮并排）。
+          */}
+          {(notice.canRevoke || notice.canPin) && !revoked ? (
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              {notice.canRevoke && !revoked ? (
+                <Button size="sm" variant="ghost" icon={<IconTrash size={15} />} disabled={busy} onClick={onRevoke}>
+                  撤下
+                </Button>
+              ) : null}
+              {notice.canPin && !revoked ? (
+                <Button size="sm" variant="ghost" disabled={busy} onClick={onTogglePin}>
+                  {notice.pinned ? '取消置顶' : '置顶'}
+                </Button>
+              ) : null}
             </div>
           ) : null}
           {revoked ? (

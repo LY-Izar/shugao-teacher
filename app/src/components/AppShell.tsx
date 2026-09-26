@@ -1,14 +1,17 @@
 import { useEffect, useRef, useState } from 'react'
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { useStore, useToast } from '../data/store'
-import { WEEKDAY_TEXT, type TeacherRole } from '../data/types'
+import { WEEKDAY_TEXT, type Student, type TeacherRole } from '../data/types'
+import * as remote from '../data/remote'
 import { useClassroomPresence } from '../hooks/useClassroomPresence'
 import { useMood } from '../hooks/useMood'
 import { useScheduleReminder } from '../hooks/useScheduleReminder'
-import { analyzeRoster } from '../lib/roster'
+import { rosterStateOf } from '../lib/roster'
+import { classKindOf } from '../lib/pick'
 import { currentIdentityLabel, ENTRIES, entryVisible, IDENTITY_TAG_STYLE } from '../lib/roles'
 import { awayText, toMinutes, weekdayOf } from '../lib/schedule'
 import { connectionMode } from '../lib/supabase'
+import { useTheme } from '../lib/theme'
 import { APP_VERSION_LABEL } from '../lib/version'
 import { DoneCelebration, MorningWelcome } from './MoodModals'
 import { AnnouncementStack } from './AnnouncementStack'
@@ -24,6 +27,8 @@ import {
   IconGrid,
   IconHash,
   IconInfo,
+  IconMoon,
+  IconSun,
   IconTarget,
   IconUser,
   IconUsers,
@@ -222,6 +227,9 @@ export function ToastHost() {
           className="glass-dark anim-toast pointer-events-auto flex items-center gap-2.5 px-3.5 py-2.5 text-left"
           style={{
             maxWidth: 420,
+            /* ⚠️ 这里是 `#fff` 而**不是** `var(--color-ink)`：Toast 是 `.glass-dark`（**永远深底**，
+               亮暗两档都不变），压在上面的字必须永远是白的 —— 走令牌的话暗色下它反而变成近白、
+               亮色下变成近黑（那样在深玻璃上直接看不见）。深底上的固定色是"正确"而不是"漏改"。 */
             color: '#fff',
             border: '1px solid rgb(255 255 255 / .14)',
             borderRadius: 6,
@@ -230,6 +238,9 @@ export function ToastHost() {
         >
           <span
             style={{
+              /* 这一组跟着 `tone` 走的是**深玻璃上的状态色**（`.glass-dark` 恒深底）——
+                 所以它们是"深底专用的提亮档"，**不换令牌**（换成 --color-ok 之类，
+                 亮色下那支会暗到在深玻璃上看不清）。 */
               color:
                 t.tone === 'ok'
                   ? '#4ade9a'
@@ -390,7 +401,242 @@ function UnreadDot() {
  *   不是矩形）描一圈很淡的浅色，深色图标在深底上就有了"玻璃里的白边"。
  * ⚠️ 两处（胶囊图标 / 圆按钮箭头）用的是**同一串值**，改一处就得改另一处。
  */
-const ICON_HALO = 'drop-shadow(0 0 0.6px rgb(255 255 255 / .9)) drop-shadow(0 0 1.4px rgb(255 255 255 / .45))'
+/* ---------- 材料令牌（见 `index.css` 的"派生语义色"）----------
+ * 这一组是**液态玻璃的高光与描边**：亮色下与收编前的字面量逐字相同，
+ * 暗色下换成"低透明度白 + 提亮后的 accent"（口径写在 `index.css` 的暗色块里）。
+ * ⛔ 别把它们换成 `--color-surface*`：玻璃的高光不是"面"，换了就成一块死色。
+ */
+const GLASS_HI = 'var(--color-glasshi)'
+const GLASS_HI2 = 'var(--color-glasshi2)'
+const GLASS_LINE = 'var(--color-glassline)'
+/** 液态玻璃"当前页"那一圈淡蓝描边（`AppShell` 里高亮边的 `border/outline/外扩影` 共用） */
+const HI_LINE = 'var(--color-hiline)'
+
+const ICON_HALO = `drop-shadow(0 0 0.6px rgb(${GLASS_LINE} / .9)) drop-shadow(0 0 1.4px rgb(${GLASS_LINE} / .45))`
+
+/* ============================================================
+   🔴 液态玻璃的**边缘折射**（2026-10-01 第三轮 · 用户附参考图 iOS 26 Liquid Glass）
+
+   参考图里最关键的一条是"**玻璃的边缘把背景扭一下**" —— 那道边不是画上去的亮线，
+   而是**真的**把后面的内容折了一下。CSS 没有"只折个边"的滤镜，能做这件事的只有 SVG：
+   `feTurbulence` 造一张**低频**位移场 → `feDisplacementMap` 让背景按它位移；
+   `index.css` 的 `.glass-light[data-refract='on']` 用 `url(#…)` 把它接到 `backdrop-filter` 上。
+   （静态的那一半 —— 一明一暗的内描边 + 三道递减白圈 = "厚边" —— 仍在 CSS 里，两半都要有。）
+
+   为什么用 `feTurbulence` 而不是"手绘一张径向置换图"：
+     · 手绘要 `feImage` + 一个 `data:` 图 —— 那是一条**外部资源**，CSP / 引擎差异都可能让它
+       **静默加载不到**（什么都不报，位移变成常数 → 整块背景被整体挪走，比不生效更糟）；
+     · `feTurbulence` 是**算出来的**，不依赖任何资源，把 `baseFrequency` 调低就是"平滑的位移场"。
+     ⚠️ 低频（0.004 / 0.02）是刻意的：高频出来是"磨砂噪点"，低频才是"背景被揉了一下"。
+
+   三条降级（任何一条不过 → `data-refract='off'`）：
+     ① 引擎不支持 `backdrop-filter: url(#…)`（`CSS.supports` 判，CSS 那头另有 `@supports` 兜一道）；
+     ② **低端机不赌**（核数 ≤ 4 或 `deviceMemory` ≤ 4）：这是实时滤镜，老师和教室那台机器
+        可能就是低端机（`AGENTS.md` 第一节），掉帧比"少一点折射"难看得多；
+     ③ **掉帧看门狗**：挂上之后量 24 帧的 `requestAnimationFrame` 间隔，
+        中位数超过 `FRAME_BUDGET_MS` 就**当场摘掉**（本会话内不再打开）。
+   ⚠️ 退回之后剩下的就是"**只有模糊 + 描边**"（`index.css` 里那条基础声明照常生效）——
+      可读性**不靠折射**（图标靠 `ICON_HALO`、面板靠 0.88 的白兜底层），所以降级只损失"像不像"。
+
+   🔴 **这一轮又多了第二个实时滤镜**（选中项那个"液态果冻"指示器的 gooey，见下面 `GOO_ID`）。
+      两个都是 GPU 上的实时滤镜，**绝不能无脑叠**：低端机上 `lowEndDevice()` 会把**两个一起关掉**，
+      看门狗掉帧时也是**一起关**（同一个 `costly` 开关）——
+      那时剩下的正是"**模糊 + 描边 + 颜色变化 + 弹簧位移**"（颜色与弹簧是 CPU 级的，几乎不花钱）。
+   ============================================================ */
+
+/** 与 `index.css` 里那两处 `url(#…)` **必须同字**：不一致 = 指针指空 = 静默不生效（`shots.mjs` 会钉） */
+export const REFRACT_ID = 'shugao-liquid-refract'
+
+/** 🔴 选中项那颗"液态果冻"指示器的 gooey 滤镜（`feGaussianBlur` + `feColorMatrix` 对比切边） */
+export const GOO_ID = 'shugao-nav-goo'
+
+/** 一帧最多允许多少毫秒（≈45fps）：超了就当"这台机器吃不下实时滤镜" */
+const FRAME_BUDGET_MS = 22
+
+/** ② 低端机不赌（两个阈值都是保守值；读不到就当它是好机器，交给看门狗兜） */
+function lowEndDevice(): boolean {
+  const nav = navigator as Navigator & { deviceMemory?: number }
+  const cores = nav.hardwareConcurrency ?? 8
+  const memory = nav.deviceMemory ?? 8
+  return cores <= 4 || memory <= 4
+}
+
+/** ① 引擎认不认 `backdrop-filter: url(#…)`（不认就没必要往下走） */
+function refractSupported(): boolean {
+  if (typeof CSS === 'undefined' || typeof CSS.supports !== 'function') return false
+  if (!CSS.supports('backdrop-filter', `url(#${REFRACT_ID})`)) return false
+  if (window.matchMedia?.('(prefers-reduced-transparency: reduce)').matches) return false
+  return !lowEndDevice()
+}
+
+/** ①' gooey 走的是普通 `filter`（比 `backdrop-filter: url()` 的支持面宽得多，但不能想当然） */
+function gooSupported(): boolean {
+  if (typeof CSS === 'undefined' || typeof CSS.supports !== 'function') return false
+  return CSS.supports('filter', `url(#${GOO_ID})`) && !lowEndDevice()
+}
+
+/** `(prefers-reduced-motion: reduce)` —— 有人对动效敏感，果冻/拉伸必须让路（不是"建议"） */
+function useReducedMotion(): boolean {
+  const [reduced, setReduced] = useState(
+    () => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false,
+  )
+  useEffect(() => {
+    const mq = window.matchMedia?.('(prefers-reduced-motion: reduce)')
+    if (!mq) return
+    const on = () => setReduced(mq.matches)
+    mq.addEventListener('change', on)
+    return () => mq.removeEventListener('change', on)
+  }, [])
+  return reduced
+}
+
+/**
+ * 两个实时滤镜（折射 / gooey）**共用的一个预算开关**：
+ *   · 先各自做特性检测与低端机判据（`useState` 只算一次）；
+ *   · 再看门狗：挂上之后量 24 帧的 `requestAnimationFrame` 间隔，中位数超 `FRAME_BUDGET_MS`
+ *     → **两个一起关**（"只留一个"都嫌多的时候，正确的选择是一个都不留）；
+ *   · `key` 变了（展开 ⇄ 收起）重新量一轮 —— 展开态那张面板的面积大得多，代价不是一回事。
+ * ⚠️ 语义是"**关了不再开**"：一次掉帧就降级到底，免得在临界机器上反复开关（那比一直关更难看）。
+ */
+function useGlassFx(key: unknown): { refract: boolean; goo: boolean } {
+  const [caps] = useState(() => ({ refract: refractSupported(), goo: gooSupported() }))
+  const [costly, setCostly] = useState(true)
+  const frames = useRef<number[]>([])
+  useEffect(() => {
+    if (!caps.refract && !caps.goo) return
+    let raf = 0
+    let last = performance.now()
+    frames.current = []
+    const tick = (t: number) => {
+      const d = t - last
+      last = t
+      /* 后台标签页的帧是被节流的，不算数（否则切回来一次就"掉帧"了） */
+      if (!document.hidden && d > 0) frames.current.push(d)
+      if (frames.current.length >= 24) {
+        const sorted = [...frames.current].sort((a, b) => a - b)
+        const median = sorted[Math.floor(sorted.length / 2)]
+        frames.current = []
+        if (median > FRAME_BUDGET_MS) {
+          setCostly(false)
+          return
+        }
+      }
+      raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [caps, key])
+  return { refract: caps.refract && costly, goo: caps.goo && costly }
+}
+
+/**
+ * 滤镜本体（内联 SVG，折射与 gooey 两个；胶囊 / 圆按钮 / 展开面板共用这一份）。
+ * ⚠️ **只在对应那个开关打开时才挂进 DOM**：`url(#…)` 指不到东西时行为不可预期
+ *    （有的引擎整条声明失效），"指针与实现一起挂、一起摘"最干净 —— 关掉时连 DOM 都不留。
+ */
+function LiquidGlassFilter({ refract, goo }: { refract: boolean; goo: boolean }) {
+  return (
+    <svg
+      aria-hidden="true"
+      focusable="false"
+      width="0"
+      height="0"
+      style={{ position: 'absolute', pointerEvents: 'none' }}
+    >
+      <defs>
+        {refract ? (
+          <filter id={REFRACT_ID} x="0" y="0" width="100%" height="100%" colorInterpolationFilters="sRGB">
+            <feTurbulence
+              type="fractalNoise"
+              baseFrequency="0.004 0.02"
+              numOctaves="2"
+              seed="9"
+              result="noise"
+            />
+            {/* 噪声的原始幅度会把背景拧烂：压到 0.6 并抬到中性灰附近，只留"很轻的一下" */}
+            <feComponentTransfer in="noise" result="ripple">
+              <feFuncR type="linear" slope="0.6" intercept="0.2" />
+              <feFuncG type="linear" slope="0.6" intercept="0.2" />
+            </feComponentTransfer>
+            <feDisplacementMap
+              in="SourceGraphic"
+              in2="ripple"
+              scale="14"
+              xChannelSelector="R"
+              yChannelSelector="G"
+            />
+          </filter>
+        ) : null}
+        {/*
+          🔴 **液态果冻（gooey）**：指示器本体与它那个"拖尾圆"同在这张滤镜里 ——
+          `feGaussianBlur` 把两个形状糊成一片，`feColorMatrix` 最后一行是**alpha 的对比切边**
+          （`0 0 0 18 -7`：alpha ≥ ~0.6 直接切到 1、以下切到 0）。
+          两个圆靠近时它们被糊成一坨、再被切回**一个**形状（就是"粘连"）；
+          靠得远时是**两个圆 + 中间一条细颈**（"两头圆、中间细"）。
+          ⚠️ 最后那个 `feGaussianBlur stdDeviation=".4"` 是**抗锯齿用的**：
+             alpha 切边会把圆角的锯齿放大，轻糊一下才干净（别删）。
+          ⚠️ 阈值切边只对**不透明填充**成立：指示器与拖尾圆用的是同一个近乎不透明的色，
+             两处**必须同色同透明度**，改一处就得改另一处（否则一个被切掉、一个留下）。
+        */}
+        {goo ? (
+          <filter id={GOO_ID} x="-20%" y="-20%" width="140%" height="140%" colorInterpolationFilters="sRGB">
+            <feGaussianBlur in="SourceGraphic" stdDeviation="7" result="blurred" />
+            <feColorMatrix
+              in="blurred"
+              result="goo"
+              type="matrix"
+              values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 18 -7"
+            />
+            <feGaussianBlur in="goo" stdDeviation=".4" />
+          </filter>
+        ) : null}
+      </defs>
+    </svg>
+  )
+}
+
+/**
+ * 液态玻璃那一族的圆角：**与 `index.css` 的 `--radius-liquid` 必须同值**。
+ * 那是本项目**唯一的大圆角**（理由写在 `index.css` 的令牌那一行），别拿它去改别的控件。
+ */
+const LG_RADIUS = 18
+
+/* ============================================================
+   🔴 **选中项那颗"液态果冻"指示器**（2026-10-01 第三轮追加 · 用户第二张参考图）
+
+   用户原话：「我想把移动端最下面左侧的导航栏改成这种样子，按钮要有那种**液态晃动**的感觉，
+   要**Q弹**」。参考图（相册 App 的底部悬浮胶囊）里看到的形态：
+     · 选中项的指示器是一个**液体块**，在两项之间移动时**先朝目标方向拉长**（像被拽着的果冻）；
+     · 中间态是"**两头圆、中间细**"的粘连形态；到位后收圆、微微过冲再弹回；
+     · 指示器边缘有一圈**亮的高光边**（与玻璃面板同一套材质语言）。
+
+   **"粘连"不是圆角能做出来的，是 gooey 滤镜**（`LiquidGlassFilter` 里的 `GOO_ID`）：
+   把**本体填充**与一个**拖尾圆**放进同一层滤镜 —— `feGaussianBlur` 把两坨糊在一起、
+   `feColorMatrix` 的 alpha 阈值再切回形状。两坨靠近时被糊成一坨 → "粘连"；
+   靠得远时是两坨 + 中间一条细颈 → "两头圆、中间细"。
+
+   **"Q弹"不是 ease，是弹簧**：拖尾圆由 `requestAnimationFrame` 的欠阻尼弹簧驱动
+   （`SPRING_STIFF` / `SPRING_DAMP`），速度决定它与本体的间距；本体自己那 0.44s 的
+   `cubic-bezier(.34,1.32,.5,1)` 是**带过冲**的（与桌面左栏同一套缓动）。
+
+   🔴 **三条硬约束（都不许为了好看让步）**：
+     ① **指示器不许是唯一信号**：选中项与未选中项的**图标颜色**必须同时不同
+        （`--color-accentink` ⇄ `--color-ink2`，下方 `PinTab`）—— 色盲 / 强光 / 低对比背景
+        都要能看出"我在哪一页"。gooey 关掉、弹簧关掉，颜色照旧。
+     ② **不许与折射无脑叠**：两个都是实时滤镜，`useGlassFx` 里低端机与掉帧看门狗
+        会把**两个一起关**（那时只留"模糊 + 描边 + 颜色 + 弹簧位移"）。
+     ③ **`prefers-reduced-motion: reduce` → 直接跳过去、无果冻**：不跑弹簧、不做拉伸回弹、
+        指示器的 `left/width` 过渡也改成 `none`（`useReducedMotion`）。
+   ⚠️ 高光边（淡蓝描边 + 顶部内高光）**留在 goo 层外面**（`hiRingRef` 那一层）：
+      alpha 阈值会把 0.3 的淡蓝边**切成实心蓝**（那是它固有的行为），挪出来才保得住原来的观感。
+   ============================================================ */
+
+/** 弹簧刚度：越大跟得越紧（0.14 ≈ 跟得上但明显滞后，滞后才看得见"果冻"） */
+const SPRING_STIFF = 0.14
+
+/** 每帧保留的速度比例：< 1 就是欠阻尼 → 会过冲一下再收回来（"Q弹"就是这一下） */
+const SPRING_DAMP = 0.78
+
 /**
  * 胶囊里的一个图标：可点区域 48×48，当前页高亮由父级的滑动胶囊负责。
  *
@@ -463,6 +709,18 @@ function MobileNav() {
    */
   const [moreAt, setMoreAt] = useState<string | null>(null)
   const more = moreAt === pathname
+  /*
+   * 🔴 **两个实时滤镜开不开**（2026-10-01 第三轮）：特性检测 + 低端机 + 掉帧看门狗，
+   * 见本文件上方那一大段（两个**共用同一个预算开关**，低端机上会一起关掉）。
+   * ⚠️ `key` 传 `more`：展开那张面板的面积比胶囊大一个量级，收起 / 展开要各量一轮。
+   * ⚠️ 它们**只是"像不像参考图"**：关掉之后模糊与描边照旧，读字靠的是兜底层（`index.css`），
+   *    "我在哪一页"靠的是图标颜色（见下面 `PinTab`）。
+   */
+  const { refract, goo } = useGlassFx(more)
+  /** 🔴 动效敏感的人：**没有果冻、没有拉伸、没有过渡**，指示器直接跳过去（硬要求） */
+  const reduced = useReducedMotion()
+  /** 果冻指示器 = gooey 可用 **且** 用户没要求减少动效 */
+  const jelly = goo && !reduced
 
   /*
    * 当前页在胶囊里 → 高亮滑到那一格；在「更多入口」里 → 圆按钮加一圈**蓝**描边
@@ -477,6 +735,8 @@ function MobileNav() {
 
   const pillRef = useRef<HTMLDivElement>(null)
   const hiRef = useRef<HTMLSpanElement>(null)
+  /** 高光边那一层（**在 goo 层外面**，见上面 `data-hi-ring` 的注释）：它要跟着填充一起做拉伸回弹 */
+  const hiRingRef = useRef<HTMLSpanElement>(null)
   const lastIdx = useRef(-1)
   const [hi, setHi] = useState({ left: 4, width: 48, show: false })
 
@@ -511,17 +771,20 @@ function MobileNav() {
     if (lastIdx.current === pinIdx) return
     lastIdx.current = pinIdx
     if (first) return
-    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
-    hiRef.current?.animate(
-      [
-        { transform: 'scaleX(1)' },
-        { transform: 'scaleX(1.16)' },
-        { transform: 'scaleX(0.97)' },
-        { transform: 'scaleX(1)' },
-      ],
-      { duration: 470, easing: 'cubic-bezier(.34,1.3,.5,1)' },
-    )
-  }, [pinIdx])
+    /* 🔴 `prefers-reduced-motion: reduce` → **不弹也不拉长**（有人对动效敏感，这不是建议） */
+    if (reduced) return
+    /* ⚠️ **填充与高光边一起弹**：它们是两层（高光边挪到 goo 层外面了），只弹一层的话
+       那一圈淡蓝描边会"留在原地"，看着像描边错位。两层的 keyframes 必须同一串。 */
+    const stretch = [
+      { transform: 'scaleX(1)' },
+      { transform: 'scaleX(1.16)' },
+      { transform: 'scaleX(0.97)' },
+      { transform: 'scaleX(1)' },
+    ]
+    const opts = { duration: 470, easing: 'cubic-bezier(.34,1.3,.5,1)' }
+    hiRef.current?.animate(stretch, opts)
+    hiRingRef.current?.animate(stretch, opts)
+  }, [pinIdx, reduced])
 
   /* ---- 在胶囊上滑动：高亮跟手，松手落到手指最近的那一格 ---- */
 
@@ -532,6 +795,67 @@ function MobileNav() {
   } | null>(null)
   const suppressClick = useRef(false)
   const [dragX, setDragX] = useState<number | null>(null)
+
+  /* ---- 🔴 液态果冻的**拖尾圆**：一个 rAF 弹簧（零依赖，见 `SPRING_*` 的注释） ----
+   *
+   * 为什么不是纯 CSS：CSS 过渡给的是"两端之间的插值"，而果冻要的是**欠阻尼的滞后**
+   *   —— 尾巴的位置由"本体此刻在哪 + 速度"决定，还会过冲一下再收回来。
+   * ⚠️ 弹簧状态放在 ref 里跨"重启"保留：拖动时 `dragX` 每帧都变，effect 会不停重启，
+   *    每次把速度清零的话尾巴会**一直贴在本体上**（等于没有果冻）。
+   * ⚠️ 停稳之后**主动停掉 rAF**（`st.raf = 0` 后不再排帧）：不为一个静止的圆常年占着帧。
+   * ⚠️ 它必须排在 `dragX` **之后**：依赖数组里要用它（`useState` 之前引用 = TDZ 报错）。
+   */
+  const tailRef = useRef<HTMLSpanElement>(null)
+  const springRef = useRef({ x: 0, v: 0, raf: 0, init: false })
+  useEffect(() => {
+    if (!jelly || !hi.show) return
+    const tail = tailRef.current
+    const wrap = pillRef.current
+    if (!tail || !wrap) return
+    const st = springRef.current
+    /*
+     * 🔴 **弹簧追的是"最终位置"（`hi.left` / `dragX`），不是"此刻渲染到哪"**。
+     *
+     * 为什么不能用 `getComputedStyle(body).left`（第一版就是这么写的，实测**永远是 0 滞后**）：
+     *   点击之后 `hi.left` 立刻变成新值，但那条 `.44s` 的 CSS 过渡**要等下一次样式重算才起步**
+     *   —— 实测在"换页 + 渲染新页面"那一下能拖到 **150~300ms** 之后。这段空窗里读到的
+     *   `left` 还是旧位置，弹簧于是在**动画开始之前**就跑完并判定"停稳"、把自己停掉了；
+     *   等过渡真的开始，没有人再叫醒它 —— 拖尾全程贴在本体上（果冻消失）。
+     * 追最终位置就没有这个空窗：目标在那一刻就跳到了 52，滞后 >= 48px，绝不会误判停稳。
+     * ⚠️ 副作用是好的：这一版**一次布局都不读**（原来每帧 `getComputedStyle`）。
+     */
+    const targetX = dragX ?? hi.left
+    /* 拖尾圆只能在**内容盒**里跑：跑出胶囊外面就不像"一块玻璃"了（那是两坨东西） */
+    const minX = 4
+    const maxX = Math.max(minX, wrap.clientWidth - 4 - hi.width)
+    let last = performance.now()
+    const clamp = (x: number) => Math.min(Math.max(x, minX), maxX)
+    if (!st.init) {
+      st.x = targetX
+      st.init = true
+    }
+    const tick = (t: number) => {
+      /* 掉帧时按真实间隔折算，免得"帧率越低弹簧越硬" */
+      const k = Math.min(3, Math.max(0.2, (t - last) / 16.7))
+      last = t
+      st.v = (st.v + (targetX - st.x) * SPRING_STIFF * k) * Math.pow(SPRING_DAMP, k)
+      st.x += st.v * k
+      tail.style.transform = `translateX(${clamp(st.x) - targetX}px)`
+      if (Math.abs(targetX - st.x) < 0.35 && Math.abs(st.v) < 0.06) {
+        st.x = targetX
+        st.v = 0
+        tail.style.transform = 'translateX(0px)'
+        st.raf = 0
+        return
+      }
+      st.raf = requestAnimationFrame(tick)
+    }
+    st.raf = requestAnimationFrame(tick)
+    return () => {
+      cancelAnimationFrame(st.raf)
+      st.raf = 0
+    }
+  }, [jelly, hi.show, hi.left, hi.width, pathname, dragX])
 
   /** 胶囊内边距盒在视口里的左边缘（滑动的坐标系原点） */
   const pillOrigin = (wrap: HTMLElement) => wrap.getBoundingClientRect().left + wrap.clientLeft
@@ -599,6 +923,8 @@ function MobileNav() {
 
   return (
     <>
+      {/* 实时滤镜（内联 SVG：折射 + gooey）：哪个开关打开才挂哪个，见 `LiquidGlassFilter` */}
+      {refract || goo ? <LiquidGlassFilter refract={refract} goo={goo} /> : null}
       <nav
         aria-label="主导航"
         /*
@@ -647,9 +973,10 @@ function MobileNav() {
           className="mx-auto flex items-center gap-3"
           style={{ width: 'fit-content', maxWidth: 640, padding: '0 16px' }}
         >
-          {/* ① 胶囊：工作台 / 作业 / 我的 —— 半透明**亮色**液态玻璃、细描边、12 圆角 */}
+          {/* ① 胶囊：工作台 / 作业 / 我的 —— 半透明**亮色**液态玻璃、细描边、**大圆角 18** */}
           <div
             ref={pillRef}
+            data-refract={refract ? 'on' : 'off'}
             className="glass-light pointer-events-auto relative flex items-center"
             style={{
               /* 58 = 1 边框 + 4 内边距 + 48 图标格 + 4 + 1（box-sizing 是 border-box）。
@@ -657,7 +984,9 @@ function MobileNav() {
                     所以这个算式、`clientLeft`、以及 38/39 两张拖拽图量的坐标全都不变。 */
               height: 58,
               padding: 4,
-              borderRadius: 12,
+              /* 🔴 18 = `LG_RADIUS` = `index.css` 的 `--radius-liquid`（本项目**唯一的大圆角**，
+                 理由写在令牌那一行）。⚠️ 只改圆角不动任何尺寸：58 / 48 / 4 全照旧（I21）。 */
+              borderRadius: LG_RADIUS,
               touchAction: 'pan-y',
               /* 展开态整栏在淡出：这时候**不能还能点**（见 `<nav>` 上那段层叠注释） */
               pointerEvents: more ? 'none' : 'auto',
@@ -683,27 +1012,103 @@ function MobileNav() {
                    **一圈淡蓝描边 + 色块**就能读出来（不必靠不透明）。实测（浅底）：
                    块上的 `--color-accentink` #0847c4 = **7.5:1**，整格逐像素 **7.4:1**；
                    "看得见我在这一页"这一条另由 `shots.mjs` 的 35/36/37 三张图
-                   （高亮位置真的会动）+ 下面的 `data-active` 断言钉住，没有丢。 */}
-            <span
-              ref={hiRef}
+                   （高亮位置真的会动）+ 下面的 `data-active` 断言钉住，没有丢。
+                🔴 **2026-10-01 第三轮拆成两层**（为了果冻，见上面 `SPRING_STIFF` 那一段）：
+                   ① `data-jelly` 这一层里是**填充**与**拖尾圆**，两者一起进 gooey 滤镜；
+                   ② 高光边（淡蓝描边 + 顶部内高光）挪到**滤镜外面**那一层 ——
+                      alpha 阈值会把 0.3 的淡蓝边切成**实心蓝**，那是滤镜的固有行为，躲开它。
+                   ⚠️ `jelly` 关掉时这一层照样在（它就是"当前页"那块填充，不是装饰），
+                      只是不挂滤镜、不渲染拖尾圆。 */}
+            <div
               aria-hidden="true"
+              data-jelly={jelly ? 'on' : 'off'}
+              style={{
+                position: 'absolute',
+                /* = 胶囊的内边距盒：里面那两个 span 的坐标口径与改动前**一模一样**
+                   （`hi.left` / `dragX` 一直是内边距盒坐标） */
+                inset: 0,
+                pointerEvents: 'none',
+                filter: jelly ? `url(#${GOO_ID})` : undefined,
+              }}
+            >
+              {/* ① 填充（**必须是第一个 `span[aria-hidden]`**：`shots.mjs` 的探针按它量高亮位置） */}
+              <span
+                ref={hiRef}
+                aria-hidden="true"
+                style={{
+                  position: 'absolute',
+                  top: 4,
+                  bottom: 4,
+                  left: dragX ?? hi.left,
+                  width: hi.width,
+                  zIndex: 1,
+                  /* 与胶囊**同心**：外圈 18 − 内边距 4 = 14（差着 4px 会在角上露出月牙） */
+                  borderRadius: LG_RADIUS - 4,
+                  background:
+                    /* ⚠️ `--color-glasshi` / `--color-glasshi2` 是**材料令牌**（见文件头）：
+                       "高光那一层的颜色分量"，不透明度留在这一行 ——
+                       亮色 = 白 90% / `--color-accentsoft` 88%（与收编前**逐字相同**）；
+                       暗色 = 白 14% / 白 8%（同一档材质，只是白的分量降下来）。
+                       ⛔ 别把这两个换成 `--color-surface*`：玻璃的高光不是"面"，换了就成一块死色。 */
+                    `linear-gradient(180deg, rgb(${GLASS_HI} / .9) 0%, rgb(${GLASS_HI2} / .88) 100%)`,
+                  opacity: hi.show ? 1 : 0,
+                  pointerEvents: 'none',
+                  willChange: 'left, width, transform',
+                  transition:
+                    dragX !== null || reduced
+                      ? /* 🔴 动效敏感：**直接跳过去**（没有过渡 = 没有果冻、没有滑动） */
+                        'opacity .2s'
+                      : 'left .44s cubic-bezier(.34,1.32,.5,1), width .44s cubic-bezier(.34,1.32,.5,1), opacity .2s',
+                }}
+              />
+              {/* ② 拖尾圆：**同一颗圆**滞后一点点 → 与填充之间被糊成"两头圆、中间细" */}
+              {jelly ? (
+                <span
+                  ref={tailRef}
+                  aria-hidden="true"
+                  style={{
+                    position: 'absolute',
+                    top: 4,
+                    bottom: 4,
+                    left: dragX ?? hi.left,
+                    width: hi.width,
+                    borderRadius: 999,
+                    /* ⚠️ 与填充**同色同透明度**：alpha 阈值只对不透明的填切成形，
+                       两处不一致会出现"一个被切掉、一个留下" */
+                    background: 'rgb(var(--color-glasshi) / .9)',
+                    opacity: hi.show ? 1 : 0,
+                    pointerEvents: 'none',
+                    willChange: 'transform',
+                    /* ⚠️ `left` **不能**跟着做过渡：拖尾的"滞后"是由下面那个弹簧的
+                       `translateX` 算的（位置 = 终点的 left + 与本体之间的滞后）。
+                       给 `left` 也加过渡，两者就同步了 —— 尾巴永远贴在身上，果冻消失。 */
+                    transition: 'opacity .2s',
+                  }}
+                />
+              ) : null}
+            </div>
+            {/* ③ 高光边层（**不进 goo 滤镜**）：淡蓝描边 + 顶部内高光，与玻璃面板同一套语言
+                ⚠️ `data-hi-ring` 是给 `shots.mjs` 认的锚点（它要断言"这一层不在 goo 层里"） */}
+            <span
+              ref={hiRingRef}
+              aria-hidden="true"
+              data-hi-ring=""
               style={{
                 position: 'absolute',
                 top: 4,
                 bottom: 4,
                 left: dragX ?? hi.left,
                 width: hi.width,
-                borderRadius: 12,
-                background:
-                  'linear-gradient(180deg, rgb(255 255 255 / .9) 0%, rgb(233 240 254 / .88) 100%)',
-                border: '1px solid rgb(11 92 240 / .3)',
-                boxShadow: 'inset 0 1px 0 rgb(255 255 255 / .95), 0 1px 2px rgb(14 20 27 / .08), 0 8px 18px -10px rgb(11 92 240 / .45)',
+                borderRadius: LG_RADIUS - 4,
+                border: `1px solid rgb(${HI_LINE} / .3)`,
+                /* ⚠️ 这一串里三个颜色全部走**材料令牌**（亮色与收编前逐字相同）：
+                   `glassline`（内高光）/ `shadow`（贴边影）/ `hiline`（淡蓝边与它的外扩影）。 */
+                boxShadow: `inset 0 1px 0 rgb(${GLASS_LINE} / .95), 0 1px 2px rgb(var(--color-shadow) / .08), 0 8px 18px -10px rgb(${HI_LINE} / .45)`,
                 opacity: hi.show ? 1 : 0,
                 pointerEvents: 'none',
-                willChange: 'left, width, transform',
                 transition:
-                  dragX !== null
-                    ? 'none'
+                  dragX !== null || reduced
+                    ? 'opacity .2s'
                     : 'left .44s cubic-bezier(.34,1.32,.5,1), width .44s cubic-bezier(.34,1.32,.5,1), opacity .2s',
               }}
             />
@@ -740,6 +1145,7 @@ function MobileNav() {
             aria-expanded={more}
             aria-haspopup="dialog"
             title={more ? '收起更多入口' : '更多入口'}
+            data-refract={refract ? 'on' : 'off'}
             className="glass-light pointer-events-auto grid shrink-0 place-items-center"
             style={{
               /* 与胶囊等高（58），全圆 */
@@ -752,7 +1158,7 @@ function MobileNav() {
               pointerEvents: more ? 'none' : 'auto',
               /* 当前页在展开层里时描一圈同色蓝，免得"高亮不见了" */
               outline:
-                more || moreActive ? '2px solid rgb(11 92 240 / .55)' : '2px solid transparent',
+                more || moreActive ? `2px solid rgb(${HI_LINE} / .55)` : '2px solid transparent',
               outlineOffset: 3,
               transition: 'outline-color .2s',
             }}
@@ -798,7 +1204,16 @@ function MobileNav() {
           </Button>
         }
       >
+        {/*
+          🔴 `data-nav-glass` 是**给 CSS 认的标记**（`index.css` 的 `.sheet:has([data-nav-glass])`）：
+          这一轮要的"移动端底部导航**展开态**也是液态玻璃"，只能从壳子这边指过去 ——
+          `ui.tsx` 的 `Sheet` 是全站共用的（十来个页面在用），**不许动它**（那是别的页面的脸）。
+          `:has()` 认不出这个标记的老浏览器 → 面板维持原来的不透明白底，**可用性零损失**。
+          ⚠️ `data-refract` 同理：`on` 时那张面板才接上折射（判定在 `useLiquidRefract`）。
+        */}
         <div
+          data-nav-glass=""
+          data-refract={refract ? 'on' : 'off'}
           className="overflow-hidden"
           style={{ border: '1px solid var(--color-line)', borderRadius: 4 }}
         >
@@ -818,7 +1233,12 @@ function MobileNav() {
                   minHeight: 52,
                   borderBottom:
                     i === collapsed.length - 1 ? undefined : '1px solid var(--color-line)',
-                  background: on ? 'var(--color-accentsoft)' : 'var(--color-surface)',
+                  /* 🔴 这一轮行底从**实心白**改成**透明**：面板自己已经是一块奶白玻璃，
+                     行再垫一层实白就把玻璃全挡掉了（展开态看着还是"一张白纸"）。
+                     ⚠️ 透出去的是**面板那一层 0.88 的白**（不是页面），所以字仍然压在白底上 ——
+                        "读得清"靠的是面板的兜底层，不是这一行的实心白（`index.css` 那一段有算式）。
+                     ⚠️ 当前页那一行仍是 `accentsoft`（实色）：它是"我在这一页"的记号，要稳。 */
+                  background: on ? 'var(--color-accentsoft)' : 'transparent',
                 }}
               >
                 <span
@@ -847,7 +1267,11 @@ function MobileNav() {
                     {n.label}
                   </span>
                   {MORE_HINT[n.to] ? (
-                    <span style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
+                    /* ⚠️ 说明小字这一轮从 `--color-ink3` 提到 **`--color-ink2`**：
+                       面板变成半透明之后，最坏背景（底下是深色内容）上 ink3 只剩 ≈1.9:1，
+                       而 ink2 在**面板的兜底白**上仍有 ≈5.2:1（AA 过线）。
+                       要不要再浅，先看 `index.css` 里那段算式 —— 这行字是"菜单里的字"里最细的一档。 */
+                    <span style={{ fontSize: 11.5, color: 'var(--color-ink2)' }}>
                       {MORE_HINT[n.to]}
                     </span>
                   ) : null}
@@ -916,6 +1340,70 @@ function ClockPanel() {
 
 /* ---------------- 应用壳 ---------------- */
 
+/* ============================================================
+   🆕 2026-10-09 F4：**亮 / 暗切换**那颗小圆钮
+
+   放哪儿（用户原话：「切换的按钮就放在**平台标题的右侧**，用一个小圆钮」）：
+     · **桌面**：左栏最上面那一行（树形图标 + 「树高教师平台」+ TEACHER CONSOLE）的**右端** ——
+       就是"平台标题的右侧"字面意思。那里原来只有品牌标，右边是空的，加一颗不挤任何东西。
+     · **移动端**：左栏在窄屏是**没有的**（`<aside>` 是 `hidden lg:block`），
+       所以放**顶部那一条玻璃顶栏**里、平台名右侧、班级标签左边。
+       **理由**：那颗按钮的语义是"平台级显示设置"，而移动端唯一一处**全局**的位置就是这条顶栏；
+       放「我的」页要多点两层（而且它不是账号设置，是显示设置），
+       放底部胶囊要挤掉一个导航格（48px 的格子一个都不能少，见 §十五）。
+       ⚠️ 顶栏窄屏下只有 50px 高，所以这一颗必须**比桌面那颗小一档**（见下面两个 size 常量）。
+
+   ⚠️ **触控目标不许小于现在那些**（用户点过这一条）：
+     桌面 30×30、移动 34×34 —— 都**大于**左栏「当前班级」那个 34 高的 `select`，
+     也大于顶部那颗 23 高的班级标签；移动端 34 与 `Logo` 那一格同级。
+     （移动端导航胶囊里的图标格是 44×44，那是"手指每天点十几次"的东西；
+       这一颗是**每次会话用一次**的显示开关，按 34 走，但**不许更小**。）
+
+   🔴 图标显示的是**当前档**（暗色显示太阳、亮色显示月亮，照 `more ? 收起 : 展开` 那条口径）——
+      点下去会变成什么，`title` / `aria-label` 里说清楚。
+   ============================================================ */
+
+/** 桌面左栏那颗的直径（⚠️ 与下面 `mt-4` 那一行的行高对齐，改尺寸要一起看） */
+const THEME_BTN_DESKTOP = 30
+/** 移动端顶栏那颗的直径（顶栏只有 50 高，30 会显小、38 会顶到边） */
+const THEME_BTN_MOBILE = 34
+
+function ThemeToggle({
+  theme,
+  onToggle,
+  size = THEME_BTN_DESKTOP,
+}: {
+  theme: 'light' | 'dark'
+  onToggle: () => void
+  size?: number
+}) {
+  const dark = theme === 'dark'
+  const label = dark ? '切到亮色模式' : '切到暗色模式'
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      data-theme-toggle={theme}
+      aria-label={label}
+      title={label}
+      className="grid shrink-0 place-items-center"
+      style={{
+        width: size,
+        height: size,
+        borderRadius: 999,
+        border: '1px solid var(--color-line2)',
+        /* 圆钮是"浮在标题行上的一颗"：底色比它所在的底**高一档**（暗色下就是"更亮"那一档） */
+        background: 'var(--color-surface2)',
+        color: dark ? 'var(--color-accentink)' : 'var(--color-ink2)',
+        cursor: 'pointer',
+        transition: 'color .18s cubic-bezier(.22,.8,.24,1), background-color .18s',
+      }}
+    >
+      {dark ? <IconSun size={size >= 34 ? 18 : 16} /> : <IconMoon size={size >= 34 ? 18 : 16} />}
+    </button>
+  )
+}
+
 export function AppShell({ children }: { children: React.ReactNode }) {
   const teacher = useStore((s) => s.teacher)
   /*
@@ -960,15 +1448,100 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const { pathname } = useLocation()
   const navigate = useNavigate()
   const current = classes.find((c) => c.id === currentClassId)
+  /*
+   * 🆕 亮 / 暗（2026-10-09 F4）。
+   * ⚠️ `pathname` 是它的 `key`：路由一变就重算一次 —— 这一条专门兜住
+   *    「从教师端进 `/classroom`」时把 `data-theme` 摘掉（教室端恒亮，见 `lib/theme.ts`）。
+   *    ⛔ 别改成 `useTheme()` 不带参：那样进教室端那一下属性会留到下一次重载。
+   */
+  const { theme, toggle: toggleTheme } = useTheme(pathname)
 
   /*
-   * 桌面左栏的液态玻璃胶囊：量出激活项的位置，让胶囊滑过去。
-   * 移动端那颗悬浮胶囊由 `MobileNav` 自己管（两份状态各自独立 —— 两个端从不同时出现）。
+   * 右栏「名单体检」要的那一份数据（2026-10-08 修「0 人的班被画成绿勾」）。
+   *
+   * 🔴 走班班的成员在 `class_members`（多对多，§27.5）—— **不进 `loadSnapshot()`**
+   *    （老库上没有那张表），所以这里**懒加载 + 先探针**，与班级页那两处同一条纪律。
+   * ⚠️ 读不到 → `sidKnown = false` → 屏上写「人数待读」，**绝不写 0 人**（§三.4 的三态）；
+   *    而写班名那一行只在**点数**，与"读没读到"无关（照旧按 `students.class_id` 数）。
+   */
+  const streamIdList = classes
+    .filter((c) => classKindOf(c) === 'stream')
+    .map((c) => c.id)
+  const sidKey = streamIdList.join(',')
+  const [sidList, setSidList] = useState<Record<string, Student[]>>({})
+  const [sidKnown, setSidKnown] = useState(false)
+  useEffect(() => {
+    if (!sidKey) return
+    let alive = true
+    void remote.loadClassMembersFull(sidKey.split(',')).then((r) => {
+      if (!alive) return
+      setSidKnown(r.known)
+      const by: Record<string, Student[]> = {}
+      for (const [k, list] of Object.entries(r.by)) {
+        by[k] = list.map((p, i) => ({
+          id: p.id,
+          name: p.name,
+          studentNo: p.studentNo,
+          status: p.status,
+          createdAt: i,
+        }))
+      }
+      setSidList(by)
+    })
+    return () => {
+      alive = false
+    }
+  }, [sidKey])  /** 🔴 动效敏感的人：左栏那层高亮也**直接跳、不带弹簧**（与移动端同一条纪律） */
+  const reduced = useReducedMotion()
+  /** 左栏高亮要不要走弹簧（`false` = 直接跳） */
+  const railFlow = !reduced
+
+  /*
+   * 🔴 **桌面左栏的选中高亮 = 一层会"流"过去的高亮**（2026-10-01 第三轮追加 · 用户第三张图）
+   *
+   * 用户原话：「这个地方的选中按钮也改一下质感吧，要 **Q 弹的液态效果**（**这个是长方形的，
+   * 效果别叠太过了**）」。参考的是"**液体在管子里流过去**"，不是"两滴水融合"。
+   *
+   * 高亮**本来就已经是一层**（`.rail-pill` 那颗绝对定位的 span，`top`/`height` 由测量给出），
+   * 这一轮改的是**它怎么动**：
+   *   · 位移从"CSS 过渡 + 一次 `scaleY(1.24)` 的 WAAPI 拉伸"换成**一个 rAF 弹簧**
+   *     （与移动端那颗果冻同一套常数：`SPRING_STIFF` / `SPRING_DAMP`）——
+   *     所以有"略欠阻尼"的过冲与回弹；
+   *   · **沿运动方向轻轻拉长**：`scaleY = 1 + min(6%, |v| × 0.012)` —— 速度决定拉伸量，
+   *     到位自动收回 1（⛔ 不用 1.24 那种大变形，也不加 gooey：矩形做融合会很难看）；
+   *   · `height` 也走弹簧（各项高度将来不同也能平滑过去）。
+   *
+   * 🔴 **三条纪律（都容易被漏）**：
+   *   ① **首屏不许播动画**：`st.init` 为假时**直接定位**（否则一进页面高亮从顶部飞下来，很怪）；
+   *   ② **`prefers-reduced-motion: reduce` → 直接跳、无弹簧**（与移动端同一条）；
+   *   ③ **窗口尺寸 / 左栏自己滚动 / 栏内高度变化之后要重算**（否则高亮会指错项）——
+   *      见下面 `measure()` 里的 `resize` + `scroll` + `ResizeObserver`。
+   * ⚠️ 2026-10-08：**同一个 `measure()` 还负责算"滚动到哪一边"**（`railScroll` → 渐隐），
+   *    因为导航项那一块现在溢出时自己滚（`.rail-nav`）。两者共用一套触发，
+   *    ⛔ 别为渐隐再挂一套监听（同一件事两个触发口径 = 本仓库踩过四次的坑）。
+   * ⚠️ 选中态的三个信号**一个都没删**（竖条 / 高亮底 / 文字与图标变蓝）：
+   *    用户明确要求"可辨识性不许降低"，`shots.mjs` 里有一条专门钉"至少还有两个"。
    */
   const railNavRef = useRef<HTMLElement>(null)
   const railPillRef = useRef<HTMLSpanElement>(null)
-  const lastIdx = useRef(-1)
   const [railInd, setRailInd] = useState({ top: 0, height: 40, show: false })
+  /**
+   * 🔴 **导航项那一块滚到哪儿了**（2026-10-08 追加：用户要"溢出了就自动变成能滚动的，交界处要有过渡"）。
+   *
+   * 值说的是**哪一边还要渐隐**（不是"滚到哪"）：
+   *   · `none`   —— 放得下，**既没有滚动条也没有渐隐**；
+   *   · `bottom` —— 在顶端、底下还有内容 → **底下渐隐**；
+   *   · `top`    —— 在底端、顶上还有内容 → **顶上渐隐**；
+   *   · `both`   —— 中间，两头都还有内容。
+   * CSS 按这个属性选择器决定 `mask-image`（见 `index.css` 的 `.rail-nav`）。
+   * ⚠️ **它由下面那个 `measure()` 写** —— 与高亮重算**同一处、同一套触发**（`resize` /
+   *    `scroll` 按帧合并 / `ResizeObserver`），**没有另起一套监听**。
+   */
+  const [railScroll, setRailScroll] = useState<'none' | 'top' | 'bottom' | 'both'>('none')
+  /** 量出来的**目标**（弹簧按它跑；`measure()` 之外没人写） */
+  const railTarget = useRef({ top: 0, height: 40 })
+  /** 弹簧自己的状态：位置 / 高度 / 两个速度 / 跑没跑过（首屏靠它判断"直接定位"） */
+  const railSpring = useRef({ top: 0, height: 40, v: 0, vh: 0, init: false, raf: 0 })
 
   const activeIdx = visible.findIndex((n) =>
     n.end ? pathname === n.to : pathname.startsWith(n.to),
@@ -977,44 +1550,129 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     const measure = () => {
       const rw = railNavRef.current
-      if (rw) {
-        const el = rw.querySelector<HTMLElement>('[data-active="true"]')
-        if (el) {
-          const r = el.getBoundingClientRect()
-          const pr = rw.getBoundingClientRect()
-          setRailInd({ top: r.top - pr.top, height: r.height, show: true })
-        } else {
-          setRailInd((v) => ({ ...v, show: false }))
-        }
+      if (!rw) return
+      /*
+       * 🔴 先算**溢出方向**（跟高亮**共用这一次测量**，所以下面那三个触发就是它的触发）。
+       *    `scrollHeight - clientHeight <= 1` = 放得下 → `none`（不出滚动条、不出渐隐）。
+       * ⚠️ 两端各留 1px 容差：`scrollTop` 是整数而 `scrollHeight` 可能是小数，
+       *    没这个容差会在"刚好滚到底"时闪一下渐隐。
+       */
+      const over = rw.scrollHeight - rw.clientHeight
+      const next: 'none' | 'top' | 'bottom' | 'both' =
+        over <= 1
+          ? 'none'
+          : rw.scrollTop <= 1
+            ? 'bottom'
+            : rw.scrollTop >= over - 1
+              ? 'top'
+              : 'both'
+      setRailScroll((v) => (v === next ? v : next))
+      const el = rw.querySelector<HTMLElement>('[data-active="true"]')
+      if (!el) {
+        setRailInd((v) => ({ ...v, show: false }))
+        return
       }
+      const r = el.getBoundingClientRect()
+      const pr = rw.getBoundingClientRect()
+      /*
+       * 🔴 **必须加 `rw.scrollTop`**（2026-10-08 加上"导航项那一块自己滚"之后的新口径）：
+       *    高亮那一片是**绝对定位在 `nav` 里**的，也就是**滚动内容的一部分** —— 它跟着内容
+       *    一起被卷走。而 `r.top - pr.top` 量到的是**卷过之后**的视口相对值，
+       *    直接写进去就**少算了一个 `scrollTop`**。
+       *    实测（脚本探针）：滚到底时高亮整片飞到可见区外 330px，而且量一次动一次。
+       *    ⚠️ 横竖都别退回 `r.top - pr.top`：不滚时 `scrollTop` 是 0，两条式子等价；
+       *       一滚起来只有这条对。`left` 不由这里管（`left/right: 0` 是 CSS 定的）。
+       */
+      railTarget.current = { top: r.top - pr.top + rw.scrollTop, height: r.height }
+      setRailInd({ top: railTarget.current.top, height: railTarget.current.height, show: true })
     }
     measure()
     const t = window.setTimeout(measure, 80)
+    /* 🔴 **重算的三种触发**（用户点名要的第三条）：窗口尺寸、左栏自己滚动、栏内高度变化
+       （字体变大 / 身份标签换行 / 顶部公告条让位都会改高度）。
+       ⚠️ 滚动那条要**按帧合并**：`scroll` 一秒钟能来上百次，每次都量一遍 = 布局抖动。 */
+    let queued = false
+    const onScroll = () => {
+      if (queued) return
+      queued = true
+      window.requestAnimationFrame(() => {
+        queued = false
+        measure()
+      })
+    }
+    const nav = railNavRef.current
     window.addEventListener('resize', measure)
+    window.addEventListener('scroll', onScroll, { passive: true })
+    nav?.addEventListener('scroll', onScroll, { passive: true })
+    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure)
+    if (nav) ro?.observe(nav)
     return () => {
       window.clearTimeout(t)
       window.removeEventListener('resize', measure)
+      window.removeEventListener('scroll', onScroll)
+      nav?.removeEventListener('scroll', onScroll)
+      ro?.disconnect()
     }
   }, [pathname])
 
-  /* 切页时给左栏胶囊一段拉伸回弹，做出「液态」的手感 */
+  /* 🔴 桌面左栏那一层高亮**怎么动**：见上面那段注释（弹簧 / 首屏直接定位 / reduced 直接跳） */
   useEffect(() => {
-    if (activeIdx < 0) return
-    const first = lastIdx.current === -1
-    if (lastIdx.current === activeIdx) return
-    lastIdx.current = activeIdx
-    if (first) return
-    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
-    railPillRef.current?.animate(
-      [
-        { transform: 'scaleY(1)' },
-        { transform: 'scaleY(1.24)' },
-        { transform: 'scaleY(0.96)' },
-        { transform: 'scaleY(1)' },
-      ],
-      { duration: 470, easing: 'cubic-bezier(.34,1.3,.5,1)' },
-    )
-  }, [activeIdx])
+    const pill = railPillRef.current
+    if (!pill) return
+    const st = railSpring.current
+    const put = (top: number, height: number) => {
+      pill.style.top = `${top}px`
+      pill.style.height = `${height}px`
+    }
+    /* ① **首屏直接定位**（不插值）；② reduced-motion：也直接跳（并且不再往下跑弹簧） */
+    if (!st.init || !railFlow) {
+      const target = railTarget.current
+      st.top = target.top
+      st.height = target.height
+      st.v = 0
+      st.vh = 0
+      st.init = true
+      put(st.top, st.height)
+      pill.style.transform = 'scaleY(1)'
+      if (!railFlow) return
+    }
+    let last = performance.now()
+    let lastTarget = Number.NaN
+    let stable = 0
+    const tick = (t: number) => {
+      /* 掉帧时按真实间隔折算，免得"帧率越低弹簧越硬" */
+      const k = Math.min(3, Math.max(0.2, (t - last) / 16.7))
+      last = t
+      const tg = railTarget.current
+      /* ⚠️ 目标没变够几帧**不许判定"停稳"**：否则第一帧就可能把还在路上的动画收掉（移动端踩过） */
+      stable = tg.top === lastTarget ? stable + 1 : 0
+      lastTarget = tg.top
+      st.v = (st.v + (tg.top - st.top) * SPRING_STIFF * k) * Math.pow(SPRING_DAMP, k)
+      st.top += st.v * k
+      st.vh = (st.vh + (tg.height - st.height) * SPRING_STIFF * k) * Math.pow(SPRING_DAMP, k)
+      st.height += st.vh * k
+      /* "液体在管子里流过去"：动的时候沿运动方向拉长一点点，到位收圆 */
+      const stretch = Math.min(0.06, Math.abs(st.v) * 0.012)
+      put(st.top, st.height)
+      pill.style.transform = `scaleY(${(1 + stretch).toFixed(4)})`
+      if (stable > 8 && Math.abs(tg.top - st.top) < 0.25 && Math.abs(st.v) < 0.05) {
+        st.top = tg.top
+        st.height = tg.height
+        st.v = 0
+        st.vh = 0
+        put(st.top, st.height)
+        pill.style.transform = 'scaleY(1)'
+        st.raf = 0
+        return
+      }
+      st.raf = requestAnimationFrame(tick)
+    }
+    st.raf = requestAnimationFrame(tick)
+    return () => {
+      cancelAnimationFrame(st.raf)
+      st.raf = 0
+    }
+  }, [pathname, activeIdx, railFlow, reduced, railInd.top, railInd.height, railInd.show])
 
   useEffect(() => {
     touchStreak()
@@ -1097,6 +1755,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 TEACHER CONSOLE
               </span>
             </span>
+            {/* 🆕 亮 / 暗切换 —— **平台标题的右侧**（用户指定的位置，见 `ThemeToggle` 的说明） */}
+            <span className="flex-1" />
+            <ThemeToggle theme={theme} onToggle={toggleTheme} />
           </div>
 
           <div className="rail-block">
@@ -1150,17 +1811,26 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                ⚠️ 别用样式类名当选择器（§15.5 的教训：`nav.nav-frost` 已经配不上，
                `boundingBox()` 直接超时）。移动端那颗胶囊用的是 `aria-label="主导航"`。 */
             aria-label="主导航 · 桌面"
-            className="relative mt-3 flex flex-1 flex-col gap-0.5 pt-3"
+            data-rail-flow={railFlow ? 'on' : 'off'}
+            /* 滚到哪儿了 → CSS 决定哪一边渐隐（见 `index.css` 的 `.rail-nav`） */
+            data-rail-scroll={railScroll}
+            /*
+             * 🔴 放不下时**只有这一块滚**（`min-h-0` 是关键：flex 子项默认 `min-height: auto`
+             *    会撑住不肯缩，那样滚的不是它、而是把底下那两行顶出去）。
+             *    ⚠️ 底部的「已连接云端」「N 个班级」在 `nav` **外面** → 它们固定在底部不跟着滚。
+             */
+            className="rail-nav relative mt-3 flex min-h-0 flex-1 flex-col gap-0.5 pt-3"
             style={{ borderTop: '1px solid var(--color-line)' }}
           >
+            {/*
+              🔴 这一层高亮的 `top` / `height` / `transform` 由**上面那个 rAF 弹簧**逐帧写
+              （所以这里**不能**再写 `transition: top`：CSS 过渡 + JS 弹簧 = 两套动画叠加，
+              会变成"追不上又抖"）。React 只管 `opacity` 这一个属性。
+            */}
             <span
               ref={railPillRef}
               className="rail-pill"
-              style={{
-                top: railInd.top,
-                height: railInd.height,
-                opacity: railInd.show ? 1 : 0,
-              }}
+              style={{ opacity: railInd.show ? 1 : 0 }}
             />
             {visible.map((n) => (
               <RailItem key={n.to} {...n} dot={n.to === '/notices' && hasUnreadNotice} />
@@ -1168,6 +1838,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </nav>
 
           <div
+            /* 稳定选择器（回归脚本按它取"底部那两行"，见 shots.mjs 的「左栏导航溢出可滚」）：
+               🔴 它在 `nav` **外面** —— 滚的只有导航项，这两行固定在底部。 */
+            data-rail-foot
             className="mt-3 flex flex-col gap-2 px-1 pt-3"
             style={{ borderTop: '1px solid var(--color-line)' }}
           >
@@ -1216,6 +1889,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <span style={{ fontSize: 14.5, fontWeight: 650 }}>树高教师平台</span>
           </span>
           <span className="flex-1" />
+          {/* 🆕 亮 / 暗切换 —— 移动端摆在这里（左栏在窄屏没有，理由见 `ThemeToggle` 的说明）。
+              ⚠️ 它排在班级标签**左边**：标签是"这一页在看哪个班"（内容级），
+                 主题是"平台怎么显示"（平台级）—— 平台级靠标题更近。 */}
+          <ThemeToggle theme={theme} onToggle={toggleTheme} size={THEME_BTN_MOBILE} />
           {current ? (
             <button
               type="button"
@@ -1247,7 +1924,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               className="anim-in mb-3 flex w-full items-start gap-2.5 p-3 text-left"
               style={{
                 background: 'var(--color-warnsoft)',
-                border: '1px solid #ecd9ae',
+                border: '1px solid var(--color-warnline)',
                 borderRadius: 6,
               }}
             >
@@ -1255,14 +1932,20 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 <IconAlert size={16} />
               </span>
               <span style={{ flex: 1 }}>
-                <span style={{ display: 'block', fontSize: 13, fontWeight: 620, color: '#8a5a12' }}>
+                <span
+                  style={{ display: 'block', fontSize: 13, fontWeight: 620, color: 'var(--color-warnink)' }}
+                >
                   数据没能存到服务器
                 </span>
-                <span style={{ display: 'block', fontSize: 11.5, color: '#96702f', marginTop: 2 }}>
+                <span
+                  style={{ display: 'block', fontSize: 11.5, color: 'var(--color-warnink2)', marginTop: 2 }}
+                >
                   {syncError} · 本地已保留
                 </span>
               </span>
-              <span style={{ fontSize: 11.5, color: '#96702f', flexShrink: 0 }}>知道了</span>
+              <span style={{ fontSize: 11.5, color: 'var(--color-warnink2)', flexShrink: 0 }}>
+                知道了
+              </span>
             </button>
           ) : null}
           {children}
@@ -1291,24 +1974,57 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 <div style={{ fontSize: 12.5, color: 'var(--color-ink3)' }}>还没有班级</div>
               ) : (
                 classes.map((c) => {
-                  const h = analyzeRoster(c.students)
-                  const issues = h.gaps.length + h.dupNos.length + h.dupNames.length
+                  /*
+                   * 🔴 **人数从哪儿读，取决于这是哪种班**（2026-10-08 修）。
+                   *
+                   *   走班班是 `classes` 里 `kind='stream'` 的一行，它的人来自
+                   *   `class_members`（**多对多**）—— 在 `students.class_id` 上**永远没有他们**。
+                   *   这里原来对两种班都算 `analyzeRoster(c.students)`，于是走班班恒为 0 人，
+                   *   而 0 人又恰好"没有缺号、没有重号" → 右栏给它画一个**绿勾**。
+                   *   同一份数据在班级页说 2 人、在这里画勾 —— 两个页面自相矛盾。
+                   *
+                   * 🔴 判据只有一处：`lib/roster.ts` 的 `rosterStateOf()`（四态）。
+                   *    这一块**不许**自己写 `count === 0`，也不许拿 `analyzeRoster` 的
+                   *    `healthy` 直接当"正常" —— 0 人不是"完整"。
+                   */
+                  const stream = classKindOf(c) === 'stream'
+                  const known = stream ? sidKnown : true
+                  const rs = rosterStateOf(
+                    stream ? (sidList[c.id] ?? []) : c.students,
+                    stream ? 'members' : 'class',
+                    known,
+                  )
+                  /* 绿勾只在**真的完整**时画；"还没有名单"/"没读到"/"待核对"都不是绿勾 */
+                  const issues = rs.health
+                    ? rs.health.gaps.length + rs.health.dupNos.length + rs.health.dupNames.length
+                    : 0
+                  const good = rs.kind === 'ok'
                   return (
                     <div key={c.id} className="flex items-center gap-2">
                       <span
                         style={{
-                          color: issues === 0 ? 'var(--color-ok)' : 'var(--color-warn)',
+                          color: good ? 'var(--color-ok)' : 'var(--color-warn)',
                           display: 'grid',
                           placeItems: 'center',
                         }}
                       >
-                        {issues === 0 ? <IconCheck size={14} /> : <IconAlert size={14} />}
+                        {good ? <IconCheck size={14} /> : <IconAlert size={14} />}
                       </span>
                       <span className="flex-1 truncate" style={{ fontSize: 12.5, fontWeight: 550 }}>
                         {c.name}
                       </span>
-                      <span className="num" style={{ fontSize: 12, color: 'var(--color-ink3)' }}>
-                        {h.count} 人
+                      <span
+                        className="num"
+                        style={{
+                          fontSize: 12,
+                          color: !good && issues === 0 ? 'var(--color-warn)' : 'var(--color-ink3)',
+                        }}
+                      >
+                        {rs.kind === 'unknown'
+                          ? '人数待读'
+                          : rs.kind === 'nobody'
+                            ? '还没有名单'
+                            : `${rs.count} 人`}
                       </span>
                     </div>
                   )

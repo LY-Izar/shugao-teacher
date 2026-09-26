@@ -515,7 +515,8 @@ export default function AssignmentNew() {
                             borderRadius: 3,
                             border: `1px solid ${on ? 'var(--color-accent)' : 'var(--color-line2)'}`,
                             background: on ? 'var(--color-accent)' : 'transparent',
-                            color: '#fff',
+                            /* 勾画在**实心 accent 块**上 → 暗色下它必须是近黑（见 index.css） */
+                            color: 'var(--color-onaccent)',
                           }}
                         >
                           {on ? <IconCheck size={11} strokeWidth={3} /> : null}

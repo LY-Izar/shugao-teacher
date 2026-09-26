@@ -31,7 +31,7 @@ import { CHANGELOG } from '../lib/changelog'
 import {
   backupSummary,
   downloadJson,
-  makeBackup,
+  exportWithProfiles,
   notifyBackupDone,
   pushBackupToCloud,
   readJsonFile,
@@ -71,7 +71,6 @@ export default function Settings() {
   const schedule = useStore((s) => s.schedule)
   const currentClassId = useStore((s) => s.currentClassId)
   const setCurrentClass = useStore((s) => s.setCurrentClass)
-  const clearAll = useStore((s) => s.clearAll)
   const restoreBackup = useStore((s) => s.restoreBackup)
   const bkRef = useRef<HTMLInputElement>(null)
   const navigate = useNavigate()
@@ -246,22 +245,6 @@ export default function Settings() {
   const canAdmin = isRemote && entryVisible('/admin', myRoles)
   // 只看教师自己的排课表 —— 班级课表（scope='class'）是教室端给学生看的，混进来数字会对不上
   const todayCount = itemsForDate(schedule.filter((s) => s.scope !== 'class')).length
-
-  const exportJson = () => {
-    const payload = {
-      exportedAt: new Date().toISOString(),
-      teacher,
-      classes,
-    }
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `树高教师平台-数据导出-${new Date().toISOString().slice(0, 10)}.json`
-    a.click()
-    URL.revokeObjectURL(url)
-    push({ text: '已导出全部数据', tone: 'ok' })
-  }
 
   return (
     <>
@@ -479,10 +462,22 @@ export default function Settings() {
               <Button
                 block
                 icon={<IconDownload size={16} />}
-                onClick={() => {
-                  const b = makeBackup(useStore.getState())
-                  downloadJson(b, `树高备份-${ymdOf(beijingNow())}.json`)
-                  push({ text: `已导出：${backupSummary(b)}`, tone: 'ok' })
+                onClick={async () => {
+                  /*
+                   * 🆕 2026-10：走 `exportWithProfiles()`（而不是直接 `makeBackup`）——
+                   * 学生档案 / 教师档案在**两张独立的表**里，必须异步读出来一起打包，
+                   * 否则老师点这个按钮搬走的数据里**没有家长电话 / 家庭住址 / 老师住址**
+                   * （这是这一轮补的那个静默缺口）。
+                   * ⚠️ 读不到时**照样导出**，但把原因说出来（`desc`）——
+                   * 少两张表也比"什么都没导出"强，而"缺了却不说"是不可接受的。
+                   */
+                  const r = await exportWithProfiles(useStore.getState())
+                  downloadJson(r.data, `树高备份-${ymdOf(beijingNow())}.json`)
+                  push({
+                    text: `已导出：${backupSummary(r.data)}`,
+                    tone: 'ok',
+                    ...(r.issues.length ? { desc: `这份文件里没有学生/教师档案（${r.issues[0]}）` } : {}),
+                  })
                 }}
               >
                 导出备份文件
@@ -501,36 +496,40 @@ export default function Settings() {
                 icon={<IconSend size={16} />}
                 disabled={bkNotifyBusy}
                 data-backup-notify
-                onClick={() => {
-                  const b = makeBackup(useStore.getState())
-                  downloadJson(b, `树高备份-${ymdOf(beijingNow())}.json`)
+                onClick={async () => {
+                  /* 与「导出备份文件」同一个入口（档案要一起带上，读不到就把原因说出来） */
+                  const r = await exportWithProfiles(useStore.getState())
+                  downloadJson(r.data, `树高备份-${ymdOf(beijingNow())}.json`)
                   setBkNotifyBusy(true)
-                  void notifyBackupDone(`本机备份已导出：${backupSummary(b)}`, `文件：树高备份-${ymdOf(beijingNow())}.json`).then(
-                    (r) => {
+                  void notifyBackupDone(`本机备份已导出：${backupSummary(r.data)}`, `文件：树高备份-${ymdOf(beijingNow())}.json`).then(
+                    (res) => {
                       setBkNotifyBusy(false)
-                      if (r.ok) {
-                        push({ text: '备份已导出，并已通知管理员邮箱', tone: 'ok' })
-                      } else {
-                        /* 🔴 **不发假成功**：邮件没出去就说没出去，并把"不许删"讲清楚 */
+                      if (res.ok) {
                         push({
-                          text: '备份已导出，但通知邮件没发出去',
+                          text: '备份已存到云端',
+                          tone: 'ok',
+                          ...(r.issues.length ? { desc: `这份文件里没有学生/教师档案（${r.issues[0]}）` } : {}),
+                        })
+                      } else {
+                        /* 🔴 **不发假成功**：没存上就说没存上，并把"不许删"讲清楚 */
+                        push({
+                          text: '备份已导出，但没能存到云端',
                           tone: 'warn',
-                          desc: `${r.message}，发不出去就先别删刚才那份备份文件`,
+                          desc: `${res.message}，没存上就先别删刚才那份备份文件`,
                         })
                       }
                     },
                   )
                 }}
               >
-                {bkNotifyBusy ? '正在发通知…' : '备份并通知管理员邮箱'}
+                {bkNotifyBusy ? '正在备份…' : '备份到云端'}
               </Button>
               <Button block icon={<IconUpload size={16} />} onClick={() => bkRef.current?.click()}>
                 从备份文件恢复
               </Button>
             </div>
             <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 10, lineHeight: 1.7 }}>
-              云端是主副本，这份备份是<b>额外</b>一道保险。主要防两件事：
-              误点下面的「清空全部数据」、以及换账号时把数据搬过去。
+              云端是主副本，这份备份是<b>额外</b>一道保险 —— 换账号、换设备时把数据搬过去。
             </p>
           </Panel>
         </div>
@@ -543,28 +542,16 @@ export default function Settings() {
           别以为是漏做了又加回来（见 功能设计与不变量.md §十七 17.1）。
         */}
 
-        {/* 数据 */}
-        <div className="mb-4">
-          <Sect>数据</Sect>
-          <Panel bodyClass="p-3">
-            <div className="flex flex-col gap-2">
-              <Button block icon={<IconDownload size={16} />} onClick={exportJson}>
-                导出全部数据（JSON）
-              </Button>
-              <Button
-                block
-                variant="danger"
-                onClick={() => {
-                  clearAll()
-                  push({ text: '已清空全部数据', tone: 'warn', desc: '包含班级与学生名单' })
-                  navigate('/login', { replace: true })
-                }}
-              >
-                清空全部数据
-              </Button>
-            </div>
-          </Panel>
-        </div>
+        {/*
+          这里原来还有一整栏「数据」：**导出全部数据（JSON）** + **清空全部数据**。
+          2026-09-26 按用户要求**连那一栏一起删掉**（含小标题，不留空标题）。
+
+          为什么该删：这个平台马上要装 **1000+ 学生**的真实数据，而「清空全部数据」
+          是个**客户端按钮** —— 点错一次就是全校数据没了，且不可撤销。
+          备份那条线（导出备份文件 / 备份到云端 / 从备份文件恢复）
+          本来就够用，它才是那条该走的保险。别以为是漏做了又加回来
+          （见 功能设计与不变量.md §十七 17.3）。
+        */}
 
         {/* 教室端 */}
         <div className="mb-4">
@@ -660,14 +647,14 @@ export default function Settings() {
               className="mt-2 flex items-start gap-2.5 p-3"
               style={{
                 background: 'var(--color-warnsoft)',
-                border: '1px solid #ecd9ae',
+                border: '1px solid var(--color-warnline)',
                 borderRadius: 6,
               }}
             >
               <span style={{ color: 'var(--color-warn)', marginTop: 1 }}>
                 <IconAlert size={16} />
               </span>
-              <div style={{ fontSize: 12.5, color: '#8a5a12', lineHeight: 1.65 }}>
+              <div style={{ fontSize: 12.5, color: 'var(--color-warnink)', lineHeight: 1.65 }}>
                 这台设备现在是<b>教室端</b>：在这台机器上进教师端会先被拦去登录页。
                 输一次教师密码即可自动改回教师端，或者直接点下面的按钮。
               </div>

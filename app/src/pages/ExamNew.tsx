@@ -622,7 +622,7 @@ export default function ExamNew() {
                               borderRadius: 3,
                               border: `1px solid ${on ? 'var(--color-accent)' : 'var(--color-line2)'}`,
                               background: on ? 'var(--color-accent)' : 'var(--color-surface2)',
-                              color: on ? '#fff' : 'var(--color-ink2)',
+                              color: on ? 'var(--color-onaccent)' : 'var(--color-ink2)',
                               fontSize: 12,
                               fontWeight: 700,
                             }}
@@ -815,7 +815,9 @@ export default function ExamNew() {
                             borderRadius: 3,
                             border: `1px solid ${on ? 'var(--color-accent)' : 'var(--color-line2)'}`,
                             background: on ? 'var(--color-accent)' : 'transparent',
-                            color: '#fff',
+                            /* 勾是画在**实心 accent 块**上的（那两个状态只有它自己在变），
+                               `--color-onaccent` 在暗色下是近黑 —— 见 index.css 的说明 */
+                            color: 'var(--color-onaccent)',
                           }}
                         >
                           {on ? <IconCheck size={11} strokeWidth={3} /> : null}

@@ -10,6 +10,7 @@ import {
 } from '../components/icons'
 import { Button, PageHead, Panel, Sect, Tag } from '../components/ui'
 import { activeStudents, useStore } from '../data/store'
+import { goBackOr } from '../lib/back'
 import { splitByKind } from '../lib/pick'
 import { buildWrongBook, rankedCountOf } from '../lib/wrongbook'
 
@@ -72,7 +73,12 @@ export default function WrongBook() {
             ? `${adminClasses.length} 个班 · ${totalStudents} 名学生`
             : undefined
         }
-        onBack={() => navigate('/')}
+        /*
+         * 🔴 「返回」不写死路径：`/wrong` 是左栏/底部的顶层 tab（写死 `/` 会把
+         *    从任意一页点进来的人扔回首页）。有上一页回上一页；书签/PWA 直开时回 `/`。
+         *    形状与理由见 `lib/back.ts`。
+         */
+        onBack={() => goBackOr(navigate, '/')}
       />
 
       <Page>

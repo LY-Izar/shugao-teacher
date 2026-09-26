@@ -149,6 +149,27 @@ export default function Classroom() {
   const teacher = useStore((s) => s.teacher)
   const navigate = useNavigate()
 
+  /*
+   * 🔴🔴 **教室端恒亮 —— 这条是硬规矩，不是偏好**（2026-10-09 F4，用户拍板）。
+   *
+   * 这块屏挂在**亮着灯的教室**里给学生看。暗色在那儿是错的：晚上灯一开、屏幕一暗，
+   * 三米外的学生先看不清的是**字**，而这块屏存在的全部意义就是"看得清"。
+   *
+   * 所以这里做的是**摘掉** `<html data-theme="dark">`，而不是"跟着偏好走"：
+   *   · `lib/theme.ts` 的 `effective()` 一命中 `/classroom` 就恒返回 `'light'`（不读偏好）；
+   *   · `index.html` 里那段内联脚本在首帧之前也是同一条判断（所以**不会**先暗一下再变亮）；
+   *   · 这一句是**第三道**：这条路由被**直接打开**（书签 / 二维码 / SPA 内部跳转）时，
+   *     前面两道都可能已经被别处写上的属性越过 —— 这里在**挂载时无条件清一次**。
+   *
+   * ⚠️ 为什么不用 `apply()`：`apply()` 会顺手改 `<meta name="theme-color">`，
+   *    而那一条是"教师端顶栏的颜色"；教室端有自己的显示方式，不该动它。
+   * ⛔ 别在这里加"如果系统是暗色就跟着暗"的分支 —— 那正是这条硬规矩要挡掉的东西。
+   *    `shots.mjs` 的 F4 那一节有一条断言专门钉它（含反向对照：让它跟着暗必须红）。
+   */
+  useEffect(() => {
+    document.documentElement.removeAttribute('data-theme')
+  }, [])
+
   const [classId, setClassId] = useState(() => {
     try {
       return localStorage.getItem(CLASS_KEY) ?? ''
@@ -1132,14 +1153,14 @@ export default function Classroom() {
               className="mb-4 flex items-start gap-2.5 p-3.5"
               style={{
                 background: 'var(--color-warnsoft)',
-                border: '1px solid #ecd9ae',
+                border: '1px solid var(--color-warnline)',
                 borderRadius: 6,
               }}
             >
               <span style={{ color: 'var(--color-warn)', marginTop: 1 }}>
                 <IconAlert size={17} />
               </span>
-              <div style={{ fontSize: 13, color: '#8a5a12', lineHeight: 1.7 }}>
+              <div style={{ fontSize: 13, color: 'var(--color-warnink)', lineHeight: 1.7 }}>
                 当前浏览器不支持<b>强制置顶小窗</b>（需要 Edge / Chrome 116 及以上）。
                 讲评时请用手机或平板看题号与正确率。
               </div>
@@ -1149,14 +1170,17 @@ export default function Classroom() {
               className="mb-4 flex flex-wrap items-center gap-3 p-3.5"
               style={{
                 background: 'var(--color-accentsoft)',
-                border: '1px solid #c3d6fb',
+                border: '1px solid var(--color-infoline)',
                 borderRadius: 6,
               }}
             >
               <span style={{ color: 'var(--color-accent)' }}>
                 <IconInfo size={17} />
               </span>
-              <div className="flex-1" style={{ fontSize: 13, color: '#0d3f9e', lineHeight: 1.7 }}>
+              <div
+                className="flex-1"
+                style={{ fontSize: 13, color: 'var(--color-accentink)', lineHeight: 1.7 }}
+              >
                 点一次「启动置顶小窗」：小窗会浮在全屏的新教育平台之上，显示当前题号与正确率。
                 <b>同时这一步也解开了浏览器的声音限制</b>，呼叫播报才能出声。
               </div>
@@ -1319,10 +1343,10 @@ export default function Classroom() {
                     className="mb-2 flex flex-wrap items-center gap-1.5 p-2"
                     style={{
                       background: 'var(--color-warnsoft)',
-                      border: '1px solid #ecd9ae',
+                      border: '1px solid var(--color-warnline)',
                       borderRadius: 4,
                       fontSize: 11.5,
-                      color: '#8a5a12',
+                      color: 'var(--color-warnink)',
                     }}
                   >
                     <span>今天是调休上班日，按</span>
@@ -1340,6 +1364,9 @@ export default function Classroom() {
                             useWeekday === w && weekOverride !== null
                               ? 'var(--color-warn)'
                               : 'rgb(255 255 255 / .6)',
+                          /* ⚠️ 教室端恒亮（`data-theme` 在 `/classroom` 上永远不写），
+                             所以这里 `#fff / rgb(255 255 255/.6)` **是有意的**：
+                             它是压在那条**暖黄 warn 块**上的字，不是"漏改的面色"。 */
                           color:
                             useWeekday === w && weekOverride !== null ? '#fff' : 'inherit',
                         }}
@@ -1365,10 +1392,10 @@ export default function Classroom() {
                     className="mb-2 p-2"
                     style={{
                       background: 'var(--color-badsoft)',
-                      border: '1px solid #f0c9c9',
+                      border: '1px solid var(--color-badline)',
                       borderRadius: 4,
                       fontSize: 11.5,
-                      color: '#8f2b2b',
+                      color: 'var(--color-badink)',
                       lineHeight: 1.6,
                     }}
                   >
@@ -1944,9 +1971,9 @@ export default function Classroom() {
                         className="px-3 py-2.5"
                         style={{
                           fontSize: 12,
-                          color: '#8f2b2b',
+                          color: 'var(--color-badink)',
                           background: 'var(--color-badsoft)',
-                          borderBottom: '1px solid #f0c9c9',
+                          borderBottom: '1px solid var(--color-badline)',
                           lineHeight: 1.7,
                         }}
                       >
@@ -2115,6 +2142,9 @@ export default function Classroom() {
                   padding: '12px 16px',
                   textAlign: 'center',
                   font: '13px/1.7 system-ui, -apple-system, "Microsoft YaHei", sans-serif',
+                  /* ⚠️ 这块 DOM 渲染进的是**另一个文档**（Document PiP 的系统置顶窗口），
+                     那边**没有主文档的 CSS 自定义属性** → 令牌取不到，只能靠 `,` 后面的兜底色。
+                     所以这里的三处 `#333 / #fff / #777` **不是漏改**：它们是那个窗口的**唯一**颜色来源。 */
                   color: 'var(--color-ink2, #333)',
                   background: 'var(--color-surface, #fff)',
                 }}
@@ -2275,7 +2305,7 @@ function SyncBanner() {
       className="anim-in mb-4 flex w-full items-start gap-2.5 p-3.5 text-left"
       style={{
         background: 'var(--color-warnsoft)',
-        border: '1px solid #ecd9ae',
+        border: '1px solid var(--color-warnline)',
         borderRadius: 6,
       }}
     >
@@ -2283,14 +2313,24 @@ function SyncBanner() {
         <IconAlert size={17} />
       </span>
       <span style={{ flex: 1 }}>
-        <span style={{ display: 'block', fontSize: 13.5, fontWeight: 620, color: '#8a5a12' }}>
+        <span
+          style={{ display: 'block', fontSize: 13.5, fontWeight: 620, color: 'var(--color-warnink)' }}
+        >
           数据没能存到服务器
         </span>
-        <span style={{ display: 'block', fontSize: 12, color: '#96702f', marginTop: 3, lineHeight: 1.7 }}>
+        <span
+          style={{
+            display: 'block',
+            fontSize: 12,
+            color: 'var(--color-warnink2)',
+            marginTop: 3,
+            lineHeight: 1.7,
+          }}
+        >
           {syncError} · 本地已保留，网络好了再操作一次
         </span>
       </span>
-      <span style={{ fontSize: 11.5, color: '#96702f', flexShrink: 0 }}>知道了</span>
+      <span style={{ fontSize: 11.5, color: 'var(--color-warnink2)', flexShrink: 0 }}>知道了</span>
     </button>
   )
 }

@@ -77,6 +77,8 @@ type Body = {
     | 'subjectPurgePreview'
     /** 🆕 P10：删旧科目数据（**不确认就删不掉**） */
     | 'subjectPurge'
+    /** 🆕 2026-10-09：我在这个班能不能"从班级管理呼叫学生"（**只决定摆不摆那个入口**） */
+    | 'classCallable'
   gradeId?: string
   rows?: unknown[]
   /* ---- `streamGenerate`（P7，`schema.sql` §32.2）---- */
@@ -115,6 +117,11 @@ const NEED_STAGE32 =
 /** P10（§34）还没跑时的那句话 */
 const NEED_STAGE34 =
   '数据库还没跑"选科变更审计"那一段（仓库里 supabase/schema.sql 第 34 段）。' +
+  '到 Supabase → SQL Editor 跑一遍再回来；刚跑完的话等十几秒让接口刷新一下缓存。'
+
+/** 🆕 呼叫判据（§33）还没跑时的那句话 */
+const NEED_STAGE33 =
+  '数据库还没跑"呼叫判据"那一段（仓库里 supabase/schema.sql 第 33 段）。' +
   '到 Supabase → SQL Editor 跑一遍再回来；刚跑完的话等十几秒让接口刷新一下缓存。'
 
 /** 走班四科 —— 与 `lib/stream.ts` 的 `STREAM_SUBJECT_CODES` 同值（那一份是唯一判定入口） */
@@ -372,6 +379,29 @@ export async function onRequestPost(context: {
     const can = await rpcBool(env, me.token, 'can_manage_grade_setup', { p_grade_id: gradeId })
     if (can === 'missing') return json({ status: 'error', message: NEED_STAGE27 }, 503)
     return json({ status: 'ok', canSetup: can })
+  }
+
+  /* ---------------- classCallable：我在这个班能不能"从班级管理呼叫学生" ----------------
+   * 与 `canSetup` 同一个口径（M1/M2）：**只决定"摆不摆那个入口"**，不是安全边界 ——
+   * 真发呼叫时数据库那三条 `calls` 策略会再问一次**同一个**判据（§33.3）。
+   *
+   * 🔴 判据**一处都不新写**：直接问数据库的裸版 `can_call(class_id, null)` ——
+   *    `assignment_id` 为空正好是 `can_call_for()` 的"**事务性呼叫**"那一支
+   *    （= `can_manage_class_for()` ∪ 行政班，§33.2）。
+   *    ⚠️ 刻意**不掺"有作业的呼叫"那一支**：那条还额外给科任老师（`teaches_in_class_for`），
+   *    是**另一档**权力，"从班级管理直接叫人"不该按它摆。
+   *    它顺带把 Q17 的边界也带上了：走班班（`kind='stream'`）的事务性呼叫判据恒假 →
+   *    那些班自然不摆这个按钮。
+   */
+  if (action === 'classCallable') {
+    const classId = String(body.classId ?? '').trim()
+    if (!UUID_RE.test(classId)) return json({ status: 'error', message: '没有指定班级' }, 400)
+    const can = await rpcBool(env, me.token, 'can_call', {
+      p_class_id: classId,
+      p_assignment_id: null,
+    })
+    if (can === 'missing') return json({ status: 'error', message: NEED_STAGE33 }, 503)
+    return json({ status: 'ok', canCall: can })
   }
 
   /* ---------------- rosterImport：录名单 + 按班号自动建班（**一个事务**） ---------------- */

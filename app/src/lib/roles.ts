@@ -449,6 +449,43 @@ export function hasManagingRole(roles?: readonly TeacherRole[] | null): boolean 
 }
 
 /**
+ * 🆕 2026-10-06：我**该不该看见**"改这个班的班级档案"这个入口（学生档案那几个字段）。
+ *
+ * 🔴 它对应数据库那一个判据 `can_manage_class_for()`（`schema.sql` §16.2）——
+ *    最高管理员 / 教务处 ∪ **本年级**年级主任 ∪ **本班**班主任，
+ *    **逐支照抄，不另发明**。用户口径「班主任通过班级可以改这些信息」就是中间那一支。
+ *
+ * ⚠️ 与 `hasManagingRole()` 的分工（别拿它去替上面那两个）：
+ *    · `hasManagingRole()` 是**粗档**（super / admin / grade_head，**不含班主任**），
+ *      用在"呼叫学生"那种"摆出来也不会错到自己班"的入口上；
+ *    · 这一个**看 `scope_id`**，因为它要回答的是"**这一个**班归不归我管"。
+ *
+ * 🔴 边界（与文件头那三条一致）：它只回答"**摆不摆**入口"，不回答"能不能改"——
+ *    真正那一刀在数据库（被挡下的更新是 0 行，`lib/studentProfile.ts` 会显式报错）。
+ *    ⚠️ **认不出范围的一律当"摆"**（`scope_id` 空 = 前端没读全，不是"没权限"）：
+ *    宁可多摆一个按钮、由数据库拒，也不要让真班主任看不见入口。
+ *    ⚠️ 数据行不过这里（M3）：`classes` 是 RLS 筛过的结果，再筛一次就是前端在做权限判断。
+ */
+export function canEditClassFor(
+  roles: readonly TeacherRole[] | null | undefined,
+  classId: string,
+  gradeId?: string,
+): boolean {
+  return (roles ?? []).some((r) => {
+    if (r.role === 'super' || r.role === 'admin') return true
+    if (r.role === 'grade_head') {
+      if (!r.scopeId) return true // 范围没读全 → 摆（由数据库拒）
+      return r.scopeType === 'grade' && Boolean(gradeId) && r.scopeId === gradeId
+    }
+    if (r.role === 'head_teacher') {
+      if (!r.scopeId) return true
+      return r.scopeType === 'class' && r.scopeId === classId
+    }
+    return false
+  })
+}
+
+/**
  * 🆕 2026-10-01：我该不该看见「**行政管理**」这一个入口（`/manage`）。
  *
  * 🔴 **它是一条"并集"判据，不是第四条新规矩** —— 那一页只是三个入口的**合集**，

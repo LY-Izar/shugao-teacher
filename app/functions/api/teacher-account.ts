@@ -34,6 +34,15 @@
  *     · 校验（非空 / 不超过 `NAME_MAX` 个字）与建号**同一个函数**（`checkTeacherName`）——
  *       一个字段一种语义，别让"建号时不许的名字"能从这里写进去。
  *
+ *  🆕 2026-10-06：**教师档案**（家庭住址 / 电话号码 / 邮箱）走这个 Function 的 `profile` 动作。
+ *     · 判据同样用 `can_create_teacher_accounts`（超管 / 教务处 / **办公室主任**）——
+ *       这三列是**档案属性**（同上部门 / 姓名两轮）；🔴 **不新立判据**（I17）。
+ *     · 🔴 **老师本人不走这条路**（这条只给管档案的人）：本动作是 service_role，绕开 RLS ——
+ *       若给老师本人，"谁能读/写"就变成"TS 里再写一遍规则"。他自己那一行由
+ *       `schema.sql` §36 的读策略给（**只读**）。
+ *     · 表在 `schema.sql` §1.1、策略在 §36；形状（电话/邮箱）由**数据库那两条 check** 守 ——
+ *       这里只判长度，不抄第二份规则（23514 与 42501 各自翻成人话）。
+ *
  *  🔴 **2026-09-28：拆成两个函数（建号 ≠ 指派身份）** —— `管理架构与角色权限方案.md` §三.4 的 N-1。
  *     新架构里唯一变宽的写权限是「办公室主任建号」，而 `can_manage_teachers()` 原本
  *     **同时**管建号 / 任课关系 / **指派身份**三件事：
@@ -79,7 +88,7 @@ type RoleCode =
   | 'teacher'
 
 type Body = {
-  action?: 'list' | 'create' | 'reset' | 'assign' | 'role' | 'department' | 'rename'
+  action?: 'list' | 'create' | 'reset' | 'assign' | 'role' | 'department' | 'rename' | 'profile'
   /** create / rename */
   name?: string
   email?: string
@@ -89,7 +98,7 @@ type Body = {
   subject?: string
   school?: string
   classIds?: string[]
-  /** reset / assign / role / 🆕 rename */
+  /** reset / assign / role / 🆕 rename / 🆕 profile */
   teacherId?: string
   /** assign */
   classId?: string
@@ -104,6 +113,8 @@ type Body = {
   departments?: string[]
   /** 🆕 department：对哪些老师（多选；与 `departments` 是**笛卡尔积**关系） */
   teacherIds?: string[]
+  /** 🆕 profile：教师档案那三个字段（家庭住址 / 电话号码 / 邮箱，§1.1 / §36）—— **全可空** */
+  profile?: { homeAddress?: string; phone?: string; email?: string }
 }
 
 /**
@@ -293,6 +304,13 @@ function isMissingColumn(status: number, text: string): boolean {
 
 const isMissing = (r: Read) => isMissingTable(r.status, r.text) || isMissingColumn(r.status, r.text)
 
+/**
+ * 🆕 教师档案那三个字段（`schema.sql` §1.1 / §36）的长度上限 —— **只防撑爆界面与库**，
+ * 不是形状判据：形状（电话/邮箱）由数据库那两条 check 守（那是唯一一处规则），
+ * 这里只把"粘了一整篇进去"这种情况在**写之前**说清楚。
+ */
+const PROFILE_MAX = { homeAddress: 120, phone: 40, email: 120 } as const
+
 /* ---------------- 调用者是谁 ---------------- */
 
 async function caller(request: Request, env: Env): Promise<{ id: string; token: string } | null> {
@@ -440,12 +458,32 @@ async function loadDirectory(env: Env) {
   const teachers = (tRes.rows as unknown as TeacherRow[])
     // 教室端账号也有一行 teachers（触发器给每个 auth 用户都建），别把它当成老师列出来
     .filter((t) => !roomIds.has(t.id))
+    /*
+     * 🆕 2026-10-09：**这个人能不能被选去"教书"**（班主任 / 年级主任 / 任课关系的那些下拉）。
+     *
+     * 🔴 为什么由**服务端**给这一位布尔（而不是让前端自己看 `roles`）：
+     *    M1/M2 那条纪律 —— 前端只决定"摆不摆入口"，**角色判断一处都不许在前端另写**。
+     *    与通知的 `canRevoke`（`functions/api/notice.ts`）同一个形状。
+     *
+     * 🔴 判据只有一条：**没有 `super` 身份**。
+     *    · 最高管理员（`super`）是**平台主人**，不是这个学校的任课老师 ——
+     *      用户原话：「我作为最高管理员，不应该能被当成老师选中去教书」；
+     *    · ⚠️ **教务处（`admin`）照旧可以**（唐友余就是教务处 + 班主任 + 教课）——
+     *      千万别把这条判据写成"有管理身份就排除"；
+     *    · ⚠️ **教室端账号**天然到不了这里（上面那一句 `.filter` 已经把
+     *      `classroom_accounts` 里的 id 剔掉了），所以不是靠这一位兜的。
+     *
+     * ⚠️ 这一位**只回答"能不能被选去教书"**，不回答"要不要出现在名单里" ——
+     *    「教师管理」那一页照旧列**所有人**（它管理的是账号，不是任教分配）。
+     */
     .map((t) => ({
       id: t.id,
       name: t.name,
       subject: t.subject,
       primarySubjectCode: t.primary_subject_code ?? null,
       school: t.school ?? '',
+      /* 🆕 平台主人不出现在"选老师去教书"的下拉里（判据见上面那条注释） */
+      teachable: !roles.some((x) => x.teacher_id === t.id && x.role === 'super'),
       roles: roles
         .filter((x) => x.teacher_id === t.id)
         .map((x) => ({
@@ -554,6 +592,25 @@ export async function onRequestPost(context: {
    */
   const mayAssign = await rpcBool(env, me.token, 'can_assign_roles')
   if (mayAssign === 'missing') return json({ status: 'error', message: NEED_STAGE13 }, 503)
+
+  /*
+   * 🆕 2026-10-08：「**发 super**」比"指派身份"还要再窄一档 —— **只有最高管理员能发**。
+   *
+   * 🔴 用户拍板：「超管锁死，只能有我一个」。数据库那一半是
+   *    `schema.sql` §10.1.1 ⑥ 的部分唯一索引 `teacher_roles_one_super`（保证"多不了"）；
+   *    服务端这一半管的是"**谁有资格发**"和"**被拒时要说人话**"。
+   *
+   * 🔴 为什么不能只用 `mayAssign`：`can_assign_roles()` = 最高管理员 ∪ 教务处（**保持不动**）——
+   *    教务处该能发班主任 / 年级主任 / 组长，但**不该**能发 `super`
+   *    （那等于"教务处可以给自己升一级"）。所以**只给"发 super"这一个动作**加一道。
+   *
+   * ⚠️ 判据仍在数据库（`can_assign_super_role` 在 schema.sql §13.2.2），这里**不重写规则** ——
+   *    与上一段同一个形状：拿调用者自己的 JWT 去 RPC 问，不让前端传身份。
+   * ⚠️ 与 `mayCreate` / `mayAssign` 同一条纪律：`'missing'` **不能当成 false**，
+   *    否则旧库上会说"你不是超管"，而他明明是（第 13 段还没跑）。
+   */
+  const mayAssignSuper = await rpcBool(env, me.token, 'can_assign_super_role')
+  if (mayAssignSuper === 'missing') return json({ status: 'error', message: NEED_STAGE13 }, 503)
 
   /* ---------------- list ---------------- */
   if (action === 'list') {
@@ -844,6 +901,112 @@ export async function onRequestPost(context: {
     return json({ status: 'ok', teacher: { id: teacherId, name } })
   }
 
+  /* ---------------- 🆕 profile：教师档案（家庭住址 / 电话号码 / 邮箱） ---------------- */
+  if (action === 'profile') {
+    /*
+     * 🔴 **判据**：`can_create_teacher_accounts`（超管 / 教务处 / 办公室主任）——
+     *    上面已经问过数据库了（`mayCreate`），这里**不重写规则**。
+     *    为什么与建号同一档：这三列是**档案属性**（同上 `department` / `rename` 两条）；
+     *    为什么**不给老师本人**：他改自己的档案就走服务端这条路 = 绕开 RLS（见下），
+     *    而"改档案"这一档本轮明确只给管档案的人（`schema.sql` §36 那一段写清了理由）。
+     *    ⚠️ **班主任 / 年级主任都不在里面** —— 老师的家庭住址不是班主任该看的。
+     *
+     * 🔴 **这个动作走 service_role**（`sb()` 用的是 service key），也就是说它**绕开 RLS** ——
+     *    所以上面那句判据是**唯一的闸门**，删掉它就没有第二道了。
+     *    （`schema.sql` §36 里那条 update 策略是同一判据的第二道，服务端这条路看不到它。）
+     */
+    const teacherId = String(body.teacherId ?? '').trim()
+    if (!UUID_RE.test(teacherId)) return json({ status: 'error', message: '没有指定老师' }, 400)
+
+    /* 教室端账号不是老师（与 `reset` / `rename` 两支同一口径） */
+    const room = await read(await sb(env, `/rest/v1/classroom_accounts?select=id&id=eq.${teacherId}`))
+    if (room.ok && room.rows.length) {
+      return json({ status: 'error', message: '这是教室端账号，不在这里记档案' }, 400)
+    }
+
+    /* 三个字段**全可空**：空串 = 清掉这一格（落库统一成 null，免得库里"空串"与"没填"两种写法） */
+    const raw = body.profile ?? {}
+    const pick = (v: unknown, max: number) => {
+      const s = String(v ?? '').trim()
+      return { value: s === '' ? null : s, tooLong: s.length > max }
+    }
+    const addr = pick(raw.homeAddress, PROFILE_MAX.homeAddress)
+    const tel = pick(raw.phone, PROFILE_MAX.phone)
+    const mail = pick(raw.email, PROFILE_MAX.email)
+    if (addr.tooLong) return json({ status: 'error', message: `家庭住址最多 ${PROFILE_MAX.homeAddress} 个字` }, 400)
+    if (tel.tooLong) return json({ status: 'error', message: `电话号码最多 ${PROFILE_MAX.phone} 个字` }, 400)
+    if (mail.tooLong) return json({ status: 'error', message: `邮箱最多 ${PROFILE_MAX.email} 个字` }, 400)
+
+    /*
+     * upsert 一行（`teacher_id` 是主键）—— `return=representation` 是**故意的**：
+     * 回读那一行是为了让"一行都没写进去"**报错**，不是静默成功。
+     */
+    const wrote = await read(
+      await sb(env, '/rest/v1/teacher_profiles?on_conflict=teacher_id', {
+        method: 'POST',
+        headers: { Prefer: 'resolution=merge-duplicates,return=representation' },
+        body: JSON.stringify([
+          { teacher_id: teacherId, home_address: addr.value, phone: tel.value, email: mail.value },
+        ]),
+      }),
+    )
+    if (!wrote.ok) {
+      /*
+       * 🔴 形状不合（数据库那两条 check，SQLSTATE 23514）：把**是哪一格**说清楚，
+       *    这是唯一一处规则（`schema.sql` §1.1），服务端**不再抄一份**。
+       * 🔴 `42501 permission denied` **不许静默成"你没权限"**：它是**部署事故** ——
+       *    同一个坑 `rename` 那一支记过一次。
+       */
+      const text = wrote.text
+      if (/23514|violates check constraint/i.test(text)) {
+        const which = /teacher_profiles_phone_check/.test(text)
+          ? '电话号码这一格看着不像电话（座机、带区号、分机都可以）'
+          : /teacher_profiles_email_check/.test(text)
+            ? '邮箱这一格看着不像邮箱地址'
+            : '有一格的值不合形状'
+        return json({ status: 'error', message: `没记上：${which}`, detail: text.slice(0, 200) }, 400)
+      }
+      if (wrote.status === 401 || /42501|permission denied/i.test(text)) {
+        return json(
+          {
+            status: 'error',
+            message: '存档案失败：接口没有写库的权限（这是部署问题，不是你没权限）',
+            detail: text.slice(0, 200),
+          },
+          503,
+        )
+      }
+      return json(
+        {
+          status: 'error',
+          message: isMissing(wrote)
+            ? '数据库还没跑教师档案那一段（仓库里 supabase/schema.sql 第 36 段）。到 Supabase → SQL Editor 跑一遍再回来。'
+            : '存档案失败',
+          detail: text.slice(0, 200),
+        },
+        isMissing(wrote) ? 503 : 502,
+      )
+    }
+    /* 0 行 = 这个人不在 teachers 里（外键/触发器那边有出入）→ **显式报错**，别静默成功 */
+    if (wrote.rows.length === 0) {
+      return json({ status: 'error', message: '没找到这位老师，档案没有记上' }, 404)
+    }
+
+    const saved = wrote.rows[0] as {
+      home_address?: string | null
+      phone?: string | null
+      email?: string | null
+    }
+    return json({
+      status: 'ok',
+      profile: {
+        homeAddress: saved.home_address ?? '',
+        phone: saved.phone ?? '',
+        email: saved.email ?? '',
+      },
+    })
+  }
+
   /* ---------------- assign：任课关系（哪个班、哪一科） ---------------- */
   if (action === 'assign') {
     const teacherId = String(body.teacherId ?? '').trim()
@@ -1018,6 +1181,63 @@ export async function onRequestPost(context: {
         )
       }
       subjectCode = roleSubjectCode
+    }
+
+    /*
+     * 🆕 2026-10-08：**发 super 这一个动作**的两道闸（只有"加"走这里；"撤"在下面那一段）。
+     *
+     * ① 数据库判据：只有最高管理员能发（`can_assign_super_role`，§13.2.2）——
+     *    教务处照旧能发班主任 / 年级主任 / 组长，**只是发不了 super**。
+     * ② 已经有一个 super 时**说人话**，别让数据库抛 23505：
+     *    下面写失败把 23505 当成功是为了幂等（"这一行已经有了"）——
+     *    但"另一个人已经是超管了"也长着 23505 这张脸，会在界面上显示成**成功**。
+     *    所以先查一遍：已经有别人拿着 → 拒掉并说清怎么交接。
+     */
+    if (on && role === 'super') {
+      if (!mayAssignSuper) {
+        return json(
+          {
+            status: 'error',
+            message:
+              '最高管理员只能由最高管理员授予。教务处可以指派班主任 / 年级主任 / 组长，但发不了这一档。',
+          },
+          403,
+        )
+      }
+      const have = await read(
+        await sb(env, '/rest/v1/teacher_roles?select=teacher_id&role=eq.super'),
+      )
+      if (!have.ok) {
+        return json(
+          {
+            status: 'error',
+            message: isMissing(have) ? NEED_STAGE10 : '读不到最高管理员名单，先不写',
+            detail: have.text.slice(0, 200),
+          },
+          502,
+        )
+      }
+      // 他自己已经拿着 → 幂等，当成功（下面那次写会被唯一索引拒掉，是正常的）
+      const already = have.rows.some((r) => String(r.teacher_id) === teacherId)
+      if (!already && have.rows.length > 0) {
+        return json(
+          {
+            status: 'error',
+            message:
+              '已经有一个最高管理员了，全平台只留一个 —— 要换人：先撤掉现在这个，再把这一档给新的人。',
+          },
+          409,
+        )
+      }
+      if (have.rows.length > 1) {
+        return json(
+          {
+            status: 'error',
+            message: `数据库里有 ${have.rows.length} 个最高管理员（约束没建起来或被人手工绕过了）—— 先在 SQL Editor 里撤到只剩一个，再指派。`,
+          },
+          409,
+        )
+      }
     }
 
     // 别把自己唯一那条 super 摘掉 —— 摘了就没人能再指派身份了（把自己锁在门外）

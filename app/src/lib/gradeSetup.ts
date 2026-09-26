@@ -87,6 +87,51 @@ export async function apiCanSetup(gradeId: string): Promise<CanSetupState> {
   return readCanSetup(await postApi('/api/grade-setup', { action: 'canSetup', gradeId }))
 }
 
+/* ---------------- 🆕 班级页「呼叫学生」那个入口摆不摆 ----------------
+ * 🔴 与通知的 `canRevoke`（`functions/api/notice.ts` → `lib/notices.ts`）**同一个形状**：
+ *    判据由**服务端**算好、随回话给前端一个布尔，前端照着摆 ——
+ *    前端**不另写一套角色判断**（I16 / I29：前端只决定"摆不摆入口"）。
+ *
+ * ⚠️ 服务端那一支用的是数据库的 `can_call(class_id, null)` =
+ *    `can_call_for()` 的"事务性呼叫"那一支（`can_manage_class_for()` ∪ 行政班，§33.2）
+ *    —— **不是**"有作业的呼叫"那一支（那条还额外给科任老师，是另一档）。
+ *    所以本班班主任摆得出来，科任老师摆不出来。
+ */
+export type CanCallVerdict = 'allowed' | 'denied' | 'missing' | 'signin' | 'offline' | 'error'
+
+export type CanCallState = {
+  canCall: boolean
+  verdict: CanCallVerdict
+  /** 读不到时的原因（摆不了那个按钮时，页面上要说得出来"为什么没摆"） */
+  notice: string
+}
+
+/** 把服务端的回话分拣成上面那几档（**纯函数**：`grade-checks.mjs` 逐档断言它） */
+export function readCanCall(r: ApiResult): CanCallState {
+  if (r.ok) {
+    if (r.data.canCall === true) return { canCall: true, verdict: 'allowed', notice: '' }
+    if (r.data.canCall === false) return { canCall: false, verdict: 'denied', notice: '' }
+    /* 🔴 回了 ok 却没有结论 —— **不许静默当成"没权限"**（那会冤枉一位班主任，正是这次要修的形状） */
+    return { canCall: false, verdict: 'error', notice: '接口没给呼叫权限的结论，这个入口先不摆。' }
+  }
+  if (r.status === 503) {
+    return { canCall: false, verdict: 'missing', notice: apiMessage(r, '接口还没就绪。') }
+  }
+  if (r.status === 401) {
+    return { canCall: false, verdict: 'signin', notice: '登录已过期，重新登录后再试。' }
+  }
+  if (r.status === 0) {
+    /* ⚠️ 与 `readCanSetup` 同一口径：不把带 `（/api/*）` 的技术路径摆到界面上 */
+    return { canCall: false, verdict: 'offline', notice: '连不上服务器，这个入口先不摆。' }
+  }
+  return { canCall: false, verdict: 'error', notice: apiMessage(r, '读不到你的呼叫权限，这个入口先不摆。') }
+}
+
+/** 问服务端"我在这个班能不能从班级管理呼叫学生"（走 `postApi`：它带 JWT） */
+export async function apiClassCallable(classId: string): Promise<CanCallState> {
+  return readCanCall(await postApi('/api/grade-setup', { action: 'classCallable', classId }))
+}
+
 /** 一次导入名单的行数上限（服务端 `bulk_import_roster` 里的那个数） */
 export const ROSTER_IMPORT_MAX = 3000
 

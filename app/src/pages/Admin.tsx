@@ -13,10 +13,12 @@ import {
   humanBytes,
   judgeBackup,
   judgeDbUsage,
+  judgeEgress,
   judgeErrorLog,
   judgeFeedback,
   judgeR2,
   judgeServiceKey,
+  judgeSuperAdminCount,
   probeSchemaDrift,
   scanAssignmentContradictions,
   dirtyGroups,
@@ -26,15 +28,19 @@ import {
   ADMIN_SECTIONS,
   ARCHIVE_META_BAD_BYTES,
   DB_QUOTA_BYTES,
+  EGRESS_QUOTA_BYTES,
   NO_PROBE_REASON,
   R2_KEYS,
   type AdminTab,
   type BackupFacts,
   type DbFacts,
   type DriftSection,
+  type EgressFacts,
+  type EgressJudgement,
   type ErrorFacts,
   type FeedbackFacts,
   type SecretFacts,
+  type SuperAdminFacts,
   type Tone,
 } from '../lib/adminChart'
 import {
@@ -155,6 +161,13 @@ type ServerReport = {
     sizeUnknownReason?: string | null
     error?: string
   }
+  /**
+   * 🆕 2026-10-07 · `all` 那一支也带数据库用量 + **出流量**。
+   * ⚠️ 这里**只用它的 `egress`**（库大小那半走 `adminOps.fetchDbUsage()`，
+   *    回话形状由那个文件负责）—— 出流量是**另一条来源**（Management API），
+   *    它的字段进不了 `DbReport`，所以直接从原始回话里读。
+   */
+  db?: { egress?: EgressFacts }
   message?: string
 }
 
@@ -326,8 +339,8 @@ function PrivacyLine() {
       className="mx-3.5 mb-2 flex items-center gap-2 px-2.5 py-1.5"
       style={{
         background: 'var(--color-warnsoft)',
-        border: '1px solid #ecd9ae',
-        color: '#8a5a12',
+        border: '1px solid var(--color-warnline)',
+        color: 'var(--color-warnink)',
         borderRadius: 4,
         fontSize: 12,
       }}
@@ -404,11 +417,11 @@ function PanelLogin({ reason }: { reason: string }) {
             className="mb-4 p-2.5"
             style={{
               background: 'var(--color-warnsoft)',
-              border: '1px solid #ecd9ae',
+              border: '1px solid var(--color-warnline)',
               borderRadius: 4,
               fontSize: 12.5,
               lineHeight: 1.7,
-              color: '#8a5a12',
+              color: 'var(--color-warnink)',
             }}
           >
             {reason}
@@ -599,10 +612,58 @@ export default function Admin() {
     }
   }, [])
 
+  /*
+   * 🆕 2026-10-08：**最高管理员有几个**（「超管锁死」那一格的数）。
+   *
+   * 一次 `select('*')` 只读——🔴 **`select('*')` 不是 `select('id')`**（本项目踩过两次：
+   * `subjects` 没有 `id` 列；探针一旦假设"每张表都有 id"，那条卡在任何正确的库上都是红的）。
+   * 这里读的是**真的行**（不是探针），但表可能还没建（旧库）——所以照三态处理：
+   * 读失败 → 灰"无法判断"；读到 0 行 → **红**（谁也管不了平台）；1 行 → 绿；>1 行 → 红。
+   *
+   * ⚠️ RLS：`teacher_roles_read` 只给"自己那一行"，而这一屏只有超管打得开
+   *    —— 读到的恰好就是他自己那一条。**判据仍在数据库**，前端只负责显示。
+   */
+  const [superAdmins, setSuperAdmins] = useState<SuperAdminFacts>(() =>
+    /*
+     * 🔴 「本地模式（没有连数据库）」这一档**在初值里就说清**，不再留到 effect 里 `setState` ——
+     *    "在 effect 体里同步 setState"会被 oxlint 的 `react(set-state-in-effect)` 记一笔
+     *    （这一批要 lint 0/0），而这一档本来就是个**常量**，没必要多绕一轮渲染。
+     *    结论与行为一字不变：这一屏在 `sessionChecked` 之前根本不画（见下面的 early return）。
+     */
+    getSupabase()
+      ? { readable: false, count: null, unknownReason: null }
+      : { readable: false, count: null, unknownReason: '本地模式（没有连数据库）' },
+  )
+  useEffect(() => {
+    if (!sessionChecked || !hasSession) return
+    let alive = true
+    const sb = getSupabase()
+    /* 本地模式那一档已经由初值说过了（见上）——这里没什么可问的 */
+    if (!sb) return
+    void sb
+      .from('teacher_roles')
+      .select('*')
+      .eq('role', 'super')
+      .then(({ data, error }) => {
+        if (!alive) return
+        if (error) {
+          setSuperAdmins({
+            readable: false,
+            count: null,
+            unknownReason: `${error.message}${error.code ? `（${error.code}）` : ''}`,
+          })
+          return
+        }
+        setSuperAdmins({ readable: true, count: (data ?? []).length, unknownReason: null })
+      })
+    return () => {
+      alive = false
+    }
+  }, [sessionChecked, hasSession])
+
   /* 3. C2 前端探测汇总（读现成状态，**不改任何写入路径**） */
   const probes: ProbeReport = useMemo(() => probeReport(), [])
   const examProbe = getExamTablesProbeStatus()
-
   /* 4. E7 矛盾扫描（🟢 纯前端、零额外请求） */
   const classNames = useMemo(() => new Map(classes.map((c) => [c.id, c.name])), [classes])
   const contradictions = useMemo(
@@ -796,6 +857,32 @@ export default function Admin() {
   }
   const dbJudge = judgeDbUsage(dbFacts)
 
+  /*
+   * 🆕 出流量（Supabase Management API 那一份）。
+   *
+   * 🔴 **三态**：没配 / 读不到 → 灰；只有真拿到了才显示数字与颜色。
+   *    `configured` 为 false 的两种情形必须分开说：服务端整个读不到（本地模式
+   *    或 `/api/*` 没部署）vs 服务端在、但两个变量没配 —— 后者才是"去配一下就好"。
+   */
+  const eg = serverOk ? server.report.db?.egress : undefined
+  const egressFacts: EgressFacts = {
+    configured: eg?.configured === true,
+    bytes: eg?.bytes ?? null,
+    dbSizeBytes: eg?.dbSizeBytes ?? null,
+    wholeDbBytes: db?.totalBytes ?? null,
+    reason:
+      eg?.reason ??
+      (serverOk
+        ? null
+        : server.kind === 'not_configured'
+          ? `服务端还没配置好：${server.message}`
+          : '读不到服务端的 `all` 回话（本地模式 / 接口没部署）'),
+    source: eg?.source ?? '',
+    periodStart: eg?.periodStart ?? null,
+    periodEnd: eg?.periodEnd ?? null,
+  }
+  const egressJudge = judgeEgress(egressFacts)
+
   const errFacts: ErrorFacts = {
     readable: errReport !== null,
     total: errReport?.total ?? null,
@@ -814,6 +901,13 @@ export default function Admin() {
     unknownReason: fbErr || null,
   }
   const fbJudge = judgeFeedback(fbFacts)
+
+  /*
+   * 🆕 最高管理员那一格（用户 2026-10-08：「超管锁死，只能有我一个」）。
+   * 🔴 它**不是**"多 super 报警" —— 数据库那条部分唯一索引让"多"不可能。
+   *    它防的是 **0 个**：一个都没有 = 谁也管不了平台，而且**不报错**。
+   */
+  const superJudge = judgeSuperAdminCount(superAdmins)
 
   /* C1 */
   const driftInfo = drift ? driftSummary(drift.sections) : null
@@ -845,8 +939,13 @@ export default function Admin() {
   const toneErrors: Tone = errJudge.tone
   const toneFeedback: Tone = fbJudge.tone
   const toneMaint: Tone = maintLive.read === 'failed' ? 'unknown' : maintLive.enabled ? 'warn' : 'ok'
+  /*
+   * 🆕 最高管理员那一格也进 `allTones`：**"0 个 super"必须让概览那句话说出口**，
+   *    不能只躺在磁贴里（那正是"谁也管不了平台"最容易被漏掉的地方）。
+   */
+  const toneSuper: Tone = superJudge.tone
 
-  const allTones = [toneDeploy, toneConfig, toneSchema, toneData, toneBackup, toneDb, toneErrors, toneFeedback, toneMaint]
+  const allTones = [toneDeploy, toneConfig, toneSchema, toneData, toneBackup, toneDb, toneErrors, toneFeedback, toneMaint, toneSuper]
   const toneAll = worstTone(allTones)
   const badCount = allTones.filter((t) => t === 'bad').length
   const warnCount = allTones.filter((t) => t === 'warn').length
@@ -961,7 +1060,7 @@ export default function Admin() {
                     ? 'var(--color-idlesoft)'
                     : 'transparent',
               borderTop: '1px solid var(--color-line)',
-              color: maintLive.enabled ? '#8a5a12' : 'var(--color-ink3)',
+              color: maintLive.enabled ? 'var(--color-warnink)' : 'var(--color-ink3)',
               fontSize: 12.5,
               lineHeight: 1.7,
             }}
@@ -991,8 +1090,8 @@ export default function Admin() {
               className="flex items-start gap-2 px-3.5 py-2.5"
               style={{
                 background: 'var(--color-badsoft)',
-                borderTop: '1px solid #f3c9cd',
-                color: '#8f1c26',
+                borderTop: '1px solid var(--color-badline)',
+                color: 'var(--color-badink)',
                 fontSize: 13,
                 lineHeight: 1.75,
               }}
@@ -1012,8 +1111,8 @@ export default function Admin() {
               className="flex items-start gap-2 px-3.5 py-2.5"
               style={{
                 background: 'var(--color-warnsoft)',
-                borderTop: '1px solid #ecd9ae',
-                color: '#8a5a12',
+                borderTop: '1px solid var(--color-warnline)',
+                color: 'var(--color-warnink)',
                 fontSize: 12.5,
                 lineHeight: 1.75,
               }}
@@ -1033,8 +1132,8 @@ export default function Admin() {
               className="px-3.5 py-2.5"
               style={{
                 background: 'var(--color-badsoft)',
-                borderTop: '1px solid #f3c9cd',
-                color: '#8f1c26',
+                borderTop: '1px solid var(--color-badline)',
+                color: 'var(--color-badink)',
                 fontSize: 12.5,
                 lineHeight: 1.7,
               }}
@@ -1064,6 +1163,36 @@ export default function Admin() {
                   ? '无法判断'
                   : `${humanBytes(dbFacts.totalBytes)} / ${humanBytes(DB_QUOTA_BYTES)}`,
               tone: toneDb,
+            },
+            {
+              /* 🆕 2026-10-07：出流量（用户点名）—— 与库用量同一张账单，磁贴挨着放 */
+              key: 'egress',
+              label: '出流量',
+              value: egressJudge.pct === null ? '读不到' : `${egressJudge.pct.toFixed(1)}%`,
+              sub:
+                egressFacts.bytes === null
+                  ? '无法判断（不是"还有 5 GB"）'
+                  : `${humanBytes(egressFacts.bytes)} / ${humanBytes(EGRESS_QUOTA_BYTES)}`,
+              tone: egressJudge.tone,
+            },
+            {
+              /*
+               * 🆕 最高管理员（用户 2026-10-08：「超管锁死，只能有我一个」）。
+               * 🔴 **不是报警，是健康检查**：数据库那条部分唯一索引让"多"不可能 ——
+               *    这一格真正要暴露的是 **0 个**（谁也管不了平台，而且不报错）。
+               * ⚠️ 读不到 = 灰（不是"有 1 个"，也不是"一个都没有"）。
+               */
+              key: 'super',
+              label: '超级管理员',
+              value: superAdmins.readable && superAdmins.count !== null ? String(superAdmins.count) : '读不到',
+              sub:
+                superAdmins.readable && superAdmins.count === 0
+                  ? '🔴 谁也管不了平台'
+                  : superAdmins.readable
+                    ? '全平台只留一个'
+                    : '无法判断（不是"有 1 个"）',
+              tone: toneSuper,
+              to: 'health',
             },
             {
               key: 'backup',
@@ -1774,7 +1903,14 @@ export default function Admin() {
           截图断言里露出来；而条件渲染会让"没渲染"与"渲染了但空"看起来一样）。
           ============================================================ */}
       <div hidden={tab !== 'db'}>
-        <DbCard report={db} error={dbErr} judge={dbJudge} now={now} />
+        <DbCard
+          report={db}
+          error={dbErr}
+          judge={dbJudge}
+          egressFacts={egressFacts}
+          egressJudge={egressJudge}
+          now={now}
+        />
       </div>
       <div hidden={tab !== 'announce'}>
         <AnnounceCard />
@@ -2177,8 +2313,8 @@ function AnnounceCard() {
             data-admin-ann-privacy
             style={{
               background: 'var(--color-warnsoft)',
-              border: '1px solid #ecd9ae',
-              color: '#8a5a12',
+              border: '1px solid var(--color-warnline)',
+              color: 'var(--color-warnink)',
               borderRadius: 4,
               fontSize: 12,
               lineHeight: 1.7,
@@ -2476,6 +2612,8 @@ function Tiles({
 }) {
   const targets: Partial<Record<string, AdminTab>> = {
     db: 'db',
+    /* 🆕 出流量与库用量在同一格里（同一张账单的两个数） */
+    egress: 'db',
     backup: 'health',
     health: 'health',
     errors: 'errors',
@@ -2528,6 +2666,12 @@ function Tiles({
       · 本卡回答"**全库还剩多少**"；
       · 明细里的"体积最大的几份档案"回答"**哪一份档案最大**"（一份就能到十几 MB）。
       两者**在同一页互相指路**，而且**只有一张排行表**（不再各做一张）。
+   🔴 **2026-10-07 修"这张卡让人误判"**（用户实测：控制台 11% / 面板 1.4%）：
+      · **百分比只能按"整库"算**（`pg_database_size`，与控制台同一口径）；
+      · 逐表排行**留着**（它对找大头有用），但必须**标明它是"用户表之和"**，
+        而且把两个数**并排写出来 + 解释差额**（系统目录 / WAL / 其他 schema）——
+        两个数看着矛盾，正是这张卡原来的样子；
+      · 新增**出流量**那一格（Management API，只读 PAT；三态，读不到=灰）。
    🔴 隐私：这一整卡是 **A 类（聚合计数 / 字节数）**，唯一的 B 类是"哪份档案大"
       —— 给的是**班级名 + 档案 id + 字节数**，**没有学生、没有题目、没有成绩**
       （`db_usage_report()` 返回的对象里根本没有那些字段）。
@@ -2537,26 +2681,36 @@ function DbCard({
   report,
   error,
   judge,
+  egressFacts,
+  egressJudge,
   now,
 }: {
   report: DbReport | null
   error: string
   judge: ReturnType<typeof judgeDbUsage>
+  egressFacts: EgressFacts
+  egressJudge: EgressJudgement
   now: number
 }) {
   const pct = judge.pct
   /**
-   * 🔴 配额口径（用户拍板）—— **它不是量出来的数，是判据本身**，所以两种模式下都要在屏上：
+   * 🔴 配额口径 —— **它不是量出来的数，是判据本身**，所以两种模式下都要在屏上：
    *    · 有服务端：`report !== null` → 这一行在 `note` 里；
    *    · 本地演示模式（没有 `/api/*`）：`report === null` → 用量是**灰的"无法判断"**，
-   *      但"按 1 GB 算 / 三档线 60 / 85"照写（灰的是数，不是口径）。
+   *      但"按 500 MB 算 / 出流量 5 GB / 三档线 60 / 85"照写（灰的是数，不是口径）。
    *
    * 原来这句话只写在 `report !== null` 那一支里 → 本地模式整句从屏上消失，
-   * 而 `shots.mjs` 那条断言（"数据库那一格写着配额按 1 GB 算与三档线"）是按"有服务端"写的
+   * 而 `shots.mjs` 那条断言（"数据库那一格写着配额与三档线"）是按"有服务端"写的
    * —— 于是 `admin-checks` ⑥（断的是常量与判据函数）全绿、真界面上却是空的。
-   * 同一件事的另一半在 `admin-checks.mjs` ⑥：`DB_QUOTA_BYTES === 1 GB`、三档线 60 / 85。
+   * 同一件事的另一半在 `admin-checks.mjs` ⑥：`DB_QUOTA_BYTES === 500 MB`、三档线 60 / 85。
+   *
+   * ⚠️ **2026-10-07 配额从 1 GB 改成 500 MB**（免费版的库上限，控制台写 0.5 GB）：
+   *    1 GB 是估数 —— 配额写大一倍，百分比就小一半，正是"面板让人误判"的一半原因。
+   *    三档线**一个字没动**（60 / 85）。
    */
-  const quotaNote = '配额按 **1 GB** 算（用户拍板）· 三档线 🟢 <60% · 🟡 60–85% · 🔴 >85%'
+  const quotaNote =
+    '库配额按 **500 MB** 算（免费版 · 三档线 🟢 <60% · 🟡 60–85% · 🔴 >85%）· ' +
+    '出流量按 **5 GB/账单周期** 算（免费版）'
   return (
     <Card
       tone={judge.tone}
@@ -2582,13 +2736,21 @@ function DbCard({
         </div>
       ) : (
         <>
-          <SubHead>总量 / 已用 / 剩余（A 类：聚合计数，直接显示）</SubHead>
-          <Line k="已用" v={<span className="num">{humanBytes(report.totalBytes)}</span>} />
+          <SubHead>整库 / 已用 / 剩余（A 类：聚合计数，直接显示）</SubHead>
+          <Line
+            k="整库"
+            v={
+              <span className="num">
+                {humanBytes(report.totalBytes)} —— 🔴 **百分比按这个数算**（与控制台同一个口径：
+                `pg_database_size`）
+              </span>
+            }
+          />
           <Line
             k="剩余"
             v={<span className="num">{judge.freeBytes === null ? '未知' : humanBytes(judge.freeBytes)}</span>}
           />
-          <Line k="配额" v={<span className="num">{humanBytes(DB_QUOTA_BYTES)}（1 GB）</span>} />
+          <Line k="配额" v={<span className="num">{humanBytes(DB_QUOTA_BYTES)}（500 MB · 免费版）</span>} />
           <Line
             k="百分比"
             v={
@@ -2618,7 +2780,22 @@ function DbCard({
             }
           />
 
-          <SubHead>按表排行（前 12 名 · ⚠️ 行数是**规划器估算**，不是精确值）</SubHead>
+          {/* ============================================================
+              🔴 两个口径并排（2026-10-07 修）：上面那一行是**整库**，这一块是
+                 **用户表之和** —— 不写清楚，屏上就是"整库 53 MB"配一张加起来
+                 才 14.8 MB 的排行表，看着自相矛盾。
+              ============================================================ */}
+          <SubHead>按表排行（前 12 名 · 口径 = **用户表之和**，不是整库）</SubHead>
+          <div
+            className="px-3.5 py-2"
+            style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.75 }}
+          >
+            🔴 下面这张表**只统计 `public` 里那些表**（含索引与 TOAST），它们加起来的
+            <b>用户表之和</b>
+            {judge.userTableBytes === null ? '没读到' : ` = ${humanBytes(judge.userTableBytes)}`}
+            ，**比上面的整库小** —— 差的是<b>系统目录 / WAL / 其他 schema</b>（auth / storage /
+            realtime…）。🔴 **两个数不是矛盾，是两个口径**：百分比只按整库算（控制台也只认整库）。
+          </div>
           <div style={{ overflowX: 'auto' }}>
             <table className="w-full" style={{ fontSize: 12, borderCollapse: 'collapse' }}>
               <thead>
@@ -2629,7 +2806,9 @@ function DbCard({
                 </tr>
               </thead>
               <tbody>
-                {report.tables.map((t) => (
+                {/* ⚠️ 服务端现在给的是 **public 全部表**（面板要算"用户表之和"这个完整口径），
+                    所以这里**显示时才取前 12 名** —— 与下面那句"前 12 名"对齐。 */}
+                {report.tables.slice(0, 12).map((t) => (
                   <tr key={t.name} style={{ borderTop: '1px solid var(--color-line)' }}>
                     <td style={{ padding: '4px 14px' }} className="num" data-db-table={t.name}>
                       {t.name} 表
@@ -2651,8 +2830,69 @@ function DbCard({
             style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.75 }}
           >
             ⚠️ 口径：写「`assignments` 表：9 行」，**不写**「作业：9 份」——
-            表名与业务名**语义不同**（第一期 J1 的原话）。
+            表名与业务名**语义不同**（第一期 J1 的原话）。⚠️ 行数是**规划器估算**，不是精确值
+            （还没统计过就写"未知"）。
           </div>
+
+          {/* ============================================================
+              🆕 2026-10-07 · 出流量（用户点名）—— 与"③ 备份"那一格同款的三态：
+                 没配 / 读不到 = **灰**（不是红、不是 0）；只有真拿到才判色。
+              ============================================================ */}
+          <SubHead>
+            出流量（本账单周期 · 免费版 5 GB）
+            <span style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+              <Dot tone={egressJudge.tone} />
+              <span style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
+                {TONE_STYLE[egressJudge.tone].text}
+              </span>
+            </span>
+          </SubHead>
+          <Line
+            k="已用"
+            v={
+              egressFacts.bytes === null ? (
+                <span style={{ color: 'var(--color-ink3)' }}>读不到</span>
+              ) : (
+                <span className="num">{humanBytes(egressFacts.bytes)}</span>
+              )
+            }
+          />
+          <Line
+            k="限额"
+            v={
+              <span className="num">
+                {humanBytes(EGRESS_QUOTA_BYTES)}（5 GB · 免费版 · **按账单周期清零**）
+              </span>
+            }
+          />
+          <Line
+            k="百分比"
+            v={egressJudge.pct === null ? '无法判断' : <span className="num">{egressJudge.pct.toFixed(1)}%</span>}
+          />
+          <div className="px-3.5 pb-2">
+            <Track value={egressJudge.pct ?? 0} tone={egressJudge.tone} />
+          </div>
+          <Line k="判据" v={egressJudge.text} />
+          {egressJudge.notes.map((n, i) => (
+            <div
+              key={i}
+              className="px-3.5 py-1.5"
+              style={{
+                borderBottom: '1px solid var(--color-line)',
+                fontSize: 12,
+                color: 'var(--color-ink2)',
+                lineHeight: 1.75,
+              }}
+            >
+              · {n}
+            </div>
+          ))}
+          {egressFacts.periodStart || egressFacts.periodEnd ? (
+            <Line
+              k="账单周期"
+              v={`${egressFacts.periodStart ?? '?'} → ${egressFacts.periodEnd ?? '?'}（Management API 报的）`}
+            />
+          ) : null}
 
           <PrivacyLine />
           <SubHead>体积最大的几份档案（答案："还能不能再塞一份"）</SubHead>
@@ -2699,8 +2939,9 @@ function DbCard({
             真要腾空间：先确认 G2 最近一次备份是成功的，再人工处理那几份超预算的档案。
           </HintOnly>
           <div className="px-3.5 pb-3" style={{ fontSize: 11.5, color: 'var(--color-ink4)' }}>
-            读数时刻：{now ? agoText(now) : '未知'} · 来源 `db_usage_report()`
-            （`schema.sql` §26，只 grant 给 service_role）
+            读数时刻：{now ? agoText(now) : '未知'} · 两个来源：库大小走 `db_usage_report()`
+            （`schema.sql` §26，只 grant 给 service_role）· 出流量走 Supabase Management API
+            （只读 `SUPABASE_PAT`，服务端代取）
           </div>
         </>
       )}
@@ -3484,8 +3725,8 @@ function FeedbackCard({
           data-fb-mail-warn
           style={{
             background: 'var(--color-badsoft)',
-            border: '1px solid #f3c9cd',
-            color: '#8f1c26',
+            border: '1px solid var(--color-badline)',
+            color: 'var(--color-badink)',
             borderRadius: 4,
             fontSize: 12.5,
             lineHeight: 1.8,

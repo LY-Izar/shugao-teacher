@@ -15,6 +15,7 @@ import { Button, PageHead, Panel, Sect, Sheet, Tag } from '../components/ui'
 import { useStore, useToast } from '../data/store'
 import { loadClassMembers, loadClassSubjects } from '../data/remote'
 import { WEEKDAY_TEXT, type ScheduleItem, type ScheduleKind } from '../data/types'
+import { goBackOr } from '../lib/back'
 import { notifyPermission, requestNotify } from '../lib/notify'
 import {
   REMIND_BEFORE,
@@ -127,7 +128,12 @@ export default function Schedule() {
          */
         title="日程表"
         sub={`每周 ${mine.length} 项 · 今天 ${state.items.length} 项`}
-        onBack={() => navigate('/settings')}
+        /*
+         * 🔴 「返回」不写死路径：这一页**既是左栏/底部的顶层 tab，又从「我的」那一行进来**，
+         *    写死 `/settings` 会让"从 tab 进来"的那一半回错页。
+         *    形状与理由见 `lib/back.ts`（有上一页回上一页；书签/PWA 直开时回 `/`）。
+         */
+        onBack={() => goBackOr(navigate, '/')}
         right={
           <Button
             size="sm"
@@ -147,7 +153,7 @@ export default function Schedule() {
             className="anim-in mb-3 flex flex-wrap items-center gap-3 p-3.5"
             style={{
               background: perm === 'unsupported' ? 'var(--color-warnsoft)' : 'var(--color-accentsoft)',
-              border: `1px solid ${perm === 'unsupported' ? '#ecd9ae' : '#c3d6fb'}`,
+              border: `1px solid ${perm === 'unsupported' ? 'var(--color-warnline)' : 'var(--color-infoline)'}`,
               borderRadius: 6,
             }}
           >
@@ -155,14 +161,19 @@ export default function Schedule() {
               {perm === 'unsupported' ? <IconAlert size={17} /> : <IconBell size={17} />}
             </span>
             <div className="flex-1" style={{ fontSize: 12.5, lineHeight: 1.7 }}>
-              <div style={{ fontWeight: 620, color: perm === 'unsupported' ? '#8a5a12' : '#0d3f9e' }}>
+              <div
+                style={{
+                  fontWeight: 620,
+                  color: perm === 'unsupported' ? 'var(--color-warnink)' : 'var(--color-accentink)',
+                }}
+              >
                 {perm === 'unsupported'
                   ? '这个浏览器不支持系统通知'
                   : perm === 'denied'
                     ? '系统通知被拒绝了'
                     : `开启通知，上课前 ${REMIND_BEFORE} 分钟提醒你`}
               </div>
-              <div style={{ color: perm === 'unsupported' ? '#96702f' : '#2a5bb8', marginTop: 2 }}>
+              <div style={{ color: perm === 'unsupported' ? 'var(--color-warnink2)' : 'var(--color-ink2)', marginTop: 2 }}>
                 {perm === 'unsupported'
                   ? '会改用页内提醒（需要平台开着）。把网站装到手机桌面后再授权，通常就能收到。'
                   : perm === 'denied'
@@ -190,12 +201,12 @@ export default function Schedule() {
         ) : (
           <div
             className="anim-in mb-3 flex items-center gap-2.5 p-3"
-            style={{ background: 'var(--color-oksoft)', border: '1px solid #b9e2cf', borderRadius: 6 }}
+            style={{ background: 'var(--color-oksoft)', border: '1px solid var(--color-okline)', borderRadius: 6 }}
           >
             <span style={{ color: 'var(--color-ok)' }}>
               <IconCheck size={16} />
             </span>
-            <span style={{ fontSize: 12.5, color: '#0b6b4a' }}>
+            <span style={{ fontSize: 12.5, color: 'var(--color-okink)' }}>
               通知已开启 · 上课前 {REMIND_BEFORE} 分钟提醒
             </span>
           </div>

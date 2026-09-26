@@ -11,6 +11,7 @@ import {
   listTeachers,
   renameTeacher,
   resetTeacherPassword,
+  saveTeacherProfile,
   setDepartment,
   setRole,
   type CreatedAccount,
@@ -18,13 +19,19 @@ import {
   type DirTeacher,
 } from '../lib/accounts'
 import { DEPARTMENTS, departmentName } from '../lib/departments'
+import { goBackOr } from '../lib/back'
 import { canAssignRoles, canManageTeachers, roleName } from '../lib/roles'
 import { SUBJECTS, asSubjectCode, subjectName } from '../lib/subjects'
+import {
+  TEACHER_PROFILE_FIELDS,
+  loadTeacherProfiles,
+  type TeacherProfile,
+} from '../lib/teacherProfile'
 
 /**
- * 教师账号（建号 · 主学科 · 任课关系 · 身份 · 🆕部门 · 🆕显示姓名）。
+ * 教师账号（建号 · 主学科 · 任课关系 · 身份 · 🆕部门 · 🆕显示姓名 · 🆕教师档案）。
  *
- * 五件事在这一页上合起来才有用：
+ * 六件事在这一页上合起来才有用：
  *   ① **建号时就带上学科** —— 落进 `teachers.primary_subject_code`，
  *      新老师第一次登录时新建作业的学科 chip 就是预选好的那一科，不是物理。
  *   ② **任课关系**（谁教哪个班哪一科）—— 它决定这位老师登录后
@@ -41,12 +48,22 @@ import { SUBJECTS, asSubjectCode, subjectName } from '../lib/subjects'
  *   ⑤ 🆕 **显示姓名**（2026-09-28 第三轮）—— 姓名打错了、或写法要统一（"李老师" / "李某某"）时改它。
  *      它与部门一样是**档案属性**，判据同"建号"那一档；
  *      🔴 改的只是 `teachers.name`，**不动登录账号**：任教关系 / 身份 / 部门 / 登录方式一字不变。
+ *   ⑥ 🆕 **教师档案**（2026-10-06）—— **家庭住址 / 电话号码 / 邮箱**（用户口径原话：
+ *      「除了给老师建号，应该也可以记录老师的个人信息的，例如家庭住址，电话号码，邮箱」）。
+ *      · 表是 `teacher_profiles`（`schema.sql` §1.1，与 `students` 那一侧的
+ *        `student_profiles` 同一套做法：**RLS 只能按行收口、不能按列**，
+ *        所以个人信息放**单独一张表**，而不是 `teachers` 上加三列）。
+ *      · 判据：**读** = 自己那一行 ∪ `can_create_teacher_accounts()`；**写** = 同一个判据。
+ *        🔴 **班主任 / 年级主任不在里面** —— 老师的家庭住址不是班主任该看的。
+ *      · 三个字段**全可空**：没录过就是空着，建号那条路一个字都不碰它。
+ *      · 🔴 `email` 是**联系邮箱**，不是登录账号（登录名在 `auth.users.email`）。
  *
  * 🔴 这一页的按钮显隐只是"少点几下"，**不是判据**：
  *    真正的闸门在服务端（`functions/api/teacher-account.ts` 拿你的 JWT 去问
  *    数据库的 `can_create_teacher_accounts()` / `can_assign_roles()` / `is_super_admin()`）。
  *    所以就算有人把这一页的入口撬开，他也什么都做不成 —— 包括那条"显示姓名"：
- *    它摆不摆由 `canManage` 决定，写不写得进去由服务端问数据库决定。
+ *    它摆不摆由 `canManage` 决定，写不写得进去由服务端问数据库决定。教师档案同理
+ *    （读那一侧另有数据库的行策略兜着：读得到名单 ≠ 读得到档案）。
  */
 /**
  * 每一档身份的**范围形状** + 界面上的那句说明（下拉里的一条 = 一行）。
@@ -107,6 +124,13 @@ export default function TeacherAccounts() {
   const [newKey, setNewKey] = useState(0)
   const [created, setCreated] = useState<CreatedAccount | null>(null)
   const [target, setTarget] = useState<DirTeacher | null>(null)
+  /**
+   * 🆕 教师档案（家庭住址 / 电话号码 / 邮箱）—— **与名单分开读**：
+   * 名单是"谁能建号 / 教什么"（所有人都看得到），档案是**个人信息**（读得到的行少得多）。
+   * 读不到时 `profileErr` 写一句人话 —— 界面上「读不到」与「没录过」**分开说**（三态）。
+   */
+  const [profiles, setProfiles] = useState<Map<string, TeacherProfile>>(new Map())
+  const [profileErr, setProfileErr] = useState<string | null>(null)
 
   // 读名单 + 状态。⚠️ 不写成 useCallback：这一页没有需要稳定引用的下游，
   // 而 effect 里"同步 setState"的告警会盯着 useCallback 里的 setState（与 Files.tsx 同一写法）
@@ -121,6 +145,16 @@ export default function TeacherAccounts() {
     setDir(r.data)
     // 弹层里那份要跟着刷新，否则改完还显示旧身份
     setTarget((prev) => (prev ? (r.data.teachers.find((t) => t.id === prev.id) ?? null) : null))
+    /* 🆕 档案：拿得到名单的人**不一定**读得到档案（行由数据库的读策略收口）——
+       所以这一支单独读、单独报错，**绝不**因为读不到档案就让整页打不开 */
+    const p = await loadTeacherProfiles(r.data.teachers.map((t) => t.id))
+    if (p.ok) {
+      setProfiles(p.profiles)
+      setProfileErr(null)
+    } else {
+      setProfiles(new Map())
+      setProfileErr(p.message)
+    }
   }
 
   // 首屏拉一次（loading 初值就是 true，这里不再同步 setState）
@@ -149,9 +183,28 @@ export default function TeacherAccounts() {
     setTarget((prev) => (prev && prev.id === id ? { ...prev, name } : prev))
   }
 
+  /**
+   * 🆕 改完档案 → **就地改那一份**（不重拉整张名单，与 `afterRename` 同一条理由：
+   * 回话里就是存下来的三个值）。
+   */
+  const afterProfileSaved = (id: string, p: TeacherProfile) => {
+    setProfiles((prev) => new Map(prev).set(id, p))
+    setProfileErr(null)
+  }
+
   return (
     <>
-      <PageHead title="教师账号" sub="建号 · 学科 · 任课关系 · 身份" onBack={() => navigate(-1)} />
+      <PageHead
+        title="教师管理"
+        sub="建号 · 学科 · 任课关系 · 身份 · 部门"
+        /*
+         * 🔴 **不许裸用 `navigate(-1)`**（`lib/back.ts` 的纪律）：这一页能从
+         *    「行政管理」那一行点进来，**也能直接打开**（书签 / 手打地址）——
+         *    直开时这个 SPA 内部没有上一页，裸 `-1` 会把老师**带出应用**。
+         *    有上一页就回上一页；没有（`history.state.idx === 0`）就回「我的」。
+         */
+        onBack={() => goBackOr(navigate, '/settings')}
+      />
       <Page>
         {err ? (
           <Panel bodyClass="p-4">
@@ -233,6 +286,12 @@ export default function TeacherAccounts() {
                               : t.subject || '未设学科'}
                           </Tag>
                           {t.id === userId ? <Tag tone="idle">我</Tag> : null}
+                          {/*
+                            🔴 服务端给的 `teachable` 在这里**只读、不筛**：
+                            这一页是**管理名单**，所有人照旧在列 ——
+                            这个标记只是说清"他为什么不出现在那些选老师的下拉里"。
+                          */}
+                          {!t.teachable ? <Tag tone="idle">不参与任教分配</Tag> : null}
                         </span>
                         <span
                           className="mt-1 flex flex-wrap items-center gap-1"
@@ -349,6 +408,9 @@ export default function TeacherAccounts() {
         canAssign={canAssign}
         canManage={canManage}
         isMe={target?.id === userId}
+        profile={target ? (profiles.get(target.id) ?? null) : null}
+        profileErr={profileErr}
+        onProfileSaved={afterProfileSaved}
         onClose={() => setTarget(null)}
         onChanged={afterRoleChange}
         onRenamed={afterRename}
@@ -698,6 +760,9 @@ function TeacherSheet({
   canAssign,
   canManage,
   isMe,
+  profile,
+  profileErr,
+  onProfileSaved,
   onClose,
   onChanged,
   onRenamed,
@@ -705,9 +770,15 @@ function TeacherSheet({
   teacher: DirTeacher | null
   dir: Directory | null
   canAssign: boolean
-  /** 🆕 能不能维护**档案属性**（部门归属 / 显示姓名）—— 与"建号"同一档：超管 / 教务处 / 办公室主任 */
+  /** 🆕 能不能维护**档案属性**（部门归属 / 显示姓名 / 🆕教师档案）—— 与"建号"同一档：超管 / 教务处 / 办公室主任 */
   canManage: boolean
   isMe: boolean
+  /** 🆕 这位老师的档案（`teacher_profiles`）；`null` = 没读到 / 没这行 —— 两者由 `profileErr` 分开说 */
+  profile: TeacherProfile | null
+  /** 🆕 读不到档案时那一句人话（读到过就是 null） */
+  profileErr: string | null
+  /** 🆕 改完档案：把存下来的三个值就地写回那一份 */
+  onProfileSaved: (teacherId: string, p: TeacherProfile) => void
   onClose: () => void
   onChanged: (teacherId: string) => Promise<void>
   /** 🆕 改完姓名：把新名字就地写回那一行（`id` + `name`） */
@@ -722,6 +793,15 @@ function TeacherSheet({
   const [pwd, setPwd] = useState('')
   /** 🆕 显示姓名：**跟着这个人挂载**（`key` 是人 id，换个人自然是空的 —— 不串到别人身上） */
   const [name, setName] = useState('')
+  /**
+   * 🆕 教师档案的三个草稿值：同样**跟着这个人挂载**（`key` = 人 id）。
+   * 初值来自上面读到的 `profile`（没录过 = 空串），编辑时就地改，保存后由回话覆盖。
+   */
+  const [pDraft, setPDraft] = useState<Record<string, string>>(() => ({
+    homeAddress: profile?.homeAddress ?? '',
+    phone: profile?.phone ?? '',
+    email: profile?.email ?? '',
+  }))
 
   if (!teacher || !dir) {
     return (
@@ -748,6 +828,16 @@ function TeacherSheet({
   const needsSubject = shape === 'subject' || shape === 'grade_subject'
   const scopeOptions = shape === 'grade' || shape === 'grade_subject' ? dir.grades : shape === 'class' ? dir.classes : []
   const scopeReady = (!needsScope || !!scopeId) && (!needsSubject || !!newCode)
+
+  /** 🆕 档案那三个格：与读到的值比一比，**没改动就不让点保存**（与显示姓名那个按钮同一条） */
+  const savedProfile = {
+    homeAddress: profile?.homeAddress ?? '',
+    phone: profile?.phone ?? '',
+    email: profile?.email ?? '',
+  }
+  const pDirty = TEACHER_PROFILE_FIELDS.some(
+    (f) => String(pDraft[f.key] ?? '').trim() !== savedProfile[f.key],
+  )
 
   return (
     <Sheet open={!!teacher} onClose={onClose} title={teacher.name}>
@@ -799,6 +889,72 @@ function TeacherSheet({
               保存
             </Button>
           </div>
+        </div>
+      ) : null}
+
+      {/* ---- 🆕 教师档案（家庭住址 / 电话号码 / 邮箱） ----
+           判据在数据库（`teacher_profiles` 的读策略 = 自己那一行 ∪ 建号那一档，写 = 建号那一档，§36）；
+           这里只决定摆不摆："能建号的人"摆输入框，其余人**只读**——一行都读不到时什么都不摆。 */}
+      {canManage ? (
+        <div className="mt-5">
+          <span className="label">教师档案</span>
+          <div className="flex flex-col gap-2">
+            {TEACHER_PROFILE_FIELDS.map((f) => (
+              <label key={f.key} className="flex flex-col gap-1">
+                <span style={{ fontSize: 12, color: 'var(--color-ink3)' }}>{f.label}</span>
+                <input
+                  className="input"
+                  value={pDraft[f.key] ?? ''}
+                  maxLength={f.key === 'homeAddress' || f.key === 'email' ? 120 : 40}
+                  placeholder={f.hint}
+                  aria-label={f.label}
+                  onChange={(e) => setPDraft((prev) => ({ ...prev, [f.key]: e.target.value }))}
+                />
+              </label>
+            ))}
+            <div className="flex justify-end">
+              <Button
+                disabled={busy || !pDirty}
+                onClick={() =>
+                  void run(async () => {
+                    const r = await saveTeacherProfile(teacher.id, {
+                      homeAddress: (pDraft.homeAddress ?? '').trim(),
+                      phone: (pDraft.phone ?? '').trim(),
+                      email: (pDraft.email ?? '').trim(),
+                    })
+                    if (!r.ok) return { ok: false, message: r.message, detail: r.detail }
+                    const saved = r.data.profile
+                    onProfileSaved(teacher.id, { teacherId: teacher.id, ...saved })
+                    setPDraft({ homeAddress: saved.homeAddress, phone: saved.phone, email: saved.email })
+                    return { ok: true }
+                  })
+                }
+              >
+                保存
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : (profile && TEACHER_PROFILE_FIELDS.some((f) => String(profile[f.key] ?? '').trim() !== '')) ? (
+        <div className="mt-5">
+          <span className="label">教师档案</span>
+          <div className="flex flex-col gap-1">
+            {TEACHER_PROFILE_FIELDS.map((f) => {
+              const v = String(profile[f.key] ?? '').trim()
+              if (!v) return null
+              return (
+                <div key={f.key} className="flex gap-2" style={{ fontSize: 12.5, lineHeight: 1.7 }}>
+                  <span style={{ color: 'var(--color-ink3)', minWidth: 56 }}>{f.label}</span>
+                  <span className="min-w-0 flex-1 break-all">{v}</span>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      ) : profileErr ? (
+        <div className="mt-5">
+          <span className="label">教师档案</span>
+          <p style={{ fontSize: 12.5, color: 'var(--color-ink3)', lineHeight: 1.7 }}>{profileErr}</p>
         </div>
       ) : null}
 

@@ -640,7 +640,7 @@ await withLock(async () => {
     }
     if (NEGATIVE === 'p4-mail-not-required') {
       const anchor = `  if not v_rec.mail_ok then
-    raise exception '备份还没有发到超管邮箱（%）—— 删除流程停在这里：先把信发出去',
+    raise exception '备份还没有完成（%）—— 删除流程停在这里：先重新生成一次备份',
       coalesce(nullif(v_rec.mail_reason, ''), '原因不明');
   end if;`
       if (!text.includes(anchor)) throw new Error('p4-mail-not-required 的锚点没找到')
@@ -3022,7 +3022,7 @@ await withLock(async () => {
         gradeId: G23,
         confirmName: '高三（2023 级）',
       })
-      eq('T4e：🔴 **备份没发出 → 删不了**（400 + 数据库那句人话）', [del0.status, /备份还没有发到超管邮箱/.test(String(del0.json.message))], [400, true])
+      eq('T4e：🔴 **备份没发出 → 删不了**（400 + 数据库那句人话）', [del0.status, /备份还没有完成/.test(String(del0.json.message))], [400, true])
       eq('T4f：后置自证：年级还在、班还在、学生还在（一个字节都没删）', [
         await count(`grades where id = '${G23}'`),
         await count(`classes where id = '${C9}'`),
@@ -3834,6 +3834,35 @@ await withLock(async () => {
     eq('R24c：走班班那一行的负责人也换成了这位老师', one(await db.query(`select teacher_id::text as t from classes where id = '${chemId}'::uuid`)).t, U7.chem)
     const assign2 = one(await db.query(`select public.assign_stream_teacher($1::uuid, $2::uuid, $3::uuid) as v`, [U7.super, chemId, U7.chem])).v
     eq('R24d：再分配一次 → `added = 0`（幂等，不会补出第二行）', assign2.added, 0)
+
+    /* ---- R24e–R24g：**换一位老师 = 真的换**（2026-10-08 修的那条读不到的链） ----
+     *
+     * 🔴 原来只有 `insert … on conflict (class_id, subject_code, teacher_id) do nothing`：
+     *    换成**另一位**老师时那个 unique 元组不同 → 旧行 + 新行**都留着**，
+     *    而 `class_subjects` 上没有 (class_id, subject_code) 的唯一约束 ——
+     *    一个班一科两位老师是"合法"的脏数据；前端「第一条命中」回显 →
+     *    **刷新之后看到的可能是旧老师**（用户报的「分配的老师刷新就没了」）。
+     *
+     * 反向对照（当场可验）：删掉 `schema.sql` §32.3 里那句
+     *   `delete from class_subjects cs where cs.class_id = p_class_id and cs.subject_code = any (v_codes) …`
+     * → R24f 的 `n = 1` 必须红（会变成 2）。
+     *
+     * ⚠️ 用**生物**那个走班班（化学班被 R25 的"建作业"那几条绑着，不动它）。 */
+    const bioAssign1 = one(
+      await db.query(`select public.assign_stream_teacher($1::uuid, $2::uuid, $3::uuid) as v`, [U7.super, bioId, U7.chem]),
+    ).v
+    eq('R24e：先给生物走班班分配化学老师 → 补了 1 行', bioAssign1.added, 1)
+    /* ⚠️ 这一步**有副作用**（"换老师"要真的在库里发生），所以**调用本身不能删** ——
+       只是它的返回值下面几步都用不着（原来写成 `const bioSwap = one(…).v`，
+       而 `bioSwap` 一次都没被读过 → oxlint 的 `no-unused-vars` 记了一笔）。 */
+    await db.query(`select public.assign_stream_teacher($1::uuid, $2::uuid, $3::uuid) as v`, [U7.super, bioId, U7.super])
+    eq('R24f：🔴 再换成另一位老师 → 那一科**只剩新老师一行**（旧行必须被清掉）', (await authRowsOf(bioId)).length, 1)
+    eq(
+      'R24f2：换完之后那一行就是 (这个走班班, biology, 新老师)',
+      await authRowsOf(bioId),
+      [{ subject_code: 'biology', tid: U7.super }],
+    )
+    eq('R24g：走班班那一行的负责人也跟着换', one(await db.query(`select teacher_id::text as t from classes where id = '${bioId}'::uuid`)).t, U7.super)
 
     /* 🔴 R25：补完之后**那位老师建得了作业**（I47 的存在理由） */
     const after = await tryInsertAssignment(chemId, 'chemistry', '化学', U7.chem)

@@ -22,7 +22,7 @@
  */
 
 /** 发版号：**每次发版顺手改这里**（并同步 `app/package.json`、更新日志）。 */
-export const APP_VERSION = '0.9.1'
+export const APP_VERSION = '0.9.9'
 
 /**
  * 构建产物哈希（生产是 `/assets/index-XXXXXXXX.js` 里那一段）。

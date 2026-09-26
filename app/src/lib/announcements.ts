@@ -50,10 +50,14 @@ let annProbe: Promise<AnnouncementProbeState> | null = null
  * 🔴 这里**绝不能**把 `42703`（`undefined_column`）当成"表不在"，也**绝不能**只写一个
  *    泛化的 `/does not exist/i` —— `column <表>.<列> does not exist` 里也有这两个词，
  *    而那说的**只是"这一列不在"**，不是"这张表没建"。
+ *
+ * ⚠️ 2026-10-06 起这两条**导出**了：`lib/studentProfile.ts` 的"表存在性探针"直接用它们，
+ *    不再各写一套（**同一件事只有一个判定入口**；`nav-checks` D10-B 那张"表不在判据清单"
+ *    正是拿它的**声明处**当锚点的 —— 所以在别的文件里另起一个同名判据会让那一节变红）。
  */
-const MISSING_TABLE_RE = /42P01|PGRST205|Could not find the table|relation .+ does not exist/i
+export const MISSING_TABLE_RE = /42P01|PGRST205|Could not find the table|relation .+ does not exist/i
 /** 「**列**不在」：`42703` / `PGRST204` / `column … does not exist`（与上面那条成对，判据分流） */
-const MISSING_COL_RE = /42703|PGRST204|column .+ does not exist/i
+export const MISSING_COL_RE = /42703|PGRST204|column .+ does not exist/i
 
 async function probeAnnouncementTable(): Promise<AnnouncementProbeState> {
   const sb = getSupabase()

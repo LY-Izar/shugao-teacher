@@ -115,10 +115,10 @@ export function WordImport({
               className="mb-2.5 flex items-start gap-2 p-2.5"
               style={{
                 background: 'var(--color-warnsoft)',
-                border: '1px solid #ecd9ae',
+                border: '1px solid var(--color-warnline)',
                 borderRadius: 4,
                 fontSize: 11.5,
-                color: '#8a5a12',
+                color: 'var(--color-warnink)',
                 lineHeight: 1.6,
               }}
             >
@@ -160,6 +160,8 @@ export function WordImport({
                           objectFit: 'contain',
                           border: '1px solid var(--color-line2)',
                           borderRadius: 3,
+                          /* 🔴 这是**题图的衬底**（Word 里抠出来的图）：暗色下也偏白，
+                             透明度很低的图压在深底上会整个糊掉。 */
                           background: '#fff',
                         }}
                       />
@@ -174,7 +176,7 @@ export function WordImport({
                             padding: '0 3px',
                             borderRadius: 3,
                             background: 'var(--color-accent)',
-                            color: '#fff',
+                            color: 'var(--color-onaccent)',
                           }}
                         >
                           {q.imgs.length}
@@ -187,7 +189,7 @@ export function WordImport({
                       style={{
                         width: 34,
                         height: 34,
-                        border: '1px solid #f0c9c9',
+                        border: '1px solid var(--color-badline)',
                         borderRadius: 3,
                         background: 'var(--color-badsoft)',
                         color: 'var(--color-bad)',
@@ -281,10 +283,10 @@ export function WordImport({
           className="mt-2.5 flex items-start gap-2 p-2.5"
           style={{
             background: 'var(--color-badsoft)',
-            border: '1px solid #f0c9c9',
+            border: '1px solid var(--color-badline)',
             borderRadius: 4,
             fontSize: 11.5,
-            color: '#8f2b2b',
+            color: 'var(--color-badink)',
             lineHeight: 1.6,
           }}
         >

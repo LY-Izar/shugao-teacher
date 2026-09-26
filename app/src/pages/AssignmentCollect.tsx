@@ -49,6 +49,10 @@ function MockStack({ highlight }: { highlight?: string }) {
   return (
     <div
       className="absolute inset-0 flex flex-col justify-center gap-[2px] px-3"
+      /* 🔴 这一张是**纸**（"拍一张花名册"那个示意画面），**暗色下也是白的** ——
+         它是"被拍的那张实物"的示意图，不是一块 UI 面。换成 `--color-surface` 的话，
+         暗色下它变成深灰，整幅画面就读不成"一张白纸"了（那正是这张图要表达的东西）。
+         所以 `#fff` 与下面那三行（斑马纹 / 发丝线）**故意不令牌化**。 */
       style={{ background: '#fff', paddingBottom: 36, paddingTop: 12 }}
     >
       {Array.from({ length: rows }).map((_, i) => {
@@ -488,6 +492,7 @@ export default function AssignmentCollect() {
                     right: 0,
                     bottom: 0,
                     padding: '7px 10px',
+                    /* 压在**深色渐变**上的字（拍照预览底栏），亮暗两档都仍然是白 —— 故意不令牌化 */
                     color: '#fff',
                     fontSize: 11.5,
                     display: 'flex',
@@ -604,10 +609,10 @@ export default function AssignmentCollect() {
                       className="mt-2.5 flex items-start gap-2 p-2.5"
                       style={{
                         background: 'var(--color-warnsoft)',
-                        border: '1px solid #ecd9ae',
+                        border: '1px solid var(--color-warnline)',
                         borderRadius: 4,
                         fontSize: 11.5,
-                        color: '#8a5a12',
+                        color: 'var(--color-warnink)',
                         lineHeight: 1.6,
                       }}
                     >
@@ -632,10 +637,10 @@ export default function AssignmentCollect() {
                           ocrErr.msg.includes('没有班级') || ocrErr.msg.includes('没配置')
                             ? 'var(--color-warnsoft)'
                             : 'var(--color-badsoft)',
-                        border: '1px solid #f0c9c9',
+                        border: '1px solid var(--color-badline)',
                         borderRadius: 4,
                         fontSize: 11.5,
-                        color: '#8f2b2b',
+                        color: 'var(--color-badink)',
                         lineHeight: 1.6,
                       }}
                     >
@@ -788,14 +793,14 @@ export default function AssignmentCollect() {
                 className="mb-2 flex items-start gap-2.5 p-3"
                 style={{
                   background: 'var(--color-warnsoft)',
-                  border: '1px solid #ecd9ae',
+                  border: '1px solid var(--color-warnline)',
                   borderRadius: 6,
                 }}
               >
                 <span style={{ color: 'var(--color-warn)', marginTop: 1 }}>
                   <IconAlert size={16} />
                 </span>
-                <div style={{ fontSize: 12.5, color: '#8a5a12', lineHeight: 1.65 }}>
+                <div style={{ fontSize: 12.5, color: 'var(--color-warnink)', lineHeight: 1.65 }}>
                   {scan.likelyMisread.length ? (
                     <div>
                       很可能是
@@ -824,14 +829,14 @@ export default function AssignmentCollect() {
                 className="mb-2 flex items-center gap-2.5 p-3"
                 style={{
                   background: 'var(--color-oksoft)',
-                  border: '1px solid #b9e2cf',
+                  border: '1px solid var(--color-okline)',
                   borderRadius: 6,
                 }}
               >
                 <span style={{ color: 'var(--color-ok)' }}>
                   <IconCheck size={16} />
                 </span>
-                <span style={{ fontSize: 12.5, color: '#0b6b4a' }}>
+                <span style={{ fontSize: 12.5, color: 'var(--color-okink)' }}>
                   序列校验通过：识别到 <b className="num">{detectedCount}</b> 个学号，号码连续无重复。
                 </span>
               </div>
@@ -842,14 +847,14 @@ export default function AssignmentCollect() {
                 className="mb-3 flex items-start gap-2.5 p-3"
                 style={{
                   background: 'var(--color-badsoft)',
-                  border: '1px solid #f0c9c9',
+                  border: '1px solid var(--color-badline)',
                   borderRadius: 6,
                 }}
               >
                 <span style={{ color: 'var(--color-bad)', marginTop: 1, flexShrink: 0 }}>
                   <IconAlert size={18} />
                 </span>
-                <div style={{ fontSize: 12.5, color: '#8f2b2b', lineHeight: 1.7 }}>
+                <div style={{ fontSize: 12.5, color: 'var(--color-badink)', lineHeight: 1.7 }}>
                   <b>这张照片没认全，先别用它登记。</b>
                   <br />
                   应交 <b className="num">{allNos.length}</b> 人，只认出{' '}
@@ -863,7 +868,7 @@ export default function AssignmentCollect() {
                 <button
                   type="button"
                   className="shrink-0"
-                  style={{ fontSize: 12, color: '#8f2b2b', textDecoration: 'underline' }}
+                  style={{ fontSize: 12, color: 'var(--color-badink)', textDecoration: 'underline' }}
                   onClick={() => {
                     setStage('idle')
                     setScan(null)
@@ -880,14 +885,14 @@ export default function AssignmentCollect() {
                 className="mb-3 flex items-start gap-2.5 p-3"
                 style={{
                   background: 'var(--color-warnsoft)',
-                  border: '1px solid #ecd9ae',
+                  border: '1px solid var(--color-warnline)',
                   borderRadius: 6,
                 }}
               >
                 <span style={{ color: 'var(--color-warn)', marginTop: 1, flexShrink: 0 }}>
                   <IconAlert size={16} />
                 </span>
-                <div style={{ fontSize: 12.5, color: '#8a5a12', lineHeight: 1.65 }}>
+                <div style={{ fontSize: 12.5, color: 'var(--color-warnink)', lineHeight: 1.65 }}>
                   {lowConf.size > 0 ? (
                     <>
                       有 <b className="num">{lowConf.size}</b> 个号识别得不够确定
@@ -1176,7 +1181,7 @@ export default function AssignmentCollect() {
           <div
             className="scrim"
             onClick={() => setZoom(false)}
-            style={{ background: 'rgb(14 20 27 / .82)' }}
+            style={{ background: 'rgb(var(--color-scrimstrong) / .82)' }}
           />
           <div
             className="fixed inset-0 z-[51] grid place-items-center p-4"
@@ -1190,6 +1195,8 @@ export default function AssignmentCollect() {
                 aspectRatio: '16 / 10',
                 borderRadius: 6,
                 border: '1px solid var(--color-line2)',
+                /* 🔴 这是**照片的衬底**（原图放大）—— 暗色下也必须偏白，
+                   不然照片四边会和衬底糊在一起（"看不见照片边界"比"衬底太亮"糟得多）。 */
                 background: '#fff',
               }}
             >

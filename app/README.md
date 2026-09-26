@@ -31,17 +31,27 @@ npm run fetch:holidays   # 从中国政府网重新抓取放假安排
 
 ---
 
-## 🔐 云端环境变量（**邮件收件人由部署环境决定**）
+## 🔐 云端环境变量（**邮件收件人由部署环境决定**；用量读取由**只读**令牌决定）
 
 配在 **Cloudflare Pages → Settings → Variables and secrets**，**一律不进仓库**：
 
 | 变量 | 是什么 | 没配会怎样 |
 | --- | --- | --- |
 | `SUPABASE_SERVICE_ROLE_KEY` | 🔴 Secret（建号 / 改身份用） | 教师账号、教室端账号那两页打不开 |
+| `SUPABASE_PAT` | 🔴 Secret · **只读**的 Supabase 个人访问令牌（Personal Access Token，**只给读权限**，只用来读用量） | 出流量那一格显示"无法判断"（**灰**，不是红：读不到 ≠ 用超了） |
+| `SUPABASE_PROJECT_REF` | Supabase 项目 ref（项目 URL 里那一段，不是 Secret） | 同上：出流量那一格显示"无法判断"（灰） |
 | `RESEND_API_KEY` | 🔴 Secret（Resend 发信） | 邮件发不出去；接口**显式回错**（不静默） |
 | `ADMIN_NOTIFY_EMAIL` | **邮件收件人**（管理员自己的邮箱，不是 secret） | 邮件**一封也发不出去**：`sendMail()` 回 `reason:'no_to'` + 一句人话 |
 | `R2_ENDPOINT` / `R2_BUCKET` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | 备份归档到 R2 | 那一格显示"无法判断"，备份改留 Artifact |
 | `GITHUB_TOKEN` / `GITHUB_REPO` | 运维面板读 Actions（细粒度 PAT，只给 `Actions: Read`） | 那一格显示"无法判断" |
+
+🔴 **`SUPABASE_PAT` 必须是只读的**：它只用于读用量（Supabase Management API），
+**服务端不读它的值、也不回显它**（回话里只说"在 / 不在"，与 `GITHUB_TOKEN` 同一纪律）。
+⚠️ **没配（或两个都没配）时，面板上那一格是"无法判断"的灰，不是红** ——
+"读不到用量"与"用量超了"是两件事（三态纪律，见 `功能设计与不变量.md` §三）；
+两格**各读各的**：出流量读不到**不影响**库大小那一格，反之亦然。
+（`SUPABASE_PAT` / `SUPABASE_PROJECT_REF` 是 2026-10-07 随"数据库用量"那一格加的，
+之前漏在本表外。）
 
 🔴 **`ADMIN_NOTIFY_EMAIL` 为什么必须由部署方给**：2026-09-30 之前这个收件人地址是
 **写死在源码里**的，而本仓库**公开** —— 真实个人邮箱不能随仓库发给全世界。现在的口径：

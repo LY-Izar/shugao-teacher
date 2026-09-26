@@ -999,20 +999,33 @@ export const ADMIN_SECTIONS = [
 
 export type AdminTab = (typeof ADMIN_SECTIONS)[number]['key']
 
-/* ---------------- ① 数据库用量（配额按 **1 GB** 算 —— 用户拍板） ---------------- */
+/* ---------------- ① 数据库用量（配额按 **500 MB** 算 —— 免费版的库上限） ---------------- */
 
 /**
- * 🔴 **配额 = 1 GB**（用户 2026-09-28 拍板）。
+ * 🔴 **配额 = 500 MB**（Supabase **免费版**的库上限，控制台写 0.5 GB）。
+ *
+ * 2026-10-07 从 1 GB 改成 500 MB：1 GB 是当初的估数，而线上跑的就是免费版
+ * （控制台实测：数据库 0.053 GB / 0.5 GB）。配额写大一倍 = 百分比小一半 =
+ * 同一张"让人误判"的脸 —— 用户实测那一轮就是"控制台说 11%，面板说 1.4%"。
  *
  * ⚠️ 这个常量**只在这里**：服务端 `db_usage_report()`**只量字节数、不判色**
  *    （`admin-checks` 有一条反向断言：服务端回话里**不许**出现 `quotaBytes` ——
  *    否则就是"同一个数两处实现"，改一处忘一处时面板会开始骗人）。
  */
-export const DB_QUOTA_BYTES = 1_073_741_824
-/** 🟡 60%：够用但该看一眼了 */
+export const DB_QUOTA_BYTES = 500 * 1024 * 1024
+/** 🟡 60%：够用但该看一眼了（**三档线没动**） */
 export const DB_WARN_PCT = 60
-/** 🔴 85%：再写入就有失败风险 */
+/** 🔴 85%：再写入就有失败风险（**三档线没动**） */
 export const DB_BAD_PCT = 85
+/**
+ * 🔴 **出流量的限额 = 5 GB**（Supabase 免费版的**统一出流量**额度，按**账单周期**清零）。
+ *
+ * ⚠️ 与库配额同一条纪律：**只在这里** —— 服务端（`config-check.ts`）只回报
+ *    "用掉多少字节"，**不许**回报限额（那会变成同一个数两处实现）。
+ * ⚠️ 三档线**复用** `DB_WARN_PCT` / `DB_BAD_PCT`（60 / 85）：不新开第二套阈值 ——
+ *    两个额度是同一张账单上的两个格子，阈值也要是同一套。
+ */
+export const EGRESS_QUOTA_BYTES = 5 * 1024 ** 3
 /**
  * 🔴 **与百分比无关的一条红**：单份档案的 `question_meta` > 5 MB。
  *
@@ -1030,7 +1043,14 @@ export type DbArchiveFact = { assignmentId: string; className: string; bytes: nu
 export type DbFacts = {
   /** 服务端有没有拿到数（false = 没配密钥 / 接口没部署 → **灰**，不是绿也不是红） */
   configured: boolean
+  /** 🔴 **整库**字节数（`pg_database_size`）—— **百分比按它算** */
   totalBytes: number | null
+  /**
+   * ⚠️ **public schema 全部表**（含索引与 TOAST），不是"前 12 名" ——
+   *    面板要能算出「**用户表之和**」这个完整口径（`userTableBytes`）。
+   *    🔴 它与 `totalBytes`（整库）**不是一个口径**：差的那些是系统目录 / WAL /
+   *    其他 schema（auth / storage…）。两个数都要在屏上，别只显示一个。
+   */
   tables: DbTableFact[]
   questionMetaBytes: number | null
   archives: DbArchiveFact[]
@@ -1043,19 +1063,61 @@ export type DbJudgement = {
   /** 卡上那一句话（一般只放**一个数字**，照第一期 §3.4 的 L1 密度纪律） */
   text: string
   notes: string[]
-  /** 已经用掉的百分比（拿不到是 null） */
+  /** 已经用掉的百分比 —— 🔴 **按整库算**（拿不到是 null） */
   pct: number | null
   freeBytes: number | null
+  /** 「用户表之和」（`tables` 全量相加）；一张表都没探到 = null（**不许掰成 0**） */
+  userTableBytes: number | null
   /** 体积超标的那几份档案（**只有班级名与字节数**，没有题目内容） */
   oversized: DbArchiveFact[]
   /** 体积最大的那一份（永远显示：它是"还能不能再塞一份"的答案） */
   biggest: DbArchiveFact | null
 }
 
+/**
+ * 🔴 **出流量**（Supabase Management API 取的那一份）。
+ *
+ * 为什么它不是 `DbFacts` 的一部分：**两件事、两个来源** —— 库大小来自数据库
+ * （`db_usage_report()`），出流量来自 Supabase 的**账单周期**（数据库里量不到）。
+ * 所以**读不到出流量不影响库大小那一格**，反之亦然。
+ */
+export type EgressFacts = {
+  /** `SUPABASE_PAT` + `SUPABASE_PROJECT_REF` 在不在（不在 = **灰**，不是红、不是 0） */
+  configured: boolean
+  /** 本账单周期已用出流量（字节）；读不到是 **null**（**绝不掰成 0**） */
+  bytes: number | null
+  /** Management API 顺手报的库大小（**对账**用：与本页的整库数互相印证） */
+  dbSizeBytes: number | null
+  /** 本页那一格量到的**整库**字节数（`db_usage_report().totalBytes`）—— 对账的另一半 */
+  wholeDbBytes: number | null
+  /** 为什么读不到（**显式**；`null` = 拿到了）—— 静默成 0 正是这张卡这次的毛病 */
+  reason: string | null
+  /** 实际取数的端点（诊断用，**不含 PAT**） */
+  source: string
+  /** 账单周期起止（端点给了才有；界面用它说清"这是哪个周期"） */
+  periodStart: string | null
+  periodEnd: string | null
+}
+
+export type EgressJudgement = {
+  tone: Tone
+  text: string
+  notes: string[]
+  pct: number | null
+}
+
 export function judgeDbUsage(f: DbFacts): DbJudgement {
+  /*
+   * 「用户表之和」= `tables`（**全量** public schema）相加。
+   * ⚠️ 一张都没探到 → null（**无法判断**），不许写成 0 —— "0 字节"与"没读到"是两件事。
+   */
+  const userTableBytes = f.tables.length
+    ? f.tables.reduce((s, t) => s + (Number.isFinite(t.bytes) ? t.bytes : 0), 0)
+    : null
   const none: Omit<DbJudgement, 'tone' | 'text' | 'notes'> = {
     pct: null,
     freeBytes: null,
+    userTableBytes,
     oversized: [],
     biggest: null,
   }
@@ -1072,14 +1134,26 @@ export function judgeDbUsage(f: DbFacts): DbJudgement {
       ...none,
     }
   }
+  /* 🔴 **百分比按整库算**（`f.totalBytes` = `pg_database_size`，与控制台同一口径）。
+     曾经踩过的坑：按"用户表之和"算 → 面板 1.4% 而控制台 11% —— 面板显示 50% 时库早就满了。*/
   const pct = (f.totalBytes / DB_QUOTA_BYTES) * 100
   const freeBytes = Math.max(0, DB_QUOTA_BYTES - f.totalBytes)
   const oversized = f.archives.filter((a) => a.bytes > ARCHIVE_META_BAD_BYTES)
   const biggest = [...f.archives].sort((a, b) => b.bytes - a.bytes)[0] ?? null
 
-  const head = `数据库 ${humanBytes(f.totalBytes)} / ${humanBytes(DB_QUOTA_BYTES)}（${pct.toFixed(1)}%）`
+  const head = `数据库（整库）${humanBytes(f.totalBytes)} / ${humanBytes(DB_QUOTA_BYTES)}（${pct.toFixed(1)}%）`
   const notes: string[] = [
     `剩余 ${humanBytes(freeBytes)}`,
+    /*
+     * 🔴 **两个口径必须都写出来**，否则屏上就是"整库 53 MB（11%）"配一张加起来才
+     *    14.8 MB 的排行表 —— 看着自相矛盾（用户 2026-10-07 实测那一轮就是这样）。
+     */
+    userTableBytes === null
+      ? '⚠️ 逐表排行这一栏没读到 → "用户表之和"也算不出来（这一格是未知，不是 0）'
+      : `本页**整库** ${humanBytes(f.totalBytes)} 与逐表排行的**用户表之和** ${humanBytes(
+          userTableBytes,
+        )} 差 ${humanBytes(Math.max(0, f.totalBytes - userTableBytes))} —— 那不是矛盾：` +
+        '差的是**系统目录 / WAL / 其他 schema**（auth / storage / realtime…），**排名表本来就只统计 public 里那些表**。',
     /* ⚠️ 交叉引用：本卡回答"全库还剩多少"，**不重复**回答"哪一份档案最大" */
     '单份档案的体积排行就在**本页明细**里（与"全库还剩多少"是两个问题：一份档案就能到十几 MB）',
     '🔴 本卡**没有任何写操作**：不给"清理题图""压缩"按钮（题图是老师拍的原始材料，删了找不回来）',
@@ -1093,7 +1167,37 @@ export function judgeDbUsage(f: DbFacts): DbJudgement {
     )
   }
 
-  /* 红的第一条：**与百分比无关**（单份档案太大 = 这一份存不进去） */
+  /*
+   * 🔴 **红的第一条：口径自相矛盾**（整库 **<=** "用户表之和" = 物理上不可能）。
+   *
+   * 为什么含等号：整库（`pg_database_size`）**必然严格大于** public 里的表之和
+   * （系统目录、WAL、auth/storage 那些 schema 永远不为 0）。所以"**等于**"就已经是
+   * 旧版口径的指纹 —— 那个函数当初就是把用户表加起来当整库报的。
+   * ⚠️ 用 `>` 会漏掉最典型的那种情形（两个数一模一样），这一条就等于没写。
+   *
+   * 判成红而不是灰：**不是没结论，是确实不对**（数字就在那儿，只是口径错了）。
+   */
+  if (userTableBytes !== null && userTableBytes > 0 && userTableBytes >= f.totalBytes) {
+    return {
+      tone: 'bad',
+      text:
+        `口径不对：服务端报的整库 ${humanBytes(f.totalBytes)} 不比"用户表之和" ${humanBytes(
+          userTableBytes,
+        )} 大 —— 那个函数还是**旧版（只算用户表）**，百分比是偏小的`,
+      notes: [
+        '整库（`pg_database_size`）必然**大于** public 里那些表之和（系统目录 / WAL / 别的 schema 都不是 0）—— 相等或更小只可能是口径错了。',
+        '修法：到 Supabase → SQL Editor 重跑 `schema.sql` 第 26 段（`create or replace function` 是幂等的），再回本页刷新。',
+        ...notes,
+      ],
+      pct,
+      freeBytes,
+      userTableBytes,
+      oversized,
+      biggest,
+    }
+  }
+
+  /* 红的第二条：**与百分比无关**（单份档案太大 = 这一份存不进去） */
   if (oversized.length > 0) {
     return {
       tone: 'bad',
@@ -1106,6 +1210,7 @@ export function judgeDbUsage(f: DbFacts): DbJudgement {
       ],
       pct,
       freeBytes,
+      userTableBytes,
       oversized,
       biggest,
     }
@@ -1117,6 +1222,7 @@ export function judgeDbUsage(f: DbFacts): DbJudgement {
       notes: ['先去 G2 那一条确认最近一次备份是成功的（要清东西之前，先确保有退路）', ...notes],
       pct,
       freeBytes,
+      userTableBytes,
       oversized,
       biggest,
     }
@@ -1128,6 +1234,7 @@ export function judgeDbUsage(f: DbFacts): DbJudgement {
       notes: [`过了 ${DB_WARN_PCT}% 就该知道"是谁占的"（明细里有逐表排行）`, ...notes],
       pct,
       freeBytes,
+      userTableBytes,
       oversized,
       biggest,
     }
@@ -1144,9 +1251,83 @@ export function judgeDbUsage(f: DbFacts): DbJudgement {
     ],
     pct,
     freeBytes,
+    userTableBytes,
     oversized,
     biggest,
   }
+}
+
+/**
+ * 🔴 **出流量的三态**（与这张卡上"③ 备份"那一格同款）：
+ *   · 没配 `SUPABASE_PAT` / `SUPABASE_PROJECT_REF` → **灰**（读不到），**不是红**；
+ *   · 配了但取不回来（HTTP 错 / 回话里没有那个字段）→ **灰 + 把原因写出来**（**显式**，
+ *     绝不静默成一个 0 —— 静默成 0 正是这张卡这次的毛病）；
+ *   · 拿到了 → 按 5 GB 的三档线判色（阈值与库那一格共用，见 `EGRESS_QUOTA_BYTES`）。
+ */
+export function judgeEgress(f: EgressFacts): EgressJudgement {
+  const quota = humanBytes(EGRESS_QUOTA_BYTES)
+  if (!f.configured) {
+    return {
+      tone: 'unknown',
+      text: `出流量 —— 读不到（还没配 \`SUPABASE_PAT\` / \`SUPABASE_PROJECT_REF\`）`,
+      notes: [
+        f.reason ?? '（服务端没给出原因 —— 这本身就是一条要查的事）',
+        `⚠️ 读不到**不是**"还有 ${quota}"，也**不是**"超了"。这一格永远是灰的（与旁边"③ 备份"同款）。`,
+        '要它变绿：去 Cloudflare Pages → Settings → Variables and secrets 加一个**只读**的 `SUPABASE_PAT`（Supabase → Account → Access Tokens）与 `SUPABASE_PROJECT_REF`（项目 ref，20 位小写字母），然后重新部署。',
+        '🔴 面板**只回报它在不在**，**绝不回显、也不回长度** —— 这条纪律与 `GITHUB_TOKEN` 那一条逐字相同。',
+      ],
+      pct: null,
+    }
+  }
+  if (f.bytes === null) {
+    return {
+      tone: 'unknown',
+      text: `出流量 —— 读不到（${f.reason ?? '服务端没给原因'}）`,
+      notes: [
+        `取数端点：${f.source || '（未知）'}（Supabase Management API，只读 PAT）`,
+        `⚠️ 读不到**不是**"还有 ${quota}" —— 这一格永远是灰的，**不许按 0 算**。`,
+        '要它变绿：确认 PAT 没过期、`SUPABASE_PROJECT_REF` 是这个项目的 ref、PAT 至少能读用量。',
+      ],
+      pct: null,
+    }
+  }
+  const pct = (f.bytes / EGRESS_QUOTA_BYTES) * 100
+  const notes: string[] = [
+    `本账单周期已用 ${humanBytes(f.bytes)} / ${quota}（按**账单周期**清零，不是"每月 1 号"）`,
+    `来源：Supabase Management API（${f.source || '（未记录端点）'}）· 只读 PAT`,
+    '⚠️ 出流量涨起来比库快：教室端大屏每次刷新都在下载数据 —— 库还没满它先满。',
+  ]
+  if (f.dbSizeBytes !== null && f.wholeDbBytes !== null) {
+    const rel = (Math.abs(f.dbSizeBytes - f.wholeDbBytes) / Math.max(1, f.wholeDbBytes)) * 100
+    notes.push(
+      `对账：Management API 报的库大小 ${humanBytes(f.dbSizeBytes)} · ` +
+        `本页那一格（\`pg_database_size\`）${humanBytes(f.wholeDbBytes)} —— 差 ${rel.toFixed(1)}%；` +
+        '两者都是"整个库"的口径，差一点点正常（量数时刻 / WAL 记账不同），**差上一倍就要查那一格**。',
+    )
+  } else if (f.dbSizeBytes !== null) {
+    notes.push(
+      `对账：Management API 报的库大小 ${humanBytes(f.dbSizeBytes)}；本页那一格没读到 → **这次对不了账**。`,
+    )
+  } else {
+    notes.push('Management API 这次没回报库大小 → 对不了账（**这是"少了一条印证"，不是"对上了"**）。')
+  }
+  if (pct > DB_BAD_PCT) {
+    return {
+      tone: 'bad',
+      text: `出流量 ${humanBytes(f.bytes)} / ${quota}（${pct.toFixed(1)}%）—— 再超就限速`,
+      notes: ['节流顺序：先看教室端大屏的刷新频率与图片体积，再看作业档案里那些大题图。', ...notes],
+      pct,
+    }
+  }
+  if (pct >= DB_WARN_PCT) {
+    return {
+      tone: 'warn',
+      text: `出流量 ${humanBytes(f.bytes)} / ${quota}（${pct.toFixed(1)}%）—— 建议看一眼是谁在下载`,
+      notes: [`过了 ${DB_WARN_PCT}% 就该知道"流量花在哪"（教室端大屏 / 题图 / 导出）。`, ...notes],
+      pct,
+    }
+  }
+  return { tone: 'ok', text: `出流量 ${humanBytes(f.bytes)} / ${quota}（${pct.toFixed(1)}%）—— 够用`, notes, pct }
 }
 
 /* ---------------- ② 前端错误日志（24 小时条数） ---------------- */
@@ -1200,6 +1381,75 @@ export function judgeErrorLog(f: ErrorFacts): { tone: Tone; text: string; notes:
     return { tone: 'warn', text: `近 24 小时 ${f.last24h} 条错误${where}`, notes }
   }
   return { tone: 'ok', text: `近 24 小时 0 条错误${where}`, notes }
+}
+
+/* ---------------- ③ 🆕 最高管理员：**有几个**（锁死成一个之后，真正要防的是 0 个） ---------------- */
+
+/**
+ * 🔴 用户 2026-10-08 拍板：「超管锁死，只能有我一个」。
+ *
+ * 数据库那一半是 `schema.sql` §10.1.1 ⑥ 的**部分唯一索引** `teacher_roles_one_super`
+ * —— 有那条约束在，**多于 1 个是不可能的**。所以这一格**不是**"多 super 报警"：
+ * 报警只能告诉你有两个，而锁死让它根本多不了。
+ *
+ * 🔴 它真正要防的是**另一个状态：0 个 super** ——
+ *    那意味着**谁也管不了平台**（建号 / 指派身份 / 发公告 / 毕业删除全废），
+ *    而它最可能的来路是**自己把自己撤了**（超管在「教师账号」里点掉自己那条身份）。
+ *    这种故障**不报错**：接口一个个都还好，只是每一扇门都打不开。
+ *
+ * 三态（本项目最贵的一条教训：拿不到 ≠ 正常）：
+ *   · 读不到（表没建 / 没权限 / 断网）→ **灰**"无法判断"，绝不画绿；
+ *   · 0 个 → **红**；1 个 → **绿**；
+ *   · 多于 1 个 → **红**（有约束在就不可能，所以留着这一支是防"约束被人 drop 掉了"）。
+ */
+export const SUPER_ADMIN_EXPECTED = 1
+
+export type SuperAdminFacts = {
+  /** 读得到吗（false = 表没建 / 读不到 / 断网 → 灰） */
+  readable: boolean
+  /** 库里 `teacher_roles.role = 'super'` 的行数（读不到时是 null） */
+  count: number | null
+  unknownReason: string | null
+}
+
+export function judgeSuperAdminCount(f: SuperAdminFacts): { tone: Tone; text: string; notes: string[] } {
+  const notes = [
+    '🔴 数据库那条部分唯一索引（`teacher_roles_one_super`）保证**多不了** —— 所以这一格不是报警，是**健康检查**。',
+    '🔴 它防的是 **0 个**：一个都没有 = 谁也管不了平台（建号 / 指派身份 / 发公告全废），而且**不报错**。',
+    '要换人：先给新的人加上，再摘自己那条（摘自己最后一条会被服务端拦住 —— 见「教师账号」那一屏的提示）。',
+  ]
+  if (!f.readable || f.count === null) {
+    return {
+      tone: 'unknown',
+      text: '无法判断 —— 身份表（teacher_roles）读不到',
+      notes: [
+        f.unknownReason ?? '（没给出原因）',
+        '⚠️ 读不到**不是**"有 1 个"，也不是"一个都没有" —— 这一格永远是灰的。',
+        ...notes,
+      ],
+    }
+  }
+  if (f.count === 0) {
+    return {
+      tone: 'bad',
+      text: '一个最高管理员都没有 —— 谁也管不了平台',
+      notes: [
+        "🔴 补一个的办法：在 Supabase SQL Editor 里照 `schema.sql` §10.6 的角色指派模板插一条 `role = 'super'`。",
+        ...notes,
+      ],
+    }
+  }
+  if (f.count > SUPER_ADMIN_EXPECTED) {
+    return {
+      tone: 'bad',
+      text: `有 ${f.count} 个最高管理员 —— 约束没建起来（或被人手工 drop 掉了）`,
+      notes: [
+        '🔴 先跑一遍 `supabase/schema.sql`（第 10.1.1 段那条部分唯一索引会自己收口，只保留最早创建的那一个）。',
+        ...notes,
+      ],
+    }
+  }
+  return { tone: 'ok', text: '最高管理员 1 个（锁死：全平台只留一个）', notes }
 }
 
 /* ---------------- ③ 用户反馈（未处理数 + 邮件没发出去的数） ---------------- */

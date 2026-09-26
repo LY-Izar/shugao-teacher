@@ -134,14 +134,14 @@ export default function AssignmentGradeDone() {
             className="anim-in mb-4 flex items-start gap-2.5 p-3"
             style={{
               background: 'var(--color-warnsoft)',
-              border: '1px solid #ecd9ae',
+              border: '1px solid var(--color-warnline)',
               borderRadius: 6,
             }}
           >
             <span style={{ color: 'var(--color-warn)', marginTop: 1 }}>
               <IconAlert size={16} />
             </span>
-            <div style={{ fontSize: 12.5, color: '#8a5a12', lineHeight: 1.65 }}>
+            <div style={{ fontSize: 12.5, color: 'var(--color-warnink)', lineHeight: 1.65 }}>
               {simple ? '等级录入' : '批改完整度'} {Math.round(stats.completeness * 100)}%：还有{' '}
               {stats.total - stats.confirmedCount} 人{simple ? '没评等级' : '没打开过题号列表'}。
               {simple

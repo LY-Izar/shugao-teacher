@@ -17,6 +17,10 @@ import {
 import * as remote from './remote'
 import type { GradeRow } from './gradeSetup'
 import type { Term } from '../lib/terms'
+/* ⚠️ 只 import **类型**：档案的读写在 `lib/studentProfile.ts` / `lib/teacherProfile.ts`
+   （判据在数据库），store 只是"导出备份时要带上它们"的那一处落脚点。 */
+import type { StudentProfile } from '../lib/studentProfile'
+import type { TeacherProfile } from '../lib/teacherProfile'
 import * as noticeApi from '../lib/notices'
 import * as annApi from '../lib/announcements'
 import { makeClassrooms, makeDemoAssignments, makeDemoClasses, makeDemoExams, makeDemoSchedule, makeTemplates } from './seed'
@@ -148,6 +152,24 @@ type State = {
   calls: CallRecord[]
   /* ---- 课表 ---- */
   schedule: ScheduleItem[]
+  /**
+   * 🆕 档案（2026-10 备份缺口）：**学生档案 / 教师档案**，导出备份时带上它们。
+   *
+   * 🔴 为什么放进 state：`makeBackup(useStore.getState())` 是**同步**的，而这两张表要
+   *    异步读（`lib/studentProfile.ts` / `lib/teacherProfile.ts`）。放进 state 之后，
+   *    "导出"和"从备份恢复"读的是**同一处** —— 恢复完再导出，两份内容才可能逐字相等
+   *    （这是本项目对导入导出的验收口径）。
+   *
+   * ⚠️ 它**不是**这两张表的第二个真相：判据、读写口径都还在那两个 lib 里；
+   *    这里的数组只由"从备份恢复"填、只由"导出"读。
+   *    平时是空数组（页面自己的读走 `loadStudentProfiles()`），所以**不会**让界面
+   *    把"读不到"误当成"没录过"。
+   * ⚠️ **不进 localStorage**（`partialize` 没列它们）：家长电话 / 家庭住址这类 PII
+   *    不该因为"打开过设置页"就常驻在浏览器里。
+   */
+  studentProfiles: StudentProfile[]
+  /** 同上，教师档案（家庭住址 / 电话 / 邮箱）；只存**自己那一行**（见 `lib/teacherProfile.ts` 的读策略） */
+  teacherProfiles: TeacherProfile[]
   /* ---- 考试（见 功能设计与不变量.md §十四）---- */
   exams: Exam[]
   examScores: ExamScore[]
@@ -463,7 +485,22 @@ type State = {
     schedule: ScheduleItem[]
     calls: CallRecord[]
     classrooms: ClassroomClient[]
+    /* 🆕 老备份（v1–v3，没有这两项）→ **空数组**，不是"清掉云端那两张表"（见 lib/backup.ts） */
+    studentProfiles?: StudentProfile[]
+    teacherProfiles?: TeacherProfile[]
   }) => void
+  /**
+   * 清空**本机**的全部 state（危险操作）。
+   *
+   * ⚠️ 调用方只剩一个：`Workbench.tsx` 的「演示数据提示」横幅 ——
+   *    那条横幅**只在 `isDemo === true` 时渲染**（看到的本来就是演示数据），所以够不到真实数据。
+   *
+   * 🔴 `Settings.tsx`（我的）里原来那一栏「数据」的
+   *    「**清空全部数据**」按钮已于 2026-09-26 按用户要求**连那一栏一起删除**：
+   *    这个平台马上要装 1000+ 学生的真实数据，而它是个客户端按钮 ——
+   *    点错一次就是全校数据没了，且不可撤销。
+   *    **别再把它摆回设置页或其它无条件显示的地方**（见 功能设计与不变量.md §十七 17.3）。
+   */
   clearAll: () => void
   touchStreak: () => void
 }
@@ -710,6 +747,9 @@ export const useStore = create<State>()(
       examTables: 'unknown',
       noticesState: 'unknown',
       notices: [],
+      /* 🆕 档案：平时是空的（页面自己异步读那两张表）；只有"从备份恢复"会填它们 */
+      studentProfiles: [] as StudentProfile[],
+      teacherProfiles: [] as TeacherProfile[],
       noticesCanPublish: false,
       noticesScopes: [],
       noticesSeenAt: null,
@@ -1766,6 +1806,13 @@ export const useStore = create<State>()(
           schedule: b.schedule,
           calls: b.calls,
           classrooms: b.classrooms,
+          /*
+           * 🆕 档案：备份里没有（v1–v3 老备份）就是**空数组**。
+           * ⚠️ 空数组的语义是"这份备份里没带档案"，**不是**"把这两张表清空" ——
+           *    回推云端那一侧也照这个口径（不动没有档案的老师/学生，见 pushBackupToCloud）。
+           */
+          studentProfiles: b.studentProfiles ?? [],
+          teacherProfiles: b.teacherProfiles ?? [],
           isDemo: false,
         })
       },
@@ -1798,6 +1845,9 @@ export const useStore = create<State>()(
           schedule: [],
           exams: [],
           examScores: [],
+          /* 🆕 两份档案也一起清（别把上一个人的 PII 留在内存里 —— 全仓只此一处清空本机 state） */
+          studentProfiles: [],
+          teacherProfiles: [],
           examTables: 'unknown',
           noticesState: 'unknown',
           notices: [],
