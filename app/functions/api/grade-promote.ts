@@ -37,6 +37,7 @@ import {
   rpcBool,
   rpcJson,
   serviceKey,
+  svcRpc as svcRpcLib,
 } from './_lib/supa'
 import { beijingStamp, sendAuditedMail } from './_lib/mail'
 
@@ -66,38 +67,14 @@ type RpcOut = { ok: boolean; status: number; value: Record<string, unknown>; mes
  * 用管理员密钥调一个 RPC（绕过 RLS），**写路径只有这一处**。
  * ⚠️ `p_actor` 必须由调用方传进来，而且只能是 `caller()` 验出来的那个 id ——
  *    这是"service_role 不凭一个幽灵 id 写库"的唯一保证（照 `notice.ts` 的做法）。
+ *
+ * ⚠️ 2026-10-02：函数体已抽到 `_lib/supa.ts` 的 `svcRpc()`（`grade-setup.ts` 的
+ *    三个写入口现在也走它）—— 这里只留一个**转发 + 保留原返回形状**的薄壳，
+ *    免得同一段解析逻辑有两份、改一处忘一处。`RpcOut` 这个名字在本文件里照旧用。
  */
-async function svcRpc(
-  env: Env,
-  fn: string,
-  body: Record<string, unknown>,
-): Promise<RpcOut> {
-  const key = serviceKey(env)
-  const res = await fetch(`${baseUrl(env)}/rest/v1/rpc/${fn}`, {
-    method: 'POST',
-    headers: {
-      apikey: key,
-      Authorization: `Bearer ${key}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-  })
-  const text = await res.text()
-  let value: Record<string, unknown> = {}
-  let message = ''
-  try {
-    const v = JSON.parse(text || '{}') as Record<string, unknown>
-    if (v && typeof v === 'object' && !Array.isArray(v)) {
-      value = v
-      if (typeof v.message === 'string') message = v.message
-    } else if (Array.isArray(v)) {
-      value = {}
-    }
-  } catch {
-    /* 不是 JSON —— 当空处理，message 留空 */
-  }
-  if (!res.ok && !message) message = `服务端回 ${res.status}`
-  return { ok: res.ok, status: res.status, value, message }
+async function svcRpc(env: Env, fn: string, body: Record<string, unknown>): Promise<RpcOut> {
+  const r = await svcRpcLib(env, fn, body)
+  return { ok: r.ok, status: r.status, value: r.value, message: r.message }
 }
 
 /**

@@ -5849,44 +5849,61 @@ create unique index if not exists teacher_roles_one_grade_head
 --  这个年级的开学准备（录名单 / 建班 / 设班型 / 采选科）归谁管：
 --  **最高管理员 · 教务处 · 本年级的年级主任**。
 --  ⚠️ 班主任**不在**这一档（他能改本班学生的选科，但设不了班型、建不了班）。
-create or replace function public.can_manage_grade_setup(p_grade_id uuid)
+--
+--  🔴 **2026-10-02（集成修复）：本条与下面两条判据一律拆成 `_for` / 裸版两件套**（I33），
+--     与 §13.2 / §16.2 / §21.4 / §29.2 同一个形状。理由见本节末尾
+--     「27.13 服务端调写入口的正确形状」：三个写入口必须由服务端用 **service_role + 显式 `p_actor`**
+--     调（它们的 `revoke … from authenticated` 不能撤 —— 见 §27.12），
+--     而 `service_role` 下 `auth.uid()` 是 **NULL** —— 判据必须能接受"显式传进来的人"。
+--  ⚠️ `_for` 变体接受任意 uid，等于"以任意人身份问权限" → 一律 revoke（见 §27.12）。
+create or replace function public.can_manage_grade_setup_for(p_uid uuid, p_grade_id uuid)
 returns boolean
 language sql
 stable
 security definer
 set search_path = public
 as $$
-  select public.is_school_admin()
+  select public.is_school_admin_for(p_uid)
       or exists (
            select 1 from teacher_roles r
-            where r.teacher_id = auth.uid()
+            where r.teacher_id = p_uid
               and r.role = 'grade_head'
               and r.scope_type = 'grade'
               and r.scope_id = p_grade_id
          );
 $$;
 
+-- 当前登录者版本（前端读它决定摆不摆入口；写入口一律用 `_for` 那一份 + 显式人）
+create or replace function public.can_manage_grade_setup(p_grade_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$ select public.can_manage_grade_setup_for(auth.uid(), p_grade_id) $$;
+
 --  这个学生的选科归谁改：**最高管理员 · 教务处 · 本年级的年级主任 · 本班班主任**。
 --  ⚠️ 与 `can_manage_grade_setup` 的差别只有"班主任"这一档 —— 两条判据分开写，
 --     因为"能改一个学生的选科"与"能设定整个年级的班型"是**两种权限**。
-create or replace function public.can_edit_student_subject(p_student_id uuid)
+--  🔴 同样拆两件套（理由见 `can_manage_grade_setup_for` 上面那段与 §27.13）。
+create or replace function public.can_edit_student_subject_for(p_uid uuid, p_student_id uuid)
 returns boolean
 language sql
 stable
 security definer
 set search_path = public
 as $$
-  select public.is_school_admin()
+  select public.is_school_admin_for(p_uid)
       or exists (
            select 1
              from students s
              join classes c on c.id = s.class_id
             where s.id = p_student_id
               and (
-                   c.id in (select visible_class_ids())
+                   c.id in (select visible_class_ids_for(p_uid))
                 or exists (
                      select 1 from teacher_roles r
-                      where r.teacher_id = auth.uid()
+                      where r.teacher_id = p_uid
                         and r.role = 'grade_head'
                         and r.scope_type = 'grade'
                         and r.scope_id = c.grade_id
@@ -5895,18 +5912,35 @@ as $$
          );
 $$;
 
+create or replace function public.can_edit_student_subject(p_student_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$ select public.can_edit_student_subject_for(auth.uid(), p_student_id) $$;
+
 --  派生判据：这个班的开学准备（班型 / 建班）归谁管 → 直接走它所属年级那条。
-create or replace function public.can_manage_class_setup(p_class_id uuid)
+create or replace function public.can_manage_class_setup_for(p_uid uuid, p_class_id uuid)
 returns boolean
 language sql
 stable
 security definer
 set search_path = public
 as $$
-  select public.can_manage_grade_setup(
+  select public.can_manage_grade_setup_for(
+           p_uid,
            (select c.grade_id from classes c where c.id = p_class_id)
          );
 $$;
+
+create or replace function public.can_manage_class_setup(p_class_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$ select public.can_manage_class_setup_for(auth.uid(), p_class_id) $$;
 
 -- -------- 27.8 RLS：**读得宽、写得窄** --------
 alter table student_subjects enable row level security;
@@ -5951,7 +5985,20 @@ revoke all on student_subjects from anon;
 --     两次 PostgREST 请求 = 两个事务 = **可以只成功一半**，
 --     而那正是本期验收要钉死的那条（"改一半的情况不发生"）。
 --     PostgREST 一次 RPC = 一个事务，所以这里必须是一句 SQL 函数。
+--
+--  🔴 **2026-10-02（集成修复）：第一个参数是 `p_actor`**（照 §29.4 `promote_grades(p_actor)`
+--     的形状）。本函数 `revoke … from authenticated`（§27.12）不能撤 ——
+--     PostgREST 以 `authenticated` 角色执行，而 `service_role` 下 `auth.uid()` 是 **NULL**
+--     （那是属主身份），所以"谁干的"必须**显式传进来**；
+--     判据由 `can_edit_student_subject_for(p_actor, …)` 自己问数据库，服务端一个判据都不写。
+--     完整理由与"为什么不能改成 grant execute … to authenticated"见 §27.13。
+--
+--  ⚠️ **先 drop 旧签名、再建新的**（§21.3.2 的先例）：这三个函数在线上已经存在，
+--     而 `create or replace` **改不了签名**（那是重载）—— 留着旧签名 =
+--     同一个动作有两个入口、"少传一个 `p_actor` 也能过权限那道门"（判据会拿到 NULL）。
+drop function if exists public.write_student_subject(uuid, text, text, text[], text, uuid[]);
 create or replace function public.write_student_subject(
+  p_actor uuid,
   p_student_id uuid,
   p_kind text,
   p_primary text,
@@ -5969,7 +6016,7 @@ declare
   v_class_grade  uuid;
   v_members      uuid[];
 begin
-  if not public.can_edit_student_subject(p_student_id) then
+  if not public.can_edit_student_subject_for(p_actor, p_student_id) then
     raise exception '你没有改这个学生选科的权限';
   end if;
 
@@ -5984,7 +6031,7 @@ begin
 
   insert into student_subjects (student_id, primary_code, second_codes, kind, note, updated_by, updated_at)
   values (p_student_id, coalesce(p_primary, ''), coalesce(p_second, '{}'), p_kind,
-          coalesce(p_note, ''), auth.uid(), now())
+          coalesce(p_note, ''), p_actor, now())
   on conflict (student_id) do update
      set primary_code = excluded.primary_code,
          second_codes = excluded.second_codes,
@@ -6027,15 +6074,17 @@ end $$;
 
 -- -------- 27.10 🔑 批量写任教关系（**一个事务**）--------
 --  `class_subjects` 在数据库层**零写权限**（§27.8 同款纪律），所以它只能走
---  **service_role 的服务端 Function**；那个 Function 拿调用者 JWT 问
---  `can_manage_class_setup()`，再调本函数写。
+--  **service_role 的服务端 Function**；那个 Function 用 **service_role + 显式 `p_actor`**
+--  调本函数，判据由 `can_manage_grade_setup_for(p_actor, …)` 自己问数据库（见 §27.13）。
 --
 --  🔴 一个 RPC = 一个事务：**要么全成、要么全不成**（本期验收的那条断言）。
 --  🔴 顺序纪律：**先解析、再逐行校验、最后才写** —— 任何一行非法都还没碰过一张表。
 --
 --  入参形状（服务端已经做过形状校验；这里只信类型、不信内容）：
---    [{ "class_id": "<uuid>", "subject_code": "physics", "teacher_id": "<uuid>" }, …]
-create or replace function public.bulk_write_class_subjects(p_rows jsonb)
+--    · `p_actor`：**谁在写**（服务端从调用者 JWT 里验出来的那个 id）
+--    · `p_rows`：[{ "class_id": "<uuid>", "subject_code": "physics", "teacher_id": "<uuid>" }, …]
+drop function if exists public.bulk_write_class_subjects(jsonb);
+create or replace function public.bulk_write_class_subjects(p_actor uuid, p_rows jsonb)
 returns jsonb
 language plpgsql
 security definer
@@ -6088,7 +6137,7 @@ begin
 
   /* ② 判据（**每个班各自的年级都问一遍**；全部通过才往下走） */
   for v_g in select distinct g from unnest(v_grades) g where g is not null loop
-    if not public.can_manage_grade_setup(v_g) then
+    if not public.can_manage_grade_setup_for(p_actor, v_g) then
       raise exception '你没有设定这个年级任课关系的权限（年级 %）', v_g;
     end if;
   end loop;
@@ -6134,11 +6183,16 @@ end $$;
 --  🔴 **顺序纪律**：先校验完**每一行**，再碰任何一张表。
 --
 --  入参形状（服务端的形状校验只保证"是数组"；内容一律在这里判）：
---    [{ "class_no": "1", "student_no": "01", "name": "王志远", "serial": "2026001" }, …]
+--    · `p_actor`：**谁在导**（服务端从调用者 JWT 里验出来的那个 id）——
+--      `service_role` 下 `auth.uid()` 是 NULL，所以它同时承担三件事：
+--      判据（`can_manage_grade_setup_for`）/ 新建班的 `teacher_id` / 审计口径（见 §27.13）。
+--    · `p_rows`：[{ "class_no": "1", "student_no": "01", "name": "王志远", "serial": "2026001" }, …]
 --    · `serial` 留空 → 交给 §20 的 `students_serial_fill()` 触发器**自动发号**
 --      （**导入不许自己算号** —— 算号只有那一处）。
 --    · `class_no` = 班号，**按它自动建班**（0 步：名单里出现几个班号就建几个班）。
+drop function if exists public.bulk_import_roster(uuid, jsonb, text);
 create or replace function public.bulk_import_roster(
+  p_actor uuid,
   p_grade_id uuid,
   p_rows jsonb,
   p_class_name_template text default '%s'
@@ -6152,7 +6206,7 @@ declare
   v_n             int := 0;
   v_grade_name    text;
   v_school_id     uuid;
-  v_teacher_id    uuid := auth.uid();
+  v_teacher_id    uuid := p_actor;
   v_class_id      uuid;
   v_class_ids     uuid[] := '{}';
   v_students      int := 0;
@@ -6173,7 +6227,7 @@ begin
     raise exception '这个年级不存在';
   end if;
 
-  if not public.can_manage_grade_setup(p_grade_id) then
+  if not public.can_manage_grade_setup_for(p_actor, p_grade_id) then
     raise exception '你没有给这个年级录名单的权限（教务处 / 最高管理员 / 本年级的年级主任）';
   end if;
 
@@ -6316,13 +6370,58 @@ end $$;
 --    ① 以 authenticated 身份 `select public.write_student_subject(...)` → **42501**
 --    ② 以 authenticated 身份 `select public.bulk_write_class_subjects('[]')` → **42501**
 --    ③ 以 authenticated 身份 `select public.bulk_import_roster(...)` → **42501**
---    ④ 以 service_role 身份调 → 通（或报出差的那一行的人话）
-revoke all on function public.write_student_subject(uuid, text, text, text[], text, uuid[])
+--    ④ 以 service_role 身份调（带显式 `p_actor`）→ 通（或报出差的那一行的人话）
+--
+--  🔴 **这三条 revoke 不能撤**（2026-10-02 复核，见 §27.13）：
+--     `authenticated` 对 `class_subjects` / `class_members` 是**零写权限**的表，
+--     而这三个函数是 `security definer`（绕过 RLS）—— grant 出去 =
+--     "任何登录者都能凭一个浏览器的 anon key 直接批量写任教关系 / 建班 / 写选科"，
+--     并且绕过服务端的形状校验与上限。所以修法只能是**服务端改用 service_role + 显式 `p_actor`**。
+revoke all on function public.write_student_subject(uuid, uuid, text, text, text[], text, uuid[])
   from public, anon, authenticated;
-revoke all on function public.bulk_write_class_subjects(jsonb)
+revoke all on function public.bulk_write_class_subjects(uuid, jsonb)
   from public, anon, authenticated;
-revoke all on function public.bulk_import_roster(uuid, jsonb, text)
+revoke all on function public.bulk_import_roster(uuid, uuid, jsonb, text)
   from public, anon, authenticated;
+
+--  `_for` 变体一律 revoke（接受任意 uid = "以任意人身份问权限"；只留给属主核对 / 服务端经 RPC 调）
+revoke all on function public.can_manage_grade_setup_for(uuid, uuid) from public, anon, authenticated;
+revoke all on function public.can_edit_student_subject_for(uuid, uuid) from public, anon, authenticated;
+revoke all on function public.can_manage_class_setup_for(uuid, uuid) from public, anon, authenticated;
+
+--  裸版（读 `auth.uid()`）给 authenticated：`canSetup` 与 `can_edit_student_subject` 的 RLS 策略用它
+grant execute on function public.can_manage_grade_setup(uuid) to authenticated;
+grant execute on function public.can_manage_class_setup(uuid) to authenticated;
+revoke all on function public.can_manage_grade_setup(uuid) from anon;
+revoke all on function public.can_manage_class_setup(uuid) from anon;
+
+-- -------- 27.13 🔴 服务端调这三个写入口的**正确形状**（2026-10-02 集成修复）--------
+--  事故：`app/functions/api/grade-setup.ts` 拿**调用者 JWT** 去 `POST /rest/v1/rpc/<函数名>`
+--  调这三个写函数，而 PostgREST 以 `authenticated` 角色执行 —— 撞上 §27.12 的
+--  `revoke … from authenticated` → **线上必 42501**（"录名单 / 批量写任教关系 / 写选科"全线导不进去）。
+--  而当时的 `grade-checks`（269 条）全绿：那些断言是**以属主 / 服务角色**跑的 ——
+--  "各层各自绿、端到端没人验"。
+--
+--  ✅ 正确形状（与 §29.4 `promote_grades(p_actor)` **同一套**，全仓一个形状而不是两个）：
+--    ① 服务端用 `caller()` 拿调用者 JWT 问 `/auth/v1/user`，验出 `me.id`（**身份只有这一处来源**）；
+--    ② 用 **service_role**（属主身份、绕过 RLS）调 `POST /rest/v1/rpc/<函数名>`；
+--    ③ **显式传 `p_actor: me.id`** —— `service_role` 下 `auth.uid()` 是 **NULL**，
+--       "谁干的"数据库自己问不出来；
+--    ④ 判据**仍然只有数据库一处**：函数体里问 `*_for(p_actor, …)`；服务端一个判据都不写
+--       （前端只决定摆不摆入口）。
+--    ⑤ `bulk_import_roster` 里新建班的 `teacher_id` 也用 `p_actor`（原来是 `auth.uid()`，
+--       在 service_role 下会是 NULL → 建出没有班主任的班）。
+--
+--  ⛔ **为什么不改成 `grant execute … to authenticated`**（看起来只改一行）：
+--    · 三个函数**自己确实有判据**（`can_manage_grade_setup_for` / `can_edit_student_subject_for`），
+--      所以 grant 之后不会变成"谁都能写" —— 但那是**碰巧**安全，不是设计上安全：
+--      它们是 `security definer`，而 `authenticated` 对 `class_subjects` / `class_members`
+--      是零写权限的表（§27.8）—— 一旦哪天函数体里少一句判断，grant 就是**直接开一个绕过 RLS 的写口**；
+--    · 谁也**绕不过服务端那一层**：形状校验、3000 / 2000 行上限、人话错误码都在那儿；
+--      grant 之后浏览器可以拿 anon key 直接打 RPC，同一件事就有**两个入口**（本项目最贵的一类坑）；
+--    · §29 已经确立了"service_role + 显式人"这一个形状（§29 的文件头逐字写了为什么不照 §27 那样做）——
+--      两种形状并存，下一个写入口的作者必然选错。
+-- ============================================================
 
 -- -------- 27.12 核对（把下面整段粘进 SQL 编辑器）--------
 --  ① 三个届回填到位：
@@ -6339,9 +6438,11 @@ revoke all on function public.bulk_import_roster(uuid, jsonb, text)
 --  -- select indexname from pg_indexes where tablename='teacher_roles' and indexname='teacher_roles_one_grade_head';
 --
 --  ④ 写入口只有服务端能调（三条都要 42501）：
---  -- select public.write_student_subject('00000000-0000-0000-0000-000000000000','standard','physics','{chemistry,biology}','', '{}');
---  -- select public.bulk_write_class_subjects('[]'::jsonb);
---  -- select public.bulk_import_roster('00000000-0000-0000-0000-000000000000','[]'::jsonb);
+--  -- select public.write_student_subject('00000000-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000000','standard','physics','{chemistry,biology}','', '{}');
+--  -- select public.bulk_write_class_subjects('00000000-0000-0000-0000-000000000000','[]'::jsonb);
+--  -- select public.bulk_import_roster('00000000-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000000','[]'::jsonb);
+--  -- 以及 `_for` 那三个（接受任意 uid，同样不许 authenticated 调）：
+--  -- select public.can_manage_grade_setup_for('00000000-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000000');
 --
 --  ⑤ `class_subjects` 换 unique 之前**必须先跑这一条**（有重复时建索引会失败）：
 --  -- select class_id, subject_code, teacher_id, count(*) from class_subjects
@@ -6351,7 +6452,7 @@ revoke all on function public.bulk_import_roster(uuid, jsonb, text)
 --  -- select indexname from pg_indexes where tablename='class_subjects';
 --
 --  ⑥ 批量函数的人话错误码（每一条都要报出"第几行 + 为什么"）：
---  -- select public.bulk_write_class_subjects('[{"class_id":"00000000-0000-0000-0000-000000000000","subject_code":"physics","teacher_id":"00000000-0000-0000-0000-000000000000"}]'::jsonb);
+--  -- select public.bulk_write_class_subjects('00000000-0000-0000-0000-000000000000','[{"class_id":"00000000-0000-0000-0000-000000000000","subject_code":"physics","teacher_id":"00000000-0000-0000-0000-000000000000"}]'::jsonb);
 --  -- 期望：报「第 1 行的班级不存在」
 -- ============================================================
 
@@ -6517,6 +6618,19 @@ as $$
 $$;
 
 --  这个学年属于哪所学校（写入口要用它判权限）。
+--  🔴 与 §27.13 同一个形状：判据拆成 `_for` / 裸版两件套 ——
+--     `write_academic_year()` 的 `revoke … from authenticated`（见下）不能撤，
+--     服务端用 service_role 调它，而 service_role 下 `auth.uid()` 是 NULL。
+create or replace function public.can_manage_terms_for(p_uid uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select public.is_school_admin_for(p_uid);
+$$;
+
 create or replace function public.can_manage_terms()
 returns boolean
 language sql
@@ -6524,13 +6638,16 @@ stable
 security definer
 set search_path = public
 as $$
-  select public.is_school_admin();
+  select public.can_manage_terms_for(auth.uid());
 $$;
 
 -- -------- 28.5 教导处的写入口：设一个学年的上下半期（**一个事务**）--------
---  入参：学年名 + 两个半期的起止（4 个日期）。一个 RPC = 一个事务 ——
---  "只改了上半期、下半期还是老日期"是这一页最不能接受的失败样子。
+--  入参：**谁在写（`p_actor`）** + 学年名 + 两个半期的起止（4 个日期）。
+--  一个 RPC = 一个事务 —— "只改了上半期、下半期还是老日期"是这一页最不能接受的失败样子。
+--  ⚠️ 先 drop 旧签名（同 §27.13：`create or replace` 改不了签名，旧的重载会留下"另一个入口"）。
+drop function if exists public.write_academic_year(text, date, date, date, date, date, date);
 create or replace function public.write_academic_year(
+  p_actor uuid,
   p_name text,
   p_year_start date,
   p_year_end date,
@@ -6547,7 +6664,7 @@ declare
   v_school uuid;
   v_year   uuid;
 begin
-  if not public.can_manage_terms() then
+  if not public.can_manage_terms_for(p_actor) then
     raise exception '只有教导处 / 最高管理员能设学年与学期';
   end if;
   if coalesce(btrim(p_name), '') = '' then
@@ -6593,8 +6710,9 @@ begin
   return jsonb_build_object('ok', true, 'academicYearId', v_year, 'name', btrim(p_name));
 end $$;
 
-revoke all on function public.write_academic_year(text, date, date, date, date, date, date)
+revoke all on function public.write_academic_year(uuid, text, date, date, date, date, date, date)
   from public, anon, authenticated;
+revoke all on function public.can_manage_terms_for(uuid) from public, anon, authenticated;
 
 grant execute on function public.beijing_today() to authenticated;
 grant execute on function public.term_of_date(date) to authenticated;

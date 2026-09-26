@@ -6,7 +6,19 @@
  *    但"自己校验"不等于"在 TypeScript 里再写一遍规则" —— 判据只有一处，在数据库：
  *      · `can_manage_grade_setup(grade_id)` —— 录名单 / 建班 / 设班型 / 写任教关系
  *      · `can_edit_student_subject(student_id)` —— 改一个学生的选科
- *    这里拿**调用者自己的 JWT** 走 `POST /rest/v1/rpc/<函数名>` 去问（`auth.uid()` 就是调用者）。
+ *    **读**（`canSetup`）拿**调用者自己的 JWT** 走 `POST /rest/v1/rpc/<函数名>` 去问
+ *    （`auth.uid()` 就是调用者）。
+ *
+ * 🔴 **写：service_role + 显式 `p_actor`**（2026-10-02 集成修复 —— 与 `grade-promote.ts` §29 **同一套形状**）。
+ *    三个写函数在 `schema.sql` §27.12 是 `revoke … from authenticated` 的，而 PostgREST
+ *    以 `authenticated` 角色执行 —— 原来拿调用者 JWT 调它们，**线上必 42501**
+ *    （"录名单 / 批量写任教关系 / 写选科"三条路全线导不进去，而当时的门禁全绿，
+ *    因为那些断言是以属主 / 服务角色跑的）。所以：
+ *      · 用 `caller()` 从调用者 JWT 验出 `me.id`（**身份只有这一处来源**）；
+ *      · 用 **service_role** 调 RPC（`svcRpc()`）；
+ *      · **显式传 `p_actor: me.id`** —— service_role 下 `auth.uid()` 是 **NULL**，
+ *        数据库自己问不出"谁干的"；判据仍是数据库的 `*_for(p_actor, …)` 说了算。
+ *    完整理由见 `schema.sql` §27.13。
  *
  * 🔴 **一个事务**：三个写入动作**各是一次 RPC**，不是一串 PostgREST 请求。
  *    PostgREST 一次 RPC = 一个事务 —— 这正是本期验收要钉的那条
@@ -17,6 +29,8 @@
  *          一条非法只挡那一条、并报出是哪个人；而"整批回滚"会让用户重贴 300 行。
  *          本期唯一要求"整批原子"的是**名单导入**与**任教关系**那两条。）
  *      · `classSubjectBulk`  → `bulk_write_class_subjects()`（一个事务）
+ *      · `academicYearWrite` → `write_academic_year()`（学年 + 上下半期，一个事务 ——
+ *        它同样是 `revoke … from authenticated` 的，所以走**同一条** service_role + `p_actor` 链）
  *
  * 🔴 **上限**（超了报人话，不静默截断）—— 与 `app/src/lib/gradeSetup.ts` 里那两个常量
  *    **必须同值**（`nav-checks.mjs` 的 A11 逐字比对）：
@@ -28,6 +42,8 @@
  *   SUPABASE_ANON_KEY / VITE_SUPABASE_ANON_KEY
  *   SUPABASE_SERVICE_ROLE_KEY                        （🔴 Secret，绝不能进前端、绝不能进仓库）
  */
+
+import { anonKey, baseUrl, caller, json, rpcBool, svcRpc } from './_lib/supa'
 
 type Env = {
   SUPABASE_URL?: string
@@ -74,142 +90,27 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
-function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: {
-      'Content-Type': 'application/json; charset=utf-8',
-      'Cache-Control': 'no-store',
-    },
-  })
-}
+/* ---------------- 三条链（`json()` / `svcRpc()` / `caller()` 都在 `_lib/supa.ts`） ----------------
+ * ⚠️ 少了的是那两个"留着备用"的本地 `sb()` / `sbAs()`（一直没人调）：
+ *    这一页今天**读**走 `rpcBool()`（调用者 JWT）、**写**走 `svcRpc()`（service_role + `p_actor`），
+ *    两条链都在 `_lib/supa.ts` 里各只有一份 —— 别在这里再长出一份。
+ */
 
-function baseUrl(env: Env): string {
-  return (env.SUPABASE_URL || env.VITE_SUPABASE_URL || '').replace(/\/+$/, '')
-}
-
-function anonKey(env: Env): string {
-  return env.SUPABASE_ANON_KEY || env.VITE_SUPABASE_ANON_KEY || ''
-}
-
-/** 用**调用者的 JWT** 调 Supabase（RLS 生效）—— 这一页的**读**都走它
- *  ⚠️ 今天这三个动作**全是写**，所以它暂时没有调用方；留着是因为
- *     "读走调用者 JWT、写走 service_role 且写之前先问判据"是这一页的形状说明。
- *     下一个动作（比如"读这个年级的任课关系"）会直接用它 —— 别把它当死代码删掉。 */
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function sbAs(env: Env, token: string, path: string, init?: RequestInit): Promise<Response> {
-  return fetch(`${baseUrl(env)}${path}`, {
-    ...init,
-    headers: {
-      apikey: anonKey(env),
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-      ...(init?.headers ?? {}),
-    },
-  })
-}
+/** 第 27 段的函数还没建时的形状：PostgREST 404 / `PGRST202`，或 PostgreSQL 的 `42883` */
+const FN_MISSING_RE = /42P01|42703|42883|PGRST20[245]|does not exist|schema cache/i
 
 /**
- * 用**管理员密钥**调 Supabase（绕过 RLS）。
- *
- * ⚠️ 今天**没有调用方**：三个写入动作全部走 `rpc()`（拿**调用者 JWT** 调 RPC，
- *    由数据库的 `security definer` 函数把关）。
- *    这比"用管理员密钥直写表"更好 —— 少一次"我在 TypeScript 里判权限"的机会。
- *    留着它是因为下一期的动作（改班型 / 建走班班）大概率要直写 `classes`。
+ * 写入口失败 → HTTP 码（**三种形状必须分开报**）：
+ *   · `42501`（`permission denied for function`）= 数据库的 execute 权限挡住 —— 那是**部署事故**
+ *     （说明服务端没有用 service_role 调，或那一段 SQL 的 grant 被改过），给 500 而不是 403：
+ *     它不是"这个人没权限"，而是"这个接口坏了"。**不许静默成"你没权限"。**
+ *   · 数据库 `raise exception` 说"你没权限" → 403（判据挡住）
+ *   · 其余（"第 3 行缺班号"这种）→ 400
  */
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function sb(env: Env, path: string, init?: RequestInit): Promise<Response> {
-  const key = env.SUPABASE_SERVICE_ROLE_KEY ?? ''
-  return fetch(`${baseUrl(env)}${path}`, {
-    ...init,
-    headers: {
-      apikey: key,
-      Authorization: `Bearer ${key}`,
-      'Content-Type': 'application/json',
-      ...(init?.headers ?? {}),
-    },
-  })
-}
-
-type Read = { ok: boolean; status: number; rows: Record<string, unknown>[]; text: string }
-
-async function read(res: Response): Promise<Read> {
-  const text = await res.text()
-  let rows: Record<string, unknown>[] = []
-  try {
-    const v = JSON.parse(text || '[]')
-    if (Array.isArray(v)) rows = v as Record<string, unknown>[]
-  } catch {
-    rows = []
-  }
-  return { ok: res.ok, status: res.status, rows, text }
-}
-
-const isMissing = (r: Read) =>
-  r.status === 404 ||
-  /42P01|42703|PGRST20[45]|PGRST202|does not exist|schema cache/i.test(r.text)
-
-/**
- * 调一个 RPC，**回原样的结果**（成功时 `rows[0]` 是那个 jsonb 返回值）。
- *
- * 🔴 数据库用 `raise exception` 报的都是**人话**（"第 3 行缺班号"）——
- *    那些话必须**原样带给用户**，不能吞掉换成"保存失败"。
- *    `status === 400` 且 `message` 是 `P0001`（raise_exception）时取那句话。
- */
-async function rpc(
-  env: Env,
-  token: string,
-  fn: string,
-  body: Record<string, unknown>,
-): Promise<Read & { p0001: string | null }> {
-  const res = await fetch(`${baseUrl(env)}/rest/v1/rpc/${fn}`, {
-    method: 'POST',
-    headers: {
-      apikey: anonKey(env),
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-  })
-  const r = await read(res)
-  let p0001: string | null = null
-  try {
-    const v = JSON.parse(r.text || '{}') as { code?: string; message?: string }
-    if (v?.message) p0001 = String(v.message)
-  } catch {
-    /* 不是 JSON 就当没有那句话 */
-  }
-  return { ...r, p0001 }
-}
-
-/** 问数据库：这个判据对我返回什么？`'missing'` = 函数还没建（第 27 段没跑） */
-async function rpcBool(
-  env: Env,
-  token: string,
-  fn: string,
-  body: Record<string, unknown>,
-): Promise<boolean | 'missing'> {
-  const r = await rpc(env, token, fn, body)
-  if (r.ok) return r.text.trim() === 'true'
-  if (r.status === 401 || r.status === 403) return false
-  if (r.status === 404 || /PGRST202|does not exist|schema cache/i.test(r.text)) return 'missing'
-  return false
-}
-
-/* ---------------- 调用者是谁 ---------------- */
-
-async function caller(request: Request, env: Env): Promise<{ id: string; token: string } | null> {
-  const auth = request.headers.get('Authorization') ?? ''
-  const token = auth.replace(/^Bearer\s+/i, '').trim()
-  if (!token) return null
-  const key = anonKey(env)
-  if (!key) return null
-  const res = await fetch(`${baseUrl(env)}/auth/v1/user`, {
-    headers: { apikey: key, Authorization: `Bearer ${token}` },
-  })
-  if (!res.ok) return null
-  const user = (await res.json()) as { id?: string }
-  return user?.id ? { id: user.id, token } : null
+function writeFailStatus(r: { status: number; message: string }): number {
+  if (/42501|permission denied for function/i.test(r.message) || r.status === 401) return 500
+  if (/没权限|只有教导处|只有最高管理员|你没有/.test(r.message)) return 403
+  return 400
 }
 
 /* ---------------- 形状校验（**不是**权限校验） ---------------- */
@@ -392,17 +293,19 @@ export async function onRequestPost(context: {
     const shaped = shapeRoster(Array.isArray(body.rows) ? body.rows : [])
     if (!shaped.ok) return json({ status: 'error', message: shaped.message }, 400)
 
-    const r = await rpc(env, me.token, 'bulk_import_roster', {
+    /* 🔴 service_role + 显式 `p_actor`（见文件头与 `schema.sql` §27.13） */
+    const r = await svcRpc(env, 'bulk_import_roster', {
+      p_actor: me.id,
       p_grade_id: gradeId,
       p_rows: shaped.rows,
       p_class_name_template: '%s',
     })
     if (!r.ok) {
-      if (isMissing(r)) return json({ status: 'error', message: NEED_STAGE27 }, 503)
+      if (FN_MISSING_RE.test(r.message)) return json({ status: 'error', message: NEED_STAGE27 }, 503)
       /* 🔴 数据库那几句人话（"第 3 行缺班号" / "你没有…权限"）原样带回去 */
-      return json({ status: 'error', message: r.p0001 ?? '导入名单失败' }, r.status === 403 ? 403 : 400)
+      return json({ status: 'error', message: r.message || '导入名单失败' }, writeFailStatus(r))
     }
-    const v = (r.rows[0] ?? {}) as Record<string, unknown>
+    const v = r.value
     return json({
       status: 'ok',
       classes: Number(v.classes ?? 0),
@@ -421,7 +324,8 @@ export async function onRequestPost(context: {
     let written = 0
     const failures: Array<{ studentId: string; reason: string }> = []
     for (const row of shaped.rows) {
-      const r = await rpc(env, me.token, 'write_student_subject', {
+      const r = await svcRpc(env, 'write_student_subject', {
+        p_actor: me.id,
         p_student_id: row.student_id,
         p_kind: row.kind,
         p_primary: row.primary_code,
@@ -431,10 +335,10 @@ export async function onRequestPost(context: {
       })
       if (r.ok) {
         written++
-      } else if (isMissing(r)) {
+      } else if (FN_MISSING_RE.test(r.message)) {
         return json({ status: 'error', message: NEED_STAGE27 }, 503)
       } else {
-        failures.push({ studentId: String(row.student_id), reason: r.p0001 ?? '保存失败' })
+        failures.push({ studentId: String(row.student_id), reason: r.message || '保存失败' })
       }
     }
     return json({ status: 'ok', written, failures })
@@ -446,19 +350,24 @@ export async function onRequestPost(context: {
     const shaped = shapeClassSubjects(Array.isArray(body.rows) ? body.rows : [])
     if (!shaped.ok) return json({ status: 'error', message: shaped.message }, 400)
 
-    const r = await rpc(env, me.token, 'bulk_write_class_subjects', { p_rows: shaped.rows })
+    const r = await svcRpc(env, 'bulk_write_class_subjects', {
+      p_actor: me.id,
+      p_rows: shaped.rows,
+    })
     if (!r.ok) {
-      if (isMissing(r)) return json({ status: 'error', message: NEED_STAGE27 }, 503)
-      return json({ status: 'error', message: r.p0001 ?? '写任教关系失败' }, r.status === 403 ? 403 : 400)
+      if (FN_MISSING_RE.test(r.message)) return json({ status: 'error', message: NEED_STAGE27 }, 503)
+      return json({ status: 'error', message: r.message || '写任教关系失败' }, writeFailStatus(r))
     }
-    const v = (r.rows[0] ?? {}) as Record<string, unknown>
+    const v = r.value
     return json({ status: 'ok', rows: Number(v.rows ?? 0), replaced: Number(v.replaced ?? 0) })
   }
 
   /* ---------------- academicYearWrite：设一个学年的上下半期（**一个事务**，P3 / §28） ----------------
-   *  🔴 判据不在这一层：`write_academic_year()` 自己问数据库的 `can_manage_terms()`
-   *     （= 教导处 / 最高管理员）。四段日期在这一层先按形状挡一道（省一次往返），
-   *     真正的校验（重叠、先后）在数据库里报人话。 */
+   *  🔴 判据不在这一层：`write_academic_year()` 自己问数据库的
+   *     `can_manage_terms_for(p_actor)`（= 教导处 / 最高管理员）。
+   *     四段日期在这一层先按形状挡一道（省一次往返），真正的校验（重叠、先后）在数据库里报人话。
+   *  ⚠️ 这个写入口同样是 `revoke … from authenticated` 的（§28.5）：
+   *     与上面三个一样走 **service_role + 显式 `p_actor`** —— 这是同一类 bug（见 §27.13）。 */
   if (action === 'academicYearWrite') {
     const name = String(body.name ?? '').trim()
     const dates = {
@@ -475,12 +384,12 @@ export async function onRequestPost(context: {
     for (const [k, v] of Object.entries(dates)) {
       if (!DATE_RE.test(v)) return json({ status: 'error', message: `${k} 要一个 YYYY-MM-DD 的日期` }, 400)
     }
-    const r = await rpc(env, me.token, 'write_academic_year', { p_name: name, ...dates })
+    const r = await svcRpc(env, 'write_academic_year', { p_actor: me.id, p_name: name, ...dates })
     if (!r.ok) {
-      if (isMissing(r)) return json({ status: 'error', message: NEED_STAGE28 }, 503)
-      return json({ status: 'error', message: r.p0001 ?? '保存学年与学期失败' }, r.status === 403 ? 403 : 400)
+      if (FN_MISSING_RE.test(r.message)) return json({ status: 'error', message: NEED_STAGE28 }, 503)
+      return json({ status: 'error', message: r.message || '保存学年与学期失败' }, writeFailStatus(r))
     }
-    const v = (r.rows[0] ?? {}) as Record<string, unknown>
+    const v = r.value
     return json({ status: 'ok', academicYearId: String(v.academicYearId ?? ''), name: String(v.name ?? name) })
   }
 

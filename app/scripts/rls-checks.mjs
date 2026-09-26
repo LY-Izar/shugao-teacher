@@ -3533,15 +3533,23 @@ await withLock(async () => {
        *    它们**必须**有 `_for` 版：§29 的写入口是 `revoke … from authenticated` 的，
        *    服务端只能用 service_role 调，而 service_role 那条路上 `auth.uid()` 是 NULL ——
        *    判据只能靠**显式传进来的 `p_actor`**（`grade-checks` 第十二节的 T1/T4/T5 就是拿它验的）。
+       * 🆕 25 → **29**：**2026-10-02 集成修复**（`schema.sql` §27.7 / §27.13 / §28.5）——
+       *    §27 那三个写入口（录名单 / 批量写任教关系 / 写选科）与 §28 的 `write_academic_year`
+       *    也改成了"service_role + 显式 `p_actor`"（它们原来拿**调用者 JWT** 调被 revoke 的函数
+       *    → 线上必 42501）。于是它们判据链上的四条也拆成了两件套：
+       *    `can_manage_grade_setup_for` / `can_edit_student_subject_for` /
+       *    `can_manage_class_setup_for` / `can_manage_terms_for`。
        *    这一行只是"数一数"的记账：**判据别只写裸版**这条纪律一个字没变。
        */
       const forNames = forCount.rows.map((r) => r.proname)
       ok(
-        '`_for` 变体一共 25 个（13 + 管理架构轮 8 个 + 公告轮 1 个 `can_publish_announcement_for`' +
+        '`_for` 变体一共 29 个（13 + 管理架构轮 8 个 + 公告轮 1 个 `can_publish_announcement_for`' +
           ' + 管理台第二期 1 个 `can_contact_admin_for`' +
-          ' + 🆕P4 2 个 `can_promote_grades_for` / `can_delete_grade_for`）' +
+          ' + 🆕P4 2 个 `can_promote_grades_for` / `can_delete_grade_for`' +
+          ' + 🆕集成修复 4 个 `can_manage_grade_setup_for` / `can_edit_student_subject_for` /' +
+          ' `can_manage_class_setup_for` / `can_manage_terms_for`）' +
           ' —— id 变体也算判据的两件套，新增判据别只写裸版',
-        forNames.length === 25,
+        forNames.length === 29,
         `实际 ${forNames.length} 个：${forNames.join('、')}`,
       )
       const hasBare = await db.query(`select has_function_privilege('authenticated', 'public.can_edit_exam(uuid[], text, text)', 'EXECUTE') as v`)

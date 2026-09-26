@@ -25,6 +25,12 @@
  *      · `columns-mismatch`     —— 把导出的表头改成另一套列名（导入导出不再同源）
  *      · `setup-broken-fn`      —— 🆕 让第十一节的桩去问"砍掉 `is_school_admin()` 那半边"的
  *                                  `can_manage_grade_setup` → **R1（超管 true）/ R2（教务处 true）必须红**
+ *      · 🆕 2026-10-02（集成修复）两条 —— 对着第十一节 W 段那三条**"被拒"**的断言：
+ *        `actor-grant-authenticated`（把三个写入口 grant 给 authenticated = 走 B 方案那条路）
+ *                                  → **W29/W30 必须红**（`updated_by` 不再是那个超管：
+ *                                    service_role 下 `auth.uid()` 是 NULL）
+ *        `actor-dropped`           （砍掉函数体里"判据看显式 `p_actor`"那一支）
+ *                                  → **W29/W30 必须红**（判据没了，谁都能写）
  *      · 🆕 P4（第十二节）五条 —— 每一条都对着一条"必须红"的断言：
  *        `p4-promote-not-idempotent`（提档幂等，T1e/T1f）·
  *        `p4-promote-revokes-roles`（提档不撤回身份，T3a）·
@@ -52,11 +58,15 @@ registerTsResolve()
 
 const NEGATIVE = process.env.GRADE_NEGATIVE ?? ''
 
-/** K 段用的函数签名（`has_function_privilege` 要精确的签名串） */
+/** K 段用的函数签名（`has_function_privilege` 要精确的签名串）
+ *  ⚠️ 2026-10-02（集成修复）：三个写入口的第一个参数都是 **`p_actor`** ——
+ *     它们由服务端用 service_role 调，而 service_role 下 `auth.uid()` 是 NULL，
+ *     "谁干的"必须显式传进来（见 `schema.sql` §27.13）。签名变了，这里必须跟着变，
+ *     否则 `has_function_privilege` 问的是一个不存在的函数 → 报错 / 假绿。 */
 const FUNC_ARGS = {
-  write_student_subject: 'uuid,text,text,text[],text,uuid[]',
-  bulk_write_class_subjects: 'jsonb',
-  bulk_import_roster: 'uuid,jsonb,text',
+  write_student_subject: 'uuid,uuid,text,text,text[],text,uuid[]',
+  bulk_write_class_subjects: 'uuid,jsonb',
+  bulk_import_roster: 'uuid,uuid,jsonb,text',
 }
 
 /* ---------------- 被测模块（**不抄一份**，真的 import 仓库里那几份） ---------------- */
@@ -796,7 +806,8 @@ await withLock(async () => {
       { class_no: '1', student_no: '02', name: '乙', serial: '' },
       { class_no: '2', student_no: '01', name: '丙', serial: '' },
     ])
-    const r = await tryAs(U.admin, 'select public.bulk_import_roster($1, $2::jsonb)', [
+    const r = await tryAs(U.admin, 'select public.bulk_import_roster($1::uuid,$2::uuid,$3::jsonb)', [
+      U.admin,
       null,
       good,
     ])
@@ -804,7 +815,7 @@ await withLock(async () => {
     ok('H1：不给年级 → 报"导入名单要指定一个年级"', !r.ok && r.message.includes('年级'), r.message)
 
     const gid = one(await db.query(`select id::text from grades where name = '高一'`)).id
-    const okRes = await tryAs(U.admin, 'select public.bulk_import_roster($1::uuid, $2::jsonb)', [gid, good])
+    const okRes = await tryAs(U.admin, 'select public.bulk_import_roster($1::uuid,$2::uuid,$3::jsonb)', [U.admin, gid, good])
     ok('H2：教务处导 3 行 → 成功', okRes.ok, okRes.message)
     /* `as()` 回的是**行数组**，`bulk_import_roster` 的返回值是 JSON **对象**（不是行集）→ 直接取第一格 */
     const R = (okRes.rows ?? [])[0]?.bulk_import_roster ?? (okRes.rows ?? [])[0] ?? {}
@@ -845,7 +856,7 @@ await withLock(async () => {
       { class_no: '1', student_no: '11', name: '己', serial: '' },
       { class_no: '3', student_no: '', name: '庚', serial: '' }, // ← 第 3 行缺班级内学号
     ])
-    const badRes = await tryAs(U.admin, 'select public.bulk_import_roster($1::uuid, $2::jsonb)', [gid, bad])
+    const badRes = await tryAs(U.admin, 'select public.bulk_import_roster($1::uuid,$2::uuid,$3::jsonb)', [U.admin, gid, bad])
     ok('H11：第 3 行非法 → 报错', !badRes.ok, badRes.message)
     ok('H12：理由里带着**行号 3** 与原因', /第 3 行/.test(badRes.message) && /班级内学号/.test(badRes.message), badRes.message)
     const after = Number(one(await db.query('select count(*)::int as n from students')).n)
@@ -854,12 +865,14 @@ await withLock(async () => {
     eq('H14：🔴 那个会在第 3 行之前建的"3 班"**也没有被建出来**', cls2, 2)
 
     /* 只读身份：年级主任能导本年级、教务处能导、别的年级的年级主任不行 */
-    const other = await tryAs(U.head, 'select public.bulk_import_roster($1::uuid, $2::jsonb)', [
+    const other = await tryAs(U.head, 'select public.bulk_import_roster($1::uuid,$2::uuid,$3::jsonb)', [
+      U.head,
       gid,
       JSON.stringify([{ class_no: '9', student_no: '01', name: '辛', serial: '' }]),
     ])
     ok('H15：班主任**不能**录名单（他不是教务处 / 年级主任）', !other.ok && /权限/.test(other.message), other.message)
-    const gh = await tryAs(U.grade, 'select public.bulk_import_roster($1::uuid, $2::jsonb)', [
+    const gh = await tryAs(U.grade, 'select public.bulk_import_roster($1::uuid,$2::uuid,$3::jsonb)', [
+      U.grade,
       gid,
       JSON.stringify([{ class_no: '2', student_no: '02', name: '壬', serial: '' }]),
     ])
@@ -869,7 +882,8 @@ await withLock(async () => {
   /* ---------------- I：选科校验 + 「其他」 ---------------- */
   {
     const stu = one(await db.query(`select id::text from students where name = '甲'`)).id
-    const ok1 = await tryAs(U.grade, 'select public.write_student_subject($1::uuid,$2,$3,$4::text[],$5,$6::uuid[])', [
+    const ok1 = await tryAs(U.grade, 'select public.write_student_subject($1::uuid,$2::uuid,$3,$4,$5::text[],$6,$7::uuid[])', [
+      U.grade,
       stu, 'standard', 'physics', ['chemistry', 'biology'], '', [],
     ])
     ok('I1：合法组合能写进去', ok1.ok, ok1.message)
@@ -882,42 +896,49 @@ await withLock(async () => {
       ['再选里有物理', ['physics', 'biology']],
       ['首选混进再选', ['physics', 'chemistry']],
     ]) {
-      const r = await tryAs(U.grade, 'select public.write_student_subject($1::uuid,$2,$3,$4::text[],$5,$6::uuid[])', [
+      const r = await tryAs(U.grade, 'select public.write_student_subject($1::uuid,$2::uuid,$3,$4,$5::text[],$6,$7::uuid[])', [
+        U.grade,
         stu, 'standard', 'physics', second, '', [],
       ])
       ok(`I3：**非法选科当场拦住** —— ${label}`, !r.ok, r.ok ? '居然写进去了' : r.message)
     }
-    const badPrimary = await tryAs(U.grade, 'select public.write_student_subject($1::uuid,$2,$3,$4::text[],$5,$6::uuid[])', [
+    const badPrimary = await tryAs(U.grade, 'select public.write_student_subject($1::uuid,$2::uuid,$3,$4,$5::text[],$6,$7::uuid[])', [
+      U.grade,
       stu, 'standard', 'chemistry', ['biology', 'geography'], '', [],
     ])
     ok('I4：首选不是物理/历史 → 拦住', !badPrimary.ok, badPrimary.message)
 
     /* 「其他」：必须手工选走班科目（**不能只填组合名**） */
-    const otherNoMember = await tryAs(U.grade, 'select public.write_student_subject($1::uuid,$2,$3,$4::text[],$5,$6::uuid[])', [
+    const otherNoMember = await tryAs(U.grade, 'select public.write_student_subject($1::uuid,$2::uuid,$3,$4,$5::text[],$6,$7::uuid[])', [
+      U.grade,
       stu, 'other', '', ['chemistry', 'biology'], '转学待定', [],
     ])
     ok('I5：🔴「其他」没选走班班 → 拦住', !otherNoMember.ok, otherNoMember.message)
     ok('I6：那句话就是"必须手工选走班科目"', /手工选走班科目/.test(otherNoMember.message), otherNoMember.message)
 
-    const otherNoNote = await tryAs(U.grade, 'select public.write_student_subject($1::uuid,$2,$3,$4::text[],$5,$6::uuid[])', [
+    const otherNoNote = await tryAs(U.grade, 'select public.write_student_subject($1::uuid,$2::uuid,$3,$4,$5::text[],$6,$7::uuid[])', [
+      U.grade,
       stu, 'other', '', ['chemistry', 'biology'], '', [],
     ])
     ok('I7：「其他」没填原因 → 拦住', !otherNoNote.ok, otherNoNote.message)
 
     /* 标准组合**不许**手工选班（那是 P7 的活） */
-    const stdMember = await tryAs(U.grade, 'select public.write_student_subject($1::uuid,$2,$3,$4::text[],$5,$6::uuid[])', [
+    const stdMember = await tryAs(U.grade, 'select public.write_student_subject($1::uuid,$2::uuid,$3,$4,$5::text[],$6,$7::uuid[])', [
+      U.grade,
       stu, 'standard', 'physics', ['chemistry', 'biology'], '', [classOf('高一(1)班')],
     ])
     ok('I8：标准组合手工选走班班 → 拦住（走班班由系统生成）', !stdMember.ok, stdMember.message)
 
     /* 班主任改不了（他不是那三档） */
-    const headWrite = await tryAs(U.head, 'select public.write_student_subject($1::uuid,$2,$3,$4::text[],$5,$6::uuid[])', [
+    const headWrite = await tryAs(U.head, 'select public.write_student_subject($1::uuid,$2::uuid,$3,$4,$5::text[],$6,$7::uuid[])', [
+      U.head,
       stu, 'standard', 'physics', ['chemistry', 'geography'], '', [],
     ])
     ok('I9：任课/班主任档在**别的年级**的班上改不了（这里班主任无 scope → 拦）', !headWrite.ok, headWrite.message)
 
     /* 反向对照：合法的那一条**确实写得进去**（不然前面的"拦住"全是假绿） */
-    const ok2 = await tryAs(U.grade, 'select public.write_student_subject($1::uuid,$2,$3,$4::text[],$5,$6::uuid[])', [
+    const ok2 = await tryAs(U.grade, 'select public.write_student_subject($1::uuid,$2::uuid,$3,$4,$5::text[],$6,$7::uuid[])', [
+      U.grade,
       stu, 'standard', 'history', ['politics', 'geography'], '', [],
     ])
     ok('I10（对照）：换成合法组合 → 写得进去', ok2.ok, ok2.message)
@@ -928,17 +949,21 @@ await withLock(async () => {
     const c1 = classOf('高一(1)班')
     const c2 = classOf('高一(2)班')
     const t1 = `'${U.teacher}'::uuid`
-    /* 用参数传 uuid：PostgREST 那边是 jsonb，这里直接构造 jsonb */
+    /* 用参数传 uuid：PostgREST 那边是 jsonb，这里直接构造 jsonb。
+       🔴 第一个参数是 `p_actor`（谁在写）—— 服务端用 service_role 调它，
+          而 service_role 下 `auth.uid()` 是 NULL（见 `schema.sql` §27.13）。 */
     const build = (arr) => JSON.stringify(arr)
 
-    const badRow = await tryAs(U.grade, 'select public.bulk_write_class_subjects($1::jsonb)', [
+    const badRow = await tryAs(U.grade, 'select public.bulk_write_class_subjects($1::uuid,$2::jsonb)', [
+      U.grade,
       build([{ class_id: '00000000-0000-0000-0000-000000000000', subject_code: 'physics', teacher_id: U.teacher }]),
     ])
     ok('J1：第 1 行的班级不存在 → 报"第 1 行的班级不存在"', !badRow.ok && /第 1 行/.test(badRow.message), badRow.message)
 
     const before = Number(one(await db.query('select count(*)::int as n from class_subjects')).n)
     /* 第 2 行非法 → 第 1 行（合法）**也不许写进去** */
-    const mixed = await tryAs(U.grade, 'select public.bulk_write_class_subjects($1::jsonb)', [
+    const mixed = await tryAs(U.grade, 'select public.bulk_write_class_subjects($1::uuid,$2::jsonb)', [
+      U.grade,
       build([
         { class_id: (await db.query(`select id::text from classes where name='高一(1)班'`)).rows[0].id, subject_code: 'physics', teacher_id: U.teacher },
         { class_id: '00000000-0000-0000-0000-000000000000', subject_code: 'math', teacher_id: U.teacher },
@@ -949,7 +974,8 @@ await withLock(async () => {
     const after = Number(one(await db.query('select count(*)::int as n from class_subjects')).n)
     eq('J4：🔴 **改一半的情况不发生**（行数一个都没变）', after, before)
 
-    const goodBulk = await tryAs(U.grade, 'select public.bulk_write_class_subjects($1::jsonb)', [
+    const goodBulk = await tryAs(U.grade, 'select public.bulk_write_class_subjects($1::uuid,$2::jsonb)', [
+      U.grade,
       build([
         { class_id: (await db.query(`select id::text from classes where name='高一(1)班'`)).rows[0].id, subject_code: 'physics', teacher_id: U.teacher },
         { class_id: (await db.query(`select id::text from classes where name='高一(2)班'`)).rows[0].id, subject_code: 'physics', teacher_id: U.teacher },
@@ -962,23 +988,27 @@ await withLock(async () => {
     eq('J7：`subject`（老列的真名）被从 `subjects` 字典里取出来填上了', names, ['物理', '物理'])
 
     /* 换老师 = 替换（同一个班同一科不留两个人）—— 唯一索引 + delete 两件事 */
-    const swap = await tryAs(U.grade, 'select public.bulk_write_class_subjects($1::jsonb)', [
+    const swap = await tryAs(U.grade, 'select public.bulk_write_class_subjects($1::uuid,$2::jsonb)', [
+      U.grade,
       build([{ class_id: (await db.query(`select id::text from classes where name='高一(1)班'`)).rows[0].id, subject_code: 'physics', teacher_id: U.head }]),
     ])
     ok('J8：换一个老师教同一个班的物理 → 成功', swap.ok, swap.message)
     const hold = Number(one(await db.query(`select count(*)::int as n from class_subjects where subject_code = 'physics' and class_id = ${classOf('高一(1)班')} and teacher_id = '${U.teacher}'`)).n)
     eq('J9：原来那位老师的行被换掉了（同一个班同一科不留两个人）', hold, 0)
 
-    const notMine = await tryAs(U.super, 'select public.bulk_write_class_subjects($1::jsonb)', [
+    const notMine = await tryAs(U.super, 'select public.bulk_write_class_subjects($1::uuid,$2::jsonb)', [
+      U.super,
       build([{ class_id: (await db.query(`select id::text from classes where name='高一(1)班'`)).rows[0].id, subject_code: 'math', teacher_id: U.teacher }]),
     ])
     ok('J10：超管（不是 any 年级主任、但是 is_school_admin）→ 也能写', notMine.ok, notMine.message)
-    const nobody = await tryAs(U.teacher, 'select public.bulk_write_class_subjects($1::jsonb)', [
+    const nobody = await tryAs(U.teacher, 'select public.bulk_write_class_subjects($1::uuid,$2::jsonb)', [
+      U.teacher,
       build([{ class_id: (await db.query(`select id::text from classes where name='高一(1)班'`)).rows[0].id, subject_code: 'math', teacher_id: U.teacher }]),
     ])
     ok('J11：任课老师 → 被拒（"你没有设定这个年级任课关系的权限"）', !nobody.ok && /权限/.test(nobody.message), nobody.message)
 
-    const tooMany = await tryAs(U.admin, 'select public.bulk_write_class_subjects($1::jsonb)', [
+    const tooMany = await tryAs(U.admin, 'select public.bulk_write_class_subjects($1::uuid,$2::jsonb)', [
+      U.admin,
       JSON.stringify(
         Array.from({ length: 2001 }, (_, i) => ({
           /* 形状**合法**（这样才会走到"行数上限"那一条，而不是先被形状校验拦下） */
@@ -991,7 +1021,7 @@ await withLock(async () => {
     ok('J12：超过 2000 行 → 报人话（不是静默截断）', !tooMany.ok && /2000/.test(tooMany.message), tooMany.message)
 
     /* 空数组 */
-    const empty = await tryAs(U.admin, 'select public.bulk_write_class_subjects($1::jsonb)', ['[]'])
+    const empty = await tryAs(U.admin, 'select public.bulk_write_class_subjects($1::uuid,$2::jsonb)', [U.admin, '[]'])
     ok('J13：空数组 → 报"一行都没有 —— 这份表是空的"', !empty.ok && /一行都没有/.test(empty.message), empty.message)
     void c1
     void c2
@@ -1001,8 +1031,8 @@ await withLock(async () => {
   /* ---------------- K：权限：写入口只有服务端能调 ---------------- */
   {
     for (const [label, sql, params] of [
-      ['write_student_subject', 'select public.write_student_subject($1::uuid,$2,$3,$4::text[],$5,$6::uuid[])', ['00000000-0000-0000-0000-000000000000', 'standard', 'physics', ['chemistry', 'biology'], '', []]],
-      ['bulk_write_class_subjects', 'select public.bulk_write_class_subjects($1::jsonb)', ['[]']],
+      ['write_student_subject', 'select public.write_student_subject($1::uuid,$2::uuid,$3,$4,$5::text[],$6,$7::uuid[])', ['00000000-0000-0000-0000-000000000000', 'standard', 'physics', ['chemistry', 'biology'], '', []]],
+      ['bulk_write_class_subjects', 'select public.bulk_write_class_subjects($1::uuid,$2::jsonb)', ['[]']],
       ['bulk_import_roster', 'select public.bulk_import_roster($1::uuid,$2::jsonb,$3)', ['00000000-0000-0000-0000-000000000000', '[]', '%s']],
     ]) {
       /* `authenticated` 这个角色**没有执行权** —— 与"跑得起来但判据为假"是两件事 */
@@ -1014,6 +1044,72 @@ await withLock(async () => {
       void sql
       void params
     }
+    /*
+     * 🆕 2026-10-02（集成修复）：三个写入口的第一个参数是**显式 `p_actor`**，
+     *   而 `_for` 判据变体（接受任意 uid）一律 revoke —— 上面 K1 问的就是**新签名**
+     *   （`FUNC_ARGS` 已跟着改）。这里再钉两条：
+     *    · 服务端拿 service_role 调的是**新签名**（旧签名必须已经不存在）；
+     *    · `_for` 那三个从 `authenticated` 调用是 **42501**，而裸版仍然可调。
+     */
+    const oldSig = rowsOf(
+      await db.query(`
+        select p.proname::text as name, pg_get_function_arguments(p.oid) as args
+          from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+         where n.nspname = 'public'
+           and p.proname in ('write_student_subject', 'bulk_write_class_subjects', 'bulk_import_roster',
+                             'write_academic_year')
+         order by 1, 2`),
+    )
+    eq(
+      'K4：三个写入口 + 学年写入**只有新签名**（第一个参数是 `p_actor`）—— 旧的已经不在库里',
+      oldSig.map((x) => `${x.name}:${x.args.split(',')[0]}`),
+      [
+        'bulk_import_roster:p_actor uuid',
+        'bulk_write_class_subjects:p_actor uuid',
+        'write_academic_year:p_actor uuid',
+        'write_student_subject:p_actor uuid',
+      ],
+    )
+    for (const [label, args] of [
+      ['can_manage_grade_setup_for', 'uuid, uuid'],
+      ['can_edit_student_subject_for', 'uuid, uuid'],
+      ['can_manage_class_setup_for', 'uuid, uuid'],
+      ['can_manage_terms_for', 'uuid'],
+    ]) {
+      const r = await db
+        .query(`select has_function_privilege('authenticated', 'public.${label}(${args})', 'execute') as p`)
+        .then((x) => x.rows[0])
+        .catch((e) => ({ err: String(e.message) }))
+      eq(`K5：\`authenticated\` 对 **${label}** 没有 execute 权限（接受任意 uid = 以任意人身份问权限）`, r?.p, false)
+    }
+    const bareBools = rowsOf(
+      await db.query(`
+        select p.proname::text as name,
+               has_function_privilege('authenticated', p.oid, 'execute') as can
+          from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+         where n.nspname = 'public'
+           and p.proname in ('can_manage_grade_setup', 'can_manage_class_setup', 'can_manage_terms',
+                             'can_edit_student_subject', 'can_manage_terms_for')
+         order by 1`),
+    )
+    eq(
+      'K6：裸版判据仍然可以被 authenticated 调用（前端靠它决定摆不摆入口）—— 只有 `_for` 是 revoke 的',
+      bareBools.map((x) => `${x.name}=${x.can}`),
+      [
+        'can_edit_student_subject=true',
+        'can_manage_class_setup=true',
+        'can_manage_grade_setup=true',
+        'can_manage_terms=true',
+        'can_manage_terms_for=false',
+      ],
+    )
+    /* 对照：把 `_for` 的 revoke 拿掉（= 走 B 方案那条路的样子）→ K5 必须变红 */
+    await db.exec('grant execute on function public.can_manage_grade_setup_for(uuid, uuid) to authenticated')
+    const granted = await db
+      .query(`select has_function_privilege('authenticated', 'public.can_manage_grade_setup_for(uuid, uuid)', 'execute') as p`)
+      .then((x) => x.rows[0])
+    eq('K7（对照）：把 `_for` 的 revoke 换成 grant → K5 那一条**会变红**（它不是永远为绿的摆设）', granted.p, true)
+    await db.exec('revoke all on function public.can_manage_grade_setup_for(uuid, uuid) from public, anon, authenticated')
     /* 判据函数本身是可以被 authenticated 调用的（前端要靠它决定摆不摆入口） */
     const canCall = await db
       .query(`select has_function_privilege('authenticated', 'public.can_manage_grade_setup(uuid)', 'execute') as p`)
@@ -1326,10 +1422,10 @@ await withLock(async () => {
     eq('N34：`current_term_id()` 可以被 authenticated 调用（列表要用它推当前学期）', canTerms.p, true)
     const wY = await db
       .query(
-        `select has_function_privilege('authenticated', 'public.write_academic_year(text,date,date,date,date,date,date)', 'execute') as p`,
+        `select has_function_privilege('authenticated', 'public.write_academic_year(uuid,text,date,date,date,date,date,date)', 'execute') as p`,
       )
       .then((x) => x.rows[0])
-    eq('N35：`write_academic_year()` **只有服务端能调**（authenticated 没有 execute）', wY.p, false)
+    eq('N35：`write_academic_year()` **只有服务端能调**（authenticated 没有 execute；签名里第一个参数是 `p_actor`）', wY.p, false)
     const bf = await db
       .query(`select has_function_privilege('authenticated', 'public.p3_backfill_terms_and_cohorts()', 'execute') as p`)
       .then((x) => x.rows[0])
@@ -1350,26 +1446,28 @@ await withLock(async () => {
       ['terms', true],
     ])
 
-    /* ⑫ 学年写入口：重叠的两个半期要被拒（人话） */
+    /* ⑫ 学年写入口：重叠的两个半期要被拒（人话）
+       ⚠️ 2026-10-02：签名第一个参数是**显式 `p_actor`**（服务端用 service_role 调它，
+          而 service_role 下 `auth.uid()` 是 NULL —— 见 `schema.sql` §27.13）。 */
     const overlap = await tryAs(
       U.admin,
-      `select public.write_academic_year('2027-2028', date '2027-09-01', date '2028-08-31',
+      `select public.write_academic_year('${U.admin}', '2027-2028', date '2027-09-01', date '2028-08-31',
         date '2027-09-01', date '2028-02-28', date '2028-02-01', date '2028-08-31')`,
     )
     ok('N39：上下半期重叠 → 被拒（报的是人话）', !overlap.ok && /重叠/.test(overlap.message), overlap.message)
     const badName = await tryAs(
       U.admin,
-      `select public.write_academic_year('', date '2027-09-01', date '2028-08-31',
+      `select public.write_academic_year('${U.admin}', '', date '2027-09-01', date '2028-08-31',
         date '2027-09-01', date '2028-01-31', date '2028-02-01', date '2028-08-31')`,
     )
     ok('N40：学年名空着 → 被拒', !badName.ok, badName.message)
     /* 反向对照：合法的那一条**确实写得进去**（不然前面两条"被拒"全是假绿）
        ⚠️ 用 `U.super` 写：本夹具里的 `U.admin` 只有 `admin` 这一条身份，
-       而 `can_manage_terms()` = `is_school_admin()`（超管 / 教务处 **那一行**
-       `teacher_roles` 的 scope 要落对）—— 夹具里只有 super 那一条是确定的。 */
+       而 `can_manage_terms_for(p_actor)` = `is_school_admin_for(p_actor)`（超管 / 教务处 —— 那条判据
+       读的是 `teacher_roles`；夹具里只有 super 那一条是确定的）。 */
     const okYear = await tryAs(
       U.super,
-      `select public.write_academic_year('2027-2028', date '2027-09-01', date '2028-08-31',
+      `select public.write_academic_year('${U.super}', '2027-2028', date '2027-09-01', date '2028-08-31',
         date '2027-09-01', date '2028-01-31', date '2028-02-01', date '2028-08-31')`,
     )
     ok('N41（对照）：合法的学年 → 写得进去', okYear.ok, okYear.message)
@@ -1380,14 +1478,21 @@ await withLock(async () => {
       2,
     )
     /* 幂等：同一个学年再写一次 → 还是两行（on conflict do update，不新增）
-       ⚠️ 必须走 `tryAs`（它负责把调用者身份 `set_config` 进去）—— 裸 `db.query`
-       读到的 `auth.uid()` 是空的，`can_manage_terms()` 直接假 → 当场 raise。 */
+       ⚠️ 判据现在读的是**显式传进来的那个 id**，不再读 `auth.uid()` ——
+       所以这条对照反而更硬：它证明"人是谁"与"会话里有没有那个人"无关。 */
     const again = await tryAs(
       U.super,
-      `select public.write_academic_year('2027-2028', date '2027-09-01', date '2028-08-31',
+      `select public.write_academic_year('${U.super}', '2027-2028', date '2027-09-01', date '2028-08-31',
         date '2027-09-01', date '2028-01-31', date '2028-02-01', date '2028-08-31')`,
     )
     ok('N42b（对照）：同一个学年再写一遍 → 也成功（`on conflict do update`）', again.ok, again.message)
+    /* 🔴 反向对照：**换个没权限的人**用同一段 SQL 写 → 必须被拒（判据真的看了那个 id） */
+    const otherYear = await tryAs(
+      U.teacher,
+      `select public.write_academic_year('${U.teacher}', '2028-2029', date '2028-09-01', date '2029-08-31',
+        date '2028-09-01', date '2029-01-31', date '2029-02-01', date '2029-08-31')`,
+    )
+    ok('N42c（🔴 反向对照）：任课教师拿自己的 id 写学年 → 被拒（判据看的确实是 `p_actor`，不是"调用者是谁"）', !otherYear.ok && /只有教导处/.test(otherYear.message), otherYear.message)
     eq(
       'N43：同一个学年写两遍 → 仍然只有 2 个半期（不是 4 个）',
       await cnt(`from terms t join academic_years y on y.id = t.academic_year_id where y.name = '2027-2028'`),
@@ -1858,35 +1963,80 @@ await withLock(async () => {
     const gid2 = one(await db.query(`select id::text as id from grades where name = '高二'`)).id
 
     /*
-     * 🔴 反向对照那份"改坏的真函数"：取 `schema.sql` 里 `can_manage_grade_setup()` 的**真文本**，
-     *    把第一支（`select public.is_school_admin() or exists (…`）砍掉，落成 `_neg_grade_setup()`。
+     * 🔴 反向对照那份"改坏的真函数"：取 `schema.sql` 里 `can_manage_grade_setup_for(uid, grade)` 的
+     *    **真文本**，把第一支（`select public.is_school_admin_for(p_uid) or exists (…`）砍掉，
+     *    落成 `_neg_grade_setup(uid, grade)`。
+     *    ⚠️ 2026-10-02（集成修复）：判据函数拆成 `_for` / 裸版两件套之后，桩问的那一条是**裸版**
+     *       （走 `auth.uid()`）—— 这里改成只替 `_for` 那一份的**函数名 + 那一行**，
+     *       让桩带着调用者的 uid 去问它，仍然是"同一份真源码、只砍掉校级管理那一支"。
      *    ⚠️ 为什么不用全局 `GRADE_NEGATIVE` 改原文：那一支**同时**是 H 段"导入名单"的闸门，
      *       改掉后 H2 先失败（学生一个都没写进去）→ 脚本在 I 段中断，反而看不到 R1 变红。
      *    `GRADE_NEGATIVE=setup-broken-fn` 会让桩**从头**就问这一份 —— 于是 R1/R2 当场红。
      */
     const fnText = RAW.match(
-      /create or replace function public\.can_manage_grade_setup\(p_grade_id uuid\)[\s\S]*?\n\$\$;/,
+      /create or replace function public\.can_manage_grade_setup_for\(p_uid uuid, p_grade_id uuid\)[\s\S]*?\n\$\$;/,
     )
-    const half = `  select public.is_school_admin()
+    const half = `  select public.is_school_admin_for(p_uid)
       or exists (`
-    const brokenFn = fnText ? fnText[0].replace(half, '  select exists (') : ''
+    const brokenFn = fnText
+      ? fnText[0]
+          .replace(half, '  select exists (')
+          .replace(
+            'create or replace function public.can_manage_grade_setup_for(',
+            'create or replace function public._neg_grade_setup(',
+          )
+      : ''
     if (fnText) {
-      await db.exec(
-        brokenFn.replace(
-          'create or replace function public.can_manage_grade_setup(',
-          'create or replace function public._neg_grade_setup(',
-        ),
-      )
+      await db.exec(brokenFn)
     }
 
-    /* ---------------- fetch 桩：Supabase 的两条链，接到真库 ---------------- */
+    /* ---------------- fetch 桩：Supabase 的两条链，接到真库 ----------------
+     * 🔴 **2026-10-02（集成修复）扩展**：以前这个桩只会执行 `can_manage_grade_setup(p_grade_id)`
+     *    那一条（判据）；现在它还要执行**三个写入口**，而且**必须用真的 service_role 形状**：
+     *      · 调用者 JWT（`tok-*`）那条链 → `set local role authenticated` + jwt claim（读 auth.uid()）；
+     *      · `fake-service-role`（= `svcRpc()` 用的那个 key）那条链 → **属主身份**（不做 set role），
+     *        并且**要求 body 里有显式 `p_actor`** —— 这正是"服务端必须显式传人"的断言点。
+     *    ⚠️ 三个写入口对 authenticated 是 **42501**（`schema.sql` §27.12 的 revoke）——
+     *       所以"拿调用者 JWT 调它"这一条路在本节里也被真跑一遍（R40）。
+     */
     const realFetch = globalThis.fetch
     const rpcCalls = []
+    const writeActorArgs = {}
     let rpcMissing = false
+    /** `fake-service-role` 就是 `ENV.SUPABASE_SERVICE_ROLE_KEY`（写入口用的那个 key） */
+    const SVC = 'fake-service-role'
+    /** 只有 service_role 能调写入口 —— 反向对照会把它打开（= 走 B 方案那条路的样子） */
+    let asServiceAllowed = true
     /** 反向对照用：把桩要问的函数换成"改坏的那一份"（默认问真的那一个） */
     let fnOverride = NEGATIVE === 'setup-broken-fn' ? '_neg_grade_setup' : null
     const jsonRes = (v, status = 200) =>
       new Response(JSON.stringify(v), { status, headers: { 'Content-Type': 'application/json' } })
+
+    /** 桩认识的 RPC → 一条真 SQL（参数形状与 `schema.sql` §27 的新签名逐字对应） */
+    const RPC_SQL = {
+      can_manage_grade_setup: (b) => [`select public.can_manage_grade_setup($1::uuid) as v`, [b.p_grade_id]],
+      bulk_import_roster: (b) => [
+        `select public.bulk_import_roster($1::uuid, $2::uuid, $3::jsonb, $4::text) as v`,
+        [b.p_actor, b.p_grade_id, JSON.stringify(b.p_rows ?? []), b.p_class_name_template ?? '%s'],
+      ],
+      bulk_write_class_subjects: (b) => [
+        `select public.bulk_write_class_subjects($1::uuid, $2::jsonb) as v`,
+        [b.p_actor, JSON.stringify(b.p_rows ?? [])],
+      ],
+      write_student_subject: (b) => [
+        `select public.write_student_subject($1::uuid,$2::uuid,$3::text,$4::text,$5::text[],$6::text,$7::uuid[]) as v`,
+        [b.p_actor, b.p_student_id, b.p_kind, b.p_primary, b.p_second ?? [], b.p_note ?? '', b.p_member_class_ids ?? []],
+      ],
+      write_academic_year: (b) => [
+        `select public.write_academic_year($1::uuid,$2::text,$3::date,$4::date,$5::date,$6::date,$7::date,$8::date) as v`,
+        [b.p_actor, b.p_name, b.p_year_start, b.p_year_end, b.p_half1_start, b.p_half1_end, b.p_half2_start, b.p_half2_end],
+      ],
+    }
+    const isWriteFn = (fn) =>
+      fn === 'bulk_import_roster' ||
+      fn === 'bulk_write_class_subjects' ||
+      fn === 'write_student_subject' ||
+      fn === 'write_academic_year'
 
     globalThis.fetch = async (input, init = {}) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
@@ -1902,8 +2052,8 @@ await withLock(async () => {
       if (!m) return realFetch(input, init)
       const fn = fnOverride ?? m[1]
       rpcCalls.push({ fn, token })
+      const asService = token === SVC
       const uid = TOKEN_OF.get(token)
-      if (!uid) return jsonRes({ message: 'JWT required' }, 401)
       /* 这一段是**假的 PostgREST**：形状按真的来（函数不存在 = 404 + PGRST202） */
       if (rpcMissing) {
         return jsonRes(
@@ -1915,16 +2065,44 @@ await withLock(async () => {
         )
       }
       const body = JSON.parse(String(init.body ?? '{}'))
+      /* 反向对照那一份是 `_for(uid, grade)` 两参形状；真判据是裸版 `(grade)` 一参 */
+      const callSql =
+        fn === '_neg_grade_setup'
+          ? `select public._neg_grade_setup($1::uuid, $2::uuid) as v`
+          : RPC_SQL[fn]?.(body)?.[0]
+      const callParams = fn === '_neg_grade_setup' ? [uid, body.p_grade_id] : RPC_SQL[fn]?.(body)?.[1]
+      if (!callSql) return jsonRes({ message: `桩不认识这个 RPC：${fn}` }, 500)
+      if (isWriteFn(fn)) {
+        /* 🔴 service_role 那条链**必须**显式带 `p_actor` —— 这才叫"验出来的身份传下去" */
+        if (!asService && asServiceAllowed) {
+          /* = 数据库的 `revoke … from authenticated`：**42501**（不是"判据为假"） */
+          return jsonRes({ message: 'permission denied for function ' + fn }, 401)
+        }
+        if (!body.p_actor) return jsonRes({ code: 'P0001', message: '没有传 p_actor' }, 400)
+        writeActorArgs[fn] = body.p_actor
+      } else if (!uid) {
+        return jsonRes({ message: 'JWT required' }, 401)
+      }
       await db.exec('begin')
       try {
-        await db.exec('set local role authenticated')
-        await db.query(`select set_config('request.jwt.claim.sub', $1, true)`, [uid])
-        const out = await db.query(`select public.${fn}($1::uuid) as v`, [body.p_grade_id])
+        if (asService && asServiceAllowed) {
+          /* 属主身份 = 真的 PostgREST 用 service_role 跑的样子（**不** set role），
+             而且**清掉**会话里的 jwt claim —— service_role 下 `auth.uid()` 就是 **NULL**。
+             🔴 这一句是"三个写入口必须显式传 `p_actor`"的**运行时**根据：
+                不清的话 `auth.uid()` 会漏到上一次调用留下的值（假绿）。 */
+          await db.query(`select set_config('request.jwt.claim.sub', '', true)`)
+        } else {
+          /* 调用者 JWT 那条链（`set role authenticated` + claim）——
+             反向对照 `asServiceAllowed=false` 时，写入口也走这一支（= B 方案的样子） */
+          await db.exec('set local role authenticated')
+          await db.query(`select set_config('request.jwt.claim.sub', $1, true)`, [uid])
+        }
+        const out = await db.query(callSql, callParams)
         await db.exec('commit')
         return jsonRes(out.rows[0].v)
       } catch (e) {
         await db.exec('rollback')
-        return jsonRes({ message: String(e?.message ?? e).split('\n')[0] }, 400)
+        return jsonRes({ code: 'P0001', message: String(e?.message ?? e).split('\n')[0] }, 400)
       }
     }
 
@@ -1933,8 +2111,8 @@ await withLock(async () => {
       SUPABASE_ANON_KEY: 'fake-anon',
       SUPABASE_SERVICE_ROLE_KEY: 'fake-service-role',
     }
-    /** 走**真源码**的那个分支问一次（`token = null` = 前端漏带 Authorization 的形状） */
-    const ask = async (token, gradeId) => {
+    /** 走**真源码**问一次（`token = null` = 前端漏带 Authorization 的形状） */
+    const post = async (token, payload) => {
       const res = await api.onRequestPost({
         request: new Request('https://example.invalid/api/grade-setup', {
           method: 'POST',
@@ -1942,12 +2120,13 @@ await withLock(async () => {
             'Content-Type': 'application/json',
             ...(token ? { Authorization: `Bearer ${token}` } : {}),
           },
-          body: JSON.stringify({ action: 'canSetup', gradeId }),
+          body: JSON.stringify(payload),
         }),
         env: ENV,
       })
       return { status: res.status, json: await res.json() }
     }
+    const ask = (token, gradeId) => post(token, { action: 'canSetup', gradeId })
 
     try {
       /* ① 🔴 **缺的就是这一条**：全平台最高管理员 */
@@ -2033,6 +2212,421 @@ await withLock(async () => {
         rNegHead.json.canSetup,
         true,
       )
+
+      /* ============================================================
+         ⑥ 🔴🔴 三个**写动作**的端到端（2026-10-02 集成修复：本轮最重要的交付）
+         ------------------------------------------------------------
+         为什么必须补：`canSetup` 那条路（R1–R23）当时是绿的，而**三个写动作**
+         （录名单 / 批量写任教关系 / 写选科）在线上是 42501 —— 服务端拿调用者 JWT
+         去调三个 `revoke … from authenticated` 的函数。各层各自绿、端到端没人验。
+         🔴 这一节**必须用 `authenticated` 角色跑**（写入口那条链用属主 = service_role 的形状，
+            那是**设计要求**，不是"绕过去"）：
+            · `canSetup` 那条链：`set local role authenticated` + jwt claim（R1b 已经在钉它）；
+            · 写入口那条链：service_role（属主）+ **显式 `p_actor`** ——
+              桩里 `writeActorArgs[fn]` 记的就是服务端真的传了什么。
+         ============================================================ */
+      await db.exec(`
+        insert into classes (teacher_id, name, grade, school_id, grade_id, kind, class_type)
+        values ('${U.grade}', '高一走A班', '高一', ${school}, ${gradeOf('高一')}, 'stream', '');
+        insert into students (class_id, student_no, name, serial) values
+          (${classOf('高二(1)班')}, 'G2-01', '高二学生', ''),
+          (${classOf('高一走A班')}, 'ST-01', '走班生', '');
+      `)
+      const s1 = one(await db.query(`select id::text as id from students where class_id = ${classOf('高一(1)班')} order by student_no limit 1`)).id
+      const s2 = one(await db.query(`select id::text as id from students where student_no = 'G2-01'`)).id
+      const streamId = one(await db.query(`select id::text as id from classes where name = '高一走A班'`)).id
+      /* ⚠️ 服务端那一层要真 uuid 字符串（`classOf()` 是 SQL 子查询文本，只给库内用） */
+      const c1id = one(await db.query(`select id::text as id from classes where name = '高一(1)班'`)).id
+      const c2id = one(await db.query(`select id::text as id from classes where name = '高一(2)班'`)).id
+      const c21id = one(await db.query(`select id::text as id from classes where name = '高二(1)班'`)).id
+      const countOf = async (table, where = '') =>
+        Number(one(await db.query(`select count(*)::int as n from ${table} ${where}`)).n)
+
+      /* ---- ⑤ 无 Authorization → 401，**连数据库都不到** ---- */
+      const before401 = rpcCalls.length
+      const wNoAuth = await post(null, {
+        action: 'rosterImport',
+        gradeId: gid1,
+        rows: [{ classNo: '1', studentNo: '03', name: '辛', serial: '' }],
+      })
+      eq('W26：🔴 三个写动作**不带 Authorization** → HTTP 401', wNoAuth.status, 401)
+      eq('W27：那一次**一次 RPC 都没发**（`caller()` 就挡了 —— 不是"没权限"）', rpcCalls.length, before401)
+
+      /* ---- ⑥ §27 没跑（函数不存在）→ 503，**不是**"你没权限" ---- */
+      rpcMissing = true
+      const wMissing = await post('tok-super', {
+        action: 'rosterImport',
+        gradeId: gid1,
+        rows: [{ classNo: '1', studentNo: '04', name: '壬', serial: '' }],
+      })
+      rpcMissing = false
+      eq('W28：§27 没跑 → HTTP 503（把"去跑 SQL"那句人话带回来）', [wMissing.status, /第 27 段/.test(String(wMissing.json.message))], [503, true])
+
+      /*
+       * 🔴 W28c：**信任边界**那一条 —— grant 出去之后，"谁能调"就只剩数据库那道判据。
+       *    做法：**直接以 `authenticated` 身份**调 `bulk_write_class_subjects`，
+       *    但 `p_actor` 传一个**没有权限的任课教师**（不是调用者自己）。
+       *      · 正常模式：函数甚至不被允许执行 → **42501**（那扇门就是 §27.12 那三条 revoke 关着的）；
+       *      · `actor-grant-authenticated`（= B 方案）：门开了，于是**只能靠函数体里那句判据**挡 ——
+       *        本断言要的正是"挡得住"这个结果，所以它在两种情况下都是绿的；
+       *        真正会翻红的是紧跟着的 W28d（`p_actor` 那道判据被砍掉时，这里就挡不住了）。
+       *    ⚠️ 它把"B 方案把安全边界从 **角色 + 判据** 缩到 **只剩判据**"这件事钉在门禁里。
+       */
+      const asActor = async (actorId) => {
+        await db.exec('begin')
+        try {
+          await db.exec('set local role authenticated')
+          await db.exec(
+            `select public.bulk_write_class_subjects('${actorId}'::uuid, '[{"class_id":"${c1id}","subject_code":"geography","teacher_id":"${U.teacher}"}]'::jsonb)`,
+          )
+          await db.exec('commit')
+          return { ok: true, message: '' }
+        } catch (e) {
+          await db.exec('rollback')
+          return { ok: false, message: String(e?.message ?? e).split('\n')[0] }
+        }
+      }
+      const lowActor = await asActor(U.teacher)
+      ok(
+        'W28c：🔴 直接以 authenticated 调写入口、`p_actor` = 一个任课教师 → **挡得住**（要么 42501，要么"你没有设定这个年级任课关系的权限"）',
+        !lowActor.ok && /42501|permission denied|没有设定这个年级任课关系的权限/.test(lowActor.message),
+        lowActor.message,
+      )
+
+      /* ============================================================
+         ⑦ 🔴 反向对照（**真跑**）：把修法改回去 —— 下面 ⑦ 之后那批断言必须当场翻红
+         ------------------------------------------------------------
+         `GRADE_NEGATIVE` 在这里把**修法**去掉，然后**同一段脚本、同一批断言**继续跑：
+           · `actor-dropped`             —— 砍掉函数体里"判据看显式 `p_actor`"那一支
+                                        → **W22/W23/W24/W25**（该被拒的那几档）翻红（实测 14 条红）；
+           · `actor-grant-authenticated` —— 按 B 方案把三个写入口 grant 给 authenticated，
+                                        并且不再要求 service_role
+                                        → **W28c**（"只靠判据挡"那道信任边界）翻红。
+         ⚠️ 所以这一段**必须排在 W 断言之前** —— 排在后面的话，"改回去"根本没被执行到，
+            脚本会以"负向对照却没有红"收场（`exit 1`），那是**对照没生效**，不是修法错了。
+         ⚠️ 还要有"对照自证"（W29/W30）：证明锚点找得到、权限点确实在 —— 否则对照是假绿。
+         ============================================================ */
+      if (NEGATIVE === 'actor-dropped') {
+        await db.exec(`
+          do $$
+          begin
+            execute replace(pg_get_functiondef('public.bulk_write_class_subjects(uuid,jsonb)'::regprocedure),
+                            'public.can_manage_grade_setup_for(p_actor, v_g)', 'true');
+            execute replace(pg_get_functiondef('public.write_student_subject(uuid,uuid,text,text,text[],text,uuid[])'::regprocedure),
+                            'public.can_edit_student_subject_for(p_actor, p_student_id)', 'true');
+            execute replace(pg_get_functiondef('public.bulk_import_roster(uuid,uuid,jsonb,text)'::regprocedure),
+                            'public.can_manage_grade_setup_for(p_actor, p_grade_id)', 'true');
+          end $$;
+        `)
+      }
+      if (NEGATIVE === 'actor-grant-authenticated') {
+        /*  把三个写入口 grant 给 authenticated，并且**不再要求 service_role**
+            —— 也就是"任何登录者拿浏览器里的 anon key + 自己的 JWT 就能直接打这三个 RPC"。 */
+        await db.exec(`
+          grant execute on function public.write_student_subject(uuid,uuid,text,text,text[],text,uuid[]) to authenticated;
+          grant execute on function public.bulk_write_class_subjects(uuid,jsonb) to authenticated;
+          grant execute on function public.bulk_import_roster(uuid,uuid,jsonb,text) to authenticated;
+        `)
+        asServiceAllowed = false
+      }
+      if (!NEGATIVE) {
+        const cbDef = one(await db.query(`select pg_get_functiondef('public.bulk_write_class_subjects(uuid,jsonb)'::regprocedure) as d`)).d
+        const wsDef = one(await db.query(`select pg_get_functiondef('public.write_student_subject(uuid,uuid,text,text,text[],text,uuid[])'::regprocedure) as d`)).d
+        const biDef = one(await db.query(`select pg_get_functiondef('public.bulk_import_roster(uuid,uuid,jsonb,text)'::regprocedure) as d`)).d
+        ok(
+          'W29（对照自证）：三个写入口的真函数体都取得出来，而且判据那一句确实在（砍它的锚点找得到）',
+          /can_manage_grade_setup_for\(p_actor, v_g\)/.test(String(cbDef)) &&
+            /can_edit_student_subject_for\(p_actor, p_student_id\)/.test(String(wsDef)) &&
+            /can_manage_grade_setup_for\(p_actor, p_grade_id\)/.test(String(biDef)),
+          [cbDef, wsDef, biDef].map((s) => String(s).slice(0, 60)).join(' | '),
+        )
+        eq(
+          'W30（对照自证）：`authenticated` 对三个写入口**没有被 grant**（K1/K5 问的也是它）',
+          Number(await db
+            .query(`select has_function_privilege('authenticated', 'public.bulk_import_roster(uuid,uuid,jsonb,text)', 'execute') as p`)
+            .then((x) => x.rows[0].p)),
+          0,
+        )
+      } else {
+        /*
+         * 🔴 反向对照那一轮：**先证明"改回去"这件事真的发生了**。
+         *    ⚠️ 这一条本身就是"对照必须能红"的保险：哪一天锚点漂了、grant 语句写错了，
+         *       改回去**没生效** —— 这里当场红，而不是让整个脚本以
+         *       "负向对照却没有红" 那种含糊的方式收场。
+         */
+        const negCbDef = String(
+          one(await db.query(`select pg_get_functiondef('public.bulk_write_class_subjects(uuid,jsonb)'::regprocedure) as d`)).d,
+        )
+        const grantedToAuth = Number(
+          await db
+            .query(`select has_function_privilege('authenticated', 'public.bulk_import_roster(uuid,uuid,jsonb,text)', 'execute') as p`)
+            .then((x) => x.rows[0].p),
+        )
+        const dropped =
+          NEGATIVE === 'actor-dropped'
+            ? !/can_manage_grade_setup_for\(p_actor, v_g\)/.test(negCbDef)
+            : true /* `actor-grant-authenticated` 只动 grant / service_role 那两道，函数体不动 */
+        const granted = NEGATIVE === 'actor-grant-authenticated' ? grantedToAuth === 1 && !asServiceAllowed : true
+        eq(
+          `W29（对照自证）：\`${NEGATIVE}\` 的"改回去"**确实生效了**`,
+          [dropped, granted],
+          [true, true],
+        )
+        if (NEGATIVE === 'actor-grant-authenticated') {
+          /*  🔴 B 方案的**决定性证据**：grant 出去之后，浏览器拿 anon key + 自己的 JWT
+              就能**直接**打这三个写 RPC —— 服务端不再是唯一入口，而唯一的闸门只剩
+              `_for(p_actor, …)` 那一句判据。
+              下面这条断言的**期望值 = 0**：它是**修法存在**的断言 ——
+              所以这一轮（`actor-grant-authenticated` 把修法改回去）它**必须红**。
+              实测对照：`schema.sql` §27.12 的三条 revoke 一恢复，它立刻变绿。 */
+          eq(
+            'W29b（🔴 反向对照 `actor-grant-authenticated`）：`authenticated` **不该**有这三个写入口的 execute 权限',
+            grantedToAuth,
+            0,
+          )
+        }
+      }
+
+      /* ---- ① 超管：三个动作**都成功**（这条就是这次坏掉的那条路） ---- */
+      const wSuperRoster = await post('tok-super', {
+        action: 'rosterImport',
+        gradeId: gid1,
+        rows: [
+          { classNo: '1', studentNo: '01', name: '丙', serial: '' },
+          { classNo: '3', studentNo: '01', name: '丁', serial: '' },
+        ],
+      })
+      eq(
+        'W1：🔴 超管录名单（1 复用 + 1 新建）→ 200 且 students = 2',
+        [wSuperRoster.status, wSuperRoster.json.status, wSuperRoster.json.students],
+        [200, 'ok', 2],
+      )
+      ok(
+        'W2：桩收到的是 **service_role + 显式 `p_actor = 超管`**（不是调用者 JWT、也不是没有 p_actor）',
+        writeActorArgs.bulk_import_roster === U.super &&
+          rpcCalls.some((c) => c.fn === 'bulk_import_roster' && c.token === SVC),
+        JSON.stringify({ actor: writeActorArgs.bulk_import_roster, calls: rpcCalls }),
+      )
+      const rosterRows = Array.isArray(wSuperRoster.json.roster) ? wSuperRoster.json.roster : []
+      ok(
+        'W3：名单真的落库了（"丙"在新班里、还有别的班的学生一起回来了）',
+        rosterRows.some((x) => x.name === '丙' && x.studentNo === '01'),
+        JSON.stringify(rosterRows),
+      )
+      const newCls = one(await db.query(`select id::text as id, teacher_id::text as tid, kind from classes where grade_id = ${gradeOf('高一')} and name like '高一(3)%'`))
+      eq('W4：🔴 新建的班**归调用者**（原来是 `auth.uid()`，service_role 下会是 NULL → 建出没有班主任的班）', newCls?.tid, U.super)
+      eq('W4b：那是个行政班（不是走班班）', newCls?.kind, 'admin')
+
+      const wSuperSubjects = await post('tok-super', {
+        action: 'classSubjectBulk',
+        gradeId: gid1,
+        rows: [{ classId: c1id, subjectCode: 'physics', teacherId: U.teacher }],
+      })
+      eq(
+        'W5：🔴 超管批量写任教关系 → 200 且 rows = 1',
+        [wSuperSubjects.status, wSuperSubjects.json.status, wSuperSubjects.json.rows],
+        [200, 'ok', 1],
+      )
+      eq('W6：服务端传的 `p_actor` 还是那个超管', writeActorArgs.bulk_write_class_subjects, U.super)
+      eq(
+        'W7：任教关系真的落库了（RLS 表 `class_subjects` 只能由这条链写）',
+        await countOf('class_subjects', `where class_id = ${classOf('高一(1)班')} and subject_code = 'physics' and teacher_id = '${U.teacher}'`),
+        1,
+      )
+
+      const mkOther = (studentId) => ({
+        studentId,
+        kind: 'other',
+        primaryCode: '',
+        secondCodes: ['chemistry', 'biology'],
+        note: '转学待定',
+        memberClassIds: [streamId],
+      })
+      const wSuperStudent = await post('tok-super', {
+        action: 'subjectWrite',
+        gradeId: gid1,
+        rows: [mkOther(s1)],
+      })
+      eq(
+        'W8：🔴 超管写选科（「其他」+ 手工选走班班）→ 200 且 written = 1、failures 空',
+        [wSuperStudent.status, wSuperStudent.json.status, wSuperStudent.json.written, wSuperStudent.json.failures],
+        [200, 'ok', 1, []],
+      )
+      eq('W9：服务端传的 `p_actor` 是那个超管', writeActorArgs.write_student_subject, U.super)
+      eq(
+        'W10：🔴 `updated_by` 记的就是 `p_actor`（service_role 下 `auth.uid()` 是 NULL —— "谁干的"只能靠显式传人）',
+        one(await db.query(`select updated_by::text as u from student_subjects where student_id = '${s1}'`)).u,
+        U.super,
+      )
+      const subjRow = one(await db.query(`select kind, primary_code, array_to_string(second_codes, ',') as s from student_subjects where student_id = '${s1}'`))
+      eq(
+        'W11：选科的那一行真的落库了（物生化 + other）',
+        [subjRow?.kind, subjRow?.primary_code, subjRow?.s],
+        ['other', '', 'chemistry,biology'],
+      )
+      eq(
+        'W12：手工选的走班班真的落库了（`class_members` 对 authenticated 是零写权限）',
+        await countOf('class_members', `where student_id = '${s1}'`),
+        1,
+      )
+
+      /* ---- ② 教务处（`admin`）→ 三个动作都必须成功 ---- */
+      eq(
+        'W13：教务处批量写任教关系 → 成功',
+        (await post('tok-admin', {
+          action: 'classSubjectBulk',
+          gradeId: gid1,
+          rows: [{ classId: c2id, subjectCode: 'history', teacherId: U.teacher }],
+        })).json.status,
+        'ok',
+      )
+      const wAdminSubject = await post('tok-admin', {
+        action: 'subjectWrite',
+        gradeId: gid1,
+        rows: [{ studentId: s1, kind: 'standard', primaryCode: 'physics', secondCodes: ['chemistry', 'geography'], note: '' }],
+      })
+      eq('W14：教务处写选科（标准组合）→ 成功', [wAdminSubject.status, wAdminSubject.json.written], [200, 1])
+      eq(
+        'W15：教务处录名单 → 成功',
+        (await post('tok-admin', {
+          action: 'rosterImport',
+          gradeId: gid1,
+          rows: [{ classNo: '1', studentNo: '02', name: '戊', serial: '' }],
+        })).json.status,
+        'ok',
+      )
+
+      /* ---- ②b 第四个写动作：`academicYearWrite`（§28，**同一类 bug** 一起修的） ----
+       *  `write_academic_year` 也是 `revoke … from authenticated` 的，服务端原来也是拿调用者 JWT 调它
+       *  —— 所以它必须在**同一批**端到端断言里被覆盖。 */
+      const wYearOk = await post('tok-super', {
+        action: 'academicYearWrite',
+        name: '2031-2032',
+        yearStart: '2031-09-01',
+        yearEnd: '2032-08-31',
+        half1Start: '2031-09-01',
+        half1End: '2032-01-31',
+        half2Start: '2032-02-01',
+        half2End: '2032-08-31',
+      })
+      eq(
+        'W15b：🔴 超管设学年与上下半期 → 200 且 `academicYearId` 回来了（第四个写动作，同一类 bug）',
+        [wYearOk.status, wYearOk.json.status, /^[0-9a-f-]{36}$/.test(String(wYearOk.json.academicYearId))],
+        [200, 'ok', true],
+      )
+      eq('W15c：服务端传的 `p_actor` 是那个超管', writeActorArgs.write_academic_year, U.super)
+      eq(
+        'W15d：那一年的两个半期真的落库了',
+        await countOf('terms', `where academic_year_id = (select id from academic_years where name = '2031-2032')`),
+        2,
+      )
+      const wYearDenied = await post('tok-head', {
+        action: 'academicYearWrite',
+        name: '2032-2033',
+        yearStart: '2032-09-01',
+        yearEnd: '2033-08-31',
+        half1Start: '2032-09-01',
+        half1End: '2033-01-31',
+        half2Start: '2033-02-01',
+        half2End: '2033-08-31',
+      })
+      ok(
+        'W15e：🔴 班主任设学年 → 被拒（把"只有教导处 / 最高管理员能设学年与学期"那句人话带回来）',
+        wYearDenied.status >= 400 && /只有教导处|permission denied/i.test(String(wYearDenied.json.message)),
+        `${wYearDenied.status} ${wYearDenied.json.message}`,
+      )
+
+      /* ---- ③ 年级主任：本年级成功、别的年级被拒 ---- */
+      eq(
+        'W16：高一主任批量写任教关系（本年级）→ 成功',
+        (await post('tok-grade', {
+          action: 'classSubjectBulk',
+          gradeId: gid1,
+          rows: [{ classId: c1id, subjectCode: 'math', teacherId: U.teacher }],
+        })).json.status,
+        'ok',
+      )
+      const wGradeOther = await post('tok-grade', {
+        action: 'classSubjectBulk',
+        gradeId: gid2,
+        rows: [{ classId: c21id, subjectCode: 'math', teacherId: U.teacher }],
+      })
+      eq('W17：🔴 高一主任写**高二**的任教关系 → 403（判据挡住，不是"格式不对"）', [wGradeOther.status, wGradeOther.json.status], [403, 'error'])
+      ok('W18：理由是"你没有设定这个年级任课关系的权限"（数据库那句话原样带回来）', /你没有设定这个年级任课关系的权限/.test(String(wGradeOther.json.message)), String(wGradeOther.json.message))
+      const wGradeRosterOther = await post('tok-grade', {
+        action: 'rosterImport',
+        gradeId: gid2,
+        rows: [{ classNo: '9', studentNo: '01', name: '己', serial: '' }],
+      })
+      eq('W19：🔴 高一主任录**高二**的名单 → 403 且那句人话是"你没有给这个年级录名单的权限"', [wGradeRosterOther.status, /你没有给这个年级录名单的权限/.test(String(wGradeRosterOther.json.message))], [403, true])
+      const wGradeSubjectOwn = await post('tok-grade', {
+        action: 'subjectWrite',
+        gradeId: gid1,
+        rows: [{ studentId: s1, kind: 'standard', primaryCode: 'history', secondCodes: ['politics', 'geography'], note: '' }],
+      })
+      eq('W20：本年级的年级主任改本年级学生的选科 → 成功', [wGradeSubjectOwn.status, wGradeSubjectOwn.json.written], [200, 1])
+      const wGradeSubjectOther = await post('tok-grade', {
+        action: 'subjectWrite',
+        gradeId: gid2,
+        rows: [{ studentId: s2, kind: 'standard', primaryCode: 'history', secondCodes: ['politics', 'geography'], note: '' }],
+      })
+      eq('W21：🔴 高一主任改**高二**学生的选科 → 200 但那一行进了 `failures`（不是静默成功）', [wGradeSubjectOther.status, wGradeSubjectOther.json.written, wGradeSubjectOther.json.failures.length], [200, 0, 1])
+      ok('W22：那条失败的人话是"你没有改这个学生选科的权限"', /你没有改这个学生选科的权限/.test(String(wGradeSubjectOther.json.failures[0]?.reason)), JSON.stringify(wGradeSubjectOther.json.failures))
+
+      /* ---- ④ 班主任 / 任课教师 / 教室端 → 一律被拒 ---- */
+      for (const [tok, who] of [['tok-head', '班主任'], ['tok-teacher', '任课教师'], ['tok-room', '教室端账号']]) {
+        const r1 = await post(tok, {
+          action: 'classSubjectBulk',
+          gradeId: gid1,
+          rows: [{ classId: c1id, subjectCode: 'biology', teacherId: U.teacher }],
+        })
+        ok(`W23：${who} 批量写任教关系 → 被拒（${who} 不在那三档里）`, r1.status === 403 && /权限/.test(String(r1.json.message)), `${r1.status} ${r1.json.message}`)
+        const r2 = await post(tok, {
+          action: 'rosterImport',
+          gradeId: gid1,
+          rows: [{ classNo: '8', studentNo: '01', name: '庚', serial: '' }],
+        })
+        ok(`W24：${who} 录名单 → 被拒`, r2.status === 403 && /权限/.test(String(r2.json.message)), `${r2.status} ${r2.json.message}`)
+        const r3 = await post(tok, {
+          action: 'subjectWrite',
+          gradeId: gid2,
+          rows: [{ studentId: s2, kind: 'standard', primaryCode: 'physics', secondCodes: ['biology', 'geography'], note: '' }],
+        })
+        ok(
+          `W25：${who} 写**别的年级**的选科 → 那一行进 \`failures\`（逐条事务：不是 200 就悄悄算成功）`,
+          r3.status === 200 && r3.json.written === 0 && r3.json.failures.length === 1,
+          `${r3.status} ${JSON.stringify(r3.json)}`,
+        )
+      }
+
+      /* ---- ⑦ 🔴 反向对照（**真跑**）：把修法改回去 → 这一节必须红 ---- */
+      /* 🔴 先补两条**无条件**的"谁干的"断言（必须在反向对照之前跑，否则对照那一轮会把状态改掉）：
+         `school` / `service` 这几个 token 都不是登录者 —— 写进去的 `updated_by` 只能是显式传的 `p_actor`。 */
+      const sStream2 = one(await db.query(`select id::text as id from students where student_no = 'ST-01'`)).id
+      const wSuperStudent2 = await post('tok-super', {
+        action: 'subjectWrite',
+        gradeId: gid1,
+        rows: [mkOther(sStream2)],
+      })
+      eq('W31：超管再写一次「其他」学生的选科 → 成功（同一个人第二次，幂等 upsert）', [wSuperStudent2.status, wSuperStudent2.json.written], [200, 1])
+      eq(
+        'W32：🔴 `updated_by` 记的就是那个 `p_actor`（service_role 下 `auth.uid()` 是 NULL —— 桩里已把它清掉）',
+        one(await db.query(`select updated_by::text as u from student_subjects where student_id = '${sStream2}'`))?.u,
+        U.super,
+      )
+      eq(
+        'W33：同一个学生那次是最后写的人赢（高一主任 W20 之后 = 主任；超管刚写完 = 超管）—— 两条分别看',
+        [
+          one(await db.query(`select updated_by::text as u from student_subjects where student_id = '${s1}'`))?.u,
+          one(await db.query(`select updated_by::text as u from student_subjects where student_id = '${sStream2}'`))?.u,
+        ],
+        [U.grade, U.super],
+      )
+
+      /*
+       * 🔴 反向对照已经在本节 ⑦ 那一段（W26–W30 之前）执行完了 ——
+       *    这里不再重复，见那段注释里"必须排在 W 断言之前"的理由。
+       */
     } finally {
       globalThis.fetch = realFetch
     }

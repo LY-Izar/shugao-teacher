@@ -174,6 +174,78 @@ export function svc(env: Env, path: string, init?: RequestInit): Promise<Respons
   })
 }
 
+export type SvcRpcOut = {
+  ok: boolean
+  status: number
+  /** 成功时 = RPC 返回的那个 jsonb（对象）；失败时 = `{}` */
+  value: Record<string, unknown>
+  /** 数据库 `raise exception` 的那句人话（没有就给一句兜底） */
+  message: string
+  /** 原始响应文本（调用方要自己认 `does not exist` 那种形状时用它） */
+  text: string
+}
+
+/**
+ * 用**管理员密钥**调一个 RPC（跳过 RLS）—— **写入口只有这一处**。
+ *
+ * 🔴 2026-10-02（集成修复）新增：`grade-setup.ts` 原来拿**调用者 JWT** 调三个写函数，
+ *    而它们在 `schema.sql` 里是 `revoke … from authenticated` 的（§27.12）——
+ *    PostgREST 以 `authenticated` 角色执行 → **线上必 42501**。
+ *    现在与 `grade-promote.ts`（§29）**同一个形状**：service_role + 显式 `p_actor`。
+ *
+ * ⚠️ `p_actor` 必须由调用方传进来，而且**只能是 `caller()` 从调用者 JWT 里验出来的那个 id** ——
+ *    这是"service_role 不凭一个幽灵 id 写库"的唯一保证（`service_role` 下 `auth.uid()` 是 NULL，
+ *    数据库自己问不出"谁干的"）。
+ * ⚠️ 与 `grade-promote.ts` 里那份私有实现**一字不差**（那边先写、这边后抽；两份都在跑）。
+ */
+export async function svcRpc(
+  env: Env,
+  fn: string,
+  body: Record<string, unknown>,
+): Promise<SvcRpcOut> {
+  const key = serviceKey(env)
+  let status = 0
+  let text = ''
+  try {
+    const res = await fetch(`${baseUrl(env)}/rest/v1/rpc/${fn}`, {
+      method: 'POST',
+      headers: {
+        apikey: key,
+        Authorization: `Bearer ${key}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    })
+    status = res.status
+    text = await res.text()
+  } catch (e) {
+    return {
+      ok: false,
+      status: 0,
+      value: {},
+      message: e instanceof Error ? e.message : String(e),
+      text: '',
+    }
+  }
+  let value: Record<string, unknown> = {}
+  let message = ''
+  try {
+    const v = JSON.parse(text || '{}') as Record<string, unknown>
+    if (v && typeof v === 'object' && !Array.isArray(v)) {
+      value = v
+      if (typeof v.message === 'string') message = v.message
+    }
+  } catch {
+    /* 不是 JSON —— 当空处理，message 留空 */
+  }
+  if (status < 200 || status >= 300) {
+    if (!message) message = `服务端回 ${status}`
+    return { ok: false, status, value: {}, message, text }
+  }
+  return { ok: true, status, value, message, text }
+}
+
+
 /** 表 / 列 / 函数还没建（那一段 SQL 没跑）—— 与 `notice.ts:178-180` 同款 */
 export const isMissing = (r: Read) =>
   r.status === 404 ||
