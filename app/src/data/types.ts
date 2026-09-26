@@ -1,4 +1,33 @@
-export type StudentStatus = 'active' | 'left'
+/**
+ * 在班状态（`students.status` 的 check 约束，逐字相同）—— **三档**（✅ Q28 = B）。
+ *
+ *   `'active'`     在读
+ *   `'suspended'`  **休学**：走班名单**保留**、一切历史保留，只是标记出来；
+ *                  「复学一键恢复」= 改回 `'active'`（不需要任何补偿动作）
+ *   `'left'`       已转出（转学 / 退学）：**走班名单移出**
+ *                  （数据库那边由 `schema.sql` §34.5 的触发器守，四条写入路径共用它）
+ *
+ * ⚠️ 三档的**显示名**只有下面那一份映射（界面上别再各写一份 `if`）。
+ */
+export type StudentStatus = 'active' | 'suspended' | 'left'
+
+/** 三档在班状态的中文名（**唯一一处**） */
+export const STUDENT_STATUS_NAME: Record<StudentStatus, string> = {
+  active: '在读',
+  suspended: '休学',
+  left: '已转出',
+}
+
+/**
+ * 把任意来源的值收敛成合法的在班状态。
+ *
+ * 🔴 **只有这一处**做这个收敛（旧备份 / 旧导入表 / 数据库老行三处都要过它）：
+ *    写成 `s.status === 'left' ? 'left' : 'active'` 的地方，**休学那一档会被静默吃成"在读"**
+ *    （恢复一份备份之后休学生变回在册，而且不报错）。
+ */
+export function normalizeStudentStatus(v: unknown): StudentStatus {
+  return v === 'left' || v === 'suspended' ? v : 'active'
+}
 
 /**
  * 班型（`classes.class_type`）—— 四档，**`''` 与 `'undivided'` 是两件事**。

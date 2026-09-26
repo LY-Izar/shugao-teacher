@@ -143,7 +143,13 @@ type ClassroomRow = {
 type CallRow = {
   id: string
   teacher_id: string
-  assignment_id: string
+  /**
+   * 🔴 **可空**（✅ Q32 = C，`schema.sql` §33.1 把 `calls_assignment_id_not_null` 去掉了）：
+   *    · 有值 = **作业呼叫**（挂在某份作业档案下，科任老师就能发）；
+   *    · `null` = **事务性呼叫**（班主任 / 教导处从班级管理直接叫人，不挂作业）。
+   * ⚠️ 读回来一律收敛成 `''`（前端只有"没有"这一种写法，见 `rowToCall`）。
+   */
+  assignment_id: string | null
   class_id: string
   student_nos: string[]
   text: string
@@ -1205,10 +1211,18 @@ export const classroomToRow = (c: ClassroomClient, teacherId: string): Classroom
   last_seen_at: ts(c.lastSeenAt) ?? new Date().toISOString(),
 })
 
+/**
+ * 呼叫的落库载荷。
+ *
+ * 🔴 `assignment_id` 的**唯一映射处**（✅ Q32 = C）：前端只有"没有"这一种写法（空串），
+ *    数据库那一列是**可空**的 —— `'' → null` 必须在这里发生，只此一处。
+ *    ⚠️ 写成 `c.assignmentId` 直接传的话，PostgREST 会拿空串去比 uuid 列 → `22P02`，
+ *    整条呼叫发不出去（而"发不出去"在界面上看着像"网络抖了一下"）。
+ */
 export const callToRow = (c: CallRecord, teacherId: string): CallRow => ({
   id: c.id,
   teacher_id: teacherId,
-  assignment_id: c.assignmentId,
+  assignment_id: c.assignmentId ? c.assignmentId : null,
   class_id: c.classId,
   student_nos: c.studentNos,
   text: c.text,
@@ -1295,7 +1309,8 @@ export const rowToClassroom = (r: ClassroomRow): ClassroomClient => ({
 
 export const rowToCall = (r: CallRow): CallRecord => ({
   id: r.id,
-  assignmentId: r.assignment_id,
+  /* 库里的 `null`（事务性呼叫）→ 空串：前端"没有挂作业"只有这一种写法 */
+  assignmentId: r.assignment_id ?? '',
   classId: r.class_id,
   studentNos: r.student_nos ?? [],
   text: r.text,
@@ -1753,6 +1768,93 @@ export async function loadClassMembers(classIds: string[]): Promise<Record<strin
       out[k] = list
     }
     return out
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 🆕 P10：**选科变更记录**（`student_subject_changes`，`schema.sql` §34.1）。
+ *
+ * 一行 = 一次改动：谁改的 / 什么时候 / 从什么改成什么（Q27：三档都能改 → 要能查）。
+ * `purgedAt` 有值 = 那一次改动**引出**的旧科目数据已经删过一次（**不可恢复**）。
+ */
+export type StudentSubjectChange = {
+  id: string
+  studentId: string
+  /** 改前的科目快照（`{ kind, primary, second[], note }`）；首次采集是空对象 */
+  before: Record<string, unknown>
+  after: Record<string, unknown>
+  /** 改的人（`teachers.id`）；认不出就是空串 */
+  changedBy: string
+  changedAt: number
+  purgedAt: number
+  purgeCounts: Record<string, unknown>
+}
+
+type SubjectChangeCols = { ok: boolean }
+
+let subjectChangeProbe: Promise<SubjectChangeCols> | null = null
+
+async function probeSubjectChanges(): Promise<SubjectChangeCols> {
+  const sb = getSupabase()
+  if (!sb) return { ok: false }
+  try {
+    /* ⚠️ 探针一律 `select('*')`（`nav-checks` D10 会静态抓具体列名 —— 这一类 bug 咬过两次） */
+    const { error } = await sb.from('student_subject_changes').select('*').limit(1)
+    if (!error) return { ok: true }
+    const msg = String(error.message ?? '')
+    const code = String((error as { code?: string }).code ?? '')
+    /* 表不存在 = 还没跑 §34；别的错误（网络、权限）一律当作"有" */
+    return { ok: !(code === '42P01' || code === '42703' || /does not exist/i.test(msg)) }
+  } catch {
+    return { ok: true }
+  }
+}
+
+/** 探测一次（同一页面内只探一次） */
+export function ensureSubjectChanges(): Promise<SubjectChangeCols> {
+  if (!subjectChangeProbe) {
+    subjectChangeProbe = watchProbe('subjectChanges', probeSubjectChanges(), (v) =>
+      v.ok ? 'present' : 'missing',
+    )
+  }
+  return subjectChangeProbe
+}
+
+/**
+ * 读这些学生的选科变更记录（**新的在前**）。
+ * **读不到回 `null`（"不知道"），不回空数组** —— 空数组在界面上是"这个学生从没改过选科"，
+ * 与"这张表还没建 / 没读到"完全是两回事（`loadClassMembers` 同一条纪律）。
+ */
+export async function loadStudentSubjectChanges(
+  studentIds: string[],
+): Promise<StudentSubjectChange[] | null> {
+  const sb = getSupabase()
+  if (!sb || !studentIds.length) return sb ? [] : null
+  const cols = await ensureSubjectChanges()
+  if (!cols.ok) return null
+  try {
+    const { data, error } = await sb
+      .from('student_subject_changes')
+      .select('*')
+      .in('student_id', studentIds)
+      .order('changed_at', { ascending: false })
+      .limit(500)
+    if (error) return null
+    return (data ?? []).map((r) => {
+      const x = r as Record<string, unknown>
+      return {
+        id: String(x.id ?? ''),
+        studentId: String(x.student_id ?? ''),
+        before: (x.before ?? {}) as Record<string, unknown>,
+        after: (x.after ?? {}) as Record<string, unknown>,
+        changedBy: String(x.changed_by ?? ''),
+        changedAt: Date.parse(String(x.changed_at ?? '')) || 0,
+        purgedAt: Date.parse(String(x.purged_at ?? '')) || 0,
+        purgeCounts: (x.purge_counts ?? {}) as Record<string, unknown>,
+      }
+    })
   } catch {
     return null
   }

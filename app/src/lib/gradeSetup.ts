@@ -196,8 +196,69 @@ export async function apiWriteSubjects(
   }
 }
 
-export type ClassSubjectWriteRow = { classId: string; subjectCode: string; teacherId: string }
+/* ============================================================
+   🆕 P10：旧科目数据经确认后删除（`schema.sql` §34.3）
+   ------------------------------------------------------------
+   🔴 两步、各有其人（**这是同一件事的一半在服务端、一半在数据库**）：
+     · `apiOldSubjectPreview()` —— **只算不删**：界面上那句"将删除 N 条记录"用它；
+     · `apiPurgeOldSubjectData()` —— 传 `confirm`；**不传（或不是 true）数据库会报错**，
+       报错那句里就带着"将删除 N 条记录（不可恢复）"。
+   ⚠️ 前端**一个字都不写**这两张表（`student_subject_changes` 只有 select 策略）——
+      删除只有服务端那一条路（service_role + 显式 `p_actor`，§30 的形状）。
+   ============================================================ */
 
+export type OldSubjectCounts = {
+  ok: boolean
+  message: string
+  /** 被放弃的科目（科目代码） */
+  oldSubjects: string[]
+  /** 将删除的**考试成绩行**条数 */
+  scores: number
+  /** 将删除的**走班班成员关系残留**条数 */
+  members: number
+  total: number
+}
+
+const EMPTY_COUNTS: OldSubjectCounts = {
+  ok: false,
+  message: '',
+  oldSubjects: [],
+  scores: 0,
+  members: 0,
+  total: 0,
+}
+
+/** 读"将删除什么"（**只算不删**） */
+export async function apiOldSubjectPreview(studentId: string): Promise<OldSubjectCounts> {
+  const r = await postApi('/api/grade-setup', { action: 'subjectPurgePreview', studentId })
+  if (!r.ok) return { ...EMPTY_COUNTS, message: apiMessage(r, '读不到要删的东西') }
+  const d = r.data as Record<string, unknown>
+  return {
+    ok: true,
+    message: '',
+    oldSubjects: Array.isArray(d.oldSubjects) ? (d.oldSubjects as unknown[]).map(String) : [],
+    scores: Number(d.scores ?? 0),
+    members: Number(d.members ?? 0),
+    total: Number(d.total ?? 0),
+  }
+}
+
+/** 真删（**不确认就删不掉** —— 数据库那一侧 `raise exception`） */
+export async function apiPurgeOldSubjectData(
+  studentId: string,
+  confirm: boolean,
+): Promise<{ ok: boolean; message: string; deleted: { scores: number; members: number } }> {
+  const r = await postApi('/api/grade-setup', { action: 'subjectPurge', studentId, confirm })
+  const d = r.data as Record<string, unknown>
+  const deleted = (d.deleted ?? {}) as Record<string, unknown>
+  return {
+    ok: r.ok,
+    message: r.ok ? String(d.message ?? '已删除') : apiMessage(r, '删除失败'),
+    deleted: { scores: Number(deleted.scores ?? 0), members: Number(deleted.members ?? 0) },
+  }
+}
+
+export type ClassSubjectWriteRow = { classId: string; subjectCode: string; teacherId: string }
 /**
  * **批量写任教关系**（一个事务）。
  *

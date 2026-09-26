@@ -19,6 +19,7 @@ import { Button, Panel, Sect, Sheet, Tag } from '../components/ui'
 import { useStore, useToast } from '../data/store'
 import { collectStats } from '../lib/assignments'
 import { BAND_META, gradeStats } from '../lib/grading'
+import { isStreamClass } from '../lib/pick'
 import { closePip, openPip, pipSupported } from '../lib/pip'
 import { useMaintenanceStatus } from '../lib/useMaintenance'
 import { MaintenanceScreen } from '../components/MaintenanceGate'
@@ -158,6 +159,28 @@ export default function Classroom() {
   const klass = classes.find((c) => c.id === classId) ?? classes[0]
   const client = classrooms.find((c) => c.classId === klass?.id)
 
+  /*
+   * 🆕 P9：走班班的屏**还要能看考试**（Q17：「只看作业和考试」）。
+   * ⚠️ `exams` **不在 `loadSnapshot()` 里**（与通知同一条纪律：读不到它不该让整块屏打不开），
+   *    所以这里显式 `hydrateExams()` —— 它自己带探测（老库上回 `missing`，页面照常显示作业）。
+   * 🔴 **读得到、写不了一点**：`exams` / `exam_scores` 上教室端一条写策略都没有（§15.3）。
+   * ⚠️ 这两个 hook 必须在**所有 early return 之前**（`rules-of-hooks`：hook 的调用顺序每次都一样），
+   *    而 `klass` 又要先算出来 —— 所以位置正好夹在两者之间。
+   */
+  const exams = useStore((s) => s.exams)
+  const hydrateExams = useStore((s) => s.hydrateExams)
+  useEffect(() => {
+    void hydrateExams()
+  }, [hydrateExams])
+  const classExams = useMemo(
+    () =>
+      exams
+        .filter((e) => (e.classIds ?? []).includes(klass?.id ?? ''))
+        .sort((a, b) => (a.examDate < b.examDate ? 1 : -1))
+        .slice(0, 6),
+    [exams, klass?.id],
+  )
+
   /**
    * 教室端能看的「已批改作业」—— 判据**必须**用 `lib/wrongbook.ts` 的 `ranked`，
    * 不能在这里手写 `status === 'graded'`。
@@ -261,6 +284,12 @@ export default function Classroom() {
 
   useEffect(() => {
     if (!isRemote) return
+    /*
+     * ⚠️ 走班班的屏不摆「老师传来的文件」那一块（Q17：只看作业与考试），
+     *    所以连取回也停掉 —— 它会把每一份文件的字节都拉到这台机器上。
+     * 🔴 **这不是权限**：读那一半一个字没改（"读得宽"），只是这块屏不用它。
+     */
+    if (isStreamClass(klass)) return
     let alive = true
 
     const pull = async () => {
@@ -318,7 +347,7 @@ export default function Classroom() {
       alive = false
       window.clearInterval(t)
     }
-  }, [klass?.id, refreshLocal])
+  }, [klass?.id, refreshLocal]) // eslint-disable-line react-hooks/exhaustive-deps
 
   /* 今天的课表 —— 教师端维护，这里只读；也支持现场拍一张课表自动识别 */
   const schedule = useStore((s) => s.schedule)
@@ -571,6 +600,13 @@ export default function Classroom() {
 
   useEffect(() => {
     if (!klass) return
+    /*
+     * 🔴 Q17：**走班班的屏不接呼叫**（呼叫一律落到该学生**行政班**那块屏上）。
+     *    数据库那一层已经保证了这一点（`calls.class_id` 只能是行政班，`schema.sql` §33.2），
+     *    所以这里连轮询都不开 —— 开着它只会每 8 秒空跑一次，而且会让人以为
+     *    "这块屏本来该收到呼叫，只是还没来"。
+     */
+    if (isStreamClass(klass)) return
     /*
      * 只负责**入队**，不负责播 —— 多个学科的老师可能几乎同时叫。
      * 以前是 setBroadcast(c) 直接顶掉上一条，语文老师刚喊完物理老师就叫，
@@ -838,6 +874,18 @@ export default function Classroom() {
     )
   }
 
+  /*
+   * 🔴 Q17：**走班班的屏**（`classes.kind = 'stream'`）—— 「有屏，但只读」。
+   *    它能看的只有**作业**与**考试**；所以下面把这些入口**不摆**：
+   *      · 粘贴课表 / 拍课表（那是**写**：`schedule_items` 上教室端那两处有限写之一，
+   *        数据库那边也已经把它收窄到行政班了 —— `schema.sql` §33.4，这里只是不摆入口）；
+   *      · 呼叫播报面板（走班班的屏**不接呼叫** —— 呼叫落行政班）；
+   *      · 老师传来的文件、自动备份到本机（那是行政班那块屏的活）。
+   *    ⚠️ **摆不摆入口 ≠ 判据**：判据全在数据库（`visible_class_ids_for` + §33.4 那三条
+   *       restrictive 策略）。少写一处前端隐藏，并不会让它多出一点权限。
+   */
+  const streamMode = isStreamClass(klass)
+
   return (
     <Shell>
       {/* 照片识别的结果先给教师核对 —— 时间最容易认错，不能直接入库 */}
@@ -1018,6 +1066,8 @@ export default function Classroom() {
             </span>
             <span style={{ fontSize: 15.5, fontWeight: 650 }}>树高教师平台</span>
             <Tag tone="accent">教室端</Tag>
+            {/* 🔴 Q17：走班班的屏 —— 有屏但只读，只看作业与考试，不接呼叫 */}
+            {streamMode ? <Tag tone="warn">走班班 · 只读</Tag> : null}
           </span>
 
           <span className="flex-1" />
@@ -1190,6 +1240,35 @@ export default function Classroom() {
                 </Panel>
               ) : null}
 
+              {/* 🆕 P9：本班考试（**只读**）—— Q17 说走班班的屏"只看作业和考试"，
+                  这是"考试"那一半。它是**纯读**：`exams` 上教室端零写策略（§15.3）。 */}
+              {classExams.length ? (
+                <Panel className="overflow-hidden">
+                  <div className="panel-head">
+                    <h2>本班考试</h2>
+                    <span className="flex-1" />
+                    <span style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
+                      共 {classExams.length} 场
+                    </span>
+                  </div>
+                  <div className="p-3">
+                    {classExams.map((e) => (
+                      <div key={e.id} className="flex items-center gap-2 py-1.5">
+                        <span className="num shrink-0" style={{ width: 48, fontSize: 12.5, color: 'var(--color-ink2)' }}>
+                          {e.examDate.slice(5).replace('-', '/')}
+                        </span>
+                        <span className="min-w-0 flex-1 truncate" style={{ fontSize: 13.5, fontWeight: 550 }}>
+                          {e.subject || e.title}
+                        </span>
+                        <Tag tone={e.status === 'graded' ? 'ok' : 'idle'}>
+                          {e.status === 'graded' ? '已定稿' : '批阅中'}
+                        </Tag>
+                      </div>
+                    ))}
+                  </div>
+                </Panel>
+              ) : null}
+
               {/* 今天的课 —— 时间在最前面，一眼看清现在上什么、下一节什么 */}
               <Panel bodyClass="p-4">
                 <input
@@ -1210,24 +1289,29 @@ export default function Classroom() {
                     这个班的课 · {WEEKDAY_TEXT[weekdayOf(now) - 1]}
                   </span>
                   <span className="flex-1" />
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setPasteText('')
-                      setPasteOpen(true)
-                    }}
-                    style={{ fontSize: 11.5, color: 'var(--color-accent)' }}
-                  >
-                    粘贴课表
-                  </button>
-                  <button
-                    type="button"
-                    disabled={schedBusy}
-                    onClick={() => schedRef.current?.click()}
-                    style={{ fontSize: 11.5, color: 'var(--color-accent)' }}
-                  >
-                    {schedBusy ? '识别中…' : '拍课表'}
-                  </button>
+                  {/* 走班班的屏**只读**：这两个是"粘贴 / 拍课表"的**写**入口，不摆（§33.4 已从数据库收窄） */}
+                  {streamMode ? null : (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPasteText('')
+                          setPasteOpen(true)
+                        }}
+                        style={{ fontSize: 11.5, color: 'var(--color-accent)' }}
+                      >
+                        粘贴课表
+                      </button>
+                      <button
+                        type="button"
+                        disabled={schedBusy}
+                        onClick={() => schedRef.current?.click()}
+                        style={{ fontSize: 11.5, color: 'var(--color-accent)' }}
+                      >
+                        {schedBusy ? '识别中…' : '拍课表'}
+                      </button>
+                    </>
+                  )}
                 </div>
 
                 {isMakeup ? (
@@ -1431,6 +1515,8 @@ export default function Classroom() {
                 ) : null}
               </Panel>
 
+              {/* 呼叫播报：走班班的屏**不接呼叫**（Q17），整块不摆 */}
+              {streamMode ? null : (
               <Panel bodyClass="p-4">
                 <div className="flex items-center gap-2" style={{ fontSize: 12.5 }}>
                   <IconMegaphone size={15} />
@@ -1467,6 +1553,7 @@ export default function Classroom() {
                   {exam ? '结束考试' : '考试静音'}
                 </Button>
               </Panel>
+              )}
 
               {/* 考试模式：全屏黑底时钟，所有声音停掉 */}
               {exam ? (
@@ -1513,7 +1600,10 @@ export default function Classroom() {
                 </div>
               ) : null}
 
-              {/* 自动备份到这台电脑上的一个文件夹 —— 云端之外的第二份保险 */}
+              {/* 自动备份到这台电脑上的一个文件夹 —— 云端之外的第二份保险
+                  ⚠️ 走班班的屏不摆它：Q17 的口径是"只看作业与考试"，
+                     而整份备份是行政班那块屏的活。 */}
+              {streamMode ? null : (
               <Panel bodyClass="p-4">
                 <div className="flex items-center gap-2" style={{ fontSize: 12.5 }}>
                   <IconCheck size={15} />
@@ -1562,6 +1652,7 @@ export default function Classroom() {
                         : '选一个文件夹（建议放在网盘同步目录里），之后每 5 分钟自动写一份备份。'}
                 </div>
               </Panel>
+              )}
 
               {/* 小窗同款面板：不支持置顶小窗时，这就是兜底 */}
               {cur && !closing ? (
@@ -1824,6 +1915,10 @@ export default function Classroom() {
                     </div>
                   </Panel>
 
+                  {/* 老师传来的文件：走班班的屏**不摆**（Q17：它只看作业与考试）。
+                      ⚠️ 读那一半**一个字没改**（"读得宽"）—— 只是这块屏不显示。 */}
+                  {streamMode ? null : (
+                  <>
                   <Sect>老师传来的文件</Sect>
                   <Panel className="overflow-hidden">
                     {pulling ? (
@@ -1961,6 +2056,8 @@ export default function Classroom() {
                       </>
                     ) : null}
                   </p>
+                  </>
+                  )}
 
                   <Sect>小窗操作</Sect>
                   <Panel bodyClass="p-4">

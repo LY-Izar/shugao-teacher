@@ -17,7 +17,29 @@ import {
 } from '../components/icons'
 import { Button, PageHead, Panel, Sect, Sheet, StatStrip, Tag } from '../components/ui'
 import { useStore, useToast } from '../data/store'
+import { STUDENT_STATUS_NAME, type StudentStatus } from '../data/types'
 import { analyzeRoster, compareRoster } from '../lib/roster'
+import { CALL_LIMIT, CUSTOM_MAX, composeCallText } from '../lib/calls'
+import { archiveKeyOf } from '../lib/keys'
+import { hasManagingRole } from '../lib/roles'
+import { subjectName } from '../lib/subjects'
+import {
+  apiOldSubjectPreview,
+  apiPurgeOldSubjectData,
+  type OldSubjectCounts,
+} from '../lib/gradeSetup'
+import { isRemote } from '../lib/supabase'
+import * as remote from '../data/remote'
+
+/** 一条选科快照 → 人话（`物化生`）；空快照 = "还没采过" */
+function comboText(snap: Record<string, unknown> | undefined): string {
+  const primary = String(snap?.primary ?? '')
+  const raw = snap?.second
+  const second = Array.isArray(raw) ? raw.map(String) : []
+  const parts = [primary, ...second].filter(Boolean)
+  if (!parts.length) return '还没采过'
+  return parts.map((c) => subjectName(c, c)).join('')
+}
 
 export default function ClassDetail() {
   const { id = '' } = useParams()
@@ -29,19 +51,45 @@ export default function ClassDetail() {
   const currentClassId = useStore((s) => s.currentClassId)
   const setCurrentClass = useStore((s) => s.setCurrentClass)
   const updateStudent = useStore((s) => s.updateStudent)
-  const assignments = useStore((s) => s.assignments)
   const sendCall = useStore((s) => s.sendCall)
+  /*
+   * 「从班级管理里直接呼叫学生」—— 摆不摆这个入口。
+   *
+   * 🔴 这**只是"摆不摆入口"**（M1/M2 那条纪律），**不是判据**：
+   *    真正能不能发由数据库的 `can_call()` 说了算（`schema.sql` §33.2）——
+   *    事务性呼叫只给班级管理权那一档，**科任老师一定会被拒**。
+   *    这里用 `hasManagingRole()`（已有的那个粗档）只是免得科任老师看着一个
+   *    必然失败的按钮。⚠️ 它**不覆盖"本班班主任"**（那是 `teacher_roles` 的一行），
+   *    所以入口对班主任也是摆着的 —— 那正是要的（Q32 = C）。
+   */
+  const myRoles = useStore((s) => s.myRoles)
+  const canManageClass = hasManagingRole(myRoles)
 
-  /** 自由播报：教师自己输要念的话，不针对某次作业 */
+  /** 自由播报 / 呼叫学生：教师自己输要念的话，不针对某次作业 */
   const [callOpen, setCallOpen] = useState(false)
   const [callText, setCallText] = useState('')
+  /** 被叫学生（`students.id`）；**事务性呼叫**可以不选人（整班播报） */
+  const [callPicked, setCallPicked] = useState<string[]>([])
   const removeStudent = useStore((s) => s.removeStudent)
   const transferStudent = useStore((s) => s.transferStudent)
   const addStudents = useStore((s) => s.addStudents)
 
+  /* ---- 🆕 P10：选科变更记录 + 旧科目数据的删除（班主任确认那一层）----
+     记录本身**只读**（前端一个字都不许写这张表：`student_subject_changes` 只有 select 策略）；
+     删除走服务端（那两个函数是 `_for` 变体，一律 revoke）。 */
+  const [changes, setChanges] = useState<remote.StudentSubjectChange[] | null>(null)
+  const [changesErr, setChangesErr] = useState('')
+  const [purgeCounts, setPurgeCounts] = useState<OldSubjectCounts | null>(null)
+  const [purgeErr, setPurgeErr] = useState('')
+  const [purgeBusy, setPurgeBusy] = useState(false)
+
   const [q, setQ] = useState('')
   const [editing, setEditing] = useState<string | null>(null)
-  const [form, setForm] = useState({ studentNo: '', name: '', status: 'active' as 'active' | 'left' })
+  const [form, setForm] = useState<{ studentNo: string; name: string; status: StudentStatus }>({
+    studentNo: '',
+    name: '',
+    status: 'active',
+  })
   const [addOpen, setAddOpen] = useState(false)
   const [addForm, setAddForm] = useState({ studentNo: '', name: '' })
 
@@ -75,6 +123,30 @@ export default function ClassDetail() {
     if (!s) return
     setEditing(sid)
     setForm({ studentNo: s.studentNo, name: s.name, status: s.status })
+    /* 每次打开都重读一次（刚在开学准备页改过选科的，这里要立刻看得到） */
+    setChanges(null)
+    setChangesErr('')
+    setPurgeCounts(null)
+    setPurgeErr('')
+    if (isRemote) void loadChanges(sid)
+  }
+
+  /**
+   * 读这个学生的选科变更记录。
+   * ⚠️ 读不到回 `null`（**"不知道"**），界面必须与"从没改过"分开说 ——
+   *    写成空数组的话，"这张表还没建"会长得跟"他没改过选科"一模一样。
+   */
+  const loadChanges = async (sid: string) => {
+    const rows = await remote.loadStudentSubjectChanges([sid])
+    if (rows === null) {
+      setChanges(null)
+      setChangesErr(
+        '读不到选科变更记录。数据库可能还没跑 supabase/schema.sql 第 34 段（选科变更审计那一张表）。',
+      )
+      return
+    }
+    setChangesErr('')
+    setChanges(rows)
   }
 
   /** 正在编辑的那个学生 —— 编辑面板上要显示他的**序列号（只读）** */
@@ -90,18 +162,24 @@ export default function ClassDetail() {
         onBack={() => navigate('/classes')}
         right={
           <div className="flex items-center gap-2">
-            {/* 自由播报：不针对某次作业，教师自己输要念的话 */}
-            <Button
-              size="sm"
-              variant="ghost"
-              icon={<IconMegaphone size={15} />}
-              onClick={() => {
-                setCallText('')
-                setCallOpen(true)
-              }}
-            >
-              呼叫
-            </Button>
+            {/*
+              事务性呼叫的入口（Q32 = C）。**摆不摆**用 `hasManagingRole()` 这个粗档；
+              能不能发由数据库的 `can_call()` 说了算（科任老师一定被拒，见 §33.2）。
+            */}
+            {canManageClass ? (
+              <Button
+                size="sm"
+                variant="ghost"
+                icon={<IconMegaphone size={15} />}
+                onClick={() => {
+                  setCallText('')
+                  setCallPicked([])
+                  setCallOpen(true)
+                }}
+              >
+                呼叫学生
+              </Button>
+            ) : null}
             {currentClassId === klass.id ? (
               <Tag tone="accent">当前班级</Tag>
             ) : (
@@ -280,11 +358,10 @@ export default function ClassDetail() {
                         </td>
                         <td style={{ fontWeight: 550 }}>{s.name || '—'}</td>
                         <td>
-                          {s.status === 'active' ? (
-                            <Tag tone="ok">在读</Tag>
-                          ) : (
-                            <Tag tone="idle">已转出</Tag>
-                          )}
+                          {/* 三档（Q28 = B）—— 显示名只有一处（`types.ts` 的映射） */}
+                          <Tag tone={s.status === 'active' ? 'ok' : s.status === 'suspended' ? 'warn' : 'idle'}>
+                            {STUDENT_STATUS_NAME[s.status] ?? STUDENT_STATUS_NAME.active}
+                          </Tag>
                         </td>
                         <td>
                           <button
@@ -371,25 +448,162 @@ export default function ClassDetail() {
             />
           </label>
 
+          {/*
+            ✅ Q28 = B：**三档**。转班 / 转学移出走班名单；**休学保留但标记**（复学一键恢复）。
+            🔴 移出这件事**不在这里做**：数据库那边 `students` 上的触发器
+               （`schema.sql` §34.5）守住了**全部四条写入路径**（逐个改 / 粘贴导入 /
+               备份恢复回推 / 服务端），界面这一层只是把三档摆出来。
+          */}
           <div>
             <span className="label">在班状态</span>
             <div className="seg">
-              <button
-                type="button"
-                data-on={form.status === 'active'}
-                onClick={() => setForm({ ...form, status: 'active' })}
-              >
-                在读
-              </button>
-              <button
-                type="button"
-                data-on={form.status === 'left'}
-                onClick={() => setForm({ ...form, status: 'left' })}
-              >
-                已转出
-              </button>
+              {(['active', 'suspended', 'left'] as const).map((v) => (
+                <button
+                  key={v}
+                  type="button"
+                  data-on={form.status === v}
+                  onClick={() => setForm({ ...form, status: v })}
+                >
+                  {STUDENT_STATUS_NAME[v]}
+                </button>
+              ))}
             </div>
+            {form.status === 'suspended' ? (
+              <div style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 6, lineHeight: 1.7 }}>
+                休学期间走班名单与全部历史都保留；复学时把状态改回「在读」即可。
+              </div>
+            ) : null}
+            {form.status === 'left' ? (
+              <div style={{ fontSize: 11.5, color: 'var(--color-warn)', marginTop: 6, lineHeight: 1.7 }}>
+                转出会把这位学生移出走班名单。历史作业与成绩不受影响。
+              </div>
+            ) : null}
           </div>
+
+          {isRemote && editing ? (
+            <div>
+              <span className="label">选科变更记录</span>
+              {changesErr ? (
+                <div style={{ fontSize: 12, color: 'var(--color-warn)', lineHeight: 1.7 }}>{changesErr}</div>
+              ) : changes === null ? (
+                <div style={{ fontSize: 12, color: 'var(--color-ink3)' }}>正在读…</div>
+              ) : changes.length === 0 ? (
+                <div style={{ fontSize: 12, color: 'var(--color-ink3)' }}>
+                  这位学生还没有选科变更记录。
+                </div>
+              ) : (
+                <div className="flex flex-col gap-1.5">
+                  {changes.slice(0, 8).map((c) => (
+                    <div
+                      key={c.id}
+                      style={{
+                        border: '1px solid var(--color-line2)',
+                        borderRadius: 4,
+                        padding: '6px 8px',
+                        fontSize: 12,
+                        lineHeight: 1.7,
+                      }}
+                    >
+                      <div>
+                        {comboText(c.before)} → {comboText(c.after)}
+                      </div>
+                      <div style={{ color: 'var(--color-ink3)', fontSize: 11 }}>
+                        {c.changedAt ? new Date(c.changedAt).toLocaleString('zh-CN') : '时间不明'}
+                        {c.purgedAt ? ' · 旧科目数据已删除' : ''}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/*
+                🔴 **二次确认**（Q20 = A）：先把"将删除 N 条记录"摆出来，点确认才真删。
+                数字来自数据库（`old_subject_data_counts_for()`）——**前端不自己数一遍**
+                （数错了就是"确认框上写着 0 条、实际删掉一片"，而那是不可恢复的操作）。
+              */}
+              {purgeCounts?.ok && purgeCounts.total > 0 ? (
+                <div
+                  className="mt-2"
+                  style={{
+                    border: '1px solid #ecd9ae',
+                    background: 'var(--color-warnsoft)',
+                    borderRadius: 4,
+                    padding: '8px 10px',
+                    fontSize: 12,
+                    lineHeight: 1.8,
+                  }}
+                >
+                  <div style={{ color: '#8a5a12', fontWeight: 600 }}>
+                    将删除 {purgeCounts.total} 条记录（无可恢复）
+                  </div>
+                  <div style={{ color: '#8a5a12' }}>
+                    被放弃的科目：{purgeCounts.oldSubjects.map((c) => subjectName(c, c)).join('、') || '（无）'}
+                    <br />
+                    考试成绩 {purgeCounts.scores} 条 · 走班班成员 {purgeCounts.members} 条
+                  </div>
+                  <div className="mt-2 flex gap-2">
+                    <Button size="sm" onClick={() => setPurgeCounts(null)}>
+                      取消
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="danger"
+                      disabled={purgeBusy}
+                      onClick={async () => {
+                        setPurgeBusy(true)
+                        const r = await apiPurgeOldSubjectData(editing, true)
+                        setPurgeBusy(false)
+                        setPurgeCounts(null)
+                        if (!r.ok) {
+                          setPurgeErr(r.message)
+                          return
+                        }
+                        setPurgeErr('')
+                        push({
+                          text: '已删除旧科目数据',
+                          tone: 'warn',
+                          desc: `成绩 ${r.deleted.scores} 条 · 走班班成员 ${r.deleted.members} 条`,
+                        })
+                        void loadChanges(editing)
+                      }}
+                    >
+                      确认删除
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
+
+              {purgeErr ? (
+                <div style={{ fontSize: 12, color: 'var(--color-bad)', marginTop: 6, lineHeight: 1.7 }}>
+                  {purgeErr}
+                </div>
+              ) : null}
+
+              <Button
+                size="sm"
+                variant="ghost"
+                className="mt-2"
+                disabled={purgeBusy || !changes?.length}
+                onClick={async () => {
+                  setPurgeErr('')
+                  setPurgeBusy(true)
+                  const c = await apiOldSubjectPreview(editing)
+                  setPurgeBusy(false)
+                  if (!c.ok) {
+                    setPurgeErr(c.message)
+                    return
+                  }
+                  if (c.total === 0) {
+                    push({ text: '没有要删的旧科目数据', tone: 'ok' })
+                    return
+                  }
+                  setPurgeCounts(c)
+                }}
+              >
+                删除变更掉的旧科目数据
+              </Button>
+            </div>
+          ) : null}
 
           {classes.length > 1 ? (
             <div>
@@ -477,57 +691,121 @@ export default function ClassDetail() {
         </div>
       </Sheet>
 
-      {/* 自由播报：教师自己输内容，教室端直接念 */}
-      <Sheet open={callOpen} onClose={() => setCallOpen(false)} title={`呼叫 ${klass.name}`}>
+      {/*
+        🆕 P9 / Q32 = C：**事务性呼叫** —— 班主任 / 教导处从班级管理里直接叫学生，
+        **不挂任何作业档案**（`calls.assignment_id` 是空的，`schema.sql` §33.1 把它放开了）。
+        ⚠️ 它落在**这个行政班**的教室端（走班班的屏不接呼叫 —— Q17）。
+        ⚠️ 能不能发**不由这里决定**：数据库的 `can_call()`（§33.2）只管班级管理权那一档，
+           科任老师即使把请求打进来也会被拒。
+      */}
+      <Sheet
+        open={callOpen}
+        onClose={() => setCallOpen(false)}
+        title={`呼叫 ${klass.name}`}
+        footer={
+          <div className="flex gap-2">
+            <Button block onClick={() => setCallOpen(false)}>
+              取消
+            </Button>
+            <Button
+              block
+              variant="primary"
+              disabled={!callText.trim()}
+              onClick={() => {
+                const picked = klass.students.filter((s) => callPicked.includes(s.id))
+                const nos = picked.map((s) => archiveKeyOf(s))
+                /*
+                 * `assignmentId: ''` = **事务性呼叫**（不挂作业）。
+                 * 文案只有一处拼（`lib/calls.ts` 的 `composeCallText`）——
+                 * 页面里再拼一遍就会与作业页那一句不一致。
+                 */
+                sendCall({
+                  assignmentId: '',
+                  classId: klass.id,
+                  studentNos: nos,
+                  text: composeCallText(
+                    picked.map((s) => s.studentNo),
+                    klass.name,
+                    '',
+                    callText.trim(),
+                  ),
+                  room: klass.name,
+                })
+                push({
+                  text: '已发送到本班教室端',
+                  tone: 'ok',
+                  desc: picked.length ? `${picked.length} 人` : '整班播报',
+                })
+                setCallText('')
+                setCallPicked([])
+                setCallOpen(false)
+              }}
+            >
+              发送播报
+            </Button>
+          </div>
+        }
+      >
         <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.7, marginBottom: 8 }}>
-          输入想让教室端念出来的话。教室端会先响一声提示音，再用系统语音播报。
+          输入想让教室端念出来的话；可以顺手勾上要叫的学生。教室端会先响一声提示音，再用系统语音播报。
         </p>
         <textarea
           className="input"
-          rows={4}
+          rows={3}
           value={callText}
-          onChange={(e) => setCallText(e.target.value)}
-          placeholder={`例如：请 ${klass.name} 的课代表把作业收齐送到办公室。`}
+          onChange={(e) => setCallText(e.target.value.slice(0, CUSTOM_MAX))}
+          placeholder={`例如：带上作业本到办公室。`}
           style={{ width: '100%', fontFamily: 'inherit', lineHeight: 1.7, resize: 'vertical' }}
         />
-        <div className="mt-3 flex gap-2">
-          <Button block onClick={() => setCallOpen(false)}>
-            取消
-          </Button>
-          <Button
-            block
-            variant="primary"
-            disabled={!callText.trim()}
-            onClick={() => {
-              /*
-               * 呼叫记录在数据库里必须挂在某份作业档案上（assignment_id 是 NOT NULL + 外键），
-               * 所以这里挂到该班最近的一份档案上 —— 至少呼叫记录里能看出是哪个班。
-               */
-              const carrier = [...assignments]
-                .filter((a) => a.classId === klass.id)
-                .sort((a, b) => (a.assignDate < b.assignDate ? 1 : -1))[0]
-              if (!carrier) {
-                push({
-                  text: '这个班还没有作业档案',
-                  tone: 'warn',
-                  desc: '自由播报需要先有一份档案来挂靠呼叫记录',
-                })
-                return
-              }
-              sendCall({
-                assignmentId: carrier.id,
-                classId: klass.id,
-                studentNos: [],
-                text: callText.trim(),
-                room: klass.name,
-              })
-              push({ text: '已发送到教室端', tone: 'ok', desc: callText.trim() })
-              setCallText('')
-              setCallOpen(false)
-            }}
-          >
-            发送播报
-          </Button>
+        <div className="mt-3">
+          <span className="label">
+            要叫谁（可不选 —— 不选就是整班播报 · 最多 {CALL_LIMIT} 人）
+          </span>
+          <div className="max-h-[28vh] overflow-y-auto" style={{ border: '1px solid var(--color-line2)', borderRadius: 4 }}>
+            {klass.students
+              .filter((s) => s.status !== 'left')
+              .sort(compareRoster)
+              .map((s) => {
+                const on = callPicked.includes(s.id)
+                return (
+                  <button
+                    key={s.id}
+                    type="button"
+                    onClick={() =>
+                      setCallPicked((prev) =>
+                        on
+                          ? prev.filter((x) => x !== s.id)
+                          : prev.length >= CALL_LIMIT
+                            ? prev
+                            : [...prev, s.id],
+                      )
+                    }
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left"
+                    style={{
+                      borderBottom: '1px solid var(--color-line)',
+                      background: on ? 'var(--color-accentsoft)' : 'transparent',
+                      fontSize: 13,
+                    }}
+                  >
+                    <span
+                      style={{
+                        width: 14,
+                        height: 14,
+                        borderRadius: 3,
+                        border: '1px solid var(--color-line2)',
+                        background: on ? 'var(--color-accent)' : 'transparent',
+                        display: 'inline-block',
+                        flexShrink: 0,
+                      }}
+                    />
+                    <span className="num" style={{ width: 48, color: 'var(--color-ink3)' }}>
+                      {s.studentNo}
+                    </span>
+                    <span style={{ fontWeight: 550 }}>{s.name || '—'}</span>
+                  </button>
+                )
+              })}
+          </div>
         </div>
       </Sheet>
     </>

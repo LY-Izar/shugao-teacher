@@ -73,6 +73,10 @@ type Body = {
     | 'streamGenerate'
     /** 🆕 P7：分配走班班老师（**自动补 `class_subjects`**） */
     | 'classSubjectAssign'
+    /** 🆕 P10：旧科目数据「将删除什么」的清单（**只算不删**） */
+    | 'subjectPurgePreview'
+    /** 🆕 P10：删旧科目数据（**不确认就删不掉**） */
+    | 'subjectPurge'
   gradeId?: string
   rows?: unknown[]
   /* ---- `streamGenerate`（P7，`schema.sql` §32.2）---- */
@@ -80,6 +84,10 @@ type Body = {
   /* ---- `classSubjectAssign`（P7，`schema.sql` §32.3）---- */
   classId?: string
   teacherId?: string
+  /* ---- `subjectPurgePreview` / `subjectPurge`（P10，`schema.sql` §34.3）---- */
+  studentId?: string
+  /** 二次确认：**不是 true 就删不掉**（数据库那一侧 `raise exception`） */
+  confirm?: boolean
   /* ---- `academicYearWrite`（P3，`schema.sql` §28）：一个学年 + 上下半期 ---- */
   name?: string
   yearStart?: string
@@ -102,6 +110,11 @@ const NEED_STAGE28 =
 /** P7（§32）还没跑时的那句话 */
 const NEED_STAGE32 =
   '数据库还没跑"走班班"那一段（仓库里 supabase/schema.sql 第 32 段）。' +
+  '到 Supabase → SQL Editor 跑一遍再回来；刚跑完的话等十几秒让接口刷新一下缓存。'
+
+/** P10（§34）还没跑时的那句话 */
+const NEED_STAGE34 =
+  '数据库还没跑"选科变更审计"那一段（仓库里 supabase/schema.sql 第 34 段）。' +
   '到 Supabase → SQL Editor 跑一遍再回来；刚跑完的话等十几秒让接口刷新一下缓存。'
 
 /** 走班四科 —— 与 `lib/stream.ts` 的 `STREAM_SUBJECT_CODES` 同值（那一份是唯一判定入口） */
@@ -418,8 +431,61 @@ export async function onRequestPost(context: {
     return json({ status: 'ok', written, failures })
   }
 
-  /* ---------------- classSubjectBulk：批量写任教关系（**一个事务**） ---------------- */
-  if (action === 'classSubjectBulk') {
+  /* ---------------- subjectPurgePreview：旧科目数据「将删除什么」（**只算不删**，P10 / §34.3） ----------------
+   *  🔴 数字**只有一处算**（`old_subject_data_counts_for()`，`schema.sql` §34.3）——
+   *     服务端与界面都**不许**自己数一遍（数错了 = 二次确认上写着"将删除 0 条"、
+   *     实际删掉一片，而那正是"不可恢复"的操作最怕的样子）。
+   *  ⚠️ 读也要走 service_role：那两个函数是 `_for(p_uid, …)`，**一律 revoke**（§16.2 的纪律）。
+   */
+  if (action === 'subjectPurgePreview') {
+    const studentId = String(body.studentId ?? '').trim()
+    if (!UUID_RE.test(studentId)) return json({ status: 'error', message: '没有指定学生' }, 400)
+    const r = await svcRpc(env, 'old_subject_data_counts_for', {
+      p_uid: me.id,
+      p_student_id: studentId,
+    })
+    if (!r.ok) {
+      if (FN_MISSING_RE.test(r.message)) return json({ status: 'error', message: NEED_STAGE34 }, 503)
+      return json({ status: 'error', message: r.message || '读不到要删的东西' }, writeFailStatus(r))
+    }
+    const v = r.value
+    return json({
+      status: 'ok',
+      oldSubjects: Array.isArray(v.oldSubjects) ? v.oldSubjects : [],
+      scores: Number(v.scores ?? 0),
+      members: Number(v.members ?? 0),
+      total: Number(v.total ?? 0),
+    })
+  }
+
+  /* ---------------- subjectPurge：删旧科目数据（**不确认就删不掉**，P10 / §34.3） ---------------- */
+  if (action === 'subjectPurge') {
+    const studentId = String(body.studentId ?? '').trim()
+    if (!UUID_RE.test(studentId)) return json({ status: 'error', message: '没有指定学生' }, 400)
+    const r = await svcRpc(env, 'purge_old_subject_data', {
+      p_actor: me.id,
+      p_student_id: studentId,
+      /*
+       * 🔴 只有**字面上的 true** 才算确认 —— 但**判断本身仍在数据库**：
+       *    这里传什么都不能绕过 `purge_old_subject_data()` 里
+       *    `if p_confirm is not true then raise exception …` 那一句。
+       */
+      p_confirm: body.confirm === true,
+    })
+    if (!r.ok) {
+      if (FN_MISSING_RE.test(r.message)) return json({ status: 'error', message: NEED_STAGE34 }, 503)
+      /* 数据库那句人话里带着"将删除 N 条记录（不可恢复）" —— 原样带回去当确认文案 */
+      return json({ status: 'error', message: r.message || '删除失败', notDeleted: true }, writeFailStatus(r))
+    }
+    const v = r.value
+    return json({
+      status: 'ok',
+      message: String(v.message ?? '已删除'),
+      deleted: v.deleted ?? { scores: 0, members: 0 },
+    })
+  }
+
+  /* ---------------- classSubjectBulk：批量写任教关系（**一个事务**） ---------------- */  if (action === 'classSubjectBulk') {
     if (!UUID_RE.test(gradeId)) return json({ status: 'error', message: '没有指定年级' }, 400)
     const shaped = shapeClassSubjects(Array.isArray(body.rows) ? body.rows : [])
     if (!shaped.ok) return json({ status: 'error', message: shaped.message }, 400)
@@ -533,7 +599,7 @@ export async function onRequestGet(): Promise<Response> {
   return json(
     {
       status: 'ok',
-      hint: '开学准备的服务端接口：POST { action: canSetup | rosterImport | subjectWrite | classSubjectBulk | classSubjectAssign | streamGenerate | academicYearWrite }',
+      hint: '开学准备的服务端接口：POST { action: canSetup | rosterImport | subjectWrite | classSubjectBulk | classSubjectAssign | streamGenerate | academicYearWrite | subjectPurgePreview | subjectPurge }',
     },
     200,
   )

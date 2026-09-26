@@ -233,7 +233,7 @@ export type StreamPlan = {
   pending: StreamPending[]
   /** 选科分布（**复核用**：生成结果与它对得上） */
   combos: StreamComboRow[]
-  /** 在册学生总数（分母） */
+  /** 参与生成的学生总数（分母）—— **在读 + 休学**，不含已转出（Q28 = B） */
   students: number
 }
 
@@ -268,7 +268,14 @@ export function planStreamClasses(
   for (const k of admin) {
     const ct = classTypeOf(k)
     for (const st of k.students) {
-      if (st.status !== 'active') continue
+      /*
+       * ✅ Q28 = B：**只跳过"已转出"**（`left`）—— 转班/转学移出走班名单。
+       * ⚠️ **休学（`suspended`）照旧参与生成**：用户口径是"休学保留但标记、
+       *    复学可一键恢复"，所以他的走班班成员关系必须**继续算进去** ——
+       *    写成 `status !== 'active'` 的话，教导处下一次"重新生成走班班"就会
+       *    把休学生**静默移出**（`generate_stream_classes()` 是整组重算成员的）。
+       */
+      if (st.status === 'left') continue
       byStudent.set(st.id, {
         name: st.name,
         serial: st.serial ?? '',

@@ -1649,6 +1649,14 @@ section('第九节 · D3/D4/D5：判据白名单 · myRoles 读取点白名单 �
           '真正的闸门是服务端拿调用者 JWT 问数据库的 `can_manage_terms()`（= 教导处 / 最高管理员）',
       ],
       ['src/lib/roles.ts', '入口表与判据的定义处（不是读取处）'],
+      [
+        'src/pages/ClassDetail.tsx',
+        '🆕 教室端两块能力（P9）：「呼叫学生」那个按钮的**显隐**（`hasManagingRole(myRoles)`）—— ' +
+          '与 `/settings/terms` 同一档的那个粗判据，**只决定摆不摆入口、不读任何数据行**。' +
+          '⚠️ 它**故意覆盖不到"本班班主任"**（那是 `teacher_roles` 的一行），所以那个入口对班主任也是摆着的。' +
+          '真正的闸门是数据库的 `can_call()`（`schema.sql` §33.2）：事务性呼叫只给班级管理权那一档，' +
+          '科任老师即使把请求打进来也会被拒（`rls-checks` 第十七节有一条反向对照钉着它）',
+      ],
     ])
   const hits = []
   const walk = (dir) => {
@@ -1701,6 +1709,12 @@ section('第九节 · D3/D4/D5：判据白名单 · myRoles 读取点白名单 �
       'src/pages/Grades.tsx',
       '🆕 年级管理（P6）：`.filter` 滤的是这个年级的行政班与在册学生（与角色无关）；' +
         '`myRoles` 只出现在空态文案那一句',
+    ],
+    [
+      'src/pages/ClassDetail.tsx',
+      '🆕 教室端两块能力（P9）：4 处 `.filter` **没有一处与角色有关** —— 滤的是搜索命中的学生、' +
+        '转班时的候选班、以及呼叫面板里"没转出的学生"；`myRoles` 单独出现在那个按钮的显隐上' +
+        '（`hasManagingRole(myRoles)`，见 D4 的白名单理由）',
     ],
   ])
   const SUSPECT = []

@@ -42,6 +42,11 @@
  *   $env:RLS_NEGATIVE='file-read-closed'   ; node scripts/rls-checks.mjs   # 读策略改成恒假（教室端的文件列表又变成空的）
  *   $env:RLS_NEGATIVE='file-object-wider'  ; node scripts/rls-checks.mjs   # 存储对象的读策略改成恒真（桶里任何文件都能签直链）
  *   $env:RLS_NEGATIVE='department-open'    ; node scripts/rls-checks.mjs   # 🆕 部门那一支两半判据拿掉（空部门也能发 + 年级主任也能发）
+ *   $env:RLS_NEGATIVE='p9-stream-write'    ; node scripts/rls-checks.mjs   # 拿掉"走班班的屏零写"那三条收窄（它能往自己班粘课表）
+ *   $env:RLS_NEGATIVE='p9-call-no-manage'  ; node scripts/rls-checks.mjs   # 事务性呼叫放宽成"任教就能发"（科任老师也能叫人）
+ *   $env:RLS_NEGATIVE='p10-no-audit'       ; node scripts/rls-checks.mjs   # 拿掉选科变更审计（三个人改了，谁也查不出）
+ *   $env:RLS_NEGATIVE='p10-purge-no-confirm' ; node scripts/rls-checks.mjs # 拿掉旧科目数据的二次确认（不确认也能删）
+ *   $env:RLS_NEGATIVE='p10-suspend-removes-members' ; node scripts/rls-checks.mjs # 让"休学也移出走班名单"（Q28 = B 明确否掉）
  *   （改的全是**内存里的 SQL 文本**，仓库文件一个字节都不动。）
  */
 
@@ -525,6 +530,105 @@ await withLock(async () => {
           'create policy classroom_files_read on storage.objects\n  for select to authenticated\n  using (true);\n' +
           seg.slice(m[0].length)
         )
+      }
+      /*
+       * 🆕 P9（第十七节）三条负向对照 —— 每一条都对着一条"必须红"的断言。
+       */
+      if (mode === 'p9-stream-write') {
+        /*
+         * 走班班的屏**零写**那一半（§33.4 的三条 restrictive 策略）：
+         * 把它们的条件换成 `true` = 策略恒真 = **不存在**，
+         * 正是"2026-10-05 收紧之前"的样子（教室端能往**走班班**上粘贴课表）。
+         * 期望：第十七节"走班班的屏写全部被拒"里那三条 schedule_items 的断言**必须红**，
+         *      而同节"行政班的教室端仍然能粘贴本班课表"那一条**必须照旧绿**
+         *      （那一条是"收紧没有误伤"的对照）。
+         */
+        let out = text
+        for (const p of [
+          'schedule_classroom_admin_only_insert',
+          'schedule_classroom_admin_only_update',
+          'schedule_classroom_admin_only_delete',
+          'calls_classroom_admin_only',
+        ]) {
+          const seg = new RegExp(`(create policy ${p}[\\s\\S]*?;\\n)`)
+          const m = out.match(seg)
+          if (!m) throw new Error(`负向对照锚点没找到：${p} 这条策略不见了（模式 p9-stream-write）`)
+          const stripped = m[1].replace(
+            /not is_classroom_account\(\)\s*\n\s*or exists \(select 1 from classes c where c\.id = class_id and c\.kind = 'admin'\)/g,
+            'true',
+          )
+          if (stripped === m[1]) {
+            throw new Error(`负向对照锚点没找到：${p} 里的那条"只许行政班"的守卫不见了（模式 p9-stream-write）`)
+          }
+          out = out.replace(seg, stripped)
+        }
+        return out
+      }
+      if (mode === 'p9-call-no-manage') {
+        /*
+         * 事务性呼叫那一支（§33.2）：把"只有班级管理权"改成"**任教就能发**" ——
+         * 那正是"科任老师也能从班级管理里直接叫人"的形状（Q32 = C 明确不要）。
+         * 期望：第十七节"科任老师发事务性呼叫 → 被拒"那一条**必须红**。
+         * ⚠️ 只改**事务性**那一支（`when ... = ''`），作业呼叫那一支一个字不动。
+         */
+        const re =
+          /when coalesce\(btrim\(p_assignment_id::text\), ''\) = '' then\s*\n\s*public\.can_manage_class_for\(p_uid, p_class_id\)\s*\n\s*and exists \(select 1 from classes c where c\.id = p_class_id and c\.kind = 'admin'\)/
+        if (!re.test(text)) {
+          throw new Error('负向对照锚点没找到：can_call_for 的"事务性"那一支变了（模式 p9-call-no-manage）')
+        }
+        return text.replace(
+          re,
+          `when coalesce(btrim(p_assignment_id::text), '') = '' then
+      public.can_manage_class_for(p_uid, p_class_id)
+      or public.teaches_in_class_for(p_uid, p_class_id)`,
+        )
+      }
+      if (mode === 'p10-no-audit') {
+        /*
+         * 选科变更审计（§34）的**两半**一起拿掉 —— 它们各自对应一条"必须红"的断言：
+         *   ① `write_student_subject` 里"内容变了就写一条记录"整段：
+         *      那正是"三个人都能改，但谁也查不出改了什么"的形状（Q27 = B 明确要它）
+         *      → 第十八节"改一次选科 → 记录恰好一条"必须红；
+         *   ② 读策略里的 `not is_classroom_account()`：
+         *      教室里那块屏就会读到"谁改了谁的选科"
+         *      → 第十八节"教室端 → 0 行"必须红。
+         */
+        const re = /if v_before is distinct from v_after then\s*\n\s*insert into student_subject_changes[\s\S]*?returning id into v_change_id;\s*\n\s*end if;/
+        if (!re.test(text)) {
+          throw new Error('负向对照锚点没找到：write_student_subject 里那段审计插入不见了（模式 p10-no-audit）')
+        }
+        const out = text.replace(re, '/* 负向对照：审计插入被拿掉 */')
+        const re2 = /not is_classroom_account\(\) and public\.can_edit_student_subject\(student_id\)/
+        if (!re2.test(out)) {
+          throw new Error('负向对照锚点没找到：审计读策略里的教室端守卫不见了（模式 p10-no-audit）')
+        }
+        return out.replace(re2, 'public.can_edit_student_subject(student_id)')
+      }
+      if (mode === 'p10-purge-no-confirm') {
+        /*
+         * 旧科目数据的**二次确认**（§34.3）：把 `if p_confirm is not true then raise …` 拿掉 ——
+         * 那正是"不确认也能删"的形状，而删除**不可恢复**。
+         * 期望：第十八节"不确认 → 删不掉"那一条**必须红**（而且那一行会被真删掉，
+         *       所以它后面还跟着一条"确认后才删得掉"的断言，两条一起看）。
+         */
+        const re =
+          /if p_confirm is not true then\s*\n\s*raise exception '删除旧科目数据需要二次确认[\s\S]*?\n\s*end if;/
+        if (!re.test(text)) {
+          throw new Error('负向对照锚点没找到：purge_old_subject_data 里那句二次确认不见了（模式 p10-purge-no-confirm）')
+        }
+        return text.replace(re, '/* 负向对照：二次确认被拿掉 */')
+      }
+      if (mode === 'p10-suspend-removes-members') {
+        /*
+         * 休学那一档（§34.5 的触发器）：把"只在 `left` 时移出"放宽成"**休学也移出**" ——
+         * 那正是 Q28 = B 明确否掉的做法（"休学保留但标记"）。
+         * 期望：第十八节"休学 → 走班名单**保留**"那一条**必须红**。
+         */
+        const re = /if new\.status = 'left' and old\.status is distinct from 'left' then/
+        if (!re.test(text)) {
+          throw new Error('负向对照锚点没找到：触发器里那句 `new.status = \'left\'` 不见了（模式 p10-suspend-removes-members）')
+        }
+        return text.replace(re, "if new.status in ('left', 'suspended') and old.status is distinct from new.status then")
       }
       throw new Error(`不认识的 RLS_NEGATIVE=${mode}`)
     }
@@ -3097,11 +3201,14 @@ await withLock(async () => {
            from pg_policies where schemaname = 'public' and tablename = 'schedule_items' order by policyname`,
       )
       eq(
-        '裂缝 B：schedule_items 上的策略清单（读两路 + 写三路 + 一条教室端边界）',
+        '裂缝 B：schedule_items 上的策略清单（读两路 + 写三路 + 一条教室端边界 + 🆕P9 三条"走班班的屏零写"）',
         sPol.rows.map((x) => `${x.policyname}:${x.cmd}${x.permissive === 'RESTRICTIVE' ? ':RESTRICTIVE' : ''}`),
         [
           'schedule_class_visible:SELECT',
           'schedule_class_write:ALL',
+          'schedule_classroom_admin_only_delete:DELETE:RESTRICTIVE',
+          'schedule_classroom_admin_only_insert:INSERT:RESTRICTIVE',
+          'schedule_classroom_admin_only_update:UPDATE:RESTRICTIVE',
           'schedule_classroom_scope_only:ALL:RESTRICTIVE',
           'schedule_classroom_write:ALL',
           'schedule_mine_read:SELECT',
@@ -3290,9 +3397,20 @@ await withLock(async () => {
       }
       const sch = await per('schedule_items')
       eq(
-        'schedule_items：读两路（自己的 + 班级的）+ 写三路（自己 / 班级 / 教室端）+ §17.2 的教室端边界',
+        'schedule_items：读两路（自己的 + 班级的）+ 写三路（自己 / 班级 / 教室端）+ §17.2 的教室端边界' +
+          ' + 🆕P9 三条（走班班的屏零写）',
         sch.map((r) => r.policyname).sort(),
-        ['schedule_class_visible', 'schedule_class_write', 'schedule_classroom_scope_only', 'schedule_classroom_write', 'schedule_mine_read', 'schedule_mine_write'],
+        [
+          'schedule_class_visible',
+          'schedule_class_write',
+          'schedule_classroom_admin_only_delete',
+          'schedule_classroom_admin_only_insert',
+          'schedule_classroom_admin_only_update',
+          'schedule_classroom_scope_only',
+          'schedule_classroom_write',
+          'schedule_mine_read',
+          'schedule_mine_write',
+        ],
       )
 
       const upd = await db.query(`select count(*)::int as n from pg_policies where schemaname='public' and cmd='UPDATE' and with_check is null`)
@@ -3558,14 +3676,16 @@ await withLock(async () => {
        */
       const forNames = forCount.rows.map((r) => r.proname)
       ok(
-        '`_for` 变体一共 30 个（13 + 管理架构轮 8 个 + 公告轮 1 个 `can_publish_announcement_for`' +
+        '`_for` 变体一共 32 个（13 + 管理架构轮 8 个 + 公告轮 1 个 `can_publish_announcement_for`' +
           ' + 管理台第二期 1 个 `can_contact_admin_for`' +
           ' + 🆕P4 2 个 `can_promote_grades_for` / `can_delete_grade_for`' +
           ' + 🆕集成修复 4 个 `can_manage_grade_setup_for` / `can_edit_student_subject_for` /' +
           ' `can_manage_class_setup_for` / `can_manage_terms_for`' +
-          ' + 🆕P5 1 个 `assignments_write_ok_for`）' +
+          ' + 🆕P5 1 个 `assignments_write_ok_for`' +
+          ' + 🆕P9 1 个 `can_call_for`（事务性呼叫的判据）' +
+          ' + 🆕P10 1 个 `old_subject_data_counts_for`（旧科目数据的清单））' +
           ' —— id 变体也算判据的两件套，新增判据别只写裸版',
-        forNames.length === 30,
+        forNames.length === 32,
         `实际 ${forNames.length} 个：${forNames.join('、')}`,
       )
       const hasBare = await db.query(`select has_function_privilege('authenticated', 'public.can_edit_exam(uuid[], text, text)', 'EXECUTE') as v`)
@@ -4747,6 +4867,520 @@ await withLock(async () => {
         '⑦ "行 → 模型"的 kind 映射确实在（`remote.ts` 读库那一行；两处豁免的根据）',
         /row\.kind === 'stream'/.test(rowMap),
       )
+
+      /* ============================================================
+         十七、🆕 P9：教室端的两块新能力（`schema.sql` §33）
+         ------------------------------------------------------------
+         Q17：走班班的屏**有屏但只读**（只看作业与考试；**不接呼叫**；**不许能写**）
+         Q32 = C：**允许呼叫不挂作业**（事务性呼叫 —— 班主任 / 教导处从班级管理直接叫人）
+
+         🔴 这一节的形状照 `功能设计与不变量.md` §十七·补：**单独收紧 + 反向对照断言**。
+            所以"零写"那一段是**逐动作**列的，而且每一条都能被 `RLS_NEGATIVE=p9-stream-write` 弄红。
+         ============================================================ */
+      section('十七、🆕P9：走班班的屏（只读作业 + 只读考试 + 走班班零写 + 不接呼叫）+ 事务性呼叫')
+
+      const R2 = mk('a0', 9)          // 走班班那块屏的账号（`classroom_accounts.id` 就是它的 auth uid）
+      const CS_BIO = mk('c0', 10)     // 走班班-生物（`stream_key = 'biology'`）
+      const CS_GEO = mk('c0', 11)     // 走班班-地理
+      const CS_CHEM = mk('c0', 12)    // 走班班-化学
+      const ASG_STREAM = mk('e0', 30) // 挂走班班的作业（教室端要"读得到"的那一份）
+      const EX_STREAM = mk('e1', 30)  // 挂走班班的考试
+      const S9 = mk('50', 10)         // 走班生：行政班 c1，走班班-生物
+      const CALL_TX = mk('ca', 3)     // 事务性呼叫（`assignment_id` 为空）
+      const CALL_STREAM = mk('ca', 4) // 走班班上的一条呼叫（给"改/删"两条探针当靶子）
+      const SCH_STREAM = mk('5c', 30) // 走班班上的一条课表（给"改/删"两条探针当靶子）
+
+      await D.db.exec(`
+    insert into auth.users (id, email, raw_user_meta_data) values
+      ('${R2}', 'room2@shugao.test', '{"name":"走班班生物教室"}'::jsonb);
+
+    -- 走班班：**单科一个班**（stream_key = 科目代码 —— 与 lib/stream.ts 的 streamKeyOf 同口径）
+    insert into classes (id, teacher_id, name, grade, year, school_id, grade_id, kind, stream_key) values
+      ('${CS_BIO}',  '${U.phy}', '走班班-生物', '高二', '2025', (select id from schools order by created_at limit 1), (select id from grades where name = '高二'), 'stream', 'biology'),
+      ('${CS_GEO}',  '${U.phy}', '走班班-地理', '高二', '2025', (select id from schools order by created_at limit 1), (select id from grades where name = '高二'), 'stream', 'geography'),
+      ('${CS_CHEM}', '${U.phy}', '走班班-化学', '高二', '2025', (select id from schools order by created_at limit 1), (select id from grades where name = '高二'), 'stream', 'chemistry');
+
+    -- 班主任那个班设成理科班（P10 的"内容自动迁移"要靠班型算 walk）
+    update classes set class_type = 'science' where id = '${C.c1}';
+
+    -- 走班生：**行政班是 c1**（所以他的呼叫落 c1 那块屏 —— Q17）；走班班-生物
+    insert into students (id, class_id, student_no, name) values ('${S9}', '${C.c1}', '9', '壬');
+    insert into class_members (class_id, student_id) values ('${CS_BIO}', '${S9}');
+
+    -- 走班班上的一份作业 + 一场考试（教室端"读得到"的那两样）
+    --   ⚠️ 走班班的任教关系**要有**（P7 的"分配走班老师"会补）：不然连那位老师都看不见它
+    insert into class_subjects (id, class_id, subject, subject_code, teacher_id) values
+      ('${mk('c5', 40)}', '${CS_BIO}', '生物', 'biology', '${U.phy}');
+    insert into assignments (id, class_id, teacher_id, title, subject, subject_code, assign_date, question_count)
+    values ('${ASG_STREAM}', '${CS_BIO}', '${U.phy}', '走班班生物练习1', '生物', 'biology', '2026-09-25', 10);
+    insert into exams (id, teacher_id, title, paper_key, subject, subject_code, scope, grade, source, mode, exam_date, question_count, class_ids, absent_nos)
+    values ('${EX_STREAM}', '${U.phy}', '走班班生物练习8', '生物练习8', '生物', 'biology', 'class', '高二', 'manual', 'scores', '2026-09-25', 10, array['${CS_BIO}']::uuid[], '{}');
+
+    -- 走班班上的一条呼叫 + 一条课表（**只给"改 / 删"两条探针当靶子**，正常路径建不出它们）
+    insert into calls (id, teacher_id, assignment_id, class_id, text)
+    values ('${CALL_STREAM}', '${U.phy}', '${ASG_STREAM}', '${CS_BIO}', '走班班上的呼叫');
+    insert into schedule_items (id, teacher_id, weekday, start_time, end_time, title, class_id, scope)
+    values ('${SCH_STREAM}', '${U.phy}', 2, '15:00', '15:40', '走班班生物', '${CS_BIO}', 'class');
+
+    -- 另一个学生的选科行（给"教室端能不能改选科"那条探针当靶子）
+    insert into student_subjects (student_id, primary_code, second_codes, kind)
+    values ('${S.s1}', 'physics', array['chemistry','biology'], 'standard');
+
+    -- 教室端账号：**指向走班班那一行**（§2.11 的结论：class_id 本来就能指它）
+    insert into classroom_accounts (id, class_id, name, email, created_by)
+    values ('${R2}', '${CS_BIO}', '走班班生物教室', 'room2@shugao.test', '${U.phy}');
+      `)
+
+      /* ---- ① 读得到：作业 + 考试（Q17 的"只看作业和考试"）---- */
+      eq(
+        '① 走班班的屏**读得到**挂在它上的作业（Q17：只读作业）',
+        await idsAs(D.db, R2, `select id from assignments where id = $1`, [ASG_STREAM]),
+        [ASG_STREAM],
+      )
+      eq(
+        '① 走班班的屏**读得到**挂在它上的考试（Q17：只读考试）',
+        await idsAs(D.db, R2, `select id from exams where id = $1`, [EX_STREAM]),
+        [EX_STREAM],
+      )
+      eq(
+        '① 反向对照：走班班的屏读不到**行政班**的作业',
+        await idsAs(D.db, R2, `select id from assignments where id = $1`, [E.a1]),
+        [],
+      )
+      eq(
+        '① 反向对照：走班班的屏读不到**别班**的考试',
+        await idsAs(D.db, R2, `select id from exams where id = $1`, [EX.e1]),
+        [],
+      )
+
+      /* ---- ② 🔴 零写：**逐动作**（这一期的红线；`RLS_NEGATIVE=p9-stream-write` 时必须红）---- */
+      const streamWriteProbes = [
+        ['assignments 插一行', `insert into assignments (id, class_id, teacher_id, title, subject, subject_code, assign_date, question_count) values ($1, $2, $3, '教室端试写', '生物', 'biology', '2026-09-26', 10)`, [mk('e0', 41), CS_BIO, R2]],
+        ['assignments 改一行', `update assignments set title = '被教室端改名了' where id = $1 returning id`, [ASG_STREAM]],
+        ['assignments 删一行', `delete from assignments where id = $1 returning id`, [ASG_STREAM]],
+        ['students 改一行', `update students set name = '被教室端改名了' where id = $1 returning id`, [S9]],
+        ['students 删一行', `delete from students where id = $1 returning id`, [S9]],
+        ['calls 插一行（作业呼叫）', `insert into calls (id, teacher_id, assignment_id, class_id, text) values ($1, $2, $3, $4, '教室端试写')`, [mk('ca', 5), R2, ASG_STREAM, CS_BIO]],
+        ['calls 改一行', `update calls set text = '被教室端改了' where id = $1 returning id`, [CALL_STREAM]],
+        ['calls 删一行', `delete from calls where id = $1 returning id`, [CALL_STREAM]],
+        ['exams 插一行', `insert into exams (id, teacher_id, title, subject, subject_code, scope, grade, source, mode, exam_date, question_count, class_ids) values ($1, $2, '教室端试写', '生物', 'biology', 'class', '高二', 'manual', 'scores', '2026-09-26', 10, array[$3]::uuid[])`, [mk('e1', 41), R2, CS_BIO]],
+        ['exam_scores 插一行', `insert into exam_scores (id, exam_id, class_id, student_no, name) values ($1, $2, $3, '9', '壬')`, [mk('e2', 41), EX_STREAM, CS_BIO]],
+        ['schedule_items **往自己那个走班班插**（§33.4 本轮唯一新增的收窄）', `insert into schedule_items (id, teacher_id, weekday, start_time, end_time, title, class_id, scope) values ($1, $2, 3, '15:00', '15:40', '教室端试写', $3, 'class')`, [mk('5c', 31), R2, CS_BIO]],
+        ['schedule_items 改走班班那一行', `update schedule_items set title = '被教室端改了' where id = $1 returning id`, [SCH_STREAM]],
+        ['schedule_items 删走班班那一行', `delete from schedule_items where id = $1 returning id`, [SCH_STREAM]],
+        ['shared_files 插一行', `insert into shared_files (id, teacher_id, class_id, class_ids, name, mime, size, storage_path) values ($1, $2, $3, array[$3]::uuid[], '教室端想传的.png', 'image/png', 10, $4)`, [mk('f0', 41), R2, CS_BIO, `${R2}/hh-教室端.png`]],
+        ['classes 插一行', `insert into classes (id, teacher_id, name, grade, year) values ($1, $2, '教室端建的班', '高二', '2025')`, [mk('c0', 41), R2]],
+        ['class_members 插一行', `insert into class_members (class_id, student_id) values ($1, $2)`, [CS_GEO, S9]],
+        ['student_subjects 改一行', `update student_subjects set primary_code = 'history' where student_id = $1 returning student_id`, [S.s1]],
+        ['teachers 改自己那一行', `update teachers set name = '走班班那块屏把自己改名了' where id = $1 returning id`, [R2]],
+      ]
+      for (const [name, sql, params] of streamWriteProbes) {
+        denied(`🔴 走班班的屏 ${name}`, await attempt(D.db, R2, sql, params))
+      }
+      /* 反向对照（"收紧不许误伤"）：**行政班那块屏照旧能粘贴本班课表** ——
+         §11.1 的两处有限写一个字没动，§33.4 只收窄了"走班班"那一半。 */
+      allowed(
+        '② 反向对照：**行政班**的教室端仍然能粘贴本班课表（§11.1 那两处有限写没被误伤）',
+        await attempt(
+          D.db,
+          U.room,
+          `insert into schedule_items (id, teacher_id, weekday, start_time, end_time, title, class_id, scope)
+           values ($1, $2, 4, '15:00', '15:40', '教室端粘贴的课', $3, 'class')`,
+          [mk('5c', 32), U.room, C.c1],
+        ),
+      )
+
+      /* ---- ③ `calls.assignment_id` 允许为空（Q32 = C 的破坏性迁移）---- */
+      {
+        const nn = await D.db.query(
+          `select attnotnull from pg_attribute
+            where attrelid = 'calls'::regclass and attname = 'assignment_id'`,
+        )
+        eq('③ `calls.assignment_id` **允许为空**（Q32 = C；旧列级 not null 已去掉）', Boolean(nn.rows[0].attnotnull), false)
+      }
+
+      /* ---- ④ 事务性呼叫：谁能发（**判据在数据库**；两条路共用 `can_call`）---- */
+      /*
+       * 一条事务性呼叫的载荷（**前端真实形状**）：`assignment_id` 为 `null`、
+       * `teacher_id` 必须是调用者自己（`calls_insert` 里那一句一个字没改）。
+       * `student_nos` 里放的是**档案键**（序列号优先 —— 与 `lib/keys.ts` 的 `archiveKeyOf` 同口径）。
+       */
+      const TX_SQL = `insert into calls (id, teacher_id, assignment_id, class_id, student_nos, text)
+           values ($1, $2, null, $3,
+                   array[(select coalesce(nullif(btrim(coalesce(s.serial,'')),''), s.student_no) from students s where s.id = $4)],
+                   '请壬同学到办公室')`
+      allowed(
+        '⑤ 事务性呼叫：**班主任**从班级管理直接叫人（`assignment_id` 为空）→ 通过',
+        await attempt(D.db, U.head, TX_SQL, [CALL_TX, U.head, C.c1, S9]),
+      )
+      allowed(
+        '⑤ 事务性呼叫：**教务处**也能发',
+        await attempt(D.db, U.admin, TX_SQL, [mk('ca', 6), U.admin, C.c1, S9]),
+      )
+      allowed(
+        '⑤ 事务性呼叫：**本年级的年级主任**也能发',
+        await attempt(D.db, U.grade, TX_SQL, [mk('ca', 7), U.grade, C.c1, S9]),
+      )
+      denied(
+        '🔴 反向对照：**科任老师**发事务性呼叫 → 被拒（他没有班级管理权 —— Q32 = C 的口径）',
+        await attempt(D.db, U.phy, TX_SQL, [mk('ca', 8), U.phy, C.c1, S9]),
+      )
+      allowed(
+        '⑤ 反向对照：**作业呼叫**一个字没被收窄 —— 科任老师照样能发（老口径 `teaches_in_class`）',
+        await attempt(
+          D.db,
+          U.phy,
+          `insert into calls (id, teacher_id, assignment_id, class_id, text) values ($1, $2, $3, $4, '作业呼叫')`,
+          [mk('ca', 9), U.phy, E.a1, C.c1],
+        ),
+      )
+      denied(
+        '🔴 事务性呼叫的归属**不许是走班班**（Q17：走班班的屏不接呼叫）—— 教务处也不行',
+        await attempt(
+          D.db,
+          U.admin,
+          `insert into calls (id, teacher_id, assignment_id, class_id, text) values ($1, $2, null, $3, '想发到走班班')`,
+          [mk('ca', 10), U.admin, CS_BIO],
+        ),
+      )
+      /*
+       * ⚠️ **两张皮**（与 §十六 那一段同一个理由）：上面 `attempt` 证明"这条写被接受"，
+       *    但它整条包在一个事务里、**最后 rollback**（它只判策略，不留数据）。
+       *    下面这一句（属主身份）才把那条呼叫**真的留在库里**，给"谁看得见"那几条用。
+       */
+      await D.db.exec(`
+    insert into calls (id, teacher_id, assignment_id, class_id, student_nos, text)
+    values ('${CALL_TX}', '${U.head}', null, '${C.c1}',
+            array[(select coalesce(nullif(btrim(coalesce(s.serial,'')),''), s.student_no) from students s where s.id = '${S9}')],
+            '请壬同学到办公室');
+      `)
+
+      /* ---- ⑦ 可见范围：事务性呼叫**落行政班**（这一节的核心断言）---- */
+      eq(
+        '⑦ 给一个**走班生**发的呼叫，出现在他**行政班**的教室端（c1）',
+        await idsAs(D.db, U.room, `select id from calls where id = $1`, [CALL_TX]),
+        [CALL_TX],
+      )
+      eq(
+        '🔴 走班班的屏**收不到呼叫**（Q17：一块都读不到 —— 连它自己那个走班班上的作业呼叫也读不到）',
+        await countAs(D.db, R2, `select count(*)::int as n from calls`),
+        0,
+      )
+      ok(
+        '⑦ 反向对照：**行政班**那块屏照旧读得到本班的呼叫（§33.5 的收窄没有误伤它）',
+        (await idsAs(D.db, U.room, `select id from calls where id = $1`, [CALL_TX])).length === 1,
+      )
+      eq(
+        '⑦ 反向对照：换一个不该看见这条呼叫的人（高一的新老师）→ 看不见',
+        await idsAs(D.db, U.fresh, `select id from calls where id = $1`, [CALL_TX]),
+        [],
+      )
+      eq(
+        '⑦ 而这条呼叫的班主任看得见（他管这个班）',
+        await idsAs(D.db, U.head, `select id from calls where id = $1`, [CALL_TX]),
+        [CALL_TX],
+      )
+
+      /* ---- ⑧ `assignment_id is null` 的兼容：**三处读都不丢行** ----
+         判据是"一条事务性呼叫在任何一处都不会因为 null 被筛掉"：
+           · 教室端轮询（`loadRecentCalls` → `select('*')` 按 class_id 取）；
+           · `rowToCall` / `callToRow` 的双向映射（`''↔null`，**只此一处**）；
+           · 统计页按 `assignment_id` 分组时不把它算进任何一份作业。 */
+      {
+        const c = await asUser(D.db, U.room, async () => {
+          const r = await D.db.query(`select * from calls where class_id = $1 order by created_at desc limit 20`, [C.c1])
+          return r.rows.map((x) => M.rowToCall(x))
+        })
+        const tx = c.find((x) => x.id === CALL_TX)
+        ok(
+          '⑧ 教室端轮询读到的这条事务性呼叫：`assignmentId` 收敛成空串（不是 null / 不是 undefined）',
+          Boolean(tx) && tx.assignmentId === '',
+          tx ? `assignmentId=${JSON.stringify(tx.assignmentId)}` : '没读到那一行',
+        )
+        const back = M.callToRow(tx, U.head)
+        eq('⑧ 再写回去：空串 → 载荷里的 `null`（只此一处映射，PostgREST 不会拿空串去比 uuid）', back.assignment_id, null)
+        ok(
+          '⑧ 统计页按 `assignmentId` 分组时，它**不会**被算进任何一份作业（空串 ≠ 任何档案 id）',
+          c.filter((x) => x.assignmentId === E.a1).every((x) => x.id !== CALL_TX),
+        )
+      }
+
+      /* ============================================================
+         十八、🆕 P10：收尾（`schema.sql` §34）
+         ------------------------------------------------------------
+         ① 选科变更审计（Q27 = B：三个人都能改 → 出问题要能查）
+         ② 旧科目数据**经确认后**删除（Q20 = A）—— 不确认就删不掉
+         ③ 休学档位 + 转班/转学移出走班名单（Q28 = B）
+         ④ `subjects.can_stream` 废弃登记（P7 已做，§32.6）
+         ============================================================ */
+      section('十八、🆕P10：选科变更审计 + 旧科目数据二次确认删除 + 休学档位（§34）')
+
+      const chgCount = async () => Number(
+        (await D.db.query(`select count(*)::int as n from student_subject_changes where student_id = $1`, [S9]))
+          .rows[0].n,
+      )
+      const subjectOf = async () =>
+        (await D.db.query(`select kind, primary_code, second_codes from student_subjects where student_id = $1`, [S9]))
+          .rows[0] ?? null
+      const membersOf9 = async () =>
+        (await D.db.query(`select class_id from class_members where student_id = $1 order by class_id`, [S9]))
+          .rows.map((r) => r.class_id)
+      const writeSubject = (actor, kind, primary, second, note = '', memberIds = []) =>
+        D.db.query(
+          `select public.write_student_subject($1::uuid, $2::uuid, $3::text, $4::text, $5::text[], $6::text, $7::uuid[]) as v`,
+          [actor, S9, kind, primary, second, note, memberIds],
+        )
+      const tryWriteSubject = async (actor, ...args) => {
+        try {
+          await writeSubject(actor, ...args)
+          return { ok: true, message: '' }
+        } catch (e) {
+          return { ok: false, message: shortErr(e) }
+        }
+      }
+
+      /* ---- ① 改一次选科 → 记录**恰好一条**（`before` / `after` 是科目代码快照）---- */
+      await writeSubject(U.head, 'standard', 'physics', ['chemistry', 'geography'])
+      eq('① 改一次选科 → `student_subject_changes` 里**恰好一条**', await chgCount(), 1)
+      {
+        /* ⚠️ 判空行不行都要**走到断言**（负向对照要"断言红"，不是"脚本炸"） */
+        const row = (await D.db.query(
+          `select before, after, changed_by from student_subject_changes where student_id = $1`,
+          [S9],
+        )).rows[0] ?? null
+        eq('① 记录里的"**谁改的**"= 那个班主任（Q27：三个人都能改，所以要能查）', row?.changed_by ?? null, U.head)
+        eq('① 记录里的"**改前**"是空快照（这位学生第一次采选科）', row?.before ?? null, {})
+        eq(
+          '① 记录里的"**改成什么**"用**科目代码**、不用姓名',
+          { primary: row?.after?.primary ?? null, second: row?.after?.second ?? null },
+          { primary: 'physics', second: ['chemistry', 'geography'] },
+        )
+      }
+      /* 原样再存一次**不写第二条**（否则"变更记录"会被无意义的保存刷满） */
+      await writeSubject(U.head, 'standard', 'physics', ['chemistry', 'geography'])
+      eq('① 内容没变时**不会再写一条**（这不是"每次保存都记一笔"）', await chgCount(), 1)
+
+      /* ---- ② 内容自动迁移：走班班成员按新选科**立刻重算**（Q20 = A 的另一半）---- */
+      eq(
+        '② 内容自动迁移：理科班 + 物化地 → walk = {地理} → 成员只剩**走班班-地理**',
+        await membersOf9(),
+        [CS_GEO],
+      )
+      const mismatch = await tryWriteSubject(U.head, 'standard', 'history', ['politics', 'geography'])
+      ok('② 「首选与班型不符」照样能存（那是"建议转班"，不是拒绝）', mismatch.ok, mismatch.message)
+      eq(
+        '② ⚠️「认不出就不动」：首选与班型不符 → 走班班成员**原样不动**（不许自动清空）',
+        await membersOf9(),
+        [CS_GEO],
+      )
+      await writeSubject(U.head, 'standard', 'physics', ['chemistry', 'biology'])
+      eq('② walk = 空（物化生 = 理科班默认）→ 成员被清空', await membersOf9(), [])
+      eq('② 而这三次改动一共留下三条记录', await chgCount(), 3)
+      eq(
+        '② 已发出的作业档案**一个字都没动**（I54：历史档案是快照）',
+        await countAs(D.db, U.phy, `select count(*)::int as n from assignments where id = $1`, [ASG_STREAM]),
+        1,
+      )
+
+      /* ---- ③ 一个事务：写一半不许留下（审计与选科**同生共死**）---- */
+      {
+        const before = await subjectOf()
+        const n0 = await chgCount()
+        /* 「其他」+ 选了一个**行政班** → 在 `student_subject_changes` **之后**那一支才报错：
+           这正是"两次 PostgREST 请求 = 两个事务"会留下半截的那种失败。 */
+        const r = await tryWriteSubject(U.head, 'other', 'physics', ['chemistry', 'biology'], '转学插班', [C.c2])
+        ok('③ 「其他」选了非走班班 → **显式报错**（不静默）', !r.ok && /走班班/.test(r.message), r.message)
+        eq('③ 🔴 同一个事务：报错之后 `student_subjects` **一个字没改**（不是"改了一半"）', await subjectOf(), before)
+        eq('③ 🔴 同一个事务：审计记录也**没留下**（否则就成了"改了但没记"或"记了但没改"）', await chgCount(), n0)
+      }
+
+      /* ---- ④ 写权限：**前端一个字都不许写**这张审计表 ---- */
+      denied(
+        '④ `student_subject_changes` 客户端**插**一行 → 被拒（与 class_subjects / class_members 同一条纪律）',
+        await attempt(D.db, U.head, `insert into student_subject_changes (student_id, before, after) values ($1, '{}'::jsonb, '{}'::jsonb)`, [S9]),
+      )
+      denied(
+        '④ 客户端**改**一行 → 被拒',
+        await attempt(D.db, U.super, `update student_subject_changes set note = '偷改' where student_id = $1 returning id`, [S9]),
+      )
+      denied(
+        '④ 客户端**删**一行 → 被拒',
+        await attempt(D.db, U.super, `delete from student_subject_changes where student_id = $1 returning id`, [S9]),
+      )
+
+      /* ---- ⑤ 读的判据：能改的人才能看（Q27：「要能查」）---- */
+      const chgSeen = async (uid) =>
+        countAs(D.db, uid, `select count(*)::int as n from student_subject_changes where student_id = $1`, [S9])
+      ok('⑤ 班主任看得见自己班学生的变更记录', (await chgSeen(U.head)) >= 1)
+      ok('⑤ 本年级的年级主任看得见', (await chgSeen(U.grade)) >= 1)
+      ok('⑤ 教务处 / 超管看得见', (await chgSeen(U.admin)) >= 1 && (await chgSeen(U.super)) >= 1)
+      eq('⑤ 反向对照：与本班无关的老师（高一的新老师）→ **0 行**', await chgSeen(U.fresh), 0)
+      eq(
+        '⑤ 反向对照：**教室端**（学生碰得到那台机器）→ **0 行**（"谁改了谁的选科"是人事留痕，不是教学内容）',
+        await chgSeen(U.room),
+        0,
+      )
+
+      /* ---- ⑥ 旧科目数据：**不确认就删不掉**（Q20 = A）---- */
+      {
+        /* 先把"旧科目数据"造出来：一次改动把**生物**放弃掉，并留下两条"该删的东西"：
+             ㈠ 他在 c1 的生物考试成绩行；㈡ 走班班-生物的成员关系残留（模拟"手工选过班"）。 */
+        await writeSubject(U.head, 'standard', 'physics', ['chemistry', 'geography'])
+        const EX_BIO = mk('e1', 42)
+        await D.db.exec(`
+    insert into exams (id, teacher_id, title, paper_key, subject, subject_code, scope, grade, source, mode, exam_date, question_count, class_ids, absent_nos)
+    values ('${EX_BIO}', '${U.head}', '高二(1)班生物练习8', '生物练习8', '生物', 'biology', 'class', '高二', 'manual', 'scores', '2026-09-23', 10, array['${C.c1}']::uuid[], '{}');
+    insert into exam_scores (id, exam_id, class_id, student_no, name, graded, total)
+    values ('${mk('e2', 42)}', '${EX_BIO}', '${C.c1}',
+            (select coalesce(nullif(btrim(coalesce(s.serial,'')),''), s.student_no) from students s where s.id = '${S9}'),
+            '壬', true, 77);
+    insert into class_members (class_id, student_id) values ('${CS_BIO}', '${S9}');
+        `)
+
+        const counts = await D.db.query(
+          `select public.old_subject_data_counts_for($1::uuid, $2::uuid) as v`,
+          [U.head, S9],
+        )
+        const cv = counts.rows[0].v
+        ok(
+          '⑥ 「将删除什么」的清单由**数据库算**：被放弃的科目里有生物，且考试成绩 ≥1 条、走班班成员 ≥1 条',
+          cv.oldSubjects.includes('biology') && Number(cv.scores) >= 1 && Number(cv.members) >= 1,
+          JSON.stringify(cv),
+        )
+        const scoreLeft = () => countAs(D.db, U.super, `select count(*)::int as n from exam_scores where exam_id = $1`, [EX_BIO])
+        const bioMemberLeft = () => countAs(D.db, U.super, `select count(*)::int as n from class_members where class_id = $1 and student_id = $2`, [CS_BIO, S9])
+        eq('⑥ 删之前：那条生物成绩行在', await scoreLeft(), 1)
+
+        const noConfirm = await (async () => {
+          try {
+            await D.db.query(`select public.purge_old_subject_data($1::uuid, $2::uuid, $3::boolean)`, [U.head, S9, false])
+            return { ok: true, message: '' }
+          } catch (e) {
+            return { ok: false, message: shortErr(e) }
+          }
+        })()
+        ok(
+          '🔴 不确认（`p_confirm = false`）→ **报错，一条都不删**；报错里带着"将删除 N 条记录（不可恢复）"',
+          !noConfirm.ok && /二次确认/.test(noConfirm.message) && /不可恢复/.test(noConfirm.message),
+          noConfirm.message,
+        )
+        eq('🔴 反向对照（删不掉那一半）：成绩行**还在**', await scoreLeft(), 1)
+        eq('🔴 反向对照（删不掉那一半）：走班班成员残留**还在**', await bioMemberLeft(), 1)
+
+        await D.db.query(`select public.purge_old_subject_data($1::uuid, $2::uuid, $3::boolean)`, [U.head, S9, true])
+        eq('⑥ 确认之后：那条生物成绩行**被删掉**（不可恢复）', await scoreLeft(), 0)
+        eq('⑥ 确认之后：走班班成员残留也清掉', await bioMemberLeft(), 0)
+        const row = (await D.db.query(
+            `select purged_at, purged_by, purge_counts from student_subject_changes
+              where student_id = $1 and purged_at is not null order by changed_at desc limit 1`,
+            [S9],
+          )).rows[0]
+        ok('⑥ 删除**留了审计**：`purged_at` / `purged_by` / `purge_counts` 都写上了', Boolean(row) && row.purged_by === U.head && Number(row.purge_counts.scores) >= 1)
+        /*
+         * ⚠️ 这里全部用可选链 + 显式判空：`RLS_NEGATIVE=p10-no-audit` 时审计插入被拿掉，
+         *    上面那几条会**红**；但如果这里写 `rows[0].purge_counts`，脚本会**先抛 TypeError 崩掉** ——
+         *    负向对照要的是"断言变红"，不是"脚本炸了"（后者会掩盖掉"到底哪条断言在起作用"）。
+         */
+        const purgedRow = (await D.db.query(
+          `select id, purge_counts from student_subject_changes
+            where student_id = $1 and purged_at is not null order by changed_at desc limit 1`,
+          [S9],
+        )).rows[0]
+        const purgedId = purgedRow?.id ?? null
+        const countsBefore = purgedRow?.purge_counts ?? null
+
+        /*
+         * 🔴 "同一批不会被删第二遍"：一次改动**只删一次**。
+         *    ⚠️ 这里必须**删到没有待删项为止**再断言 —— 上面 ⑥ 自己那次改选科
+         *       （物化地）也留下了一批（它的旧科目是 地理/政治/历史），
+         *       所以"第二次调用"按设计确实还有活干。真正的幂等断言是
+         *       "**已经删过的那条记录不再被当成待删项**" + "没有待删项时回一句人话"。
+         */
+        let last = null
+        for (let i = 0; i < 6; i++) {
+          last = await D.db.query(`select public.purge_old_subject_data($1::uuid, $2::uuid, $3::boolean) as v`, [U.head, S9, true])
+          if (/没有要删/.test(String(last.rows[0].v?.message ?? ''))) break
+        }
+        ok(
+          '⑥ 同一批**不会被删第二遍**：删到没有待删项之后，再调一次回"没有要删的旧科目数据"',
+          /没有要删/.test(String(last.rows[0].v?.message ?? '')),
+          JSON.stringify(last.rows[0].v),
+        )
+        eq(
+          '⑥ 而**已经删过的那条**记录不会被改写（`purge_counts` 与第一次删完时逐字相同）',
+          purgedId ? (await D.db.query(`select purge_counts from student_subject_changes where id = $1`, [purgedId])).rows[0].purge_counts : null,
+          countsBefore,
+        )
+      }
+
+      /* ---- ⑦ 休学档位（Q28 = B）：休学**保留**、转班/转学**移出**、复学一键恢复 ---- */
+      {
+        await D.db.exec(`insert into class_members (class_id, student_id) values ('${CS_GEO}', '${S9}') on conflict do nothing`)
+        eq('⑦ 前置：这位学生在走班班-地理里', await membersOf9(), [CS_GEO])
+
+        await D.db.query(`update students set status = 'suspended' where id = $1`, [S9])
+        eq(
+          '🔴 休学（`suspended`）：**走班名单保留**（Q28 = B：保留但标记）',
+          await membersOf9(),
+          [CS_GEO],
+        )
+        eq(
+          '🔴 休学的标记是**读得出来**的（`students.status`）',
+          (await D.db.query(`select status from students where id = $1`, [S9])).rows[0].status,
+          'suspended',
+        )
+        const bad = await attempt(D.db, U.super, `update students set status = 'dropped' where id = $1 returning id`, [S9])
+        denied('⑦ 第四档不认（check 约束只认 active / suspended / left）', bad)
+
+        await D.db.query(`update students set status = 'active' where id = $1`, [S9])
+        eq('⑦ 复学一键恢复：状态回 `active`，而走班名单**本来就没被动过**', await membersOf9(), [CS_GEO])
+        eq(
+          '⑦ 复学之后状态就是在读',
+          (await D.db.query(`select status from students where id = $1`, [S9])).rows[0].status,
+          'active',
+        )
+
+        await D.db.query(`update students set status = 'left' where id = $1`, [S9])
+        eq('🔴 转学 / 退学（`left`）：**走班名单移出**（Q28 = B 的另一半）', await membersOf9(), [])
+
+        await D.db.query(`update students set status = 'active' where id = $1`, [S9])
+        await D.db.exec(`insert into class_members (class_id, student_id) values ('${CS_GEO}', '${S9}') on conflict do nothing`)
+        await D.db.query(`update students set class_id = $1 where id = $2`, [C.c2, S9])
+        eq('🔴 转班（`class_id` 变了）：**走班名单移出**（四条写入路径共用这一个触发器）', await membersOf9(), [])
+        await D.db.query(`update students set class_id = $1 where id = $2`, [C.c1, S9])
+      }
+
+      /* ---- ⑧ `students.status` 的约束形状（幂等迁移的落点）---- */
+      {
+        const cons = await D.db.query(
+          `select conname from pg_constraint
+            where conrelid = 'students'::regclass and contype = 'c' order by conname`,
+        )
+        const names = cons.rows.map((r) => r.conname)
+        ok('⑧ 旧的 `students_status_check`（只认两档）**已经删掉**', !names.includes('students_status_check'), names.join('、'))
+        ok('⑧ 新的 `students_status_check_v2`（三档）在', names.includes('students_status_check_v2'), names.join('、'))
+      }
+
+      /* ---- ⑨ `subjects.can_stream` 废弃登记（✅ P7 已经删列 —— 这里只核一遍）----
+         判据就是计划里那一句：**全仓搜索 `can_stream` → 只剩注释与那一句 `drop column`**。
+         ⚠️ 这里刻意不扫 `src/**`：`lib/subjects.ts` 与 `lib/stream.ts` 的注释里**必须要提它**
+            （不提就没人知道它为什么没了），扫源码只会得到一堆注释命中、证明不了任何事。 */
+      {
+        const col = await D.db.query(
+          `select column_name from information_schema.columns
+            where table_schema = 'public' and table_name = 'subjects' and column_name = 'can_stream'`,
+        )
+        eq('⑨ `subjects.can_stream` 那一列**不存在**（§32.6 已删；Q24 = B）', col.rows, [])
+        const codeHits = readFileSync(SCHEMA_FILE, 'utf8')
+          .split('\n')
+          .filter((l) => !l.trim().startsWith('--') && /can_stream/.test(l))
+          .map((l) => l.trim())
+        eq(
+          '⑨ `schema.sql` 里 `can_stream` 只剩那一句 `drop column`（其余全是注释 —— 计划里那条验收）',
+          codeHits,
+          ['alter table subjects drop column if exists can_stream;'],
+        )
+      }
 
       await Dp.db.close()
     }

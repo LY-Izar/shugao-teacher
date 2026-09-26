@@ -35,6 +35,7 @@ import type {
   StudentStatus,
   Teacher,
 } from '../data/types'
+import { normalizeStudentStatus } from '../data/types'
 
 /* ============================================================
    备份与恢复
@@ -148,7 +149,8 @@ function normalizeStudent(raw: unknown, index: number, seenIds: Set<string>): St
   let id = asText(s.id)
   if (!id || seenIds.has(id)) id = uuid()
   seenIds.add(id)
-  const status: StudentStatus = s.status === 'left' ? 'left' : 'active'
+  /* ⚠️ 收敛走 `normalizeStudentStatus()`（**唯一一处**）：休学那一档不许被吃成"在读" */
+  const status: StudentStatus = normalizeStudentStatus(s.status)
   /*
    * 序列号（v3 才有）：**原样收下**（非空字符串就要），但**不在这里校验形状、也不补号** ——
    * 补号是 `upgradeKeysToSerial` 的活（它要看到整班名单才能按 U-2 的规则"追加到年级末尾"）。

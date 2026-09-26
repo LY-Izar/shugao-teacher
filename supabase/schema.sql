@@ -8381,3 +8381,726 @@ alter table subjects drop column if exists can_stream;
 --  -- select column_name from information_schema.columns
 --  --  where table_schema='public' and table_name='subjects' and column_name='can_stream';
 -- ============================================================
+
+-- ============================================================
+--  33. 教室端的两块新能力（P9，2026-10-05）
+--        ① 走班班的屏（✅ Q17：**有屏，但只读** —— 只看作业与考试，**不接呼叫**）
+--        ② 事务性呼叫（✅ Q32 = C：**允许呼叫不挂作业**）
+-- ------------------------------------------------------------
+--  ⚠️ 本段**动的正是教室端那条线** —— `功能设计与不变量.md` §十七·补 写着
+--     「**教室端那条线不许顺手动**」（三次收紧都是血换的）。所以它：
+--       · **单独一节**（不问别的期一起做）；
+--       · 改动**单独登记**、**单独收紧**、**单独加反向对照断言**；
+--       · 三条地基一个都不重造（见下）。
+--
+--  🔴 三条地基（先读，别重造）：
+--     ① §27.2 `classes.kind` —— 走班班就是 `classes` 里 `kind='stream'` 的一行，
+--        所以 `classroom_accounts.class_id` **直接指向它**即可（不新增账号类型、不新增判据函数）；
+--     ② §10.3 `visible_class_ids_for()` 的教室端分支按 `ca.class_id = c.id` 判 ——
+--        走班班是 `classes` 的行 → **这一支天然成立**；
+--     ③ §31 统一模型（`assignments.class_id` 已可空；作业可以挂在走班班那一行上）。
+--
+--  ✅ 本段的四件事：
+--     33.1 `calls.assignment_id` 允许为空（**幂等**，破坏性迁移）
+--     33.2 「这条呼叫我能不能发」——**唯一**判据 `can_call_for()`（两条路共用）
+--     33.3 三条 `calls` 写策略改用上面那一个判据
+--     33.4 🔴 走班班的屏**一个字也写不了**（教室端那两处有限写收窄成一处）
+-- ============================================================
+
+-- -------- 33.1 🔴 `calls.assignment_id` 允许为空（**幂等**）--------
+--  ✅ **只需要一句，而且它天生幂等**（与 §31.2 完全同一手法）：
+--     PostgreSQL 的列级 `not null` 在 `pg_constraint` 里就是一条名为
+--     `<表>_<列>_not_null` 的 check，所以这一句就是它。
+--  为什么必须放开：事务性呼叫（班主任 / 教导处从班级管理直接呼叫学生）**本来就不该**
+--     挂到某一份作业档案上 —— 它是"事务"，不是"作业的附属"。
+--     ⚠️ 改之前那套做法（`ClassDetail` 的自由播报挂到"该班最近的一份档案"上）
+--        会让呼叫的归属随作业的增删漂移，而且一次事务性呼叫**被记成作业的呼叫**。
+alter table calls drop constraint if exists calls_assignment_id_not_null;
+
+--  自检（**幂等**：跑两遍，`attnotnull` 必须是 false；第二遍不能报 42710/23514）：
+--  -- select a.attnotnull from pg_attribute a
+--  --  where a.attrelid = 'calls'::regclass and a.attname = 'assignment_id';
+--  -- select conname from pg_constraint
+--  --  where conrelid = 'calls'::regclass and contype = 'c' order by 1;
+--  回退（要恢复 `not null` 时；⚠️ 第 ① 步不是可选项）：
+--  -- select id, text from calls where assignment_id is null;
+--  -- delete from calls where assignment_id is null;    -- 或把它们挂到某份档案上
+--  -- alter table calls add constraint calls_assignment_id_not_null
+--  --   check (assignment_id is not null) not valid;
+--  -- alter table calls validate constraint calls_assignment_id_not_null;
+
+-- -------- 33.2 「这条呼叫我能不能发」—— **唯一**判据（I16）--------
+--  两条路**共用它**（这就是计划里那条"事务性呼叫与作业呼叫共用同一套判据函数"）：
+--    · **作业呼叫**（`assignment_id` 有值）：老口径 **一个字不改** ——
+--      `can_manage_class_for` ∪ `teaches_in_class_for`。
+--      ⚠️ 科任老师给本班发"作业呼叫"是**既有功能**（收缴/改错的现场就叫人了），
+--         不在这一期收窄 —— 收窄它等于砍掉一条每天在用的路。
+--    · **事务性呼叫**（`assignment_id` 为空）：**只有班级管理权那一档**
+--      （超管 / 教务处 / 年级主任 / 班主任）→ **科任老师被拒**。
+--      理由：作业呼叫是"针对这份作业"的事，科任老师是这件事的主人；
+--      事务性呼叫是"从班级管理里直接叫人"，那是**班级管理**的权力。
+--
+--  🔴 它还顺手把 Q17 那条边界钉进数据库：**事务性呼叫的归属必须是行政班**
+--     （`kind='admin'`）。走班班的屏不接呼叫，所以**不许有一条 `class_id` 指向走班班的
+--     事务性呼叫被建出来**（否则它会在走班班的屏上响 —— 那是 Q17 明确不要的）。
+--     ⚠️ 作业呼叫**不受这一条约束**：走班作业挂在走班班那一行（§31.1），
+--        它的呼叫也落在走班班 —— 那是 P5/P7 的既有口径，不许在这里顺手收窄。
+--
+--  🔴 **归属为空（`class_id` 为空/空串）一律拒**：呼叫没有"不属于任何班"这一档
+--     （`assignment_unassigned()` 是 §31.3 定义的那一份，**不另写一个判据**）。
+create or replace function public.can_call_for(
+  p_uid uuid,
+  p_class_id uuid,
+  p_assignment_id uuid
+)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select case
+    when public.assignment_unassigned(p_class_id) then false
+    when coalesce(btrim(p_assignment_id::text), '') = '' then
+      public.can_manage_class_for(p_uid, p_class_id)
+      and exists (select 1 from classes c where c.id = p_class_id and c.kind = 'admin')
+    else
+      public.can_manage_class_for(p_uid, p_class_id)
+      or public.teaches_in_class_for(p_uid, p_class_id)
+  end;
+$$;
+
+--  `_for` 变体接受任意 uid（"以任意人身份问权限"）→ **一律 revoke**（§16.2 / §27.12 的纪律）
+revoke all on function public.can_call_for(uuid, uuid, uuid) from public, anon, authenticated;
+
+--  裸版：给策略用（`auth.uid()` 由数据库自己取，前端插不上手）
+create or replace function public.can_call(p_class_id uuid, p_assignment_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$ select public.can_call_for(auth.uid(), p_class_id, p_assignment_id) $$;
+
+grant execute on function public.can_call(uuid, uuid) to authenticated;
+revoke all on function public.can_call(uuid, uuid) from anon;
+
+-- -------- 33.3 三条 `calls` 写策略改用上面那一个判据 --------
+--  🔴 为什么要重写它们（而不是"让前端别发"）：**同一不变量要在所有写入路径上守**。
+--     客户端是**直接 upsert `calls`** 的（`remote.saveCall`），所以"事务性呼叫只有
+--     班级管理那一档能发"这句话必须落在策略上 —— 只写在前端就是"谁都能绕过去"。
+--  ⚠️ `calls_update` 的 `using` 取的是**旧行**的 `assignment_id`、`with check` 取的是**新行**的；
+--     两处都要判，否则把一条作业呼叫的 `assignment_id` 改成 null 就能绕过 33.2 那一支。
+--  ⚠️ 读**不在**这里：读是 `calls_visible`（§11 / §16.3），本段一个字不动它
+--     —— 「读得宽、写得窄」里读那一半这一期不改。
+drop policy if exists calls_insert on calls;
+create policy calls_insert on calls for insert to authenticated
+  with check (teacher_id = auth.uid() and public.can_call(class_id, assignment_id));
+
+drop policy if exists calls_update on calls;
+create policy calls_update on calls for update to authenticated
+  using (public.can_call(class_id, assignment_id))
+  with check (public.can_call(class_id, assignment_id));
+
+drop policy if exists calls_delete on calls;
+create policy calls_delete on calls for delete to authenticated
+  using (public.can_call(class_id, assignment_id));
+
+-- -------- 33.4 🔴 走班班的屏：**一个字也写不了**（Q17「不许能写」）--------
+--  教室端今天有**两处有限写**（§11.1）：
+--    ① 心跳（`classrooms_heartbeat`）：**留着**。它不是业务数据，而是"这块屏在线"的
+--       唯一信号；去掉它，教师端会把走班班的屏显示成"离线"—— 那是往已知的假信号上再叠一层。
+--    ② 粘贴本班班级课表（`schedule_classroom_write`）：🔴 **收窄成只对行政班开放**。
+--       Q17 的口径是"走班班的屏**只读**作业 + 只读考试"，所以它一个字都不该能写。
+--
+--  🔴 为什么用三条**逐动作 restrictive**、而不是改 `schedule_classroom_write` 的正文：
+--     `schedule_classroom_write` 是 `for all` —— 它的 `using` **同时给着 SELECT**
+--     （教室端读自己班的课表有它一份）。改它的正文 = 顺手把"读"也改掉，
+--     而这一期读那一半一个字都不该动。restrictive 策略是 **AND**：
+--     下面三条只做减法、**不放宽任何东西**。
+--     ⚠️ 同理**不能**写成一条 `for all` 的 restrictive（§17.1 实测踩过：
+--        restrictive 的 `using` 对 SELECT 也生效，会把教室端读课表一起挡掉）。
+drop policy if exists schedule_classroom_admin_only_insert on schedule_items;
+create policy schedule_classroom_admin_only_insert on schedule_items
+  as restrictive for insert to authenticated
+  with check (
+    not is_classroom_account()
+    or exists (select 1 from classes c where c.id = class_id and c.kind = 'admin')
+  );
+
+drop policy if exists schedule_classroom_admin_only_update on schedule_items;
+create policy schedule_classroom_admin_only_update on schedule_items
+  as restrictive for update to authenticated
+  using (
+    not is_classroom_account()
+    or exists (select 1 from classes c where c.id = class_id and c.kind = 'admin')
+  )
+  with check (
+    not is_classroom_account()
+    or exists (select 1 from classes c where c.id = class_id and c.kind = 'admin')
+  );
+
+drop policy if exists schedule_classroom_admin_only_delete on schedule_items;
+create policy schedule_classroom_admin_only_delete on schedule_items
+  as restrictive for delete to authenticated
+  using (
+    not is_classroom_account()
+    or exists (select 1 from classes c where c.id = class_id and c.kind = 'admin')
+  );
+
+-- -------- 33.5 🔴 走班班的屏**收不到呼叫**（Q17 的另一半）--------
+--  Q17 的原话是"**呼叫仍落到该学生行政班的教室端**"、"走班班的屏**不接呼叫**"。
+--  33.2 已经把**事务性**呼叫的归属钉死在行政班；这一条补上**读**那一半：
+--  **凡是教室端这块屏（任意一个教室端账号），呼叫的读只限行政班**。
+--
+--  🔴 为什么读也要收 —— 一个反例就够：走班班的作业挂在走班班那一行（§31.1），
+--     它的**作业呼叫** `class_id` 就是走班班 —— 于是走班班的屏会在自己教室里
+--     把那声呼叫**念出来**（"请 12 号到办公室"），而那个学生**正在别处上走班课**、
+--     行政班那块屏也在念同一句。Q17 明确不要这个效果（"学生上完就走"）。
+--
+--  ⚠️ 为什么用 **restrictive for select**（而不是改 `calls_visible` 的正文）：
+--     `calls_visible` 是**所有身份共用**的那一条（老师也靠它）——
+--     改它的正文 = 顺手把老师的读也改掉。restrictive 是 **AND**：
+--     它对真正的老师**恒真**（`not is_classroom_account()`），所以老师那一侧一个字节没动。
+--     ⚠️ 这里用 `for select` 而不是 `for all`：写那三条（33.3）已经各管各的了，
+--        多一条 `for all` 只会让策略清单更难读。
+drop policy if exists calls_classroom_admin_only on calls;
+create policy calls_classroom_admin_only on calls
+  as restrictive for select to authenticated
+  using (
+    not is_classroom_account()
+    or exists (select 1 from classes c where c.id = class_id and c.kind = 'admin')
+  );
+
+-- -------- 33.6 核对（把下面整段粘进 SQL 编辑器）--------
+--  ① `calls.assignment_id` 已经不是 not null（期望 false）：
+--  -- select a.attnotnull from pg_attribute a
+--  --  where a.attrelid = 'calls'::regclass and a.attname = 'assignment_id';
+--  ② 三条 calls 策略都提到 `can_call`（期望 3 行）：
+--  -- select policyname from pg_policies
+--  --  where schemaname='public' and tablename='calls' and cmd in ('INSERT','UPDATE','DELETE')
+--  --    and qual||coalesce(with_check,'') like '%can_call%';
+--  ③ 走班班那块屏**一条写操作都不通**（换成真实 uid 与走班班 id；期望 0 行 / 报错）：
+--  -- select 1 from assignments where class_id = '<走班班 id>';          -- 读：要读得到
+--  -- insert into schedule_items (teacher_id, weekday, start_time, end_time, title, class_id, scope)
+--  --   values ('<这块屏的 uid>', 1, '08:00', '08:40', '试写', '<走班班 id>', 'class');  -- 必须被拒
+--  ④ 走班班那块屏**读不到本班之外的呼叫**（期望 0 行）：
+--  -- select count(*) from calls where class_id = '<走班班 id>';
+--  ⑤ `_for` 变体没有给 authenticated（期望 1 行 = 只有裸版 can_call）：
+--  -- select p.proname from pg_proc p
+--  --  where p.proname in ('can_call','can_call_for')
+--  --    and has_function_privilege('authenticated', p.oid, 'execute');
+-- ============================================================
+
+-- ============================================================
+--  34. 收尾（P10，2026-10-05）
+--        ① 选科变更审计（✅ Q27 = B：三个人都能改 → 出问题要能查）
+--        ② 旧科目数据经班主任确认后删除（✅ Q20 = A）
+--        ③ 休学档位 + 转班/转学移出走班名单（✅ Q28 = B）
+--        ④ `subjects.can_stream` 废弃登记（✅ P7 已做，见 §32.6 —— 本段只指路）
+-- ------------------------------------------------------------
+--  ✅ 四件事的边界（**先把"不做什么"写清楚，再写做什么**）：
+--    · ① 审计与改选科**同一个事务**（`write_student_subject()` 一个 RPC = 一个事务）；
+--      **前端一个字都不许写**（RLS 只给 select）；读的判据**复用** `can_edit_student_subject()`。
+--    · ② 删除是**不可逆**的：**不确认就删不掉**（`raise exception` 里带着"将删除 N 条记录"）。
+--    · ③ `students.status` 加第三档；**休学保留**走班名单、**转班/转学移出**。
+--    · ④ 走班四科写死在 `app/src/lib/stream.ts`，`can_stream` 那一列 §32.6 已经删掉，
+--      **本段不重复做**（只留这一行指向它）。
+--
+--  🔴 「学生所有内容自动迁移」的**定界**（Q20 = A 那一半，方案 §2.16 的 U-29/U-30 收在这里）：
+--    · **迁**：`student_subjects` 那一行 + 该生的**走班班成员关系**（"当前 / 未来视图"）；
+--    · **不迁**（I54：**历史档案是快照**）：`assignments` 的 `wrong` / `missing_nos` 等
+--      **一律不回改** —— 改一次选科就静默改掉上学期的名单，那是最坏的一类失败。
+--    · **要删**（Q20 说的"变更掉的旧科目数据"、且**必须二次确认**）：
+--      他在**被放弃的科目**上的 ㈠ 考试成绩行（`exam_scores`）；
+--      ㈡ 走班班成员关系的**残留**（正常情况下 ① 已经迁走，只有"手工选过班 / 手工改过班"
+--      才会剩；清单里照实报，是 0 就说 0）。
+--      ⚠️ **不许**把作业档案算进去 —— 那是历史（同上）。
+-- ============================================================
+
+-- -------- 34.1 选科变更审计表（`student_subject_changes`）--------
+--  形状照方案 §4.2.3（`年级管理与选科走班方案.md` 的建表草图），**逐列都有理由**：
+--    · `before` / `after`：**科目代码的快照**（`{"kind","primary","second[]","note"}`）——
+--      ⚠️ 用**代码不用姓名**：改名之后快照还要能读（方案 §2.16 明确）。
+--    · `changed_by` / `changed_at`：答"谁改的、什么时候"。
+--    · `purged_*`：Q20 那道"删除工序"登记在**引入它的那一条变更记录**上 ——
+--      `purged_at` 为空 = 旧科目数据**还在**；有值 = 已经删过一次（**不可恢复**）。
+--      这样"删了什么"永远能顺着"哪一次改动"查回去，不需要第二张表。
+create table if not exists student_subject_changes (
+  id           uuid primary key default gen_random_uuid(),
+  student_id   uuid not null references students (id) on delete cascade,
+  before       jsonb not null default '{}'::jsonb,
+  after        jsonb not null default '{}'::jsonb,
+  changed_by   uuid references teachers (id),
+  changed_at   timestamptz not null default now(),
+  note         text not null default '',
+  purged_at    timestamptz,
+  purged_by    uuid references teachers (id),
+  purge_counts jsonb not null default '{}'::jsonb
+);
+create index if not exists student_subject_changes_student_idx
+  on student_subject_changes (student_id, changed_at desc);
+
+alter table student_subject_changes enable row level security;
+
+--  读：**谁能改这个学生的选科，谁就能看他的变更记录**（Q27：三个人都能改 → 要能查）。
+--  🔴 **复用 `can_edit_student_subject()` 这同一个判据**，不另写一套 ——
+--     权限矩阵（方案 §4.2.5）里"改学生选科"与"看选科变更记录"本来就写着**同一档人**，
+--     多写一个函数就是"同一件事两个判定入口"，两条判据一旦不一致就会打架。
+--  🔴 **教室端一个字节都读不到**（`and not is_classroom_account()`）：
+--     `can_edit_student_subject_for` 走的是 `visible_class_ids_for`，而它有一条
+--     "教室端：本班"的分支 —— 也就是说**不加这一句，教室里那块屏能读到"谁改了谁的选科"**。
+--     那块屏是给学生看的（§十七·补），而"谁改的、什么时候改的"是**人事留痕**，不是教学内容。
+--     ⚠️ 与 `schedule_mine_write` 那处收紧同一个手法：`and not is_classroom_account()`，正文其余不动。
+--  ⚠️ 方案里还写着"学生本人看自己的" —— **平台上没有学生的登录身份**
+--     （只有教师与教室端 `classroom_accounts`），所以这一支**今天不存在**；
+--     登记在此，免得后人以为漏了。
+drop policy if exists student_subject_changes_read on student_subject_changes;
+create policy student_subject_changes_read on student_subject_changes for select to authenticated
+  using (not is_classroom_account() and public.can_edit_student_subject(student_id));
+
+--  写：**前端一个字都不许写**（与 `class_subjects` / `class_members` 同一条纪律）。
+--  ⚠️ 一行 `insert` 策略都不给 = 客户端写入**显式报错**（不是静默失败）。
+revoke all on student_subject_changes from anon, authenticated;
+grant select on student_subject_changes to authenticated;
+
+-- -------- 34.2 🔑 改选科 = 写选科 + **写审计** + **内容自动迁移**（一个事务）--------
+--  本函数是 `write_student_subject()` 的**第三次修订**（签名与入参形状一个字未改，
+--  所以 §27.12 那三条 `revoke` **继续有效**，服务端的调用形状也不用动）。
+--  与 §27.9 相比只多三段，逐段都是这一期的验收：
+--    ① **改前快照** → ② **审计插入（同一个事务）** → ③ **走班班成员按新选科重算**。
+--
+--  🔴 ③ 的算法与 `app/src/lib/stream.ts` 的 `streamDiff()` **同一条口径**：
+--       `walk = （他选的再选两门 ∩ 走班四科）− 本班班型的默认那两门`；
+--       一个学生走 2 门 = **同时进 2 个走班班**（U-1 = A 的多对多）。
+--     ⚠️ 认不出的三种情形（未设班型 / 首选与班型不符 / 「其他」）**一律不动成员关系** ——
+--        那几种情况的走班是人工处理的（方案 §2.2 的「建议转班」、Q1 = C 的手工选班）；
+--        自动清空会把"认不出"变成"他那一科没有课上，而且不报错"（正是 §2.2 那条失败模式）。
+--     ⚠️ 走班四科**写死在这里**（与 `lib/stream.ts` 的 `STREAM_SUBJECT_CODES` 同值）：
+--        这一列 `subjects.can_stream` **已经删了**（§32.6，Q24 = B），没有第二个真相可读。
+create or replace function public.write_student_subject(
+  p_actor uuid,
+  p_student_id uuid,
+  p_kind text,
+  p_primary text,
+  p_second text[],
+  p_note text,
+  p_member_class_ids uuid[] default '{}'
+) returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_target_grade uuid;
+  v_class        uuid;
+  v_class_grade  uuid;
+  v_class_type   text;
+  v_members      uuid[];
+  v_before       jsonb;
+  v_after        jsonb;
+  v_walk         text[] := '{}';
+  v_change_id    uuid;
+begin
+  if not public.can_edit_student_subject_for(p_actor, p_student_id) then
+    raise exception '你没有改这个学生选科的权限';
+  end if;
+
+  perform public.student_subject_check(p_kind, p_primary, p_second, p_note);
+
+  select c.grade_id, c.id, c.class_type
+    into v_target_grade, v_class, v_class_type
+    from students s join classes c on c.id = s.class_id
+   where s.id = p_student_id;
+  if v_target_grade is null then
+    raise exception '这个学生没有挂到任何年级上，先把它挂到班与年级上再采选科';
+  end if;
+
+  /* ---- ① 改前的快照（**科目代码，不是姓名**）---- */
+  select jsonb_build_object(
+           'kind', ss.kind,
+           'primary', ss.primary_code,
+           'second', to_jsonb(ss.second_codes),
+           'note', ss.note)
+    into v_before
+    from student_subjects ss
+   where ss.student_id = p_student_id;
+
+  v_after := jsonb_build_object(
+    'kind', p_kind,
+    'primary', coalesce(p_primary, ''),
+    'second', to_jsonb(coalesce(p_second, '{}'::text[])),
+    'note', coalesce(p_note, ''));
+
+  insert into student_subjects (student_id, primary_code, second_codes, kind, note, updated_by, updated_at)
+  values (p_student_id, coalesce(p_primary, ''), coalesce(p_second, '{}'), p_kind,
+          coalesce(p_note, ''), p_actor, now())
+  on conflict (student_id) do update
+     set primary_code = excluded.primary_code,
+         second_codes = excluded.second_codes,
+         kind         = excluded.kind,
+         note         = excluded.note,
+         updated_by   = excluded.updated_by,
+         updated_at   = now();
+
+  /* ---- ② 审计：**与上面那一行同一个事务**（要么一起落、要么都不落）----
+     ⚠️ 判据是"内容真的变了"（`is distinct from`）—— 原样再存一次**不写记录**，
+        否则界面上"变更记录"会被无意义的保存刷满，而 Q27 要的是"能查"。
+     ⚠️ **首次采集也算一条**（`before` 为 null → distinct）：那是"从没有到有"，
+        与方案 §2.16 说的"改一次选科 → 记录恰好一条"一致。 */
+  if v_before is distinct from v_after then
+    insert into student_subject_changes (student_id, before, after, changed_by, note)
+    values (p_student_id, coalesce(v_before, '{}'::jsonb), v_after, p_actor, '')
+    returning id into v_change_id;
+  end if;
+
+  /* ---- ③ 内容自动迁移：走班班成员关系按新选科**立刻重算** ---- */
+  if p_kind = 'standard' and v_class_type in ('science', 'arts') then
+    if (v_class_type = 'science' and coalesce(p_primary, '') = 'physics')
+       or (v_class_type = 'arts' and coalesce(p_primary, '') = 'history') then
+      select coalesce(array_agg(distinct x), '{}') into v_walk
+        from (
+          select e as x
+            from unnest(coalesce(p_second, '{}'::text[])) as e
+           where e in ('chemistry', 'biology', 'politics', 'geography')
+        ) t
+       where t.x not in (
+         select d
+           from unnest(
+             case v_class_type
+               when 'science' then array['chemistry', 'biology']::text[]
+               else array['politics', 'geography']::text[]
+             end
+           ) as d
+       );
+
+      delete from class_members cm
+       using classes c
+       where cm.class_id = c.id
+         and cm.student_id = p_student_id
+         and c.kind = 'stream'
+         and c.grade_id = v_target_grade
+         and not (c.stream_key = any (v_walk));
+
+      insert into class_members (class_id, student_id)
+      select c.id, p_student_id
+        from classes c
+       where c.kind = 'stream'
+         and c.grade_id = v_target_grade
+         and c.stream_key = any (v_walk)
+      on conflict do nothing;
+    end if;
+  end if;
+
+  /* 手工选班只对「其他」开放：标准组合的走班班由 P7 生成 / 由上面 ③ 自动迁，不许在这里插队 */
+  if p_kind = 'other' then
+    if coalesce(array_length(p_member_class_ids, 1), 0) = 0 then
+      raise exception '「其他」的学生必须手工选走班科目（走班班一个都没选）';
+    end if;
+    foreach v_class in array p_member_class_ids loop
+      select c.grade_id into v_class_grade from classes c where c.id = v_class;
+      if v_class_grade is null then
+        raise exception '选中的走班班不存在或没有年级（%）', v_class;
+      end if;
+      if v_class_grade <> v_target_grade then
+        raise exception '走班班必须和学生在同一个年级里（这个班属另一个年级）';
+      end if;
+      if not exists (select 1 from classes c where c.id = v_class and c.kind = 'stream') then
+        raise exception '只能选走班班（kind = stream），% 不是走班班', v_class;
+      end if;
+    end loop;
+    select coalesce(array_agg(distinct x), '{}') into v_members
+      from unnest(p_member_class_ids) x;
+    delete from class_members where student_id = p_student_id;
+    insert into class_members (class_id, student_id)
+    select m, p_student_id from unnest(v_members) m
+    on conflict do nothing;
+  else
+    if coalesce(array_length(p_member_class_ids, 1), 0) > 0 then
+      raise exception '标准组合的走班班由系统生成（P7），手工选班只对「其他」开放';
+    end if;
+  end if;
+
+  return jsonb_build_object('ok', true, 'studentId', p_student_id, 'changeId', v_change_id);
+end $$;
+
+-- -------- 34.3 🔑 「旧科目数据」的清单与删除（Q20 = A）--------
+--  🔴 两步分开、各有其人：
+--    · `old_subject_data_counts_for()` —— **只算、不删**（界面上那句"将删除 N 条记录"用它）；
+--    · `purge_old_subject_data()`      —— **不确认就删不掉**（`p_confirm` 不是 true → 直接报错）。
+--  两个都是 `_for(p_uid, …)`（接受任意人）→ **一律 revoke**；调用一律走服务端
+--  （service_role + 显式 `p_actor`，§30 的形状）。
+--
+--  ⚠️ 判据：与"改这个学生的选科"**同一档**（`can_edit_student_subject_for`）——
+--     能改的人才能删；Q20 说的"经**班主任**确认"落在**界面上的二次确认**这一层
+--     （数据库不该假装知道屏幕上那个弹层长什么样，它只管"没确认就不许删"）。
+--
+--  ⚠️ 只认**最新那条还没删过的变更记录**：删过一次就 `purged_at` 有值，
+--     第二次调用回 0 —— 同一批旧数据不会被删两遍，也不会误删"新改动引入的那一批"。
+create or replace function public.old_subject_data_counts_for(p_uid uuid, p_student_id uuid)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = public
+as $$
+declare
+  v_change_id uuid;
+  v_before    jsonb;
+  v_after     jsonb;
+  v_old       text[] := '{}';
+  v_class     uuid;
+  v_key       text;
+  v_scores    int := 0;
+  v_members   int := 0;
+begin
+  if not public.can_edit_student_subject_for(p_uid, p_student_id) then
+    raise exception '你没有改这个学生选科的权限';
+  end if;
+
+  select ch.id, ch.before, ch.after
+    into v_change_id, v_before, v_after
+    from student_subject_changes ch
+   where ch.student_id = p_student_id
+     and ch.purged_at is null
+   order by ch.changed_at desc, ch.id desc
+   limit 1;
+
+  if v_change_id is null then
+    return jsonb_build_object(
+      'changeId', null, 'oldSubjects', '[]'::jsonb,
+      'scores', 0, 'members', 0, 'total', 0);
+  end if;
+
+  /* 旧科目 = （改前选过的）−（改后还选的）；首选与再选一视同仁 */
+  select coalesce(array_agg(distinct x), '{}') into v_old
+    from (
+      select v_before ->> 'primary' as x
+      union all
+      select e from jsonb_array_elements_text(coalesce(v_before -> 'second', '[]'::jsonb)) as e
+    ) t
+   where coalesce(btrim(t.x), '') <> ''
+     and t.x not in (
+       select v_after ->> 'primary'
+       union
+       select e from jsonb_array_elements_text(coalesce(v_after -> 'second', '[]'::jsonb)) as e
+     );
+
+  select s.class_id into v_class from students s where s.id = p_student_id;
+  /* 档案键与 `app/src/lib/keys.ts` 的 `archiveKeyOf()` 同一口径：**序列号优先、退回班内学号** */
+  select coalesce(nullif(btrim(coalesce(s.serial, '')), ''), s.student_no)
+    into v_key
+    from students s where s.id = p_student_id;
+
+  /*
+   * ㈠ 考试成绩行：**只认他自己行政班里、被放弃科目上的那些**。
+   *    ⚠️ 加 `class_id` 这一道不是多余的：老库上"档案键"退回班内学号，
+   *       而班内学号**只在班内唯一** —— 不加就会误删别班同号学生的成绩。
+   *       **宁可少删，不许误删**（删除不可恢复）。
+   */
+  if v_class is not null and v_key is not null and array_length(v_old, 1) > 0 then
+    select count(*) into v_scores
+      from exam_scores es
+      join exams e on e.id = es.exam_id
+     where es.class_id = v_class
+       and es.student_no = v_key
+       and e.subject_code = any (v_old);
+  end if;
+
+  /* ㈡ 走班班成员关系的**残留**（正常情况下 34.2 的 ③ 已经迁走；手工选过班的会剩） */
+  if array_length(v_old, 1) > 0 then
+    select count(*) into v_members
+      from class_members cm
+      join classes c on c.id = cm.class_id
+     where cm.student_id = p_student_id
+       and c.kind = 'stream'
+       and c.stream_key = any (v_old);
+  end if;
+
+  return jsonb_build_object(
+    'changeId', v_change_id,
+    'oldSubjects', to_jsonb(v_old),
+    'scores', v_scores,
+    'members', v_members,
+    'total', v_scores + v_members);
+end $$;
+
+--  🔴 **删除**：`p_confirm` 不是 true → **抛错，一条都不删**（这就是"不确认 → 删不掉"）。
+--     报错里带着"将删除 N 条记录（不可恢复）"—— 界面直接拿它当二次确认的文案，
+--     不需要第二个人话来源（一个数字只有一处算）。
+create or replace function public.purge_old_subject_data(
+  p_actor uuid,
+  p_student_id uuid,
+  p_confirm boolean
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_counts jsonb;
+  v_total  int;
+  v_scores int;
+  v_members int;
+  v_old    text[];
+  v_change uuid;
+  v_class  uuid;
+  v_key    text;
+begin
+  v_counts := public.old_subject_data_counts_for(p_actor, p_student_id);
+  v_change := nullif(v_counts ->> 'changeId', '')::uuid;
+  v_total  := coalesce((v_counts ->> 'total')::int, 0);
+  v_scores := coalesce((v_counts ->> 'scores')::int, 0);
+  v_members:= coalesce((v_counts ->> 'members')::int, 0);
+
+  if v_change is null or v_total = 0 then
+    return jsonb_build_object(
+      'ok', true, 'deleted', jsonb_build_object('scores', 0, 'members', 0),
+      'counts', v_counts, 'message', '没有要删的旧科目数据');
+  end if;
+
+  if p_confirm is not true then
+    raise exception '删除旧科目数据需要二次确认：将删除 % 条记录（考试成绩 % 条 · 走班班成员 % 条），删除后不可恢复',
+      v_total, v_scores, v_members;
+  end if;
+
+  v_old := array(select jsonb_array_elements_text(coalesce(v_counts -> 'oldSubjects', '[]'::jsonb)));
+
+  select s.class_id into v_class from students s where s.id = p_student_id;
+  select coalesce(nullif(btrim(coalesce(s.serial, '')), ''), s.student_no)
+    into v_key from students s where s.id = p_student_id;
+
+  if array_length(v_old, 1) > 0 then
+    delete from exam_scores es
+     using exams e
+     where e.id = es.exam_id
+       and es.class_id = v_class
+       and es.student_no = v_key
+       and e.subject_code = any (v_old);
+
+    delete from class_members cm
+     using classes c
+     where c.id = cm.class_id
+       and cm.student_id = p_student_id
+       and c.kind = 'stream'
+       and c.stream_key = any (v_old);
+  end if;
+
+  /* 审计：**登记在引入这批旧数据的那条变更记录上**（purged_at 为空 = 还在） */
+  update student_subject_changes
+     set purged_at = now(),
+         purged_by = p_actor,
+         purge_counts = jsonb_build_object('scores', v_scores, 'members', v_members)
+   where id = v_change;
+
+  return jsonb_build_object(
+    'ok', true,
+    'deleted', jsonb_build_object('scores', v_scores, 'members', v_members),
+    'counts', v_counts,
+    'message', '已删除旧科目数据');
+end $$;
+
+revoke all on function public.old_subject_data_counts_for(uuid, uuid) from public, anon, authenticated;
+revoke all on function public.purge_old_subject_data(uuid, uuid, boolean) from public, anon, authenticated;
+
+-- -------- 34.4 ✅ Q28 = B：`students.status` 加第三档「休学」 --------
+--  取值域从 `('active','left')` 扩到 `('active','suspended','left')`：
+--    · `active`    在读
+--    · `suspended` **休学**（保留走班名单、保留一切历史，只是标记出来）
+--    · `left`      已转出（转学 / 退学 → 走班名单移出，见 34.5）
+--
+--  🔴 顺序纪律：**先建新的、再 drop 旧的**（AGENTS：任何一刻都必须有约束在）。
+--     `do` 块里那句 `if not exists` 让它幂等（`add constraint` 没有 `if not exists`）。
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+     where conrelid = 'students'::regclass and conname = 'students_status_check_v2'
+  ) then
+    alter table students add constraint students_status_check_v2
+      check (status in ('active', 'suspended', 'left'));
+  end if;
+end $$;
+
+--  🔴 旧的列级 check（`students_status_check`，只认两档）**必须等新的建好之后再删**。
+--     ⚠️ `create table` 那一份**故意不动**：新库照旧先建出旧约束，再由这一句删掉 ——
+--        两类库（新库 / 老库）因此收敛到**同一个形状**（§一「schema 必须幂等」）。
+--     ⚠️ 数据不用清洗：新约束是旧约束的**超集**，任何一行都仍然合法。
+alter table students drop constraint if exists students_status_check;
+
+--  自检（幂等：跑两遍，期望**只剩一条** `students_status_check_v2`）：
+--  -- select conname, pg_get_constraintdef(oid) from pg_constraint
+--  --  where conrelid = 'students'::regclass and contype = 'c' order by 1;
+--  回退（要退回两档时；先把已休学的行改回在读，否则 add 会失败）：
+--  -- update students set status = 'active' where status = 'suspended';
+--  -- alter table students drop constraint if exists students_status_check_v2;
+--  -- alter table students add constraint students_status_check check (status in ('active','left'));
+
+-- -------- 34.5 ✅ Q28 = B：**转班 / 转学移出**走班名单；**休学保留** --------
+--  🔴 为什么做成 `students` 上的触发器、而不是改"那一个写入入口"：
+--     "转班"这件事在平台上有**四条写入路径**（班级页逐个改 / 粘贴导入 /
+--     备份恢复回推 / 服务端 RPC），逐个改一遍 = I16 的"同一不变量四个入口"，
+--     而漏掉任何一条都会**静默**留下一个已经在别班的人的走班关系。
+--     挂在 `students` 的 UPDATE 上，四条路自动共用这一处。
+--  🔴 **只做减法**（delete `class_members`），**一个业务列都不改** ——
+--     触发器顺手改业务值会让"谁改的"说不清（`students` 上已经有两个触发器：
+--     §20.2 的序列号不可改、§20.2b 的发号，各管一件事）。
+--  ⚠️ `security definer` 不能省：`class_members` 对 `authenticated` **只有 select 策略**
+--     （§27.8），以调用者身份跑 DELETE 会被 RLS 静默筛成 0 行（连报错都没有）。
+--  ⚠️ **休学（`suspended`）走不到任何一个分支** → 成员关系原样保留，
+--     "复学一键恢复"就是把它改回 `active`（不需要任何补偿动作，因为什么都没删）。
+create or replace function public.students_stream_membership_cleanup()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  /* ① 转班（`class_id` 变了）→ 旧的走班关系作废，移出全部走班名单。
+        ⚠️ 之后要重新进走班班，由教导处重跑「生成走班班」（方案 §4.3.3：
+           "改了之后走班班不自动重建，那是教导处/年级主任的动作"）。 */
+  if new.class_id is distinct from old.class_id then
+    delete from class_members where student_id = new.id;
+  end if;
+  /* ② 转学 / 退学（变成 'left'）→ 移出；休学不在此列。 */
+  if new.status = 'left' and old.status is distinct from 'left' then
+    delete from class_members where student_id = new.id;
+  end if;
+  return new;
+end $$;
+
+drop trigger if exists students_stream_membership_cleanup on students;
+create trigger students_stream_membership_cleanup
+  before update on students
+  for each row execute function public.students_stream_membership_cleanup();
+
+--  自检（把下面整段粘进 SQL 编辑器；`<学生 id>` / `<新班 id>` 换成真实值）：
+--  -- select status, count(*) from students group by 1;
+--  -- update students set status = 'suspended' where id = '<学生 id>';   -- 休学：成员数不变
+--  -- select count(*) from class_members where student_id = '<学生 id>';
+--  -- update students set status = 'active'    where id = '<学生 id>';   -- 复学：一键恢复
+--  -- update students set class_id = '<新班 id>' where id = '<学生 id>'; -- 转班：成员数必须变 0
+--  -- select count(*) from class_members where student_id = '<学生 id>';
+--  回退（把这一期的行为整段撤掉）：
+--  -- drop trigger if exists students_stream_membership_cleanup on students;
+--  -- drop function if exists public.students_stream_membership_cleanup();
+
+-- -------- 34.6 核对（把下面整段粘进 SQL 编辑器）--------
+--  ① 审计表在、且前端**读得到写不了**（期望 1 行 select / 0 行 insert）：
+--  -- select has_table_privilege('authenticated', 'student_subject_changes', 'select') as 能读,
+--  --        has_table_privilege('authenticated', 'student_subject_changes', 'insert') as 能写;
+--  ② 审计表的读策略只有一条（期望 1）：
+--  -- select count(*) from pg_policies
+--  --  where schemaname='public' and tablename='student_subject_changes' and cmd = 'SELECT';
+--  ③ `students.status` 现在认三档（上面那一条自检里的 `update` 不报错即可）：
+--  -- select pg_get_constraintdef(oid) from pg_constraint
+--  --  where conrelid = 'students'::regclass and conname = 'students_status_check_v2';
+--  ④ 旧科目数据那两个函数**没有给 authenticated**（期望 0 行）：
+--  -- select p.proname from pg_proc p
+--  --  where p.proname in ('old_subject_data_counts_for','purge_old_subject_data')
+--  --    and has_function_privilege('authenticated', p.oid, 'execute');
+--  ⑤ `can_stream` 那一列**不存在**（§32.6 已删；期望 0 行）：
+--  -- select column_name from information_schema.columns
+--  --  where table_schema='public' and table_name='subjects' and column_name='can_stream';
+-- ============================================================

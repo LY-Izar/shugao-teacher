@@ -21,6 +21,7 @@ import { compareRoster } from '../lib/roster'
 import { classTypeOf, isAdminClass } from '../lib/pick'
 import { loadClassMembers } from './remote'
 import type { ClassType, Klass, Student } from './types'
+import { normalizeStudentStatus } from './types'
 import type { StudentSubject } from '../lib/pick'
 
 /** 探测结论：三态（"没结论"必须是灰，绝不红 —— §三.4 的硬不变量） */
@@ -67,7 +68,8 @@ function asStudent(row: Record<string, unknown>): Student {
     id: String(row.id),
     studentNo: String(row.student_no ?? ''),
     name: String(row.name ?? ''),
-    status: row.status === 'left' ? 'left' : 'active',
+    /* ⚠️ 收敛走 `normalizeStudentStatus()`（**唯一一处**）：休学那一档不许被吃成"在读" */
+    status: normalizeStudentStatus(row.status),
     serial: row.serial ? String(row.serial) : undefined,
     createdAt: Date.parse(String(row.created_at ?? '')) || 0,
   }

@@ -662,6 +662,30 @@ await withLock(async () => {
         '  -- （负向对照：拿掉孤儿 exams 的显式删除 —— 数组建不了外键，没人替你删）\n  n_exams := 0;',
       )
     }
+    /*
+     * 🆕 P10（§34）三条对照 —— 每一条都对着第十四节里一条**必须红**的断言：
+     *   · `p10-no-audit`               → 拿掉 `write_student_subject()` 里那段审计插入
+     *                                    → S3/S5 红（"改一次选科 → 恰好一条"）
+     *   · `p10-purge-no-confirm`       → 拿掉 `purge_old_subject_data()` 里那句二次确认
+     *                                    → S11 红（"不确认 → 删不掉"）
+     *   · `p10-suspend-removes-members` → 把触发器放宽成"休学也移出"
+     *                                    → S16 红（"休学保留"）
+     */
+    if (NEGATIVE === 'p10-no-audit') {
+      const re = /if v_before is distinct from v_after then\s*\n\s*insert into student_subject_changes[\s\S]*?returning id into v_change_id;\s*\n\s*end if;/
+      if (!re.test(text)) throw new Error('p10-no-audit 的锚点没找到')
+      return text.replace(re, '  -- （负向对照：审计插入被拿掉）')
+    }
+    if (NEGATIVE === 'p10-purge-no-confirm') {
+      const re = /if p_confirm is not true then\s*\n\s*raise exception '删除旧科目数据需要二次确认[\s\S]*?\n\s*end if;/
+      if (!re.test(text)) throw new Error('p10-purge-no-confirm 的锚点没找到')
+      return text.replace(re, '  -- （负向对照：二次确认被拿掉）')
+    }
+    if (NEGATIVE === 'p10-suspend-removes-members') {
+      const anchor = `if new.status = 'left' and old.status is distinct from 'left' then`
+      if (!text.includes(anchor)) throw new Error('p10-suspend-removes-members 的锚点没找到')
+      return text.replace(anchor, `if new.status in ('left', 'suspended') and old.status is distinct from new.status then`)
+    }
     return text
   }
 
@@ -3823,6 +3847,280 @@ await withLock(async () => {
         rmSync(TMP8, { force: true })
       }
       eq('R36b：🔴 砍掉"老师撞课"之后**一条都报不出来**（R27 会红）—— 这才是真对照', onlyStudent, 0)
+    }
+  }
+
+  /* ============================================================
+     第十四节 · 🆕 P10 收尾（`schema.sql` §34）
+     ------------------------------------------------------------
+     ① 选科变更审计（Q27 = B）：改一次 → 记录**恰好一条**，含"谁改的 / 从什么改成什么"
+     ② 内容自动迁移（Q20 = A）：走班班成员按新选科**立刻重算**；**不动历史档案**（I54）
+     ③ 一个事务：报错之后选科与审计**都没留下**
+     ④ 旧科目数据：**不确认就删不掉**；报错里带着"将删除 N 条记录（不可恢复）"
+     ⑤ 休学档位（Q28 = B）：休学**保留**、转班/转学**移出**、复学一键恢复
+     ⑥ `subjects.can_stream` 废弃登记（P7 已做，这里只核一遍）
+     ============================================================ */
+  section('第十四节 · 🆕P10：选科变更审计 + 内容自动迁移 + 旧科目数据二次确认 + 休学档位（§34）')
+  {
+    const g1 = gradeOf('高一')
+    const cSci10 = 'aaaa2222-0000-4000-8000-000000000001'
+    const sP10 = 'bbbb2222-0000-4000-8000-000000000001'
+    /* 走班班**复用** §十三 已经生成的那几个（`(grade_id, stream_key)` 上有一条部分唯一索引，
+       再建一个同键的会当场撞索引） */
+    const streamOf = (key) =>
+      `(select id from classes where kind = 'stream' and grade_id = ${g1} and stream_key = '${key}' limit 1)`
+
+    await db.exec(`
+      insert into classes (id, teacher_id, name, grade, school_id, grade_id, kind, class_type) values
+        ('${cSci10}'::uuid, '${U.super}', '高一(P10理)班', '高一', ${school}, ${g1}, 'admin', 'science');
+    `)
+    await db.query(`insert into students (id, class_id, student_no, name) values ($1::uuid,$2::uuid,'P10-01','壬')`, [
+      sP10,
+      cSci10,
+    ])
+    /* 先给他一条"旧科目数据"残留（走班班-化学的成员关系）—— 迁移那一条要把它换掉 */
+    await db.query(`insert into class_members (class_id, student_id) values (${streamOf('chemistry')}, $1::uuid)`, [sP10])
+
+    const WRITE = `select public.write_student_subject($1::uuid,$2::uuid,$3::text,$4::text,$5::text[],$6::text,$7::uuid[]) as v`
+    const wr = (actor, kind, primary, second, note = '', memberIds = []) =>
+      db.query(WRITE, [actor, sP10, kind, primary, second, note, memberIds])
+    const tryWr = async (actor, ...a) => {
+      try {
+        await wr(actor, ...a)
+        return { ok: true, message: '' }
+      } catch (e) {
+        return { ok: false, message: String(e?.message ?? e).split('\n')[0] }
+      }
+    }
+    const chgN = async () =>
+      Number(one(await db.query(`select count(*)::int as n from student_subject_changes where student_id = $1`, [sP10])).n)
+    const subjRow = async () =>
+      one(await db.query(`select kind, primary_code, array_to_string(second_codes, ',') as s from student_subjects where student_id = $1`, [sP10])) ?? null
+    const memberKeys = async () =>
+      (await db.query(
+        `select c.stream_key as k from class_members cm join classes c on c.id = cm.class_id
+          where cm.student_id = $1 order by 1`,
+        [sP10],
+      )).rows.map((r) => r.k)
+
+    /* ---- S1–S2：审计表存在 + 前端**零写权限** ---- */
+    eq(
+      'S1：`student_subject_changes` 对 `authenticated` **能读、不能写**（写只走服务端）',
+      [
+        one(await db.query(`select has_table_privilege('authenticated','student_subject_changes','select') as r`)).r,
+        one(await db.query(`select has_table_privilege('authenticated','student_subject_changes','insert') as r`)).r,
+      ],
+      [true, false],
+    )
+
+    /* ---- S3–S5：改一次选科 → 记录**恰好一条**（谁改的 / 从什么改成什么）---- */
+    const first = await tryWr(U.grade, 'standard', 'physics', ['chemistry', 'geography'])
+    ok('S3：年级主任改一次选科 → 成功', first.ok, first.message)
+    eq('S4：审计里**恰好一条**', await chgN(), 1)
+    {
+      /* ⚠️ 全部判空：`GRADE_NEGATIVE=p10-no-audit` 时审计插入被拿掉，上面 S4 会红；
+         但这里若直接取 `row.changed_by`，脚本会**先抛 TypeError 崩掉** ——
+         负向对照要的是"断言变红"，不是"脚本炸了"。 */
+      const row =
+        one(await db.query(`select before, after, changed_by from student_subject_changes where student_id = $1`, [sP10])) ?? null
+      eq('S5：「谁改的」= 那个年级主任（Q27：三个人都能改，所以要能查）', row?.changed_by ?? null, U.grade)
+      eq('S5b：「改前」是空快照（这位学生第一次采选科）', row?.before ?? null, {})
+      eq(
+        'S5c：「改成什么」用科目代码（`{primary, second[]}`），不用姓名',
+        { primary: row?.after?.primary ?? null, second: row?.after?.second ?? null },
+        { primary: 'physics', second: ['chemistry', 'geography'] },
+      )
+    }
+    await wr(U.grade, 'standard', 'physics', ['chemistry', 'geography'])
+    eq('S6：内容没变时**不会再写一条**（不是"每次保存都记一笔"）', await chgN(), 1)
+
+    /* ---- S7–S10：内容自动迁移 + I54（不动历史档案）---- */
+    eq(
+      'S7：🔴 内容自动迁移（Q20 = A）：理科班 + 物化地 → `walk = {地理}` → 成员换成**走班班-地理**',
+      await memberKeys(),
+      ['geography'],
+    )
+    const mismatch = await tryWr(U.grade, 'standard', 'history', ['politics', 'geography'])
+    ok('S8：「首选与班型不符」照样能存（那是"建议转班"，不是拒绝）', mismatch.ok, mismatch.message)
+    eq('S9：⚠️「认不出就不动」：首选与班型不符 → 走班班成员**原样不动**（不许自动清空）', await memberKeys(), ['geography'])
+    await wr(U.grade, 'standard', 'physics', ['chemistry', 'biology'])
+    eq('S10：`walk = 空`（物化生 = 理科班默认）→ 成员被清空', await memberKeys(), [])
+    eq('S10b：三次改动一共留下三条记录', await chgN(), 3)
+    eq(
+      'S10c：🔴 I54：**已发出的作业档案一个字都没动**（历史档案是快照）',
+      Number(one(await db.query(`select count(*)::int as n from assignments where class_id = $1`, [cSci10])).n),
+      0,
+    )
+
+    /* ---- S11–S12：一个事务（写一半不许留下）---- */
+    {
+      const before = await subjRow()
+      const n0 = await chgN()
+      const bad = await tryWr(U.grade, 'other', 'physics', ['chemistry', 'biology'], '转学插班', [cSci10])
+      ok('S11：「其他」选了非走班班 → **显式报错**（不静默）', !bad.ok && /走班班/.test(bad.message), bad.message)
+      eq('S11b：🔴 同一个事务：报错之后 `student_subjects` **一个字没改**', await subjRow(), before)
+      eq('S11c：🔴 同一个事务：审计也**没留下**（不是"记了但没改"，也不是"改了但没记"）', await chgN(), n0)
+    }
+
+    /* ---- S12：前端直写审计表 → 被拒（三条路）----
+       ⚠️ 这里**必须显式切角色**：本脚本的 `as()` 只塞 JWT 声明、**不切 `authenticated`**，
+       那样跑在属主身份下，表级权限与 RLS 一起被绕过 —— 断言会变成"恒绿"。
+       （RLS 那一条线由 `rls-checks.mjs` 的 `attempt()` 覆盖，这里管的是**表级 grant**。） */
+    const asAuthed = async (sql, params) => {
+      await db.exec('begin')
+      try {
+        await db.exec('set local role authenticated')
+        await db.query(sql, params)
+        await db.exec('commit')
+        return { ok: true }
+      } catch (e) {
+        await db.exec('rollback')
+        return { ok: false, message: String(e?.message ?? e).split('\n')[0] }
+      }
+    }
+    for (const [label, sql] of [
+      ['插一行', `insert into student_subject_changes (student_id, before, after) values ($1::uuid, '{}'::jsonb, '{}'::jsonb)`],
+      ['改一行', `update student_subject_changes set note = '偷改' where student_id = $1::uuid`],
+      ['删一行', `delete from student_subject_changes where student_id = $1::uuid`],
+    ]) {
+      const r = await asAuthed(sql, [sP10])
+      ok(`S12：客户端${label}选科变更记录 → **被拒**`, !r.ok, r.ok ? '居然成功了' : r.message)
+    }
+
+    /* ---- S13：读的判据（"要能查" + 与这件无关的人读不到）---- */
+    const seen = async (uid) => {
+      await db.exec('begin')
+      try {
+        await db.query(`select set_config('request.jwt.claim.sub', $1, true)`, [uid])
+        await db.exec('set local role authenticated')
+        const n = Number(one(await db.query(`select count(*)::int as n from student_subject_changes where student_id = $1`, [sP10])).n)
+        await db.exec('commit')
+        return n
+      } catch {
+        await db.exec('rollback')
+        return -1
+      }
+    }
+    ok(
+      'S13：超管 / 教务处 / 本年级的年级主任都**看得见**（Q27：三个人都能改 → 要能查）',
+      (await seen(U.super)) >= 1 && (await seen(U.admin)) >= 1 && (await seen(U.grade)) >= 1,
+    )
+    eq('S13b：反向对照：与本班无关的任课老师 → **0 行**', await seen(U.teacher), 0)
+
+    /* ---- S14–S15：旧科目数据：**不确认就删不掉** ----
+       先把"旧科目数据"造出来：最后一次改动把 **生物** 放弃掉，并留下
+       ㈠ 他在本班的生物考试成绩行；㈡ 走班班-生物的成员关系残留。 */
+    {
+      await wr(U.grade, 'standard', 'physics', ['chemistry', 'geography'])
+      await db.query(
+        `insert into exams (id, teacher_id, title, paper_key, subject, subject_code, scope, grade, source, mode, exam_date, question_count, class_ids)
+         values ('eeee2222-0000-4000-8000-000000000001'::uuid, $1::uuid, 'P10 生物练习8', 'P10生物8', '生物', 'biology', 'class', '高一', 'manual', 'scores', '2026-09-23', 10, array[$2::uuid])`,
+        [U.grade, cSci10],
+      )
+      await db.query(
+        `insert into exam_scores (exam_id, class_id, student_no, name, graded, total)
+         values ('eeee2222-0000-4000-8000-000000000001'::uuid, $2::uuid,
+                 (select coalesce(nullif(btrim(coalesce(s.serial,'')),''), s.student_no) from students s where s.id = $1::uuid), '壬', true, 77)`,
+        [sP10, cSci10],
+      )
+      await db.query(`insert into class_members (class_id, student_id) values (${streamOf('biology')}, $1::uuid)`, [sP10])
+
+      const counts = one(await db.query(`select public.old_subject_data_counts_for($1::uuid, $2::uuid) as v`, [U.grade, sP10])).v
+      ok(
+        'S14：「将删除什么」由**数据库算**：被放弃的科目里有生物，成绩 ≥1 条、走班班成员 ≥1 条',
+        counts.oldSubjects.includes('biology') && Number(counts.scores) >= 1 && Number(counts.members) >= 1,
+        JSON.stringify(counts),
+      )
+      const scoreLeft = async () =>
+        Number(one(await db.query(`select count(*)::int as n from exam_scores where exam_id = 'eeee2222-0000-4000-8000-000000000001'`)).n)
+      const bioLeft = async () =>
+        Number(one(await db.query(`select count(*)::int as n from class_members where class_id = ${streamOf('biology')} and student_id = $1::uuid`, [sP10])).n)
+
+      const noConfirm = await (async () => {
+        try {
+          await db.query(`select public.purge_old_subject_data($1::uuid, $2::uuid, $3::boolean)`, [U.grade, sP10, false])
+          return { ok: true, message: '' }
+        } catch (e) {
+          return { ok: false, message: String(e?.message ?? e).split('\n')[0] }
+        }
+      })()
+      ok(
+        '🔴 S15：不确认（`p_confirm = false`）→ **报错、一条都不删**；那句话里带着"将删除 N 条记录（不可恢复）"',
+        !noConfirm.ok && /二次确认/.test(noConfirm.message) && /不可恢复/.test(noConfirm.message),
+        noConfirm.message,
+      )
+      eq('S15b：反向对照（删不掉那一半）：成绩行**还在**', await scoreLeft(), 1)
+      eq('S15c：反向对照（删不掉那一半）：走班班成员残留**还在**', await bioLeft(), 1)
+
+      await db.query(`select public.purge_old_subject_data($1::uuid, $2::uuid, $3::boolean)`, [U.grade, sP10, true])
+      eq('S16：确认之后 → 那条生物成绩行**被删掉**（不可恢复）', await scoreLeft(), 0)
+      eq('S16b：确认之后 → 走班班成员残留也清掉', await bioLeft(), 0)
+      {
+        const row = one(
+          await db.query(
+            `select purged_by, purge_counts from student_subject_changes
+              where student_id = $1 and purged_at is not null order by changed_at desc limit 1`,
+            [sP10],
+          ),
+        )
+        ok('S16c：删除**留了审计**（`purged_by` / `purge_counts` 都写上了）', row?.purged_by === U.grade && Number(row?.purge_counts?.scores) >= 1)
+      }
+      let last = null
+      for (let i = 0; i < 6; i++) {
+        last = one(await db.query(`select public.purge_old_subject_data($1::uuid, $2::uuid, $3::boolean) as v`, [U.grade, sP10, true])).v
+        if (/没有要删/.test(String(last?.message ?? ''))) break
+      }
+      ok('S16d：删到没有待删项之后，再调一次回"没有要删的旧科目数据"（同一批不会被删第二遍）', /没有要删/.test(String(last?.message ?? '')), JSON.stringify(last))
+    }
+
+    /* ---- S17–S19：休学档位（Q28 = B）---- */
+    await db.query(`insert into class_members (class_id, student_id) values (${streamOf('geography')}, $1::uuid) on conflict do nothing`, [sP10])
+    eq('S17：前置：这位学生在走班班-地理里', await memberKeys(), ['geography'])
+    await db.query(`update students set status = 'suspended' where id = $1::uuid`, [sP10])
+    eq('🔴 S18：休学（`suspended`）→ **走班名单保留**（Q28 = B：保留但标记）', await memberKeys(), ['geography'])
+    eq('S18b：休学的标记**读得出来**', one(await db.query(`select status from students where id = $1::uuid`, [sP10])).status, 'suspended')
+    const fourth = await tryAs(U.super, `update students set status = 'dropped' where id = $1::uuid`, [sP10])
+    ok('S18c：第四档不认（check 约束只认 active / suspended / left）', !fourth.ok, fourth.message)
+    await db.query(`update students set status = 'active' where id = $1::uuid`, [sP10])
+    eq('S19：复学一键恢复 → 状态回 `active`，走班名单**本来就没被动过**', await memberKeys(), ['geography'])
+    await db.query(`update students set status = 'left' where id = $1::uuid`, [sP10])
+    eq('🔴 S19b：转学 / 退学（`left`）→ **走班名单移出**', await memberKeys(), [])
+    await db.query(`update students set status = 'active' where id = $1::uuid`, [sP10])
+    await db.query(`insert into class_members (class_id, student_id) values (${streamOf('geography')}, $1::uuid) on conflict do nothing`, [sP10])
+    /* ⚠️ 转到**另一个班**才算"转班"（转到同一个班 `class_id` 没变，触发器按设计什么都不做） */
+    await db.query(`update students set class_id = ${classOf('高一(1)班')} where id = $1::uuid`, [sP10])
+    eq('🔴 S19c：转班（`class_id` 变了）→ **走班名单移出**（四条写入路径共用这一个触发器）', await memberKeys(), [])
+    {
+      const cons = (await db.query(
+        `select conname from pg_constraint where conrelid = 'students'::regclass and contype = 'c' order by conname`,
+      )).rows.map((r) => r.conname)
+      ok('S19d：旧的 `students_status_check`（两档）已删、新的 `students_status_check_v2`（三档）在', !cons.includes('students_status_check') && cons.includes('students_status_check_v2'), cons.join('、'))
+    }
+
+    /* ---- S20：`subjects.can_stream` 废弃登记 ---- */
+    eq(
+      'S20：`subjects.can_stream` 那一列**不存在**（§32.6 已删；Q24 = B）',
+      (await db.query(`select column_name from information_schema.columns where table_schema='public' and table_name='subjects' and column_name='can_stream'`)).rows,
+      [],
+    )
+
+    /* ---- S21：前端那几处真的接上了（静态钉住 —— 少一处就是"后端做了、界面没入口"）---- */
+    {
+      const read = (f) => readFileSync(resolvePath(APP, f), 'utf8')
+      const cd = read('src/pages/ClassDetail.tsx')
+      ok('S21：班级管理页真的把「事务性呼叫」发成**不挂作业**（`assignmentId: \'\'`）', /assignmentId: ''/.test(cd))
+      ok('S21b：班级管理页有**三档**在班状态（在读 / 休学 / 已转出）', /STUDENT_STATUS_NAME\[v\]/.test(cd) && /'active', 'suspended', 'left'/.test(cd))
+      ok('S21c：班级管理页有「删除旧科目数据」入口 + **二次确认**（先看"将删除 N 条记录"）', /apiOldSubjectPreview/.test(cd) && /apiPurgeOldSubjectData/.test(cd) && /将删除 \{purgeCounts\.total\} 条记录/.test(cd))
+      ok('S21d：班级管理页有「选科变更记录」（只读）', /loadStudentSubjectChanges/.test(cd))
+      const cr = read('src/pages/Classroom.tsx')
+      ok('S21e：教室端认得出**走班班**（`isStreamClass`）并且不摆写入口', /streamMode = isStreamClass\(klass\)/.test(cr))
+      ok('S21f：走班班的屏**只看作业与考试** —— 粘贴/拍课表、呼叫面板、文件、备份都不摆', (cr.match(/\{streamMode \? null :/g) ?? []).length >= 4)
+      ok('S21g：教室端有「本班考试」那一块（Q17 的"只看作业和考试"里"考试"那一半）', /本班考试/.test(cr))
+      const rm = read('src/data/remote.ts')
+      ok('S21h：`calls.assignment_id` 的「空串 ↔ null」映射**只有一处**（空串直接写进 uuid 列会 22P02）', /assignment_id: c\.assignmentId \? c\.assignmentId : null/.test(rm) && /assignmentId: r\.assignment_id \?\? ''/.test(rm))
+      const fn = read('functions/api/grade-setup.ts')
+      ok('S21i：服务端用 **service_role + 显式 `p_actor`** 调那两个 `_for` 函数（§30 的形状）', /svcRpc\(env, 'purge_old_subject_data'/.test(fn) && /p_actor: me\.id/.test(fn) && /svcRpc\(env, 'old_subject_data_counts_for'/.test(fn))
+      ok('S21j：服务端**不自己判二审**（`p_confirm` 原样传下去，判断在数据库）', /p_confirm: body\.confirm === true/.test(fn))
     }
   }
 
