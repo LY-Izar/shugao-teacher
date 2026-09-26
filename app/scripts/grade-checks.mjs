@@ -23,6 +23,8 @@
  *      · `bulk-no-precheck`     —— 去掉 `bulk_write_class_subjects()` 的逐行校验
  *      · `steps-not-zero`       —— 把"建班 0 步"改成 2 步（步数表的反向对照）
  *      · `columns-mismatch`     —— 把导出的表头改成另一套列名（导入导出不再同源）
+ *      · `setup-broken-fn`      —— 🆕 让第十一节的桩去问"砍掉 `is_school_admin()` 那半边"的
+ *                                  `can_manage_grade_setup` → **R1（超管 true）/ R2（教务处 true）必须红**
  *
  * 前置条件：无（不需要 dev server，也不需要 Supabase）。
  */
@@ -56,6 +58,12 @@ const FUNC_ARGS = {
 const rosterLib = await import(pathToFileURL(resolvePath(APP, 'src/lib/roster.ts')).href)
 const pickLib = await import(pathToFileURL(resolvePath(APP, 'src/lib/pick.ts')).href)
 const gi = await import(pathToFileURL(resolvePath(APP, 'src/lib/gradeImport.ts')).href)
+/*
+ * 🆕 P3：《学期筛选》的判据**不抄一份** —— N16/N17 拿的就是作业 / 考试列表
+ * 读的那一个函数（`lib/terms.ts` 的 `termMatches`）。抄一份的话，
+ * "列表默认只看本学期"就永远绿，而它恰恰是 P2 唯一的失败模式。
+ */
+const termsLib = await import(pathToFileURL(resolvePath(APP, 'src/lib/terms.ts')).href)
 
 await withLock(async () => {
   let pass = 0
@@ -538,6 +546,39 @@ await withLock(async () => {
       if (!text.includes(anchor)) throw new Error('bulk-no-precheck 的锚点没找到')
       return text.replace(anchor, '    -- （负向对照：把"班级不存在"这一条预校验拿掉）')
     }
+    /*
+     * 🆕 P3/P2：把回填的 `where <目标列为空>` 拿掉 —— 幂等就没了。
+     * 锚点必须**带上前面的 `update` 那一行**（源码里 `a.term_id is null` 只出现在这一处，
+     * 但只锚一句话会在别处误命中；带上整句最稳）。
+     */
+    if (NEGATIVE === 'backfill-not-idempotent') {
+      const anchor = `   where a.term_id is null
+     and a.assign_date between t.start_date and t.end_date;`
+      if (!text.includes(anchor)) throw new Error('backfill-not-idempotent 的锚点没找到')
+      return text.replace(
+        anchor,
+        '   where a.assign_date between t.start_date and t.end_date;  -- （负向对照：拿掉"只填空的"）',
+      )
+    }
+    /* 🆕 P3：把按届的唯一索引拿掉 —— "两个高二（不同届）"仍该允许，但"同一届两个年级"就拦不住了。
+       ⚠️ 锚点在 `schema.sql` 里出现**两处**（§27.1 与 §28.7 各建一次，**而且两处的换行位置不同**：
+       §27.1 把 `on grades …` 写在第一行、§28.7 单独一行）。所以这里用"从关键字起、
+       到分号止"的非贪婪匹配**两处一起替** —— 只替一处的话索引照样建起来，
+       N26 会变成一条**红不了的假对照**（实测踩过：第一版只锚了一种写法，`no-cohort-key` 居然全绿）。 */
+    if (NEGATIVE === 'no-cohort-key') {
+      const re = /create unique index if not exists grades_school_cohort_key[\s\S]*?where cohort <> '';/g
+      const n = (text.match(re) ?? []).length
+      if (n !== 2) throw new Error(`no-cohort-key 的锚点个数不对（找到 ${n} 处，期望 2 处）`)
+      return text.replace(re, '-- （负向对照：不建按届的唯一索引）')
+    }
+    /*
+     * ⚠️ 这里**故意不提供** `GRADE_NEGATIVE=setup-no-super` 那种"改原文"的对照：
+     *    `is_school_admin()` 那半边同时是 H 段"导入名单"的闸门 —— 改掉它，
+     *    H2 先失败（学生一个都没写进去）→ 脚本在 I 段因为取不到学生而**中断**，
+     *    反而看不到"超管那条 `canSetup` 变红"。所以那条对照挪进第十一节：
+     *    在那里把改坏的那份函数体落成 `_neg_grade_setup()` 真函数、让桩去问它
+     *    （R21/R22：超管必须翻成 false，而本年级年级主任仍为 true）。
+     */
     return text
   }
 
@@ -584,6 +625,72 @@ await withLock(async () => {
   -- 名字里有 (1) 班的现有班（用来测"复用已有班"）
   insert into classes (teacher_id, name, grade, school_id, grade_id, kind, class_type) values
     ('${U.head}', '高一(1)班', '高一', ${school}, (select id from grades where name = '高一'), 'admin', 'science');
+
+  /* ============================================================
+     🆕 2026-09-30（P3/P2）**存量数据的替身**：三个班 / 130 学生 / 9 份作业 / 1 场考试
+     ------------------------------------------------------------
+     ⚠️ 这是**测试夹具**，不是线上那 130 个人的姓名 —— 线上那三个班的届 /
+     学期归属由 supabase/schema.sql §28.8 的 p3_backfill_terms_and_cohorts() 回填，
+     本脚本只能验那段 SQL 的**行为**（幂等 / 归属 / 补不上的报出来），
+     不能替代线上跑一次（线上有 service_role 密钥的地方才跑得动）。
+     ⚠️ 「测试专用」那个班在线上是**另一个共同开发者在用的班**，一条都不能动 ——
+     这里用一个同名（「测试专用」）的班把那条口径一起钉住。
+     ============================================================ */
+  insert into classes (teacher_id, name, grade, school_id, grade_id, kind, class_type) values
+    ('${U.head}', '高二(1)班', '高二', ${school}, (select id from grades where name = '高二'), 'admin', ''),
+    ('${U.head}', '高二(4)班', '高二', ${school}, (select id from grades where name = '高二'), 'admin', ''),
+    ('${U.head}', '测试专用',  '',     ${school}, null, 'admin', '');
+
+  /* 130 个学生：65 + 65 —— 序列号按 P1 的规则自己写好（P2 只**复核**，不重发）。
+     ⚠️ 序列号必须**全校唯一**（students_serial_key），所以两个班共用一个序号空间：
+        序号 = 班内序号 + 班偏移（(1)班 0 / (4)班 65）—— 同一个班内还是 001…065。 */
+  insert into students (class_id, student_no, name, serial)
+  select c.id,
+         lpad(g::text, 2, '0'),
+         '存量' || c.name || g::text,
+         '2025' || lpad((g + case when c.name = '高二(4)班' then 65 else 0 end)::text, 3, '0')
+    from classes c
+    cross join generate_series(1, 65) g
+   where c.name in ('高二(1)班', '高二(4)班')
+     and not exists (
+       select 1 from students s where s.class_id = c.id and s.student_no = lpad(g::text, 2, '0')
+     );
+
+  /* 🔴 **9 份作业**（与线上同一形状：全部落在 2026 年 9 月 = 当前学期 = 2026-2027 上半期） */
+  insert into assignments (class_id, teacher_id, title, subject, assign_date)
+  select c.id, '${U.head}', '存量作业 ' || g::text, '物理',
+         (date '2026-09-01' + (g - 1))::date
+    from classes c
+    cross join generate_series(1, 9) g
+   where c.name = '高二(1)班'
+     and not exists (select 1 from assignments a where a.class_id = c.id and a.title = '存量作业 ' || g::text);
+
+  /* 另外 2 份**以前学期**的（2026 年 3 月 = 2025-2026 下半期）：
+     它们是**反向对照** —— "默认只看本学期"必须把它们收起，又不能把它们藏掉 */
+  insert into assignments (class_id, teacher_id, title, subject, assign_date)
+  select c.id, '${U.head}', '上学期作业 ' || g::text, '物理', (date '2026-03-10' + (g - 1))::date
+    from classes c
+    cross join generate_series(1, 2) g
+   where c.name = '高二(4)班'
+     and not exists (select 1 from assignments a where a.class_id = c.id and a.title = '上学期作业 ' || g::text);
+
+  /* 1 场考试：**只有年级名文本**（Q33 之前的老档案的形状），届与学期都空着。
+     另外 1 场在上学期（对照：默认视图里不该看见它）。 */
+  insert into exams (teacher_id, title, paper_key, subject, subject_code, scope, grade,
+                     source, mode, exam_date, question_count, class_ids)
+  select '${U.head}', '存量月考', '存量月考', '物理', 'physics', 'grade', '高二',
+         'manual', 'scores', date '2026-09-20', 10, array[c.id]
+    from classes c
+   where c.name = '高二(1)班'
+     and not exists (select 1 from exams e where e.title = '存量月考');
+
+  insert into exams (teacher_id, title, paper_key, subject, subject_code, scope, grade,
+                     source, mode, exam_date, question_count, class_ids)
+  select '${U.head}', '上学期月考', '上学期月考', '物理', 'physics', 'grade', '高二',
+         'manual', 'scores', date '2026-03-15', 10, array[c.id]
+    from classes c
+   where c.name = '高二(1)班'
+     and not exists (select 1 from exams e where e.title = '上学期月考');
   `)
 
   const gradeOf = (n) => `(select id from grades where name = '${n}')`
@@ -640,11 +747,20 @@ await withLock(async () => {
     eq('H4：写进去 3 个学生', okRes.ok && Number(R.students ?? 0), 3)
     const clsCount = Number(one(await db.query(`select count(*)::int as n from classes where grade_id = ${gradeOf('高一')}`)).n)
     eq('H5：库里确实有 2 个班了（1 班复用 + 2 班新建）', clsCount, 2)
-    const stuCount = Number(one(await db.query(`select count(*)::int as n from students`)).n)
+    const stuCount = Number(
+      one(
+        await db.query(
+          `select count(*) as n from students where class_id in (${classOf('高一(1)班')}, ${classOf('高一(2)班')})`,
+        ),
+      ).n,
+    )
     eq('H6：库里确实有 3 个学生', stuCount, 3)
-
     /* 🔴 序列号由**触发器**发号：导入没自己算，但库里必须有号 */
-    const serials = rowsOf(await db.query(`select serial from students order by serial`)).map((x) => x.serial)
+    const serials = rowsOf(
+      await db.query(
+        `select serial from students where class_id in (${classOf('高一(1)班')}, ${classOf('高一(2)班')}) order by serial`,
+      ),
+    ).map((x) => x.serial)
     eq('H7：3 个学生都拿到了序列号（触发器发的）', serials.length, 3)
     ok(
       'H8：序列号形状 = `2026` + 3 位（届是 2026，来自 `grades.cohort`）',
@@ -906,6 +1022,405 @@ await withLock(async () => {
     ])
   }
 
+  /* ---------------- N：🆕 P3 + P2（学年 / 学期 / 届 + 存量回填） ---------------- */
+  {
+    /*
+     * 🔴 这一节是 P3/P2 的**验收核心**，两件事：
+     *   ① **回填幂等**：`p3_backfill_terms_and_cohorts()` 跑第二遍 → **0 行受影响**；
+     *   ② **默认视图里那 9 份作业 + 1 场考试都看得见** —— 判据是 `lib/terms.ts` 的
+     *      `termMatches()`（前端与作业/考试列表**同一份**，不是这里另写一套）。
+     *
+     * ⚠️ 夹具在 `db.exec` 的那一大段 SQL 里（三个班 / 130 学生 / 9 作业 / 1 考试），
+     *    形状照线上存量数据：考试的届与学期**一开始都是空的** ——
+     *    不补就看不见，这正是 P2 存在的唯一理由。
+     */
+    const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k)
+
+    /* ① 夹具落库了（自证：验不动的东西先证明它在） */
+    /* ⚠️ 参数是** `count(*)` 后面的那一半**（`from … where …`），别把 `count(*)` 一起传进来。
+       也别在 SQL 里拼 `::int` —— 那个后缀要贴在**整个 count 表达式**上，
+       写成 `select ${sql}::int` 会在 `from` 这种片段上直接语法错（实测踩过）。 */
+    const cnt = async (tail) => Number(one(await db.query(`select count(*) as n ${tail}`)).n)
+    eq(
+      'N1：库里的班 ≥ 5 个（H 段建的 2 个高一班 + 存量 3 个）—— 只做自证，不写死条数',
+      (await cnt('from classes')) >= 5,
+      true,
+    )
+    eq(
+      'N1b：三个存量班都在（高二(1) / 高二(4) / 测试专用）',
+      await cnt(`from classes where name in ('高二(1)班','高二(4)班','测试专用')`),
+      3,
+    )
+    eq('N2：夹具 130 个存量学生（65 + 65）在库里', await cnt("from students where serial like '2025%'"), 130)
+    eq(
+      'N3：夹具 **9 份本学期作业**（与线上同一形状）在库里',
+      await cnt(`from assignments where title like '存量作业 %'`),
+      9,
+    )
+    eq(
+      'N3b：另外 2 份**上学期**的作业也在（反向对照用）',
+      await cnt(`from assignments where title like '上学期作业 %'`),
+      2,
+    )
+    eq('N4：夹具 1 场本学期考试 + 1 场上学期考试', await cnt('from exams'), 2)
+
+    /* ② 跑一段"没跑过回填"的状态：把 term_id / grade_id 清回来（schema.sql 已经跑过一次） */
+    await db.exec('update assignments set term_id = null; update exams set term_id = null, grade_id = null;')
+    eq(
+      'N5：清回来之后 —— 11 份作业与 2 场考试的归属都是空的（= 补之前的样子）',
+      `${await cnt('from assignments where term_id is null')}/${await cnt('from exams where term_id is null')}/${await cnt('from exams where grade_id is null')}`,
+      '11/2/2',
+    )
+
+    /* ③ 🔴 第一遍：把该补的补上（行数逐项核） */
+    const r1 = one(await db.query('select public.p3_backfill_terms_and_cohorts() as r')).r
+    eq('N6：第一遍回填 —— 11 份作业都归到了学期', Number(r1.assignmentsTermFilled), 11)
+    eq('N7：第一遍回填 —— 2 场考试都归到了学期', Number(r1.examsTermFilled), 2)
+    eq('N8：第一遍回填 —— 2 场考试都按年级名反查到了届', Number(r1.examsGradeFilled), 2)
+    eq(
+      'N9：补不上的清单**四项全 0**（序列号那一样 P1 已经做过，本函数只复核）',
+      [
+        Number(r1.unresolvable.assignmentsNoTerm),
+        Number(r1.unresolvable.examsNoTerm),
+        Number(r1.unresolvable.examsNoGrade),
+        Number(r1.unresolvable.studentsNoSerial),
+      ].join('/'),
+      '0/0/0/0',
+      `实际 ${JSON.stringify(r1)}`,
+    )
+
+    /* ④ 🔴 第二遍：**受影响行数 = 0**（幂等的唯一根据是每一条 SQL 的 `where <列为空>`） */
+    const r2 = one(await db.query('select public.p3_backfill_terms_and_cohorts() as r')).r
+    eq('N10：🔴 重跑一遍 —— 作业 0 行受影响', Number(r2.assignmentsTermFilled), 0)
+    eq('N11：🔴 重跑一遍 —— 考试学期 0 行受影响', Number(r2.examsTermFilled), 0)
+    eq('N12：🔴 重跑一遍 —— 考试届 0 行受影响', Number(r2.examsGradeFilled), 0)
+
+    /* ⑤ 归属对不对：8 份在 2026-2027 上半期、1 份在 2025-2026 下半期 */
+    const terms = rowsOf(await db.query('select id::text, half, start_date::text, end_date::text from terms order by start_date'))
+    const cur = one(await db.query('select public.current_term_id()::text as id')).id
+    eq('N13：库里一共 4 个学期（2025-2026 与 2026-2027 各两个半期）', terms.length, 4)
+    const curTerm = terms.find((t) => t.id === cur)
+    eq(
+      'N14：🔴「当前学期」推得出来，而且是 2026-2027 上半期那一行（今天 = 真 PG 的 now()，按北京时间）',
+      curTerm ? `${curTerm.start_date}~${curTerm.end_date}` : '（推不出来）',
+      '2026-09-01~2027-01-31',
+    )
+    const older = one(
+      await db.query(
+        `select t.id::text as id from assignments a join terms t on t.id = a.term_id
+          where a.title = '上学期作业 1'`,
+      ),
+    )
+    ok('N15：那份 2026 年 3 月的作业归到了**另一个**学期（不是当前学期）', older.id !== cur, older.id)
+
+    /* ⑥ 🔴 "不补就消失"的直接防线：那 9 份作业与 1 场考试在**默认视图**里都看得见 */
+    const gradeIdOf = async (cohort) =>
+      one(await db.query(`select id::text from grades where cohort = '${cohort}'`)).id
+    const { termMatches, termFilterOptions } = termsLib
+    const curFilter = termFilterOptions(terms, cur)[0].value
+
+    const assignRows = rowsOf(
+      await db.query('select id::text, title, term_id::text from assignments order by title'),
+    )
+    const examRows = rowsOf(
+      await db.query('select id::text, title, term_id::text, grade_id::text from exams'),
+    )
+    /*
+     * 🔴 口径：线上那 9 份**全部落在同一个学期里**（2026 年 9 月 = 当前学期），
+     *    所以「默认视图里 9 份作业 + 1 场考试都看得见」这句话在这里就是
+     *    **可见 = 9 / 1**。另外那 2 份作业 + 1 场考试是**反向对照**：
+     *    它们属于上一个学期 → 默认视图**必须收起**，但切到「全部学期」**看得见**
+     *    （N22/N23/N26）—— 收起不等于藏掉。
+     */
+    const visibleAssign = assignRows.filter((r) => termMatches(r.term_id ?? null, curFilter, cur, terms))
+    eq(
+      'N16：🔴 **默认视图里那 9 份作业都看得见**（判据就是作业列表读的那个 `termMatches`）',
+      visibleAssign.length,
+      9,
+      `可见：${visibleAssign.filter((r) => r.title.startsWith('存量')).map((r) => r.title).join('、')}`,
+    )
+    ok(
+      'N16b（对照）：【上学期那 2 份】**不在**默认视图里（不然"默认只看本学期"是句空话）',
+      !visibleAssign.some((r) => r.title.startsWith('上学期')),
+      JSON.stringify(visibleAssign.map((r) => r.title)),
+    )
+    ok(
+      'N16c：🔴 **没有一份档案因为"没有学期归属"而从默认视图里消失**（这是 P2 的直接防线）',
+      assignRows
+        .filter((r) => r.term_id === null || r.term_id === undefined)
+        .every((r) => termMatches(r.term_id ?? null, curFilter, cur, terms)),
+    )
+    const visibleExam = examRows.filter((r) => termMatches(r.term_id ?? null, curFilter, cur, terms))
+    eq(
+      'N17：🔴 **默认视图里那 1 场考试也看得见**（它就是 P2 存在的唯一理由）',
+      visibleExam.length,
+      1,
+      JSON.stringify(visibleExam),
+    )
+    eq('N17b：默认视图里看见的就是「存量月考」那一场', visibleExam[0]?.title, '存量月考')
+    const curExam = examRows.find((r) => r.title === '存量月考')
+    eq('N18：那场考试的届 = 高二那一行（cohort 2025）', curExam.grade_id, await gradeIdOf('2025'))
+    eq(
+      'N19：那场考试的年级名文本**没被改**（Q33：`grade` 老列留着，两条读法并存）',
+      one(await db.query("select grade from exams where title = '存量月考'")).grade,
+      '高二',
+    )
+
+    /* ⑦ 反向对照（**内存里**的判据）：没有归属 / 列读不到时，默认视图必须**照常显示** */
+    ok(
+      'N20（对照）：`term_id = null`（回填漏了的那一条）在默认视图里**照样显示** —— 不静默藏数据',
+      termMatches(null, curFilter, cur, terms) === true,
+    )
+    ok(
+      'N21（对照）：`term_id = undefined`（线上库还没跑 §28）在默认视图里**照样显示**',
+      termMatches(undefined, curFilter, cur, terms) === true,
+    )
+    ok(
+      'N22（对照）：确实属于**另一个**学期的档案在默认视图里**被收起**（这是"默认只看本学期"的全部含义）',
+      termMatches(older.id, curFilter, cur, terms) === false,
+    )
+    ok(
+      'N23（对照）：切到「全部学期」之后，上学期那份**看得见**（收起不等于藏掉）',
+      termMatches(older.id, termFilterOptions(terms, cur)[1].value, cur, terms) === true,
+    )
+    const olderExam = examRows.find((r) => r.title === '上学期月考')
+    ok(
+      'N23b（对照）：上学期那场考试同样 —— 默认收起、切到「全部学期」看得见',
+      termMatches(olderExam.term_id, curFilter, cur, terms) === false &&
+        termMatches(olderExam.term_id, termFilterOptions(terms, cur)[1].value, cur, terms) === true,
+      JSON.stringify(olderExam),
+    )
+
+    /* ⑧ 🔴 唯一键换成 `(school_id, cohort)` */
+    const idx = rowsOf(await db.query('select indexname from pg_indexes where tablename = \'grades\'')).map(
+      (x) => x.indexname,
+    )
+    ok('N24：按届的唯一索引在（`grades_school_cohort_key`）', idx.includes('grades_school_cohort_key'), JSON.stringify(idx))
+    ok('N25：按名字的唯一索引**已经 drop**（留着它"两个高二"永远撞，见 Q22）', !idx.includes('grades_school_name_key'), JSON.stringify(idx))
+    const dupCohort = await tryAs(
+      U.admin,
+      `insert into grades (school_id, name, cohort) select id, '高二', '2025' from schools limit 1`,
+    )
+    ok('N26：插第二个**同届**的年级 → **被唯一索引拒**', !dupCohort.ok, dupCohort.ok ? '居然插进去了' : dupCohort.message)
+    const twoNames = await tryAs(
+      U.admin,
+      `insert into grades (school_id, name, cohort) select id, '高二', '2027' from schools limit 1`,
+    )
+    ok('N27：插第二个「高二」（**不同届**）→ **允许**（这正是 Q22 要的）', twoNames.ok, twoNames.message)
+    if (twoNames.ok) await db.exec(`delete from grades where cohort = '2027'`)
+
+    /* ⑨ 🔴 提档只改 `stage`：班级的 `grade_id` **一个字都不改** */
+    const classIdsBefore = rowsOf(
+      await db.query(
+        `select c.id::text as id, c.grade_id::text as g from classes c
+           join grades g on g.id = c.grade_id where g.cohort = '2025' order by c.name`,
+      ),
+    )
+    eq('N28：夹具里 2 个班挂在高二（cohort 2025）上', classIdsBefore.length, 2)
+    await db.query(`update grades set stage = 3 where cohort = '2025'`)
+    const classIdsAfter = rowsOf(
+      await db.query(
+        `select c.id::text as id, c.grade_id::text as g from classes c
+           join grades g on g.id = c.grade_id where g.cohort = '2025' order by c.name`,
+      ),
+    )
+    eq(
+      'N29：🔴 提档前后班级的 `grade_id` **逐字相同**（提档只改 stage，年级 id 不变）',
+      JSON.stringify(classIdsAfter),
+      JSON.stringify(classIdsBefore),
+    )
+    eq('N30：提档之后 stage 确实变成了 3', Number(one(await db.query(`select stage from grades where cohort = '2025'`)).stage), 3)
+    await db.query(`update grades set stage = 2 where cohort = '2025'`)
+
+    /* ⑩ 「测试专用」班**零改动**（它的 grade_id 本来就是空，回填不碰班那一侧） */
+    const test = one(
+      await db.query(
+        `select grade_id::text as g, kind, class_type from classes where name = '测试专用'`,
+      ),
+    )
+    eq(
+      'N31：🔴「测试专用」班**零改动**（`grade_id` 仍然空、kind/class_type 原样）',
+      `${test.g ?? 'null'}/${test.kind}/${test.class_type}`,
+      'null/admin/',
+    )
+    eq(
+      'N32：「测试专用」班下**一个学生都没有**（存量回填不碰它）',
+      await cnt(`from students s join classes c on c.id = s.class_id where c.name = '测试专用'`),
+      0,
+    )
+
+    /* ⑪ 判据函数与写入口的权限形状 */
+    eq(
+      'N33：`term_of_date()` 对区间外的那一天返回空（**绝不就近归到某一学期**，I14）',
+      one(await db.query(`select public.term_of_date(date '2030-01-01')::text as id`)).id ?? 'null',
+      'null',
+    )
+    const canTerms = await db
+      .query(`select has_function_privilege('authenticated', 'public.current_term_id()', 'execute') as p`)
+      .then((x) => x.rows[0])
+    eq('N34：`current_term_id()` 可以被 authenticated 调用（列表要用它推当前学期）', canTerms.p, true)
+    const wY = await db
+      .query(
+        `select has_function_privilege('authenticated', 'public.write_academic_year(text,date,date,date,date,date,date)', 'execute') as p`,
+      )
+      .then((x) => x.rows[0])
+    eq('N35：`write_academic_year()` **只有服务端能调**（authenticated 没有 execute）', wY.p, false)
+    const bf = await db
+      .query(`select has_function_privilege('authenticated', 'public.p3_backfill_terms_and_cohorts()', 'execute') as p`)
+      .then((x) => x.rows[0])
+    eq('N36：`p3_backfill_terms_and_cohorts()` **只有服务端能调**', bf.p, false)
+    const pol = rowsOf(
+      await db.query(
+        `select tablename from pg_policies where tablename in ('academic_years','terms') order by tablename`,
+      ),
+    ).map((x) => x.tablename)
+    eq('N37：两张新表的读策略都在（读得宽）', pol, ['academic_years', 'terms'])
+    const rls2 = rowsOf(
+      await db.query(
+        `select relname, relrowsecurity from pg_class where relname in ('academic_years','terms') order by relname`,
+      ),
+    )
+    eq('N38：两张新表都开了 RLS（不开 = 裸奔）', rls2.map((r) => [r.relname, r.relrowsecurity]), [
+      ['academic_years', true],
+      ['terms', true],
+    ])
+
+    /* ⑫ 学年写入口：重叠的两个半期要被拒（人话） */
+    const overlap = await tryAs(
+      U.admin,
+      `select public.write_academic_year('2027-2028', date '2027-09-01', date '2028-08-31',
+        date '2027-09-01', date '2028-02-28', date '2028-02-01', date '2028-08-31')`,
+    )
+    ok('N39：上下半期重叠 → 被拒（报的是人话）', !overlap.ok && /重叠/.test(overlap.message), overlap.message)
+    const badName = await tryAs(
+      U.admin,
+      `select public.write_academic_year('', date '2027-09-01', date '2028-08-31',
+        date '2027-09-01', date '2028-01-31', date '2028-02-01', date '2028-08-31')`,
+    )
+    ok('N40：学年名空着 → 被拒', !badName.ok, badName.message)
+    /* 反向对照：合法的那一条**确实写得进去**（不然前面两条"被拒"全是假绿）
+       ⚠️ 用 `U.super` 写：本夹具里的 `U.admin` 只有 `admin` 这一条身份，
+       而 `can_manage_terms()` = `is_school_admin()`（超管 / 教务处 **那一行**
+       `teacher_roles` 的 scope 要落对）—— 夹具里只有 super 那一条是确定的。 */
+    const okYear = await tryAs(
+      U.super,
+      `select public.write_academic_year('2027-2028', date '2027-09-01', date '2028-08-31',
+        date '2027-09-01', date '2028-01-31', date '2028-02-01', date '2028-08-31')`,
+    )
+    ok('N41（对照）：合法的学年 → 写得进去', okYear.ok, okYear.message)
+    eq(
+      'N42：写完之后那一年确实有了两个半期',
+      await cnt(`from terms t join academic_years y on y.id = t.academic_year_id where y.name = '2027-2028'`,
+      ),
+      2,
+    )
+    /* 幂等：同一个学年再写一次 → 还是两行（on conflict do update，不新增）
+       ⚠️ 必须走 `tryAs`（它负责把调用者身份 `set_config` 进去）—— 裸 `db.query`
+       读到的 `auth.uid()` 是空的，`can_manage_terms()` 直接假 → 当场 raise。 */
+    const again = await tryAs(
+      U.super,
+      `select public.write_academic_year('2027-2028', date '2027-09-01', date '2028-08-31',
+        date '2027-09-01', date '2028-01-31', date '2028-02-01', date '2028-08-31')`,
+    )
+    ok('N42b（对照）：同一个学年再写一遍 → 也成功（`on conflict do update`）', again.ok, again.message)
+    eq(
+      'N43：同一个学年写两遍 → 仍然只有 2 个半期（不是 4 个）',
+      await cnt(`from terms t join academic_years y on y.id = t.academic_year_id where y.name = '2027-2028'`),
+      2,
+    )
+    // 收尾：把这一轮新增的学年删回去（后面的静态节不看数据，但别留脏）
+    await db.exec(`delete from academic_years where name = '2027-2028'`)
+    void has
+
+    /* ⑬ 🕐 **假时钟跨学期边界**：1 月 31 日 → 2 月 1 日、8 月 31 日 → 9 月 1 日，
+     *   推出来的"当前学期"必须**正好翻过去**（这是"当前学期是推的、不是存的"那条的全部意义）。
+     *   ⚠️ 用**真的那份 `terms` 数据**（从库里读回来的四行），只把"现在"换成一个假 Date。 */
+    {
+      const { termOfDate, currentTermId } = termsLib
+      const at = (iso) => new Date(`${iso}T09:00:00+08:00`)
+      /*
+       * ⚠️ `terms` 是**从库里读回来的行**（snake_case），而 `lib/terms.ts` 的 `Term`
+       *    是 camelCase —— 这里显式映射一次（**不是另写一份判据**：判据仍是那个函数）。
+       *    第一版直接拿行去问，语义字段全是 undefined → 每一条都"不在任何学期里"。
+       */
+      const termList = terms.map((t) => ({
+        id: t.id,
+        yearName: '',
+        yearStart: '',
+        yearEnd: '',
+        half: Number(t.half) === 2 ? 2 : 1,
+        startDate: t.start_date,
+        endDate: t.end_date,
+      }))
+      const halfOf = (iso) => {
+        const id = currentTermId(termList, at(iso))
+        const t = termList.find((x) => x.id === id)
+        return t ? `${t.startDate}~${t.endDate}` : '（不在任何学期里）'
+      }
+      eq('N48：2026-01-31 还是上半期', halfOf('2026-01-31'), '2025-09-01~2026-01-31')
+      eq('N49：🔴 2026-02-01 就翻到下半期了（跨学期边界那一天）', halfOf('2026-02-01'), '2026-02-01~2026-08-31')
+      eq('N50：2026-08-31 还是 2025-2026 的下半期', halfOf('2026-08-31'), '2026-02-01~2026-08-31')
+      eq('N51：🔴 2026-09-01 就翻到 2026-2027 上半期了（跨学年边界那一天）', halfOf('2026-09-01'), '2026-09-01~2027-01-31')
+      eq('N52：2027-01-31 仍是上半期的最后一天', halfOf('2027-01-31'), '2026-09-01~2027-01-31')
+      eq('N53：2027-02-01 翻到下半期', halfOf('2027-02-01'), '2027-02-01~2027-08-31')
+      eq(
+        'N54（对照）：2030-01-01 不在任何学期区间里 → **认不出**（不许就近归到某一学期，I14）',
+        currentTermId(termList, at('2030-01-01')),
+        null,
+      )
+      eq(
+        'N55：边界那两天用 `termOfDate` 直接问也是同一结论（同一个函数，没有第二套判据）',
+        [termOfDate(termList, '2026-01-31'), termOfDate(termList, '2026-02-01')].join('|'),
+        [
+          termList.find((t) => t.startDate === '2025-09-01').id,
+          termList.find((t) => t.startDate === '2026-02-01').id,
+        ].join('|'),
+      )
+      /* 反向对照：把 2025-2026 的**上半期结束日**从 1 月 31 日改成 2 月 1 日
+         （它原来是那一天结束的）→ 同一天（2 月 1 日）推出来的就变成上半期了。
+         ⚠️ 别去挪下半期的起点：那会在两个半期之间留出一道缝，
+         同一天会"不在任何学期里"（第一版就是这么写的，直接 TypeError）。 */
+      const shifted = termList.map((t) =>
+        t.endDate === '2026-01-31' ? { ...t, endDate: '2026-02-01' } : t,
+      )
+      const hitId = currentTermId(shifted, at('2026-02-01'))
+      eq(
+        'N56（对照）：把上半期结束日改成 2026-02-01 之后，同一天推出的是**上半期**（边界确实在起作用）',
+        termList.find((t) => t.id === hitId)?.endDate,
+        '2026-01-31',
+      )
+    }
+
+    /* ⑬ 🔴 **负向对照（真 SQL，自己验自己）**
+     *
+     *  为什么这条对照必须在**真库**里跑：N20–N23 那一组验的是**前端判据**，
+     *  而"回填幂等"这句话的实体是**那句 SQL**。只断言"跑第二遍是 0 行"、
+     *  从不试着改坏它 —— 那条断言就是**永远为绿的摆设**（§三.2 踩过）。
+     *
+     *  ⚠️ 它只改**内存里的 SQL 文本**（`applyNegative`），仓库文件一个字节都不动。 */
+    ok(
+      'N44：幂等对照的两个锚点在源码里找得到（找不到说明这段对照已经失效）',
+      /a\.term_id is null/.test(RAW) && /p3_backfill_terms_and_cohorts/.test(RAW),
+    )
+    if (NEGATIVE === 'backfill-not-idempotent') {
+      const broken = applyNegative(RAW)
+      ok('N45（对照自证）：`applyNegative` 确实改动了文本', broken !== RAW)
+      const m = broken.match(
+        /create or replace function public\.p3_backfill_terms_and_cohorts\(\)[\s\S]*?\nend \$\$;/,
+      )
+      ok('N46（对照自证）：改坏的那份函数文本取得出来', !!m)
+      if (m) {
+        await db.exec(m[0].replace('public.p3_backfill_terms_and_cohorts()', 'public._neg_backfill()'))
+        const again = one(await db.query('select public._neg_backfill() as r')).r
+        ok(
+          'N47（对照）：拿掉"只填空的"之后，**重跑一遍不再是 0 行**（N10/N11/N12 因此会红）',
+          Number(again.assignmentsTermFilled) > 0,
+          `实际 ${JSON.stringify(again)}`,
+        )
+      }
+    }
+  }
+
   /* ============================================================
      三、静态：导入导出同一套列名 / 步数表 / 探针
      ============================================================ */
@@ -981,6 +1496,52 @@ await withLock(async () => {
     ok(
       'N18：前端 `gradeImport.ts` 里也没有算号的代码（只有"空串 = 交给触发器"那一句）',
       !/lpad|padStart/.test(src('src/lib/gradeImport.ts')),
+    )
+
+    /* ---- 🆕 P3（学年 / 学期 / 届）的四条静态证据 ---- */
+
+    const termsSrc = src('src/lib/terms.ts')
+    ok(
+      'N19：学期筛选判据只有一处定义（`lib/terms.ts` 的 `termMatches`）',
+      (termsSrc.match(/export function termMatches/g) ?? []).length === 1,
+    )
+    ok(
+      'N20：作业列表**复用**它（不是另写一套学期判断）',
+      /termMatches\(/.test(src('src/pages/Assignments.tsx')),
+    )
+    ok(
+      'N21：考试列表**复用**同一个判据',
+      /termMatches\(/.test(src('src/pages/Exams.tsx')),
+    )
+    ok(
+      "N22：学期列的探针用 `select('*')`（D10 会抓 `select('term_id')`）",
+      /from\('assignments'\)\s*\.select\('\*'\)/.test(remoteSrc),
+    )
+    ok(
+      'N23：那个探针是 `probeTermCols`（D10 认得出这个命名才会按"探针"的规矩查它的 select）',
+      /async function probeTermCols/.test(remoteSrc),
+    )
+    ok(
+      'N24：`terms` 表**没有** `is_current` 这一列（"当前学期"是推出来的，不落列）',
+      /* ⚠️ 只在**建表那一段**里查：`schema.sql` 的注释里写着"不存 is_current"这句话本身
+         （那是解释），所以要按"有没有 `is_current` 这一列的定义"判。 */
+      !/is_current\s+(boolean|text|int|date|timestamptz)/.test(schemaText) &&
+        !/is_current/.test(termsSrc.replace(/[^\n]*没有[^\n]*\n/g, '')),
+    )
+    ok(
+      "N25：两边同一条时间口径 —— 前端 `beijingNow()`（SQL 那边是 `at time zone 'Asia/Shanghai'`）",
+      /beijingNow\(\)/.test(termsSrc) && /at time zone 'Asia\/Shanghai'/.test(schemaText),
+    )
+    ok(
+      'N26：写学期那一列只有 `remote.ts` 的两处写路径（作业 + 考试各一处，都由日期推）',
+      (remoteSrc.match(/row\.term_id = /g) ?? []).length === 2 &&
+        /* 调用点两处 + 它自己的定义一处 = 3 */
+        (remoteSrc.match(/termIdForDate\(/g) ?? []).length === 3 &&
+        /* 页面与 store 都不许自己写这一列（同一件事两个入口必错一个） */
+        !['src/pages/Assignments.tsx', 'src/pages/Exams.tsx', 'src/data/store.ts'].some((p) =>
+          /\.term_id\s*=/.test(src(p)),
+        ),
+      `remote.ts ${(remoteSrc.match(/row\.term_id = /g) ?? []).length} 处 / 调用点 ${(remoteSrc.match(/termIdForDate\(/g) ?? []).length} 处`,
     )
   }
 
@@ -1127,6 +1688,289 @@ await withLock(async () => {
       `改坏前 = ${JSON.stringify(before)}；改坏后 = ${JSON.stringify(after)}`,
     )
     eq('P7：临时文件已经删掉（仓库里不留痕迹）', existsSync(TMP), false)
+
+    /* ---- 🆕 P3（学期筛选）：三条真跑一遍的对照 ---- */
+    {
+      const termsSrc = readFileSync(resolvePath(APP, 'src/lib/terms.ts'), 'utf8')
+      /* ① 把"没有归属也算看得见"拿掉 → N20/N21 会红 */
+      const poisonedNull = termsSrc.replace(
+        /    if \(termId === undefined \|\| termId === null\) return true\n    return termId === current/,
+        '    return termId === current',
+      )
+      eq('P8：把"没有归属的也算看得见"拿掉 —— 文本确实被改坏了（锚点找得到）', poisonedNull !== termsSrc, true)
+      const T2 = resolvePath(APP, 'src/lib/.__p8_negative_tmp.ts')
+      let afterNull = '（没跑起来）'
+      try {
+        writeFileSync(T2, poisonedNull)
+        const mod = await import(pathToFileURL(T2).href)
+        afterNull = mod.termMatches(null, 'current', 'T-current', [])
+      } catch (e) {
+        afterNull = `（求值失败：${String(e?.message ?? e).split('\n')[0]}）`
+      } finally {
+        try {
+          rmSync(T2, { force: true })
+        } catch {
+          /* 删不掉由下一条断言抓 */
+        }
+      }
+      ok(
+        'P9：改坏之后 `term_id = null` 的档案**不再显示**（N20/N21 会红）—— 这才是真对照',
+        afterNull === false,
+        `实际 ${JSON.stringify(afterNull)}`,
+      )
+      eq('P10：那个临时文件也删掉了', existsSync(T2), false)
+
+      /* ② 列表默认必须是「本学期」，不是「全部」
+         ⚠️ 这里**故意写死 `'current'`**（而不是读 `termsLib` 的常量）：这条断言要能独立
+         指出"两页的默认值变了"，读被测模块自己的常量会让两边一起变、永远为绿。 */
+      const curFilter = 'current'
+      eq(
+        'P11a（自证）：`TERM_FILTER_CURRENT` 就是写死的那个 `current`（常量改名时这里会红）',
+        termsLib.TERM_FILTER_CURRENT,
+        curFilter,
+      )
+      ok(
+        'P11：作业列表的默认学期筛选就是「本学期」（`useState<TermFilterValue>(TERM_FILTER_CURRENT)`）',
+        new RegExp(`useState<TermFilterValue>\\(TERM_FILTER_CURRENT\\)`).test(
+          readFileSync(resolvePath(APP, 'src/pages/Assignments.tsx'), 'utf8'),
+        ),
+        curFilter,
+      )
+      ok(
+        'P12：考试列表的默认学期筛选也是「本学期」（两页同一口径）',
+        new RegExp(`useState<TermFilterValue>\\(TERM_FILTER_CURRENT\\)`).test(
+          readFileSync(resolvePath(APP, 'src/pages/Exams.tsx'), 'utf8'),
+        ),
+        curFilter,
+      )
+    }
+  }
+
+  /* ============================================================
+     第十一节 · 🔴 canSetup 端到端（**问题一**）：「超管拿到 true」必须有断言
+     ------------------------------------------------------------
+     为什么要有这一节：上面那些条里**没有一条**验过"超管拿到 `canSetup === true`"——
+     各层各自绿（K2 只验"函数能被 authenticated 调用"、H 段只验"年级主任能导名单"），
+     而**端到端那一条没人验**。于是"超管被显示成只能看"这种坏法能一路全绿。
+
+     🔴 这一节**不是**再测一遍纯函数：它 import `functions/api/grade-setup.ts` 的**真源码**，
+        用 `onRequestPost()` 走真的 `canSetup` 分支；下面那个 fetch 桩把
+        `/auth/v1/user` 与 `/rest/v1/rpc/can_manage_grade_setup` 接到**真库**上，
+        并且照 PostgREST 的做法执行：`set local role authenticated` +
+        把调用者的 sub 放进 `request.jwt.claim.sub`（`auth.uid()` 就读它）。
+        ⚠️ **一个字节都不出网**：桩只认那两个地址。
+     ============================================================ */
+
+  section('第十一节 · 🔴 canSetup 端到端：超管 / 教务处 / 年级主任 / 班主任（真源码 + 真库）')
+
+  {
+    const api = await import(pathToFileURL(resolvePath(APP, 'functions/api/grade-setup.ts')).href)
+    const gsLib = await import(pathToFileURL(resolvePath(APP, 'src/lib/gradeSetup.ts')).href)
+
+    /* 两个新夹具：**别的年级**的年级主任 / **教室端账号**（`teacher_roles` 里没有它那一行） */
+    const U2 = {
+      other: '66666666-6666-6666-6666-666666666666',
+      room: '77777777-7777-7777-7777-777777777777',
+    }
+    await db.exec(`
+      insert into auth.users (id, email, raw_user_meta_data) values
+        ('${U2.other}', 'other@test', '{"name":"高二主任"}'::jsonb),
+        ('${U2.room}',  'room@test',  '{"name":"一(1)班教室端"}'::jsonb);
+      insert into teacher_roles (teacher_id, role, scope_type, scope_id) values
+        ('${U2.other}', 'grade_head', 'grade', ${gradeOf('高二')});
+    `)
+
+    const TOKEN_OF = new Map([
+      ['tok-super', U.super],
+      ['tok-admin', U.admin],
+      ['tok-grade', U.grade],
+      ['tok-other', U2.other],
+      ['tok-head', U.head],
+      ['tok-teacher', U.teacher],
+      ['tok-room', U2.room],
+    ])
+    const gid1 = one(await db.query(`select id::text as id from grades where name = '高一'`)).id
+    const gid2 = one(await db.query(`select id::text as id from grades where name = '高二'`)).id
+
+    /*
+     * 🔴 反向对照那份"改坏的真函数"：取 `schema.sql` 里 `can_manage_grade_setup()` 的**真文本**，
+     *    把第一支（`select public.is_school_admin() or exists (…`）砍掉，落成 `_neg_grade_setup()`。
+     *    ⚠️ 为什么不用全局 `GRADE_NEGATIVE` 改原文：那一支**同时**是 H 段"导入名单"的闸门，
+     *       改掉后 H2 先失败（学生一个都没写进去）→ 脚本在 I 段中断，反而看不到 R1 变红。
+     *    `GRADE_NEGATIVE=setup-broken-fn` 会让桩**从头**就问这一份 —— 于是 R1/R2 当场红。
+     */
+    const fnText = RAW.match(
+      /create or replace function public\.can_manage_grade_setup\(p_grade_id uuid\)[\s\S]*?\n\$\$;/,
+    )
+    const half = `  select public.is_school_admin()
+      or exists (`
+    const brokenFn = fnText ? fnText[0].replace(half, '  select exists (') : ''
+    if (fnText) {
+      await db.exec(
+        brokenFn.replace(
+          'create or replace function public.can_manage_grade_setup(',
+          'create or replace function public._neg_grade_setup(',
+        ),
+      )
+    }
+
+    /* ---------------- fetch 桩：Supabase 的两条链，接到真库 ---------------- */
+    const realFetch = globalThis.fetch
+    const rpcCalls = []
+    let rpcMissing = false
+    /** 反向对照用：把桩要问的函数换成"改坏的那一份"（默认问真的那一个） */
+    let fnOverride = NEGATIVE === 'setup-broken-fn' ? '_neg_grade_setup' : null
+    const jsonRes = (v, status = 200) =>
+      new Response(JSON.stringify(v), { status, headers: { 'Content-Type': 'application/json' } })
+
+    globalThis.fetch = async (input, init = {}) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      const token = String(new Headers(init.headers ?? {}).get('authorization') ?? '').replace(
+        /^Bearer\s+/i,
+        '',
+      )
+      if (/\/auth\/v1\/user$/.test(url)) {
+        const uid = TOKEN_OF.get(token)
+        return uid ? jsonRes({ id: uid }) : jsonRes({ message: 'invalid jwt' }, 401)
+      }
+      const m = /\/rest\/v1\/rpc\/([a-z_]+)$/.exec(url)
+      if (!m) return realFetch(input, init)
+      const fn = fnOverride ?? m[1]
+      rpcCalls.push({ fn, token })
+      const uid = TOKEN_OF.get(token)
+      if (!uid) return jsonRes({ message: 'JWT required' }, 401)
+      /* 这一段是**假的 PostgREST**：形状按真的来（函数不存在 = 404 + PGRST202） */
+      if (rpcMissing) {
+        return jsonRes(
+          {
+            code: 'PGRST202',
+            message: `Could not find the function public.${fn}(p_grade_id) in the schema cache`,
+          },
+          404,
+        )
+      }
+      const body = JSON.parse(String(init.body ?? '{}'))
+      await db.exec('begin')
+      try {
+        await db.exec('set local role authenticated')
+        await db.query(`select set_config('request.jwt.claim.sub', $1, true)`, [uid])
+        const out = await db.query(`select public.${fn}($1::uuid) as v`, [body.p_grade_id])
+        await db.exec('commit')
+        return jsonRes(out.rows[0].v)
+      } catch (e) {
+        await db.exec('rollback')
+        return jsonRes({ message: String(e?.message ?? e).split('\n')[0] }, 400)
+      }
+    }
+
+    const ENV = {
+      SUPABASE_URL: 'http://127.0.0.1:9',
+      SUPABASE_ANON_KEY: 'fake-anon',
+      SUPABASE_SERVICE_ROLE_KEY: 'fake-service-role',
+    }
+    /** 走**真源码**的那个分支问一次（`token = null` = 前端漏带 Authorization 的形状） */
+    const ask = async (token, gradeId) => {
+      const res = await api.onRequestPost({
+        request: new Request('https://example.invalid/api/grade-setup', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify({ action: 'canSetup', gradeId }),
+        }),
+        env: ENV,
+      })
+      return { status: res.status, json: await res.json() }
+    }
+
+    try {
+      /* ① 🔴 **缺的就是这一条**：全平台最高管理员 */
+      const rSuper = await ask('tok-super', gid1)
+      eq('R1：🔴 超管 → `canSetup === true`（这就是这次 bug 里没人验的那一条）', [rSuper.status, rSuper.json.canSetup], [200, true])
+      ok(
+        'R1b：服务端是拿**调用者自己的 JWT**去问数据库的（不是 service_role、也不是不带令牌）',
+        rpcCalls.length > 0 && rpcCalls.every((c) => c.fn === 'can_manage_grade_setup' && c.token === 'tok-super'),
+        JSON.stringify(rpcCalls),
+      )
+      eq('R2：教务处（`admin`）→ true', (await ask('tok-admin', gid1)).json.canSetup, true)
+      eq('R3：**本年级**（高一）的年级主任 → true', (await ask('tok-grade', gid1)).json.canSetup, true)
+      eq('R4：**别的年级**（高二）的年级主任 → false', (await ask('tok-other', gid1)).json.canSetup, false)
+      eq('R4b（对照）：同一个高二主任在自己那个年级 → true', (await ask('tok-other', gid2)).json.canSetup, true)
+      eq('R5：班主任 → false', (await ask('tok-head', gid1)).json.canSetup, false)
+      eq('R6：任课教师 → false', (await ask('tok-teacher', gid1)).json.canSetup, false)
+      eq('R7：教室端账号（`teacher_roles` 里没有它那一行）→ false', (await ask('tok-room', gid1)).json.canSetup, false)
+
+      /* ② 三种**不是"没权限"**的失败必须能分开认出来（问题一的第 3 条） */
+      const before = rpcCalls.length
+      const rNoAuth = await ask(null, gid1)
+      eq('R8：🔴 **不带 Authorization** → HTTP 401（本次 bug 的形状：前端漏带 JWT）', rNoAuth.status, 401)
+      eq('R9：那一次请求**根本没走到数据库**（`caller()` 就把它挡了）—— 所以它不是"没权限"', rpcCalls.length, before)
+      const rBadId = await ask('tok-super', 'not-a-uuid')
+      eq('R10：年级 id 不是 uuid → HTTP 400（人话是"没有指定年级"，不是"你没权限"）', [rBadId.status, rBadId.json.message], [400, '没有指定年级'])
+      rpcMissing = true
+      const rNoFn = await ask('tok-super', gid1)
+      rpcMissing = false
+      eq('R11：§27 没跑（判据函数不存在）→ HTTP 503（**不是 200/false**）', rNoFn.status, 503)
+      ok('R12：那句人话里写着"第 27 段"（前端照它显示"接口还没就绪"）', /第 27 段/.test(String(rNoFn.json.message)), String(rNoFn.json.message))
+
+      /* ③ 前端那一层：**几种失败分开说**（`readCanSetup`，真源码的纯函数） */
+      const st = (r) => gsLib.readCanSetup(r)
+      const sOk = st({ ok: true, status: 200, data: { canSetup: true } })
+      const sNo = st({ ok: true, status: 200, data: { canSetup: false } })
+      const s503 = st({ ok: false, status: 503, data: { message: rNoFn.json.message } })
+      const s401 = st({ ok: false, status: 401, data: { message: '登录已过期，请重新登录后再试' } })
+      const s0 = st({ ok: false, status: 0, data: { message: '连不上服务器（Failed to fetch）' } })
+      const sOdd = st({ ok: true, status: 200, data: {} })
+      eq('R13：`canSetup:true` → 有权限，且**一个字都不说**（不解释、不辩护）', [sOk.canSetup, sOk.notice], [true, ''])
+      eq('R14：`canSetup:false` → **只有这一档**才说"只能看，不能改"', [sNo.canSetup, sNo.verdict], [false, 'denied'])
+      eq('R15：503（§27 没跑）→ 说"去跑 schema.sql"（把服务端那句话原样带出来），**不说"你没权限"**', [s503.verdict, /第 27 段/.test(s503.notice)], ['missing', true])
+      eq('R16：401（没登 / 会话过期）→ 说"重新登录"', [s401.verdict, /登录已过期/.test(s401.notice)], ['signin', true])
+      eq('R17：status 0（连不上 / 本地演示模式）→ 说"连不上"', [s0.verdict, /连不上/.test(s0.notice)], ['offline', true])
+      eq('R18：🔴 `ok` 却没有 `canSetup` → 报"接口没给结论"（**不许静默当成"没权限"**）', sOdd.verdict, 'error')
+
+      /* ④ 前端那一句判据：这一页**不许自己写 fetch**（漏带 JWT 就是这个 bug 的根因） */
+      const gsPage = readFileSync(resolvePath(APP, 'src/pages/GradeSetup.tsx'), 'utf8')
+      const goesThroughApi = (t) =>
+        /apiCanSetup\(/.test(t) && !/fetch\(\s*['"]\/api\/grade-setup/.test(t)
+      ok('R19：`canSetup` 走 `apiCanSetup()`（那条链带着 JWT），页面里没有裸 fetch', goesThroughApi(gsPage))
+      eq(
+        "R20（对照）：把 `apiCanSetup(id)` 换回裸 `fetch('/api/grade-setup')` → 同一条判据必须变红",
+        goesThroughApi(gsPage.replace('apiCanSetup(id)', "fetch('/api/grade-setup')")),
+        false,
+      )
+
+      /* ---------------- ⑤ 🔴 反向对照：把 `is_school_admin()` 那半边**真拿掉** ----------------
+       * 那份改坏的真函数已经在本节开头落成 `_neg_grade_setup()`（见那段注释）。
+       * 这里再让桩拿**同一个超管**去问它一次 —— 结果必须是 false。
+       * ⚠️ 还要有"对照的对照"（R23）：改坏之后**本年级年级主任仍然是 true** ——
+       *    否则"全 false"也能让 R22 绿，那就是**假对照**。
+       */
+      ok('R21a：`can_manage_grade_setup()` 的真函数文本取得出来（取不出来说明锚点坏了）', !!fnText)
+      eq(
+        'R21b（对照自证）：把 `is_school_admin()` 那半边砍掉 —— 文本确实被改坏了（锚点找得到）',
+        brokenFn !== '' && brokenFn !== fnText?.[0] && !brokenFn.includes('is_school_admin()'),
+        true,
+      )
+      const savedOverride = fnOverride
+      fnOverride = '_neg_grade_setup'
+      const rNegSuper = await ask('tok-super', gid1)
+      const rNegHead = await ask('tok-grade', gid1)
+      fnOverride = savedOverride
+      await db.exec('drop function if exists public._neg_grade_setup(uuid)')
+      eq(
+        'R22（🔴 反向对照）：砍掉那半边 → **超管那条翻成 false**（R1 因此会红，它不是永远为绿的摆设）',
+        rNegSuper.json.canSetup,
+        false,
+      )
+      eq(
+        'R23（对照的对照）：同一次里**本年级年级主任仍然 true** —— 说明砍的只是"校级管理"那一支，不是"全 false"',
+        rNegHead.json.canSetup,
+        true,
+      )
+    } finally {
+      globalThis.fetch = realFetch
+    }
   }
 
   /* ---------------- 收尾 ---------------- */
@@ -1144,5 +1988,5 @@ await withLock(async () => {
     console.log(`\n⚠️ 这一轮是负向对照（GRADE_NEGATIVE=${NEGATIVE}），但它**没有红** —— 说明对照没生效`)
     process.exit(1)
   }
-  console.log('  全部通过 ✅（纯逻辑 A–G / 真 PostgreSQL H–M / 静态 N / 对照 P）')
+  console.log('  全部通过 ✅（纯逻辑 A–G / 真 PostgreSQL H–M / 静态 N · O / canSetup 端到端 R / 对照 P）')
 })

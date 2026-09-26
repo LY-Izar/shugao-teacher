@@ -134,7 +134,18 @@ export const PAGES: PageRow[] = [
    *       所以 §4.2 里它与 `/grades/:id` **逐格相同**（对非入口身份都是 E）。
    */
   { path: '/grades/:id/promote', group: '★ 页内', entry: '/grades/promote', live: false },
-  { path: '/settings/terms', group: '★ 我的（新增一行）', entry: '/settings/terms', live: false },
+  /*
+   * 🆕 2026-09-30（P3）：`/settings/terms` **从 ★ 变成真路由** —— 页面做出来了
+   * （`pages/Terms.tsx`）。它的入口 key 早就登记在 `ENTRIES` 里（`hasManagingRole`＝
+   * 超管 / 教务处 / 年级主任），所以 `PLANNED_PAGE_COUNT` 从 3 降到 **2**。
+   *
+   * ⚠️ 它**不是**"矩阵要加一行"：`按身份显示导航方案.md` §2.2 的那张表里
+   *    本来就有 `/settings/terms` 这一行（带 ★）—— 本轮做的是把 ★ 去掉。
+   *    这与 P6 的 `/grades/:id/setup` 是同一条教训（见 `MATRIX_SHAPE` 的长注释）：
+   *    **`PAGES` 里"从 live:false 变成真路由"不等于矩阵要加行**，
+   *    `MATRIX_SHAPE` / `MATRIX_SHAPE_13` 那几个数**一个都不动**。
+   */
+  { path: '/settings/terms', group: '我的 → 年级管理', entry: '/settings/terms' },
   { path: '/admin/probes', group: '★ 页内', entry: null, live: false },
 ]
 
@@ -158,8 +169,12 @@ export const PAGES: PageRow[] = [
  *    ⚠️ 三条一起落地是**故意**的：只落一条会让 `PAGES` 里出现"一半有页面"的中间态，
  *       而 `D1` 那两个等式（规划条数 + 真路由条数）在中间态里**仍然绿** ——
  *       那种绿什么也没证明。
+ *
+ * 🔴 **2026-09-30（P3）再把它从 3 改成 2**：`/settings/terms`（学期与学年）
+ *    也**真的做出来了**（`pages/Terms.tsx` + `App.tsx` 里那条路由）。
+ *    剩下两条规划项：`/grades/:id/promote`（P4 提档）与 `/admin/probes`（运维探针）。
  */
-export const PLANNED_PAGE_COUNT = 3
+export const PLANNED_PAGE_COUNT = 2
 
 /**
  * 方案 §2.2 矩阵的规模（D2 的自证值：从文档里读回来必须逐项相等）

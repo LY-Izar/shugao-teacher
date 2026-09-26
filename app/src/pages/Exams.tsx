@@ -31,6 +31,14 @@ import { ymdOf, beijingNow } from '../lib/holiday'
 import { friendlyDate } from '../lib/date'
 import { examReport } from '../lib/examStats'
 import { archiveKeyOf } from '../lib/keys'
+import {
+  TERM_FILTER_CURRENT,
+  isOtherTerm,
+  termFilterOptions,
+  termLabelOf,
+  termMatches,
+  type TermFilterValue,
+} from '../lib/terms'
 
 /* ============================================================
    考试列表
@@ -50,6 +58,15 @@ export default function Exams() {
   const setExamScores = useStore((s) => s.setExamScores)
   const examTables = useStore((s) => s.examTables)
   const refreshExamTables = useStore((s) => s.refreshExamTables)
+  const terms = useStore((s) => s.terms)
+  const currentTerm = useStore((s) => s.currentTermId)
+
+  /**
+   * 学期筛选（默认「本学期」，与作业列表同一口径 —— 判据只有 `lib/terms.ts` 一处）。
+   * ⚠️ 它不会让考试档案消失：推不出当前学期时不筛、没有归属的照常显示
+   *    （P2 那 1 场考试补不上归属时**绝不能从列表里消失**，见实施计划 P2 验收第 4 条）。
+   */
+  const [termFilter, setTermFilter] = useState<TermFilterValue>(TERM_FILTER_CURRENT)
 
   const [confirmId, setConfirmId] = useState<string | null>(null)
   const [importOpen, setImportOpen] = useState(false)
@@ -71,17 +88,21 @@ export default function Exams() {
 
   const nameOfClass = (id: string) => classes.find((c) => c.id === id)?.name ?? '班级已删除'
 
-  /** 同场考试的合并展示：按 paperKey + 学科分组 */
+  /** 同场考试的合并展示：按 paperKey + 学科分组（**先按学期筛**，见上面 `termFilter`） */
+  const shown = useMemo(
+    () => exams.filter((e) => termMatches(e.termId, termFilter, currentTerm, terms)),
+    [exams, termFilter, currentTerm, terms],
+  )
   const groups = useMemo(() => {
     const map = new Map<string, Exam[]>()
-    for (const e of exams) {
+    for (const e of shown) {
       const key = `${e.paperKey}|${e.subjectCode}|${e.grade}|${e.examDate}`
       const list = map.get(key) ?? []
       list.push(e)
       map.set(key, list)
     }
     return [...map.values()].sort((a, b) => (a[0].examDate < b[0].examDate ? 1 : -1))
-  }, [exams])
+  }, [shown])
 
   /** 处理一份导入文件 */
   const handleFile = async (f: File) => {
@@ -266,6 +287,31 @@ export default function Exams() {
       />
 
       <Page>
+        {/*
+          学期筛选（默认「本学期」）。摆在下拉里的学期**只列数据里真有的**，
+          与作业列表同一口径；切到「全部学期」就能看到以前那几场。
+        */}
+        {exams.length ? (
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            <select
+              className="input"
+              style={{ width: 'auto', height: 34, fontSize: 13 }}
+              value={termFilter}
+              onChange={(e) => setTermFilter(e.target.value)}
+              aria-label="按学期筛选"
+            >
+              {termFilterOptions(terms, currentTerm).map((t) => (
+                <option key={t.value} value={t.value}>
+                  {t.label}
+                </option>
+              ))}
+            </select>
+            <span style={{ fontSize: 12, color: 'var(--color-ink3)' }}>
+              共 {shown.length} 份档案
+            </span>
+          </div>
+        ) : null}
+
         {examTables === 'missing' ? (
           <Panel className="mb-3" bodyClass="p-3">
             <div className="flex items-start gap-2" style={{ fontSize: 12.5, lineHeight: 1.7 }}>
@@ -280,20 +326,31 @@ export default function Exams() {
           </Panel>
         ) : null}
 
-        {exams.length === 0 ? (
+        {exams.length === 0 || shown.length === 0 ? (
           <Panel>
             <Empty
               icon={<IconClipboard size={24} />}
-              title="还没有考试档案"
+              title={exams.length === 0 ? '还没有考试档案' : '这个学期里还没有考试档案'}
+              desc={
+                exams.length === 0
+                  ? undefined
+                  : '换一个学期、或者切到「全部学期」试试。'
+              }
               action={
-                <div className="flex gap-2">
-                  <Button size="sm" variant="primary" icon={<IconPlus size={15} />} onClick={() => navigate('/exams/new')}>
-                    建立第一份档案
+                exams.length === 0 ? (
+                  <div className="flex gap-2">
+                    <Button size="sm" variant="primary" icon={<IconPlus size={15} />} onClick={() => navigate('/exams/new')}>
+                      建立第一份档案
+                    </Button>
+                    <Button size="sm" icon={<IconUpload size={14} />} onClick={() => setImportOpen(true)}>
+                      导入成绩单
+                    </Button>
+                  </div>
+                ) : (
+                  <Button size="sm" onClick={() => setTermFilter('all')}>
+                    看全部学期
                   </Button>
-                  <Button size="sm" icon={<IconUpload size={14} />} onClick={() => setImportOpen(true)}>
-                    导入成绩单
-                  </Button>
-                </div>
+                )
               }
             />
           </Panel>
@@ -338,6 +395,10 @@ export default function Exams() {
                                 <span style={{ fontSize: 12, color: 'var(--color-ink3)' }}>
                                   {friendlyDate(e.examDate)}
                                 </span>
+                                {/* 不是本学期的那几场，切到「全部学期」时要认得出来 */}
+                                {isOtherTerm(e.termId, currentTerm) ? (
+                                  <Tag tone="idle">{termLabelOf(e.termId, terms)}</Tag>
+                                ) : null}
                               </span>
                               <span className="mt-1.5 block truncate" style={{ fontSize: 15, fontWeight: 640 }}>
                                 {e.title}

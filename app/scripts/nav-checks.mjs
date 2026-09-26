@@ -1080,13 +1080,17 @@ const realRoutes = routes.filter((p) => p !== '*')
    *    ⚠️ 三条**一起**落地是故意的：只落一条会让 `PAGES` 停在中间态，
    *       而中间态里 D1 那两个等式**仍然绿** —— 那种绿什么也没证明。
    *    ⚠️ 顺带：`/grades/:id/setup` 同时**加进了上面的 `MATRIX_PATHS`**（它是新地址）。
+   * 🆕 2026-09-30（P3）「学期与学年」落地：这一组从 **3 条降到 2 条** ——
+   *    `/settings/terms` 的页面真的做出来了（`pages/Terms.tsx` + `App.tsx` 的路由），
+   *    `PAGES` 里那一行也去掉了 `live: false`。
+   *    ⚠️ 与 P6 那三条同一条教训：它**原来就在矩阵里**（§2.2 带 ★ 的那一行），
+   *       所以 `MATRIX_SHAPE` / `MATRIX_SHAPE_13` 那几个数**一个都不动**。
    */
-  const PLANNED3 = [
+  const PLANNED2 = [
     '/grades/:id/promote',
-    '/settings/terms',
     '/admin/probes',
   ]
-  eqSet('D1：规划中的路径就是那 3 条（写死核对，不看 live 字段）', planned, PLANNED3)
+  eqSet('D1：规划中的路径就是那 2 条（写死核对，不看 live 字段）', planned, PLANNED2)
   check(
     realRoutes.includes('/admin'),
     'D1：`/admin` 是**真路由**（★ 里唯一一个已经落地的，见注释）',
@@ -1632,6 +1636,12 @@ section('第九节 · D3/D4/D5：判据白名单 · myRoles 读取点白名单 �
         'src/pages/Grades.tsx',
         '🆕 年级管理（P6）：**只用来选一句空态文案**（"你的账号看不到任何年级" vs "还没有年级"）—— ' +
           '连入口都不判（入口在 `Settings.tsx` 那一行走 `entryVisible("/grades", …)`）',
+      ],
+      [
+        'src/pages/Terms.tsx',
+        '🆕 学期与学年（P3）：**只决定摆不摆那个录入表单**（`entryVisible("/settings/terms", myRoles)`，' +
+          '与「我的」页那一行**同一个 key、同一个函数**）；**不读任何数据行**。' +
+          '真正的闸门是服务端拿调用者 JWT 问数据库的 `can_manage_terms()`（= 教导处 / 最高管理员）',
       ],
       ['src/lib/roles.ts', '入口表与判据的定义处（不是读取处）'],
     ])

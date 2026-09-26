@@ -154,6 +154,20 @@ export type Exam = {
   mode: ExamMode
   /** 考试日期 YYYY-MM-DD（**用 beijingNow() 取"今天"**） */
   examDate: string
+  /**
+   * 学期归属（`schema.sql` §28，P3）。判据与作业的 `Assignment.termId` **同一套**
+   * （`lib/terms.ts` 的 `termMatches()`）：`undefined` / `null` 都算"能看见"，
+   * 只有"确实属于另一个学期"才被默认筛掉。
+   */
+  termId?: string | null
+  /**
+   * 这一场考试属于哪个**届**（`grades.id`，Q33）。
+   *
+   * ⚠️ 兼容期两条读法并存：老档案只有 `grade`（年级名**文本**），
+   *    新档案两个都写。`grade` 文本**不删**（历史档案靠它显示），
+   *    但**判据一律读 `gradeId`** —— 文本会随提档变成"高二（2025 级）"这类渲染名（§2.13.1）。
+   */
+  gradeId?: string | null
   questionCount: number
   /** 题号 → 题目结构 */
   questions: Record<string, ExamQuestion>

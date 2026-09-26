@@ -21,7 +21,71 @@
         · 一次写任教关系：**2000 行**
    ============================================================ */
 
-import { apiMessage, postApi } from './api'
+import { apiMessage, postApi, type ApiResult } from './api'
+
+/* ============================================================
+   「我在这个年级能不能改」—— 前端只做一件事：**把服务端的话分拣成人话**
+   ------------------------------------------------------------
+   🔴 2026-09-30 修的 bug：这一页以前**自己写了一遍 `fetch('/api/grade-setup')`，
+      没有带 JWT** → 服务端的 `caller()` 回 401 → 页面把"没带令牌"显示成
+      「你的身份只能看，不能改」——**连最高管理员都被冤枉**（他的按钮全灰）。
+      根因就是"同一件事两个入口"：别的写动作都走 `postApi`（它带 JWT），
+      只有这一条自己写了一遍。现在 `canSetup` **只有这一个入口**（`apiCanSetup`）。
+
+   ⚠️ 判据**一个字都不在这里**：`canSetup` 由服务端拿调用者 JWT 问数据库的
+      `can_manage_grade_setup()`。这一层只把下面几种情况**分开说** ——
+      它们的下一步动作完全不同，混成一句"你没权限"会让人去改权限设置：
+        · `denied`    服务端问过数据库：不能改（**只有这一种**能说"你的身份只能看"）
+        · `missing`   §27 那一段 SQL 还没跑 → 去跑 `supabase/schema.sql`
+        · `signin`    没有会话 / 会话过期 → 重新登录
+        · `offline`   连不上服务端（断网 / 本地演示模式没有 `/api/*`）
+        · `error`     别的失败（年级 id 不合法等）→ 原样带服务端那句话
+   ============================================================ */
+
+export type CanSetupVerdict = 'allowed' | 'denied' | 'missing' | 'signin' | 'offline' | 'error'
+
+export type CanSetupState = {
+  canSetup: boolean
+  verdict: CanSetupVerdict
+  /** 页面上那一句话；`''` = 没什么要说的（有权限时不解释） */
+  notice: string
+}
+
+/** 把服务端的回话分拣成上面那几档（**纯函数**，`grade-checks.mjs` 逐档断言它） */
+export function readCanSetup(r: ApiResult): CanSetupState {
+  if (r.ok) {
+    if (r.data.canSetup === true) return { canSetup: true, verdict: 'allowed', notice: '' }
+    if (r.data.canSetup === false) return { canSetup: false, verdict: 'denied', notice: '你在这个年级只能看，不能改。' }
+    /* 🔴 接口回了 ok 却没有结论 —— **不许静默当成"没权限"**（那又是冤枉一个人） */
+    return {
+      canSetup: false,
+      verdict: 'error',
+      notice: '接口没给权限结论，这一页现在只能看。',
+    }
+  }
+  if (r.status === 503) {
+    /* 服务端那句话里带着"第 27 段 / 去 SQL Editor 跑一遍"——原样带出来 */
+    return { canSetup: false, verdict: 'missing', notice: apiMessage(r, '接口还没就绪。') }
+  }
+  if (r.status === 401) {
+    return { canSetup: false, verdict: 'signin', notice: '登录已过期，重新登录后再试。' }
+  }
+  if (r.status === 0) {
+    /* ⚠️ 这一档**不用** `apiMessage`：`postApi` 在本地演示模式下给的那句话里带着
+       `（/api/*）` 这种技术路径 —— 判据 A+ 的口径是"主文案里不出现路径"。 */
+    return { canSetup: false, verdict: 'offline', notice: '连不上服务器，这一页现在只能看。' }
+  }
+  return { canSetup: false, verdict: 'error', notice: apiMessage(r, '读不到你的权限，这一页现在只能看。') }
+}
+
+/**
+ * 问服务端"我在这个年级能不能改"。
+ * 🔴 走 `postApi`（它把当前会话的 JWT 放进 `Authorization`）—— **不许再自己写 fetch**：
+ *    漏带 JWT = 服务端回 401 = 超管被显示成"你的身份只能看"（这次 bug 的形状）。
+ */
+export async function apiCanSetup(gradeId: string): Promise<CanSetupState> {
+  return readCanSetup(await postApi('/api/grade-setup', { action: 'canSetup', gradeId }))
+}
 
 /** 一次导入名单的行数上限（服务端 `bulk_import_roster` 里的那个数） */
 export const ROSTER_IMPORT_MAX = 3000

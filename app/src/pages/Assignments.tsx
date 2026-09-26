@@ -20,6 +20,14 @@ import { STATUS_TEXT, type Assignment, type AssignmentStatus, type Klass } from 
 import { collectStats } from '../lib/assignments'
 import { friendlyDate, isoOffset, parseISODate, toISODate } from '../lib/date'
 import { SUBJECTS, subjectCodeOf, subjectName } from '../lib/subjects'
+import {
+  TERM_FILTER_CURRENT,
+  isOtherTerm,
+  termFilterOptions,
+  termLabelOf,
+  termMatches,
+  type TermFilterValue,
+} from '../lib/terms'
 
 const wrongTotal = (a: Assignment) =>
   Object.values(a.wrong ?? {}).reduce((n, keys) => n + keys.length, 0)
@@ -130,6 +138,8 @@ function primaryLabel(a: { status: AssignmentStatus; confirmedNos?: string[] }):
 export default function Assignments() {
   const assignments = useStore((s) => s.assignments)
   const classes = useStore((s) => s.classes)
+  const terms = useStore((s) => s.terms)
+  const currentTerm = useStore((s) => s.currentTermId)
   const removeAssignment = useStore((s) => s.removeAssignment)
   const addAssignment = useStore((s) => s.addAssignment)
   const updateAssignment = useStore((s) => s.updateAssignment)
@@ -139,6 +149,15 @@ export default function Assignments() {
   const [classFilter, setClassFilter] = useState<string>('all')
   const [subjectFilter, setSubjectFilter] = useState<string>('all')
   const [timeFilter, setTimeFilter] = useState<TimeFilter>('all')
+  /**
+   * 学期筛选 —— **默认"本学期"**（Q9：期末归档 + 列表默认只显示本学期）。
+   *
+   * 🔴 它**不会让档案消失**，这是刻意的（`lib/terms.ts` 文件头 ②）：
+   *    · 学期表读不到 / 推不出当前学期（本地演示、§28 还没跑）→ 默认**不筛**；
+   *    · 档案没有学期归属（回填漏了的那一条）→ **照常显示**。
+   *    只有"确实属于**另一个**学期"才被默认收起 —— 切一下筛选就能看见。
+   */
+  const [termFilter, setTermFilter] = useState<TermFilterValue>(TERM_FILTER_CURRENT)
   const [view, setView] = useState<ViewMode>('time')
   const [confirmId, setConfirmId] = useState<string | null>(null)
   /** 正在改布置日期的档案 id */
@@ -172,13 +191,14 @@ export default function Assignments() {
         .filter((r) => (classFilter === 'all' ? true : r.a.classId === classFilter))
         .filter((r) => (subjectFilter === 'all' ? true : subjectCodeOf(r.a) === subjectFilter))
         .filter((r) => inTimeRange(r.a.assignDate, timeFilter))
+        .filter((r) => termMatches(r.a.termId, termFilter, currentTerm, terms))
         // 默认排序：时间最近的在最上面
         .sort(
           (x, y) =>
             (x.a.assignDate < y.a.assignDate ? 1 : x.a.assignDate > y.a.assignDate ? -1 : 0) ||
             y.a.createdAt - x.a.createdAt,
         ),
-    [assignments, classes, filter, classFilter, subjectFilter, timeFilter],
+    [assignments, classes, filter, classFilter, subjectFilter, timeFilter, termFilter, terms, currentTerm],
   )
 
   /** 有几种学科就有没有"分类"这回事：只有一科时不摆这个开关（摆了也是空转） */
@@ -307,6 +327,25 @@ export default function Assignments() {
               ))}
             </select>
             {/*
+              学期筛选。**默认"本学期"** —— 期末归档之后，上学期那几十份档案
+              不该跟本学期的混在一条流水里。
+              ⚠️ 它不会让任何档案消失：推不出当前学期时不筛、没有归属的照常显示
+                 （判据只有 `lib/terms.ts` 的 `termMatches()` 一处）。
+            */}
+            <select
+              className="input"
+              style={{ width: 'auto', height: 34, fontSize: 13 }}
+              value={termFilter}
+              onChange={(e) => setTermFilter(e.target.value)}
+              aria-label="按学期筛选"
+            >
+              {termFilterOptions(terms, currentTerm).map((t) => (
+                <option key={t.value} value={t.value}>
+                  {t.label}
+                </option>
+              ))}
+            </select>
+            {/*
               「按学科」这个开关**只在数据里真的有两种以上学科时**才摆出来
               （判据与上面那个学科下拉框同一条：`subjectOptions.length > 1`）——
               只有一科时它点了也是原样，属于多余的控件。
@@ -341,6 +380,7 @@ export default function Assignments() {
                   setClassFilter('all')
                   setSubjectFilter('all')
                   setTimeFilter('all')
+                  setTermFilter('all')
                 }}
                 style={{ fontSize: 12, color: 'var(--color-ink3)' }}
               >
@@ -428,6 +468,7 @@ export default function Assignments() {
                       // 教师会以为档案没了（这一条曾经真的漏过）
                       setSubjectFilter('all')
                       setTimeFilter('all')
+                      setTermFilter('all')
                     }}
                   >
                     清空筛选
@@ -468,6 +509,14 @@ export default function Assignments() {
                       <span style={{ fontSize: 12, color: 'var(--color-ink3)' }}>
                         {friendlyDate(a.assignDate)}
                       </span>
+                      {/*
+                        「以前学期」这一枚只在**它不是本学期**时出现 ——
+                        筛选切到「全部学期」时，一眼就能看出哪几份是旧档案
+                        （不然它们和本学期的档案长得一模一样）。
+                      */}
+                      {isOtherTerm(a.termId, currentTerm) ? (
+                        <Tag tone="idle">{termLabelOf(a.termId, terms)}</Tag>
+                      ) : null}
                     </span>
                     <span
                       className="mt-1.5 block truncate"

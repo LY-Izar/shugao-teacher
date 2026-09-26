@@ -1,7 +1,15 @@
 import { getSupabase } from '../lib/supabase'
+import { apiMessage, postApi } from '../lib/api'
 import { asSubjectCode, subjectCodeOfName } from '../lib/subjects'
 import { compareRoster } from '../lib/roster'
 import { classKindOf } from '../lib/pick'
+import {
+  currentTermId,
+  sortTerms,
+  termOfDate,
+  type AcademicYearDraft,
+  type Term,
+} from '../lib/terms'
 import type { Exam, ExamScore } from './examTypes'
 import type {
   Assignment,
@@ -100,6 +108,8 @@ type AssignmentRow = {
   graded_at: string | null
   /** 由数据库默认值生成，只在读取时才有 */
   created_at?: string | null
+  /** 学期归属（`schema.sql` §28）：见 `ExamRow.term_id` 的说明（读不到 = 不知道） */
+  term_id?: string | null
 }
 type ScheduleRow = {
   id: string
@@ -167,6 +177,13 @@ type ExamRow = {
   graded_at?: string | null
   note: string
   created_at?: string | null
+  /**
+   * 学期归属（`schema.sql` §28，P3）。⚠️ **可选**：线上库还没跑 §28 时读不到这一列，
+   * 读到 `undefined` = "不知道"（列表**照样显示**，见 `lib/terms.ts`）。
+   */
+  term_id?: string | null
+  /** 这一场考试属于哪个届（`grades.id`）。同上：读不到 = 不知道 */
+  grade_id?: string | null
 }
 
 type ExamScoreRow = {
@@ -302,6 +319,139 @@ export function ensureClassCols(): Promise<ClassCols> {
     classColsProbe = watchProbe('classCols', p, (v) => (v.kind ? 'present' : 'missing'))
   }
   return classColsProbe
+}
+
+/* ---------------- 兼容期：学年 / 学期（schema.sql §28，P3） ----------------
+
+   与 `ensureClassCols()` **同一套纪律**（判据只认「列/表不在」；网络与权限一律当作"有"）：
+     · 读：`select('*')` 读到 `term_id` 就是有；读不到 → `undefined` = **不知道**
+       （列表照常显示，见 `lib/terms.ts` 文件头 ②）；
+     · 写：`term_id` 只在**列真的在、而且算得出学期**时才放进载荷 ——
+       带上一个不存在的列会让整条 upsert 被 PostgREST 拒（"保存失败 = 刷新即丢"）。
+
+   ⚠️ 为什么单独一个探测、不塞进 `ensureGradeLookup()`（那个也读 `grades`）：
+      它们探的是**不同的东西**（那边问 `classes.grade_id` 能不能写，这边问 §28 跑没跑）。
+      混成一个结论 = 两段 SQL 只能一起跑，而用户常常只跑其中一段。 */
+
+type TermCols = { ok: boolean }
+
+let termColsProbe: Promise<TermCols> | null = null
+
+/**
+ * 探针 —— **`select('*')`，不是 `select('term_id')`**（`nav-checks` 的 D10 会静态抓后者）。
+ * 要问的本来就是"这一列在不在"，拿它自己去问，在没有这一列的库上连"表在不在"都判不出来。
+ */
+async function probeTermCols(): Promise<TermCols> {
+  const sb = getSupabase()
+  if (!sb) return { ok: false }
+  try {
+    const { data, error } = await sb.from('assignments').select('*').limit(1)
+    if (error) {
+      const msg = String(error.message ?? '')
+      const code = String((error as { code?: string }).code ?? '')
+      if (code === '42P01' || code === '42703' || /does not exist/i.test(msg)) return { ok: false }
+      return { ok: true }
+    }
+    const row = (data ?? [])[0] as Record<string, unknown> | undefined
+    // 空表读不出键 —— 全新空库上 §28 与建表是一起跑的，按"有"处理（同 probeClassCols）
+    if (!row) return { ok: true }
+    return { ok: Object.prototype.hasOwnProperty.call(row, 'term_id') }
+  } catch {
+    return { ok: true }
+  }
+}
+
+/** 探测一次（同一页面内只探一次）：§28 的 `assignments.term_id` 在不在 */
+export function ensureTermCols(): Promise<TermCols> {
+  if (!termColsProbe) {
+    const p = probeTermCols()
+    termColsProbe = watchProbe('termCols', p, (v) => (v.ok ? 'present' : 'missing'))
+  }
+  return termColsProbe
+}
+
+/** 学年 + 学期（**这一份缓存是"当前学期"的唯一来源**，不是本地数据模型的一部分） */
+export type AcademicTerms = { terms: Term[]; current: string | null }
+
+let termsCache: AcademicTerms | null = null
+
+/** 读学年与学期（表不在 → 空；**不抛错、不白屏**） */
+export async function loadTerms(force = false): Promise<AcademicTerms> {
+  if (termsCache && !force) return termsCache
+  const sb = getSupabase()
+  const empty: AcademicTerms = { terms: [], current: null }
+  if (!sb) {
+    termsCache = empty
+    return empty
+  }
+  const cols = await ensureTermCols()
+  if (!cols.ok) {
+    termsCache = empty
+    return empty
+  }
+  try {
+    const [y, t] = await Promise.all([
+      sb.from('academic_years').select('*'),
+      sb.from('terms').select('*'),
+    ])
+    if (y.error || t.error) {
+      const err = y.error ?? t.error
+      if (!isMissingTable(err)) fail('读取学年与学期', err)
+      termsCache = empty
+      return empty
+    }
+    const years = new Map<string, Record<string, unknown>>()
+    for (const r of (y.data ?? []) as Record<string, unknown>[]) years.set(String(r.id), r)
+    const list: Term[] = []
+    for (const r of (t.data ?? []) as Record<string, unknown>[]) {
+      const yr = years.get(String(r.academic_year_id))
+      list.push({
+        id: String(r.id),
+        yearName: String(yr?.name ?? ''),
+        yearStart: String(yr?.start_date ?? ''),
+        yearEnd: String(yr?.end_date ?? ''),
+        half: Number(r.half) === 2 ? 2 : 1,
+        startDate: String(r.start_date ?? ''),
+        endDate: String(r.end_date ?? ''),
+      })
+    }
+    const terms = sortTerms(list.filter((x) => x.id && x.startDate && x.endDate))
+    termsCache = { terms, current: currentTermId(terms) }
+    return termsCache
+  } catch (e) {
+    fail('读取学年与学期', e)
+    termsCache = empty
+    return empty
+  }
+}
+
+/** 清掉学期缓存（教导处刚改完日期 → 下一次读要拿新的） */
+export function clearTermsCache() {
+  termsCache = null
+}
+
+/**
+ * 某一个日期属于哪个学期 —— **写路径唯一一处算学期的地方**。
+ * 算不出来（列不在 / 学期表没有这一段 / 表读不到）返回 `null` → 调用方**不带这一列**。
+ */
+export async function termIdForDate(date: string): Promise<string | null> {
+  const cols = await ensureTermCols()
+  if (!cols.ok) return null
+  const { terms } = await loadTerms()
+  return termOfDate(terms, date)
+}
+
+/**
+ * 写一个学年 + 上下半期（**一个 RPC = 一个事务**，服务端 `write_academic_year()`）。
+ *
+ * 判据不在这一层：服务端拿调用者 JWT 问 `can_manage_terms()`（= 教导处 / 最高管理员）。
+ * 这里只把 JWT 递上去、把人话带回来（与 `lib/gradeSetup.ts` 同一条纪律）。
+ */
+export async function saveAcademicYear(d: AcademicYearDraft): Promise<{ ok: boolean; message: string }> {
+  const r = await postApi('/api/grade-setup', { action: 'academicYearWrite', ...d })
+  if (!r.ok) return { ok: false, message: apiMessage(r, '保存学年与学期失败') }
+  clearTermsCache()
+  return { ok: true, message: '已保存' }
 }
 
 /* ---------------- 兼容期：考试那两张表在不在？（schema.sql 第 15 段） ----------------
@@ -554,6 +704,19 @@ export function probeReport(): ProbeReport {
       at: at('serialCols'),
       note: IND,
     },
+    /*
+     * 🆕 2026-09-30（P3）：学年 / 学期那一列（`assignments.term_id`，`schema.sql` §28）。
+     * 它单独一格的理由与上面那个探测单独存在一样：**它决定"列表默认只看本学期"能不能生效** ——
+     * 这一列为 `missing` 时列表不筛（照常显示全部），那一页的学年设置也就无从写起。
+     */
+    {
+      key: 'termCols',
+      label: '学期列',
+      target: 'assignments.term_id + academic_years / terms',
+      state: of('termCols'),
+      at: at('termCols'),
+      note: `它为 missing 时列表**不按学期筛**（宁可多看见，绝不静默藏档案）。${IND}`,
+    },
   ]
   return { collectedAt: Date.now(), items }
 }
@@ -653,6 +816,8 @@ const rowToExam = (r: ExamRow): Exam => ({
   source: (r.source as Exam['source']) ?? 'manual',
   mode: (r.mode as Exam['mode']) ?? 'scores',
   examDate: r.exam_date,
+  ...(Object.prototype.hasOwnProperty.call(r, 'term_id') ? { termId: r.term_id ?? null } : {}),
+  ...(Object.prototype.hasOwnProperty.call(r, 'grade_id') ? { gradeId: r.grade_id ?? null } : {}),
   questionCount: r.question_count,
   questions: (r.questions ?? {}) as Exam['questions'],
   classIds: r.class_ids ?? [],
@@ -746,7 +911,14 @@ export async function saveExam(
     return { ok: false, reason: EXAM_MIGRATION_HINT }
   }
   try {
-    const { error } = await sb.from('exams').upsert(examToRow(e, teacherId) as never, { onConflict: 'id' })
+    /*
+     * 学期归属（§28）：与作业同一条口径 —— **由 `exam_date` 推**，算不出就不带这一列
+     * （不带 = 保住库里已有的值；带 null = 把回填好的归属擦掉）。
+     */
+    const row: Record<string, unknown> = { ...examToRow(e, teacherId) }
+    const tid = await termIdForDate(e.examDate)
+    if (tid) row.term_id = tid
+    const { error } = await sb.from('exams').upsert(row as never, { onConflict: 'id' })
     if (error) {
       fail('保存考试', error)
       return { ok: false, reason: String(error.message ?? '未知错误') }
@@ -1063,6 +1235,11 @@ const rowToAssignment = (r: AssignmentRow): Assignment => ({
    */
   subjectCode: asSubjectCode(r.subject_code) ?? subjectCodeOfName(r.subject),
   assignDate: r.assign_date,
+  /*
+   * 学期归属（§28）。**列不存在时保持 `undefined`（= 不知道）**，不要写成 null：
+   * 两者在列表里都"能看见"，但 `undefined` 还能让探针与面板看出"SQL 还没跑"。
+   */
+  ...(Object.prototype.hasOwnProperty.call(r, 'term_id') ? { termId: r.term_id ?? null } : {}),
   questionCount: r.question_count,
   status: r.status as AssignmentStatus,
   templateId: r.template_id ?? undefined,
@@ -1531,6 +1708,14 @@ export async function assignmentWriteRow(
     const code = asSubjectCode(a.subjectCode)
     if (code) row.subject_code = code
   }
+  /*
+   * 学期归属（`schema.sql` §28）：**由 `assign_date` 推**，与 §28.8 的 SQL 回填同一条口径。
+   * 🔴 只在这一处写这一列 —— 页面与 store 都不许自己算（同一件事两个入口必错一个）。
+   * 列不在 / 认不出学期 / 学期表读不到 → **不带这一列**（upsert 只更新载荷里出现过的列，
+   * 所以不带 = 保住库里已有的值；带上 null = 把回填好的归属擦掉）。
+   */
+  const t = await termIdForDate(a.assignDate)
+  if (t) row.term_id = t
   return row
 }
 

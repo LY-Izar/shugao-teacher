@@ -47,14 +47,30 @@ const PRIMARY_CODES = ['physics', 'history']
 const SECOND_CODES = ['chemistry', 'biology', 'politics', 'geography']
 
 type Body = {
-  action?: 'canSetup' | 'rosterImport' | 'subjectWrite' | 'classSubjectBulk'
+  action?: 'canSetup' | 'rosterImport' | 'subjectWrite' | 'classSubjectBulk' | 'academicYearWrite'
   gradeId?: string
   rows?: unknown[]
+  /* ---- `academicYearWrite`（P3，`schema.sql` §28）：一个学年 + 上下半期 ---- */
+  name?: string
+  yearStart?: string
+  yearEnd?: string
+  half1Start?: string
+  half1End?: string
+  half2Start?: string
+  half2End?: string
 }
 
 const NEED_STAGE27 =
   '数据库还没跑"开学准备"那一段（仓库里 supabase/schema.sql 第 27 段）。' +
   '到 Supabase → SQL Editor 跑一遍再回来；刚跑完的话等十几秒让接口刷新一下缓存。'
+
+/** P3（§28）还没跑时的那句话 —— 与 `NEED_STAGE27` 同款：**把下一步动作写清楚** */
+const NEED_STAGE28 =
+  '数据库还没跑"学年与学期"那一段（仓库里 supabase/schema.sql 第 28 段）。' +
+  '到 Supabase → SQL Editor 跑一遍再回来；刚跑完的话等十几秒让接口刷新一下缓存。'
+
+/** `YYYY-MM-DD`（日期列的入参形状；四样都要） */
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -439,6 +455,35 @@ export async function onRequestPost(context: {
     return json({ status: 'ok', rows: Number(v.rows ?? 0), replaced: Number(v.replaced ?? 0) })
   }
 
+  /* ---------------- academicYearWrite：设一个学年的上下半期（**一个事务**，P3 / §28） ----------------
+   *  🔴 判据不在这一层：`write_academic_year()` 自己问数据库的 `can_manage_terms()`
+   *     （= 教导处 / 最高管理员）。四段日期在这一层先按形状挡一道（省一次往返），
+   *     真正的校验（重叠、先后）在数据库里报人话。 */
+  if (action === 'academicYearWrite') {
+    const name = String(body.name ?? '').trim()
+    const dates = {
+      p_year_start: String(body.yearStart ?? '').trim(),
+      p_year_end: String(body.yearEnd ?? '').trim(),
+      p_half1_start: String(body.half1Start ?? '').trim(),
+      p_half1_end: String(body.half1End ?? '').trim(),
+      p_half2_start: String(body.half2Start ?? '').trim(),
+      p_half2_end: String(body.half2End ?? '').trim(),
+    }
+    if (!/^\d{4}-\d{4}$/.test(name)) {
+      return json({ status: 'error', message: '学年名写成 2026-2027 这样' }, 400)
+    }
+    for (const [k, v] of Object.entries(dates)) {
+      if (!DATE_RE.test(v)) return json({ status: 'error', message: `${k} 要一个 YYYY-MM-DD 的日期` }, 400)
+    }
+    const r = await rpc(env, me.token, 'write_academic_year', { p_name: name, ...dates })
+    if (!r.ok) {
+      if (isMissing(r)) return json({ status: 'error', message: NEED_STAGE28 }, 503)
+      return json({ status: 'error', message: r.p0001 ?? '保存学年与学期失败' }, r.status === 403 ? 403 : 400)
+    }
+    const v = (r.rows[0] ?? {}) as Record<string, unknown>
+    return json({ status: 'ok', academicYearId: String(v.academicYearId ?? ''), name: String(v.name ?? name) })
+  }
+
   return json({ status: 'error', message: '不认识这个操作' }, 400)
 }
 
@@ -447,7 +492,7 @@ export async function onRequestGet(): Promise<Response> {
   return json(
     {
       status: 'ok',
-      hint: '开学准备的服务端接口：POST { action: canSetup | rosterImport | subjectWrite | classSubjectBulk }',
+      hint: '开学准备的服务端接口：POST { action: canSetup | rosterImport | subjectWrite | classSubjectBulk | academicYearWrite }',
     },
     200,
   )

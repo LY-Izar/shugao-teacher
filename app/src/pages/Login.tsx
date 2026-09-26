@@ -126,7 +126,7 @@ export default function Login() {
              * 换成**当前版本号 + 构建哈希**：排查"线上跑的是哪一版"时，
              * 登录页是所有人第一眼看到的那一屏（以前只能去比对线上 JS 的文件哈希）。
              */}
-            <span className="tag tag-idle num" title="前端版本 · 后一段是构建产物的哈希">
+            <span className="tag tag-idle num" title="前端版本">
               {APP_VERSION_LABEL}
             </span>
           </div>

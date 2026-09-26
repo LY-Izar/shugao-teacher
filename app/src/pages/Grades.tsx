@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Page } from '../components/AppShell'
-import { IconChevronRight, IconUsers } from '../components/icons'
+import { IconCalendar, IconChevronRight, IconUsers } from '../components/icons'
 import { Button, Empty, PageHead, Panel, Track } from '../components/ui'
 import { useStore } from '../data/store'
 import { loadGradeSetup, type GradeRow } from '../data/gradeSetup'
-import { GRADE_SETUP_STEP_TOTAL } from '../lib/gradeImport'
 import { classTypeOf, isAdminClass } from '../lib/pick'
+import { entryVisible } from '../lib/roles'
 
 /**
  * 「年级管理」总览页 `/grades`（`年级管理与选科走班方案.md` §4.3.1）。
@@ -65,7 +65,23 @@ export default function Grades() {
 
   return (
     <>
-      <PageHead title="年级管理" sub="开学准备那一条流水线从这里进" onBack={() => navigate('/settings')} />
+      <PageHead
+        title="年级管理"
+        onBack={() => navigate('/settings')}
+        right={
+          /* 入口判据走 `lib/roles.ts`（与「我的」页那一行同一处），页面里不手写角色数组 */
+          entryVisible('/settings/terms', myRoles) ? (
+            <Button
+              size="sm"
+              variant="ghost"
+              icon={<IconCalendar size={14} />}
+              onClick={() => navigate('/settings/terms')}
+            >
+              学期与学年
+            </Button>
+          ) : null
+        }
+      />
       <Page>
         {cards === null ? (
           <Panel bodyClass="p-6 text-center">
@@ -77,7 +93,7 @@ export default function Grades() {
             title="还没有年级"
             desc={
               myRoles.length
-                ? '建年级这一步在「学期与学年」那一期里（还没做）—— 今天这一页只显示库里已有的年级。'
+                ? '还没有年级。'
                 : '你的账号看不到任何年级。'
             }
           />
@@ -134,10 +150,6 @@ export default function Grades() {
             )
           })
         )}
-        <p style={{ fontSize: 12, color: 'var(--color-ink3)', lineHeight: 1.7 }}>
-          录一个年级的全流程大约 {GRADE_SETUP_STEP_TOTAL} 步（7 个班 330 人量级）——
-          名单里带班号，系统自动建班。
-        </p>
       </Page>
     </>
   )

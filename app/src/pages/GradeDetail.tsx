@@ -157,7 +157,7 @@ export default function GradeDetail() {
             <div style={{ fontSize: 13, color: 'var(--color-ink3)' }}>没读到（网络或权限）。</div>
           ) : csRows.length === 0 ? (
             <div style={{ fontSize: 13, color: 'var(--color-ink3)' }}>
-              还没有任课关系（在「开学准备 → 分配身份」里批量写）。
+              还没有任课关系（在「开学准备 → 分配身份」里写）。
             </div>
           ) : (
             <div style={{ fontSize: 12.5, lineHeight: 1.9, color: 'var(--color-ink2)' }}>

@@ -43,6 +43,7 @@ import Files from './pages/Files'
 import Schedule from './pages/Schedule'
 import Settings from './pages/Settings'
 import TeacherAccounts from './pages/TeacherAccounts'
+import Terms from './pages/Terms'
 import Workbench from './pages/Workbench'
 
 function Guard({ children }: { children: React.ReactNode }) {
@@ -674,6 +675,24 @@ export default function App() {
           element={
             <Guard>
               <GradeSetup />
+            </Guard>
+          }
+        />
+        {/*
+          🆕 2026-09-30「学期与学年」（P3，`年级管理与选科走班方案.md` §4.2.2 ②）。
+          入口在「年级管理」页右上角那一行（`ENTRIES['/settings/terms']` 早就登记过，
+          PAGES 里那一行原来带 `live: false` —— 本轮把页面做出来了，于是它变真路由）。
+
+          ⚠️ 刻意**不套额外守卫**（与 `/grades` 同款）：手打 URL 进得来，然后
+            · 读：`academic_years` / `terms` 的读策略对所有登录老师开放（日期不敏感）；
+            · 写：服务端拿调用者 JWT 问数据库的 `can_manage_terms()`（教导处 / 最高管理员）。
+          "藏入口"不是安全边界，这里也不假装它是。
+        */}
+        <Route
+          path="/settings/terms"
+          element={
+            <Guard>
+              <Terms />
             </Guard>
           }
         />

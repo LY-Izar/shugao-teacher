@@ -286,6 +286,17 @@ export type Assignment = {
   subjectCode?: string
   /** 布置日期 YYYY-MM-DD，默认前一天 */
   assignDate: string
+  /**
+   * 学期归属（`schema.sql` §28，P3）—— 期末归档与"列表默认只看本学期"的判据。
+   *
+   * 🔴 三种取值**语义不同**（`lib/terms.ts` 的 `termMatches()` 是唯一读法）：
+   *   · `undefined` —— 这一列读不到（线上库还没跑 §28）→ 列表**照样显示**；
+   *   · `null`      —— 列在、这份档案还没归到任何学期 → **照样显示**；
+   *   · 字符串      —— 确实属于那一个学期。
+   * ⚠️ 归落由 `assign_date` 推（`remote.assignmentWriteRow` 一处说了算），
+   *    不许页面各算各的 —— 与 §28.8 的 SQL 回填同一条口径。
+   */
+  termId?: string | null
   questionCount: number
   status: AssignmentStatus
   templateId?: string

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Page } from '../components/AppShell'
 import { IconAlert, IconCheck, IconPaste } from '../components/icons'
@@ -21,8 +21,6 @@ import {
 import { subjectName } from '../lib/subjects'
 import { ROSTER_HEADER, compareRoster, gradeRosterToText } from '../lib/roster'
 import {
-  GRADE_SETUP_STEPS,
-  StepLog,
   applyRoster,
   classTypeLabel,
   collectByClassType,
@@ -34,8 +32,10 @@ import {
 } from '../lib/gradeImport'
 import {
   apiBulkClassSubjects,
+  apiCanSetup,
   apiImportRoster,
   apiWriteSubjects,
+  type CanSetupState,
   type ClassSubjectWriteRow,
   type SubjectWriteRow,
 } from '../lib/gradeSetup'
@@ -48,13 +48,17 @@ import { listTeachers, setRole, type DirTeacher } from '../lib/accounts'
    **⑥ 本轮不做**（走班班的生成是 P7）—— 界面上留着那一格，写清"还差什么"。
 
    🔴 四条纪律落在这个文件里的位置：
-     · **操作步数**（这一轮的验收核心）：每一次点击都过 `log.add()`，
-       页头右上角显示"已点 N 步" —— 见 `lib/gradeImport.ts` 的 `StepLog`；
+     · **操作步数**（这一轮的验收核心）：账本在 `lib/gradeImport.ts` 的 `StepLog` /
+        `GRADE_SETUP_STEPS` 里，由 `grade-checks.mjs` 逐条断言 ——
+        ⚠️ **它是给验收看的内部指标，一个字都不上屏**（2026-09-30：页面上那张步数表
+        与"已点 N 步"整块删掉了）；
      · **一个事务**：名单导入先算 `planRosterImport()`（全成或全空），
        合法才发**一个**请求（服务端一个 RPC = 一个事务）；
      · **当场拦住**：选科粘贴逐行过 `subjectCheck()` + `planSubjectPaste()`，报行号；
      · **前端不另写判据**：`canSetup` 由服务端问数据库（`can_manage_grade_setup()`），
-       这里只决定"摆不摆那几个按钮"（M1/M2）。
+       这里只决定"摆不摆那几个按钮"（M1/M2）—— ⚠️ 它**必须走 `apiCanSetup()`**
+       （那条链带着调用者的 JWT）；自己写一遍 `fetch` 就会漏带令牌 → 服务端 401 →
+       超管被显示成"你的身份只能看"（2026-09-30 修掉的那个 bug）。
    ============================================================ */
 
 /** 六个完成步骤（页头那一条进度用） */
@@ -82,15 +86,12 @@ export default function GradeSetup() {
   const [subjects, setSubjects] = useState<Map<string, StudentSubject>>(new Map())
   const [csRows, setCsRows] = useState<ClassSubjectRow[] | null>(null)
   const [teachers, setTeachers] = useState<DirTeacher[]>([])
-  const [canSetup, setCanSetup] = useState(false)
-
-  /** 步数账本（`useRef`：它**不该**触发重渲染，只在页头显示一个数） */
-  const logRef = useRef(new StepLog())
-  const [stepCount, setStepCount] = useState(0)
-  const log = useCallback((what: string, steps = 1) => {
-    logRef.current.add(what, steps)
-    setStepCount(logRef.current.total)
-  }, [])
+  /**
+   * 「我在这个年级能不能改」—— 服务端拿调用者 JWT 问数据库（`can_manage_grade_setup()`）。
+   * `null` = **还在问**：这时候一个字都不说（别先喊一句"你的身份只能看，不能改"）。
+   */
+  const [setup, setSetup] = useState<CanSetupState | null>(null)
+  const canSetup = setup?.canSetup === true
 
   const load = useCallback(async () => {
     const b = await loadGradeSetup(id)
@@ -123,16 +124,14 @@ export default function GradeSetup() {
 
   useEffect(() => {
     if (!id) return
+    let alive = true
     void (async () => {
-      const r = await fetch('/api/grade-setup', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'canSetup', gradeId: id }),
-      }).catch(() => null)
-      if (!r?.ok) return
-      const v = (await r.json().catch(() => ({}))) as { canSetup?: boolean }
-      setCanSetup(v.canSetup === true)
+      const s = await apiCanSetup(id)
+      if (alive) setSetup(s)
     })()
+    return () => {
+      alive = false
+    }
   }, [id])
 
   const gradeRows = useStore((s) => s.grades)
@@ -158,7 +157,6 @@ export default function GradeSetup() {
     roles: rolesDone,
     stream: false,
   }
-  const finished = STEPS.filter((s) => stepDone[s.key]).length
 
   /* ---------------- 弹层状态 ---------------- */
   const [sheet, setSheet] = useState<null | 'roster' | 'type' | 'pick' | 'roles'>(null)
@@ -216,7 +214,7 @@ export default function GradeSetup() {
     <>
       <PageHead
         title={`开学准备 · ${grade.cohort ? `${grade.cohort}级` : ''}${grade.name}`}
-        sub={`完成度 ${finished}/6 · 已点 ${stepCount} 步`}
+        sub={`${admin.length} 个班 · ${students.length} 人`}
         onBack={() => navigate('/grades')}
         right={
           <Button size="sm" variant="ghost" onClick={() => navigate(`/grades/${grade.id}`)}>
@@ -241,12 +239,16 @@ export default function GradeSetup() {
               </span>
             ))}
           </div>
-          <div style={{ fontSize: 12, color: 'var(--color-ink3)', marginTop: 8, lineHeight: 1.7 }}>
-            {admin.length} 个班 · {students.length} 人
-            {typeDone ? '' : ' · 班型还没设全'}
-            {pickDone ? '' : ' · 选科还没采全'}
-            {canSetup ? '' : ' · 你的身份只能看，不能改'}
-          </div>
+          {/*
+            「能不能改」只在**真的不能改**时说一句，而且说的是**真实原因**
+            （没权限 / §27 没跑 / 没登 / 连不上）—— 见 `lib/gradeSetup.ts` 的 `readCanSetup`。
+            班上几个人、班型设全没有，上面那一行 ✅/⬜ 已经说了，不再重复一遍。
+          */}
+          {setup?.notice ? (
+            <div style={{ fontSize: 12, color: 'var(--color-ink3)', marginTop: 8, lineHeight: 1.7 }}>
+              {setup.notice}
+            </div>
+          ) : null}
         </Panel>
 
         {/* ---------------- ① 录名单 ---------------- */}
@@ -261,7 +263,6 @@ export default function GradeSetup() {
                 icon={<IconPaste size={15} />}
                 disabled={!canSetup}
                 onClick={() => {
-                  log('打开录名单')
                   setSheet('roster')
                 }}
               >
@@ -271,7 +272,6 @@ export default function GradeSetup() {
                 size="sm"
                 variant="ghost"
                 onClick={() => {
-                  log('导出名单')
                   downloadRoster(grade.name, admin, clsNoOf)
                 }}
               >
@@ -279,20 +279,17 @@ export default function GradeSetup() {
               </Button>
             </div>
             <p style={{ fontSize: 12, color: 'var(--color-ink3)', marginTop: 8, lineHeight: 1.7 }}>
-              四列：{ROSTER_HEADER.join(' / ')}。班号认到几个就建几个班 ——
-              不用先建班、也不用分班。序列号留空 = 系统发号。
+              四列：{ROSTER_HEADER.join(' / ')}。序列号留空就自动发号。
             </p>
           </Panel>
         </div>
 
-        {/* ---------------- ② 建班（自动） ---------------- */}
+        {/* ---------------- ② 建班（按班号自动） ---------------- */}
         <div className="mb-2">
-          <Sect>② 建班（按班号自动）</Sect>
+          <Sect>② 建班</Sect>
           <Panel bodyClass="p-3">
             {admin.length === 0 ? (
-              <div style={{ fontSize: 13, color: 'var(--color-ink3)' }}>
-                还没有班。上一步的名单里认到几个班号，这里就会出现几个班。
-              </div>
+              <div style={{ fontSize: 13, color: 'var(--color-ink3)' }}>还没有班。</div>
             ) : (
               <div className="flex flex-wrap gap-1.5">
                 {admin.map((k) => (
@@ -311,14 +308,13 @@ export default function GradeSetup() {
           <Sect>③ 设班型</Sect>
           <Panel bodyClass="p-3">
             <div style={{ fontSize: 13, color: 'var(--color-ink3)', lineHeight: 1.7 }}>
-              理科班默认物化生、文科班默认史政地、未分科是显式的一档（与"还没设置"不是一回事）。
+              理科班默认物化生，文科班默认史政地。
             </div>
             <div className="mt-2.5">
               <Button
                 size="sm"
                 disabled={!canSetup || !admin.length}
                 onClick={() => {
-                  log('打开设班型')
                   setSheet('type')
                 }}
               >
@@ -338,7 +334,6 @@ export default function GradeSetup() {
                 size="sm"
                 disabled={!canSetup || !students.length}
                 onClick={() => {
-                  log('打开采选科')
                   setSheet('pick')
                 }}
               >
@@ -363,7 +358,6 @@ export default function GradeSetup() {
                 size="sm"
                 disabled={!canAssignRoles(myRoles) || !admin.length}
                 onClick={() => {
-                  log('打开分配身份')
                   if (!teachers.length) void loadTeachers()
                   setSheet('roles')
                 }}
@@ -375,7 +369,6 @@ export default function GradeSetup() {
                 variant="ghost"
                 disabled={!canSetup || !admin.length}
                 onClick={() => {
-                  log('打开批量写任教关系')
                   if (!teachers.length) void loadTeachers()
                   setSheet('roles')
                 }}
@@ -391,36 +384,10 @@ export default function GradeSetup() {
           <Sect>⑥ 生成走班</Sect>
           <Panel bodyClass="p-3">
             <div style={{ fontSize: 13, color: 'var(--color-ink3)', lineHeight: 1.7 }}>
-              还没有做：走班班的生成与冲突检查是下一期（P7）的活。
-              今天这里只把"选科采全了没"摊开 —— 采全之后生成才不会漏人。
+              走班班的生成还没做。
             </div>
           </Panel>
         </div>
-
-        {/* ---------------- 步数表（把这一轮的核心指标摊在页面上） ---------------- */}
-        <Sect>这条流水线要几步（按 7 个班 330 人估）</Sect>
-        <Panel bodyClass="p-3">
-          {GRADE_SETUP_STEPS.map((s) => (
-            <div key={s.what} className="flex items-baseline gap-2 py-1">
-              <span style={{ fontSize: 12.5, flex: 1, color: 'var(--color-ink2)' }}>{s.what}</span>
-              <span className="num" style={{ fontSize: 12.5, fontWeight: 600 }}>
-                {s.steps} 步
-              </span>
-            </div>
-          ))}
-          <div
-            className="flex items-baseline gap-2 pt-2"
-            style={{ borderTop: '1px solid var(--color-line)' }}
-          >
-            <span style={{ fontSize: 13, flex: 1, fontWeight: 600 }}>合计</span>
-            <span className="num" style={{ fontSize: 13, fontWeight: 700 }}>
-              {GRADE_SETUP_STEPS.reduce((a, s) => a + s.steps, 0)} 步
-            </span>
-          </div>
-          <div style={{ fontSize: 12, color: 'var(--color-ink3)', marginTop: 6 }}>
-            你在这一页已经点了 <b>{stepCount}</b> 步。
-          </div>
-        </Panel>
       </Page>
 
       {/* ================= 弹层 ================= */}
@@ -466,7 +433,6 @@ export default function GradeSetup() {
             await load()
             return true
           }}
-          log={log}
         />
       </Sheet>
 
@@ -482,7 +448,6 @@ export default function GradeSetup() {
             )
             push({ text: `已设 ${patch.size} 个班的班型`, tone: 'ok' })
           }}
-          log={log}
         />
       </Sheet>
 
@@ -513,7 +478,6 @@ export default function GradeSetup() {
             })
             return r.ok
           }}
-          log={log}
         />
       </Sheet>
 
@@ -561,7 +525,6 @@ export default function GradeSetup() {
               setCsRows(cs)
             }
           }}
-          log={log}
         />
       </Sheet>
     </>
@@ -707,13 +670,11 @@ function RosterSheet({
   classes,
   canSetup,
   onDone,
-  log,
 }: {
   gradeName: string
   classes: readonly Klass[]
   canSetup: boolean
   onDone: (plan: Extract<RosterPlan, { ok: true }>) => Promise<boolean>
-  log: (what: string, steps?: number) => void
 }) {
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
@@ -722,7 +683,6 @@ function RosterSheet({
   const [showAll, setShowAll] = useState(false)
 
   const preview = () => {
-    log('预览名单')
     setPlan(planRosterImport({ text, gradeName, classes: [], existing: classes }))
   }
 
@@ -866,7 +826,6 @@ function RosterSheet({
           icon={<IconCheck size={16} />}
           onClick={async () => {
             if (!plan?.ok) return
-            log('确认导入')
             setBusy(true)
             const ok = await onDone(plan)
             setBusy(false)
@@ -878,11 +837,6 @@ function RosterSheet({
         >
           {busy ? '正在导入…' : plan?.ok ? `确认导入 ${plan.students} 行` : '先看预览'}
         </Button>
-        {canSetup ? null : (
-          <p style={{ fontSize: 12, color: 'var(--color-ink3)', marginTop: 6, textAlign: 'center' }}>
-            你没有录名单的权限（教务处 / 最高管理员 / 本年级的年级主任）。
-          </p>
-        )}
       </div>
     </div>
   )
@@ -897,13 +851,11 @@ function TypeSheet({
   classes,
   canSetup,
   onApply,
-  log,
 }: {
   gradeName: string
   classes: readonly Klass[]
   canSetup: boolean
   onApply: (patch: Map<string, ClassType>) => Promise<void>
-  log: (what: string, steps?: number) => void
 }) {
   const [spec, setSpec] = useState('')
   const [busy, setBusy] = useState(false)
@@ -914,7 +866,6 @@ function TypeSheet({
     /* 两种用法共用这一处：按班号批量（有 spec）或整年级一键（spec 为空） */
     const target = spec.trim() ? parsed.hit : classes
     if (!target.length) return
-    log(spec.trim() ? `按班号设班型（${t || '清空'}）` : `整年级设班型（${t || '清空'}）`)
     const patch = new Map<string, ClassType>()
     for (const k of target) patch.set(k.id, t)
     setBusy(true)
@@ -963,7 +914,7 @@ function TypeSheet({
       </div>
 
       <div className="mt-4">
-        <Sect>逐个班改（改完立刻生效）</Sect>
+        <Sect>逐个班改</Sect>
         {classes.map((k) => (
           <div key={k.id} className="flex items-center gap-2 py-1.5" style={{ borderBottom: '1px solid var(--color-line)' }}>
             <span style={{ flex: 1, fontSize: 13 }}>{k.name}</span>
@@ -975,7 +926,6 @@ function TypeSheet({
                   data-on={(perClass.get(k.id) ?? classTypeOf(k)) === t}
                   disabled={!canSetup}
                   onClick={() => {
-                    log('逐个班改班型')
                     setPerClass((prev) => new Map(prev).set(k.id, t))
                     void onApply(new Map([[k.id, t]]))
                   }}
@@ -1001,14 +951,12 @@ function PickSheet({
   subjects,
   canSetup,
   write,
-  log,
 }: {
   gradeName: string
   classes: readonly Klass[]
   subjects: ReadonlyMap<string, StudentSubject>
   canSetup: boolean
   write: (rows: SubjectWriteRow[]) => Promise<boolean>
-  log: (what: string, steps?: number) => void
 }) {
   void gradeName
   const [paste, setPaste] = useState('')
@@ -1058,8 +1006,7 @@ function PickSheet({
     <div>
       <Sect>一键全部按班型默认</Sect>
       <div style={{ fontSize: 12, color: 'var(--color-ink3)', lineHeight: 1.7 }}>
-        理科班 → 物化生 · 文科班 → 史政地。未分科 / 还没设班型的班不动，
-        「其他」的学生不覆盖（他们是手工定的）。
+        理科班 → 物化生 · 文科班 → 史政地。未分科 / 还没设班型的班不动，「其他」的学生不动。
       </div>
       <div className="mt-2">
         <Button
@@ -1070,11 +1017,8 @@ function PickSheet({
             /*
              * ⚠️ 这一步**只算不写**（"预览"）—— 与「录入名单」那一步同一款：
              *    按下之后先给一遍"将写 N 人 / 几个班的默认铺不开"，
-             *    用户看过再点「确认铺开」。开学准备是一条**整批**的流水线，
-             *    一次点到库里没有回头路（这条路上没有撤销）。
-             *    ⚠️ 这也是步数表里"采选科 = 4 步"的由来（一键 + 确认 + 粘贴 + 确认）。
+             *    用户看过再点「确认铺开」。开学准备是一次点到库里没有回头路（这条路上没有撤销）。
              */
-            log('一键按班型默认（看预览）')
             setPreview(collectByClassType(classes, subjects))
           }}
         >
@@ -1114,7 +1058,6 @@ function PickSheet({
               variant="primary"
               disabled={!canSetup || busy || !preview.rows.length}
               onClick={async () => {
-                log('确认铺开')
                 setBusy(true)
                 const ok = await write(preview.rows)
                 setBusy(false)
@@ -1184,7 +1127,6 @@ function PickSheet({
             disabled={!canSetup || busy || !plan?.ok}
             onClick={async () => {
               if (!plan?.ok) return
-              log('确认粘贴的选科')
               setBusy(true)
               const ok = await write(plan.rows)
               setBusy(false)
@@ -1217,7 +1159,7 @@ function PickSheet({
       ) : null}
 
       {/* 「其他」的学生：必须手工选走班科目 */}
-      <OtherPicker classes={classes} subjects={subjects} canSetup={canSetup} write={write} log={log} />
+      <OtherPicker classes={classes} subjects={subjects} canSetup={canSetup} write={write} />
 
       {msg ? (
         <p style={{ fontSize: 12.5, color: 'var(--color-ink2)', marginTop: 12, lineHeight: 1.7 }}>{msg}</p>
@@ -1225,7 +1167,7 @@ function PickSheet({
       <p style={{ fontSize: 12, color: 'var(--color-ink3)', marginTop: 12, lineHeight: 1.7 }}>
         12 种合法组合 = 首选（{PRIMARY_CODES.map((c) => subjectName(c)).join(' / ')}）
         + 再选两门（{SECOND_CODES.map((c) => subjectName(c)).join(' / ')}）。
-        学校开不出的组合走「其他」—— 那种学生必须手工选走班科目，否则不许提交。
+        学校开不出的组合走「其他」，那种学生要手工选走班科目。
       </p>
     </div>
   )
@@ -1237,13 +1179,11 @@ function OtherPicker({
   subjects,
   canSetup,
   write,
-  log,
 }: {
   classes: readonly Klass[]
   subjects: ReadonlyMap<string, StudentSubject>
   canSetup: boolean
   write: (rows: SubjectWriteRow[]) => Promise<boolean>
-  log: (what: string, steps?: number) => void
 }) {
   const [open, setOpen] = useState(false)
   const [studentId, setStudentId] = useState('')
@@ -1305,11 +1245,11 @@ function OtherPicker({
       </div>
       <div className="mt-2">
         <div style={{ fontSize: 12, color: 'var(--color-ink3)' }}>
-          手工选走班班（一个都没有的话不许提交）：
+          手工选走班班（至少要选一个）：
         </div>
         {streamClasses.length === 0 ? (
           <div style={{ fontSize: 12, color: 'var(--color-warn)', marginTop: 4 }}>
-            这个年级还没有走班班（走班班的生成是下一期 P7 的活）。
+            这个年级还没有走班班。
           </div>
         ) : (
           <div className="mt-1 flex flex-wrap gap-1.5">
@@ -1338,7 +1278,6 @@ function OtherPicker({
           variant="primary"
           disabled={!canSetup || !!err || !studentId || !member.length}
           onClick={async () => {
-            log('标为其他 + 手选走班')
             const ok = await write([
               {
                 studentId,
@@ -1387,7 +1326,6 @@ function RolesSheet({
   onAssignHeadTeacher,
   onAssignGradeHead,
   onBulkSubjects,
-  log,
 }: {
   grade: { id: string; name: string }
   classes: readonly Klass[]
@@ -1398,7 +1336,6 @@ function RolesSheet({
   onAssignHeadTeacher: (teacherId: string, classId: string, on: boolean) => Promise<void>
   onAssignGradeHead: (teacherId: string) => Promise<void>
   onBulkSubjects: (rows: ClassSubjectWriteRow[]) => Promise<void>
-  log: (what: string, steps?: number) => void
 }) {
   const [headTeacher, setHeadTeacher] = useState('')
   const [gradeHead, setGradeHead] = useState('')
@@ -1431,7 +1368,7 @@ function RolesSheet({
     <div>
       <Sect>年级主任（一个年级只允许一个）</Sect>
       <div style={{ fontSize: 12, color: 'var(--color-ink3)', lineHeight: 1.7 }}>
-        数据库里有唯一索引兜着：同一个年级第二个年级主任会被拒（改人要先撤掉前一个）。
+        一个年级只设一位年级主任；换人要先撤掉前一个。
       </div>
       <div className="mt-2 flex gap-2">
         <select className="input" value={gradeHead} onChange={(e) => setGradeHead(e.target.value)}>
@@ -1446,7 +1383,6 @@ function RolesSheet({
           size="sm"
           disabled={!canAssign || !gradeHead || busy}
           onClick={async () => {
-            log('指派年级主任')
             setBusy(true)
             await onAssignGradeHead(gradeHead)
             setBusy(false)
@@ -1482,7 +1418,6 @@ function RolesSheet({
                 variant="ghost"
                 disabled={!canAssign || !headTeacher || busy}
                 onClick={async () => {
-                  log('指派班主任')
                   setBusy(true)
                   await onAssignHeadTeacher(headTeacher, k.id, true)
                   setBusy(false)
@@ -1496,10 +1431,10 @@ function RolesSheet({
       </div>
 
       <div className="mt-4">
-        <Sect>粘贴批量指定任教关系（★ 把几十次点击压成 2 步）</Sect>
+        <Sect>粘贴批量指定任教关系</Sect>
         <div style={{ fontSize: 12, color: 'var(--color-ink3)', lineHeight: 1.7 }}>
-          把 Excel 里那三列直接粘进来（<code>班级 · 科目 · 老师</code>）。认不出的班名 / 科目 / 老师
-          报行号、一行都不写；然后走服务端一次写完（要么全成、要么全不成）。
+          把 Excel 里那三列直接粘进来（<code>班级 · 科目 · 老师</code>）。
+          认不出的班名 / 科目 / 老师会报行号，一行都不写。
         </div>
         <textarea
           className="input mt-2"
@@ -1542,7 +1477,6 @@ function RolesSheet({
             disabled={!canSetup || busy || !rolePlan?.ok}
             onClick={async () => {
               if (!rolePlan?.ok) return
-              log('粘贴批量指定任教关系')
               setBusy(true)
               await onBulkSubjects(rolePlan.rows.map((r) => ({ classId: r.classId, subjectCode: r.subjectCode, teacherId: r.teacherId })))
               setBusy(false)
@@ -1557,8 +1491,7 @@ function RolesSheet({
       <div className="mt-4">
         <Sect>或按老师批量（一位老师教全年级）</Sect>
         <div style={{ fontSize: 12, color: 'var(--color-ink3)', lineHeight: 1.7 }}>
-          选老师 + 选学科 + 班号（`1-4` / 留空 = 全部）→ 一次写完。
-          这一张表在数据库层零写权限，所以它走服务端一次写入。
+          选老师 + 选学科 + 班号（`1-4` / 留空 = 全部），一次写完。
         </div>
         <div className="mt-2 flex flex-wrap gap-2">
           <select className="input" value={bulkTeacher} onChange={(e) => setBulkTeacher(e.target.value)}>
@@ -1593,7 +1526,6 @@ function RolesSheet({
             variant="primary"
             disabled={!canSetup || !bulkTeacher || busy || !bulkTargets.length}
             onClick={async () => {
-              log('批量写任教关系')
               setBusy(true)
               await onBulkSubjects(
                 bulkTargets.map((k) => ({

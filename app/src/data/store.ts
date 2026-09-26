@@ -16,6 +16,7 @@ import {
 } from '../lib/subjects'
 import * as remote from './remote'
 import type { GradeRow } from './gradeSetup'
+import type { Term } from '../lib/terms'
 import * as noticeApi from '../lib/notices'
 import * as annApi from '../lib/announcements'
 import { makeClassrooms, makeDemoAssignments, makeDemoClasses, makeDemoExams, makeDemoSchedule, makeTemplates } from './seed'
@@ -126,6 +127,19 @@ type State = {
    *    它的唯一用途是"开学准备"页要知道有哪些年级、以及它们的届（`cohort`）。
    */
   grades: GradeRow[]
+  /**
+   * 🆕 2026-09-30（P3）：**学年与学期那一份**（`academic_years` + `terms`，`schema.sql` §28）。
+   *
+   * 🔴 **它不是本地数据模型的一部分** —— 档案的 `term_id` 由 `remote` 在写库那一刻
+   *    按日期推（`remote.termIdForDate`），这里这一份只服务**列表的筛选**：
+   *    "当前学期"是推出来的（今天落在哪个学期区间里），列表默认只看它。
+   *
+   * 读不到的三种情形（本地模式 / §28 还没跑 / 网络）一律是空数组 + `current = null`，
+   * 而 `current = null` 时列表**不筛**（宁可多看见，绝不静默藏档案，见 `lib/terms.ts`）。
+   */
+  terms: Term[]
+  /** 推导出来的"当前学期"（`lib/terms.ts` 的 `currentTermId`）；认不出是 `null` */
+  currentTermId: string | null
   currentClassId: string | null
   templates: AssignmentTemplate[]
   assignments: Assignment[]
@@ -224,6 +238,11 @@ type State = {
    * 别人改了身份不影响我这次会话里已经拿到的 myRoles。
    */
   refreshMyRoles: () => Promise<void>
+  /**
+   * 🆕 2026-09-30（P3）：重新读一遍学年与学期（教导处刚改完日期时用）。
+   * 判据不在这一层 —— 能不能**写**由服务端问数据库（`can_manage_terms()`）。
+   */
+  refreshTerms: () => Promise<void>
 
   /* ---- 🆕 通知（2026-09-28）---- */
   /**
@@ -654,6 +673,8 @@ function initialState() {  if (!isRemote) return freshDemo()
     schedule: [] as ScheduleItem[],
     exams: [] as Exam[],
     examScores: [] as ExamScore[],
+    terms: [] as Term[],
+    currentTermId: null,
     isDemo: false,
   }
 }
@@ -679,6 +700,8 @@ export const useStore = create<State>()(
       myRoles: [],
       exams: [],
       examScores: [],
+      terms: [],
+      currentTermId: null,
       examTables: 'unknown',
       noticesState: 'unknown',
       notices: [],
@@ -708,6 +731,13 @@ export const useStore = create<State>()(
          */
         const g = await remote.loadGrades()
         set({ grades: g.state === 'present' && g.grades.length ? g.grades : demoGrades() })
+        /*
+         * 🆕 2026-09-30（P3）：学年与学期 —— 与年级表同一处、同一个理由
+         * （列表要用它推"当前学期"）。**读不到就是空 + current = null**，
+         * 而 current = null 时列表不按学期筛（`lib/terms.ts` 文件头 ②）。
+         */
+        const tm = await remote.loadTerms()
+        set({ terms: tm.terms, currentTermId: tm.current })
         if (!isRemote) {
           set({ hydrated: true })
           return
@@ -773,6 +803,12 @@ export const useStore = create<State>()(
         const id = get().userId
         if (!id) return
         set({ myRoles: await remote.loadMyRoles(id) })
+      },
+
+      refreshTerms: async () => {
+        remote.clearTermsCache()
+        const tm = await remote.loadTerms(true)
+        set({ terms: tm.terms, currentTermId: tm.current })
       },
 
       /* ---- 🆕 通知（2026-09-28，见 功能设计与不变量.md I45–I50） ---- */
@@ -937,6 +973,9 @@ export const useStore = create<State>()(
           exams: [],
           examScores: [],
           examTables: 'unknown',
+          // 学年与学期也跟着会话走（它是**库里的**一份数据，不是本机设置）
+          terms: [],
+          currentTermId: null,
           // 通知也跟着会话走：换账号后不能还留着上一个人看得到的通知
           noticesState: 'unknown',
           notices: [],

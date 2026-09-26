@@ -630,11 +630,16 @@ select coalesce(
 where not exists (select 1 from schools);
 
 -- ② 三个年级
+--  ⚠️ 判据是 `where not exists`，**不能写 `on conflict do nothing`**：
+--     §28.7 把按 `(school_id, name)` 的唯一索引 drop 掉了（届才是唯一键），
+--     再跑本段时 `on conflict` 会报 `42P10`（没有能匹配的唯一索引）→ 整份脚本跑不过去。
 insert into grades (school_id, name)
 select s.id, g.name
 from schools s
 cross join (values ('高一'), ('高二'), ('高三')) as g(name)
-on conflict do nothing;
+where not exists (
+  select 1 from grades x where x.school_id = s.id and x.name = g.name
+);
 
 -- ③ 班级挂到学校
 update classes c
@@ -6348,4 +6353,429 @@ revoke all on function public.bulk_import_roster(uuid, jsonb, text)
 --  ⑥ 批量函数的人话错误码（每一条都要报出"第几行 + 为什么"）：
 --  -- select public.bulk_write_class_subjects('[{"class_id":"00000000-0000-0000-0000-000000000000","subject_code":"physics","teacher_id":"00000000-0000-0000-0000-000000000000"}]'::jsonb);
 --  -- 期望：报「第 1 行的班级不存在」
+-- ============================================================
+
+-- ============================================================
+--  28. 学年 / 学期 / 届（P3）+ 存量回填（P2），2026-09-30
+--      「年级的稳定标识是届 · 学期是一等实体 · 档案默认只看本学期」
+-- ------------------------------------------------------------
+--  与 §27（P6）的分工：§27 已经落了 `grades.cohort` / `stage` / `enrolled_at`
+--  与三个写函数；**本段不重复定义它们**，只做 §27 明确留给 P3 的四件事：
+--    ① `academic_years` + `terms`（教导处设上下半期的起止）
+--    ② `assignments.term_id` / `exams.term_id`（期末归档的归属）
+--    ③ `exams.grade_id`（Q33：考试按**届**归属，`grade` 文本降级为显示名）
+--    ④ `grades` 的唯一键从 `(school_id, name)` 换成 `(school_id, cohort)`
+--  以及这一期的**重点**：P2 的存量回填 —— 见末尾的
+--  `public.p3_backfill_terms_and_cohorts()`（幂等，重跑受影响行数 = 0）。
+--
+--  🔴 三个不能破的口径：
+--    · **届（cohort）= 纯 4 位入校年份**（`2025`）。高一 = 2026 / 高二 = 2025 / 高三 = 2024。
+--    · **提档只改 `stage`，年级 id 不变** —— 所以班级 / 走班班 / 课表的 `grade_id`
+--      一个字都不用改（这是"届才是稳定标识"的全部意义）。
+--    · **"当前学期"不落一列**（不存 `is_current`）：按**北京时间**推。
+--      时间口径一律 `(now() at time zone 'Asia/Shanghai')::date` ——
+--      与前端 `beijingNow()` 同源，别用 `current_date`（那是数据库时区，不是北京时间）。
+-- ============================================================
+
+-- -------- 28.1 学年与学期 --------
+-- `name` = 「2026-2027」；`half` = 1 上半期 / 2 下半期（一个学年恰好两个）。
+create table if not exists academic_years (
+  id         uuid primary key default gen_random_uuid(),
+  school_id  uuid not null references schools (id) on delete cascade,
+  name       text not null,
+  start_date date not null,
+  end_date   date not null,
+  created_at timestamptz not null default now()
+);
+-- 一所学校一个学年名只有一行（幂等靠它）
+create unique index if not exists academic_years_school_name_key
+  on academic_years (school_id, name);
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+     where conrelid = 'academic_years'::regclass and conname = 'academic_years_range_check'
+  ) then
+    alter table academic_years add constraint academic_years_range_check
+      check (end_date >= start_date);
+  end if;
+end $$;
+
+create table if not exists terms (
+  id               uuid primary key default gen_random_uuid(),
+  academic_year_id uuid not null references academic_years (id) on delete cascade,
+  half             int  not null,
+  start_date       date not null,
+  end_date         date not null,
+  created_at       timestamptz not null default now()
+);
+-- 一个学年上下半期各一行
+create unique index if not exists terms_year_half_key on terms (academic_year_id, half);
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+     where conrelid = 'terms'::regclass and conname = 'terms_half_check'
+  ) then
+    alter table terms add constraint terms_half_check check (half in (1, 2));
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+     where conrelid = 'terms'::regclass and conname = 'terms_range_check'
+  ) then
+    alter table terms add constraint terms_range_check check (end_date >= start_date);
+  end if;
+end $$;
+
+-- 默认学年与学期（**只建缺的那几行，绝不覆盖教导处改过的日期**）。
+-- 2026-2027 是"现在"那一个学年：2026-09 开学，所以当前学期 = 上半期 ——
+-- P2 那 9 份作业与 1 场考试落在 2026 年 9 月，正好在它的区间里。
+do $$
+declare
+  v_school uuid;
+begin
+  for v_school in select id from schools loop
+    insert into academic_years (school_id, name, start_date, end_date)
+    values (v_school, '2025-2026', date '2025-09-01', date '2026-08-31')
+    on conflict do nothing;
+
+    insert into academic_years (school_id, name, start_date, end_date)
+    values (v_school, '2026-2027', date '2026-09-01', date '2027-08-31')
+    on conflict do nothing;
+
+    insert into terms (academic_year_id, half, start_date, end_date)
+    select y.id, v.half, v.s, v.e
+      from academic_years y
+      cross join (values
+        (1, date '2025-09-01', date '2026-01-31'),
+        (2, date '2026-02-01', date '2026-08-31'),
+        (1, date '2026-09-01', date '2027-01-31'),
+        (2, date '2027-02-01', date '2027-08-31')
+      ) as v(half, s, e)
+     where y.school_id = v_school
+       and (
+         (y.name = '2025-2026' and v.s < date '2026-09-01')
+         or (y.name = '2026-2027' and v.s > date '2026-08-31')
+       )
+    on conflict do nothing;
+  end loop;
+end $$;
+
+-- -------- 28.2 档案的学期归属（`assignments` / `exams`）--------
+alter table assignments add column if not exists term_id uuid references terms (id);
+alter table exams       add column if not exists term_id uuid references terms (id);
+create index if not exists assignments_term_idx on assignments (term_id, assign_date desc);
+create index if not exists exams_term_idx       on exams (term_id, exam_date desc);
+
+-- -------- 28.3 考试的**届**归属（Q33）--------
+-- `exams.grade`（文本）**不删**：兼容期两条读法并存 —— 老档案只有文本，
+-- 新档案两个都写。**判据一律读 `grade_id`**（文本会被改显示名，见 §2.13.1 的教训）。
+-- 删年级时 `grade_id` 置空（`on delete set null`）：考试档案比年级行活得久。
+alter table exams add column if not exists grade_id uuid references grades (id) on delete set null;
+create index if not exists exams_grade_idx on exams (grade_id);
+
+-- -------- 28.4 判据函数（**定义在引用它的东西之前**）--------
+
+--  "现在"的北京时间日期。🔴 唯一一处"今天"的 SQL 口径 ——
+--  与前端 `beijingNow()` 同源。**别用 `current_date`**（那是库的时区）。
+create or replace function public.beijing_today()
+returns date
+language sql
+stable
+as $$
+  select (now() at time zone 'Asia/Shanghai')::date;
+$$;
+
+--  按日期找学期：那一天落在哪个学期里。找不到 → **空**（绝不"就近归到某一学期"，I14）。
+create or replace function public.term_of_date(p_date date)
+returns uuid
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select t.id
+    from terms t
+    join academic_years y on y.id = t.academic_year_id
+   where p_date is not null
+     and p_date between t.start_date and t.end_date
+   order by t.start_date desc
+   limit 1;
+$$;
+
+--  "当前学期" = 北京时间今天落在的那个学期。**推导值，不落列**。
+create or replace function public.current_term_id()
+returns uuid
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select public.term_of_date(public.beijing_today());
+$$;
+
+--  这个学年属于哪所学校（写入口要用它判权限）。
+create or replace function public.can_manage_terms()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select public.is_school_admin();
+$$;
+
+-- -------- 28.5 教导处的写入口：设一个学年的上下半期（**一个事务**）--------
+--  入参：学年名 + 两个半期的起止（4 个日期）。一个 RPC = 一个事务 ——
+--  "只改了上半期、下半期还是老日期"是这一页最不能接受的失败样子。
+create or replace function public.write_academic_year(
+  p_name text,
+  p_year_start date,
+  p_year_end date,
+  p_half1_start date,
+  p_half1_end date,
+  p_half2_start date,
+  p_half2_end date
+) returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_school uuid;
+  v_year   uuid;
+begin
+  if not public.can_manage_terms() then
+    raise exception '只有教导处 / 最高管理员能设学年与学期';
+  end if;
+  if coalesce(btrim(p_name), '') = '' then
+    raise exception '学年名不能空（形如 2026-2027）';
+  end if;
+  if p_half1_start is null or p_half1_end is null or p_half2_start is null or p_half2_end is null then
+    raise exception '上下半期的起止日期四样都要填';
+  end if;
+  if p_year_end < p_year_start then
+    raise exception '学年结束日期早于开始日期';
+  end if;
+  if p_half1_end < p_half1_start or p_half2_end < p_half2_start then
+    raise exception '半期的结束日期早于开始日期';
+  end if;
+  if p_half2_start < p_half1_end then
+    raise exception '下半期的开始日期早于上半期结束 —— 两个半期不许重叠';
+  end if;
+
+  select id into v_school from schools order by created_at limit 1;
+  if v_school is null then
+    raise exception '还没有学校行，先跑 schema.sql 第 10 段';
+  end if;
+
+  insert into academic_years (school_id, name, start_date, end_date)
+  values (v_school, btrim(p_name), p_year_start, p_year_end)
+  on conflict (school_id, name) do update
+     set start_date = excluded.start_date,
+         end_date   = excluded.end_date
+  returning id into v_year;
+
+  insert into terms (academic_year_id, half, start_date, end_date)
+  values (v_year, 1, p_half1_start, p_half1_end)
+  on conflict (academic_year_id, half) do update
+     set start_date = excluded.start_date,
+         end_date   = excluded.end_date;
+
+  insert into terms (academic_year_id, half, start_date, end_date)
+  values (v_year, 2, p_half2_start, p_half2_end)
+  on conflict (academic_year_id, half) do update
+     set start_date = excluded.start_date,
+         end_date   = excluded.end_date;
+
+  return jsonb_build_object('ok', true, 'academicYearId', v_year, 'name', btrim(p_name));
+end $$;
+
+revoke all on function public.write_academic_year(text, date, date, date, date, date, date)
+  from public, anon, authenticated;
+
+grant execute on function public.beijing_today() to authenticated;
+grant execute on function public.term_of_date(date) to authenticated;
+grant execute on function public.current_term_id() to authenticated;
+grant execute on function public.can_manage_terms() to authenticated;
+
+-- -------- 28.6 RLS：读得宽、写得窄（写只走服务端）--------
+alter table academic_years enable row level security;
+alter table terms          enable row level security;
+
+drop policy if exists academic_years_read on academic_years;
+create policy academic_years_read on academic_years
+  for select to authenticated using (true);
+
+drop policy if exists terms_read on terms;
+create policy terms_read on terms
+  for select to authenticated using (true);
+
+grant select on academic_years, terms to authenticated;
+revoke all on academic_years, terms from anon;
+
+-- -------- 28.7 `grades` 唯一键改列（(school_id, name) → (school_id, cohort)）--------
+--  🔴 顺序纪律（任何一刻都要有唯一性保证）：
+--    ① **先确认没有冲突**（下面那个 do 块：查得出重复就**当场 raise**，绝不静默）；
+--    ② **再建新的**唯一索引（`grades_school_cohort_key`，§27.1 已经建过一次，
+--       这里再 `if not exists` 一次是为了"只跑本段"的库也能用）；
+--    ③ **最后才 drop 旧的** `grades_school_name_key`。
+--  ⚠️ 为什么现在能 drop 它：`grades.name` 降级为**显示名**（按 `stage` 渲染），
+--     "两个高二（不同届）"必须允许 —— 留着按 name 的唯一索引就永远撞（Q22）。
+--     ①§10.2 的 `insert into grades … on conflict do nothing` 已经改成
+--     `where not exists`（不再依赖这条索引），②§27 的回填按 name 定位只发生在建索引之前。
+do $$
+declare
+  v_dup text;
+begin
+  select string_agg(format('school=%s cohort=%s × %s 行', school_id, cohort, n), '；')
+    into v_dup
+    from (
+      select school_id, cohort, count(*) as n
+        from grades
+       where cohort <> ''
+       group by 1, 2
+      having count(*) > 1
+    ) d;
+  if v_dup is not null then
+    raise exception '同一届出现了不止一个年级（%）。先把重复的那几行合并或删掉，再跑本段 —— 否则唯一索引建不起来', v_dup;
+  end if;
+end $$;
+
+create unique index if not exists grades_school_cohort_key
+  on grades (school_id, cohort) where cohort <> '';
+
+drop index if exists grades_school_name_key;
+
+-- ✅ 三个届的回填（**只填空的，绝不覆盖**；高一 = 2026 / 高二 = 2025 / 高三 = 2024）。
+--    ⚠️ 只碰 `cohort` 与 `stage` 两列，**绝不碰 `name`**（`grades` 的字段是权限判据的一环，I30）。
+update grades set cohort = '2026' where cohort = '' and name = '高一';
+update grades set cohort = '2025' where cohort = '' and name = '高二';
+update grades set cohort = '2024' where cohort = '' and name = '高三';
+update grades set stage  = 1 where stage is distinct from 1 and cohort = '2026';
+update grades set stage  = 2 where stage is distinct from 2 and cohort = '2025';
+update grades set stage  = 3 where stage is distinct from 3 and cohort = '2024';
+
+-- -------- 28.8 🔑 P2：存量回填（**幂等 —— 重跑受影响行数 = 0**）--------
+--  回填四样（序列号那一样 P1 已经做过，本函数只**复核**、不重做）：
+--    ① 作业的学期归属（`assignments.term_id`）
+--    ② 考试的学期归属（`exams.term_id`）
+--    ③ 考试的届归属（`exams.grade_id`）
+--    ④ 序列号复核（`students.serial = ''` 的条数，**只报不补**）
+--
+--  🔴 **幂等的根据是每一条 SQL 的 `where <目标列为空>`** —— 重跑时已填好的行
+--     不在 `where` 里，所以第二次跑回来就是 0 行。**不靠"猜键的形状"**。
+--  🔴 **"补不上"不许静默**：本函数把 fillable / filled / unresolvable 三个数一起报出来；
+--     `unresolvable > 0` 时**再 raise warning**，让人在 SQL 编辑器里看得见。
+--
+--  ⚠️ 回填必须发生在**第一次提档之前**：`exams.grade` 文本现在等于 `grades.name`，
+--     提档之后 `name` 会变成"高二（2025 级）"这类渲染名，文本反查就断了（§2.13 / P2 的硬理由）。
+--  ⚠️ "测试专用"班：它没有作业也没有考试，所以**天然零改动**；
+--     万一将来给它建了档案，学期回填按日期填 —— 那是正确的归属，不是"误伤"。
+create or replace function public.p3_backfill_terms_and_cohorts()
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  n_assign_filled int := 0;
+  n_exam_term     int := 0;
+  n_exam_grade    int := 0;
+  n_assign_open   int := 0;
+  n_exam_open     int := 0;
+  n_exam_nograde  int := 0;
+  n_serial_open   int := 0;
+begin
+  -- ① 作业 → 学期（按 `assign_date` 落在哪个学期）
+  update assignments a
+     set term_id = t.id
+    from terms t
+   where a.term_id is null
+     and a.assign_date between t.start_date and t.end_date;
+  get diagnostics n_assign_filled = row_count;
+
+  -- ② 考试 → 学期（按 `exam_date`）
+  update exams e
+     set term_id = t.id
+    from terms t
+   where e.term_id is null
+     and e.exam_date between t.start_date and t.end_date;
+  get diagnostics n_exam_term = row_count;
+
+  -- ③ 考试 → 届（按年级名文本反查 `grades`；同一所学校内认不出就**留空**）
+  update exams e
+     set grade_id = g.id
+    from grades g
+   where e.grade_id is null
+     and btrim(e.grade) <> ''
+     and g.school_id = (select id from schools order by created_at limit 1)
+     and (g.name = btrim(e.grade) or g.cohort = btrim(e.grade));
+  get diagnostics n_exam_grade = row_count;
+
+  -- ④ 复核（**不写**）
+  select count(*) into n_serial_open from students where coalesce(serial, '') = '';
+  select count(*) into n_assign_open from assignments where term_id is null;
+  select count(*) into n_exam_open   from exams       where term_id is null;
+  select count(*) into n_exam_nograde from exams
+   where grade_id is null and coalesce(btrim(grade), '') <> '';
+
+  if n_assign_open > 0 or n_exam_open > 0 or n_exam_nograde > 0 or n_serial_open > 0 then
+    raise warning '还有补不上的存量：作业无学期 % 条 / 考试无学期 % 条 / 考试无届 % 条 / 学生无序列号 % 人',
+      n_assign_open, n_exam_open, n_exam_nograde, n_serial_open;
+  end if;
+
+  return jsonb_build_object(
+    'ok', true,
+    'assignmentsTermFilled', n_assign_filled,
+    'examsTermFilled', n_exam_term,
+    'examsGradeFilled', n_exam_grade,
+    'unresolvable', jsonb_build_object(
+      'assignmentsNoTerm', n_assign_open,
+      'examsNoTerm', n_exam_open,
+      'examsNoGrade', n_exam_nograde,
+      'studentsNoSerial', n_serial_open
+    )
+  );
+end $$;
+
+revoke all on function public.p3_backfill_terms_and_cohorts() from public, anon;
+
+-- ✅ 落地那一刻就跑一次（幂等：手动再跑一遍是 0 行）
+select public.p3_backfill_terms_and_cohorts();
+
+-- -------- 28.9 核对（把下面整段粘进 SQL 编辑器）--------
+--  ① 学年与学期建好了、当前学期推得出来：
+--  -- select y.name, t.half, t.start_date, t.end_date,
+--  --        (t.id = public.current_term_id()) as 是当前学期
+--  --   from terms t join academic_years y on y.id = t.academic_year_id
+--  --  order by t.start_date;
+--  -- 期望：4 行；"是当前学期"在 2026-09 ~ 2027-01 那一行是 true
+--
+--  ② 回填幂等（**跑两遍，第二遍三个数都是 0**）：
+--  -- select public.p3_backfill_terms_and_cohorts();
+--  -- select public.p3_backfill_terms_and_cohorts();
+--
+--  ③ 补不上的清单（期望四项全 0；非 0 就要一份写明原因的清单）：
+--  -- select 'assignments 无学期' as 项, count(*) from assignments where term_id is null
+--  -- union all select 'exams 无学期',      count(*) from exams where term_id is null
+--  -- union all select 'exams 无届',        count(*) from exams where grade_id is null and btrim(grade) <> ''
+--  -- union all select 'students 无序列号', count(*) from students where coalesce(serial,'') = '';
+--
+--  ④ 三个届与唯一键：
+--  -- select name, cohort, stage from grades order by stage;
+--  -- 期望：高一 2026 1 / 高二 2025 2 / 高三 2024 3
+--  -- select indexname from pg_indexes where tablename = 'grades';
+--  -- 期望：grades_school_cohort_key 在，grades_school_name_key **不在**
+--  -- 反向对照（两条都要能跑）：
+--  -- insert into grades (school_id, name, cohort) select id, '高二', '2025' from schools limit 1;  -- 应被拒（同届）
+--  -- insert into grades (school_id, name, cohort) select id, '高二', '2027' from schools limit 1;  -- 应通过（两个高二）
+--
+--  ⑤ 提档只改 `stage`（**年级 id 不变** → 班级的 `grade_id` 一个字都不用改）：
+--  -- select c.id, c.grade_id from classes c join grades g on g.id = c.grade_id where g.cohort = '2025';
+--  -- update grades set stage = 3 where cohort = '2025';   -- 提档（P4 会做成函数）
+--  -- select c.id, c.grade_id from classes c join grades g on g.id = c.grade_id where g.cohort = '2025';
+--  -- 期望：两边的 grade_id **逐字相同**
 -- ============================================================

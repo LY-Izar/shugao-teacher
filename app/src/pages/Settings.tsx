@@ -219,7 +219,7 @@ export default function Settings() {
     push({
       text: '这台设备已改回教师端',
       tone: 'ok',
-      desc: isRemote ? '下次进教师端不用再输密码' : '演示环境没有密码可校验，这一步只是本机标记',
+      desc: isRemote ? '下次进教师端不用再输密码' : '演示环境里只改本机标记',
     })
   }
 
@@ -686,12 +686,6 @@ export default function Settings() {
                 在新标签页打开教室端
               </Button>
             </div>
-            <p
-              style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 8, lineHeight: 1.7 }}
-            >
-              ⚠️ 打开教室端会把<b>这台设备</b>标记成教室端。
-              要改回来，见下面「本机角色」。
-            </p>
           </Panel>
         </div>
 
@@ -728,11 +722,7 @@ export default function Settings() {
             />
           </Panel>
           <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 8, lineHeight: 1.7 }}>
-            教室端和教师端用的是<b>同一个账号</b>，所以用「这台设备是不是教室端」来拦住
-            "学生在教室里把网址后缀一改就进教师控制台"。在浏览器里打开过一次
-            <span className="num"> /classroom </span>
-            就会打上教室端标记，想回教师端要重新验一次身份；在这里也可以手动改回来。
-            这只是本机标记，不是加密级的安全 —— 真正的隔离要靠教室端独立账号 + 数据库权限。
+            这是本机标记，换台设备不生效。
           </p>
           {role === 'classroom' ? (
             <div
@@ -981,7 +971,7 @@ export default function Settings() {
           />
         </label>
         <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 6, lineHeight: 1.65 }}>
-          这个名字会出现在问候语和账目里。刚注册时它默认取邮箱前缀，建议改成本名。
+          这个名字会出现在问候语和账目里，建议写本名。
         </p>
         <label className="mt-4 block">
           <span className="label">学校</span>
@@ -1052,8 +1042,8 @@ export default function Settings() {
         {isRemote ? (
           <>
             <p style={{ fontSize: 12.5, color: 'var(--color-ink2)', lineHeight: 1.75 }}>
-              改回教师端以后，这台设备就能直接进教师控制台（成绩、名单都在里面）。
-              为防学生在一体机上随手改回来，请<b>重新输一次教师密码</b>。
+              改回教师端以后，这台设备就能直接进教师控制台。
+              请<b>重新输一次教师密码</b>。
             </p>
             <label className="mt-3 block">
               <span className="label">教师密码</span>
@@ -1069,12 +1059,8 @@ export default function Settings() {
           </>
         ) : (
           <p style={{ fontSize: 12.5, color: 'var(--color-ink2)', lineHeight: 1.75 }}>
-            这台设备现在被标记成<b>教室端</b>（在本机打开过 /classroom），
-            所以进教师端会被拦去登录页。改回教师端后就不拦了。
-            <br />
-            <br />
-            当前是<b>本地演示模式</b>（没连云端），本机没有可校验的密码，
-            所以这一步只是本机标记 —— 它挡的是"改网址"，不是有心人。
+            这台设备现在被标记成<b>教室端</b>，所以进教师端会被拦去登录页。
+            改回教师端后就不拦了。
           </p>
         )}
       </Sheet>
