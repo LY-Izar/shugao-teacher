@@ -790,7 +790,8 @@ function TeacherSheet({
                   if (!r.ok) return { ok: false, message: r.message, detail: r.detail }
                   /* 就地改那一行，**不重拉整张名单**（回话里就是新名字） */
                   onRenamed(teacher.id, r.data.teacher.name)
-                  setName('')
+                  /* 填入服务端回话的新名字（原来清空成 ''，看着像没保存上） */
+                  setName(r.data.teacher.name)
                   return { ok: true }
                 })
               }
