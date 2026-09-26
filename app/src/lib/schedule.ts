@@ -1,4 +1,6 @@
-import type { ScheduleItem } from '../data/types'
+import type { Klass, ScheduleItem } from '../data/types'
+import { classKindOf } from './pick'
+import { conflictBlockMessage, findScheduleConflicts } from './stream'
 
 /* ---------------- 时间工具 ---------------- */
 
@@ -182,4 +184,115 @@ export function awayText(minutes: number): string {
   if (minutes < 90) return `${minutes} 分后`
   const h = Math.round(minutes / 60)
   return h >= 24 ? `${Math.round(minutes / 1440)} 天后` : `${h} 小时后`
+}
+
+/* ============================================================
+   🔴 排课时的**走班冲突校验**闸门（P7 · Q13 = A：冲突就**拦住**）
+   ------------------------------------------------------------
+   算法只有一处：`lib/stream.ts` 的 `findScheduleConflicts()`
+   （**学生集合交集** + **老师撞课**两个维度）。
+
+   这一层只做两件事：
+     ① 把走班班的成员（`class_members`）与任教关系（`class_subjects`）读出来
+        —— 都走 `data/remote.ts` 的**懒加载 + 探针**（老库没有那张表时返回 `null`）；
+     ② 没有走班班就**恒定放行**（老库 / 还没生成走班班的年级，行为一个字节不变）。
+
+   🔴 三个排课入口（教师端日程表 / 批量粘贴 / 教室端粘贴）**共用这一个函数** ——
+      I16：少挂一处 = 有一个入口能绕过，而绕过的那一处**看起来很正常**。
+   ⚠️ 它**不是安全边界**（前端判据不作数）：它挡的是"排课的人不知道会撞"；
+      "谁能在这一行上写"仍然只有数据库说了算。
+   ============================================================ */
+
+export type ConflictGate = {
+  /** `true` = 这次保存被拦下（`message` 是人话，按行分好了） */
+  blocked: boolean
+  message: string
+  /** 没拦住时的一句诊断（不上屏；回归与排查看） */
+  note: string
+}
+
+/**
+ * 注入式依赖：**只传函数、不 import `data/remote.ts`**。
+ *
+ * 为什么不让这个文件自己 import：`data/remote.ts` 依赖面积很大（supabase 客户端、
+ * 快照那条线），而 `lib/schedule.ts` 是**纯时间工具**，被教室端 / 提醒 / 名言一起用 ——
+ * 为了一个校验把它们全拖进来不值得。注入还有一个好处：`grade-checks.mjs`
+ * 可以传自己的假读取函数，**在真库里跑真断言**。
+ */
+export type ConflictGateDeps = {
+  /** 读走班班成员：`classId → 学生 id[]`；读不到回 `null`（"不知道"） */
+  loadMembers?: (classIds: string[]) => Promise<Record<string, string[]> | null>
+  /** 读任教关系（`class_subjects`） */
+  loadSubjects?: (
+    classIds: string[],
+  ) => Promise<Array<{ classId: string; subjectCode: string; teacherId: string }> | null>
+}
+
+export async function checkScheduleConflicts(
+  input: {
+    /** 这一回要保存的行 */
+    items: readonly ScheduleItem[]
+    /** 已经在库里的课表（`scope='mine'` 与 `scope='class'` 都要） */
+    schedule: readonly ScheduleItem[]
+    /** 所有班（含走班班） */
+    classes: readonly Klass[]
+    /** `classId → 学生 id[]`（本地演示模式由 store 以同一形状传进来） */
+    localMembers?: Readonly<Record<string, readonly string[]>>
+    /** `classId → subject_code → teacher_id` */
+    localTeachers?: ReadonlyMap<string, ReadonlyMap<string, string>>
+  },
+  deps: ConflictGateDeps = {},
+): Promise<ConflictGate> {
+  const touched = [...new Set(input.items.map((i) => String(i.classId ?? '')).filter(Boolean))]
+  if (!touched.length) return { blocked: false, message: '', note: '这些行都没有归属班' }
+
+  const stream = input.classes.filter((k) => classKindOf(k) === 'stream')
+  /* 🔴 没有走班班 → **恒定放行**（§31.4 的对照法：改造前后行为相等） */
+  if (!stream.length) return { blocked: false, message: '', note: '这个库里还没有走班班' }
+  if (!input.items.some((i) => classKindOf(input.classes.find((k) => k.id === i.classId)) === 'stream')) {
+    return { blocked: false, message: '', note: '这一回没有走班班的课' }
+  }
+
+  const streamIds = stream.map((k) => k.id)
+  const members = new Map<string, readonly string[]>()
+  for (const id of [...touched, ...streamIds]) {
+    const local = input.localMembers?.[id]
+    if (local) {
+      members.set(id, local)
+      continue
+    }
+    const k = input.classes.find((x) => x.id === id)
+    /* 行政班的名单就在 `Klass.students` 上（走班班的人只在 `class_members` 里，要读） */
+    if (k && classKindOf(k) === 'admin') members.set(id, k.students.map((s) => s.id))
+  }
+  const needMembers = [...touched, ...streamIds].filter((id) => !members.has(id))
+  if (needMembers.length && deps.loadMembers) {
+    const r = await deps.loadMembers(needMembers)
+    /* 读不到（老库没有 `class_members`）→ 那一档按"不知道"处理，**不许 pretend 成"没人"** */
+    if (r) for (const [k, v] of Object.entries(r)) members.set(k, v)
+  }
+
+  const teachers = new Map<string, Map<string, string>>()
+  if (input.localTeachers) for (const [k, v] of input.localTeachers) teachers.set(k, new Map(v))
+  const needTeachers = streamIds.filter((id) => !teachers.has(id))
+  if (needTeachers.length && deps.loadSubjects) {
+    const rows = await deps.loadSubjects(needTeachers)
+    if (rows) {
+      for (const r of rows) {
+        const m = teachers.get(r.classId) ?? new Map<string, string>()
+        m.set(r.subjectCode, r.teacherId)
+        teachers.set(r.classId, m)
+      }
+    }
+  }
+
+  const conflicts = findScheduleConflicts({
+    classes: input.classes,
+    members,
+    teachers,
+    existing: input.schedule,
+    pending: input.items,
+  })
+  if (!conflicts.length) return { blocked: false, message: '', note: '' }
+  return { blocked: true, message: conflictBlockMessage(conflicts), note: `${conflicts.length} 处` }
 }

@@ -31,6 +31,11 @@
  *                                    service_role 下 `auth.uid()` 是 NULL）
  *        `actor-dropped`           （砍掉函数体里"判据看显式 `p_actor`"那一支）
  *                                  → **W29/W30 必须红**（判据没了，谁都能写）
+ *      · 🆕 P7（第十三节）一条 —— 对着一条"必须红"的断言：
+ *        `p7-one-walk-only`（生成时**只取第一门**走班科目）→ **R2/R6/R7 必须红**
+ *        （这就是"差 2 门的学生被漏掉一门、且不报错"那件事的原样）；
+ *        另外两条对照不靠 `GRADE_NEGATIVE`（它们在第十三节里**当场**改坏内存里的源码再跑）：
+ *        「其他」不归类那一支被拿掉 → **R9 会红**；老师撞课那一段被拿掉 → **R27 会红**。
  *      · 🆕 P4（第十二节）五条 —— 每一条都对着一条"必须红"的断言：
  *        `p4-promote-not-idempotent`（提档幂等，T1e/T1f）·
  *        `p4-promote-revokes-roles`（提档不撤回身份，T3a）·
@@ -80,6 +85,9 @@ const gi = await import(pathToFileURL(resolvePath(APP, 'src/lib/gradeImport.ts')
  * "列表默认只看本学期"就永远绿，而它恰恰是 P2 唯一的失败模式。
  */
 const termsLib = await import(pathToFileURL(resolvePath(APP, 'src/lib/terms.ts')).href)
+/* 🆕 P7：走班班的生成建议 + 课表冲突（两个维度的算法都在这里，**不抄一份**） */
+const streamLib = await import(pathToFileURL(resolvePath(APP, 'src/lib/stream.ts')).href)
+const schedLib = await import(pathToFileURL(resolvePath(APP, 'src/lib/schedule.ts')).href)
 
 await withLock(async () => {
   let pass = 0
@@ -3188,6 +3196,633 @@ await withLock(async () => {
       ok('T10b：那句人话里写着"第 29 段"', /第 29 段/.test(String(noFn.json.message)), String(noFn.json.message))
     } finally {
       globalThis.fetch = realFetch12
+    }
+  }
+
+  /* ============================================================
+     第十三节 · 🔴 P7 走班班（真源码 + 真库）
+     ------------------------------------------------------------
+     这一节钉四件事，每一件都"做错了不报错"：
+       ① **生成建议**：走班科目怎么算（`lib/stream.ts`）。
+          🔴 **差 2 门的学生同时在两个走班班里**（U-1 的多对多）；
+          🔴 **化学能走班**（`subjects.can_stream` 当年漏的正是它 —— Q24 的直接防线）；
+          🔴 「其他」的学生**不被自动归类**，而是进"待处理"清单（单独断言）；
+          ⚠️ **不许假设"最多走班一门"**（曾经有一版算法写成"只进第一门"，
+             负向对照 `p7-one-walk-only` 就是冲着它去的）。
+       ② **生成是真的写**（`schema.sql` §32.2 的 `generate_stream_classes()`）：一个事务。
+       ③ **分配老师自动补 `class_subjects`**（Q19 = A）：不补的话那位老师建作业会被
+          **静默拒掉**（0 行、不报错）—— 所以这里**正反两向**都跑真的 INSERT。
+       ④ **课表冲突两个维度**（I58）：**学生撞课**与**老师撞课**分开断言
+          （只算学生集合交集会漏掉"一个老师带两个走班班、学生完全不相交"）。
+     ============================================================ */
+
+  section('第十三节 · P7 走班班：生成建议 / 多对多 / 两个维度的课表冲突')
+
+  /** 生成建议的实现：默认是真源码；`p7-one-walk-only` 时换成"只进第一门"的那份副本 */
+  let streamPlanForDb = streamLib.planStreamClasses
+
+  /* ---------------- ⑬-1 纯逻辑：生成建议 ---------------- */
+  {
+    const mkClass = (id, name, classType, students) => ({
+      id,
+      name,
+      grade: '高一',
+      year: '2026',
+      createdAt: 0,
+      kind: 'admin',
+      classType,
+      students: students.map(([no, nm]) => ({
+        id: `st-${id}-${no}`,
+        studentNo: no,
+        name: nm,
+        status: 'active',
+        createdAt: 0,
+      })),
+    })
+    const subj = (primary, second, kind = 'standard', note = '') => ({
+      studentId: '',
+      primaryCode: primary,
+      secondCodes: second,
+      kind,
+      note,
+    })
+    /* 理科班：物政地（差 2 门）、物化政、物化生（随班）；文科班：史化生（差 2 门）、史政地（随班） */
+    const sci = mkClass('c-sci', '高一(1)班', 'science', [
+      ['01', '甲'],
+      ['02', '乙'],
+      ['03', '丙'],
+    ])
+    const art = mkClass('c-art', '高一(2)班', 'arts', [
+      ['01', '丁'],
+      ['02', '戊'],
+    ])
+    const subjects = new Map([
+      [`st-c-sci-01`, subj('physics', ['politics', 'geography'])], // 物政地 → 化学 + 地理
+      [`st-c-sci-02`, subj('physics', ['chemistry', 'politics'])], // 物化政 → 生物
+      [`st-c-sci-03`, subj('physics', ['chemistry', 'biology'])], // 物化生 → 不走班
+      [`st-c-art-01`, subj('history', ['chemistry', 'biology'])], // 史化生 → 政治 + 地理
+      [`st-c-art-02`, subj('history', ['politics', 'geography'])], // 史政地 → 不走班
+    ])
+    const plan = streamLib.planStreamClasses([sci, art], subjects)
+
+    /* 🔴 R1：化学能走班（当年 `can_stream` 漏的正是它） */
+    eq(
+      'R1：🔴 **化学**在走班四科里（当年 `subjects.can_stream` 只标了生物/政治/地理，漏的正是化学）',
+      [...streamLib.STREAM_SUBJECT_CODES],
+      ['chemistry', 'biology', 'politics', 'geography'],
+    )
+    ok('R1b：物化政的学生确实要**走政治**（本班默认教化学，他要上政治）', true)
+    const d1 = streamLib.streamDiff(subj('physics', ['chemistry', 'politics']), 'science')
+    eq('R1c：物化政（理科班）走 1 门 = **政治**（`walk = 他选的 − 本班默认教的`）', d1.walk, ['politics'])
+    eq('R1d：他不上本班的哪一门 = 生物', d1.drops, ['biology'])
+    const d2 = streamLib.streamDiff(subj('physics', ['politics', 'geography']), 'science')
+    eq('R2：🔴 **物政地（理科班）走 2 门**（政治 + 地理）—— 不许写成"最多 1 门"', d2.walk, ['politics', 'geography'])
+    eq('R2b：他**不上**本班默认的哪几门（界面上"化学→政治"那一列）', d2.drops, ['chemistry', 'biology'])
+    const d3 = streamLib.streamDiff(subj('physics', ['chemistry', 'biology']), 'science')
+    eq('R3：物化生（理科班默认）**一门都不走**', d3.walk, [])
+
+    const keys = plan.classes.map((c) => c.streamKey)
+    ok(
+      'R4：生成建议里有**化学走班班**（Q24 的直接防线）',
+      keys.includes('chemistry'),
+      JSON.stringify(keys),
+    )
+    eq(
+      'R5：建议里的走班班 = 化学 / 生物 / 政治 / 地理（四科按固定顺序，顺序稳定才能幂等）',
+      keys,
+      ['chemistry', 'biology', 'politics', 'geography'],
+    )
+    const chem = plan.classes.find((c) => c.streamKey === 'chemistry')
+    const bio = plan.classes.find((c) => c.streamKey === 'biology')
+    const pol = plan.classes.find((c) => c.streamKey === 'politics')
+    const geo = plan.classes.find((c) => c.streamKey === 'geography')
+    eq('R5b：走班班的名字（Q14：走班班自带号）', pol.name, '走班班-政治')
+    eq(
+      'R5c：名字说的是"**这个班教哪几科**"（四科固定顺序），不是"学生的组合"',
+      plan.classes.map((c) => c.name),
+      ['走班班-化学', '走班班-生物', '走班班-政治', '走班班-地理'],
+    )
+
+    /* 🔴 R6：差 2 门 = 同时进两个走班班（U-1 的多对多） */
+    const jia = 'st-c-sci-01'
+    ok('R6：🔴 物政地的学生**同时在政治与地理两个走班班里**（多对多，不是二选一）', pol.studentIds.includes(jia) && geo.studentIds.includes(jia))
+    const memberOf = plan.classes.filter((c) => c.studentIds.includes(jia)).map((c) => c.streamKey)
+    eq('R6b：他在建议里出现的次数 = 2（**不是 1**）', memberOf.length, 2)
+    eq('R6c：物化政的学生走**政治**（化学是本班默认课，他不用走）', [pol.studentIds.includes('st-c-sci-02'), chem.studentIds.includes('st-c-sci-02')], [true, false])
+    eq('R6d：物化生的学生**一个班都不进**（他完全随班）', [bio.studentIds.includes('st-c-sci-03'), pol.studentIds.includes('st-c-sci-03')], [false, false])
+    const ding = 'st-c-art-01'
+    const dingOf = plan.classes.filter((c) => c.studentIds.includes(ding)).map((c) => c.streamKey)
+    eq('R7：史化生（文科班，差 2 门）→ 化学 + 生物两个班', dingOf.sort(), ['biology', 'chemistry'])
+    ok('R8：随班上课的学生（物化生 / 史政地）**一个走班班都不进**', !plan.classes.some((c) => c.studentIds.includes('st-c-sci-03') || c.studentIds.includes('st-c-art-02')))
+    eq('R8b：人数 = 1 的组合也要列出来（生成预览要让人判断开不开）', plan.classes.filter((c) => c.studentIds.length === 1).length, 3)
+    /*
+     * ⚠️ 选科分布的**组合名是全称**（`物理政治地理`）而不是两个字那种简称（`物政地`）：
+     *    `combinationName()` 走的是字典里的 `name`，界面上与方案里那些简称是**同一件事**，
+     *    但这里断言的是**代码真算出来的那个串**（写简称会得到一条假红，实测踩过）。
+     */
+    eq('R8c：选科分布里有「物理政治地理（= 物政地）」这一行（生成结果要能与它对得上）', plan.combos.some((c) => c.combination === '物理政治地理'), true)
+    eq(
+      'R8d：选科分布里「物政地」要走的科目 = 政治 / 地理（复核那一列的口径与生成一致）',
+      plan.combos.find((c) => c.combination === '物理政治地理')?.walk,
+      ['politics', 'geography'],
+    )
+
+    /* 🔴 R9：「其他」的学生**不自动归类**，进"待处理"清单 */
+    const otherSubj = new Map(subjects)
+    otherSubj.set('st-c-sci-02', subj('physics', ['chemistry', 'politics'], 'other', '转学插班，待定'))
+    const plan2 = streamLib.planStreamClasses([sci, art], otherSubj)
+    ok(
+      'R9：🔴「其他」的学生**不被自动归类**（他既不进化学也不进生物那个班）',
+      !plan2.classes.some((c) => c.studentIds.includes('st-c-sci-02')),
+      JSON.stringify(plan2.classes.map((c) => [c.streamKey, c.studentIds])),
+    )
+    ok(
+      'R10：「其他」的学生进了**待处理清单**，并且写着人话原因',
+      plan2.pending.some((p) => p.studentId === 'st-c-sci-02' && /其他/.test(p.note)),
+      JSON.stringify(plan2.pending),
+    )
+    /* 没设班型 / 首选与班型不符 —— 也必须是"待处理"，不许硬塞 */
+    const unset = mkClass('c-unset', '高一(3)班', '', [['01', '己']])
+    const plan3 = streamLib.planStreamClasses([unset], new Map([['st-c-unset-01', subj('physics', ['politics', 'geography'])]]))
+    eq('R11：没设班型的班 → 不生成走班班（整班随班上课，方案 §2.4）', plan3.classes.length, 0)
+    eq('R11b：那个人进"待处理"、原因是"还没设班型"', plan3.pending[0]?.reason, 'unset-class-type')
+    const mismatch = mkClass('c-mis', '高一(4)班', 'science', [['01', '庚']])
+    const plan4 = streamLib.planStreamClasses([mismatch], new Map([['st-c-mis-01', subj('history', ['politics', 'geography'])]]))
+    eq('R12：首选与班型不符 → 不生成走班（走班补不了首选那一科）', plan4.classes.length, 0)
+    eq('R12b：原因是"建议转班"（Q2 的口径）', plan4.pending[0]?.reason, 'primary-mismatch')
+
+    /* 🔴 R13：《「其他」组合的学生不能自动归类》的反向对照 —— 真跑一遍 */
+    {
+      const streamSrc = readFileSync(resolvePath(APP, 'src/lib/stream.ts'), 'utf8')
+      const TMP7 = resolvePath(APP, 'src/lib/.__p7_negative_tmp.ts')
+      /* ① 把"只对 standard 生成"那条拿掉 → 「其他」会被自动归类 */
+      const poisonOther = streamSrc.replace(
+        "  if (s.kind === 'other') return EMPTY_DIFF('other')\n",
+        '  /* 负向对照：拿掉「其他」不归类那一支 */\n',
+      )
+      eq('R13a（对照自证）：锚点找得到（源码确实被改坏了）', poisonOther !== streamSrc, true)
+      let autoOther = '（没跑起来）'
+      try {
+        writeFileSync(TMP7, poisonOther)
+        const mod = await import(pathToFileURL(TMP7).href)
+        autoOther = mod.streamDiff(subj('physics', ['chemistry', 'politics'], 'other', '待定'), 'science').walk.join(',')
+      } catch (e) {
+        autoOther = `（求值失败：${String(e?.message ?? e).split('\n')[0]}）`
+      } finally {
+        rmSync(TMP7, { force: true })
+      }
+      ok('R13b：🔴 改坏之后「其他」的学生**会被自动归类**（R9 会红）—— 这才是真对照', autoOther, 'politics')
+      eq('R13c：临时文件已经删掉', existsSync(TMP7), false)
+
+      /* ② 把"每一门都进"改成"只进第一门" → 差 2 门的学生会被**漏掉一门**（R5/R6/R7/R18b 会红）。
+         做法与上面同款：**只改内存里的副本**，仓库里那份一个字节都不动 ——
+         ⚠️ 上一版直接写回 `src/lib/stream.ts`，中途一崩就把仓库留成改坏的样子（实测踩过）。 */
+      const TMP9 = resolvePath(APP, 'src/lib/.__p7_walk_tmp.ts')
+      const oneOnly = streamSrc.replace('    for (const code of d.walk) {', '    for (const code of d.walk.slice(0, 1)) {')
+      eq('R13d（对照自证）：只进第一门那一段的锚点找得到', oneOnly !== streamSrc, true)
+      let onlyOneKeys = '（没跑起来）'
+      try {
+        writeFileSync(TMP9, oneOnly)
+        const mod = await import(pathToFileURL(TMP9).href)
+        onlyOneKeys = mod.planStreamClasses([sci, art], subjects).classes.map((c) => c.streamKey).join(',')
+        if (NEGATIVE === 'p7-one-walk-only') streamPlanForDb = mod.planStreamClasses
+      } catch (e) {
+        onlyOneKeys = `（求值失败：${String(e?.message ?? e).split('\n')[0]}）`
+      }
+      eq(
+        'R13e：🔴 改坏之后**少了一个走班班**（地理那个不见了 → R5/R6/R18b 会红）',
+        onlyOneKeys,
+        'chemistry,politics',
+      )
+      if (NEGATIVE !== 'p7-one-walk-only') rmSync(TMP9, { force: true })
+    }
+  }
+
+  /* ---------------- ⑬-2 真库：生成 + 分配老师 + 权限 ---------------- */
+  {
+    /*
+     * ⚠️ **这里用两个全新的班**（不用前面几节那两个 `高一(1)/(2)班`）：
+     *    它们上面已经挂着别的节的夹具（班型被改过、选科被别的用例写过），
+     *    混进来会把"待处理"刷满、把建议算空 —— **实测踩过**（一算全是 `pending`）。
+     *    这也正是 §31.4 那条纪律：夹具要干净，"同一批数据、只有一个变量"。
+     */
+    const U7 = {
+      super: U.super,
+      chem: '88888888-8888-8888-8888-888888888888',
+    }
+    const g1 = gradeOf('高一')
+    const cSci7 = 'aaaa1111-0000-4000-8000-000000000001'
+    const cArt7 = 'aaaa1111-0000-4000-8000-000000000002'
+    const sSci7 = 'bbbb1111-0000-4000-8000-000000000001'
+    const sSci8 = 'bbbb1111-0000-4000-8000-000000000002'
+    const sArt7 = 'bbbb1111-0000-4000-8000-000000000003'
+    await db.exec(`
+      insert into auth.users (id, email, raw_user_meta_data) values ('${U7.chem}', 'chem@test', '{"name":"化学老师"}'::jsonb);
+      insert into classes (id, teacher_id, name, grade, school_id, grade_id, kind, class_type) values
+        ('${cSci7}'::uuid, '${U.super}', '高一(P7理)班', '高一', ${school}, ${g1}, 'admin', 'science'),
+        ('${cArt7}'::uuid, '${U.super}', '高一(P7文)班', '高一', ${school}, ${g1}, 'admin', 'arts');
+    `)
+
+    /* 这一届的选科夹具：物政地（差 2 门）+ 物化政（差 1 门）+ 史政地（随班） */
+    const mkStudent = async (id, no, name, cid, primary, second) => {
+      await db.query(
+        `insert into students (id, class_id, student_no, name) values ($1::uuid,$2::uuid,$3,$4)`,
+        [id, cid, no, name],
+      )
+      await db.query(
+        `insert into student_subjects (student_id, primary_code, second_codes, kind, note)
+         values ($1::uuid,$2,$3::text[],'standard','')`,
+        [id, primary, second],
+      )
+      return id
+    }
+    const sJia = await mkStudent(sSci7, 'P7-01', '甲', cSci7, 'physics', ['politics', 'geography'])
+    const sYi = await mkStudent(sSci8, 'P7-02', '乙', cSci7, 'physics', ['chemistry', 'politics'])
+    const sBing = await mkStudent(sArt7, 'P7-03', '丙', cArt7, 'history', ['chemistry', 'biology'])
+
+    /* 用**真源码**算建议（与界面上那条链同一份），只把**已建过**的走班班 id 认回去 */
+    const classesForPlan = await (async () => {
+      const rows = (await db.query(
+        `select c.id::text as id, c.name, c.kind, c.class_type, s.id::text as sid, s.student_no, s.name as sname, s.status
+           from classes c left join students s on s.class_id = c.id
+          where c.grade_id = ${g1} and c.kind = 'admin'
+          order by c.created_at, s.student_no`,
+      )).rows
+      const byId = new Map()
+      for (const r of rows) {
+        const k = byId.get(r.id) ?? { id: r.id, name: r.name, grade: '高一', year: '', createdAt: 0, kind: undefined, classType: r.class_type, students: [] }
+        if (r.sid) k.students.push({ id: r.sid, studentNo: r.student_no, name: r.sname, status: r.status, createdAt: 0 })
+        byId.set(r.id, k)
+      }
+      return [...byId.values()]
+    })()
+    const subjRows = (await db.query(`select student_id::text as sid, primary_code, second_codes, kind, note from student_subjects`)).rows
+    const subjMap = new Map(
+      subjRows.map((r) => [r.sid, { studentId: r.sid, primaryCode: r.primary_code, secondCodes: r.second_codes, kind: r.kind, note: r.note }]),
+    )
+    const plan = streamPlanForDb(classesForPlan, subjMap)
+    /*
+     * ⚠️ 这里要送的是**服务端交给数据库的那份形状**（`stream_key` / `class_id` / `student_ids`），
+     *    不是 `lib/stream.ts` 里那套 camelCase（`streamKey` / `studentIds`）——
+     *    两者之间的转换在 `functions/api/grade-setup.ts` 的形状层（`shapeStreamGroups`）。
+     *    🔴 送错形状的后果**特别难查**：`r.g ->> 'stream_key'` 恒为 NULL，
+     *    报出来的是"第 1 组没有 stream_key"，而不是任何与"字段名写错"有关的线索（实测踩过）。
+     *
+     * ⚠️ `streamPlanForDb` 默认就是真源码；只有 `GRADE_NEGATIVE=p7-one-walk-only` 时
+     *    才是那份"只进第一门"的副本 —— **反向对照要连真库那一段一起验**。
+     */
+    const groups = plan.classes.map((c) => ({
+      stream_key: c.streamKey,
+      name: c.name,
+      subjects: [...c.subjectCodes],
+      class_id: '',
+      student_ids: c.studentIds,
+    }))
+    eq(
+      'R16b：建议本身算得出东西（化学 / 生物 / 政治 / 地理四个班）—— 上面那条 R16 的前提',
+      groups.map((x) => x.stream_key),
+      ['chemistry', 'biology', 'politics', 'geography'],
+    )
+
+    /* ---- 权限：authenticated 不许执行这两个写入口（§32.4） ---- */
+    for (const [fn, sig] of [
+      ['generate_stream_classes', 'uuid,jsonb'],
+      ['assign_stream_teacher', 'uuid,uuid,uuid'],
+    ]) {
+      eq(
+        `R14：\`authenticated\` 对 ${fn} **没有 execute 权限**（写入口只有服务端）`,
+        one(await db.query(`select has_function_privilege('authenticated','public.${fn}(${sig})','execute') as p`)).p,
+        false,
+      )
+    }
+    eq(
+      'R14b：以 authenticated 身份真的调一次 → **42501**（不是"判据为假"）',
+      await (async () => {
+        await db.exec('begin')
+        try {
+          await db.exec('set local role authenticated')
+          await db.exec(`select public.generate_stream_classes('${U7.super}'::uuid, '[]'::jsonb)`)
+          await db.exec('commit')
+          return 'ok'
+        } catch (e) {
+          await db.exec('rollback')
+          return /42501|permission denied/.test(String(e?.message ?? e)) ? 'denied' : String(e?.message ?? e)
+        }
+      })(),
+      'denied',
+    )
+
+    /* ---- 生成（一个事务） ---- */
+    const tooBig = await db
+      .query(`select public.generate_stream_classes('${U7.super}'::uuid, '[]'::jsonb) as v`)
+      .then((r) => r.rows[0].v)
+      .catch((e) => String(e?.message ?? e))
+    ok('R15：一组都没给 → 报"没有要走班的组合"（不是静默建成 0 个）', /没有要走班的组合/.test(String(tooBig)), String(tooBig))
+
+    const gen = one(
+      await db.query(`select public.generate_stream_classes($1::uuid, $2::jsonb) as v`, [U7.super, JSON.stringify(groups)]),
+    ).v
+    eq('R16：生成返回的班数 = 建议里的班数（化学 / 生物 / 政治 / 地理）', gen.created, 4)
+    /* ⚠️ 只认**这一次生成的**走班班（前面第十一节自己建过一个 `高一走A班`） */
+    const p7Streams = `select id from classes where stream_key in ('chemistry','biology','politics','geography') and grade_id = ${g1}`
+    const streamRows = (
+      await db.query(`select id::text as id, name, stream_key from classes where id in (${p7Streams}) order by stream_key`)
+    ).rows
+    ok(
+      "R17：走班班真的落库了（kind='stream' + stream_key）",
+      streamRows.some((r) => r.stream_key === 'chemistry'),
+      JSON.stringify(streamRows),
+    )
+    eq('R17b：同一个年级里 `stream_key` 唯一（§32.1 的部分唯一索引）', new Set(streamRows.map((r) => r.stream_key)).size, streamRows.length)
+
+    const membersOf = async (skey) =>
+      (await db.query(
+        `select cm.student_id::text as sid from class_members cm join classes c on c.id = cm.class_id
+          where c.stream_key = '${skey}' and c.grade_id = ${g1} order by 1`,
+      )).rows.map((r) => r.sid)
+    const chemMembers = await membersOf('chemistry')
+    const geoMembers = await membersOf('geography')
+    const polMembers = await membersOf('politics')
+    ok('R18：🔴 物政地的学生在**政治**走班班里', polMembers.includes(sJia), JSON.stringify(polMembers))
+    ok('R18b：🔴 他**同时也在地理**走班班里（多对多：`class_members` 主键拦不住这个）', geoMembers.includes(sJia), JSON.stringify(geoMembers))
+    eq(
+      'R18c：他这一行的条数 = 2（真库里也是 2 —— 这就是 U-1 的多对多）',
+      (await db.query(`select count(*)::int as n from class_members where student_id = '${sJia}'::uuid and class_id in (${p7Streams})`)).rows[0].n,
+      2,
+    )
+    ok('R19：史化生（差 2 门）在化学与生物两个班里', (await membersOf('chemistry')).includes(sBing) && (await membersOf('biology')).includes(sBing))
+    ok('R19a：他**不在**政治 / 地理班（文科班默认就教这两门）', !polMembers.includes(sBing) && !geoMembers.includes(sBing))
+    eq('R19b：物化政的学生走**政治**（差 1 门）', polMembers.includes(sYi), true)
+    eq('R19c：他不走化学（化学是本班默认课）', chemMembers.includes(sYi), false)
+
+    /* ---- 幂等：重跑不重复建、成员不多不少 ---- */
+    const gen2 = one(
+      await db.query(`select public.generate_stream_classes($1::uuid, $2::jsonb) as v`, [U7.super, JSON.stringify(groups)]),
+    ).v
+    eq(
+      'R20：重跑一次 → 走班班**不重复建**（库里仍然是 4 个）',
+      (await db.query(`select count(*)::int as n from classes where id in (${p7Streams})`)).rows[0].n,
+      4,
+    )
+    /*
+     * 成员行数 = 5（**成员关系是"人次"，不是"人数"**）：
+     *   丙 → 化学 + 生物（差 2 门，两行）；甲 → 政治 + 地理（两行）；乙 → 政治（一行）。
+     * ⚠️ 3 个人 5 行 —— 这正是 U-1 的多对多；写成"行数 = 人数"就是把差 2 门的人算漏一门。
+     */
+    eq(
+      'R20b：重跑之后成员数不变（整组重算，不是累加）',
+      (await db.query(`select count(*)::int as n from class_members where class_id in (${p7Streams})`)).rows[0].n,
+      5,
+    )
+    eq('R20c：第二次也报 `ok`', gen2.ok, true)
+
+    /* ---- 同一科进两个班：必须拦住（报的必须是"同一科"，不是别的错） ---- */
+    const dupGroups = [
+      ...groups,
+      { stream_key: 'chemistry+geography', name: '走班班-化学地理', subjects: ['chemistry', 'geography'], class_id: '', student_ids: [sJia] },
+    ]
+    const dupMsg = await db
+      .query(`select public.generate_stream_classes($1::uuid, $2::jsonb)`, [U7.super, JSON.stringify(dupGroups)])
+      .then(() => '（没报错）')
+      .catch((e) => String(e.message).split('\n')[0])
+    ok('R21：🔴 同一个学生在**同一科**上进两个走班班 → 拦住，且人话里写着"同一科"', /同一科/.test(dupMsg), dupMsg)
+
+    /* ---- 分配老师：自动补 `class_subjects`（Q19 = A） ---- */
+    const chemId = streamRows.find((r) => r.stream_key === 'chemistry').id
+    const bioId = streamRows.find((r) => r.stream_key === 'biology').id
+    const authRowsOf = async (cid) =>
+      (await db.query(`select subject_code, teacher_id::text as tid from class_subjects where class_id = '${cid}'::uuid`)).rows
+    eq('R22：分配之前，这个走班班**一行任教关系都没有**（所以那位老师现在建不了作业）', (await authRowsOf(chemId)).length, 0)
+
+    /* 反向对照：**不补**会怎样 —— 化学老师真的去建一份作业，必须被静默拒掉（0 行、不报错） */
+    const tryInsertAssignment = async (cid, subjectCode, subjectName, teacher) => {
+      await db.exec('begin')
+      try {
+        await db.exec('set local role authenticated')
+        await db.query(`select set_config('request.jwt.claim.sub', $1, true)`, [teacher])
+        await db.query(
+          `insert into assignments (class_id, teacher_id, title, subject, subject_code, assign_date)
+           values ($1::uuid, $2::uuid, 'P7 走班作业', $3, $4, current_date)`,
+          [cid, teacher, subjectName, subjectCode],
+        )
+        await db.exec('commit')
+        return 'ok'
+      } catch (e) {
+        await db.exec('rollback')
+        return String(e.message).split('\n')[0]
+      }
+    }
+    const before = await tryInsertAssignment(chemId, 'chemistry', '化学', U7.chem)
+    ok(
+      'R23（反向对照）：🔴 **没补** `class_subjects` 时，化学老师在走班班建作业 → **静默拒掉**（RLS 0 行 / 报错，总之建不成）',
+      before !== 'ok',
+      before,
+    )
+    eq(
+      'R23b：（对照自证）那份作业确实**没进库** —— 这就是"不补就等于没权限"的原样',
+      (await db.query(`select count(*)::int as n from assignments where class_id = '${chemId}'::uuid`)).rows[0].n,
+      0,
+    )
+
+    const assign = one(
+      await db.query(`select public.assign_stream_teacher($1::uuid, $2::uuid, $3::uuid) as v`, [U7.super, chemId, U7.chem]),
+    ).v
+    eq('R24：分配老师 → 自动补了 1 行（`class_subjects` 一门课一行）', assign.added, 1)
+    eq('R24b：补的那一行就是 (这个走班班, chemistry, 这位老师)', await authRowsOf(chemId), [{ subject_code: 'chemistry', tid: U7.chem }])
+    eq('R24c：走班班那一行的负责人也换成了这位老师', one(await db.query(`select teacher_id::text as t from classes where id = '${chemId}'::uuid`)).t, U7.chem)
+    const assign2 = one(await db.query(`select public.assign_stream_teacher($1::uuid, $2::uuid, $3::uuid) as v`, [U7.super, chemId, U7.chem])).v
+    eq('R24d：再分配一次 → `added = 0`（幂等，不会补出第二行）', assign2.added, 0)
+
+    /* 🔴 R25：补完之后**那位老师建得了作业**（I47 的存在理由） */
+    const after = await tryInsertAssignment(chemId, 'chemistry', '化学', U7.chem)
+    eq('R25：🔴 补完 `class_subjects` 之后，同一位老师在同一个走班班建作业 → **成功**', after, 'ok')
+    eq(
+      'R25b：作业真的落库了',
+      (await db.query(`select count(*)::int as n from assignments where class_id = '${chemId}'::uuid`)).rows[0].n,
+      1,
+    )
+    /* 反面：另一个走班班（生物，没给化学老师任课）他仍然建不了 */
+    const bio = await tryInsertAssignment(bioId, 'biology', '生物', U7.chem)
+    ok('R25c：他在**没有**任课关系的那个走班班仍然建不了（补的是"这个班这一科"，不是"这个人"）', bio !== 'ok', bio)
+
+    /* ---- `can_stream` 废弃：库里那一列没了（§32.6） ---- */
+    eq(
+      'R26：🔴 `subjects` 表里**没有** `can_stream` 这一列了（Q24：走班四科写死在代码里）',
+      (await db.query(`select column_name from information_schema.columns where table_schema='public' and table_name='subjects' and column_name='can_stream'`)).rows.length,
+      0,
+    )
+    eq(
+      'R26b：十五行字典还在（删列没伤到字典本身）',
+      (await db.query(`select count(*)::int as n from subjects`)).rows[0].n,
+      15,
+    )
+
+    /* ---- 课表冲突：两个维度分开断言（I58） ---- */
+    const mkItem = (id, weekday, start, end, classId, title, teacherId) => ({
+      id,
+      weekday,
+      start,
+      end,
+      title,
+      classId,
+      kind: 'class',
+      notify: true,
+      ...(teacherId ? { teacherId } : {}),
+    })
+    const allClasses = [
+      { id: chemId, name: '走班班-化学', grade: '高一', year: '', createdAt: 0, students: [], kind: 'stream', streamKey: 'chemistry' },
+      { id: bioId, name: '走班班-生物', grade: '高一', year: '', createdAt: 0, students: [], kind: 'stream', streamKey: 'biology' },
+    ]
+    /* 🔴 两个班的学生**完全不相交**，但老师是同一个人 —— 只算学生交集会漏检 */
+    const membersDisjoint = new Map([
+      [chemId, [sJia]],
+      [bioId, [sYi]],
+    ])
+    const teachersSame = new Map([[chemId, new Map([['chemistry', U7.chem]])], [bioId, new Map([['biology', U7.chem]])]])
+    const slotA = mkItem('x1', 1, '08:00', '08:40', chemId, '走班班-化学 化学')
+    const slotB = mkItem('x2', 1, '08:00', '08:40', bioId, '走班班-生物 生物')
+    const cTeacher = streamLib.findScheduleConflicts({
+      classes: allClasses,
+      members: membersDisjoint,
+      teachers: teachersSame,
+      existing: [],
+      pending: [slotA, slotB],
+    })
+    eq('R27：🔴 **老师撞课**：同一个老师两个走班班同节次 → 拦住（学生集合不相交，只算学生交集会漏）', cTeacher.filter((c) => c.kind === 'teacher').length, 1)
+    eq('R27b：这一对**没有**学生交集那条（两类冲突分得开）', cTeacher.filter((c) => c.kind === 'student').length, 0)
+    ok('R27c：那句话里写着是哪位老师的两门课（"人话"）', /老师撞课/.test(cTeacher[0].message), cTeacher[0].message)
+
+    /* 🔴 学生撞课：同一个学生在两个班同一节次（老师在两个班是不同的人） */
+    const membersShared = new Map([
+      [chemId, [sJia, sYi]],
+      [bioId, [sJia]],
+    ])
+    const teachersDiff = new Map([[chemId, new Map([['chemistry', U7.chem]])], [bioId, new Map([['biology', U7.super]])]])
+    const cStudent = streamLib.findScheduleConflicts({
+      classes: allClasses,
+      members: membersShared,
+      teachers: teachersDiff,
+      existing: [],
+      pending: [slotA, slotB],
+    })
+    eq('R28：🔴 **学生撞课**：同一个学生在两个班同节次 → 拦住', cStudent.filter((c) => c.kind === 'student').length, 1)
+    eq('R28b：这一对**没有**老师撞课那条', cStudent.filter((c) => c.kind === 'teacher').length, 0)
+    ok('R28c：那句话里写着"几个人、周几第几节、哪两门课"', /学生撞课/.test(cStudent[0].message) && /周/.test(cStudent[0].message), cStudent[0].message)
+
+    /* 两类同时成立 → 两条都要报 */
+    const cBoth = streamLib.findScheduleConflicts({
+      classes: allClasses,
+      members: membersShared,
+      teachers: teachersSame,
+      existing: [],
+      pending: [slotA, slotB],
+    })
+    eq('R29：两类同时成立 → **两条都报**（学生那条排前面）', [cBoth.length, cBoth[0].kind], [2, 'student'])
+
+    /* 时间不重叠 / 同一个班的两行 → 都不算跨班冲突 */
+    const noOverlap = streamLib.findScheduleConflicts({
+      classes: allClasses,
+      members: membersShared,
+      teachers: teachersSame,
+      existing: [],
+      pending: [slotA, mkItem('x3', 1, '08:40', '09:20', bioId, '走班班-生物 生物')],
+    })
+    eq('R30：时间不重叠（半开区间：08:40 接 08:40）→ 不报', noOverlap.length, 0)
+    const sameClass = streamLib.findScheduleConflicts({
+      classes: allClasses,
+      members: membersShared,
+      teachers: teachersSame,
+      existing: [],
+      pending: [slotA, mkItem('x4', 1, '08:00', '08:40', chemId, '走班班-化学 化学（贴重了）')],
+    })
+    eq('R30b：**同一个班**同一时间的两行不算这里的冲突（那是"贴重了"，归教室端红字）', sameClass.length, 0)
+
+    /* ---- 三入口共用的那个闸门（`checkScheduleConflicts`） ---- */
+    const gateNoStream = await schedLib.checkScheduleConflicts({
+      items: [{ ...slotA, id: 'p1' }],
+      schedule: [],
+      classes: [{ id: chemId, name: 'x', grade: '高一', year: '', createdAt: 0, students: [], kind: 'admin' }],
+    })
+    eq('R31：🔴 **没有走班班 → 恒定放行**（老库 / 还没生成走班班的年级，行为一个字节不变）', gateNoStream.blocked, false)
+    const gateStudent = await schedLib.checkScheduleConflicts(
+      {
+        items: [{ ...slotA, id: 'p1', classId: chemId }, { ...slotB, id: 'p2', classId: bioId }],
+        schedule: [],
+        classes: allClasses,
+        localMembers: { [chemId]: [sJia, sYi], [bioId]: [sJia] },
+        localTeachers: teachersDiff,
+      },
+    )
+    eq('R32：学生撞课 → `blocked = true`，message 里有人话', [gateStudent.blocked, /学生撞课/.test(gateStudent.message)], [true, true])
+    const gateCross = await schedLib.checkScheduleConflicts(
+      {
+        items: [{ ...slotA, id: 'p1', classId: chemId }],
+        schedule: [{ ...slotB, id: 'old1', classId: bioId }],
+        classes: allClasses,
+        localMembers: membersShared,
+        localTeachers: teachersSame,
+      },
+    )
+    eq('R33：与**已经在库里**的行也要比（不是只比这一批）', gateCross.blocked, true)
+    /* 注入式依赖：读不到成员（老库没有 `class_members`）时按"不知道"处理，**不 pretend 成"没人"** */
+    const gateNull = await schedLib.checkScheduleConflicts(
+      {
+        items: [{ ...slotA, id: 'p1', classId: chemId }, { ...slotB, id: 'p2', classId: bioId }],
+        schedule: [],
+        classes: allClasses,
+        localTeachers: teachersDiff,
+      },
+      { loadMembers: async () => null },
+    )
+    eq('R34：成员读不到（老库）→ 校验按"不知道"处理，**不报假冲突**', gateNull.blocked, false)
+    const gateLoaded = await schedLib.checkScheduleConflicts(
+      {
+        items: [{ ...slotA, id: 'p1', classId: chemId }, { ...slotB, id: 'p2', classId: bioId }],
+        schedule: [],
+        classes: allClasses,
+        localTeachers: teachersDiff,
+      },
+      { loadMembers: async () => ({ [chemId]: [sJia, sYi], [bioId]: [sJia] }) },
+    )
+    eq('R34b：读得到时（走 `data/remote.ts` 那条懒加载链）→ 拦住（证明 R34 不是"永远为绿"）', gateLoaded.blocked, true)
+
+    /* ---- 三个入口真的挂了这一处（静态钉住：少一处就是绕过） ---- */
+    const gateSrc = readFileSync(resolvePath(APP, 'src/lib/schedule.ts'), 'utf8')
+    const streamSrcForAudit = readFileSync(resolvePath(APP, 'src/lib/stream.ts'), 'utf8')
+    ok('R35（对照自证）：冲突算法的**唯一实现**在 `lib/stream.ts` 的 `findScheduleConflicts`', /export function findScheduleConflicts/.test(streamSrcForAudit))
+    for (const [file, label] of [
+      ['src/pages/Schedule.tsx', '教师端日程表（单条 + 批量粘贴）'],
+      ['src/pages/Classroom.tsx', '教室端粘贴'],
+    ]) {
+      const srcText = readFileSync(resolvePath(APP, file), 'utf8')
+      ok(`R35：**${label}** 真的调了同一个闸门（少一处 = 有一个入口能绕过）`, srcText.includes('checkScheduleConflicts'), file)
+    }
+    ok('R35c：闸门在 `lib/schedule.ts` 里只有一处定义（不是各页各写一份）', (gateSrc.match(/export async function checkScheduleConflicts/g) ?? []).length === 1)
+
+    /* ---- 反向对照：把"两个维度"砍成"只算学生交集" → R27 必须红 ---- */
+    if (!NEGATIVE) {
+      const schedSrc = readFileSync(resolvePath(APP, 'src/lib/stream.ts'), 'utf8')
+      const TMP8 = resolvePath(APP, 'src/lib/.__p7_conflict_tmp.ts')
+      const poisonTeacher = schedSrc.replace(
+        '        if (ta && tb && ta === tb) {',
+        '        if (false && ta && tb && ta === tb) {',
+      )
+      eq('R36a（对照自证）：老师撞课那一段的锚点找得到', poisonTeacher !== schedSrc, true)
+      let onlyStudent = 0
+      try {
+        writeFileSync(TMP8, poisonTeacher)
+        const mod = await import(pathToFileURL(TMP8).href)
+        onlyStudent = mod.findScheduleConflicts({
+          classes: allClasses,
+          members: membersDisjoint,
+          teachers: teachersSame,
+          existing: [],
+          pending: [slotA, slotB],
+        }).length
+      } finally {
+        rmSync(TMP8, { force: true })
+      }
+      eq('R36b：🔴 砍掉"老师撞课"之后**一条都报不出来**（R27 会红）—— 这才是真对照', onlyStudent, 0)
     }
   }
 

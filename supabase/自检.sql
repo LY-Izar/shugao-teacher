@@ -93,7 +93,7 @@
 --       有非 0 → 库里有"字典外的学科字符串"（例如写成「高中语文」）。
 --       这时先看 ② 的明细，再按 §12.6 显式指派；**不要**改回填脚本去凑 0。
 --    ② 上面全 0 时这条返回 **0 行**；有明细时看「学科名」列到底写成了什么。
---    ③ **15 行**（字典里的 15 个科目；`can_stream = true` 的是走班候选）。
+--    ③ **15 行**（字典里的 15 个科目；⚠️ P7 起没有 `can_stream` 列了，走班四科在代码里）。
 --    ④ 每个学科名一行，「缺代码」列应当**全是 0**（与 ① 是同一件事的另一面）。
 --  要改什么：**不用改**。本段没有 uuid 占位，直接跑。
 --
@@ -126,8 +126,9 @@ union all
 select '任课关系', cs.subject, count(*) from class_subjects cs where cs.subject_code is null group by 2
 order by 1, 2;
 
--- ③ 字典本身（应该是 15 行；`can_stream = true` 的是走班候选）
-select code, name, short, can_stream, sort from subjects order by sort;
+-- ③ 字典本身（应该是 15 行）
+--    ⚠️ P7 起没有 `can_stream` 这一列了（走班四科写死在 app/src/lib/stream.ts，§32.6）
+select code, name, short, sort from subjects order by sort;
 
 -- ④ 回填前后对账：两个分组的行数应当**完全一致**
 --    （`subject_code is null` 的那些行会在上面 ① 里被报出来，不会被藏起来）

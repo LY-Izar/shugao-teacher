@@ -63,9 +63,23 @@ const PRIMARY_CODES = ['physics', 'history']
 const SECOND_CODES = ['chemistry', 'biology', 'politics', 'geography']
 
 type Body = {
-  action?: 'canSetup' | 'rosterImport' | 'subjectWrite' | 'classSubjectBulk' | 'academicYearWrite'
+  action?:
+    | 'canSetup'
+    | 'rosterImport'
+    | 'subjectWrite'
+    | 'classSubjectBulk'
+    | 'academicYearWrite'
+    /** 🆕 P7：生成走班班（**教导处确认之后**的那一次调用） */
+    | 'streamGenerate'
+    /** 🆕 P7：分配走班班老师（**自动补 `class_subjects`**） */
+    | 'classSubjectAssign'
   gradeId?: string
   rows?: unknown[]
+  /* ---- `streamGenerate`（P7，`schema.sql` §32.2）---- */
+  groups?: unknown[]
+  /* ---- `classSubjectAssign`（P7，`schema.sql` §32.3）---- */
+  classId?: string
+  teacherId?: string
   /* ---- `academicYearWrite`（P3，`schema.sql` §28）：一个学年 + 上下半期 ---- */
   name?: string
   yearStart?: string
@@ -84,6 +98,17 @@ const NEED_STAGE27 =
 const NEED_STAGE28 =
   '数据库还没跑"学年与学期"那一段（仓库里 supabase/schema.sql 第 28 段）。' +
   '到 Supabase → SQL Editor 跑一遍再回来；刚跑完的话等十几秒让接口刷新一下缓存。'
+
+/** P7（§32）还没跑时的那句话 */
+const NEED_STAGE32 =
+  '数据库还没跑"走班班"那一段（仓库里 supabase/schema.sql 第 32 段）。' +
+  '到 Supabase → SQL Editor 跑一遍再回来；刚跑完的话等十几秒让接口刷新一下缓存。'
+
+/** 走班四科 —— 与 `lib/stream.ts` 的 `STREAM_SUBJECT_CODES` 同值（那一份是唯一判定入口） */
+const STREAM_SUBJECT_CODES = ['chemistry', 'biology', 'politics', 'geography']
+
+/** 一次最多生成几个走班班（`generate_stream_classes()` 里那个数） */
+const STREAM_GROUP_MAX = 200
 
 /** `YYYY-MM-DD`（日期列的入参形状；四样都要） */
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
@@ -236,6 +261,55 @@ function shapeClassSubjects(
   return { ok: true, rows: out }
 }
 
+/**
+ * 走班班那一组的形状（P7 · `schema.sql` §32.2）。
+ *
+ * 🔴 **这里只挡形状，不重算走班科目**：算法（谁要走哪几科、差 2 门的人进两个班）
+ *    唯一实现在 `app/src/lib/stream.ts` 的 `planStreamClasses()`，而它是**纯逻辑** ——
+ *    服务端再写一份就是"同一件事两个判定入口"（I16）。
+ * ⚠️ 科目**必须在走班四科里**、人数**不许为 0**（空走班班不建）——
+ *    与库里那两句 `raise exception` 同款（少一层，用户在浏览器里要多等一次往返）。
+ */
+function shapeStreamGroups(
+  rows: unknown[],
+): { ok: true; rows: Record<string, unknown>[] } | { ok: false; message: string } {
+  if (rows.length > STREAM_GROUP_MAX) {
+    return { ok: false, message: `一次最多生成 ${STREAM_GROUP_MAX} 个走班班，这次有 ${rows.length} 个` }
+  }
+  const out: Record<string, unknown>[] = []
+  const seen = new Set<string>()
+  for (let i = 0; i < rows.length; i++) {
+    const r = (rows[i] ?? {}) as Record<string, unknown>
+    const streamKey = String(r.streamKey ?? '').trim()
+    const name = String(r.name ?? '').trim()
+    const subjects = Array.isArray(r.subjects)
+      ? (r.subjects as unknown[]).map((x) => String(x).trim()).filter(Boolean)
+      : []
+    const classId = String(r.classId ?? '').trim()
+    const studentIds = Array.isArray(r.studentIds)
+      ? (r.studentIds as unknown[]).map((x) => String(x).trim()).filter((x) => UUID_RE.test(x))
+      : []
+    if (!streamKey) return { ok: false, message: `第 ${i + 1} 组没有组合标识` }
+    if (seen.has(streamKey)) return { ok: false, message: `第 ${i + 1} 组的组合标识与前面重复了（${streamKey}）` }
+    seen.add(streamKey)
+    if (!name) return { ok: false, message: `第 ${i + 1} 组没有名字` }
+    if (!subjects.length) return { ok: false, message: `第 ${i + 1} 组没有指定走班科目` }
+    const bad = subjects.find((c) => !STREAM_SUBJECT_CODES.includes(c))
+    if (bad) return { ok: false, message: `第 ${i + 1} 组的科目「${bad}」不在走班四科里` }
+    if (!studentIds.length) return { ok: false, message: `第 ${i + 1} 组一个人都没有` }
+    if (classId && !UUID_RE.test(classId)) return { ok: false, message: `第 ${i + 1} 组的班级 id 不合法` }
+    out.push({
+      stream_key: streamKey,
+      name,
+      subjects,
+      class_id: classId || null,
+      student_ids: studentIds,
+    })
+  }
+  if (!out.length) return { ok: false, message: '一个走班班都没有 —— 没有要走班的组合' }
+  return { ok: true, rows: out }
+}
+
 /* ---------------- 入口 ---------------- */
 
 export async function onRequestPost(context: {
@@ -362,6 +436,64 @@ export async function onRequestPost(context: {
     return json({ status: 'ok', rows: Number(v.rows ?? 0), replaced: Number(v.replaced ?? 0) })
   }
 
+  /* ---------------- streamGenerate：生成走班班（**一个事务**，P7 / §32.2） ----------------
+   *  🔴 **确认是必经**（Q7 = B）：前端先算建议给教导处看，**只有他点了「确认生成」**
+   *     才会打到这里。服务端**不重算**（算法只有一处，在 `lib/stream.ts`），
+   *     只挡形状 + 转交库里的 `generate_stream_classes()`。
+   *  ⚠️ 这个写入口同样是 `revoke … from authenticated` 的（§32.4）：
+   *     与上面几个一样走 **service_role + 显式 `p_actor`**（§30 的那个形状）。 */
+  if (action === 'streamGenerate') {
+    if (!UUID_RE.test(gradeId)) return json({ status: 'error', message: '没有指定年级' }, 400)
+    const shaped = shapeStreamGroups(Array.isArray(body.groups) ? body.groups : [])
+    if (!shaped.ok) return json({ status: 'error', message: shaped.message }, 400)
+
+    const r = await svcRpc(env, 'generate_stream_classes', {
+      p_actor: me.id,
+      p_rows: shaped.rows,
+    })
+    if (!r.ok) {
+      if (FN_MISSING_RE.test(r.message)) return json({ status: 'error', message: NEED_STAGE32 }, 503)
+      return json({ status: 'error', message: r.message || '生成走班班失败' }, writeFailStatus(r))
+    }
+    const v = r.value
+    return json({
+      status: 'ok',
+      created: Number(v.created ?? 0),
+      members: Number(v.members ?? 0),
+      classes: Array.isArray(v.classes) ? v.classes : [],
+    })
+  }
+
+  /* ---------------- classSubjectAssign：分配走班班老师（**自动补 `class_subjects`**，P7 / §32.3） ----------------
+   *  🔴 Q19 = A 的字面实现：老师与"他在这个走班班教哪几科"**同一个事务**落库。
+   *     不补的后果是那位老师建作业被 RLS **静默拒掉**（§31.3 的 `assignments_write_ok`
+   *     在有归属时走 `can_grade_subject` → `teaches_subject_for` → 读 `class_subjects`）。
+   *  ⚠️ 走班班教哪几科从 `stream_key` 反查（库里那一段），**认不出就报错、不拿别的科目顶上**。 */
+  if (action === 'classSubjectAssign') {
+    const classId = String(body.classId ?? '').trim()
+    const teacherId = String(body.teacherId ?? '').trim()
+    if (!UUID_RE.test(classId)) return json({ status: 'error', message: '没有指定走班班' }, 400)
+    if (!UUID_RE.test(teacherId)) return json({ status: 'error', message: '没有指定老师' }, 400)
+
+    const r = await svcRpc(env, 'assign_stream_teacher', {
+      p_actor: me.id,
+      p_class_id: classId,
+      p_teacher_id: teacherId,
+    })
+    if (!r.ok) {
+      if (FN_MISSING_RE.test(r.message)) return json({ status: 'error', message: NEED_STAGE32 }, 503)
+      return json({ status: 'error', message: r.message || '分配老师失败' }, writeFailStatus(r))
+    }
+    const v = r.value
+    return json({
+      status: 'ok',
+      classId: String(v.classId ?? classId),
+      teacherId: String(v.teacherId ?? teacherId),
+      added: Number(v.added ?? 0),
+      subjects: Array.isArray(v.subjects) ? v.subjects : [],
+    })
+  }
+
   /* ---------------- academicYearWrite：设一个学年的上下半期（**一个事务**，P3 / §28） ----------------
    *  🔴 判据不在这一层：`write_academic_year()` 自己问数据库的
    *     `can_manage_terms_for(p_actor)`（= 教导处 / 最高管理员）。
@@ -401,7 +533,7 @@ export async function onRequestGet(): Promise<Response> {
   return json(
     {
       status: 'ok',
-      hint: '开学准备的服务端接口：POST { action: canSetup | rosterImport | subjectWrite | classSubjectBulk | academicYearWrite }',
+      hint: '开学准备的服务端接口：POST { action: canSetup | rosterImport | subjectWrite | classSubjectBulk | classSubjectAssign | streamGenerate | academicYearWrite }',
     },
     200,
   )

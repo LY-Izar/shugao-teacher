@@ -19,6 +19,7 @@
 import { getSupabase, isRemote } from '../lib/supabase'
 import { compareRoster } from '../lib/roster'
 import { classTypeOf, isAdminClass } from '../lib/pick'
+import { loadClassMembers } from './remote'
 import type { ClassType, Klass, Student } from './types'
 import type { StudentSubject } from '../lib/pick'
 
@@ -247,3 +248,70 @@ export async function loadGradeSetup(gradeId: string): Promise<GradeSetupBundle>
 
 /** 班的班型（给列表那一步显示"完成度"用；与 `classTypeOf()` 同一口径） */
 export const gradeClassType = (k: Klass): ClassType => classTypeOf(k)
+
+/* ============================================================
+   🆕 P7：走班班那一段（生成预览 / 分配老师 / 课表冲突都要读它）
+   ------------------------------------------------------------
+   🔴 三条纪律与 `loadGradeSetup()` 同款：
+     · **走班班是 `classes` 里 `kind='stream'` 的行**（不是另一张表）；
+       行政班那一段由 `loadGradeSetup()` 读（它只认行政班，见那里的注释）；
+     · 成员（`class_members`，多对多）与任教关系（`class_subjects`）**各自探各自的**：
+       老库上没有 `class_members` → 返回 `null`（"不知道"），**不回空对象**；
+     · 断网 / 读不到 → `state: 'unknown'`（**灰**，绝不是"这个年级没有走班班"）。
+   ============================================================ */
+
+export type StreamBundle = {
+  state: GradeSetupState
+  /** 这一届的走班班（**按 `stream_key` 排序**，顺序稳定） */
+  classes: Klass[]
+  /** `classId → 学生 id[]`；**多对多**（差 2 门的学生出现在两个班的值里） */
+  members: Record<string, string[]>
+  /** `classId → 学生 id[]` 读到了没有（`false` = 老库没有那张表，不是"没人"） */
+  membersKnown: boolean
+}
+
+const EMPTY_STREAM: StreamBundle = { state: 'missing', classes: [], members: {}, membersKnown: false }
+
+/**
+ * 读一个年级的走班班 + 成员。
+ *
+ * ⚠️ **只读三张表**（`classes` / `class_members` / 姓名用的 `students`），
+ *    而且**不进 `loadSnapshot()`** —— 老库没有 `class_members` 时这一页照样要能用。
+ */
+export async function loadStreams(gradeId: string): Promise<StreamBundle> {
+  const sb = getSupabase()
+  if (!isRemote || !sb) return EMPTY_STREAM
+  try {
+    const c = await sb
+      .from('classes')
+      .select('*')
+      .eq('grade_id', gradeId)
+      .eq('kind', 'stream')
+      .order('created_at')
+    if (c.error) {
+      const code = String((c.error as { code?: string }).code ?? '')
+      return {
+        ...EMPTY_STREAM,
+        state: isMissingError(code, String(c.error.message ?? '')) ? 'missing' : 'unknown',
+      }
+    }
+    const classes = rowsOf(c.data)
+      .map(asKlass)
+      .filter((k) => k.kind === 'stream')
+      .sort((a, b) => (a.streamKey ?? '').localeCompare(b.streamKey ?? '') || a.name.localeCompare(b.name))
+
+    const ids = classes.map((k) => k.id)
+    const members: Record<string, string[]> = {}
+    let membersKnown = false
+    if (ids.length) {
+      const raw = await loadClassMembers(ids)
+      if (raw) {
+        membersKnown = true
+        for (const [k, v] of Object.entries(raw)) members[k] = v
+      }
+    }
+    return { state: 'present', classes, members, membersKnown }
+  } catch {
+    return { ...EMPTY_STREAM, state: 'unknown' }
+  }
+}

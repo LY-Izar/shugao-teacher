@@ -62,13 +62,20 @@ export function ScheduleBatch({
   onClose: () => void
   classes: Klass[]
   today: number
-  onSave: (items: Omit<ScheduleItem, 'id'>[]) => void
+  /**
+   * 保存这一批。
+   * ⚠️ 允许返回 `false`（或 `Promise<false>`）= **没保存**（走班冲突被拦住）——
+   *    那时候面板**不关**，让他看见冲突那几句人话再改。
+   */
+  onSave: (items: Omit<ScheduleItem, 'id'>[]) => void | boolean | Promise<void | boolean>
 }) {
   const fileRef = useRef<HTMLInputElement>(null)
   const [rows, setRows] = useState<Draft[]>([])
   const [err, setErr] = useState('')
   const [warns, setWarns] = useState<string[]>([])
   const [busy, setBusy] = useState(false)
+  /* `saving`：走班冲突校验要读一次走班班成员，别让"保存全部"被连点两次 */
+  const [saving, setSaving] = useState(false)
   const [pasteOpen, setPasteOpen] = useState(false)
   const [paste, setPaste] = useState('')
 
@@ -134,28 +141,31 @@ export function ScheduleBatch({
 
   const valid = rows.filter((r) => r.title.trim() && toMinutes(r.end) > toMinutes(r.start))
 
-  const save = () => {
+  const save = async () => {
     if (!valid.length) {
       setErr('至少填一条：课程名 + 起止时间（结束要晚于开始）')
       return
     }
     const cls = (name: string) => classes.find((c) => name.includes(c.name))?.id
-    onSave(
-      valid.map((r) => {
-        const title = r.title.trim()
-        const isOther = /备课|教研|会议|活动|培训|值班|例会|讲座|监考|阅卷|升旗|社团/.test(title)
-        return {
-          weekday: r.weekday,
-          start: normalizeTime(r.start, PERIOD_SLOTS[0][0]),
-          end: normalizeTime(r.end, PERIOD_SLOTS[0][1]),
-          title,
-          room: r.room.trim() || undefined,
-          classId: cls(title),
-          kind: isOther ? ('other' as const) : ('class' as const),
-          notify: !isOther,
-        }
-      }),
-    )
+    const payload = valid.map((r) => {
+      const title = r.title.trim()
+      const isOther = /备课|教研|会议|活动|培训|值班|例会|讲座|监考|阅卷|升旗|社团/.test(title)
+      return {
+        weekday: r.weekday,
+        start: normalizeTime(r.start, PERIOD_SLOTS[0][0]),
+        end: normalizeTime(r.end, PERIOD_SLOTS[0][1]),
+        title,
+        room: r.room.trim() || undefined,
+        classId: cls(title),
+        kind: isOther ? ('other' as const) : ('class' as const),
+        notify: !isOther,
+      }
+    })
+    setSaving(true)
+    const r = await onSave(payload)
+    setSaving(false)
+    /* `false` = 被拦住了（走班冲突）—— 面板不关，让冲突那几句留在屏幕上 */
+    if (r === false) return
   }
 
   const badCount = rows.length - valid.length
@@ -171,8 +181,8 @@ export function ScheduleBatch({
             <span className="num">{valid.length}</span> 条可保存
             {badCount > 0 ? ` · ${badCount} 条待补全` : ''}
           </span>
-          <Button variant="primary" disabled={!valid.length} onClick={save}>
-            保存全部
+          <Button variant="primary" disabled={!valid.length || saving} onClick={() => void save()}>
+            {saving ? '正在校验…' : '保存全部'}
           </Button>
         </div>
       }
@@ -210,7 +220,7 @@ export function ScheduleBatch({
           </Button>
         </div>
         <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 8, lineHeight: 1.65 }}>
-          支持 .xlsx / .docx / .csv / .txt
+          支持 .xlsx / .docx / .csv / .txt。表格有十几列时建议在电脑上打开这一页。
         </p>
         <button
           type="button"

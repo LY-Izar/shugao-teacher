@@ -5,10 +5,10 @@ import { IconAlert, IconCheck, IconPaste } from '../components/icons'
 import { Button, PageHead, Panel, Sect, Sheet, Tag } from '../components/ui'
 import { useStore, useToast } from '../data/store'
 import { loadClassSubjects, loadGradeSetup, type ClassSubjectRow } from '../data/remote'
+import { loadStreams } from '../data/gradeSetup'
 import { canAssignRoles } from '../lib/roles'
 import { CLASS_TYPE_NAME, type ClassType, type Klass, type Student } from '../data/types'
 import {
-  classKindOf,
   classPickProgress,
   classTypeOf,
   isAdminClass,
@@ -19,6 +19,11 @@ import {
   type StudentSubject,
 } from '../lib/pick'
 import { subjectName } from '../lib/subjects'
+import {
+  planStreamClasses,
+  streamSubjectsOf,
+  type StreamPlan,
+} from '../lib/stream'
 import { ROSTER_HEADER, compareRoster, gradeRosterToText } from '../lib/roster'
 import {
   applyRoster,
@@ -31,12 +36,15 @@ import {
   type RosterPlan,
 } from '../lib/gradeImport'
 import {
+  apiAssignStreamTeacher,
   apiBulkClassSubjects,
   apiCanSetup,
+  apiGenerateStreams,
   apiImportRoster,
   apiWriteSubjects,
   type CanSetupState,
   type ClassSubjectWriteRow,
+  type StreamGroupRow,
   type SubjectWriteRow,
 } from '../lib/gradeSetup'
 import { listTeachers, setRole, type DirTeacher } from '../lib/accounts'
@@ -92,6 +100,26 @@ export default function GradeSetup() {
    */
   const [setup, setSetup] = useState<CanSetupState | null>(null)
   const canSetup = setup?.canSetup === true
+  /**
+   * ⑥ 走班班那一段（P7）。
+   * · `streams` = 库里**已经有**的走班班（用来认回、用来分配老师）；
+   * · `streamMembers` = `classId → 学生 id[]`（**多对多**：差 2 门的学生在两个班里）；
+   * · 生成建议**不进 state** —— 它由 `admin + subjects` **算出来**（纯函数，
+   *   永远跟当前选科一致；存进 state 就有"改了选科、预览还是旧的"这种不报错的错）。
+   */
+  const [streams, setStreams] = useState<Klass[]>([])
+  const [streamMembers, setStreamMembers] = useState<Record<string, string[]>>({})
+  const [streamCsRows, setStreamCsRows] = useState<ClassSubjectRow[]>([])
+  const [streamBusy, setStreamBusy] = useState(false)
+
+  /** 生成 / 分配老师之后把走班班那一段重读一次（成员与任教关系都变了） */
+  const reloadStreams = useCallback(async () => {
+    const s = await loadStreams(id)
+    setStreams(s.classes)
+    setStreamMembers(s.members)
+    const cs = await loadClassSubjects(s.classes.map((k) => k.id))
+    setStreamCsRows((cs ?? []).filter((r) => s.classes.some((k) => k.id === r.classId)))
+  }, [id])
 
   const load = useCallback(async () => {
     const b = await loadGradeSetup(id)
@@ -105,8 +133,18 @@ export default function GradeSetup() {
     const cls = b.classes.length ? b.classes : fromStore
     setClasses(cls)
     setSubjects(b.subjects)
-    const cs = await loadClassSubjects(cls.map((k) => k.id))
+    /* 🆕 P7：走班班单独读一次（它不进 `loadGradeSetup()` —— 老库没有 `class_members`） */
+    const s = await loadStreams(id)
+    setStreams(s.classes)
+    setStreamMembers(s.members)
+    /*
+     * 任教关系读**两种班**：行政班那份给「批量写任教关系」用（它只对行政班有意义），
+     * 走班班那份给「分配老师」回显用 —— 两处都是同一张表、同一条读路径。
+     */
+    const ids = [...cls.map((k) => k.id), ...s.classes.map((k) => k.id)]
+    const cs = await loadClassSubjects(ids)
     setCsRows(cs)
+    setStreamCsRows((cs ?? []).filter((r) => s.classes.some((k) => k.id === r.classId)))
     setLoading(false)
   }, [id, atomClasses])
 
@@ -141,6 +179,12 @@ export default function GradeSetup() {
     () => admin.flatMap((k) => k.students.filter((s) => s.status === 'active')),
     [admin],
   )
+  /**
+   * ⑥ 的**生成建议**：扫全年级选科 → 要哪几个走班班、每组多少人、分布在哪些班。
+   * 🔴 纯函数算出来（`lib/stream.ts` 的 `planStreamClasses()`）—— **只算不写**：
+   *    Q7 = B 要求教导处**确认之后**才建（`onGenerate` 才是那一次写）。
+   */
+  const plan = useMemo(() => planStreamClasses(admin, subjects), [admin, subjects])
 
   /* ---------------- 六步各自的"完成没" ---------------- */
   const typeDone = admin.length > 0 && admin.every((k) => classTypeOf(k) !== '')
@@ -155,7 +199,8 @@ export default function GradeSetup() {
     type: typeDone,
     pick: pickDone,
     roles: rolesDone,
-    stream: false,
+    /* ⚠️ "完成"= 库里**真有**走班班（不是"算出来该有"）—— 这一格说的是"做没做" */
+    stream: streams.length > 0,
   }
 
   /* ---------------- 弹层状态 ---------------- */
@@ -379,13 +424,49 @@ export default function GradeSetup() {
           </Panel>
         </div>
 
-        {/* ---------------- ⑥ 生成走班（本轮不做） ---------------- */}
+        {/* ---------------- ⑥ 生成走班 ---------------- */}
         <div className="mb-4">
           <Sect>⑥ 生成走班</Sect>
           <Panel bodyClass="p-3">
-            <div style={{ fontSize: 13, color: 'var(--color-ink3)', lineHeight: 1.7 }}>
-              走班班的生成还没做。
-            </div>
+            <StreamPanel
+              plan={plan}
+              streams={streams}
+              members={streamMembers}
+              csRows={streamCsRows}
+              teachers={teachers}
+              canSetup={canSetup}
+              busy={streamBusy}
+              onLoadTeachers={() => {
+                if (!teachers.length) void loadTeachers()
+              }}
+              onGenerate={async () => {
+                const rows: StreamGroupRow[] = plan.classes.map((c) => ({
+                  streamKey: c.streamKey,
+                  name: c.name,
+                  subjects: [...c.subjectCodes],
+                  classId: streams.find((k) => k.streamKey === c.streamKey)?.id ?? '',
+                  studentIds: c.studentIds,
+                }))
+                setStreamBusy(true)
+                const r = await apiGenerateStreams(grade.id, rows)
+                setStreamBusy(false)
+                push({
+                  text: r.message,
+                  tone: r.ok ? 'ok' : 'bad',
+                  ...(r.ok ? { desc: `成员关系 ${r.members} 条` } : {}),
+                })
+                if (r.ok) await reloadStreams()
+                return r.ok
+              }}
+              onAssign={async (classId, teacherId) => {
+                setStreamBusy(true)
+                const r = await apiAssignStreamTeacher(grade.id, classId, teacherId)
+                setStreamBusy(false)
+                push({ text: r.message, tone: r.ok ? 'ok' : 'bad' })
+                if (r.ok) await reloadStreams()
+                return r.ok
+              }}
+            />
           </Panel>
         </div>
       </Page>
@@ -455,6 +536,12 @@ export default function GradeSetup() {
         <PickSheet
           gradeName={grade.name}
           classes={admin}
+          /*
+           * 🆕 P7：走班班单独传进来 —— ⑥ 生成走班之前，这一页读到的 `classes` **只有行政班**
+           * （`loadGradeSetup()` 按 `isAdminClass` 过滤），所以「其他」学生那一段
+           * 以前永远显示"这个年级还没有走班班"。
+           */
+          streamClasses={streams}
           subjects={subjects}
           canSetup={canSetup}
           write={async (rows: SubjectWriteRow[]) => {
@@ -948,12 +1035,15 @@ function TypeSheet({
 function PickSheet({
   gradeName,
   classes,
+  streamClasses,
   subjects,
   canSetup,
   write,
 }: {
   gradeName: string
   classes: readonly Klass[]
+  /** 🆕 P7：这一届**已经建出来**的走班班（「其他」的学生要从这里面手选） */
+  streamClasses: readonly Klass[]
   subjects: ReadonlyMap<string, StudentSubject>
   canSetup: boolean
   write: (rows: SubjectWriteRow[]) => Promise<boolean>
@@ -1159,7 +1249,13 @@ function PickSheet({
       ) : null}
 
       {/* 「其他」的学生：必须手工选走班科目 */}
-      <OtherPicker classes={classes} subjects={subjects} canSetup={canSetup} write={write} />
+      <OtherPicker
+        classes={classes}
+        streamClasses={streamClasses}
+        subjects={subjects}
+        canSetup={canSetup}
+        write={write}
+      />
 
       {msg ? (
         <p style={{ fontSize: 12.5, color: 'var(--color-ink2)', marginTop: 12, lineHeight: 1.7 }}>{msg}</p>
@@ -1176,11 +1272,14 @@ function PickSheet({
 /** 「其他」的学生：**必须手工选走班科目**（走班班成员的唯一手工入口） */
 function OtherPicker({
   classes,
+  streamClasses,
   subjects,
   canSetup,
   write,
 }: {
   classes: readonly Klass[]
+  /** 🆕 P7：已建出来的走班班（从**外面**传进来 —— 这一页读到的 `classes` 只有行政班） */
+  streamClasses: readonly Klass[]
   subjects: ReadonlyMap<string, StudentSubject>
   canSetup: boolean
   write: (rows: SubjectWriteRow[]) => Promise<boolean>
@@ -1194,7 +1293,6 @@ function OtherPicker({
   const students = classes.flatMap((k) =>
     k.students.filter((s) => s.status === 'active').map((s) => ({ k, s })),
   )
-  const streamClasses = classes.filter((k) => classKindOf(k) === 'stream')
   const picked = students.find((x) => x.s.id === studentId)
   const err = subjectCheck({ kind: 'other', primaryCode: '', secondCodes: second, note })
 
@@ -1563,3 +1661,199 @@ const SUBJECT_OPTIONS: Array<{ code: string; name: string }> = [
   { code: 'art', name: '美术' },
   { code: 'mental_health', name: '心理健康' },
 ]
+
+/* ============================================================
+   ⑥ 生成走班（P7）—— **先给建议，教导处确认之后才建**（Q7 = B）
+   ------------------------------------------------------------
+   一节说清三件事（界面上只回答"这里是什么、我能做什么"）：
+     · 要建哪几个走班班、每组多少人、分布在哪些行政班（**建议**，还没建）；
+     · 归不了类的学生（「其他」/ 没设班型 / 首选与班型不符）—— 列出来让人处理；
+     · 建好之后**分配老师**（选完自动补任课关系，提示补了几行）。
+   ============================================================ */
+function StreamPanel({
+  plan,
+  streams,
+  members,
+  csRows,
+  teachers,
+  canSetup,
+  busy,
+  onLoadTeachers,
+  onGenerate,
+  onAssign,
+}: {
+  plan: StreamPlan
+  streams: readonly Klass[]
+  members: Readonly<Record<string, string[]>>
+  /** 走班班的任教关系（`class_subjects`）—— 老师下拉的当前值从它读 */
+  csRows: readonly ClassSubjectRow[]
+  teachers: readonly DirTeacher[]
+  canSetup: boolean
+  busy: boolean
+  onLoadTeachers: () => void
+  onGenerate: () => Promise<boolean>
+  onAssign: (classId: string, teacherId: string) => Promise<boolean>
+}) {
+  const byKey = new Map(streams.map((k) => [k.streamKey ?? '', k]))
+  const teacherName = (id?: string) => teachers.find((t) => t.id === id)?.name ?? ''
+  /** 这个走班班现在的老师：从它的任教关系里取第一个（自动补的就是这些行） */
+  const teacherOf = (k: Klass): string => {
+    const subs: readonly string[] = streamSubjectsOf(k.streamKey, k.name)
+    return (
+      csRows.find((r) => r.classId === k.id && subs.includes(r.subjectCode))?.teacherId ??
+      csRows.find((r) => r.classId === k.id)?.teacherId ??
+      ''
+    )
+  }
+  const [assigning, setAssigning] = useState('')
+
+  if (!plan.students) {
+    return <div style={{ fontSize: 13, color: 'var(--color-ink3)' }}>还没有学生。</div>
+  }
+  if (!plan.classes.length) {
+    return (
+      <div style={{ fontSize: 13, color: 'var(--color-ink3)', lineHeight: 1.7 }}>
+        这个年级没有要走班的学生。
+        {plan.pending.length ? `（另有 ${plan.pending.length} 人要在下面单独处理）` : ''}
+      </div>
+    )
+  }
+
+  return (
+    <div>
+      <div style={{ fontSize: 13, color: 'var(--color-ink3)', lineHeight: 1.7 }}>
+        要走班的 {plan.classes.reduce((a, c) => a + c.studentIds.length, 0)} 人次 ·
+        分成 {plan.classes.length} 个走班班
+      </div>
+
+      {/* ---- 建议（**确认之前一个字都不写库**） ---- */}
+      <div className="mt-2 flex flex-col gap-1.5">
+        {plan.classes.map((c) => {
+          const has = byKey.get(c.streamKey)
+          return (
+            <div
+              key={c.streamKey}
+              className="flex flex-wrap items-center gap-x-2 gap-y-1 p-2"
+              style={{ border: '1px solid var(--color-line)', borderRadius: 4, fontSize: 12.5 }}
+            >
+              <span style={{ fontWeight: 620 }}>{c.name}</span>
+              <span className="num" style={{ color: 'var(--color-ink3)' }}>
+                {c.studentIds.length} 人
+              </span>
+              <span style={{ color: 'var(--color-ink4)' }}>{c.classIds.length} 个班</span>
+              {has ? <Tag tone="ok">已建</Tag> : <Tag tone="idle">待建</Tag>}
+            </div>
+          )
+        })}
+      </div>
+
+      {/*
+        ⚠️ **差 2 门**：上面那些班的人数相加会**大于**要走班的人数 —— 一个学生同时在两个班里。
+        这一行必须看得见，否则教导处会以为数字算错了。
+      */}
+      {plan.classes.some((c) => c.studentIds.length) ? (
+        <p style={{ fontSize: 11.5, color: 'var(--color-ink4)', marginTop: 6, lineHeight: 1.65 }}>
+          一个人可能同时在两个走班班里（他要走两门课），所以每个班的人数相加会比人数多。
+        </p>
+      ) : null}
+
+      <div className="mt-2.5">
+        <Button size="sm" variant="primary" disabled={!canSetup || busy} onClick={() => void onGenerate()}>
+          {streams.length ? '按现在的选科重算成员' : '确认生成'}
+        </Button>
+      </div>
+
+      {/* ---- 待教导处手工处理的人（**绝不自动归类**） ---- */}
+      {plan.pending.length ? (
+        <div className="mt-3">
+          <div style={{ fontSize: 12.5, fontWeight: 620, color: 'var(--color-warn)' }}>
+            待处理 {plan.pending.length} 人（不会自动进走班班）
+          </div>
+          <div className="mt-1.5 flex flex-col gap-1">
+            {plan.pending.map((p) => (
+              <div key={p.studentId} style={{ fontSize: 12, lineHeight: 1.7 }}>
+                <span style={{ color: 'var(--color-ink2)' }}>
+                  {p.className} · {p.name}
+                  {p.serial ? ` （${p.serial}）` : p.studentNo ? ` （${p.studentNo}）` : ''}
+                </span>
+                <span style={{ color: 'var(--color-ink3)' }}> —— {p.note}</span>
+              </div>
+            ))}
+          </div>
+          <p style={{ fontSize: 11.5, color: 'var(--color-ink4)', marginTop: 4, lineHeight: 1.65 }}>
+            「其他」的学生在 ④ 采集选科里手工选走班班；没设班型的先回第③步设班型。
+          </p>
+        </div>
+      ) : null}
+
+      {/* ---- 已建的走班班：分配老师（**自动补任课关系**） ---- */}
+      {streams.length ? (
+        <div className="mt-3">
+          <div style={{ fontSize: 12.5, fontWeight: 620 }}>走班班老师</div>
+          <div className="mt-1.5 flex flex-col gap-1">
+            {streams.map((k) => (
+              <div key={k.id} className="flex flex-wrap items-center gap-2" style={{ fontSize: 12.5 }}>
+                <span style={{ minWidth: 132 }}>{k.name}</span>
+                <span className="num" style={{ color: 'var(--color-ink3)', minWidth: 52 }}>
+                  {(members[k.id] ?? []).length} 人
+                </span>
+                <select
+                  className="input"
+                  style={{ height: 30, fontSize: 12.5, maxWidth: 190 }}
+                  value={teacherOf(k)}
+                  disabled={!canSetup || busy || assigning === k.id}
+                  onFocus={onLoadTeachers}
+                  onChange={async (e) => {
+                    setAssigning(k.id)
+                    await onAssign(k.id, e.target.value)
+                    setAssigning('')
+                  }}
+                >
+                  <option value="">选老师…</option>
+                  {teachers.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.name}
+                      {t.subject ? `（${t.subject}）` : ''}
+                    </option>
+                  ))}
+                </select>
+                {teacherOf(k) ? (
+                  <span style={{ color: 'var(--color-ink3)' }}>
+                    {teacherName(teacherOf(k))}
+                    {streamSubjectsOf(k.streamKey, k.name).length
+                      ? ` · ${streamSubjectsOf(k.streamKey, k.name).map((c) => subjectName(c)).join('/')}`
+                      : ' · 认不出它教哪几科'}
+                  </span>
+                ) : null}
+              </div>
+            ))}
+          </div>
+          <p style={{ fontSize: 11.5, color: 'var(--color-ink4)', marginTop: 4, lineHeight: 1.65 }}>
+            选完老师会自动补上他在这几个走班班的任课关系，补了几行会提示。
+          </p>
+        </div>
+      ) : null}
+
+      {/* ---- 选科分布（复核用：生成结果与它对得上） ---- */}
+      {plan.combos.length ? (
+        <div className="mt-3">
+          <div style={{ fontSize: 12.5, fontWeight: 620 }}>选科分布</div>
+          <div className="mt-1 flex flex-wrap gap-1.5">
+            {plan.combos.map((c) => (
+              <Tag key={c.combination} tone={c.walk.length ? 'accent' : 'idle'}>
+                {c.combination} {c.count} 人
+                {c.walk.length ? ` → ${c.walk.map((x) => subjectName(x)).join('/')}` : ''}
+              </Tag>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {plan.classes.length && byKey.size === 0 && canSetup ? (
+        <p style={{ fontSize: 11.5, color: 'var(--color-ink4)', marginTop: 6, lineHeight: 1.65 }}>
+          确认生成之后才会建班（建议里那一份只是算给你看的）。
+        </p>
+      ) : null}
+    </div>
+  )
+}

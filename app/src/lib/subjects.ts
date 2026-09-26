@@ -12,8 +12,12 @@
      前端读不到数据库字典时（比如线上库还没跑那一段 SQL）照样要能用。
      两边**只有这一处**对应关系，别的文件不许再写一份数组。
 
-   ⚠️ 这里**不写任何界面逻辑**：谁能走班、显示几个字，都是字典里的数据
-     （`canStream` / `short`），不是代码里的 if。
+   ⚠️ 这里**不写任何界面逻辑**：显示名与顺序是字典里的数据。
+      🔴 **"哪几科能走班"不在这个文件里** —— 它是 `lib/stream.ts` 的
+      `STREAM_SUBJECT_CODES`（四科写死在代码里，Q24 = B）。
+      这里曾经有一个 `canStream` 字段（镜像库里的 `subjects.can_stream`），
+      **P7 一并删掉了**：那个字段和四科常量说的是同一件事，而两边不同值
+      （库里标 3 科、漏了化学）—— 一个字段只能有一种语义（§32.6）。
    ============================================================ */
 
 import type { Teacher } from '../data/types'
@@ -40,31 +44,26 @@ export type Subject = {
   name: string
   /** 两个字的短名，手机上用 */
   short: string
-  /**
-   * 走班候选。**只是字典里的一条数据** ——
-   * 界面入口是否打开由它决定，代码里不写 `if (subject === '生物')`。
-   */
-  canStream: boolean
   sort: number
 }
 
 /** 学科字典（15 科：用户给的 14 科 + 物理本身）。顺序就是界面上的显示顺序 */
 export const SUBJECTS: readonly Subject[] = [
-  { code: 'chinese', name: '语文', short: '语', canStream: false, sort: 1 },
-  { code: 'math', name: '数学', short: '数', canStream: false, sort: 2 },
-  { code: 'english', name: '英语', short: '英', canStream: false, sort: 3 },
-  { code: 'physics', name: '物理', short: '物', canStream: false, sort: 4 },
-  { code: 'chemistry', name: '化学', short: '化', canStream: false, sort: 5 },
-  { code: 'biology', name: '生物', short: '生', canStream: true, sort: 6 },
-  { code: 'politics', name: '政治', short: '政', canStream: true, sort: 7 },
-  { code: 'history', name: '历史', short: '史', canStream: false, sort: 8 },
-  { code: 'geography', name: '地理', short: '地', canStream: true, sort: 9 },
-  { code: 'it', name: '信息技术', short: '信', canStream: false, sort: 10 },
-  { code: 'general_tech', name: '通用技术', short: '通', canStream: false, sort: 11 },
-  { code: 'pe', name: '体育', short: '体', canStream: false, sort: 12 },
-  { code: 'music', name: '音乐', short: '音', canStream: false, sort: 13 },
-  { code: 'art', name: '美术', short: '美', canStream: false, sort: 14 },
-  { code: 'mental_health', name: '心理健康', short: '心', canStream: false, sort: 15 },
+  { code: 'chinese', name: '语文', short: '语', sort: 1 },
+  { code: 'math', name: '数学', short: '数', sort: 2 },
+  { code: 'english', name: '英语', short: '英', sort: 3 },
+  { code: 'physics', name: '物理', short: '物', sort: 4 },
+  { code: 'chemistry', name: '化学', short: '化', sort: 5 },
+  { code: 'biology', name: '生物', short: '生', sort: 6 },
+  { code: 'politics', name: '政治', short: '政', sort: 7 },
+  { code: 'history', name: '历史', short: '史', sort: 8 },
+  { code: 'geography', name: '地理', short: '地', sort: 9 },
+  { code: 'it', name: '信息技术', short: '信', sort: 10 },
+  { code: 'general_tech', name: '通用技术', short: '通', sort: 11 },
+  { code: 'pe', name: '体育', short: '体', sort: 12 },
+  { code: 'music', name: '音乐', short: '音', sort: 13 },
+  { code: 'art', name: '美术', short: '美', sort: 14 },
+  { code: 'mental_health', name: '心理健康', short: '心', sort: 15 },
 ]
 
 /**
@@ -116,12 +115,6 @@ export function subjectName(code?: string | null, fallback = ''): string {
 export function subjectShort(code?: string | null, fallback = ''): string {
   const s = asSubjectCode(code)
   return s ? (BY_CODE.get(s)?.short ?? fallback) : fallback
-}
-
-/** 这一科能不能走班（走班候选写得是字典里的数据） */
-export function canStream(code?: string | null): boolean {
-  const s = asSubjectCode(code)
-  return s ? (BY_CODE.get(s)?.canStream ?? false) : false
 }
 
 /** `{ subjectCode?, subject? }` 这个形状的兼容读取：有 code 用 code，没有就按显示名反查 */

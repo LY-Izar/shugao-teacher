@@ -38,7 +38,7 @@ import {
 
 /** 备份文件名：固定名字，每次覆盖 —— 免得一天攒几十个文件 */
 const BACKUP_NAME = '树高备份.json'
-import { awayText, dayState, maybeShift, toMinutes, weekdayOf } from '../lib/schedule'
+import { checkScheduleConflicts, awayText, dayState, maybeShift, toMinutes, weekdayOf } from '../lib/schedule'
 import { beijingNow, dayKind, holidayOn, isRestDay, nextHoliday, ymdOf } from '../lib/holiday'
 import { pickDailyQuote } from '../lib/quotes'
 import { parseScheduleText, type ParsedScheduleItem } from '../lib/scheduleParse'
@@ -924,7 +924,7 @@ export default function Classroom() {
               <Button
                 block
                 variant="primary"
-                onClick={() => {
+                onClick={async () => {
                   const rows = schedReview.filter(
                     (r) => r.title.trim() && toMinutes(r.end) > toMinutes(r.start),
                   )
@@ -932,20 +932,33 @@ export default function Classroom() {
                     push({ text: '没有可导入的课', tone: 'warn' })
                     return
                   }
-                  addScheduleMany(
-                    rows.map((it) => ({
-                      weekday: it.weekday,
-                      start: it.start,
-                      end: it.end,
-                      title: it.title.trim(),
-                      room: it.room,
-                      classId: it.classId,
-                      kind: it.kind,
-                      notify: it.notify,
-                      scope: 'class' as const,
-                    })),
+                  const items = rows.map((it) => ({
+                    weekday: it.weekday,
+                    start: it.start,
+                    end: it.end,
+                    title: it.title.trim(),
+                    room: it.room,
+                    classId: it.classId,
+                    kind: it.kind,
+                    notify: it.notify,
+                    scope: 'class' as const,
+                  }))
+                  /*
+                   * 🔴 教室端粘贴也是排课入口之一 —— **同一个** `checkScheduleConflicts`（I16）。
+                   * 教室端只看得到本班，但冲突的另一半在**别的班**（走班班 / 别的行政班），
+                   * 所以这一处不校验的话，它就是一个"看起来很正常"的绕过口（方案 §2.3）。
+                   */
+                  const gate = await checkScheduleConflicts(
+                    { items: items.map((x, i) => ({ ...x, id: `pending-${i}` })), schedule, classes },
+                    { loadMembers: remote.loadClassMembers, loadSubjects: remote.loadClassSubjects },
                   )
+                  if (gate.blocked) {
+                    setSchedErr(`和走班班撞了，没有导入：\n${gate.message}`)
+                    return
+                  }
+                  addScheduleMany(items)
                   setSchedReview(null)
+                  setSchedErr('')
                   push({ text: `已导入 ${rows.length} 条课`, tone: 'ok' })
                 }}
               >

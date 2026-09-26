@@ -1031,12 +1031,13 @@ create policy schedule_classroom_write on schedule_items for all to authenticate
 -- -------- 12.1 学科字典 --------
 --  「15 个科目」在字典里是**数据**，不是代码里的 if ——
 --  以后加一科（或学校改叫法）只需要往这张表插一行 + 前端 subjects.ts 补一行。
+--  ⚠️ 这里**曾经有一列 `can_stream`（走班候选）**：**P7 已把它删掉**（见 §32.6）。
+--     理由：它和代码里的走班四科常量说的是**同一件事**，而库里标的只有 3 科（漏了化学）
+--     → "两个真相"。走班四科现在**只认** `app/src/lib/stream.ts` 的 `STREAM_SUBJECT_CODES`。
 create table if not exists subjects (
   code       text primary key,          -- 'chinese' / 'math' / 'physics' …
   name       text not null,             -- 语文 / 数学 / 物理 …
   short      text not null default '',  -- 两个字短名，手机上用
-  -- 走班候选：**只是字典里的一条数据**，界面入口是否打开由它决定
-  can_stream boolean not null default false,
   sort       int  not null default 0,
   created_at timestamptz not null default now()
 );
@@ -1051,24 +1052,22 @@ revoke all on subjects from anon;
 
 -- -------- 12.2 字典数据（15 行）--------
 --  显示名 / 短名 / 顺序**由代码管**：重跑本段就同步（改文案不用手工改库）。
---  `can_stream`（走班候选）**冲突时不覆盖** —— 它是学校可以自己改的业务数据。
---  分工：代码管文案，学校管业务开关。
-insert into subjects (code, name, short, can_stream, sort) values
-  ('chinese',       '语文',     '语', false,  1),
-  ('math',          '数学',     '数', false,  2),
-  ('english',       '英语',     '英', false,  3),
-  ('physics',       '物理',     '物', false,  4),
-  ('chemistry',     '化学',     '化', false,  5),
-  ('biology',       '生物',     '生', true,   6),
-  ('politics',      '政治',     '政', true,   7),
-  ('history',       '历史',     '史', false,  8),
-  ('geography',     '地理',     '地', true,   9),
-  ('it',            '信息技术', '信', false, 10),
-  ('general_tech',  '通用技术', '通', false, 11),
-  ('pe',            '体育',     '体', false, 12),
-  ('music',         '音乐',     '音', false, 13),
-  ('art',           '美术',     '美', false, 14),
-  ('mental_health', '心理健康', '心', false, 15)
+insert into subjects (code, name, short, sort) values
+  ('chinese',       '语文',     '语',  1),
+  ('math',          '数学',     '数',  2),
+  ('english',       '英语',     '英',  3),
+  ('physics',       '物理',     '物',  4),
+  ('chemistry',     '化学',     '化',  5),
+  ('biology',       '生物',     '生',  6),
+  ('politics',      '政治',     '政',  7),
+  ('history',       '历史',     '史',  8),
+  ('geography',     '地理',     '地',  9),
+  ('it',            '信息技术', '信', 10),
+  ('general_tech',  '通用技术', '通', 11),
+  ('pe',            '体育',     '体', 12),
+  ('music',         '音乐',     '音', 13),
+  ('art',           '美术',     '美', 14),
+  ('mental_health', '心理健康', '心', 15)
 on conflict (code) do update
   set name = excluded.name, short = excluded.short, sort = excluded.sort;
 
@@ -1135,8 +1134,10 @@ union all
 select '任课关系', cs.subject, count(*) from class_subjects cs where cs.subject_code is null group by 2
 order by 1, 2;
 
--- ③ 字典本身（应该是 15 行；`can_stream = true` 的是走班候选）
-select code, name, short, can_stream, sort from subjects order by sort;
+-- ③ 字典本身（应该是 15 行）
+--    ⚠️ P7 起**没有 `can_stream` 这一列**了（走班四科写死在 `app/src/lib/stream.ts`，见 §32.6）：
+--       这一条 SQL 里再写它就会是 `42703 column does not exist`。
+select code, name, short, sort from subjects order by sort;
 
 -- ④ 回填前后对账：两个分组的行数应当**完全一致**
 --    （`subject_code is null` 的那些行会在上面 ① 里被报出来，不会被藏起来）
@@ -7979,4 +7980,404 @@ create policy assignments_update on assignments for update to authenticated
 --  -- alter table assignments add constraint assignments_class_id_not_null
 --  --   check (class_id is not null) not valid;   -- 再加 `validate constraint` 收口--  ③ ⚠️ **回退之后凡是建过"未归属作业"的库必须回头看一遍**：那些行会立刻违反 `not null`，
 --     所以第 ① 步不是可选项（这就是"破坏性迁移要单独一步 + 回退 SQL"的意思）。
+-- ============================================================
+
+-- ============================================================
+--  32. 走班班（P7，2026-10-04）—— 生成 + 分配老师 + `can_stream` 废弃
+-- ============================================================
+--  这一节只做三件事，每一件都对应 `选科走班实施计划.md` P7 的一段：
+--    ① 🔑 **生成走班班**（Q7 = B：系统给建议 → **教导处确认后才建**，一个事务）；
+--    ② 🔑 **分配走班班老师**（Q19 = A：**自动补 `class_subjects`** ——
+--       不补的话那位老师建作业会被权限层**静默拒掉**，见 §31.3 的 `assignments_write_ok`）；
+--    ③ `subjects.can_stream` **废弃**（Q24 = B：走班四科写死在代码里）。
+--
+--  🔴 **不新建任何判据函数**：走班班是 `classes` 里 `kind='stream'` 的一行，
+--     建 / 改 / 删天然复用 §31.1 核过的那几条（`classes_insert` / `can_manage_class_for`
+--     的年级主任一支**按 `grade_id` 取、与 `kind` 无关**）。
+--     `选科走班实施计划.md` P7 里那个 `can_manage_stream_class` 名字
+--     **故意不存在**（§31.1 已经逐条核过）—— 建了就是同一件事的第二个判定入口。
+--
+--  🔴 **写入口的形状照 §30**：`service_role` + **显式 `p_actor`**，判据在函数体里问 `_for`；
+--     `authenticated` **一个写权限都不给**（§27.12 / §29.8 同款）。
+
+-- -------- 32.1 走班班的唯一键：`(grade_id, stream_key)`，只对走班班生效 --------
+--  🔴 为什么是**部分唯一索引**而不是加一条 unique 约束：
+--     `classes.stream_key` 对行政班恒为 `''`（§27.2 的默认值），而**行政班的班名可以重复**
+--     （`classes` 没有任何班名唯一约束，§4.2.0 事实第 2 条）——
+--     一条全表 unique 会把"两个班都叫高一(1)班"从"靠人"变成"建不出来"，
+--     那是另一件事，不在这期的范围里。这里只钉住**走班班**：
+--     同一个年级里，同一个 `stream_key` 只能有一个走班班。
+--  ⚠️ 幂等：`create unique index if not exists`；已存在同名脏数据时会**直接失败并回滚整份脚本**
+--     （不会留下半截状态），查重 SQL 见 §32.7。
+create unique index if not exists classes_stream_key_uniq
+  on classes (grade_id, stream_key)
+  where kind = 'stream' and stream_key <> '';
+
+-- -------- 32.2 🔑 生成走班班（**一个事务**：先校验完，再碰任何一张表）--------
+--  为什么是"服务端算 + 库只落地"：
+--    · 算法（走班科目怎么算、差 2 门的学生进两个班）是**纯逻辑**，
+--      唯一实现在 `app/src/lib/stream.ts` 的 `planStreamClasses()` ——
+--      `grade-checks.mjs` 直接 import 它跑真断言；
+--      **不在 SQL 里再写一份**（那就是同一件事两个判定入口，本项目最贵的一类坑）。
+--    · 库里这一层的职责是**形状与完整性**：班级存在、学生在册、科目在四科里、
+--      **同一个学生不能在同一科上被塞进两个走班班**（漏一条就是"他那一科没有课上"）。
+--
+--  入参形状（服务端已经把"建议"摊成这个样子）：
+--    p_groups = [{ "stream_key": "chemistry+geography",
+--                  "name": "走班班-化学地理",
+--                  "subjects": ["chemistry", "geography"],
+--                  "class_id": null | "<已有的走班班 id>",
+--                  "student_ids": ["…", …] }, …]
+--
+--  🔴 **确认是必经**（Q7 = B）：这个函数**不会**被页面自动调用 —— 只有教导处点了
+--     「确认生成」才会打过来；它**不删**任何走班班（老师的调课 / 改名不会被一次重算抹掉）。
+drop function if exists public.generate_stream_classes(uuid, jsonb);
+create or replace function public.generate_stream_classes(p_actor uuid, p_rows jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  r           record;
+  e           record;
+  v_n         int := 0;
+  v_g         int := 0;
+  v_s         int := 0;
+  v_total     int := 0;
+  v_class     uuid;
+  v_grade     uuid;
+  v_teacher   uuid;
+  v_key       text;
+  v_name      text;
+  v_cid       text;
+  v_cid_uuid  uuid;
+  v_other     uuid;
+  /** 同一科进两个班时那一科的**科目代码**（text —— 与 `v_other` 的语义不同，所以是两个变量） */
+  v_dup       text;
+  v_subs      jsonb;
+  v_stu       jsonb;
+  v_classes   jsonb := '[]'::jsonb;
+  v_subjects  text[] := array['chemistry', 'biology', 'politics', 'geography'];
+begin
+  if p_rows is null or jsonb_typeof(p_rows) <> 'array' then
+    raise exception '要生成的是"一数组的走班班"，收到的不是数组';
+  end if;
+
+  /*
+   * 🔴 **上限与空表先判**（在逐行校验之前）—— 与 `bulk_write_class_subjects()` 同款：
+   *    否则"第 1 行的班级不存在"会盖住真正的原因（这里真正的原因往往是"没有要走班的人"）。
+   */
+  if jsonb_array_length(p_rows) = 0 then
+    raise exception '没有要走班的组合 —— 这个年级的选科里没有人在走班（先确认班型与选科都采完了）';
+  end if;
+  if jsonb_array_length(p_rows) > 200 then
+    raise exception '一次最多生成 200 个走班班，这次有 % 个', jsonb_array_length(p_rows);
+  end if;
+
+  /*
+   * 🔴 **请求内**先查一遍"同一个学生在同一科上进两组"。
+   *    ⚠️ 顺序很要紧：只靠 ① 里那句**查库**的判断，这一批**新来的**行彼此是看不见的
+   *       （都还没写进去），于是"同一科进两个班"会被静默放过（实测踩过）。
+   *       所以：**先比这一批自己**（这一句），再比库里的（① 里那句），两处都要有。
+   *    ⚠️ 写法上踩过两个坑，都写在这里（**报出来的错与真正的原因完全无关**，最难查）：
+   *       ① 数组元素是**字符串** → 一律 `#>> '{}'` 取，别写 `->>`（那是取对象的字段）；
+   *       ② 这个检查的结论是**科目代码**，必须收进 `v_dup`（**text**）——
+   *          收进 `v_other`（**uuid**，另一处在用）会得到
+   *          `invalid input syntax for type uuid: "chemistry"`。
+   *          一个变量一种语义，连"临时收一下"都不行。
+   */
+  with flat as (
+    select i.ord                                   as ord,
+           (i.value ->> 'stream_key')              as skey,
+           s.subj                                  as subj,
+           st.sid                                  as sid
+      from jsonb_array_elements(p_rows) with ordinality as i(value, ord)
+      cross join jsonb_array_elements_text(i.value -> 'subjects')    as s(subj)
+      cross join jsonb_array_elements_text(i.value -> 'student_ids') as st(sid)
+  )
+  select a.subj into v_dup
+    from flat a
+    join flat b on a.subj = b.subj and a.sid = b.sid and a.ord < b.ord
+   where a.skey <> b.skey
+   limit 1;
+  if v_dup is not null then
+    raise exception '这一批里有学生在**同一科**上进两个走班班（科目 %）—— 同一科只许进一个班', v_dup;
+  end if;
+
+  /* ① 逐组校验（这一圈里**一行都不写**） */
+  for r in select value as g from jsonb_array_elements(p_rows) loop
+    v_g := v_g + 1;
+    v_key := btrim(coalesce(r.g ->> 'stream_key', ''));
+    v_name := btrim(coalesce(r.g ->> 'name', ''));
+    v_subs := coalesce(r.g -> 'subjects', '[]'::jsonb);
+    v_stu := coalesce(r.g -> 'student_ids', '[]'::jsonb);
+    v_cid := nullif(btrim(coalesce(r.g ->> 'class_id', '')), '');
+    v_cid_uuid := null;
+    if v_cid is not null then v_cid_uuid := v_cid::uuid; end if;
+    if v_key = '' then
+      raise exception '第 % 组没有 stream_key（走班班的组合标识）', v_g;
+    end if;
+    if v_name = '' then
+      raise exception '第 % 组没有名字', v_g;
+    end if;
+    if jsonb_typeof(v_subs) <> 'array' or jsonb_array_length(v_subs) = 0 then
+      raise exception '第 % 组没有指定走班科目', v_g;
+    end if;
+    for e in select value as s from jsonb_array_elements(v_subs) loop
+      if not (btrim(e.s #>> '{}') = any (v_subjects)) then
+        raise exception '第 % 组的科目「%」不在走班四科里（化学 / 生物 / 政治 / 地理）', v_g, e.s #>> '{}';
+      end if;
+    end loop;
+    if jsonb_typeof(v_stu) <> 'array' or jsonb_array_length(v_stu) = 0 then
+      raise exception '第 % 组一个人都没有 —— 空走班班不建（人数 = 1 的也要人来判断开不开）', v_g;
+    end if;
+    /*
+     * ⚠️ 这里**不**逐组把第一个学生 cast 成 uuid 再查（`(v_stu -> 0) #>> '{}'`）：
+     *    上一次这么写时，PGlite 上冒出一句与真正原因无关的
+     *    `invalid input syntax for type uuid: "chemistry"`（而且把一个好端端的校验也带红了）。
+     *    学生存不存在由下面那句**集合式**的 exists 兜住 —— 它只比 `students`，一个 cast 都不做。
+     */
+    if not exists (
+      select 1
+        from students s
+       where s.id::text in (select sid from jsonb_array_elements_text(v_stu) as sid)
+    ) then
+      raise exception '第 % 组有学生在库里找不到', v_g;
+    end if;
+
+    /*
+     * 🔴 同一个学生在**同一科**上不许属于两个走班班：那意味着他被排了两次、必然撞车。
+     *    ⚠️ 重跑本函数时这一条**必须排除"本组自己那个班"**：
+     *       走班班的身份是 `(年级, stream_key)`（§32.1），所以判据是
+     *       **`c.stream_key = v_key` 就跳过** —— 而不是看请求里带没带 `class_id`
+     *       （重跑时前端不带 `class_id`，只看它会把"这个组自己"判成冲突 → **假红**，实测踩过）。
+     *    ⚠️ 这里刻意写成**一句 set-based 的 `exists`**，不写"循环 + record"：
+     *       `for e in select value from jsonb_array_elements(…)` 再引 `e.value` 在 PL/pgSQL 里会
+     *       撞上"变量 / 列"歧义（`42702` ambiguous），而改成 `as s` 再 `e.s` 更是**恒为 null、
+     *       quietly 放过**（PGlite 实测踩过两次）—— 数组元素是**字符串**，不是对象。
+     */
+    select cm.class_id into v_other
+      from class_members cm
+      join classes c on c.id = cm.class_id
+     where c.kind = 'stream'
+       and c.stream_key <> ''
+       and c.stream_key <> v_key
+       and (v_cid_uuid is null or cm.class_id <> v_cid_uuid)
+       and exists (
+         select 1
+           from unnest(string_to_array(c.stream_key, '+')) a
+           join unnest(string_to_array(v_key, '+')) b on a = b
+       )
+       and cm.student_id in (
+         select (elem.value #>> '{}')::uuid from jsonb_array_elements(v_stu) as elem(value)
+       )
+     limit 1;
+    if v_other is not null then
+      raise exception '第 % 组：有一个学生已经在另一个走班班里上同一科了（走班班 %）—— 同一科不许进两个班', v_g, v_other;
+    end if;
+  end loop;
+
+  /* ② 一个事务、一次写完 */
+  for r in select value as g from jsonb_array_elements(p_rows) loop
+    v_n := v_n + 1;
+    v_class := null;
+    v_key := btrim(coalesce(r.g ->> 'stream_key', ''));
+    v_stu := coalesce(r.g -> 'student_ids', '[]'::jsonb);
+
+    /*
+     * 这个组的年级：从**第一个学生**身上取（走班班属于学生的年级；§27.1 的届）。
+     * ⚠️ 一次取到，下面"认回已有的班"与"新建"都用它 —— 认回时**必须带年级**，
+     *    否则两个年级的同名组合会互相抢（`stream_key` 只在年级内唯一，§32.1）。
+     */
+    select c.grade_id, c.teacher_id into v_grade, v_teacher
+      from students s join classes c on c.id = s.class_id
+     where s.id = ((v_stu -> 0) #>> '{}')::uuid;
+    if v_grade is null then
+      raise exception '第 % 组的学生没有挂到任何年级上', v_n;
+    end if;
+
+    select nullif(btrim(coalesce(r.g ->> 'class_id', '')), '')::uuid into v_class;
+    if v_class is not null
+       and not exists (select 1 from classes c where c.id = v_class and c.kind = 'stream') then
+      v_class := null;
+    end if;
+
+    if v_class is null then
+      /* 已有的走班班按 (年级, stream_key) 认回来 —— 认不出才新建（幂等：重跑不重复建） */
+      select c.id into v_class
+        from classes c
+       where c.kind = 'stream'
+         and c.grade_id = v_grade
+         and c.stream_key = v_key
+       order by c.created_at
+       limit 1;
+    end if;
+
+    if v_class is null then
+      insert into classes (teacher_id, name, grade, school_id, grade_id, kind, class_type, stream_key)
+      values (coalesce(v_teacher, p_actor),
+              btrim(r.g ->> 'name'),
+              (select g.name from grades g where g.id = v_grade),
+              (select g.school_id from grades g where g.id = v_grade),
+              v_grade, 'stream', '', v_key)
+      returning id into v_class;
+    end if;
+
+    /* 成员关系：**整组重算**（多对多；差 2 门的学生会同时出现在两个组里） */
+    delete from class_members where class_id = v_class;
+    insert into class_members (class_id, student_id)
+    select v_class, sorted.x
+      from (
+        select distinct (elem.value #>> '{}')::uuid as x
+          from jsonb_array_elements(v_stu) as elem(value)
+      ) sorted;
+    get diagnostics v_s = row_count;
+    v_total := v_total + v_s;
+
+    v_classes := v_classes || jsonb_build_object(
+      'classId', v_class,
+      'streamKey', v_key,
+      'name', btrim(r.g ->> 'name'),
+      'subjects', r.g -> 'subjects',
+      'members', v_s
+    );
+  end loop;
+
+  return jsonb_build_object('ok', true, 'classes', v_classes, 'created', v_n, 'members', v_total);
+end $$;
+
+-- -------- 32.3 🔑 分配走班班老师（**自动补 `class_subjects`**，Q19 = A）--------
+--  为什么必须补：那位老师紧接着就要在这个走班班建作业，而 `assignments_write_ok`
+--  （§31.3）在 `class_id` 有值时走的是 `can_grade_subject` → `teaches_subject_for`
+--  —— 它读的就是 `class_subjects`。**不补 = 建作业被 RLS 静默拒掉**（返回 0 行、不报错），
+--  而"不报错但就是不对"正是这个项目反复栽的那一类（§三.5）。
+--
+--  与"分配老师"**同一个事务**：老师与任课关系要么一起落，要么都不落。
+--  走班班教哪几科从 `stream_key` 反查 —— ⚠️ 认不出来（老师手工改过名字 / 键）
+--  就**显式报错**，不许拿别的科目顶上。
+drop function if exists public.assign_stream_teacher(uuid, uuid, uuid);
+create or replace function public.assign_stream_teacher(
+  p_actor uuid,
+  p_class_id uuid,
+  p_teacher_id uuid
+) returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_grade   uuid;
+  v_key     text;
+  v_name    text;
+  v_kind    text;
+  v_codes   text[];
+  v_added   int := 0;
+begin
+  select c.grade_id, c.stream_key, c.name, c.kind
+    into v_grade, v_key, v_name, v_kind
+    from classes c where c.id = p_class_id;
+  if v_grade is null and v_name is null then
+    raise exception '这个走班班不存在';
+  end if;
+  if v_kind <> 'stream' then
+    raise exception '这不是走班班（分配走班班老师只对 kind = stream 的班）';
+  end if;
+  if not public.can_manage_grade_setup_for(p_actor, v_grade) then
+    raise exception '你没有分配这个年级走班班老师的权限（教务处 / 最高管理员 / 本年级的年级主任）';
+  end if;
+  if not exists (select 1 from teachers t where t.id = p_teacher_id) then
+    raise exception '这位老师不存在';
+  end if;
+
+  v_codes := array(
+    select x from unnest(string_to_array(coalesce(v_key, ''), '+')) x
+     where x = any (array['chemistry', 'biology', 'politics', 'geography'])
+  );
+  if coalesce(array_length(v_codes, 1), 0) = 0 then
+    raise exception '这个走班班认不出它教哪几科（stream_key 是「%」）—— 先把它的组合标识补对', coalesce(v_key, '');
+  end if;
+
+  /* ① 走班班这一行的"老师"（`classes.teacher_id`：它是"这个班的负责人"，与任教关系是两件事） */
+  update classes set teacher_id = p_teacher_id where id = p_class_id;
+
+  /* ② **自动补任教关系**：一门课一行 —— `can_grade_subject` 就是按 (班, 科目) 问的 */
+  insert into class_subjects (class_id, subject, teacher_id, subject_code)
+  select p_class_id, s.name, p_teacher_id, s.code
+    from subjects s
+   where s.code = any (v_codes)
+  on conflict (class_id, subject_code, teacher_id) do nothing;
+  get diagnostics v_added = row_count;
+
+  return jsonb_build_object('ok', true, 'classId', p_class_id, 'teacherId', p_teacher_id,
+                            'subjects', to_jsonb(v_codes), 'added', v_added);
+end $$;
+
+-- -------- 32.4 权限：两个写入口**只有服务端能调**（§30 的形状，逐条对齐 §27.12）--------
+--  ⚠️ 断言（跑完本段逐条验）：
+--    ① 以 authenticated 身份 `select public.generate_stream_classes('[]')` → **42501**
+--    ② 以 authenticated 身份 `select public.assign_stream_teacher(...)` → **42501**
+--    ③ 以 service_role（属主）身份调、带显式 `p_actor` → 通（或报出那一组的人话）
+--  🔴 **不加 grant**：`authenticated` 对 `class_members` / `class_subjects` 是零写权限的表（§27.8），
+--     而这两个函数是 `security definer` —— grant 出去 = 任何登录者拿 anon key 就能批量建班、
+--     改任教关系，并且绕过服务端的形状校验（§30.3 的三条理由一字不改地适用）。
+revoke all on function public.generate_stream_classes(uuid, jsonb) from public, anon, authenticated;
+revoke all on function public.assign_stream_teacher(uuid, uuid, uuid) from public, anon, authenticated;
+
+-- -------- 32.5 课表冲突要读的那两份数据（**读**，给前端算冲突；判据不在这里）--------
+--  冲突算法**只有一处**（`app/src/lib/stream.ts` 的 `findScheduleConflicts()`），
+--  三个排课入口（教师端日程表 / 批量粘贴 / 教室端粘贴）共用它 —— I16 的又一次现场。
+--  它需要两份数据，而这两张表都是**读得宽**的（班主任 / 任课老师都要能看见自己班的）：
+--    · 走班班的成员 → `class_members`（`class_members_read` 策略已经在 §27.8 给了；
+--      ⚠️ 前端**懒加载**，不进 `loadSnapshot()`，老库没这张表时不崩 —— 见 `data/remote.ts`）；
+--    · 走班班的任教关系 → 从 `class_members` 那一行自动补出来的 `class_subjects`
+--      （`class_subjects_read` 在 §10 已经有了）。
+--  所以本段**不新增读策略、也不新增读函数** —— 多一条就是同一份数据的第二个出口。
+
+-- -------- 32.6 🔴 `subjects.can_stream` **废弃**（Q24 = B）--------
+--  用户口径：走班四科（**含化学**）**写死在代码里**（`app/src/lib/stream.ts` 的
+--  `STREAM_SUBJECT_CODES`），**不再读 `subjects.can_stream`**。
+--
+--  为什么是 **drop 列**而不是"留着 + 标注废弃"：
+--    · 这一列**和代码里的四科常量说的是同一件事**（"哪几科能走班"），
+--      留着它 = **一个字段两种语义来源**（§四的硬约束），而且它今天就是错的
+--      （库里 `can_stream = true` 的是 生物 / 政治 / 地理 **3 科，漏了化学**，
+--       而代码里是 4 科 → "两个真相"，下一轮谁读它谁就错）。
+--    · `create table` 那一份**同时删列**（新库不建它）+ 这一句 `drop column`（老库删掉它），
+--      `schema.sql` 幂等 → 两类库收敛到**同一个形状**（§一"schema 必须幂等"的要求）。
+--    · 代价（如实登记）：**那一列的数据没了**。它是 `on conflict do nothing` 写进去的
+--      恒定种子数据（三行 true、其余 false），不是学校录入的业务数据 ——
+--      要恢复手工跑一次就行，恢复 SQL 见下面注释。
+--  ⚠️ 顺序：**先改 `create table` 的列清单、再 drop** —— `create table if not exists`
+--     对已存在的表不生效，所以两句都要在（缺一句就有一类库收敛不过去）。
+alter table subjects drop column if exists can_stream;
+--  自检（幂等：跑两遍，下面这条必须回 0 行）：
+--  -- select column_name from information_schema.columns
+--  --  where table_schema='public' and table_name='subjects' and column_name='can_stream';
+--  回退（要恢复那一列时；**四科的真相仍在 `lib/stream.ts`，不要拿它当判据**）：
+--  -- alter table subjects add column if not exists can_stream boolean not null default false;
+--  -- update subjects set can_stream = true where code in ('biology','politics','geography');
+
+-- -------- 32.7 核对（把下面整段粘进 SQL 编辑器）--------
+--  ① 走班班的唯一键在不在（期望 1 行）：
+--  -- select indexname from pg_indexes where tablename='classes' and indexname='classes_stream_key_uniq';
+--  ② 建索引之前先查重（有重复时 `create unique index` 会直接失败、整份脚本回滚）：
+--  -- select grade_id, stream_key, count(*) from classes
+--  --  where kind='stream' and stream_key <> '' group by 1,2 having count(*) > 1;
+--  ③ 走班班一览（**多对多**：同一个学生在两行里出现是正常的 —— 差 2 门）：
+--  -- select c.name, c.stream_key, count(cm.student_id) as 人数
+--  --   from classes c left join class_members cm on cm.class_id = c.id
+--  --  where c.kind = 'stream' group by 1,2 order by 1;
+--  -- select student_id, count(*) from class_members group by 1 having count(*) > 1;
+--  ④ 每个走班班有没有老师、有没有任教关系（**两列都必须 > 0**，否则那位老师建不了作业）：
+--  -- select c.name, (c.teacher_id is not null) as 有老师,
+--  --        (select count(*) from class_subjects cs where cs.class_id = c.id) as 任教关系
+--  --   from classes c where c.kind = 'stream' order by c.name;
+--  ⑤ 两个写入口**没有**给 authenticated（期望 0 行）：
+--  -- select p.proname from pg_proc p
+--  --  where p.proname in ('generate_stream_classes','assign_stream_teacher')
+--  --    and has_function_privilege('authenticated', p.oid, 'execute');
+--  ⑥ `can_stream` 那一列没了（期望 0 行）：
+--  -- select column_name from information_schema.columns
+--  --  where table_schema='public' and table_name='subjects' and column_name='can_stream';
 -- ============================================================

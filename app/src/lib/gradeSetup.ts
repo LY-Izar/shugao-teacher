@@ -227,3 +227,93 @@ export async function apiBulkClassSubjects(
     replaced: Number(d.replaced ?? 0),
   }
 }
+
+/* ============================================================
+   🆕 P7：走班班的生成与分配（`schema.sql` §32；Q7 = B / Q19 = A）
+   ------------------------------------------------------------
+   🔴 **判据一处都不在这里**：两个动作都由服务端用 service_role + 显式 `p_actor`
+      调那个写 RPC，判据在数据库的 `can_manage_grade_setup_for` 里（§30 的形状）。
+      这一层只做"算建议 + 把服务端的人话带回来"。
+   ============================================================ */
+
+/** 一个走班班的建议（`lib/stream.ts` 的 `planStreamClasses()` 算出来的，**教导处确认后才写**） */
+export type StreamGroupRow = {
+  streamKey: string
+  name: string
+  subjects: string[]
+  /** 已经存在的走班班 id（重算时认回来的那个）；没有就是空串 */
+  classId?: string
+  studentIds: string[]
+}
+
+export type StreamGenerateResult = {
+  ok: boolean
+  message: string
+  /** 这次生成 / 重算了几个走班班 */
+  created: number
+  /** 一共写了多少条成员关系（**多对多**：差 2 门的学生会算两次） */
+  members: number
+  classes: Array<{ classId: string; name: string; streamKey: string; members: number }>
+}
+
+/**
+ * **生成走班班**（一个事务）。
+ *
+ * 🔴 Q7 = B：这个函数**只在教导处点了「确认生成」之后**才被调用 ——
+ *    调用之前，`planStreamClasses()` 算出来的只是一份**建议**（页面上给他看）。
+ */
+export async function apiGenerateStreams(
+  gradeId: string,
+  groups: StreamGroupRow[],
+): Promise<StreamGenerateResult> {
+  const empty: StreamGenerateResult = { ok: false, message: '', created: 0, members: 0, classes: [] }
+  if (!groups.length) return { ...empty, message: '没有要走班的组合' }
+  const r = await postApi('/api/grade-setup', { action: 'streamGenerate', gradeId, groups })
+  if (!r.ok) return { ...empty, message: apiMessage(r, '生成走班班失败') }
+  const d = r.data as Record<string, unknown>
+  return {
+    ok: true,
+    message: `已生成 ${Number(d.created ?? 0)} 个走班班`,
+    created: Number(d.created ?? 0),
+    members: Number(d.members ?? 0),
+    classes: Array.isArray(d.classes)
+      ? (d.classes as Array<Record<string, unknown>>).map((x) => ({
+          classId: String(x.classId ?? ''),
+          name: String(x.name ?? ''),
+          streamKey: String(x.streamKey ?? ''),
+          members: Number(x.members ?? 0),
+        }))
+      : [],
+  }
+}
+
+export type StreamAssignResult = {
+  ok: boolean
+  message: string
+  /** 🔴 这次**补了几行** `class_subjects`（Q19 = A：界面必须明确提示） */
+  added: number
+  subjects: string[]
+}
+
+/**
+ * **分配走班班老师**（Q19 = A：**自动补 `class_subjects`**，与分配同一个事务）。
+ *
+ * 🔴 返回的 `added` 必须上屏 —— "补了几行"是这一条验收的口径：
+ *    不补的话那位老师建作业会被权限层**静默拒掉**（0 行、不报错）。
+ */
+export async function apiAssignStreamTeacher(
+  gradeId: string,
+  classId: string,
+  teacherId: string,
+): Promise<StreamAssignResult> {
+  const r = await postApi('/api/grade-setup', { action: 'classSubjectAssign', gradeId, classId, teacherId })
+  if (!r.ok) return { ok: false, message: apiMessage(r, '分配老师失败'), added: 0, subjects: [] }
+  const d = r.data as Record<string, unknown>
+  const added = Number(d.added ?? 0)
+  return {
+    ok: true,
+    message: added > 0 ? `已分配，并补了 ${added} 行任课关系` : '已分配（任课关系本来就在）',
+    added,
+    subjects: Array.isArray(d.subjects) ? (d.subjects as unknown[]).map(String) : [],
+  }
+}

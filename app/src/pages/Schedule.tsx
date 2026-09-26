@@ -13,10 +13,12 @@ import {
 import { ScheduleBatch } from '../components/ScheduleBatch'
 import { Button, PageHead, Panel, Sect, Sheet, Tag } from '../components/ui'
 import { useStore, useToast } from '../data/store'
+import { loadClassMembers, loadClassSubjects } from '../data/remote'
 import { WEEKDAY_TEXT, type ScheduleItem, type ScheduleKind } from '../data/types'
 import { notifyPermission, requestNotify } from '../lib/notify'
 import {
   REMIND_BEFORE,
+  checkScheduleConflicts,
   dayState,
   durationText,
   itemsOfDay,
@@ -76,7 +78,7 @@ export default function Schedule() {
     setOpen(true)
   }
 
-  const save = () => {
+  const save = async () => {
     const payload: Omit<ScheduleItem, 'id'> = {
       ...form,
       title: form.title.trim(),
@@ -87,6 +89,16 @@ export default function Schedule() {
     if (!payload.title) return
     if (toMinutes(payload.end) <= toMinutes(payload.start)) {
       push({ text: '结束时间要晚于开始时间', tone: 'bad' })
+      return
+    }
+    /* 🔴 走班冲突：**拦住**（Q13 = A）。改动的那一行要从"已有"里排掉，否则自己撞自己 */
+    const others = editing ? schedule.filter((s) => s.id !== editing) : schedule
+    const gate = await checkScheduleConflicts(
+      { items: [{ ...payload, id: editing ?? 'pending' }], schedule: others, classes },
+      { loadMembers: loadClassMembers, loadSubjects: loadClassSubjects },
+    )
+    if (gate.blocked) {
+      push({ text: '这张课表和走班班撞了，没有保存', tone: 'bad', desc: gate.message })
       return
     }
     if (editing) {
@@ -343,10 +355,20 @@ export default function Schedule() {
         onClose={() => setBatchOpen(false)}
         classes={classes}
         today={today}
-        onSave={(items) => {
+        onSave={async (items) => {
+          /* 🔴 批量粘贴这一路的走班冲突校验（与单条、教室端**同一个** `checkScheduleConflicts`） */
+          const gate = await checkScheduleConflicts(
+            { items: items.map((x, i) => ({ ...x, id: `pending-${i}` })), schedule, classes },
+            { loadMembers: loadClassMembers, loadSubjects: loadClassSubjects },
+          )
+          if (gate.blocked) {
+            push({ text: '这批课表和走班班撞了，没有保存', tone: 'bad', desc: gate.message })
+            return false
+          }
           const n = addScheduleMany(items)
           setBatchOpen(false)
           push({ text: `已加入 ${n} 条日程`, tone: 'ok' })
+          return true
         }}
       />
 

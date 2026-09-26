@@ -180,7 +180,8 @@ await withLock(async () => {
    * 它们缺列的情形仍由 `missingCols` 显式造。
    */
   const REAL_COLS = new Map([
-    ['subjects', ['code', 'name', 'short', 'can_stream', 'sort', 'created_at']],
+    // ⚠️ P7：`subjects.can_stream` **已经删掉**（§32.6 走班四科写死在 lib/stream.ts）
+    ['subjects', ['code', 'name', 'short', 'sort', 'created_at']],
   ])
   /**
    * 这些表**一律回 500 + 一个认不出来的错误码** —— 用来造"探测本身没结论"。
