@@ -292,20 +292,18 @@ for (const entry of NOTICE_ROWS) {
 }
 {
   /*
-   * ①′ 的 6 列小计：§2.2 那 **34 行**原样 + 通知两行 → 153 / 29 / 34（方案 §四.0）。
-   *
-   * ⚠️ 这里**不写死 153/29/34**，而是从 `MATRIX_SHAPE` 推 +8/+2/+2 ——
-   *    2026-09-30「开学准备」那一轮我一度以为"多了一个页面 → 矩阵多一行"，
-   *    把 `MATRIX_SHAPE` 改成 35/148/29/33 并插了一行进 §2.2 的表里；
-   *    `D2 自证：矩阵行数` 当场报"实测 34"——**因为那个地址原来就在表里**。
-   *    派生写法让这类改动只需要动 `MATRIX_SHAPE` 一处，而不是这里三个字面量。
+   * ①′ 的 6 列小计：6 列那一份的 `MATRIX_SHAPE` + 通知两行（+8 V / +2 E / +2 B）。
+   * ⚠️ 这一组**不是 §2.2 的矩阵**：§2.2 只有 6 列、**没有** `/notices` 那两行，
+   *    而这两个小计是 `管理架构与角色权限方案.md` §四.0 那个口径（含通知）。
+   * 🆕 2026-10-01：`MATRIX_SHAPE` 变了（加 `/manage` 那一行 + 按实测改正聚合数），
+   *    所以这一组的期望值也跟着变成 **156 / 30 / 35**（派生写法，改一处即可）。
    */
-  eq(`A8 对账：${MATRIX_SHAPE.v} + 8 = ${MATRIX_SHAPE.v + 8}（①′ 的 V）`, MATRIX_SHAPE.v + 8, 153)
-  eq(`A8 对账：${MATRIX_SHAPE.e} + 2 = ${MATRIX_SHAPE.e + 2}（①′ 的 E）`, MATRIX_SHAPE.e + 2, 29)
+  eq(`A8 对账：${MATRIX_SHAPE.v} + 8 = ${MATRIX_SHAPE.v + 8}（①′ 的 V）`, MATRIX_SHAPE.v + 8, 156)
+  eq(`A8 对账：${MATRIX_SHAPE.e} + 2 = ${MATRIX_SHAPE.e + 2}（①′ 的 E）`, MATRIX_SHAPE.e + 2, 31)
   eq(
     `A8 对账：${MATRIX_SHAPE.b} + 2 = ${MATRIX_SHAPE.b + 2}（①′ 的 B —— 教室端那两格）`,
     MATRIX_SHAPE.b + 2,
-    34,
+    35,
   )
   eq(
     'A8 对账自证：①′ 的 V+E+B == (矩阵行数 + 2 行) × 6',
@@ -348,6 +346,99 @@ for (const entry of NOTICE_ROWS) {
     leadKeys('subject_lead'),
     leadKeys('lesson_prep_lead'),
   )
+}
+
+/* ============================================================
+   第一节之二·补 · A11：🆕「行政管理」入口（2026-10-01）
+   ------------------------------------------------------------
+   它是**一个页面三张入口卡**（年级管理 `/grades` · 档案管理 `/grades/promote` ·
+   教师管理 `/accounts`）—— 那三行原来在「我的」页上，本轮提出来单独成一页。
+
+   🔴 它为什么必须是**单独一节**而不是塞进 A1：
+      · `EXPECTED` 那张表是"6 × 14 = 84 格"的口径（`MATRIX_SHAPE` 那个分母）；
+        这一项是**新入口**，进 A1 会把 84 变 90、把那一组自检值全带偏。
+      · 它的判据不是"某一个新的角色数组"，而是**那三张卡各自判据的并集**
+        （`roles.ts` 的 `seesAdministration()`）—— 所以这里逐档核的就是
+        "并集有没有算对"，而且**必须带反向对照**（否则它可能是个恒真的摆设）。
+   ============================================================ */
+
+section('第一节之二·补 · A11：行政管理入口（/manage）—— 逐档 + 反向对照')
+
+{
+  const as = (k) => [{ role: k }]
+  /*
+   * 逐档（对 = 摆入口）：
+   *   · super / admin —— `canManageTeachers` 直接命中（也覆盖了另外两张卡）；
+   *   · office_head   —— `canManageTeachers`（建号 + 提档那两张卡）；
+   *   · grade_head    —— **只**因为他看得见「年级管理」那张卡（`hasManagingRole`），
+   *                     而**另外两张卡对他都不摆** —— 这一档是"并集"最容易被算错的那一格。
+   */
+  for (const [k, label] of [
+    ['super', '超管'],
+    ['admin', '教务处'],
+    ['grade_head', '年级主任'],
+    ['office_head', '办公室主任'],
+  ]) {
+    eq(`A11：${label} 看得见「行政管理」入口`, roles.entryVisible('/manage', as(k)), true)
+  }
+  /*
+   * 逐档（错 = 不摆）：**带反向对照的另一半**（§18.3：两个坏法方向相反，各要一条）。
+   *   · head_teacher / teacher —— 够不着那三张卡里的任何一张；
+   *   · 教室端（`roles = []`）—— 它没有 teacher_roles 行，"没有身份"与"认不出的身份"同款。
+   *   ⚠️ 校级三档 / 德育处 / 组长**也看不见**（他们看得见「年级管理」那一页，
+   *      但那个入口不在这个页面上）—— 否则"并集"会被写成"`seesTeachingData` 也算"。
+   */
+  for (const [k, label] of [
+    ['head_teacher', '班主任'],
+    ['teacher', '任课教师'],
+    ['principal', '校长'],
+    ['vice_principal', '副校长'],
+    ['principal_assistant', '校长助理'],
+    ['moral_edu_head', '德育处主任'],
+    ['subject_lead', '教研组长'],
+    ['lesson_prep_lead', '备课组长'],
+  ]) {
+    eq(`A11：${label} **看不见**「行政管理」入口`, roles.entryVisible('/manage', as(k)), false)
+  }
+  eq('A11：教室端（roles=[]）也看不见「行政管理」', roles.entryVisible('/manage', []), false)
+  /*
+   * 🔴 反向对照（**必须有**）：如果哪天有人把它写成 `() => true`（或者把并集写成
+   *    "谁都看得见"），上面那 8 条会一起红 —— 但"上面那 8 条真的会红吗"这件事
+   *    本身没有证据。所以这里反过来钉住**并集的两半都在**：
+   *      · 至少有一个身份是 true（不是恒假）；
+   *      · 至少有一个教师身份是 false（不是恒真）。
+   *    恒真 / 恒假两种坏法各被一条断言盖住。
+   */
+  const teacherRoles = ['super', 'admin', 'principal', 'vice_principal', 'principal_assistant', 'office_head', 'moral_edu_head', 'grade_head', 'subject_lead', 'lesson_prep_lead', 'head_teacher', 'teacher']
+  const seen = teacherRoles.map((k) => roles.entryVisible('/manage', as(k)))
+  check(
+    seen.includes(true),
+    'A11 反向对照：至少有一个教师身份看得见（不是"恒假"的摆设）',
+    `true 的档：${teacherRoles.filter((_, i) => seen[i]).join('、') || '(一个都没有)'}`,
+  )
+  check(
+    seen.includes(false),
+    'A11 反向对照：至少有一个教师身份看不见（不是"恒真"的摆设）',
+    `false 的档：${teacherRoles.filter((_, i) => !seen[i]).join('、') || '(一个都没有)'}`,
+  )
+  /* 并集的推导本身：`seesAdministration` 必须**恰好**等于那两条判据的或。
+     ⚠️ 是**两条**不是三条：`/grades` 那一张卡的判据（`hasManagingRole || seesTeachingData`）
+     与另外两张卡的判据（`canManageTeachers`）取并 —— 而 `seesTeachingData` 单独那一支
+     **不算**（校级三档 / 德育处够得着 `/grades` 那一页，却够不着这个页面上的另外两张卡，
+     所以他们看不见这个入口 —— 这正是 A11 上面那两条 list 钉住的事）。 */
+  for (const k of teacherRoles) {
+    const want = roles.hasManagingRole(as(k)) || roles.canManageTeachers(as(k))
+    eq(
+      `A11：${k} 那一档 == 「年级管理 or 档案管理 or 教师管理」的并集（不许另写一套）`,
+      roles.seesAdministration(as(k)),
+      want,
+    )
+  }
+  /* 三张卡各自的判据**一个字没动**（这一轮只搬地方、没改判据） */
+  eq('A11：`/grades` 的判据没动（超管看得见）', roles.entryVisible('/grades', as('super')), true)
+  eq('A11：`/grades` 的判据没动（德育处看得见 —— 与「行政管理」入口那一档不同）', roles.entryVisible('/grades', as('moral_edu_head')), true)
+  eq('A11：`/grades/promote` 的判据没动（年级主任看不见）', roles.entryVisible('/grades/promote', as('grade_head')), false)
+  eq('A11：`/accounts` 的判据没动（办公室主任看得见）', roles.entryVisible('/accounts', as('office_head')), true)
 }
 
 /* ============================================================
@@ -1035,11 +1126,13 @@ section('第六节 · DEV 钩子：?as= 与 ?kind= 的解析规则')
 section('第七节 · D1：App.tsx 的 path="…" ↔ lib/pages.ts 的 PAGES（集合相等）')
 
 /**
- * `按身份显示导航方案.md` §2.2 矩阵里的那 **34 条路径**（**写死的清单**）。
+ * `按身份显示导航方案.md` §2.2 矩阵里的那 **35 条路径**（**写死的清单**）。
  *
  * 为什么写死而不是读文档：D1 要能独立于 D2 的解析器工作 ——
  * D2 的锚点一旦坏了，D2 自己会红，但 D1 不该跟着一起瞎。
- * ⚠️ 这 34 条**一条都不许改**（`MATRIX_SHAPE` 那个口径的实体）。
+ * ⚠️ 这 35 条**一条都不许改**（`MATRIX_SHAPE` 那个口径的实体）。
+ * 🆕 2026-10-01 加 `/manage`（行政管理）—— 这一条是**真的新地址**（§2.2 里原来没有它），
+ *    所以 `MATRIX_SHAPE` 也跟着从 34/145/27/32 变成 35/146/28/32。
  */
 const MATRIX_PATHS = [
   '/login', '/classroom', '/', '/classes', '/classes/:id',
@@ -1049,7 +1142,7 @@ const MATRIX_PATHS = [
   '/assignments/:id/stats', '/assignments/:id/call', '/calls', '/exams', '/exams/new',
   '/exams/:id/grade', '/exams/:id/stats', '/schedule', '/files', '/wrong', '/wrong/:classId',
   '/settings', '/accounts', '/grades', '/grades/:id', '/grades/:id/setup',
-  '/grades/promote', '/settings/terms', '/admin', '/admin/probes',
+  '/grades/promote', '/settings/terms', '/admin', '/admin/probes', '/manage',
 ]
 
 const appSrc = readApp('src/App.tsx')
@@ -1131,7 +1224,7 @@ const realRoutes = routes.filter((p) => p !== '*')
    第八节 · D2：方案 §2.2 的矩阵路径 ↔ PAGES（**新增页面时的纪律**的机器版）
    ============================================================ */
 
-section('第八节 · D2：方案 §2.2 矩阵（第二个单元格）↔ PAGES — 34 行 / V145 / E27 / B32')
+section('第八节 · D2：方案 §2.2 矩阵（第二个单元格）↔ PAGES — 35 行 / V146 / E28 / B32')
 
 function parseMatrix() {
   const doc = readRepo('按身份显示导航方案.md')
@@ -1199,7 +1292,8 @@ function parseMatrix() {
     check(mx.unknown.length === 0, 'D2：每一格的取值只能是 V / E / B（解析完自证）', mx.unknown.join('、') || '没有认不出的格')
     /*
      * 🔴 **先自证条数与形状，再逐条比**（§4.4 原文：条数不对就直接报"锚点解析错了"，
-     * 不许静默通过）。写死的 34 / 145 / 27 / 32 是方案 §2.2 "规模感"那张表的自检值。
+     * 不许静默通过）。`MATRIX_SHAPE` 是方案 §2.2 "规模感"那张表的自检值
+     * —— 🆕 2026-10-01 加了 `/manage` 那一行之后是 **35 / 146 / 28 / 32**。
      */
     eq('D2 自证：矩阵行数', mx.paths.length, MATRIX_SHAPE.rows)
     eq('D2 自证：V 格数', mx.sum.v, MATRIX_SHAPE.v)
@@ -1207,18 +1301,18 @@ function parseMatrix() {
     eq('D2 自证：B 格数', mx.sum.b, MATRIX_SHAPE.b)
     eq('D2 自证：V+E+B == 行数 × 6', mx.sum.v + mx.sum.e + mx.sum.b, MATRIX_SHAPE.rows * 6)
     eqSet(
-      'D2：矩阵路径 ↔ PAGES 里那 34 条（通知两行不在 §2.2 的矩阵里，见 D9）',
+      'D2：矩阵路径 ↔ PAGES 里那 35 条（通知两行不在 §2.2 的矩阵里，见 D9）',
       mx.paths,
       PAGES.map((p) => p.path).filter((p) => MATRIX_PATHS.includes(p)),
     )
     /* 逐角色的小计也核（方案 §2.2 里那张"每个角色 V/E/B"的表） */
     const ROLE_SUM = [
-      { v: 33, e: 1, b: 0 },
-      { v: 31, e: 3, b: 0 },
-      { v: 29, e: 5, b: 0 },
-      { v: 25, e: 9, b: 0 },
-      { v: 25, e: 9, b: 0 },
-      { v: 2, e: 0, b: 32 },
+      { v: 34, e: 1, b: 0 },
+      { v: 32, e: 3, b: 0 },
+      { v: 30, e: 5, b: 0 },
+      { v: 25, e: 10, b: 0 },
+      { v: 25, e: 10, b: 0 },
+      { v: 2, e: 0, b: 33 },
     ]
     ROLES6.forEach((r, i) => {
       const g = mx.perRole[i]
@@ -1282,20 +1376,20 @@ function parseMatrix() {
 /* ============================================================
    🆕 第八节之二 · D9：`管理架构与角色权限方案.md` §4.2 的 **13 列矩阵**
    ------------------------------------------------------------
-   这是本轮新增的**第二组分母**（方案 §四.0 的 ②）：**36 行 × 13 列 = 468 格**
-   （其中 30 格是办公室主任那一列的 `—` 不适用）。
+   这是本轮新增的**第二组分母**（方案 §四.0 的 ②）：**37 行 × 13 列 = 481 格**
+    （其中 16 格是办公室主任那一列的 `—` 不适用；🆕 2026-10-01 加了 `/manage` 那一行）。
 
    🔴 它与 D2 **不是同一张表**，所以**分开解析、分开断言**：
-      · D2 读 `按身份显示导航方案.md` §2.2（**34 × 6 = 204**）→ `MATRIX_SHAPE`
-      · D9 读 `管理架构与角色权限方案.md` §4.2（**36 × 13 = 468**）→ `MATRIX_SHAPE_13`
+      · D2 读 `按身份显示导航方案.md` §2.2（**35 × 6 = 210**）→ `MATRIX_SHAPE`
+      · D9 读 `管理架构与角色权限方案.md` §4.2（**37 × 13 = 481**）→ `MATRIX_SHAPE_13`
       **两个口径不许互相推导**（列数不同，"相减"出来的数没有意义 —— 方案 §4.0 原文）。
 
    🔴 **D9 的核心一条**：把矩阵里**每一格**与 `ENTRIES` **真算出来**的值对上。
       这正是"文档说的"与"代码做的"之间那根线（D2 里同样有一根）——
-      没有它，13 列那 468 格就只是文档里的一堆字母。
+      没有它，13 列那 481 格就只是文档里的一堆字母。
    ============================================================ */
 
-section('第八节之二 · D9：管理架构方案 §4.2 的 13 列矩阵（36 行 / V344 / E60 / B34 / —30）')
+section('第八节之二 · D9：管理架构方案 §4.2 的 13 列矩阵（37 行 / V349 / E81 / B35 / —16）')
 
 /**
  * 解析 `管理架构与角色权限方案.md` §4.2 的矩阵。
@@ -1382,7 +1476,7 @@ function parseMatrix13() {
     check(mx.unknown.length === 0, 'D9：每一格的取值只能是 V / E / B / —（解析完自证）', mx.unknown.join('、') || '没有认不出的格')
     /* 列序自证：表头的 13 个缩写必须与 `COLS13` 一一对应（改了列序 = 13 列全配错人） */
     eqSet('D9：§4.2 表头的 13 个缩写 == 方案的口径（超教校副助办德级教组备组班任室）', mx.heads, HEAD13)
-    /* 形状自证：36 / 344 / 60 / 34 / 30 */
+    /* 形状自证：37 / 348 / 74 / 34 / 16 */
     eq('D9 自证：矩阵行数', mx.paths.length, MATRIX_SHAPE_13.rows)
     eq('D9 自证：V 格数', mx.sum.v, MATRIX_SHAPE_13.v)
     eq('D9 自证：E 格数', mx.sum.e, MATRIX_SHAPE_13.e)
@@ -1405,11 +1499,15 @@ function parseMatrix13() {
       )
     })
     /*
-     * 36 行 = 原来那 34 行 + 通知那两行。
-     * ⚠️ 这一条是"**不推翻那 204 格**"的机器版：前 34 条路径必须与 D1 的写死清单
+     * 37 行 = 原来那 **35** 行（§2.2 那一份，含 🆕 `/manage`）+ 通知那两行。
+     * ⚠️ 这一条是"**不推翻那 210 格**"的机器版：这 35 条路径必须与 D1 的写死清单
      *    **逐项相等**（顺序可以不同，集合必须相等）。
+     *
+     * 🆕 2026-10-01：`/manage` 那一行是**两张表一起加**的（§2.2 与 §4.2）——
+     *    所以这里的 `MATRIX_PATHS` 也跟着多一条。⚠️ 别只加一处：`MATRIX_PATHS`
+     *    是 D1/D2/D9 三处共用的那一份写死清单，改了它三处一起动（这正是它的用途）。
      */
-    eqSet('D9：13 列矩阵的行 ↔ §2.2 的 34 条路径 + 通知两行', mx.paths, [
+    eqSet('D9：13 列矩阵的行 ↔ §2.2 的 35 条路径 + 通知两行', mx.paths, [
       ...MATRIX_PATHS,
       '/notices',
       '/notices/new',
@@ -1569,7 +1667,12 @@ section('第九节 · D3/D4/D5：判据白名单 · myRoles 读取点白名单 �
      *    ⚠️ 它仍然合 M1/M2（只读 `roles` 一个参数、只返回 boolean），且**两个函数都在
      *    lib/roles.ts 里**（不是就地写 `roles.some(...)`）。
      */
-    const ALLOWED = ['isSuperAdmin', 'canManageTeachers', 'canAssignRoles', 'hasManagingRole', 'canPublishNotice', 'seesTeachingData']
+    /*
+     * 🆕 2026-10-01 加 `seesAdministration`（`/manage` 那一格用的）——
+     *    它**不是**第 7 个角色判据，而是**已有那几条的并集**（写在 `lib/roles.ts` 里、
+     *    带逐条推导的注释），所以这里放行它，而不是让 `ENTRIES` 里就地写 `||`。
+     */
+    const ALLOWED = ['isSuperAdmin', 'canManageTeachers', 'canAssignRoles', 'hasManagingRole', 'canPublishNotice', 'seesTeachingData', 'seesAdministration']
     const inline = rules.filter((b) => b.includes('=>'))
     eqSet(
       'D3：就地写的判据只有两处 —— `() => true`（全员）与 `/grades` 那一行的"追加一支"',
@@ -1610,7 +1713,8 @@ section('第九节 · D3/D4/D5：判据白名单 · myRoles 读取点白名单 �
    *   · 显示用途（标签文案 / 问候语）→ 白名单，允许
    *   · 任何别的新用途 → 报出来让人看一眼（"这是显示还是判据？"）
    *
-   * ⚠️ 白名单**今天有 8 个**，比方案 §4.2 里写的 4 个多四个 —— 每一个都写清了理由，
+   * ⚠️ 白名单**今天有 15 个**（🆕 2026-10-01 加了 `src/pages/Administration.tsx`），
+   *    比方案 §4.2 里写的 4 个多十一个 —— 每一个都写清了理由，
    *    而且四个都是"这一轮/上一轮新出现的"，所以**这一条审计第一次跑就抓到了东西**
    *    （这正是它该有的样子，别把清单改成"永远为绿"）：
    *      · `src/pages/Admin.tsx`    上一轮（超管面板第一期）落的文件：`isSuperAdmin(myRoles)` 只决定摆不摆
@@ -1620,7 +1724,13 @@ section('第九节 · D3/D4/D5：判据白名单 · myRoles 读取点白名单 �
    *    加一个就要在这里加一行并写理由。
    */
     const ROLE_READERS = new Map([
-      ['src/pages/Settings.tsx', '身份卡 + 我的身份（显示）+ 三行入口读 entryVisible'],
+      ['src/pages/Settings.tsx', '身份卡 + 我的身份（显示）+ 「平台运维」那一行读 entryVisible'],
+      [
+        'src/pages/Administration.tsx',
+        '🆕 行政管理（2026-10-01）：**三张入口卡各自的显隐**（`entryVisible(卡的 key, myRoles)`）—— ' +
+          '这一页**自己不查权限**（它只是入口合集），判据全在 `lib/roles.ts` 那张表里；' +
+          '**不读任何数据行**（那三页的读写闸门由服务端与 RLS 判）',
+      ],
       ['src/pages/TeacherAccounts.tsx', '身份区按钮显隐（canAssignRoles）+ 身份名文案'],
       ['src/components/AppShell.tsx', '当前身份标签（显示）+ NAV 过滤（**唯一一处真·入口判据**）+ 🆕通知未读红点'],
       ['src/pages/Workbench.tsx', '问候语里的身份标签（显示）+ 🆕「最新通知」那一块的入口显隐'],
@@ -1695,6 +1805,12 @@ section('第九节 · D3/D4/D5：判据白名单 · myRoles 读取点白名单 �
     ['src/lib/roles.ts', 'filter 的是 EntryKey 数组（visibleEntryKeys，入口不是数据）'],
     ['src/pages/Admin.tsx', 'filter 的是面板的只读体检项 allTones（与角色无关）'],
     ['src/pages/Settings.tsx', 'filter 的是 schedule 里 scope!==class 的那一份（与角色无关）'],
+    [
+      'src/pages/Administration.tsx',
+      '🆕 行政管理（2026-10-01）：`.filter` 滤的是**入口清单**（`CARDS.filter((c) => entryVisible(c.key, myRoles))`）' +
+        '—— 与 `AppShell` 的 `NAV.filter(...)` 同一款，正是 M3 划的那条线（**入口 ≠ 数据行**）。' +
+        '这一页不读 classes / students / grades 里的任何一行',
+    ],
     ['src/pages/TeacherAccounts.tsx', 'filter 的是任课关系多选（与角色无关）'],
     ['src/pages/Workbench.tsx', 'filter 的是今日待办（与角色无关）'],
     ['src/pages/Notices.tsx', '🆕 filter 的是通知列表的**排序前拷贝**（与角色无关，未读那一段也是服务端给的）'],
@@ -1783,7 +1899,7 @@ section('第十节 · D6：PIN_KEYS ⊆ NAV（移动端胶囊的兜底）')
   const navKeys = [...shell.matchAll(/^\s*\{ to: '([^']+)'/gm)].map((m) => m[1])
   const pinLine = shell.match(/const PIN_KEYS = \[([^\]]+)\]/)
   const pinKeys = pinLine ? [...pinLine[1].matchAll(/'([^']+)'/g)].map((m) => m[1]) : []
-  eq('D6：NAV 有 8 项（🆕 2026-09-28 加了「通知」）', navKeys.length, 8)
+  eq('D6：NAV 有 9 项（🆕 2026-10-01 加了「行政管理」；之前 8 项 = 加了「通知」）', navKeys.length, 9)
   eq('D6：PIN_KEYS 有 3 项', pinKeys.length, 3)
   eqSet('D6：PIN_KEYS ⊆ NAV', pinKeys.filter((k) => !navKeys.includes(k)), [])
   eqSet('D6：NAV 的每一项都在 ENTRIES 里', navKeys.filter((k) => !(k in roles.ENTRIES)), [])

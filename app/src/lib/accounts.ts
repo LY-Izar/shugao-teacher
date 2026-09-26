@@ -10,6 +10,8 @@
    🆕 2026-09-28 第二轮：**部门归属**（`setDepartment()`）走的是**建号**那一档
       （`can_create_teacher_accounts`：超管 / 教务处 / 办公室主任），因为它改的是**档案属性**
       而不是身份 —— 判据仍然只在数据库那一侧，这里一个字都不重写。
+   🆕 2026-09-28 第三轮：**显示姓名**（`renameTeacher()`）同样走**建号**那一档（同上），
+      理由也同上：姓名是档案属性。它**不动登录账号**（见那个函数的注释）。
    这里只做三件事：补邮箱后缀、带 JWT、把错误翻成人话。
    ============================================================ */
 
@@ -136,6 +138,15 @@ async function call<T>(body: Record<string, unknown>): Promise<Result<T>> {
 
 /* ---------------- 具体动作 ---------------- */
 
+/**
+ * 🆕 显示姓名的长度上限 —— 与**服务端** `functions/api/teacher-account.ts` 的 `NAME_MAX`
+ * **同一个数**（那边是唯一的闸门，这里只是"别让他白敲"）。
+ *
+ * ⚠️ 这不是第二套判据：服务端 `checkTeacherName()` 才是判据，
+ *    这一份只用来在输入框上写一句提示（判据在数据库/服务端那一侧的纪律见 AGENTS.md）。
+ */
+export const NAME_MAX = 24
+
 export const listTeachers = () => call<Directory>({ action: 'list' })
 
 export type CreateInput = {
@@ -164,6 +175,19 @@ export const createTeacher = (input: CreateInput) =>
 
 export const resetTeacherPassword = (teacherId: string) =>
   call<{ password: string }>({ action: 'reset', teacherId })
+
+/**
+ * 🆕 改**显示姓名**（`teachers.name`）。
+ *
+ * 🔴 改的只是显示名 —— **不动登录账号**（`auth.users.email`），
+ *    所以他的任教关系 / 身份 / 部门 / 登录方式一个字都不变（这正是它的用处：
+ *    姓名打错了不必重建账号）。判据在服务端：`can_create_teacher_accounts()`
+ *    （超管 / 教务处 / 办公室主任），与建号同一档。
+ *
+ * 返回改后的姓名，调用方**就地更新那一行**即可（不必重拉整张名单）。
+ */
+export const renameTeacher = (teacherId: string, name: string) =>
+  call<{ teacher: { id: string; name: string } }>({ action: 'rename', teacherId, name })
 
 export const assignSubject = (input: {
   teacherId: string

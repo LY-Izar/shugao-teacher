@@ -246,9 +246,11 @@ const EXPECTED_FILES = [
   '84-classroom-teacher-blocked.png',
   '85-classroom-teacher-preview-ok.png',
   // 按身份显示导航（`按身份显示导航方案.md`，本轮）。三张各自钉一件事：
-  //   86 = **教导处**的桌面左栏（看不出差别才对 —— 教导处与任课教师今天入口数相同）
-  //   87 = **超管**的移动端展开层：多出「年级管理」那一项（N3：COLLAPSED 是可见差集，自动的）
-  //   88 = **教导处**的「我的」页：多出「教师账号」那一行（**该显示的时候真的显示**）
+  //   86 = **教导处**的桌面左栏（🆕 2026-10-01：比任课教师**多一项「行政管理」** ——
+  //        在此之前它与任课教师逐项相同，本轮 `/manage` 是第一个"按身份不同"的左栏项）
+  //   87 = **超管**的移动端展开层：多出「行政管理」那一项（N3：COLLAPSED 是可见差集，自动的）
+  //   88 = **教导处**的「我的」页：三行入口搬走之后只剩「平台运维」那一行
+  //        （原来这张钉的是"多出「教师账号」那一行"—— 本轮那一行搬去了 /manage）
   //   ⚠️ 任课教师那两张不需要新图：02/09 就是（今天全站账号都是任课教师）。
   '86-nav-role-desktop-admin.png',
   '87-nav-role-super-sheet.png',
@@ -285,6 +287,13 @@ const EXPECTED_FILES = [
   '101-maint-classroom.png',
   '102-maint-admin-exempt.png',
   '103-settings-feedback.png',
+  // 🆕 2026-10-01「行政管理」（`/manage`）—— 一个页面、三张入口卡。
+  //  104 = **教导处**打开 `/manage`（演示模式下摆两张卡：年级管理 + 档案管理；
+  //        第三张「教师管理」要服务端，本地不摆 —— 判据含 isRemote，不是身份问题）
+  //  105 = **任课教师**手打 `/manage`：一张卡都摆不出来、给一句说明（反向对照）
+  //  ⚠️ 图号续在 103 之后，不清空旧图；`EXPECTED_FILES` 是**集合相等**，两张都登记了。
+  '104-manage-admin.png',
+  '105-manage-teacher.png',
 ]
 
 /* ---------------- 断言与日志 ---------------- */
@@ -2141,15 +2150,29 @@ await withLock(async () => {
         return out
       }
 
-      /** 「我的」页上那几行入口在不在（按行文案，不看实现） */
+      /**
+       * 「我的」页上那几行入口在不在（按行文案，不看实现）。
+       *
+       * 🔴 **2026-10-01「行政管理」轮改了三个字段的语义**（原来是
+       * `accounts` / `files` / `schedule` / `admin`）：
+       *    · `accounts` —— 原来查的是「教师账号」那一行的副标题「建号（带学科）」，
+       *      而那一行**搬去 `/manage` 了** → 现在它查的是**「行政管理」那一行**
+       *      （副标题「年级 · 档案 · 教师」：它才是「我的」页上新出现的入口）。
+       *      更名 `manage` 是为了不留下一个名字骗人的字段（这一点比省一行改更重要）。
+       *    · 新增两个**反向字段**：`archive` / `accountsRow` ——
+       *      它们查的是**搬走的那两行原来那两句副标题**，**在「我的」页上必须查不到**。
+       *      这正是"反向断言：加回来 → 必须红"的落点（那两行加回这一页就会红）。
+       */
       const settingsRows = async () => {
         const b = await bodyText(navPage)
         return {
           body: b,
-          accounts: b.includes('建号（带学科）'),
+          manage: b.includes('年级 · 档案 · 教师'),
           files: b.includes('传到教室大屏'),
           schedule: b.includes('录入上课与日程'),
           admin: b.includes('只读体检屏'),
+          archive: b.includes('高三毕业的备份与删除'),
+          accountsRow: b.includes('建号（带学科）'),
         }
       }
 
@@ -2160,6 +2183,24 @@ await withLock(async () => {
        *    而"看通知"与"发通知"是两件事（后者只有那八档，见 `ENTRIES['/notices/new']`）。
        */
       const RAIL_TEACHER = ['工作台', '班级', '作业', '考试', '错题集', '日程表', '通知', '我的']
+
+      /**
+       * 🆕 2026-10-01「行政管理」（`/manage`）：**左栏第一次因身份而不同**。
+       *
+       * 在此之前 `NAV` 里每一项对所有教师身份都是 V（`/notices` 是 `() => true`，
+       * 其余八项也一样），所以"教导处与任课教师的左栏逐项相同"这句**是对的**。
+       * 这一轮加了 `/manage` —— 它的判据是**三张卡判据的并集**
+       * （`seesAdministration` = `hasManagingRole || canManageTeachers`
+       * = 超管 / 教务处 / 年级主任 / 办公室主任），而**班主任与任课教师看不见它**。
+       *
+       * → 所以现在有两份清单：
+       *    · `RAIL_TEACHER`（8 项，不带行政管理）—— 任课教师 / 班主任；
+       *    · `RAIL_MANAGING`（9 项，`通知` 与 `我的` 之间多一项「行政管理」）——
+       *      超管 / 教务处 / 年级主任 / 办公室主任。
+       * ⚠️ 位置是**刻意的**：它排在「通知」之后、「我的」之前 —— `NAV` 的顺序即左栏顺序，
+       *    而"行政管理是一个页面、不是设置项"这件事就体现在它**不在最后**。
+       */
+      const RAIL_MANAGING = ['工作台', '班级', '作业', '考试', '错题集', '日程表', '通知', '行政管理', '我的']
 
       /* ---------- B1：桌面左栏逐角色**集合相等**（多一项也红） ---------- */
 
@@ -2185,18 +2226,29 @@ await withLock(async () => {
           `实际 ${got.length} 项：${got.join(' / ') || '(空)'}`,
         )
         check(
-          !got.includes('年级管理') && !got.includes('平台运维'),
-          `${SNAV}：任课教师**看不见**「年级管理」「平台运维」`,
-          got.includes('年级管理') || got.includes('平台运维') ? `实际：${got.join(' / ')}` : '两个都不在',
+          !got.includes('年级管理') && !got.includes('平台运维') && !got.includes('行政管理'),
+          `${SNAV}：任课教师**看不见**「年级管理」「平台运维」「行政管理」`,
+          got.includes('年级管理') || got.includes('平台运维') || got.includes('行政管理')
+            ? `实际：${got.join(' / ')}`
+            : '三个都不在',
         )
       })
 
       await step(SNAV, async () => {
         await navGoto('/', 'admin')
         const got = await railLabels()
+        /*
+         * 🔴 **2026-10-01 这一条从"与任课教师逐项相同"改成"比任课教师多一项「行政管理」"**，
+         *    这是本轮**唯一一处"左栏按身份不同"**，理由与逐档写在这里：
+         *      · 教导处（admin）看得见 `/manage` —— 因为那三张卡里有两张的判据是
+         *        `canManageTeachers`（含 admin）；
+         *      · 任课教师看不见 —— 他够不着那三张卡里的任何一张（`RAIL_TEACHER` 那条钉的反方向）；
+         *      · ⚠️ 旧注释里那句"§2.2 的 25/9 与 31/3 说的是入口总数，不是这一栏"
+         *        **今天仍然成立**，但结论变了：左栏**不再**对五个教师身份相同。
+         */
         check(
-          JSON.stringify(got) === JSON.stringify(RAIL_TEACHER),
-          `${SNAV}：**教导处**的左栏与任课教师**逐项相同**（§2.2 的 25/9 与 31/3 说的是入口总数，不是这一栏）`,
+          JSON.stringify(got) === JSON.stringify(RAIL_MANAGING),
+          `${SNAV}：**教导处**的左栏比任课教师**多一项「行政管理」**（三张卡里有两张的判据含 admin）`,
           `实际 ${got.length} 项：${got.join(' / ') || '(空)'}`,
         )
         check(
@@ -2211,21 +2263,16 @@ await withLock(async () => {
         await navGoto('/', 'super')
         const got = await railLabels()
         /*
-         * 🔴 **今天超管的左栏与任课教师一模一样，这是对的** —— 必须把"为什么"写下来，
-         *    否则下一个人会以为这一节漏测了：
-         *    ① `NAV`（桌面左栏那 **8** 项，2026-09-28 加了「通知」）里的每一条，
-         *       方案 §2.2 / §四.2 对**所有教师身份**都是 **V**
-         *       —— 也就是说**今天这一栏的过滤结果对所有教师身份相同**；
-         *    ② 超管多出来的那两项（`/grades` 年级管理、`/admin` 平台运维）是方案里的
-         *       ★ 规划项：路由还没有（`PAGES` 的 `live:false`），`NAV` 里自然也没有。
-         *    所以这一条断言的是"**过滤没有把谁误伤掉**"，而不是"超管比别人多"；
-         *    "超管多出来的那一项在展开层里"由 F1（`/grades` 落地）那一轮的断言覆盖。
-         *    ⚠️ **不要把 `/grades` 提前塞进 `NAV` 来让这条断言好看** —— 那会造出一个
-         *       点进去 404 的入口（D1 也会红：路由与登记表对不上）。
+         * 🔴 **2026-10-01 改了这一条**：原来它断言"超管的左栏也是那 8 项"，
+         *    理由是"`NAV` 里今天没有只给超管的项"—— 那句话**不再成立**：
+         *    加了「行政管理」之后，超管（与教务处 / 年级主任 / 办公室主任）
+         *    的左栏是 **9 项**（比任课教师多「行政管理」）。
+         *    "超管比别人还多「平台运维」"这件事**一直不在左栏**（它在「我的」页那一行），
+         *    所以这里除「行政管理」之外仍然与任课教师逐项相同。
          */
         check(
-          JSON.stringify(got) === JSON.stringify(RAIL_TEACHER),
-          `${SNAV}：**超管**的左栏也是这 8 项（NAV 里今天没有"只给超管"的项 —— 见注释，不是漏测）`,
+          JSON.stringify(got) === JSON.stringify(RAIL_MANAGING),
+          `${SNAV}：**超管**的左栏 = 那 8 项 + 「行政管理」（判据是三张卡的并集；「平台运维」仍不在左栏）`,
           `实际 ${got.length} 项：${got.join(' / ') || '(空)'}`,
         )
         check(
@@ -2274,14 +2321,17 @@ await withLock(async () => {
         const sheet = await sheetLabels()
         check(sheet.open, `${SNAV}：点圆按钮弹出「更多入口」`, `open=${sheet.open}`)
         /*
-         * 展开层 = 左栏 − 胶囊那三项（N3）。今天超管与任课教师这一层**内容相同**
-         * （理由见上一条断言的注释：NAV 里没有只给超管的项）。
+         * 展开层 = 左栏 − 胶囊那三项（N3）。🆕 2026-10-01 起**超管比任课教师多一项**：
+         * 「行政管理」（`/manage`）对超管 / 教务处 / 年级主任 / 办公室主任摆，
+         * 对班主任与任课教师不摆 —— 所以两份清单：
+         *   · 超管（这里）：`['班级','考试','错题集','日程表','通知','行政管理']`；
+         *   · 任课教师（下一条 step）：那五项。
          * ⚠️ 比的是**集合相等**：多一项（比如不小心把「呼叫记录」塞进来）也红。
          */
-        const wantSheet = ['班级', '考试', '错题集', '日程表', '通知']
+        const wantSheet = ['班级', '考试', '错题集', '日程表', '通知', '行政管理']
         check(
           JSON.stringify(sheet.items) === JSON.stringify(wantSheet),
-          `${SNAV}：**超管**的展开层 = 左栏减去胶囊那三项（N3：COLLAPSED 是可见差集，自动的）`,
+          `${SNAV}：**超管**的展开层 = 左栏减去胶囊那三项（N3：COLLAPSED 是可见差集，自动的）+「行政管理」`,
           `实际：${sheet.items.join(' / ') || '(空)'}`,
           `期望：${wantSheet.join(' / ')}`,
         )
@@ -2312,13 +2362,15 @@ await withLock(async () => {
         const sheet = await sheetLabels()
         check(
           JSON.stringify(sheet.items) === JSON.stringify(['班级', '考试', '错题集', '日程表', '通知']),
-          `${SNAV}：**任课教师**的展开层只有那五项（与超管今天相同，理由见 B1 的注释）`,
+          `${SNAV}：**任课教师**的展开层只有那五项（比超管**少**「行政管理」—— 判据是他够不着那三张卡）`,
           `实际：${sheet.items.join(' / ') || '(空)'}`,
         )
         check(
-          !sheet.body.includes('年级管理') && !sheet.body.includes('平台运维'),
-          `${SNAV}：任课教师的展开层里**没有**「年级管理」「平台运维」`,
-          sheet.body.includes('年级管理') || sheet.body.includes('平台运维') ? short(sheet.body, 140) : '两个都不在',
+          !sheet.body.includes('年级管理') && !sheet.body.includes('平台运维') && !sheet.body.includes('行政管理'),
+          `${SNAV}：任课教师的展开层里**没有**「年级管理」「平台运维」「行政管理」`,
+          sheet.body.includes('年级管理') || sheet.body.includes('平台运维') || sheet.body.includes('行政管理')
+            ? short(sheet.body, 140)
+            : '三个都不在',
         )
       })
 
@@ -2329,9 +2381,9 @@ await withLock(async () => {
         await navGoto('/settings', 'teacher')
         const r = await settingsRows()
         check(
-          !r.accounts,
-          `${SNAV}：**任课教师**的「我的」页**没有**「教师账号」那一行`,
-          r.accounts ? short(r.body, 140) : '没有那一行',
+          !r.manage,
+          `${SNAV}：**任课教师**的「我的」页**没有**「行政管理」那一行（判据含 isRemote —— 本地演示模式下它不显示）`,
+          r.manage ? short(r.body, 140) : '没有那一行',
         )
         check(r.files && r.schedule, `${SNAV}：但「传到教室大屏」「日程表」两行照旧在`, `files=${r.files} schedule=${r.schedule}`)
       })
@@ -2345,18 +2397,33 @@ await withLock(async () => {
           `files=${r.files} schedule=${r.schedule}`,
         )
         /*
-         * ⚠️ **「教师账号」这一行在演示模式下显不出来**，而且这是**对的**：
-         *    `Settings.tsx` 的判据是 `isRemote && entryVisible('/accounts', myRoles)`
-         *    —— `isRemote` 那一半不是身份判据，是"这个功能本地根本没有"
-         *    （建号要 `functions/api/teacher-account.ts`）。
-         *    所以这一条断言的是**那半个判据确实还在**，而不是假装它显示出来了；
-         *    "身份那一半"（教导处 true / 任课教师 false）由 `nav-checks.mjs` 的 A1/A6
-         *    在这个钩子上逐格钉住。**这条限制写在本轮报告里。**
+         * 🔴 **2026-10-01「行政管理」轮改了这里的两条**，逐条说明：
+         *
+         * ① `!r.manage`（原来是 `!r.accounts`）：教导处的「我的」页上
+         *    **现在没有「行政管理」那一行** —— 「年级管理 / 档案管理 / 教师管理」
+         *    那三行都搬去了 `/manage` 那一页，所以这一页**只剩「平台运维」那一行**。
+         *    ⚠️ 与「教师账号」原来那条同款，它**在演示模式下本来也显不出来**
+         *    （判据是 `isRemote && entryVisible(...)`：`isRemote` 那一半不是身份判据，
+         *    是"这个功能本地没有服务端"）。所以这一条钉的是"**那半个判据还在**"，
+         *    "身份那一半"由 `nav-checks.mjs` 的 A11 逐档钉住。
+         * ② **新增两条反向断言**（`!r.archive` / `!r.accountsRow`）：
+         *    「提档与毕业」与「教师账号」那两行**已经不在「我的」页上了** ——
+         *    谁把它们加回来，这里立刻红。这正是用户要求的"别留两份入口"的机器版。
+         *    （它们现在在 `/manage` 那一页，见下面新加的那一节。）
+         *    ⚠️ **年级管理那一条不能用这种反向断言**：它那张卡的副标题
+         *    「开学准备：录名单…」**与迁走的原文一字不改**，而 `/manage` 上它照旧在 ——
+         *    所以"查不到那句话"这件事在「我的」页上**说明不了问题**（那句话在别处合法存在）。
+         *    它由第 ①/② 两条（「我的」页上只剩「平台运维」那一行）与 D2 那 35 行钉住。
          */
         check(
-          !r.accounts,
-          `${SNAV}：本地演示模式下「教师账号」不显示（判据含 isRemote —— 见上方注释，不是身份问题）`,
-          r.accounts ? short(r.body, 140) : '没有那一行（符合预期）',
+          !r.manage,
+          `${SNAV}：教导处的「我的」页上**没有**「行政管理」那一行（它已经进了左侧导航；本地演示模式下这一行也不显示）`,
+          r.manage ? short(r.body, 140) : '没有那一行（符合预期）',
+        )
+        check(
+          !r.archive && !r.accountsRow,
+          `${SNAV}：🔴 「提档与毕业（档案管理）」与「教师账号（教师管理）」那两行**都不在「我的」页上了**（搬去了 /manage）`,
+          `archive=${r.archive} accountsRow=${r.accountsRow}`,
         )
         check(
           new URL(navPage.url()).pathname === '/settings',
@@ -2364,6 +2431,135 @@ await withLock(async () => {
           new URL(navPage.url()).pathname,
         )
         await shot(navPage, SNAV, '88-nav-role-settings-admin', { full: true })
+      })
+
+      /* ---------- B4′：🆕「行政管理」页 `/manage`（三张卡各自跳对页面） ---------- */
+
+      await step(SNAV, async () => {
+        /*
+         * 🔴 这是本轮的主交付（用户 2026-10-01：「把图三里面的功能从我的里面提出来，
+         *    单独设计制作一个行政管理页面，把这三个功能放里面」）。这一节钉四件事：
+         *      ① 教导处打得开这一页、页面上是**那三张卡**（标题与副标题照迁移前那一字不改）；
+         *      ② **三张卡各自跳对页面**（真界面断言：点一下、看落点）；
+         *      ③ 这一页上**没有**「平台运维」——它与 `/admin` 那条线不是一回事；
+         *      ④ 反向对照：任课教师**看不见这个入口**（上面 B1 已钉），而这里再钉一次
+         *        "手打 `/manage` 也进得来、给的是那句说明"（藏入口不是安全边界）。
+         *
+         * ⚠️ **本地演示模式只有两张卡**：「教师管理」（`/accounts`）要服务端
+         *    `functions/api/teacher-account.ts`，判据是 `isRemote && entryVisible(...)`
+         *    —— 所以它在这一模式下**不摆**（与迁移前「我的」页那一行同款，不是身份问题）。
+         *    这一条限制写在本轮报告里；它**不是**"少做了一张卡"。
+         */
+        await navGoto('/manage', 'admin')
+        const info = await pageInfo(navPage)
+        check(
+          new URL(navPage.url()).pathname === '/manage',
+          `${SNAV}：教导处打开 /manage 停在 /manage（不跳登录页、不白屏）`,
+          `停在 ${info.url}`,
+        )
+        const cards = await navPage.evaluate(() =>
+          [...document.querySelectorAll('[data-manage-card]')].map((b) => ({
+            key: b.getAttribute('data-manage-card'),
+            text: (b.innerText ?? '').replace(/\s+/g, ' ').trim(),
+          })),
+        )
+        check(
+          cards.map((c) => c.key).join(',') === '/grades,/grades/promote,/accounts',
+          `${SNAV}：/manage 上摆着的卡 = 年级管理 + 档案管理 + 教师管理（🔴 这一页**三张卡都摆**，含要服务端的那一张）`,
+          cards.length ? cards.map((c) => `${c.key}「${short(c.text, 40)}」`).join(' | ') : '(一张卡都没有)',
+        )
+        check(
+          cards.some((c) => c.text.includes('年级管理') && c.text.includes('开学准备：录名单')),
+          `${SNAV}：第一张卡是「年级管理」，副标题与迁移前**一字不改**`,
+          short(cards[0]?.text ?? '', 80),
+        )
+        check(
+          cards.some((c) => c.text.includes('档案管理') && c.text.includes('学年提档（高一→高二→高三）')),
+          `${SNAV}：第二张卡是「**档案管理**」（原「提档与毕业」改名），副标题照旧`,
+          short(cards[1]?.text ?? '', 80),
+        )
+        check(
+          !info.body.includes('只读体检屏') && !info.body.includes('平台运维'),
+          `${SNAV}：/manage 上**没有**「平台运维」（它是超管专属的另一条线，仍留在「我的」页）`,
+          info.body.includes('平台运维') ? short(info.body, 120) : '不在',
+        )
+        await shot(navPage, SNAV, '104-manage-admin', { full: true })
+
+        /* ② 真界面：点第一张卡 → /grades */
+        await navPage.click('[data-manage-card="/grades"]')
+        await navPage.waitForTimeout(500)
+        check(
+          new URL(navPage.url()).pathname === '/grades',
+          `${SNAV}：「年级管理」那张卡 → **真的跳到 /grades**`,
+          new URL(navPage.url()).pathname,
+        )
+        await navPage.goBack()
+        await navPage.waitForTimeout(400)
+        /* ③ 真界面：点第二张卡 → /grades/promote */
+        await navPage.click('[data-manage-card="/grades/promote"]')
+        await navPage.waitForTimeout(500)
+        check(
+          new URL(navPage.url()).pathname === '/grades/promote',
+          `${SNAV}：「档案管理」那张卡 → **真的跳到 /grades/promote**（提档与毕业那一页）`,
+          new URL(navPage.url()).pathname,
+        )
+        /*
+         * ④ 第三张卡（教师管理 → `/accounts`）也**照常跳**（它跳的是那条真路由）；
+         *    但**本地模式下那一页上没有服务端**（`/api/teacher-account` 不在），
+         *    所以它渲染的是"这一页现在打不开"，而**不是**建号表单 ——
+         *    这一条把"卡片跳对了"与"本地没有服务端"两件事分开钉（别混成一句）。
+         */
+        await navPage.goBack()
+        await navPage.waitForTimeout(400)
+        await navPage.click('[data-manage-card="/accounts"]')
+        await navPage.waitForTimeout(500)
+        check(
+          new URL(navPage.url()).pathname === '/accounts',
+          `${SNAV}：「教师管理」那张卡 → **真的跳到 /accounts**（教师账号那一页）`,
+          new URL(navPage.url()).pathname,
+        )
+        const acctBody = await bodyText(navPage)
+        check(
+          !acctBody.includes('建号（带学科）'),
+          `${SNAV}：但本地演示模式下 /accounts **拿不到服务端**（渲染的是"打不开"那张面板，不是建号表单）`,
+          short(acctBody, 120),
+        )
+      })
+
+      await step(SNAV, async () => {
+        /*
+         * ④ 反向对照（§18.3：两个坏法方向相反，各要一条）：
+         *    任课教师**看不见**那个入口（B1 的 `RAIL_TEACHER` 已钉），
+         *    而这里钉的是另一半 —— **手打 `/manage` 进得来**，页面上给一句说人话的说明，
+         *    不是白屏、也不跳登录页。藏入口不是安全边界，这一条正是它的机器版。
+         */
+        await navGoto('/manage', 'teacher')
+        const info = await pageInfo(navPage)
+        check(
+          new URL(navPage.url()).pathname === '/manage',
+          `${SNAV}：任课教师手打 /manage **正常打开**（不跳登录页、不白屏 —— 藏入口不是安全边界）`,
+          `停在 ${info.url}`,
+        )
+        const cards = await navPage.evaluate(
+          () => document.querySelectorAll('[data-manage-card]').length,
+        )
+        check(cards === 0, `${SNAV}：任课教师在 /manage 上**一张卡都摆不出来**（三张卡都不是他的）`, `${cards} 张卡`)
+        check(
+          info.body.includes('看不到这一页的内容'),
+          `${SNAV}：而且给的是**一句说明**（不是空白页、不是假数据）`,
+          short(info.body, 120),
+        )
+        await shot(navPage, SNAV, '105-manage-teacher', { full: true })
+        /* 反向对照：同一个地址，教导处看得到卡、任课教师看不到 —— 两边的差就在这一条上 */
+        await navGoto('/manage', 'admin')
+        const adminCards = await navPage.evaluate(
+          () => document.querySelectorAll('[data-manage-card]').length,
+        )
+        check(
+          adminCards > 0,
+          `${SNAV}：**同一条地址**，教导处看得到卡（与上一条"任课教师 0 张"构成反向对照）`,
+          `教导处 ${adminCards} 张`,
+        )
       })
 
       /* ---------- B5：E 档的验收 —— 手打 URL 能开、不白屏、不跳登录 ---------- */
@@ -2404,7 +2600,7 @@ await withLock(async () => {
          *    而本脚本跑演示模式 → 恒为 'teacher'，所以"教室端被 Guard 送回去"这件事
          *    以前**没有任何自动断言**。现在用同一个 DEV 钩子的 `?kind=classroom` 注入。
          */
-        for (const path of ['/settings', '/wrong', '/accounts', '/exams', '/']) {
+        for (const path of ['/settings', '/wrong', '/accounts', '/exams', '/', '/manage']) {
           await navGoto(`${path}?kind=classroom`, 'teacher')
           const u = new URL(navPage.url())
           check(

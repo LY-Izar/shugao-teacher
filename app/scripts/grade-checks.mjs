@@ -1804,9 +1804,28 @@ await withLock(async () => {
     const gsPage = src('src/pages/GradeSetup.tsx')
     ok('O8：这一页的入口/按钮显隐走的是 `lib/roles.ts` 的函数（不是本地手写角色数组）', /canAssignRoles\(myRoles\)/.test(gsPage))
     ok('O9：页面里**没有**手写 `role === \'admin\'` 这种判据', !/role\s*===\s*'(admin|super|grade_head)'/.test(gsPage))
+    /*
+     * O10：`/grades` 的入口**在哪儿**。
+     * 🔴 2026-10-01 改了（原来查的是 `Settings.tsx`）：那三行的入口搬去了
+     *    「行政管理」页（`/manage`），所以判据要跟着搬家 —— 查的是
+     *    "`Administration.tsx` 里登记了 `/grades` 这张卡" +
+     *    "那一页的显隐走 `entryVisible(...)`（不是手写角色数组）" +
+     *    "**「我的」页上已经没有它了**"（别留两份入口）。
+     */
+    const adminPage = src('src/pages/Administration.tsx')
+    const adminCardKeys = [...adminPage.matchAll(/key:\s*'([^']+)'/g)].map((m) => m[1])
     ok(
-      'O10：`/grades` 的入口只在「我的」页那一行（Settings.tsx 读 `entryVisible("/grades", …)`）',
-      /entryVisible\('\/grades'/.test(src('src/pages/Settings.tsx')),
+      'O10：`/grades` 的入口**在「行政管理」页的那张卡上**（`Administration.tsx` 登记了 `/grades`）',
+      adminCardKeys.includes('/grades'),
+      `卡片 key：${adminCardKeys.join(' / ') || '(一个都没解析到)'}`,
+    )
+    ok(
+      'O10a：那一页的卡片显隐走 `entryVisible(...)`（不是本地手写角色数组）',
+      /entryVisible\(/.test(adminPage) && !/role\s*===\s*'(admin|super|grade_head|office_head)'/.test(adminPage),
+    )
+    ok(
+      'O10b：而且「我的」页上**已经没有**「年级管理」那一行（2026-10-01 搬到 /manage —— 别留两份入口）',
+      !/entryVisible\('\/grades'/.test(src('src/pages/Settings.tsx')),
     )
   }
 

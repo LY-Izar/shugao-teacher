@@ -21,6 +21,7 @@ import {
   IconChevronRight,
   IconClipboard,
   IconGauge,
+  IconGrid,
   IconHash,
   IconInfo,
   IconTarget,
@@ -54,7 +55,7 @@ type NavItem = {
  * `NAV` 的 key 白名单（= `lib/roles.ts` 里 `ENTRIES` 有的那些）。
  *
  * 为什么要单独列一行而不是直接写 `EntryKey`：`NAV` 只装**桌面左栏里摆的**入口
- * （工作台 / 班级 / 作业 / 考试 / 错题集 / 日程表 / 通知 / 我的），
+ * （工作台 / 班级 / 作业 / 考试 / 错题集 / 日程表 / 通知 / 行政管理 / 我的），
  * 而 `ENTRIES` 里还有 `/accounts`、`/files`、`/calls`、`/notices/new`
  * 这些"入口不在 NAV 里"的（它们在「我的」页或通知页里，见方案 §2.4）。
  * 两者是**包含关系**，不是相等。
@@ -62,6 +63,12 @@ type NavItem = {
  * 🆕 2026-09-28 加 `/notices`（方案 §四.2 第 18 行：**所有老师都是 V**）——
  *    这是 `NAV` 从 7 项变成 8 项的那一次；`PIN_KEYS` **一个字没动**
  *    （胶囊里那三个仍是"每天来回切"的那三个，见下）。
+ * 🆕 2026-10-01 加 `/manage`（行政管理，`NAV` 从 8 项变成 **9 项**）——
+ *    它是**一个页面**（三张入口卡：年级管理 / 档案管理 / 教师管理），
+ *    不是「我的」里的一行设置项，所以进左栏；而 `/accounts`、`/grades`、`/grades/promote`
+ *    这三条**仍然是"入口不在 NAV 里"的**（它们现在挂在 `/manage` 那一页上）。
+ *    ⚠️ `PIN_KEYS` 照旧**一个字都不动**（新入口默认落进移动端「更多入口」——
+ *    判据是频次不是权限，见下那条）。
  */
 const NAV_KEYS = [
   '/',
@@ -71,6 +78,7 @@ const NAV_KEYS = [
   '/wrong',
   '/schedule',
   '/notices',
+  '/manage',
   '/settings',
 ] as const
 
@@ -107,6 +115,28 @@ const NAV: NavItem[] = [
    *    也把「通知」点亮）。同一条判断在移动端展开层里由 `n.end` 复用。
    */
   { to: '/notices', label: '通知', icon: IconBell, end: true },
+  /*
+   * 🆕 2026-10-01 行政管理（`/manage`）。
+   *
+   * 🔴 为什么它进 `NAV`：它是**一个页面**（三张入口卡），不是「我的」里的一行设置项 ——
+   *    「年级管理 / 档案管理 / 教师管理」那三行原来都在「我的」页上，本轮**搬出来**
+   *    单独成一页（用户 2026-10-01 原话："从我的里面提出来，单独设计制作一个行政管理页面"）。
+   *    所以：`/manage` 进左栏，而 `/grades`、`/grades/promote`、`/accounts`
+   *    这三条**仍然不在 NAV 里**（它们现在挂在那一页的三张卡上）。
+   *
+   * 🔴 判据是**三张卡判据的并集**（`ENTRIES['/manage']` = `seesAdministration`，
+   *    今天 == `canManageTeachers`：超管 / 教务处 / 办公室主任）——
+   *    今天恰好也含**年级主任**（`hasManagingRole` 那一支）。
+   *    ⚠️ 这一项让**左栏第一次因身份而不同**（超管 / 教务处 / 年级主任 / 办公室主任 9 项，
+   *    班主任 / 任课教师 8 项）—— 所以 `shots.mjs` 里那条"教导处与任课教师左栏逐项相同"
+   *    必须**如实改成"多一项「行政管理」"**，并按"它对谁可见"逐档说明。
+   *
+   * ⚠️ `end: false`：`/manage` 今天是**叶子页**（没有子路由），但哪天它长出子页
+   *    （比如 `/manage/…`），`end: false` 能让「行政管理」继续高亮 —— 与 `/exams` 同款判断。
+   * ⚠️ 图标与 `/admin`（平台运维）**故意不同**：那两个入口在左栏里会同时出现（超管），
+   *    同图标 + 名字只差一个字（"行政管理" vs "平台运维"）会让人点错。
+   */
+  { to: '/manage', label: '行政管理', icon: IconGrid, end: false },
   { to: '/settings', label: '我的', icon: IconUser, end: false },
 ]
 

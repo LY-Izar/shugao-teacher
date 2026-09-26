@@ -5,9 +5,11 @@ import { IconAlert, IconCheck, IconPlus, IconRefresh, IconUser, IconX } from '..
 import { Button, Empty, Panel, PageHead, Sect, Sheet, Tag } from '../components/ui'
 import { useStore, useToast } from '../data/store'
 import {
+  NAME_MAX,
   assignSubject,
   createTeacher,
   listTeachers,
+  renameTeacher,
   resetTeacherPassword,
   setDepartment,
   setRole,
@@ -20,9 +22,9 @@ import { canAssignRoles, canManageTeachers, roleName } from '../lib/roles'
 import { SUBJECTS, asSubjectCode, subjectName } from '../lib/subjects'
 
 /**
- * 教师账号（建号 · 主学科 · 任课关系 · 身份 · 🆕部门）。
+ * 教师账号（建号 · 主学科 · 任课关系 · 身份 · 🆕部门 · 🆕显示姓名）。
  *
- * 四件事在这一页上合起来才有用：
+ * 五件事在这一页上合起来才有用：
  *   ① **建号时就带上学科** —— 落进 `teachers.primary_subject_code`，
  *      新老师第一次登录时新建作业的学科 chip 就是预选好的那一科，不是物理。
  *   ② **任课关系**（谁教哪个班哪一科）—— 它决定这位老师登录后
@@ -36,11 +38,15 @@ import { SUBJECTS, asSubjectCode, subjectName } from '../lib/subjects'
  *      ⚠️ 两点与身份不同：**一个人可以属于多个部门**、**也可以一个都不属于**（纯任课老师）；
  *      而且它**不是身份**（教务处的干事属于教务处，但没有 `admin` 的全部权限）。
  *      维护判据与"建号"同一档（超管 / 教务处 / 办公室主任），详情见服务端那两句注释。
+ *   ⑤ 🆕 **显示姓名**（2026-09-28 第三轮）—— 姓名打错了、或写法要统一（"李老师" / "李某某"）时改它。
+ *      它与部门一样是**档案属性**，判据同"建号"那一档；
+ *      🔴 改的只是 `teachers.name`，**不动登录账号**：任教关系 / 身份 / 部门 / 登录方式一字不变。
  *
  * 🔴 这一页的按钮显隐只是"少点几下"，**不是判据**：
  *    真正的闸门在服务端（`functions/api/teacher-account.ts` 拿你的 JWT 去问
  *    数据库的 `can_create_teacher_accounts()` / `can_assign_roles()` / `is_super_admin()`）。
- *    所以就算有人把这一页的入口撬开，他也什么都做不成。
+ *    所以就算有人把这一页的入口撬开，他也什么都做不成 —— 包括那条"显示姓名"：
+ *    它摆不摆由 `canManage` 决定，写不写得进去由服务端问数据库决定。
  */
 /**
  * 每一档身份的**范围形状** + 界面上的那句说明（下拉里的一条 = 一行）。
@@ -90,8 +96,8 @@ export default function TeacherAccounts() {
   const userId = useStore((s) => s.userId)
   const refreshMyRoles = useStore((s) => s.refreshMyRoles)
   const canAssign = canAssignRoles(myRoles)
-  /** 🆕 谁能维护部门归属：与"建号"同一档（超管 / 教务处 / 办公室主任）—— 见文件头 ④ */
-  const canSetDept = canManageTeachers(myRoles)
+  /** 🆕 谁能维护**档案属性**（部门归属 / 显示姓名）：与"建号"同一档（超管 / 教务处 / 办公室主任）—— 见文件头 ④ */
+  const canManage = canManageTeachers(myRoles)
 
   const [dir, setDir] = useState<Directory | null>(null)
   const [err, setErr] = useState<string | null>(null)
@@ -123,9 +129,24 @@ export default function TeacherAccounts() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const afterChange = async (tid: string) => {
+  /** 身份变动之后：重拉名单 + 刷新自己的身份（那一行按钮的显隐跟着变） */
+  const afterRoleChange = async (tid: string) => {
     await load()
     if (tid === userId) await refreshMyRoles()
+  }
+
+  /**
+   * 🆕 改完姓名 → **就地改那一行**（不重拉整张名单）。
+   *
+   * 为什么这次不 `load()`：服务端回话里就有改后的姓名，
+   * 而重拉会把整页（5 个班 + 所有人的任课关系 / 身份 / 部门）再读一遍 ——
+   * 为了一个字符串不值当。⚠️ 部门那几处仍然走 `load()`：那边一次改一批人，回话里没有明细。
+   */
+  const afterRename = (id: string, name: string) => {
+    setDir((prev) =>
+      prev ? { ...prev, teachers: prev.teachers.map((t) => (t.id === id ? { ...t, name } : t)) } : prev,
+    )
+    setTarget((prev) => (prev && prev.id === id ? { ...prev, name } : prev))
   }
 
   return (
@@ -255,7 +276,7 @@ export default function TeacherAccounts() {
             </div>
 
             {/* 🆕 部门归属 · 批量（开学时一次分几十位老师 —— 用户的口径是"不要手工点几百下"） */}
-            <DepartmentBatch dir={dir} canManage={canSetDept} onDone={load} />
+            <DepartmentBatch dir={dir} canManage={canManage} onDone={load} />
           </>
         ) : null}
       </Page>
@@ -326,10 +347,11 @@ export default function TeacherAccounts() {
         teacher={target}
         dir={dir}
         canAssign={canAssign}
-        canSetDept={canSetDept}
+        canManage={canManage}
         isMe={target?.id === userId}
         onClose={() => setTarget(null)}
-        onChanged={afterChange}
+        onChanged={afterRoleChange}
+        onRenamed={afterRename}
       />
     </>
   )
@@ -674,19 +696,22 @@ function TeacherSheet({
   teacher,
   dir,
   canAssign,
-  canSetDept,
+  canManage,
   isMe,
   onClose,
   onChanged,
+  onRenamed,
 }: {
   teacher: DirTeacher | null
   dir: Directory | null
   canAssign: boolean
-  /** 🆕 能不能改部门归属（与"建号"同一档：超管 / 教务处 / 办公室主任） */
-  canSetDept: boolean
+  /** 🆕 能不能维护**档案属性**（部门归属 / 显示姓名）—— 与"建号"同一档：超管 / 教务处 / 办公室主任 */
+  canManage: boolean
   isMe: boolean
   onClose: () => void
   onChanged: (teacherId: string) => Promise<void>
+  /** 🆕 改完姓名：把新名字就地写回那一行（`id` + `name`） */
+  onRenamed: (id: string, name: string) => void
 }) {
   const push = useToast((s) => s.push)
   const [busy, setBusy] = useState(false)
@@ -695,6 +720,8 @@ function TeacherSheet({
   const [roleKind, setRoleKind] = useState('')
   const [scopeId, setScopeId] = useState('')
   const [pwd, setPwd] = useState('')
+  /** 🆕 显示姓名：**跟着这个人挂载**（`key` 是人 id，换个人自然是空的 —— 不串到别人身上） */
+  const [name, setName] = useState('')
 
   if (!teacher || !dir) {
     return (
@@ -741,6 +768,38 @@ function TeacherSheet({
           <Tag tone="idle">任课教师</Tag>
         )}
       </div>
+
+      {/* ---- 🆕 显示姓名（只改显示名，登录账号不动） ---- */}
+      {canManage ? (
+        <div className="mt-5">
+          <span className="label">显示姓名</span>
+          <div className="flex gap-2">
+            <input
+              className="input min-w-0 flex-1"
+              value={name}
+              maxLength={NAME_MAX}
+              onChange={(e) => setName(e.target.value)}
+              placeholder={teacher.name}
+              aria-label="显示姓名"
+            />
+            <Button
+              disabled={busy || !name.trim() || name.trim() === teacher.name}
+              onClick={() =>
+                void run(async () => {
+                  const r = await renameTeacher(teacher.id, name.trim())
+                  if (!r.ok) return { ok: false, message: r.message, detail: r.detail }
+                  /* 就地改那一行，**不重拉整张名单**（回话里就是新名字） */
+                  onRenamed(teacher.id, r.data.teacher.name)
+                  setName('')
+                  return { ok: true }
+                })
+              }
+            >
+              保存
+            </Button>
+          </div>
+        </div>
+      ) : null}
 
       {/* ---- 任课关系 ---- */}
       <div className="mt-5">
@@ -954,7 +1013,7 @@ function TeacherSheet({
       {/* ---- 🆕 部门（职能部门归属：可以多个，也可以一个都没有） ---- */}
       <div className="mt-5">
         <span className="label">部门（办公室 / 教务处 / 总务处 / 德育处）</span>
-        {canSetDept ? (
+        {canManage ? (
           <>
             <div className="flex flex-wrap gap-1.5">
               {DEPARTMENTS.map((d) => {

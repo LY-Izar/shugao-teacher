@@ -16,6 +16,12 @@ create extension if not exists "pgcrypto";   -- gen_random_uuid()
 -- ============================================================
 create table if not exists teachers (
   id          uuid primary key references auth.users (id) on delete cascade,
+  -- 🆕 2026-09-28 第三轮：显示姓名可改（`/api/teacher-account` 的 `rename` 动作）。
+  --    ⚠️ 这一列**故意没有 check 约束**（长度/非空）：规则只写在服务端的一处
+  --    —— `functions/api/teacher-account.ts` 的 `checkTeacherName()`，建号与改名**调同一个函数**。
+  --    "在 SQL 里再写一遍" = 同一件事两个判定入口（I17），而且会让老库上多一段必须同步跑的东西。
+  --    （直连数据库改自己那一行仍然可能绕过它 —— 但那条路今天**只有老师改自己**，
+  --      它既不加人也不改权限，见 §17.1 与 `rls-checks` 第七节。）
   name        text not null default '',
   subject     text not null default '物理',
   school      text not null default '',

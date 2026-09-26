@@ -23,6 +23,17 @@
  *     · 写法是**批量**的（界面上的多选）：一次请求加/去一批 (老师 × 部门)，
  *       因为用户的口径是"开学时不要手工点几百下"。
  *
+ *  🆕 2026-09-28 第三轮：**改显示姓名**（`teachers.name`）也走这个 Function 的 `rename` 动作。
+ *     · 判据用 `can_create_teacher_accounts`（超管 / 教务处 / **办公室主任**）——
+ *       姓名是**档案属性**（他是谁、叫什么），与"建号 / 任课关系 / 重置密码"同一档，
+ *       和部门归属（上一轮）同理；🔴 **不新立判据**（I17），也不用 `can_assign_roles`
+ *       （那一档不含办公室主任，而办公室主任本来就建号、姓名打错了正是他经手的）。
+ *     · 🔴 **只改 `teachers.name`，不碰登录账号**（`auth.users.email`）：
+ *       姓名**只用来显示**，改了不影响任何登录方式与权限；改登录账号要碰 `auth.users.email`，
+ *       有"确认邮件"那个坑，用户拍板这一轮不做（留档见 `功能设计与不变量.md`）。
+ *     · 校验（非空 / 不超过 `NAME_MAX` 个字）与建号**同一个函数**（`checkTeacherName`）——
+ *       一个字段一种语义，别让"建号时不许的名字"能从这里写进去。
+ *
  *  🔴 **2026-09-28：拆成两个函数（建号 ≠ 指派身份）** —— `管理架构与角色权限方案.md` §三.4 的 N-1。
  *     新架构里唯一变宽的写权限是「办公室主任建号」，而 `can_manage_teachers()` 原本
  *     **同时**管建号 / 任课关系 / **指派身份**三件事：
@@ -68,8 +79,8 @@ type RoleCode =
   | 'teacher'
 
 type Body = {
-  action?: 'list' | 'create' | 'reset' | 'assign' | 'role' | 'department'
-  /** create */
+  action?: 'list' | 'create' | 'reset' | 'assign' | 'role' | 'department' | 'rename'
+  /** create / rename */
   name?: string
   email?: string
   password?: string
@@ -78,7 +89,7 @@ type Body = {
   subject?: string
   school?: string
   classIds?: string[]
-  /** reset / assign / role */
+  /** reset / assign / role / 🆕 rename */
   teacherId?: string
   /** assign */
   classId?: string
@@ -111,6 +122,34 @@ const DEPARTMENT_BATCH_MAX = 100
 
 /** 去掉容易看错、也难念给同事听的字符：I l O 0 1 */
 const PW_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789'
+
+/**
+ * 🆕 姓名的长度上限（**建号与改名共用**，见 `checkTeacherName`）。
+ *
+ * 🔴 24 是**新定的**，不是从别处搬来的：`teachers.name` 是一列 `text not null default ''`，
+ *    **没有** check 约束，建号那条路从前也只判"非空"——所以"与建号同一套规则"只能靠
+ *    **两边调同一个函数**来兑现（下面 `create` 与 `rename` 都调 `checkTeacherName`），
+ *    而不是各自写一句看起来一样的判断。
+ *    为什么是 24：中文姓名 2–4 个字，24 个字足够装下"司马·阿卜杜拉"这类，
+ *    又能挡住"把一整句备注粘进姓名栏"（那种行会把这一页的列表撑烂）。
+ */
+const NAME_MAX = 24
+
+/**
+ * 姓名的形状校验（**空 / 只有空格 / 太长**）。
+ *
+ * ⚠️ 返回的是 `null`（过）或**人话**（不过）——调用方直接把它当 message 用，
+ *    所以这里不许返回错误码：这个平台反复栽在"不报错但就是不对"上，
+ *    而"请填老师姓名"这种话是给老师看的，不是给日志看的。
+ * ⚠️ 长度按**码点**数（`[...name].length`）：`'𠮷'.length === 2` 会把一个生僻字算成两个字。
+ */
+function checkTeacherName(raw: unknown): string | null {
+  const name = String(raw ?? '').trim()
+  if (!name) return '请填老师姓名'
+  const n = [...name].length
+  if (n > NAME_MAX) return `姓名最多 ${NAME_MAX} 个字（现在 ${n} 个）`
+  return null
+}
 
 /**
  * 能指派进 `teacher_roles` 的身份（14 档里除任课教师之外的全部）。
@@ -530,7 +569,9 @@ export async function onRequestPost(context: {
     const code = String(body.subjectCode ?? '').trim()
     let subjectLabel = String(body.subject ?? '').trim()
 
-    if (!name) return json({ status: 'error', message: '请填老师姓名' }, 400)
+    /* 🆕 与 `rename` **同一个函数**：建号时不许的姓名，改名时也不许（I17 一个字段一种语义） */
+    const nameBad = checkTeacherName(name)
+    if (nameBad) return json({ status: 'error', message: nameBad }, 400)
     if (!isEmail(email)) {
       return json({ status: 'error', message: '邮箱格式不对（例如 123456@qq.com）' }, 400)
     }
@@ -731,6 +772,76 @@ export async function onRequestPost(context: {
       )
     }
     return json({ status: 'ok', password })
+  }
+
+  /* ---------------- 🆕 rename：改**显示姓名**（不碰登录账号） ---------------- */
+  if (action === 'rename') {
+    /*
+     * 🔴 **判据**：`can_create_teacher_accounts`（超管 / 教务处 / 办公室主任）——
+     *    上面已经问过数据库了（`mayCreate`），这里**不重写规则**。
+     *    为什么与建号同一档：姓名是**档案属性**（他是谁、叫什么），
+     *    与"建号 / 任课关系 / 重置密码 / 部门归属"是一类事；
+     *    为什么不是 `can_assign_roles`：那一档不含办公室主任，
+     *    而姓名打错了正是**建号那个人**要收拾的（他建号时手抖打错字）。
+     */
+    const teacherId = String(body.teacherId ?? '').trim()
+    if (!UUID_RE.test(teacherId)) return json({ status: 'error', message: '没有指定老师' }, 400)
+
+    /* 姓名形状与建号**同一个函数**（空 / 全空格 / 太长都从这里回人话，见 `checkTeacherName`） */
+    const nameBad = checkTeacherName(body.name)
+    if (nameBad) return json({ status: 'error', message: nameBad }, 400)
+    const name = String(body.name ?? '').trim()
+
+    /* 教室端账号不是老师（与 `reset` 那一支同一口径）：它的"姓名"是「高一(2)班教室」这种 */
+    const room = await read(await sb(env, `/rest/v1/classroom_accounts?select=id&id=eq.${teacherId}`))
+    if (room.ok && room.rows.length) {
+      return json({ status: 'error', message: '这是教室端账号，不在这里改' }, 400)
+    }
+
+    /*
+     * 一行 update（service_role）。`return=representation` 是**故意的**：
+     * 只写 `name` 这一列 → 任教关系（class_subjects）/ 身份（teacher_roles）/
+     * 部门（teacher_departments）**一个字都不碰**，这正是"改名比重建号好"的地方；
+     * 而回读那一行是为了让"一行都没改到"**报错**，不是静默成功。
+     */
+    const wrote = await read(
+      await sb(env, `/rest/v1/teachers?id=eq.${teacherId}`, {
+        method: 'PATCH',
+        headers: { Prefer: 'return=representation' },
+        body: JSON.stringify({ name }),
+      }),
+    )
+    if (!wrote.ok) {
+      /*
+       * 🔴 `42501 permission denied` **不许静默成"你没权限"**：
+       *    它是**部署事故**（service_role 没配对 / 那张表的 grant 被改过），
+       *    不是"这个人不该改名" —— 同一个坑在 `functions/api/grade-setup.ts:140-152` 记过一次。
+       */
+      if (wrote.status === 401 || /42501|permission denied/i.test(wrote.text)) {
+        return json(
+          {
+            status: 'error',
+            message: '改姓名失败：接口没有写库的权限（这是部署问题，不是你没权限）',
+            detail: wrote.text.slice(0, 200),
+          },
+          503,
+        )
+      }
+      return json(
+        {
+          status: 'error',
+          message: isMissing(wrote) ? NEED_STAGE10 : '改姓名失败',
+          detail: wrote.text.slice(0, 200),
+        },
+        isMissing(wrote) ? 503 : 502,
+      )
+    }
+    /* 0 行 = 这个人不在 teachers 里 → **显式报错**（RLS 挡下的更新就是这样不声不响地"成功"的） */
+    if (wrote.rows.length === 0) {
+      return json({ status: 'error', message: '没找到这位老师，姓名没有改' }, 404)
+    }
+
+    return json({ status: 'ok', teacher: { id: teacherId, name } })
   }
 
   /* ---------------- assign：任课关系（哪个班、哪一科） ---------------- */

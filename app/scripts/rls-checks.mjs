@@ -3301,6 +3301,136 @@ await withLock(async () => {
     }
 
     /* ============================================================
+       八·之二 🆕 2026-09-28 第三轮：改老师**显示姓名**，任教关系 / 身份 / 部门一字不变
+       ------------------------------------------------------------
+       这一节量的是**数据库那一侧**（接口那一侧在 `admin-checks` 第十一节）：
+         · 「改显示姓名」到底动了什么 —— 只动 `teachers.name` 这一列；
+         · 那三样（任教关系 / 身份 / 部门）**改前改后逐字相同**。
+
+       🔴 这就是"改姓名为什么比重建号好"的直接证据：重建号 = 删掉那个 auth 用户
+          （`teachers.id` 是 `references auth.users on delete cascade`）→
+          `class_subjects` / `teacher_roles` / `teacher_departments` 三张表**跟着一起走**
+          （它们全是 `references teachers (id) on delete cascade`）。
+          否定对照就在下面最后那一步：删那一行，三样当场全空。
+       ============================================================ */
+
+    section('八·之二 🆕 改显示姓名：只动 name 那一列，任教关系 / 身份 / 部门一字不变')
+
+    {
+      /** 一个人此刻的"三样"（任教关系 / 身份 / 部门）—— 顺序固定，好逐字比 */
+      const snapshot = async (uid) => {
+        const q = async (sql) => (await db.query(sql, [uid])).rows
+        return {
+          relations: await q(
+            `select class_id::text as class_id, subject, coalesce(subject_code, '') as code
+               from class_subjects where teacher_id = $1 order by class_id, subject`,
+          ),
+          roles: await q(
+            /*
+             * ⚠️ `scope_id` 是 **uuid** 列：`coalesce(scope_id, '')` 会被 PostgreSQL
+             *    当成"把 '' 转成 uuid" → `invalid input syntax for type uuid: ""`（踩过一次）。
+             *    所以先转文本再兜底空串。
+             */
+            `select role, coalesce(scope_type, '')::text as scope_type,
+                    coalesce(scope_id::text, '') as scope_id,
+                    coalesce(subject_code, '')::text as subject_code
+               from teacher_roles where teacher_id = $1 order by role`,
+          ),
+          departments: await q(
+            `select department from teacher_departments where teacher_id = $1 order by department`,
+          ),
+        }
+      }
+
+      /* 物理老师：有任教关系（1 班物理）+ 一个部门（教务处）—— 一个"活样本" */
+      const before = await snapshot(U.phy)
+      ok(
+        '自证：这个夹具**真的有三样**（任教关系 1 条、部门 1 个）—— 否则下面"一字不变"是空断言',
+        before.relations.length > 0 && before.departments.length > 0,
+        `任教关系 ${before.relations.length} 条 / 身份 ${before.roles.length} 条 / 部门 ${before.departments.length} 个`,
+      )
+
+      /*
+       * 服务端那一步：`PATCH /rest/v1/teachers?id=eq.<id>` 载荷**只有 `{ name }`**
+       * （一行 update、service_role）。这里用属主身份执行那句 SQL 是**故意**的：
+       * 它量的是"这句 SQL 本身会不会顺手动别的东西"，
+       * 而不是"service_role 能不能绕过 RLS"（那是 `admin-checks` 那一侧的事）。
+       */
+      const renamed = await db.query(
+        `update teachers set name = $1 where id = $2 returning id, name`,
+        ['李某某', U.phy],
+      )
+      eq('改姓名：**正好 1 行**被改到（0 行必须报错，见 admin-checks 第十一节 ④）', renamed.rows.length, 1)
+      eq('改姓名：库里真的是新名字', renamed.rows[0]?.name, '李某某')
+
+      const after = await snapshot(U.phy)
+      eq('🔴 任教关系：改前改后**逐字相同**', after.relations, before.relations)
+      eq('🔴 身份：改前改后**逐字相同**（他本来没有 identity 行，改完也没有）', after.roles, before.roles)
+      eq('🔴 部门归属：改前改后**逐字相同**', after.departments, before.departments)
+
+      /* 反向对照：把"只改 name"换成"重建号"（删掉那一行）→ 三样必须**当场全空** */
+      {
+        /*
+         * ⚠️ 用**现有的一位老师**（auth.users 里真的有人）当样本：`teachers.id` 是
+         *    `references auth.users (id)`，凭空造一个 uuid 插进去会当场外键报错。
+         *    而这一节给他加的三样必须**用完就撤**（种子夹具后十节还要用，多一样就换一个人设）——
+         *    所以前后各包一个事务、量完 rollback：
+         *      ① 「一样不少」→ rollback（撤掉加的三样）
+         *      ② 「删掉就全空」→ rollback（撤销那次删除）
+         */
+        const victim = U.fresh
+        const seed = async () => {
+          await db.query(
+            `insert into class_subjects (class_id, subject, subject_code, teacher_id) values ($1, '物理', 'physics', $2)`,
+            [C.c1, victim],
+          )
+          await db.query(
+            `insert into teacher_roles (teacher_id, role, scope_type) values ($1, 'grade_head', 'grade')`,
+            [victim],
+          )
+          await db.query(
+            `insert into teacher_departments (teacher_id, department) values ($1, 'academic')`,
+            [victim],
+          )
+        }
+
+        await db.exec('begin')
+        await seed()
+        const built = await snapshot(victim)
+        await db.exec('rollback')
+        ok(
+          '反向对照自证：重建前的这个人一样不少（1 条任教关系 / 1 条身份 / 1 个部门）',
+          built.relations.length === 1 && built.roles.length === 1 && built.departments.length === 1,
+          JSON.stringify(built),
+        )
+        const clean = await snapshot(victim)
+        eq(
+          '反向对照收尾：那三样已经撤掉（夹具回到本节开头的样子）',
+          [clean.relations.length, clean.roles.length, clean.departments.length],
+          [0, 0, 0],
+        )
+
+        /* ② 真正的对照：把这个人**删掉**（= 重建号）→ 三样一起没（三张表都是 on delete cascade） */
+        await db.exec('begin')
+        await seed()
+        await db.query(`delete from teachers where id = $1`, [victim])
+        const gone = await snapshot(victim)
+        await db.exec('rollback')
+        eq(
+          '🔴 反向对照：**重建号**（删掉那一行）= 任教关系 / 身份 / 部门全空 —— 这就是改姓名的价值',
+          [gone.relations.length, gone.roles.length, gone.departments.length],
+          [0, 0, 0],
+        )
+        const back = await snapshot(victim)
+        eq(
+          '反向对照收尾：夹具已还原（rollback 之后一行都没少）',
+          [back.relations.length, back.roles.length, back.departments.length],
+          [0, 0, 0],
+        )
+      }
+    }
+
+    /* ============================================================
        九、upsert：冲突转更新**也要过 INSERT 的 with check**（I26）
        ------------------------------------------------------------
        这是上一轮真 PG 实测出来、并决定了 classes_insert 为什么留 `owns_class(id)` 一支的那条。

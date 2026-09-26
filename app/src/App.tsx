@@ -11,6 +11,7 @@ import { devInjectedAccountKind, devInjectedRoles, devInjectedSyncError } from '
 import { isRemote } from './lib/supabase'
 import type { TeacherRole } from './data/types'
 import Admin from './pages/Admin'
+import Administration from './pages/Administration'
 import AssignmentCall from './pages/AssignmentCall'
 import AssignmentCollect from './pages/AssignmentCollect'
 import AssignmentGrade from './pages/AssignmentGrade'
@@ -719,6 +720,30 @@ export default function App() {
           element={
             <Guard>
               <Terms />
+            </Guard>
+          }
+        />
+        {/*
+          🆕 2026-10-01「行政管理」`/manage`。
+
+          🔴 **它是一个入口合集，不是一条权限线**：三张卡各自跳去**早就存在**的那一页
+            （`/grades` 年级管理 · `/grades/promote` 档案管理 · `/accounts` 教师管理），
+            而那三页各自的判据**一个字都没动**（照旧由服务端与 RLS 判）。
+            所以这一页**刻意不套额外守卫**（与上面那几条同款）：手打 URL 进得来，
+            然后它自己只回答"摆不摆那三张卡"（`entryVisible()` 那一张表），
+            三张都摆不出来时给一句说明（不白屏、不静默）—— 见 `Administration.tsx`。
+
+          ⚠️ **别把它和 `/admin`（平台运维）混起来**：那一条是**超管专属**、
+            不套 `Guard`/`AppShell`、用来救"设备被标成教室端"这类故障的；
+            这一条是**行政事务**（教务处 / 年级主任 / 办公室主任这一层）。
+            两条线的地址、读者、职责都不同，**入口也不在同一处**
+            （`/admin` 仍是「我的」页里那一行）。
+        */}
+        <Route
+          path="/manage"
+          element={
+            <Guard>
+              <Administration />
             </Guard>
           }
         />

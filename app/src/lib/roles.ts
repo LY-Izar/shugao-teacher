@@ -407,6 +407,10 @@ export type EntryKey =
      这是那 34 行之外的新事实，矩阵里体现为 `27/9/0` vs `26/10/0`。 */
   | '/notices'
   | '/notices/new'
+  /* 🆕 2026-10-01 行政管理（`/manage`）：**一个页面，三张入口卡** ——
+     年级管理 / 档案管理 / 教师管理。它的判据是那三张卡各自的判据的**并集**
+     （见下面 `seesAdministration()` 的长注释）—— 不新造一套。 */
+  | '/manage'
 
 type EntryRule = {
   /** 显示名（登记表要能被人读 —— 这是"矩阵能不能对上"的一半） */
@@ -442,6 +446,45 @@ export function hasManagingRole(roles?: readonly TeacherRole[] | null): boolean 
   return (roles ?? []).some(
     (r) => r.role === 'super' || r.role === 'admin' || r.role === 'grade_head',
   )
+}
+
+/**
+ * 🆕 2026-10-01：我该不该看见「**行政管理**」这一个入口（`/manage`）。
+ *
+ * 🔴 **它是一条"并集"判据，不是第四条新规矩** —— 那一页只是三个入口的**合集**，
+ *    一张卡各自跳去它自己的页面，而**那三页的判据一个字都没动**（照旧在它们自己那里）：
+ *
+ *      | 卡片 | 跳去 | 入口判据（今天）                       | 集合                     |
+ *      |---|---|---|---|
+ *      | 年级管理 | `/grades`         | `hasManagingRole \|\| seesTeachingData` | super / admin / grade_head / 校级三档 / 德育处 |
+ *      | 档案管理 | `/grades/promote` | `canManageTeachers`                     | super / admin / office_head |
+ *      | 教师管理 | `/accounts`       | `canManageTeachers`                     | super / admin / office_head |
+ *
+ *    ⚠️ **`canManageTeachers ⊆ hasManagingRole`**（前者是 super + admin + office_head，
+ *       后者是 super + admin + grade_head）—— 所以三条的并集恰好就是 `canManageTeachers`。
+ *       写成"改前先读一遍那三个 `visibleFor`"的结论，而不是凭印象定：
+ *         · `hasManagingRole` → `super / admin / grade_head`
+ *         · `canManageTeachers` → `super / admin / office_head`
+ *         · 并集 = super / admin / grade_head / office_head = **`canManageTeachers`** ✅
+ *    ⚠️ 因此这一页的可见性 = 那三张卡各自判据的**并集**，而并集是
+ *       **`hasManagingRole(roles) || canManageTeachers(roles)`**（= super / admin /
+ *       grade_head / office_head）—— 下面前两行就是它，**逐项照着那三张卡写**：
+ *         · `hasManagingRole` ← 「年级管理」那张卡（`/grades`）；
+ *         · `canManageTeachers` ← 「档案管理」与「教师管理」两张卡（`/grades/promote`、`/accounts`）。
+ *    🔴 **`seesTeachingData` 不在里面**（虽然它也够得着 `/grades`）：校级三档与德育处主任
+ *       看得见「年级管理」**那一页**，但他们够不着这个页面上的另外两张卡 ——
+ *       把 `seesTeachingData` 塞进来会让他们凭空多一个入口。**别为了"看起来整齐"加上它。**
+ *
+ * 🔴 纪律（M1/M2）：只读 `roles` 一个参数、只返回 boolean、**不读任何数据行**。
+ *    真正的闸门仍然在服务端与 RLS（建号 / 提档 / 建班各自问数据库）——
+ *    这一页**自己不查权限**，它只是个入口合集。
+ *
+ * ⚠️ 2026-10-01 落地时第一版写成了 `return canManageTeachers(roles)` —— **那是漏的**，
+ *    `nav-checks` 的 A11（"年级主任看得见入口"那一条）当场把它抓红：年级主任不在
+ *    `canManageTeachers` 里，但他**看得见「年级管理」那张卡**。
+ */
+export function seesAdministration(roles?: readonly TeacherRole[] | null): boolean {
+  return hasManagingRole(roles) || canManageTeachers(roles)
 }
 
 /**
@@ -496,6 +539,18 @@ export const ENTRIES: Record<EntryKey, EntryRule> = {
   // ★ ✅ 2026-10-01（P4）落地：提档 = `is_school_admin()`（super + 教务处），**年级主任 ❌**；
   //    地址同时从 `/grades/:id/promote` 改成 `/grades/promote`（提档是全校一年一次的动作）。
   '/grades/promote': { label: '提档与毕业', visibleFor: canManageTeachers },
+  /*
+   * 🆕 2026-10-01 **行政管理**（`/manage`）：一个页面，三张入口卡
+   * （年级管理 → `/grades` · 档案管理 → `/grades/promote` · 教师管理 → `/accounts`）。
+   *
+   * 🔴 判据是那三张卡各自判据的**并集**，而今天这个并集恰好等于 `canManageTeachers`
+   *    （推导与逐条读回来的结果写在 `seesAdministration()` 的长注释里）——
+   *    所以这里**引用那个函数**，不就地再写一遍 `||`。
+   * ⚠️ 这一页**自己不查权限**（它只是个入口合集）：三个子页面各自的判据照旧在它们自己那里，
+   *    真正的闸门在服务端与数据库。它进 `NAV`（左侧导航）是因为它是**一个页面**，
+   *    不是「我的」里的一行设置项。
+   */
+  '/manage': { label: '行政管理', visibleFor: seesAdministration },
   /*
    * ★ 将来：**super / admin / 年级主任**（`hasManagingRole`）。
    *

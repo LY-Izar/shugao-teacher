@@ -129,6 +129,25 @@ await withLock(async () => {
   /** `/auth/v1/user` 是否认这个 token */
   let tokenOk = true
   /**
+   * 🆕 `can_create_teacher_accounts` 对调用者返回什么（第十一节的改姓名要它）。
+   *
+   * ⚠️ 这是**假库对判据的回答**，不是脚本自己重写判据 —— 真判据在
+   *    `schema.sql` §13.2.1（超管 / 教务处 / 办公室主任），第十一节会**从 schema 原文里**
+   *    把它抠出来核一遍，两条对得上才算数。
+   */
+  let createAcctValue = 'true'
+  /** 🆕 假 `/auth/v1/user` 认为调用者是谁（第十一节逐个身份换它） */
+  let callerId = '11111111-1111-4111-8111-111111111111'
+  /**
+   * 🆕 写 `teachers` 时假库怎么答。
+   *  · `'ok'`          —— 真 PostgREST 的形状（`return=representation` 回那一行）
+   *  · `'permission'`  —— `42501`（service_role 没配对 / grant 被改过）：第十一节验
+   *    「**不许静默成"你没权限"**」那条纪律（照 `grade-setup.ts:140-152`）。
+   *  · `'none'`        —— 回了 200 但**一行都没有**：那是"这个人不在 teachers 里"，
+   *    服务端必须**显式报错**，不许当成功（RLS 挡下的更新就是这个形状）。
+   */
+  let teacherPatch = 'ok'
+  /**
    * 假 PostgREST 的"库结构"：
    *  · `missingTables` 里的表 → 404 + `42P01`（真 PostgREST 的表不存在就是这个形状）；
    *  · `missingCols` 里的 `表.列` → 400 + `42703`（列不存在）。
@@ -208,7 +227,7 @@ await withLock(async () => {
 
     if (url.pathname === '/auth/v1/user') {
       if (!tokenOk) return send(401, { message: 'invalid token' })
-      return send(200, { id: '11111111-1111-4111-8111-111111111111', email: 'boss@example.com' })
+      return send(200, { id: callerId, email: 'boss@example.com' })
     }
 
     /* ---- RPC（裸版；签名照 supabase/schema.sql 逐字对齐） ---- */
@@ -229,6 +248,12 @@ await withLock(async () => {
       /** 🆕 数据库用量报告（§26）—— 它回的是 **json 对象**，不是一个标量 */
       if (fn === 'db_usage_report') return send(200, dbReportValue)
       if (fn === 'can_manage_teachers') return send(200, 'true')
+      /**
+       * 🆕 第十一节：改姓名的判据（建号那一档）。
+       * ⚠️ 默认 `'true'` —— 因为现有那一批 Function 的夹具都是"调用者能管账号"；
+       *    第十一节逐个身份换它，并按**真 schema 的判据**给出期望值。
+       */
+      if (fn === 'can_create_teacher_accounts') return send(200, createAcctValue)
       // §16 / §15 的裸版判据：对未登录调用者恒为 false（这就是"函数在"的正面证据）
       return send(200, 'false')
     }
@@ -254,6 +279,16 @@ await withLock(async () => {
         }
         writes.push({ table, method, search: url.search, payload, prefer: req.headers.prefer ?? '' })
         flow.push({ kind: 'db-write', table, method })
+        /* 🆕 第十一节：`teachers` 那条写的三种答法（见 `teacherPatch` 的注释） */
+        if (table === 'teachers' && method === 'PATCH' && teacherPatch === 'permission') {
+          return send(403, {
+            code: '42501',
+            message: 'permission denied for table teachers',
+          })
+        }
+        if (table === 'teachers' && method === 'PATCH' && teacherPatch === 'none') {
+          return send(200, [])
+        }
         if (method === 'DELETE') {
           /* 真 PostgREST：`return=representation` 时回**被删掉的那些行** */
           const rows = tableRows.get(table) ?? []
@@ -394,6 +429,8 @@ await withLock(async () => {
   })
   tableRows.set('site_state', [siteRow()])
   tableRows.set('admin_audit', [])
+  /* 🆕 第十一节：教室端账号表（改姓名要按它把"教室端"挡掉）。空表 = 这里没有教室端账号 */
+  tableRows.set('classroom_accounts', [])
   tableRows.set('frontend_errors', [
     {
       id: 7,
@@ -2459,6 +2496,222 @@ function sourceFileHealth(rel) {
       /if \(isClassroomDevice\(\)\) \{\s*return <Navigate to="\/login"/.test(app2),
       '没找到 Guard 里那条 isClassroomDevice() → /login',
     )
+  }
+
+  /* ============================================================
+     第十一节 🆕 2026-09-28 第三轮：管理员改老师的**显示姓名**（`rename`）
+
+     为什么这一节要放在**这个**脚本里（而不是 rls-checks）：`rename` 动作的闸门是
+     `functions/api/teacher-account.ts` 里那句"拿调用者 JWT 问数据库"
+     （service_role 会绕过 RLS，所以能不能改**全靠这一句**），
+     而能拦住它的假库只有这里这一台（`rls-checks` 里没有 Function 那一层）。
+     ⚠️ 与 `rls-checks` 的分工：那边量**数据库**（RLS 挡不挡得住直接改库、
+       改名会不会碰到关系表），这边量**接口**（判据问没问、校验挡没挡、写没写下去）。
+
+     🔴 每条断言都带**反向对照**：
+       · 没权限那三条 → 把判据那半边去掉（`createAcctValue='true'`）必须红；
+       · "一行都没改到要报错" → 假库回 `[]` 时必须 404，不许静默成功；
+       · 42501 → 必须 503（不是"你没权限"）。
+     ============================================================ */
+
+  section('第十一节 🆕 改教师显示姓名（rename）：判据同建号 · 校验同建号 · 只改那一列')
+
+  const ACCT = await import(mod('functions/api/teacher-account.ts', '?acct'))
+  {
+    const TID = '22222222-2222-4222-8222-222222222222'
+    const me = (action, extra = {}) => ({ action, teacherId: TID, ...extra })
+    /** 🔴 必须带 JWT：`teacher-account.ts` 第一件事就是拿它去问 `/auth/v1/user`（401 出自这里） */
+    const AUTH = { Authorization: 'Bearer good-token' }
+    const callRename = () => call(ACCT, '/api/teacher-account', me('rename', { name: '李某某' }), AUTH)
+
+    /*
+     * 🔴 **先把假库的判据全部关掉**（`false`）：上一节留下的 `superValue='true'` /
+     *    `contactValue='true'` 会让"以谁的身份调"这件事看起来不成立 ——
+     *    本节的每一组断言都要自己把判据摆好，不给"by 上一节的余温而绿"留缝。
+     */
+    superValue = 'false'
+    contactValue = 'false'
+    createAcctValue = 'false'
+
+    /* ---- ① 有权限的人改 → 成功，而且**库里真的变了** ---- */
+    callerId = '11111111-1111-4111-8111-111111111111'
+    createAcctValue = 'true'
+    teacherPatch = 'ok'
+    clearFlow()
+    {
+      const res = await callRename()
+      const body = await res.json()
+      eq('① 超管改姓名 → 200', res.status, 200)
+      eq('① 而且回话里就是改后的名字（界面就地刷新靠它）', body.teacher?.name, '李某某')
+      /* 🔴 "库里真的变了"：写下去的那一行**只有 name 这一列** —— 一个字段一种语义 */
+      const w = lastWrite('teachers', 'PATCH')
+      eq(
+        '🔴 ① 写下去的载荷**只有 `name` 一个键**（任教关系 / 身份 / 部门一个字都不碰）',
+        w ? Object.keys(w.payload).sort() : null,
+        ['name'],
+      )
+      eq('① 而且写的是**这个老师**那一行', w?.search, `?id=eq.${TID}`)
+      eq('① 而且是 PATCH（不是重建号 / 不是 upsert 整行）', w?.method, 'PATCH')
+      ok(
+        '① 用的是 service_role（这一条写权限服务端拿管理员密钥代劳）',
+        seen.some((s) => s.path === '/rest/v1/teachers' && /Bearer fake-service-role/.test(s.auth)),
+        seen.filter((s) => s.path === '/rest/v1/teachers').map((s) => s.auth).join(' · '),
+      )
+      /* 判据是**问数据库**的，不是 TypeScript 里写死的 */
+      ok(
+        '🔴 ① 判据是拿调用者 JWT 去问 `can_create_teacher_accounts`（不在这里重写规则）',
+        seen.some(
+          (s) =>
+            s.path === '/rest/v1/rpc/can_create_teacher_accounts' &&
+            s.auth === 'Bearer good-token',
+        ),
+        seen.filter((s) => s.path.startsWith('/rest/v1/rpc/')).map((s) => s.path).join(' · '),
+      )
+    }
+
+    /* ---- ② 没权限的人改 → 被拒（逐档：班主任 / 任课教师 / 教室端） ---- */
+    for (const label of ['班主任', '任课教师', '教室端']) {
+      createAcctValue = 'false'
+      clearFlow()
+      const res = await callRename()
+      const body = await res.json()
+      eq(`🔴 ② ${label}改姓名 → 403（判据挡住）`, res.status, 403)
+      ok(
+        `🔴 ② ${label}：被拒的原因是**判据**，不是 RLS 把他筛成 0 行（一次写都没发出去）`,
+        writes.length === 0,
+        writes.map((w) => `${w.method} ${w.table}`).join(' · '),
+      )
+      ok(
+        `② ${label}：回的是人话（说清了是哪几档能管账号）`,
+        typeof body.message === 'string' && body.message.includes('能建教师账号'),
+        String(body.message),
+      )
+    }
+
+    /*
+     * 🔴 ② **反向对照**：把判据那半边去掉（假库一律回"能建号"）→
+     *    上面那三条 403 **必须红**。这里当场把对照跑出来，证明那三条不是摆设。
+     */
+    {
+      createAcctValue = 'true'
+      clearFlow()
+      const res = await callRename()
+      ok(
+        '🔴 ② 反向对照：把判据那半边去掉（假库一律答"能建号"）→ 同一个调用**不再被拒**（403 消失）',
+        res.status === 200,
+        `去掉判据之后拿到 ${res.status} —— 若这里仍是 403，说明那三条"被拒"根本没走到判据`,
+      )
+    }
+
+    /* ---- ③ 姓名形状：空 / 全空格 / 超长 → 400（人话） ---- */
+    createAcctValue = 'true'
+    {
+      const bad = [
+        ['空', ''],
+        ['只有空格', '   '],
+        ['全是全角空格', '\u3000\u3000'],
+        ['超长（25 个字）', '张'.repeat(25)],
+      ]
+      for (const [label, value] of bad) {
+        clearFlow()
+        const res = await call(ACCT, '/api/teacher-account', me('rename', { name: value }), AUTH)
+        eq(`🔴 ③ 姓名${label} → 400`, res.status, 400)
+        ok(`③ 姓名${label}：一次写都没发出去`, writes.length === 0, `${writes.length} 次写`)
+        const body = await res.json()
+        eq(
+          `③ 姓名${label}：回的是人话（提示里带姓名上限）`,
+          String(body.message).includes('姓名'),
+          true,
+        )
+      }
+      /* 边界：**正好 24 个字要放行**（否则"上限 24"就成了"上限 23"） */
+      clearFlow()
+      const okRes = await call(
+        ACCT,
+        '/api/teacher-account',
+        me('rename', { name: '张'.repeat(24) }),
+        AUTH,
+      )
+      eq('③ 边界：正好 24 个字 → 200（上限就是 24，不是 23）', okRes.status, 200)
+      /* 长度按**码点**算：一个生僻字不该被算成两个字（`'𠮷'.length === 2`） */
+      clearFlow()
+      const astral = await call(
+        ACCT,
+        '/api/teacher-account',
+        me('rename', { name: '𠮷'.repeat(12) }),
+        AUTH,
+      )
+      eq('③ 12 个四字节字（JS 的 length 是 24）→ 200：长度按码点算', astral.status, 200)
+    }
+
+    /* ---- ④ 写失败不许静默 ---- */
+    {
+      teacherPatch = 'permission'
+      clearFlow()
+      const res = await callRename()
+      eq(
+        '🔴 ④ `42501 permission denied` → **503**（部署事故），不是 403「你没权限」',
+        res.status,
+        503,
+      )
+      const body = await res.json()
+      ok(
+        '🔴 ④ 而且话里说清"这是部署问题，不是你没权限"（照 grade-setup.ts:140-152 那条纪律）',
+        String(body.message).includes('不是你没权限'),
+        String(body.message),
+      )
+
+      teacherPatch = 'none'
+      clearFlow()
+      const res2 = await callRename()
+      eq(
+        '🔴 ④ 回 200 但**一行都没改到**（这个人不在 teachers 里）→ 404，不许当成功',
+        res2.status,
+        404,
+      )
+      teacherPatch = 'ok'
+    }
+
+    /* ---- ⑤ 教室端账号不是老师（与 reset 那一支同一口径） ---- */
+    {
+      tableRows.set('classroom_accounts', [{ id: TID }])
+      clearFlow()
+      const res = await callRename()
+      eq('⑤ 对教室端账号改名 → 400（教室端那一行的"姓名"是「高一(2)班教室」）', res.status, 400)
+      ok('⑤ 而且一次写都没发出去', writes.length === 0, `${writes.length} 次写`)
+      tableRows.set('classroom_accounts', [])
+    }
+
+    /*
+     * ---- ⑥ 判据一个字都没新发明：与建号**同一个** `can_create_teacher_accounts` ----
+     *
+     * 静态核一遍**数据库**那一侧（`schema.sql` §13.2.1）：万一有人把 `office_head`
+     * 从判据里删掉，下面这条当场红，同时上面①/②的期望值也该跟着改 ——
+     * 这正是"判据只有一处"的用法（I17）。
+     */
+    {
+      const schema = readFileSync(resolvePath(APP, '..', 'supabase/schema.sql'), 'utf8')
+      const at = schema.indexOf('create or replace function public.can_create_teacher_accounts_for')
+      const body = at < 0 ? '' : schema.slice(at, schema.indexOf('$$;', at))
+      ok('⑥ 判据函数 `can_create_teacher_accounts_for` 在 schema 里', body.length > 100, `${body.length} 字符`)
+      ok(
+        '🔴 ⑥ 它含 super / admin / **office_head**（办公室主任：他建号，姓名打错了也是他收拾）',
+        /role in \('super', 'admin', 'office_head'\)/.test(body),
+        body.match(/role in \([^)]*\)/)?.[0] ?? '（没找到 role in (…)）',
+      )
+      ok(
+        '🔴 ⑥ 而且它**不含** `can_assign_roles` 那一档的收窄（改姓名不新立判据、也不套身份那一档）',
+        !/can_assign_roles/.test(body),
+      )
+      /* 服务端源码：`checkTeacherName` 必须被**两处**调用（建号 + 改名），否则规则会分叉 */
+      const src = readFileSync(resolvePath(APP, 'functions/api/teacher-account.ts'), 'utf8')
+      const uses = [...src.matchAll(/checkTeacherName\((?!\s*raw)/g)].length
+      eq(
+        '🔴 ⑥ `checkTeacherName()` 被调 2 次（建号 + 改名）—— 一个字段一套规则，不许各写一句',
+        uses,
+        2,
+      )
+    }
   }
 
   /* ---------------- 收尾 ---------------- */

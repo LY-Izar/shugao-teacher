@@ -13,9 +13,7 @@ import {
   IconSend,
   IconSliders,
   IconSwap,
-  IconTarget,
   IconUpload,
-  IconUsers,
   IconWifi,
 } from '../components/icons'
 import { Button, KV, PageHead, Panel, Sect, Sheet, Tag } from '../components/ui'
@@ -232,18 +230,19 @@ export default function Settings() {
    */
   const chips = roleChips(myRoles, (id) => classes.find((c) => c.id === id)?.name)
   /*
-   * 🔴 这一页里那几行入口的显隐，**一律读 `lib/roles.ts` 的入口表**（方案 §2.4 / N2）。
+   * 🔴 这一页里那些入口的显隐，**一律读 `lib/roles.ts` 的入口表**（方案 §2.4 / N2）。
    *
    * 为什么不能在这里各写一句 `canManageTeachers(myRoles)`：那正是"同一件事两个判定入口"
-   * （本仓库踩过四次的坑，§十）。今天这一页恰好是那 4 个散点之一 ——
-   * 「教师账号」那一行原来就是就地算的，现在收进表里（判据的值一个字没变）。
+   * （本仓库踩过四次的坑，§十）。
    *
-   * ⚠️ `isRemote &&` 那两处**不是身份判据**，是"这个功能在本地演示模式下根本没有"：
-   *    · `/accounts` 要服务端 `functions/api/teacher-account.ts`（本地没有）；
-   *    · `/admin` 要 Supabase 会话（本地没有）。
-   *    它们与身份无关，所以留在表外；身份那一半一律走 `entryVisible()`。
+   * ⚠️ 2026-10-01「行政管理」轮：**年级管理 / 档案管理 / 教师管理那三行搬走了** ——
+   *    它们现在在 `/manage` 那一页上（`pages/Administration.tsx`），
+   *    判据与文案一个字没变，只是换了个地方摆（原来这一页挂三行、现在挂一行入口）。
+   *    这一页**只留「平台运维」那一行**（`/admin`：超管专属、不是行政管理的一部分）。
+   *
+   * ⚠️ `isRemote &&`**不是身份判据**，是"这个功能在本地演示模式下根本没有"：
+   *    `/admin` 要 Supabase 会话（本地没有）。身份那一半一律走 `entryVisible()`。
    */
-  const canManage = isRemote && entryVisible('/accounts', myRoles)
   const canAdmin = isRemote && entryVisible('/admin', myRoles)
   // 只看教师自己的排课表 —— 班级课表（scope='class'）是教室端给学生看的，混进来数字会对不上
   const todayCount = itemsForDate(schedule.filter((s) => s.scope !== 'class')).length
@@ -350,112 +349,6 @@ export default function Settings() {
         <div className="mb-4">
           <Sect>我的</Sect>
           <Panel className="overflow-hidden">
-            {/*
-              🆕 2026-09-30「开学准备」（P6）：**年级管理**这一行。
-              🔴 判据与 `/accounts` / `/admin` 同款 —— 读 `ENTRIES`（`entryVisible('/grades', …)`），
-                 **不在这里另写一套**（M1/M2：那张表只回答"摆不摆"）。
-                 表里那一格是 `hasManagingRole || seesTeachingData`
-                 （超管 / 教务处 / 年级主任 / 校级三档 / 德育处）——
-                 年级主任看得见列表，**列表里只有他本年级**（那是 RLS，不是这一行）。
-              ⚠️ 与 `canManage` 一样加了 `isRemote`：这一页的**写**全走 `/api/grade-setup`，
-                 本地演示模式没有服务端 —— 摆一个点了必然失败的入口是"编出来的按钮"。
-                 （读那一半在本地模式仍然可用：年级表由 `demoGrades()` 提供。）
-            */}
-            {isRemote && entryVisible('/grades', myRoles) ? (
-              <button
-                type="button"
-                className="row"
-                style={{ padding: 14 }}
-                onClick={() => navigate('/grades')}
-              >
-                <span
-                  className="grid place-items-center shrink-0"
-                  style={{
-                    width: 36,
-                    height: 36,
-                    border: '1px solid var(--color-line2)',
-                    borderRadius: 4,
-                    background: 'var(--color-surface2)',
-                    color: 'var(--color-accent)',
-                  }}
-                >
-                  <IconUsers size={18} />
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span style={{ fontSize: 14.5, fontWeight: 620 }}>年级管理</span>
-                  <span className="mt-0.5 block" style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
-                    开学准备：录名单 · 建班 · 班型 · 选科 · 身份
-                  </span>
-                </span>
-                <IconChevronRight size={16} />
-              </button>
-            ) : null}
-            {/*
-              🆕 2026-10-01「提档 + 毕业删除」（P4）：**提档与毕业**这一行。
-              🔴 判据与上面那一行同款 —— 读 `ENTRIES`（`entryVisible('/grades/promote', …)`，
-                 表里那一格是 `canManageTeachers`：最高管理员 / 教务处 / 办公室主任），
-                 **不在这里另写一套**（M1/M2）。
-              ⚠️ 与 `canManage` 一样加了 `isRemote`：这一页的**写**全走 `/api/grade-promote`，
-                 本地演示模式没有服务端 —— 摆一个点了必然失败的入口是"编出来的按钮"。
-            */}
-            {isRemote && entryVisible('/grades/promote', myRoles) ? (
-              <button
-                type="button"
-                className="row"
-                style={{ padding: 14 }}
-                onClick={() => navigate('/grades/promote')}
-              >
-                <span
-                  className="grid place-items-center shrink-0"
-                  style={{
-                    width: 36,
-                    height: 36,
-                    border: '1px solid var(--color-line2)',
-                    borderRadius: 4,
-                    background: 'var(--color-surface2)',
-                    color: 'var(--color-accent)',
-                  }}
-                >
-                  <IconTarget size={18} />
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span style={{ fontSize: 14.5, fontWeight: 620 }}>提档与毕业</span>
-                  <span className="mt-0.5 block" style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
-                    学年提档（高一→高二→高三）· 高三毕业的备份与删除
-                  </span>
-                </span>
-                <IconChevronRight size={16} />
-              </button>
-            ) : null}
-            {canManage ? (
-              <button
-                type="button"
-                className="row"
-                style={{ padding: 14 }}
-                onClick={() => navigate('/accounts')}
-              >
-                <span
-                  className="grid place-items-center shrink-0"
-                  style={{
-                    width: 36,
-                    height: 36,
-                    border: '1px solid var(--color-line2)',
-                    borderRadius: 4,
-                    background: 'var(--color-surface2)',
-                    color: 'var(--color-accent)',
-                  }}
-                >
-                  <IconUsers size={18} />
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span style={{ fontSize: 14.5, fontWeight: 620 }}>教师账号</span>
-                  <span className="mt-0.5 block" style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
-                    建号（带学科）· 任课关系 · 班主任 / 年级主任
-                  </span>
-                </span>
-                <IconChevronRight size={16} />
-              </button>
-            ) : null}
             {/*
               平台运维（超管面板，`超管运维面板方案.md` 第一期）。
 
