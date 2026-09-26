@@ -291,10 +291,27 @@ for (const entry of NOTICE_ROWS) {
   )
 }
 {
-  /* ①′ 的 6 列小计：34 行原样 + 通知两行 → 153 / 29 / 34（方案 §四.0） */
-  eq('A8 对账：145 + 8 = 153（①′ 的 V）', MATRIX_SHAPE.v + 8, 153)
-  eq('A8 对账：27 + 2 = 29（①′ 的 E）', MATRIX_SHAPE.e + 2, 29)
-  eq('A8 对账：32 + 2 = 34（①′ 的 B —— 教室端那两格）', MATRIX_SHAPE.b + 2, 34)
+  /*
+   * ①′ 的 6 列小计：§2.2 那 **34 行**原样 + 通知两行 → 153 / 29 / 34（方案 §四.0）。
+   *
+   * ⚠️ 这里**不写死 153/29/34**，而是从 `MATRIX_SHAPE` 推 +8/+2/+2 ——
+   *    2026-09-30「开学准备」那一轮我一度以为"多了一个页面 → 矩阵多一行"，
+   *    把 `MATRIX_SHAPE` 改成 35/148/29/33 并插了一行进 §2.2 的表里；
+   *    `D2 自证：矩阵行数` 当场报"实测 34"——**因为那个地址原来就在表里**。
+   *    派生写法让这类改动只需要动 `MATRIX_SHAPE` 一处，而不是这里三个字面量。
+   */
+  eq(`A8 对账：${MATRIX_SHAPE.v} + 8 = ${MATRIX_SHAPE.v + 8}（①′ 的 V）`, MATRIX_SHAPE.v + 8, 153)
+  eq(`A8 对账：${MATRIX_SHAPE.e} + 2 = ${MATRIX_SHAPE.e + 2}（①′ 的 E）`, MATRIX_SHAPE.e + 2, 29)
+  eq(
+    `A8 对账：${MATRIX_SHAPE.b} + 2 = ${MATRIX_SHAPE.b + 2}（①′ 的 B —— 教室端那两格）`,
+    MATRIX_SHAPE.b + 2,
+    34,
+  )
+  eq(
+    'A8 对账自证：①′ 的 V+E+B == (矩阵行数 + 2 行) × 6',
+    MATRIX_SHAPE.v + 8 + MATRIX_SHAPE.e + 2 + MATRIX_SHAPE.b + 2,
+    (MATRIX_SHAPE.rows + 2) * 6,
+  )
 }
 {
   /*
@@ -1050,22 +1067,26 @@ const realRoutes = routes.filter((p) => p !== '*')
     PLANNED_PAGE_COUNT,
   )
   /*
-   * 自证（§4.4 的纪律）：**两个等式一起成立**才能防住"删掉 6 条规划项 + 偷偷加 6 条路由"
-   * 互相抵消成绿。所以再把那 6 条 ★ 用**写死的清单**核一遍（不信 `live` 字段本身）。
+   * 自证（§4.4 的纪律）：**两个等式一起成立**才能防住"删掉几条规划项 + 偷偷加几条路由"
+   * 互相抵消成绿。所以再把那几条 ★ 用**写死的清单**核一遍（不信 `live` 字段本身）。
    *
    * ⚠️ **`/admin` 不在这一组里**：方案 §2.2 给它带了 ★，但它的**路由其实已经落了**
-   *    （超管面板第一期），只有入口是新的 —— 所以"规划中"是 6 条，不是 7 条。
+   *    （超管面板第一期），只有入口是新的 —— 所以它是真路由，不是规划项。
    *    这是本轮发现的**方案自身的一处偏差**，已在两份文档里写明。
+   *
+   * 🆕 2026-09-30「开学准备」落地：这一组从 **6 条降到 3 条** ——
+   *    `/grades` · `/grades/:id` · `/grades/:id/setup` 三条页面真的做出来了
+   *    （`App.tsx` 里有了它们的路由，`PAGES` 里也去掉了 `live: false`）。
+   *    ⚠️ 三条**一起**落地是故意的：只落一条会让 `PAGES` 停在中间态，
+   *       而中间态里 D1 那两个等式**仍然绿** —— 那种绿什么也没证明。
+   *    ⚠️ 顺带：`/grades/:id/setup` 同时**加进了上面的 `MATRIX_PATHS`**（它是新地址）。
    */
-  const PLANNED6 = [
-    '/grades',
-    '/grades/:id',
-    '/grades/:id/setup',
+  const PLANNED3 = [
     '/grades/:id/promote',
     '/settings/terms',
     '/admin/probes',
   ]
-  eqSet('D1：规划中的路径就是那 6 条（写死核对，不看 live 字段）', planned, PLANNED6)
+  eqSet('D1：规划中的路径就是那 3 条（写死核对，不看 live 字段）', planned, PLANNED3)
   check(
     realRoutes.includes('/admin'),
     'D1：`/admin` 是**真路由**（★ 里唯一一个已经落地的，见注释）',
@@ -1085,9 +1106,10 @@ const realRoutes = routes.filter((p) => p !== '*')
    * 于是"偷偷加一条路由没登记"和"矩阵少了一行"两种坏法**都还抓得住**。
    */
   eq(
-    'D1：PAGES 里在矩阵里的行数 == 矩阵行数（34）',
+    'D1：PAGES 里在矩阵里的行数 == 矩阵行数（' + MATRIX_SHAPE.rows + '）',
     PAGES.filter((p) => MATRIX_PATHS.includes(p.path)).length,
     MATRIX_SHAPE.rows,
+    `MATRIX_PATHS=${MATRIX_PATHS.length} 条 · PAGES=${PAGES.length} 条`,
   )
   eqSet(
     'D1：PAGES 里**不在** `按身份显示导航方案.md` §2.2 矩阵里的路径 —— 恰好是通知那两行',
@@ -1600,6 +1622,17 @@ section('第九节 · D3/D4/D5：判据白名单 · myRoles 读取点白名单 �
       ['src/data/store.ts', '`myRoles` 这个槽位的**定义处**（state + hydrate/signOut 写入，不是读取处）'],
       ['src/data/types.ts', '🆕 `RoleCode` 这个**类型的定义处**（注释里引用了 `ROLE_NAME` 这个名字，不读它的值）'],
       ['src/lib/notices.ts', '🆕 通知的**数据层**里那条显示用的小工具（`noticeScopeText`，把范围翻成一句话）'],
+      [
+        'src/pages/GradeSetup.tsx',
+        '🆕 开学准备（P6）：「分配身份」那两组按钮的**显隐**（`canAssignRoles(myRoles)`）—— ' +
+          '与 `/accounts` 那一页同一档判据、同一处 `roles.ts` 函数；**不读任何数据行**。' +
+          '真正的闸门是服务端问数据库（`can_manage_grade_setup()` / `can_assign_roles()`）',
+      ],
+      [
+        'src/pages/Grades.tsx',
+        '🆕 年级管理（P6）：**只用来选一句空态文案**（"你的账号看不到任何年级" vs "还没有年级"）—— ' +
+          '连入口都不判（入口在 `Settings.tsx` 那一行走 `entryVisible("/grades", …)`）',
+      ],
       ['src/lib/roles.ts', '入口表与判据的定义处（不是读取处）'],
     ])
   const hits = []
@@ -1643,6 +1676,17 @@ section('第九节 · D3/D4/D5：判据白名单 · myRoles 读取点白名单 �
     ['src/pages/Workbench.tsx', 'filter 的是今日待办（与角色无关）'],
     ['src/pages/Notices.tsx', '🆕 filter 的是通知列表的**排序前拷贝**（与角色无关，未读那一段也是服务端给的）'],
     ['src/pages/NoticeNew.tsx', '🆕 filter 的是"我能发的范围选项"（**选项，不是数据行** —— 清单由数据库给）'],
+    [
+      'src/pages/GradeSetup.tsx',
+      '🆕 开学准备（P6）：10 处 `.filter` **没有一处与角色有关** —— 滤的是班级（`isAdminClass`）、' +
+        '在册学生（`status === "active"`）、班号表达式挑出来的班、以及数组去重；' +
+        '`myRoles` 单独出现在那两组按钮的 `disabled=` / `canAssign=` 里（见 D4 的白名单理由）',
+    ],
+    [
+      'src/pages/Grades.tsx',
+      '🆕 年级管理（P6）：`.filter` 滤的是这个年级的行政班与在册学生（与角色无关）；' +
+        '`myRoles` 只出现在空态文案那一句',
+    ],
   ])
   const SUSPECT = []
   const walk = (dir) => {

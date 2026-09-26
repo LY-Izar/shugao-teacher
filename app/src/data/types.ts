@@ -1,5 +1,50 @@
 export type StudentStatus = 'active' | 'left'
 
+/**
+ * 班型（`classes.class_type`）—— 四档，**`''` 与 `'undivided'` 是两件事**。
+ *
+ *   `''`           还没设置（默认；**不许默认成理科班** —— 猜错 = 全班的默认选科都错）
+ *   `'undivided'`  未分科（高一的默认状态，是**显式**的一档）
+ *   `'arts'`       文科班（默认 历史 + 政治 + 地理；**首选必须是历史**）
+ *   `'science'`    理科班（默认 物理 + 化学 + 生物；**首选必须是物理**）
+ *
+ * 🔴 **班型与首选绑定**（Q2）：文科班的首选只能是历史、理科班只能是物理。
+ *    不符时系统**不自动改**，只出「建议转班」提示（见 `lib/pick.ts` 的 `subjectAdvice()`）。
+ */
+export type ClassType = '' | 'undivided' | 'arts' | 'science'
+
+/** 这一档班型的中文名（**唯一一处**：界面上别再各写一份 `if`） */
+export const CLASS_TYPE_NAME: Record<ClassType, string> = {
+  '': '未设置',
+  undivided: '未分科',
+  arts: '文科班',
+  science: '理科班',
+}
+
+/**
+ * 班型的**默认组合**（首选 + 再选两门）。`''` 与 `'undivided'` 没有默认组合 ——
+ * 未分科就是"还没有默认"，不是"默认物化生"。
+ *
+ * ⚠️ 它只回答"这个班的默认选科是什么"，**不回答"这个学生选了什么"**
+ *    （后者是 `student_subjects` 的一行）。
+ */
+export const CLASS_TYPE_DEFAULT: Record<ClassType, { primary: string; second: string[] } | null> = {
+  '': null,
+  undivided: null,
+  arts: { primary: 'history', second: ['politics', 'geography'] },
+  science: { primary: 'physics', second: ['chemistry', 'biology'] },
+}
+
+/**
+ * 班级的**种类**（`classes.kind`）。
+ *
+ *   `'admin'`   行政班（高一(1)班这种）
+ *   `'stream'`  走班班（「走班班-物化政」这种，`streamKey` 是它的组合标识）
+ *
+ * ⚠️ 默认值必须是 `'admin'`：老的写入路径不送这一列，默认值让老代码行为不变。
+ */
+export type ClassKind = 'admin' | 'stream'
+
 export type Student = {
   id: string
   /** 班内学号，唯一。**它仍然可改**（班主任 / 年级主任 / 教务处三档） */
@@ -32,6 +77,23 @@ export type Klass = {
   year: string
   createdAt: number
   students: Student[]
+  /**
+   * 班级种类（`classes.kind`）。缺省 = `'admin'`（兼容期：老库还没跑 §27 时读不到这一列）。
+   * 读的人一律走 `lib/pick.ts` 的 `classKindOf()`，别直接判 `k.kind === 'stream'`。
+   */
+  kind?: ClassKind
+  /**
+   * 班型（`classes.class_type`）。缺省 = `''`（还没设置）。
+   * ⚠️ 与"未分科"（`'undivided'`）是两件事，别把空串当成未分科。
+   */
+  classType?: ClassType
+  /** 走班班的组合标识（如 `物化政`）；行政班恒为 `''` */
+  streamKey?: string
+  /**
+   * 这个班挂到哪个年级（`classes.grade_id`，权限判据的一环）。
+   * 缺省 = 认不出来（老库 / 年级名换不出 id）—— 与 `remote.ensureGradeLookup()` 同一口径。
+   */
+  gradeId?: string
 }
 
 export type Teacher = {

@@ -5597,3 +5597,755 @@ revoke all on function db_usage_report() from public, anon, authenticated;
 --  ③ ⚠️ **这个函数只量数，不判色**（配额与阈值在 `adminChart.ts`）：
 --  -- select public.db_usage_report() -> 'totalBytes';   -- 是个数字，不是颜色
 -- ============================================================
+
+
+-- ============================================================
+--  27. 开学准备（P6，2026-09-30）
+--      「名单 → 建班 → 班型 → 选科 → 身份」那一条流水线要的列、表、判据与写入口
+-- ------------------------------------------------------------
+--  ⚠️ **本段是 P6 自己带进来的最小前置**，与 `选科走班实施计划.md` 的分期对不上，
+--     原样记在这里，不给它编一个"P3/P5 已完成"的说法：
+--    · P3 的「年级生命周期」**整期没做** —— 本段只补 `grades` 的三列（届 / 学段 / 入学日期）
+--      与那条按 (school_id, cohort) 的唯一索引；`academic_years` / `terms` /
+--      提档 / 毕业删除**一行都没有**。
+--    · P5 的「统一模型改造」**整期没做** —— 本段只补 `classes.kind` / `class_type` /
+--      `stream_key` 三列。`assignments.class_id` 允许为空、以及那约 20 处 `classId`
+--      过滤点**一个字都没动**（今天库里没有任何 `kind='stream'` 的行，所以那些漏点
+--      暂时漏不出数据；**建走班班之前必须先做 P5**）。
+--    · 本段落地之后，`grades.cohort` 这一段**不影响 P1 的序列号**：§20.3 的
+--      `serial_year_of_class()` 原本就用 `to_jsonb(g) ->> 'cohort'` 读它，
+--      列一出现就自动优先取它（函数体不用改）。
+-- ============================================================
+
+-- -------- 27.1 `grades`：届 / 学段 / 入学日期 --------
+--  `cohort` = **届 = 入校年份**，纯 4 位年份（如 `2025`）。格式写死成 4 位数字，
+--  因为 P1 的序列号就是"届 + 3 位序号"，认不出年份时**不发号**（I14）。
+alter table grades add column if not exists cohort      text not null default '';
+alter table grades add column if not exists stage       int  not null default 1;
+alter table grades add column if not exists enrolled_at date;
+
+--  `cohort` 的格式约束：空串（还没填）或 4 位数字。**先建新的、再 drop 旧的**那一套
+--  在 check 约束上同样适用（幂等：`if not exists` 由 pg_constraint 判）。
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+     where conrelid = 'grades'::regclass and conname = 'grades_cohort_check'
+  ) then
+    alter table grades add constraint grades_cohort_check
+      check (cohort = '' or cohort ~ '^[0-9]{4}$');
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+     where conrelid = 'grades'::regclass and conname = 'grades_stage_check'
+  ) then
+    alter table grades add constraint grades_stage_check check (stage in (1, 2, 3));
+  end if;
+end $$;
+
+-- 一个学校一届只有一行（提档不改 id、只改 stage，所以"届"才是稳定标识）。
+-- ⚠️ 老的 `grades_school_name_key`（按 name 唯一）**留着不删** —— 删它要确认
+--    `ensureGradeLookup()` 那条按名字换 id 的兼容路不再有人走，那是 P3 的活。
+--    ⚠️ 但**不要再靠它**：两个年级的 `name` 相同（都是"高一"）时它才是拦路的那一条。
+create unique index if not exists grades_school_cohort_key on grades (school_id, cohort)
+  where cohort <> '';
+
+-- ✅ 回填（只填能确证的三个届，**绝不覆盖已有值**；Q18 给过：高二 = 2025 / 高一 = 2026 / 高三 = 2024）
+update grades set cohort = '2026' where cohort = '' and name = '高一';
+update grades set cohort = '2025' where cohort = '' and name = '高二';
+update grades set cohort = '2024' where cohort = '' and name = '高三';
+update grades set stage  = 1      where name = '高一' and stage is distinct from 1;
+update grades set stage  = 2      where name = '高二' and stage is distinct from 2;
+update grades set stage  = 3      where name = '高三' and stage is distinct from 3;
+
+-- -------- 27.2 `classes`：两种班同一张表（`kind`）+ 班型（`class_type`）+ 组合标识 --------
+--  ⚠️ `kind` 的默认值**必须是 `'admin'`**：老的 `classToRow` 不送这一列，
+--     默认值让**老代码的行为一个字节不变**（前端 `saveClass` 现在会显式带上它）。
+alter table classes add column if not exists kind        text not null default 'admin';
+alter table classes add column if not exists class_type  text not null default '';
+alter table classes add column if not exists stream_key  text not null default '';
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+     where conrelid = 'classes'::regclass and conname = 'classes_kind_check'
+  ) then
+    alter table classes add constraint classes_kind_check check (kind in ('admin', 'stream'));
+  end if;
+  /*
+   * `class_type` 的四档（一个字段只能有一种语义，所以四档的含义写死）：
+   *   ''          还没设置        ← 默认，**不许默认成理科班**（猜错 = 全班的默认选科都错）
+   *   'undivided' 未分科          ← Q3 = B 显式加的那一档，与"还没设置"是**两件事**
+   *   'arts'      文科班（默认 历史 + 政治 + 地理；**首选必须是历史**）
+   *   'science'   理科班（默认 物理 + 化学 + 生物；**首选必须是物理**）
+   */
+  if not exists (
+    select 1 from pg_constraint
+     where conrelid = 'classes'::regclass and conname = 'classes_class_type_check'
+  ) then
+    alter table classes add constraint classes_class_type_check
+      check (class_type in ('', 'undivided', 'arts', 'science'));
+  end if;
+end $$;
+
+-- -------- 27.3 `student_subjects`：首选 1 + 再选 2（+「其他」） --------
+--  🔴 **不枚举 12 种组合**（Q1 = C）：约束写成"首选 1 门 + 再选 2 门"的**结构约束**，
+--     「学校开不出的组合」走 `kind = 'other'` + `note`（原因必须填）。
+create table if not exists student_subjects (
+  student_id  uuid primary key references students (id) on delete cascade,
+  primary_code text not null default '',
+  second_codes text[] not null default '{}',
+  kind        text not null default 'standard',
+  note        text not null default '',
+  updated_by  uuid references teachers (id),
+  updated_at  timestamptz not null default now()
+);
+create index if not exists student_subjects_kind_idx on student_subjects (kind);
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+     where conrelid = 'student_subjects'::regclass and conname = 'student_subjects_kind_check'
+  ) then
+    alter table student_subjects add constraint student_subjects_kind_check
+      check (kind in ('standard', 'other'));
+  end if;
+end $$;
+
+-- -------- 27.4 🔴 **选科的唯一校验入口**（I16 / I48：四条写入路径共用它）--------
+--  四条写入路径 = ① 单条改 ② 粘贴批量 ③ 一键按班型默认 ④ 导入。
+--  它们**都必须**问这一个函数，谁都不许在自己那边再写一遍结构判断。
+--
+--  判据（三条，逐条都能单独报出人话）：
+--    ① `kind = 'other'` → **必须**手工选走班科目（再选那 2 门一个都不能空），
+--       而且 `note`（原因）必须填 —— "其他"不是"忘了填"的占位。
+--    ② `kind = 'standard'` → 首选必须是**物理或历史**（3+1+2 里的那个"1"），
+--       再选恰好 2 门、且只能从**化学 / 生物 / 政治 / 地理**里取，两门不许相同。
+--    ③ 首选**不许**出现在再选里（物理 + 物理/化学 这种）。
+--
+--  ⚠️ 12 种合法组合是上面三条的**推论**，不是另一份清单 ——
+--     写死一份 12 项的清单就成了"同一件事两个判定入口"（§十 踩过四次）。
+create or replace function public.student_subject_check(
+  p_kind text,
+  p_primary text,
+  p_second text[],
+  p_note text
+) returns void
+language plpgsql
+immutable
+as $$
+declare
+  v_second text[] := coalesce(p_second, '{}');
+begin
+  if p_kind not in ('standard', 'other') then
+    raise exception '选科类型只认 standard / other，收到的是 %', p_kind;
+  end if;
+
+  if p_kind = 'other' then
+    if coalesce(array_length(v_second, 1), 0) = 0 then
+      raise exception '「其他」的学生必须手工选走班科目（再选两门不能空）';
+    end if;
+    if array_length(v_second, 1) <> 2 then
+      raise exception '再选科目必须恰好 2 门，这一行有 % 门', array_length(v_second, 1);
+    end if;
+    if coalesce(btrim(p_note), '') = '' then
+      raise exception '「其他」必须填原因';
+    end if;
+    return;
+  end if;
+
+  if p_primary not in ('physics', 'history') then
+    raise exception '首选只能是物理或历史，收到的是 %', coalesce(nullif(p_primary, ''), '（空）');
+  end if;
+
+  if coalesce(array_length(v_second, 1), 0) <> 2 then
+    raise exception '再选科目必须恰好 2 门，这一行有 % 门', coalesce(array_length(v_second, 1), 0);
+  end if;
+
+  if exists (
+    select 1 from unnest(v_second) s
+     where s not in ('chemistry', 'biology', 'politics', 'geography')
+  ) then
+    raise exception '再选只能从 化学 / 生物 / 政治 / 地理 里取，这一行是：%', array_to_string(v_second, '、');
+  end if;
+
+  if v_second[1] = v_second[2] then
+    raise exception '再选两门不许相同：%', v_second[1];
+  end if;
+
+  if p_primary = any (v_second) then
+    raise exception '首选 % 不许出现在再选里', p_primary;
+  end if;
+end $$;
+
+-- -------- 27.5 `class_members`：走班班成员（**多对多，不能省**）--------
+--  ⚠️ 本期**只建表**：成员由 P7 的"生成走班班"与本期「其他」学生的手工选班写入。
+--     一个学生同时在 2 个走班班里是常态（差 2 门），所以主键是 (class_id, student_id)。
+create table if not exists class_members (
+  class_id   uuid not null references classes (id) on delete cascade,
+  student_id uuid not null references students (id) on delete cascade,
+  primary key (class_id, student_id)
+);
+create index if not exists class_members_student_idx on class_members (student_id);
+
+-- -------- 27.5b 🔑 `class_subjects` 的 unique 换列（P7 的破坏性迁移**提前到这里**）--------
+--  为什么要提前：本段的 `bulk_write_class_subjects()` 要用
+--  `on conflict (class_id, subject_code, teacher_id)`，而**冲突目标必须有一条唯一索引兜着**——
+--  老的 unique 是 `(class_id, subject, teacher_id)`，`on conflict` 拿它匹配不上，
+--  PostgREST 会回 `42P10`（"no unique or exclusion constraint matching the ON CONFLICT"）。
+--
+--  顺序纪律（照 §16.3「先补新的、再删旧的」）：
+--   · **只建新的，老的 `class_subjects_class_id_subject_teacher_id_key` 留着不删。**
+--     新索引的列集是老的**超集**（subject_code 与 subject 一一对应、都非空）→
+--     新的比老的严，留着老的**不会放进任何一行脏数据**；
+--     而 `drop constraint` 要单独确认没有代码依赖它 —— 那是 P7 的活，不是这一段的。
+--   · ⚠️ 建索引前先确认没有重复（有重复时 `create unique index` 会直接失败、整份脚本回滚）。
+--     查重 SQL 见 §27.12 第 ⑤ 条。
+create unique index if not exists class_subjects_unique_code
+  on class_subjects (class_id, subject_code, teacher_id);
+
+-- -------- 27.6 🆕 年级主任：**一个年级只允许一个**（Q25 = B）--------
+--  🔴 **建索引之前必须先清洗历史数据**：库里若已有同年级多行 `grade_head`，
+--     `create unique index` 会直接失败，而失败发生在整份 `schema.sql` 里 →
+--     整段回滚（不会留下半截状态，但用户会看到"跑不过去"）。
+--  清洗口径（**只在这一种情况下动手**）：同一个年级的多个年级主任里，
+--  **留最早的那一行**、删掉其余的 —— 删掉的条数与原因由下面的 `raise notice` 报出来，
+--  绝不静默。要保留别人，就先手工把该行改成正确的年级再跑本段。
+do $$
+declare
+  v_dropped int := 0;
+begin
+  with ranked as (
+    select r.id,
+           row_number() over (
+             partition by r.scope_id
+             order by r.created_at, r.id
+           ) as rn
+      from teacher_roles r
+     where r.role = 'grade_head' and r.scope_type = 'grade' and r.scope_id is not null
+  )
+  delete from teacher_roles t
+   using ranked k
+   where t.id = k.id and k.rn > 1;
+  get diagnostics v_dropped = row_count;
+  if v_dropped > 0 then
+    raise notice '一个年级只允许一个年级主任：清洗掉 % 行重复的 grade_head（留最早的那一行）', v_dropped;
+  end if;
+end $$;
+
+create unique index if not exists teacher_roles_one_grade_head
+  on teacher_roles (coalesce(scope_id, '00000000-0000-0000-0000-000000000000'::uuid))
+  where role = 'grade_head' and scope_type = 'grade';
+
+-- -------- 27.7 判据（**定义在引用它的策略之前** —— `create policy` 会当场解析函数名）--------
+
+--  这个年级的开学准备（录名单 / 建班 / 设班型 / 采选科）归谁管：
+--  **最高管理员 · 教务处 · 本年级的年级主任**。
+--  ⚠️ 班主任**不在**这一档（他能改本班学生的选科，但设不了班型、建不了班）。
+create or replace function public.can_manage_grade_setup(p_grade_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select public.is_school_admin()
+      or exists (
+           select 1 from teacher_roles r
+            where r.teacher_id = auth.uid()
+              and r.role = 'grade_head'
+              and r.scope_type = 'grade'
+              and r.scope_id = p_grade_id
+         );
+$$;
+
+--  这个学生的选科归谁改：**最高管理员 · 教务处 · 本年级的年级主任 · 本班班主任**。
+--  ⚠️ 与 `can_manage_grade_setup` 的差别只有"班主任"这一档 —— 两条判据分开写，
+--     因为"能改一个学生的选科"与"能设定整个年级的班型"是**两种权限**。
+create or replace function public.can_edit_student_subject(p_student_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select public.is_school_admin()
+      or exists (
+           select 1
+             from students s
+             join classes c on c.id = s.class_id
+            where s.id = p_student_id
+              and (
+                   c.id in (select visible_class_ids())
+                or exists (
+                     select 1 from teacher_roles r
+                      where r.teacher_id = auth.uid()
+                        and r.role = 'grade_head'
+                        and r.scope_type = 'grade'
+                        and r.scope_id = c.grade_id
+                   )
+              )
+         );
+$$;
+
+--  派生判据：这个班的开学准备（班型 / 建班）归谁管 → 直接走它所属年级那条。
+create or replace function public.can_manage_class_setup(p_class_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select public.can_manage_grade_setup(
+           (select c.grade_id from classes c where c.id = p_class_id)
+         );
+$$;
+
+-- -------- 27.8 RLS：**读得宽、写得窄** --------
+alter table student_subjects enable row level security;
+alter table class_members    enable row level security;
+
+--  读：**看得见这个学生所在班**就能读他的选科（"读得宽"；
+--      班主任 / 任课老师 / 年级主任 / 教务处都要看名单上的选科）。
+drop policy if exists student_subjects_read on student_subjects;
+create policy student_subjects_read on student_subjects for select to authenticated
+  using (
+    exists (
+      select 1 from students s
+       where s.id = student_subjects.student_id
+         and s.class_id in (select visible_class_ids())
+    )
+  );
+
+--  写：只有 `can_edit_student_subject()` 那一档。
+--  🔴 **写策略仍然要给**（哪怕写入永远走服务端）：只给 select 的策略意味着
+--     客户端 upsert 会被拒 —— 那不是"静默失败"，是**显式报错**，符合 §三.5 那条纪律。
+drop policy if exists student_subjects_write on student_subjects;
+create policy student_subjects_write on student_subjects for all to authenticated
+  using (public.can_edit_student_subject(student_id))
+  with check (public.can_edit_student_subject(student_id));
+
+--  走班班成员：读跟"看得见这个班"走；写**只走服务端**（P7 的生成 + 本期的「其他」手工选班），
+--  与 `class_subjects` 同一条纪律 —— 客户端**零写权限**。
+drop policy if exists class_members_read on class_members;
+create policy class_members_read on class_members for select to authenticated
+  using (class_id in (select visible_class_ids()));
+
+revoke all on class_members from anon, authenticated;
+grant select on class_members to authenticated;
+grant select on student_subjects to authenticated;
+revoke all on student_subjects from anon;
+
+-- -------- 27.9 🔑 「其他」学生的手工选班（**与选科写入同一个事务**）--------
+--  Q1 = C 的第三条：`kind = 'other'` 的学生**必须手工选走班科目** ——
+--  那是"走班班成员"在本期唯一的手工入口，所以它必须和选科那一行**一起**成功或一起失败。
+--
+--  🔴 为什么写成一个函数、而不是让服务端先写选科再写成员：
+--     两次 PostgREST 请求 = 两个事务 = **可以只成功一半**，
+--     而那正是本期验收要钉死的那条（"改一半的情况不发生"）。
+--     PostgREST 一次 RPC = 一个事务，所以这里必须是一句 SQL 函数。
+create or replace function public.write_student_subject(
+  p_student_id uuid,
+  p_kind text,
+  p_primary text,
+  p_second text[],
+  p_note text,
+  p_member_class_ids uuid[] default '{}'
+) returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_target_grade uuid;
+  v_class        uuid;
+  v_class_grade  uuid;
+  v_members      uuid[];
+begin
+  if not public.can_edit_student_subject(p_student_id) then
+    raise exception '你没有改这个学生选科的权限';
+  end if;
+
+  perform public.student_subject_check(p_kind, p_primary, p_second, p_note);
+
+  select c.grade_id into v_target_grade
+    from students s join classes c on c.id = s.class_id
+   where s.id = p_student_id;
+  if v_target_grade is null then
+    raise exception '这个学生没有挂到任何年级上，先把它挂到班与年级上再采选科';
+  end if;
+
+  insert into student_subjects (student_id, primary_code, second_codes, kind, note, updated_by, updated_at)
+  values (p_student_id, coalesce(p_primary, ''), coalesce(p_second, '{}'), p_kind,
+          coalesce(p_note, ''), auth.uid(), now())
+  on conflict (student_id) do update
+     set primary_code = excluded.primary_code,
+         second_codes = excluded.second_codes,
+         kind         = excluded.kind,
+         note         = excluded.note,
+         updated_by   = excluded.updated_by,
+         updated_at   = now();
+
+  /* 手工选班只对「其他」开放：标准组合的走班班由 P7 生成，不许在这里插队 */
+  if p_kind = 'other' then
+    if coalesce(array_length(p_member_class_ids, 1), 0) = 0 then
+      raise exception '「其他」的学生必须手工选走班科目（走班班一个都没选）';
+    end if;
+    foreach v_class in array p_member_class_ids loop
+      select c.grade_id into v_class_grade from classes c where c.id = v_class;
+      if v_class_grade is null then
+        raise exception '选中的走班班不存在或没有年级（%）', v_class;
+      end if;
+      if v_class_grade <> v_target_grade then
+        raise exception '走班班必须和学生在同一个年级里（这个班属另一个年级）';
+      end if;
+      if not exists (select 1 from classes c where c.id = v_class and c.kind = 'stream') then
+        raise exception '只能选走班班（kind = stream），% 不是走班班', v_class;
+      end if;
+    end loop;
+    select coalesce(array_agg(distinct x), '{}') into v_members
+      from unnest(p_member_class_ids) x;
+    delete from class_members where student_id = p_student_id;
+    insert into class_members (class_id, student_id)
+    select m, p_student_id from unnest(v_members) m
+    on conflict do nothing;
+  else
+    if coalesce(array_length(p_member_class_ids, 1), 0) > 0 then
+      raise exception '标准组合的走班班由系统生成（P7），手工选班只对「其他」开放';
+    end if;
+  end if;
+
+  return jsonb_build_object('ok', true, 'studentId', p_student_id);
+end $$;
+
+-- -------- 27.10 🔑 批量写任教关系（**一个事务**）--------
+--  `class_subjects` 在数据库层**零写权限**（§27.8 同款纪律），所以它只能走
+--  **service_role 的服务端 Function**；那个 Function 拿调用者 JWT 问
+--  `can_manage_class_setup()`，再调本函数写。
+--
+--  🔴 一个 RPC = 一个事务：**要么全成、要么全不成**（本期验收的那条断言）。
+--  🔴 顺序纪律：**先解析、再逐行校验、最后才写** —— 任何一行非法都还没碰过一张表。
+--
+--  入参形状（服务端已经做过形状校验；这里只信类型、不信内容）：
+--    [{ "class_id": "<uuid>", "subject_code": "physics", "teacher_id": "<uuid>" }, …]
+create or replace function public.bulk_write_class_subjects(p_rows jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  r          record;
+  v_g        uuid;
+  v_n        int := 0;
+  v_deleted  int := 0;
+  v_grades   uuid[] := '{}';
+begin
+  if p_rows is null or jsonb_typeof(p_rows) <> 'array' then
+    raise exception '要写的是"一数组的任课关系"，收到的不是数组';
+  end if;
+
+  /*
+   * 🔴 **上限与空表先判**（在逐行校验之前）：3001 行的那份表会被"第 1 行的班级不存在"
+   *    截住，用户看到的是一句与真正原因无关的话（与 `bulk_import_roster()` 同款）。
+   */
+  if jsonb_array_length(p_rows) = 0 then
+    raise exception '一行都没有 —— 这份表是空的';
+  end if;
+  if jsonb_array_length(p_rows) > 2000 then
+    raise exception '一次最多写 2000 行，这次有 % 行 —— 分两批', jsonb_array_length(p_rows);
+  end if;
+
+  /* ① 遍历校验（这一圈里**一行都不写**） */
+  for r in
+    select (e ->> 'class_id')::uuid     as class_id,
+           btrim(e ->> 'subject_code')  as subject_code,
+           (e ->> 'teacher_id')::uuid   as teacher_id
+      from jsonb_array_elements(p_rows) e
+  loop
+    v_n := v_n + 1;
+    if r.class_id is null or r.teacher_id is null or coalesce(r.subject_code, '') = '' then
+      raise exception '第 % 行缺字段（班级 / 学科 / 老师三样都要）', v_n;
+    end if;
+    if not exists (select 1 from classes c where c.id = r.class_id) then
+      raise exception '第 % 行的班级不存在', v_n;
+    end if;
+    if not exists (select 1 from teachers t where t.id = r.teacher_id) then
+      raise exception '第 % 行的老师不存在', v_n;
+    end if;
+    if not exists (select 1 from subjects s where s.code = r.subject_code) then
+      raise exception '第 % 行的学科认不出（%）', v_n, r.subject_code;
+    end if;
+    v_grades := v_grades || (select c.grade_id from classes c where c.id = r.class_id);
+  end loop;
+
+  /* ② 判据（**每个班各自的年级都问一遍**；全部通过才往下走） */
+  for v_g in select distinct g from unnest(v_grades) g where g is not null loop
+    if not public.can_manage_grade_setup(v_g) then
+      raise exception '你没有设定这个年级任课关系的权限（年级 %）', v_g;
+    end if;
+  end loop;
+
+  /*
+   * ③ 落地用的暂存表。
+   *    🔴 为什么用暂存表而不是 CTE：这一句里要**读同一份数据两次**
+   *       （先 delete 掉被替换的老师、再 insert），而 CTE 在多个引用点上会被展开两次，
+   *       `jsonb_array_elements(p_rows)` 就会跑两遍。暂存表让"解析"只发生一次。
+   *    ⚠️ `on commit drop` + `delete` 让它在同一会话的第二次调用里也是干净的。
+   */
+  create temp table if not exists _p6_cs (
+    class_id     uuid,
+    subject_code text,
+    teacher_id   uuid
+  ) on commit drop;
+  delete from _p6_cs;
+  insert into _p6_cs (class_id, subject_code, teacher_id)
+  select (e ->> 'class_id')::uuid, btrim(e ->> 'subject_code'), (e ->> 'teacher_id')::uuid
+    from jsonb_array_elements(p_rows) e;
+
+  /* ④ 一次写完：先删掉"同一个班同一科被别人占着"的老行，再插新的 */
+  delete from class_subjects cs
+   using _p6_cs t
+   where cs.class_id = t.class_id
+     and cs.subject_code = t.subject_code
+     and cs.teacher_id <> t.teacher_id;
+  get diagnostics v_deleted = row_count;
+
+  insert into class_subjects (class_id, subject, teacher_id, subject_code)
+  select t.class_id, s.name, t.teacher_id, t.subject_code
+    from _p6_cs t
+    join subjects s on s.code = t.subject_code
+  on conflict (class_id, subject_code, teacher_id) do nothing;
+
+  return jsonb_build_object('ok', true, 'rows', v_n, 'replaced', v_deleted);
+end $$;
+
+-- -------- 27.11 🔑 录名单 + 按班号自动建班（**一个事务**）--------
+--  教务处在「开学准备」里粘贴一整个年级的名单，服务端把解析好的行交到这里。
+--  🔴 **一个 RPC = 一个事务**：几十个班、几百个学生，要么全成、要么一行都不落 ——
+--     "导了一半"是这一期最不能接受的失败样子（人工根本对不出少了谁）。
+--  🔴 **顺序纪律**：先校验完**每一行**，再碰任何一张表。
+--
+--  入参形状（服务端的形状校验只保证"是数组"；内容一律在这里判）：
+--    [{ "class_no": "1", "student_no": "01", "name": "王志远", "serial": "2026001" }, …]
+--    · `serial` 留空 → 交给 §20 的 `students_serial_fill()` 触发器**自动发号**
+--      （**导入不许自己算号** —— 算号只有那一处）。
+--    · `class_no` = 班号，**按它自动建班**（0 步：名单里出现几个班号就建几个班）。
+create or replace function public.bulk_import_roster(
+  p_grade_id uuid,
+  p_rows jsonb,
+  p_class_name_template text default '%s'
+) returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  r               record;
+  v_n             int := 0;
+  v_grade_name    text;
+  v_school_id     uuid;
+  v_teacher_id    uuid := auth.uid();
+  v_class_id      uuid;
+  v_class_ids     uuid[] := '{}';
+  v_students      int := 0;
+  v_serial_missing int := 0;
+  v_inc           int := 0;
+  v_out           jsonb;
+  v_tmpl          text := coalesce(nullif(btrim(p_class_name_template), ''), '%s');
+begin
+  if p_grade_id is null then
+    raise exception '导入名单要指定一个年级';
+  end if;
+  if p_rows is null or jsonb_typeof(p_rows) <> 'array' then
+    raise exception '要导入的是"一数组的学生行"，收到的不是数组';
+  end if;
+
+  select g.name, g.school_id into v_grade_name, v_school_id from grades g where g.id = p_grade_id;
+  if v_grade_name is null then
+    raise exception '这个年级不存在';
+  end if;
+
+  if not public.can_manage_grade_setup(p_grade_id) then
+    raise exception '你没有给这个年级录名单的权限（教务处 / 最高管理员 / 本年级的年级主任）';
+  end if;
+
+  /*
+   * 🔴 **行数上限先判**（在逐行校验之前）：否则一份 3001 行的名单会先被
+   *    "第 N 行的班级不存在"截住 —— 用户看到的是一句与真正原因无关的话。
+   *    ⚠️ 与 `bulk_write_class_subjects()` 里那一条同款，两条都写在这个位置。
+   */
+  if jsonb_array_length(p_rows) = 0 then
+    raise exception '一行都没有 —— 这份名单是空的';
+  end if;
+  if jsonb_array_length(p_rows) > 3000 then
+    raise exception '一次最多导入 3000 行，这次有 % 行 —— 按年级分批', jsonb_array_length(p_rows);
+  end if;
+
+  /* ① 逐行校验（这一圈里**一行都不写**） */
+  for r in
+    select btrim(e ->> 'class_no')    as class_no,
+           btrim(e ->> 'student_no')  as student_no,
+           btrim(e ->> 'name')        as name,
+           coalesce(btrim(e ->> 'serial'), '') as serial
+      from jsonb_array_elements(p_rows) e
+  loop
+    v_n := v_n + 1;
+    if coalesce(r.name, '') = '' then
+      raise exception '第 % 行缺姓名', v_n;
+    end if;
+    if coalesce(r.class_no, '') = '' then
+      raise exception '第 % 行缺班号', v_n;
+    end if;
+    if length(r.class_no) > 12 then
+      raise exception '第 % 行的班号太长（%）', v_n, r.class_no;
+    end if;
+    if coalesce(r.student_no, '') = '' then
+      raise exception '第 % 行缺班级内学号', v_n;
+    end if;
+    if r.serial <> '' and r.serial !~ '^[0-9]{4}[0-9]{3}$' then
+      raise exception '第 % 行的序列号格式不对（%），序列号是"4 位年份 + 3 位序号"', v_n, r.serial;
+    end if;
+  end loop;
+
+  if v_n > 3000 then
+    raise exception '一次最多导入 3000 行，这次有 % 行 —— 按年级分批', v_n;
+  end if;
+
+  /* ② 班号 × 班内学号的重复预检（同一个班同一个学号出现两次 = 用户手上的名单有错，
+        让数据库报"唯一冲突"不如在这里直接报出"有几组"） */
+  select coalesce(sum(n - 1), 0) into v_inc
+    from (
+      select btrim(e ->> 'class_no') || '|' || btrim(e ->> 'student_no') as k, count(*) as n
+        from jsonb_array_elements(p_rows) e
+       group by 1
+    ) y;
+  if v_inc > 0 then
+    raise exception '名单里有 % 组"同一个班、同一个班内学号"出现了两次 —— 请先改掉重复的那几行', v_inc;
+  end if;
+
+  /* ③ 建班（名单里出现几个班号就建几个；已存在的不重复建） */
+  for r in
+    select distinct btrim(e ->> 'class_no') as class_no
+      from jsonb_array_elements(p_rows) e
+  loop
+    select c.id into v_class_id
+      from classes c
+     where c.grade_id = p_grade_id
+       and c.name = replace(v_tmpl, '%s', v_grade_name || '(' || r.class_no || ')班')
+     limit 1;
+    if v_class_id is null then
+      select c.id into v_class_id
+        from classes c
+       where c.grade_id = p_grade_id
+         and (c.name = v_grade_name || '(' || r.class_no || ')班' or c.name = r.class_no)
+       order by c.created_at
+       limit 1;
+    end if;
+    if v_class_id is null then
+      insert into classes (teacher_id, name, grade, school_id, grade_id, kind, class_type)
+      values (v_teacher_id,
+              replace(v_tmpl, '%s', v_grade_name || '(' || r.class_no || ')班'),
+              v_grade_name, v_school_id, p_grade_id, 'admin', '')
+      returning id into v_class_id;
+    end if;
+    v_class_ids := v_class_ids || v_class_id;
+  end loop;
+
+  /* ④ 写学生（`serial` 空着交给触发器发号；已有序列号的那一行按"能认出来"处理）
+     🔴 班 id **直接从 `classes` join 出来**（不再写一层相关子查询）：
+        实测报过 `subquery uses ungrouped column "x.value" from outer query` ——
+        把 `jsonb_array_elements` 的列裹进一个 group by 过的派生表之后再引用它，
+        PostgreSQL 会拿它当外部引用。join 一遍既更短，也没有这个坑。 */
+  insert into students (class_id, student_no, name, serial)
+  select c.id,
+         btrim(e ->> 'student_no'),
+         btrim(e ->> 'name'),
+         coalesce(btrim(e ->> 'serial'), '')
+    from jsonb_array_elements(p_rows) e
+    join classes c
+      on c.grade_id = p_grade_id
+     and (c.name = v_grade_name || '(' || btrim(e ->> 'class_no') || ')班'
+          or c.name = btrim(e ->> 'class_no'))
+  on conflict (class_id, student_no) do update
+     set name = excluded.name,
+         -- 序列号**只补空**：已有序列号的行一个字节都不动（它永久不可改，§20.2 的触发器也拒）
+         serial = case when students.serial = '' then excluded.serial else students.serial end;
+  get diagnostics v_students = row_count;
+
+  select count(*) into v_serial_missing
+    from jsonb_array_elements(p_rows) e
+    join students s
+      on s.class_id = any (v_class_ids)
+     and s.student_no = btrim(e ->> 'student_no')
+   where s.serial = '';
+  /* 认不出入校年份时触发器**不发号也不报错**（I14）——这里把这种人报出来，不静默 */
+  if v_serial_missing > 0 then
+    raise notice '有 % 个学生没拿到序列号（这一届的入校年份认不出来）', v_serial_missing;
+  end if;
+
+  select coalesce(jsonb_agg(jsonb_build_object(
+           'id', s.id,
+           'classId', s.class_id,
+           'studentNo', s.student_no,
+           'name', s.name,
+           'serial', s.serial
+         ) order by s.serial, s.student_no), '[]'::jsonb)
+    into v_out
+    from students s
+   where s.class_id = any (v_class_ids);
+
+  return jsonb_build_object(
+    'ok', true,
+    'classes', array_length(v_class_ids, 1),
+    'students', v_students,
+    'noSerial', v_serial_missing,
+    'roster', v_out
+  );
+end $$;
+
+-- -------- 27.12 权限：这三个写函数**只有服务端能调** --------
+--  ⚠️ 断言（跑完本段逐条验）：
+--    ① 以 authenticated 身份 `select public.write_student_subject(...)` → **42501**
+--    ② 以 authenticated 身份 `select public.bulk_write_class_subjects('[]')` → **42501**
+--    ③ 以 authenticated 身份 `select public.bulk_import_roster(...)` → **42501**
+--    ④ 以 service_role 身份调 → 通（或报出差的那一行的人话）
+revoke all on function public.write_student_subject(uuid, text, text, text[], text, uuid[])
+  from public, anon, authenticated;
+revoke all on function public.bulk_write_class_subjects(jsonb)
+  from public, anon, authenticated;
+revoke all on function public.bulk_import_roster(uuid, jsonb, text)
+  from public, anon, authenticated;
+
+-- -------- 27.12 核对（把下面整段粘进 SQL 编辑器）--------
+--  ① 三个届回填到位：
+--  -- select name, cohort, stage from grades order by stage;
+--  -- 期望：高一 2026 1 / 高二 2025 2 / 高三 2024 3
+--
+--  ② 选科校验函数的**正反对照**（三条都要报错，报的必须是上面那几句人话）：
+--  -- select public.student_subject_check('standard', 'physics', '{chemistry}', '');          -- 再选只有 1 门 → 报错
+--  -- select public.student_subject_check('standard', 'physics', '{chemistry,physics}', ''); -- 首选混进再选 → 报错
+--  -- select public.student_subject_check('other',    'physics', '{}', '转学待定');            -- 其他没手工选科 → 报错
+--  -- select public.student_subject_check('standard', 'physics', '{chemistry,biology}', ''); -- ✅ 不报错
+--
+--  ③ 一个年级一个年级主任（唯一索引在不在）：
+--  -- select indexname from pg_indexes where tablename='teacher_roles' and indexname='teacher_roles_one_grade_head';
+--
+--  ④ 写入口只有服务端能调（三条都要 42501）：
+--  -- select public.write_student_subject('00000000-0000-0000-0000-000000000000','standard','physics','{chemistry,biology}','', '{}');
+--  -- select public.bulk_write_class_subjects('[]'::jsonb);
+--  -- select public.bulk_import_roster('00000000-0000-0000-0000-000000000000','[]'::jsonb);
+--
+--  ⑤ `class_subjects` 换 unique 之前**必须先跑这一条**（有重复时建索引会失败）：
+--  -- select class_id, subject_code, teacher_id, count(*) from class_subjects
+--  --  group by 1,2,3 having count(*) > 1;
+--  -- 期望：0 行。非 0 就先人工合并那几行（多半是同一个老师在同一班同一科写了两遍）
+--  -- 建完之后两条索引都在（新的是老的超集，旧的留到 P7 再单独 drop）：
+--  -- select indexname from pg_indexes where tablename='class_subjects';
+--
+--  ⑥ 批量函数的人话错误码（每一条都要报出"第几行 + 为什么"）：
+--  -- select public.bulk_write_class_subjects('[{"class_id":"00000000-0000-0000-0000-000000000000","subject_code":"physics","teacher_id":"00000000-0000-0000-0000-000000000000"}]'::jsonb);
+--  -- 期望：报「第 1 行的班级不存在」
+-- ============================================================

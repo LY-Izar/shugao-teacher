@@ -205,7 +205,7 @@ export default function NoticeNew() {
         <Sect>发给谁</Sect>
         <div className="mb-4">
           {blockOf('school', '全校', '全校所有老师')}
-          {blockOf('department', '某个部门', '职能部门（办公室 / 教务处 / 总务处 / 德育处）—— 一个人可以属于多个部门')}
+          {blockOf('department', '某个部门', '职能部门（办公室 / 教务处 / 总务处 / 德育处）')}
           {blockOf('grade', '本年级', '本年级的老师')}
           {blockOf('subject', '本学科', '本校这一科的所有老师（跨年级）')}
           {blockOf('role', '某个职位', '只列得出比你低的职位')}
@@ -275,7 +275,7 @@ export default function NoticeNew() {
                 <option value={30}>30 天</option>
               </select>
             </span>
-            <span>过期后从列表里消失，但记录不删</span>
+            <span>过期后从列表里消失</span>
           </div>
         </Panel>
 

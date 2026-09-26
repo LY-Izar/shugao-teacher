@@ -1,12 +1,14 @@
 import { getSupabase } from '../lib/supabase'
 import { asSubjectCode, subjectCodeOfName } from '../lib/subjects'
 import { compareRoster } from '../lib/roster'
+import { classKindOf } from '../lib/pick'
 import type { Exam, ExamScore } from './examTypes'
 import type {
   Assignment,
   AssignmentStatus,
   CallRecord,
   CallState,
+  ClassType,
   ClassroomClient,
   Klass,
   QuestionMeta,
@@ -39,6 +41,15 @@ type ClassRow = {
    * 这一列**根本不出现**（不是写 null）—— 见 `ensureGradeLookup`。
    */
   grade_id?: string | null
+  /**
+   * 班级种类（`schema.sql` §27.2 加的列）：`admin` 行政班 / `stream` 走班班。
+   * ⚠️ **可选**：老库没有它 —— 读不到就等于 `'admin'`（读的人走 `classKindOf()`）。
+   */
+  kind?: string | null
+  /** 班型（`schema.sql` §27.2）：`''` / `undivided` / `arts` / `science`。读不到等于 `''` */
+  class_type?: string | null
+  /** 走班班的组合标识；行政班恒为 `''` */
+  stream_key?: string | null
 }
 type StudentRow = {
   id: string
@@ -235,6 +246,62 @@ export function ensureSubjectCols(): Promise<SubjectCols> {
     colsProbe = watchProbe('subjectCols', p, (v) => (v.assignments && v.teachers ? 'present' : 'missing'))
   }
   return colsProbe
+}
+
+/* ---------------- 兼容期：`classes` 的三列在不在？（schema.sql §27.2，P6） ----------------
+
+   与 `ensureSubjectCols()` **同一套纪律**（判据也同一句：只认 `42703` = 列不存在）：
+     · 读：`select('*')` 读不到就是 `undefined` → 读的人走 `classKindOf()` / `classTypeOf()`；
+     · 写：列不在就**不把这三列放进载荷**（带上会让整条 upsert 被拒 = 刷新即丢）；
+     · SQL 跑过之后前端一行都不用改，新列自动开始写。
+
+   ⚠️ 为什么不塞进 `ensureSubjectCols()`：那一个探的是 `assignments` / `teachers`，
+      混进来会让"学科列在不在"与"班级列在不在"变成同一个结论 ——
+      两段 SQL 是可以分开跑的（用户常常只跑其中一段）。 */
+
+type ClassCols = { kind: boolean }
+
+let classColsProbe: Promise<ClassCols> | null = null
+
+/**
+ * 探针 —— **`select('*')`，不是 `select('kind')`**。
+ *
+ * 🔴 探针不许假设任何列存在（`nav-checks.mjs` 的 D10 会静态抓 `select('具体列名')`）：
+ *    这里要问的本来就是"这一列在不在"，拿它自己去问，在**没有这一列的库上**会连
+ *    "表在不在"都判不出来。所以先 `select('*')` 把整行拿回来，再在 JS 里看键在不在。
+ */
+async function probeClassCols(): Promise<ClassCols> {
+  const sb = getSupabase()
+  if (!sb) return { kind: false }
+  try {
+    const { data, error } = await sb.from('classes').select('*').limit(1)
+    if (error) {
+      const msg = String(error.message ?? '')
+      const code = String((error as { code?: string }).code ?? '')
+      /* 表/列不存在 = 还没跑那一段 SQL；别的错误（网络、权限）一律当作"有" */
+      if (code === '42P01' || code === '42703' || /does not exist/i.test(msg)) return { kind: false }
+      return { kind: true }
+    }
+    const row = (data ?? [])[0] as Record<string, unknown> | undefined
+    /*
+     * ⚠️ 一行都没有的库（全新的空库）读不出键 —— 但那种库上跑 `schema.sql` 是从头跑的，
+     *    所以"空表"按 `true` 处理：不带这三列反而会让新班的班型存不进去。
+     *    （判据是"列不存在"，不是"这一行有没有值"。）
+     */
+    if (!row) return { kind: true }
+    return { kind: Object.prototype.hasOwnProperty.call(row, 'kind') }
+  } catch {
+    return { kind: true }
+  }
+}
+
+/** 探测一次（同一页面内只探一次），给写班级的路径用 */
+export function ensureClassCols(): Promise<ClassCols> {
+  if (!classColsProbe) {
+    const p = probeClassCols()
+    classColsProbe = watchProbe('classCols', p, (v) => (v.kind ? 'present' : 'missing'))
+  }
+  return classColsProbe
 }
 
 /* ---------------- 兼容期：考试那两张表在不在？（schema.sql 第 15 段） ----------------
@@ -836,13 +903,29 @@ export function ensureGradeLookup(): Promise<GradeLookup> {
  * 这是**纯函数不带可选列**的同一条纪律（对照 `assignmentToRow` 的注释）：
  * "这一列在不在/认不认得出"的判断不放在纯函数里。
  */
-export const classToRow = (k: Klass, teacherId: string, gradeId?: string | null): ClassRow => ({
+export const classToRow = (
+  k: Klass,
+  teacherId: string,
+  gradeId?: string | null,
+  /** `classes.kind` / `class_type` / `stream_key` 三列在不在（`ensureClassCols()`） */
+  withP6Cols = false,
+): ClassRow => ({
   id: k.id,
   teacher_id: teacherId,
   name: k.name,
   grade: k.grade,
   year: k.year,
   ...(gradeId ? { grade_id: gradeId } : {}),
+  /* 🔴 三列**只在列真的存在时**才带上（与 `assignmentWriteRow` 同一条纪律）：
+   *    线上库还没跑 §27 时带上它们，整条 upsert 会被 PostgREST 拒 ——
+   *    而"保存失败 = 刷新即丢"。列存在时又必须带上，否则新班的班型永远存不进去。 */
+  ...(withP6Cols
+    ? {
+        kind: classKindOf(k),
+        class_type: k.classType ?? '',
+        stream_key: k.streamKey ?? '',
+      }
+    : {}),
 })
 
 /**
@@ -1249,6 +1332,11 @@ export async function loadSnapshot(): Promise<Snapshot | null> {
     createdAt: Date.now(),
     // 名单统一排序只有一处：`compareRoster`（有序列号按序列号，没有才按班内学号）
     students: (studentsByClass.get(row.id) ?? []).sort(compareRoster),
+    /* §27.2 的三列：老库读不到 → 不写这三个键（`classKindOf()` / `classTypeOf()` 有兜底） */
+    ...(row.kind === 'stream' ? { kind: 'stream' as const } : {}),
+    ...(row.class_type ? { classType: row.class_type as ClassType } : {}),
+    ...(row.stream_key ? { streamKey: row.stream_key } : {}),
+    ...(row.grade_id ? { gradeId: row.grade_id } : {}),
   }))
 
   const tRow = t.data as {
@@ -1335,7 +1423,8 @@ export const saveTeacher = async (t: Teacher) => {
 export const saveClass = async (k: Klass, teacherId: string) => {
   const lookup = await ensureGradeLookup()
   const gradeId = lookup.column ? gradeLookupId(lookup, k.grade) : null
-  return upsert('classes', classToRow(k, teacherId, gradeId))
+  const p6 = await ensureClassCols()
+  return upsert('classes', classToRow(k, teacherId, gradeId, p6.kind))
 }
 
 /** 年级名 → id；认不出或同名多条（歧义）→ null（**不猜**，见 ensureGradeLookup） */
@@ -1352,11 +1441,58 @@ export function gradeLookupId(lookup: GradeLookup, gradeName: string): string | 
  */
 export async function classRows(list: Klass[], teacherId: string): Promise<ClassRow[]> {
   const lookup = await ensureGradeLookup()
+  const p6 = await ensureClassCols()
   return list.map((k) =>
-    classToRow(k, teacherId, lookup.column ? gradeLookupId(lookup, k.grade) : null),
+    classToRow(k, teacherId, lookup.column ? gradeLookupId(lookup, k.grade) : null, p6.kind),
   )
 }
 export const deleteClass = (id: string) => remove('classes', id)
+
+/**
+ * 🆕 2026-09-30「开学准备」：**年级表那一份**（`grades`）。
+ *
+ * 🔴 它**不在 `loadSnapshot()` 里**（与考试 / 通知那两张表同一条纪律）：
+ *    年级表读不到时不该让整份快照作废 —— 那会让"整个平台打不开"，
+ *    而它只是"开学准备那一页少一行数据"。
+ *
+ * ⚠️ 实现放在 `data/gradeSetup.ts`（那一页自己的读），这里只是一个转发口：
+ *    `store.hydrate()` 与页面都从 `remote.*` 取数据，多一个入口就是两个口径。
+ */
+export { loadGrades, loadGradeSetup } from './gradeSetup'
+export type { GradeRow, GradeSetupBundle, GradeSetupState } from './gradeSetup'
+
+/* ---------------- 开学准备（P6）：读任课关系 / 写选科（走服务端） ----------------
+
+   🔴 两张表的分工（**别混**）：
+     · `class_subjects`（任课关系）—— 客户端**只读**（`class_subjects_read` 策略）。
+       批量写在数据库层零写权限 → 只能走 `/api/grade-setup` 的 `classSubjectBulk`。
+     · `student_subjects`（学生的选科）—— 客户端有写策略，但**这一页的写入仍然走服务端**：
+       因为"选科 + 走班班成员"要**同一个事务**，而两次 PostgREST 请求 = 两个事务
+       = 可以只成功一半（本期验收要钉死的那条）。
+
+   ⚠️ 读失败一律回 `null`（"不知道"），**不许回空数组** ——
+      空数组在界面上是"这个老师一节课都没排"，与"没读到"完全是两回事。 */
+
+export type ClassSubjectRow = { classId: string; subjectCode: string; teacherId: string }
+
+export async function loadClassSubjects(classIds: string[]): Promise<ClassSubjectRow[] | null> {
+  const sb = getSupabase()
+  if (!sb || !classIds.length) return sb ? [] : null
+  try {
+    const { data, error } = await sb.from('class_subjects').select('*').in('class_id', classIds)
+    if (error) return null
+    return (data ?? [])
+      .map((r) => r as Record<string, unknown>)
+      .filter((r) => r.subject_code)
+      .map((r) => ({
+        classId: String(r.class_id),
+        subjectCode: String(r.subject_code),
+        teacherId: String(r.teacher_id),
+      }))
+  } catch {
+    return null
+  }
+}
 
 export const saveStudent = async (s: Student, classId: string) =>
   upsert('students', await studentWriteRow(s, classId))

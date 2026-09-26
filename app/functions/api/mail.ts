@@ -128,7 +128,7 @@ export async function onRequestPost(context: { request: Request; env: Env }): Pr
     if (allowed === 'missing') return json({ status: 'error', message: NEED_STAGE25 }, 503)
     if (!allowed) {
       return json(
-        { status: 'error', message: '只有**在册教师**能发备份通知（教室端那台屏不在这一档）' },
+        { status: 'error', message: '只有在册教师能发备份通知（教室端那台屏不在这一档）' },
         403,
       )
     }

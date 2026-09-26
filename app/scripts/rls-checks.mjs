@@ -198,7 +198,7 @@ await withLock(async () => {
     /** 身份名（打印用）与顺序 —— 与文档 §16.4 那张表同一组人 */
     const WHO = {
       super: '最高管理员 super',
-      admin: '教导处 admin',
+      admin: '教务处 admin',
       grade: '年级主任（高二）',
       head: '班主任（高二(1)班）',
       phy: '物理老师（教 1/4 班物理）',
@@ -576,7 +576,7 @@ await withLock(async () => {
       return `
     insert into auth.users (id, email, raw_user_meta_data) values
       ('${U.super}', 'super@shugao.test', '{"name":"最高管理员","subject":"物理","subject_code":"physics"}'::jsonb),
-      ('${U.admin}', 'admin@shugao.test', '{"name":"教导处","subject":"化学","subject_code":"chemistry"}'::jsonb),
+      ('${U.admin}', 'admin@shugao.test', '{"name":"教务处","subject":"化学","subject_code":"chemistry"}'::jsonb),
       ('${U.grade}', 'grade@shugao.test', '{"name":"高二年级主任","subject":"数学","subject_code":"math"}'::jsonb),
       ('${U.head}',  'head@shugao.test',  '{"name":"高二(1)班班主任","subject":"英语","subject_code":"english"}'::jsonb),
       ('${U.phy}',   'phy@shugao.test',   '{"name":"物理老师","subject":"物理","subject_code":"physics"}'::jsonb),
@@ -649,7 +649,7 @@ await withLock(async () => {
     --   e1 物理老师建的**单班**物理（c1）        → 他自己可写；班主任/年级主任只读；教室端读得到
     --   e2 物理老师建的**多班**物理（c1 + c2）   → 钉"多班数组"这条语义（两班他都教）
     --   e3 语文老师建的单班语文（c1）            → 物理老师**写不了**（不是他建的、也不是他那一科）
-    --   e4 教导处建的高三化学（c3）              → 教室端**看不见**（不是他的班）
+    --   e4 教务处建的高三化学（c3）              → 教室端**看不见**（不是他的班）
     insert into exams (id, teacher_id, title, paper_key, subject, subject_code, scope, grade, source, mode, exam_date, question_count, class_ids, absent_nos) values
       ('${EX.e1}', '${U.phy}',   '高二(1)班物理练习8', '物理练习8', '物理', 'physics',  'class', '高二', 'manual', 'scores', '2026-09-20', 15, array['${C.c1}']::uuid[], '{}'),
       ('${EX.e2}', '${U.phy}',   '高二物理练习8',     '物理练习8', '物理', 'physics',  'grade', '高二', 'manual', 'scores', '2026-09-20', 15, array['${C.c1}','${C.c2}']::uuid[], '{}'),
@@ -1078,11 +1078,11 @@ await withLock(async () => {
       const f = (uid, expr) => asUser(db, uid, async () => Boolean((await db.query(`select ${expr} as v`)).rows[0].v))
 
       eq('is_super_admin()：超管 true', await f(U.super, 'is_super_admin()'), true)
-      eq('is_super_admin()：教导处 false（**两种身份、判据分开**，I17）', await f(U.admin, 'is_super_admin()'), false)
-      eq('is_school_admin()：超管 / 教导处都 true', [await f(U.super, 'is_school_admin()'), await f(U.admin, 'is_school_admin()')], [true, true])
+      eq('is_super_admin()：教务处 false（**两种身份、判据分开**，I17）', await f(U.admin, 'is_super_admin()'), false)
+      eq('is_school_admin()：超管 / 教务处都 true', [await f(U.super, 'is_school_admin()'), await f(U.admin, 'is_school_admin()')], [true, true])
       eq('is_school_admin()：任课老师 false', await f(U.phy, 'is_school_admin()'), false)
       eq(
-        'can_manage_teachers()：超管 / 教导处 true（建号与指派身份同档，§16.8）',
+        'can_manage_teachers()：超管 / 教务处 true（建号与指派身份同档，§16.8）',
         [await f(U.super, 'can_manage_teachers()'), await f(U.admin, 'can_manage_teachers()')],
         [true, true],
       )
@@ -1103,7 +1103,7 @@ await withLock(async () => {
       eq('can_grade_subject：**班主任改不了本班成绩**（只读，I27 的核心）', await grade(U.head, C.c1, 'physics', '物理'), false)
       eq('can_grade_subject：年级主任改不了本年级成绩（只读）', await grade(U.grade, C.c1, 'physics', '物理'), false)
       eq(
-        'can_grade_subject：超管 / 教导处兜底 true',
+        'can_grade_subject：超管 / 教务处兜底 true',
         [await grade(U.super, C.c3, 'physics', '物理'), await grade(U.admin, C.c3, 'chinese', '语文')],
         [true, true],
       )
@@ -2825,25 +2825,25 @@ await withLock(async () => {
     }
 
     /* ============================================================
-       六、教导处 / 最高管理员：全校 + 改任何班成绩（兜底）
+       六、教务处 / 最高管理员：全校 + 改任何班成绩（兜底）
        ============================================================ */
 
-    section('六、教导处 / 最高管理员（全校可见 + 改成绩兜底）')
+    section('六、教务处 / 最高管理员（全校可见 + 改成绩兜底）')
     {
       let r = await write(db, U.super, { sql: `update assignments set wrong = '{"1":["2"]}'::jsonb where id = $1 returning id`, values: [E.a1] })
       allowed('超管改别的班别的科的成绩（兜底）', r)
       r = await write(db, U.admin, { sql: `update assignments set wrong = '{"1":["2"]}'::jsonb where id = $1 returning id`, values: [E.a5] })
-      allowed('教导处改任何班任何科的成绩（全校兜底）', r)
+      allowed('教务处改任何班任何科的成绩（全校兜底）', r)
 
       r = await write(db, U.admin, insertSql('assignments', assignmentRow(localAssignment({ id: mk('e0', 94), classId: C.c3, subject: '语文', subjectCode: 'chinese' }), U.admin)))
-      allowed('教导处在高三建语文档案（兜底支）', r)
+      allowed('教务处在高三建语文档案（兜底支）', r)
 
       r = await write(db, U.head, insertSql('classes', M.classToRow(localKlass({ id: mk('c0', 90), name: '高二(9)班' }), U.head)))
       allowed('班主任建班（用户口径①）', r)
       r = await write(db, U.grade, insertSql('classes', M.classToRow(localKlass({ id: mk('c0', 91), name: '高二(8)班' }), U.grade)))
       allowed('年级主任建班', r)
       r = await write(db, U.admin, insertSql('classes', M.classToRow(localKlass({ id: mk('c0', 95), name: '高三(9)班' }), U.admin)))
-      allowed('教导处建班', r)
+      allowed('教务处建班', r)
       r = await write(db, U.phy, insertSql('classes', M.classToRow(localKlass({ id: mk('c0', 92), name: '高二(7)班' }), U.phy)))
       denied('任课老师建班', r)
     }
@@ -3434,7 +3434,7 @@ await withLock(async () => {
 
       // ---- ② 兜底：super / admin（用户 2026-09-27 拍板保留）----
       eq(
-        'can_edit_exam_for：超管 / 教导处 → true（兜底，两个人都保留）',
+        'can_edit_exam_for：超管 / 教务处 → true（兜底，两个人都保留）',
         [await canEdit(U.super, [C.c3], 'physics', '物理'), await canEdit(U.admin, [C.c3], 'chinese', '语文')],
         [true, true],
       )
@@ -3700,7 +3700,7 @@ await withLock(async () => {
         [true, true],
       )
       eq(
-        '归属判据：超管 / 教导处 → 任意班 true（兜底）',
+        '归属判据：超管 / 教务处 → 任意班 true（兜底）',
         [await share(U.super, C.c3), await share(U.admin, C.c3)],
         [true, true],
       )
@@ -3767,7 +3767,7 @@ await withLock(async () => {
       r = await write(db, U.fresh, insertSql('shared_files', fileRow2({ id: mk('f0', 95), teacherId: U.fresh, classIds: [C.c4] })))
       allowed('🔴 无身份新老师发给自己**建的**班 → 通过（写判据与读判据同款，不能比他看得见的更窄）', r)
       r = await write(db, U.admin, insertSql('shared_files', fileRow2({ id: mk('f0', 96), teacherId: U.admin, classIds: [C.c3] })))
-      allowed('教导处发给任意班 → 通过（兜底）', r)
+      allowed('教务处发给任意班 → 通过（兜底）', r)
       r = await write(db, U.phy, { sql: `update shared_files set class_ids = array[$1]::uuid[] where id = $2 returning id`, values: [C.c3, F.f1] })
       denied('🔴 老师**改**自己那行的归属、把它挪到自己看不见的班 → 被拒（using 与 with check 同款，I28）', r)
       r = await write(db, U.phy, { sql: `update shared_files set class_ids = array[$1, $2]::uuid[] where id = $3 returning id`, values: [C.c1, C.c2, F.f1] })
@@ -4059,7 +4059,7 @@ await withLock(async () => {
       // ---- ⑧ 🔴 "序列号生成后永久不可改" —— **数据库层拒**（不是界面灰化）----
       /*
        * ⚠️ 这一组**必须**满足两个条件，否则就是一条假断言（负向对照实测踩过）：
-       *   ① 用**管得着这个班**的身份（教导处）去改 —— 用任课老师的话，
+       *   ① 用**管得着这个班**的身份（教务处）去改 —— 用任课老师的话，
        *      `students_update` 的 RLS 会先把他筛成 0 行，于是"被拒"看起来成立，
        *      而**触发器有没有生效根本验不到**（把守卫删掉照样是 0 行、照样绿）；
        *   ② 判据必须是 `denied`（**报错**），不能是 `blocked`（0 行）——
@@ -4076,9 +4076,9 @@ await withLock(async () => {
         )
       // ⚠️ `attempt(db, uid, sql, params)` 的签名与 `write(db, uid, {sql, values})` **不同**
       let w = await attempt(db, U.admin, `update students set serial = '2027999' where id = $1 returning id`, [S7[0]])
-      strictDenied('🔴 教导处改序列号（值 → 另一个值）', w, '序列号生成后永久不可改')
+      strictDenied('🔴 教务处改序列号（值 → 另一个值）', w, '序列号生成后永久不可改')
       w = await attempt(db, U.admin, `update students set serial = '' where id = $1 returning id`, [S7[0]])
-      strictDenied('🔴 教导处把序列号**清空**（想绕开唯一索引）', w, '序列号生成后永久不可改')
+      strictDenied('🔴 教务处把序列号**清空**（想绕开唯一索引）', w, '序列号生成后永久不可改')
       w = await attempt(db, U.super, `update students set legacy_student_no = 'x' where id = $1 returning id`, [S7[0]])
       strictDenied('🔴 改 `legacy_student_no`（迁移判据）', w, 'legacy_student_no 是迁移判据')
       eq(
@@ -4088,12 +4088,12 @@ await withLock(async () => {
       )
       // 对照：**同一个身份**改成"值没变"的序列号 → 通过（不是"他什么都改不了"）
       w = await attempt(db, U.admin, `update students set serial = serial where id = $1 returning id`, [S7[0]])
-      allowed('对照：教导处把序列号写成**它自己**（值没变）→ 通过 —— 证明上两条不是"他改不动这一行"', w)
+      allowed('对照：教务处把序列号写成**它自己**（值没变）→ 通过 —— 证明上两条不是"他改不动这一行"', w)
 
       // ---- ⑨ 班内学号**可改**，而且改它不影响档案（键已经是序列号）----
-      // 三档：班主任 / 年级主任 / 教导处（Q6）—— 这里用教导处；任课老师**不算**（下面那条对照）
+      // 三档：班主任 / 年级主任 / 教务处（Q6）—— 这里用教务处；任课老师**不算**（下面那条对照）
       w = await attempt(db, U.admin, `update students set student_no = '99' where id = $1 returning id`, [S7[0]])
-      allowed('🔴 改**班级内学号**（教导处）→ 通过', w)
+      allowed('🔴 改**班级内学号**（教务处）→ 通过', w)
       w = await attempt(db, U.phy, `update students set student_no = '98' where id = $1 returning id`, [S7[0]])
       denied('对照：**任课老师**改学号 → 被拒（他不在"三档"里，RLS 判的是 can_manage_class）', w)
       eq(

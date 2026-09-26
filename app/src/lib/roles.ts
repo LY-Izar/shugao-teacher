@@ -391,6 +391,11 @@ export type EntryKey =
   | '/calls'
   | '/accounts'
   | '/grades'
+  /*
+   * 🆕 2026-09-30「开学准备」落地：`/grades/:id/setup` 这一条**仍然是页内页**
+   * （`entry: null`，只能从年级列表点进来），所以它**不在这里** —— 上面 `/grades`
+   * 那一条就是它的入口 key（矩阵里凡写"页内"的行都不能是入口，M1/M2）。
+   */
   | '/grades/promote'
   | '/settings/terms'
   | '/admin'
@@ -470,9 +475,18 @@ export const ENTRIES: Record<EntryKey, EntryRule> = {
    *    ⚠️ 这一处换的是**函数**、不是值：在那 6 列（没有 office_head）上逐格不变（方案 §4.5）。
    */
   '/accounts': { label: '教师账号', visibleFor: canManageTeachers },
-  // ★ 将来（年级管理与选课走班方案 §4.1）：super/admin 全部、年级主任本年级、班主任与任课老师不进。
-  //  🆕 追加 `seesTeachingData`：德育处主任与校级三档**看得见**年级/班级名册（只读）——
-  //     德育处按"读得一样宽"给 V（他要看名册才能管班主任，方案 §4.2 第 30–32 行）。
+  /*
+   * 年级管理（`年级管理与选科走班方案.md` §4.1）：
+   * **super / admin 全部 · 年级主任只有自己那个年级 · 班主任与任课老师不进**。
+   *
+   * 🆕 追加 `seesTeachingData`：德育处主任与校级三档**看得见**年级 / 班级名册（只读）——
+   *    德育处按"读得一样宽"给 V（他要看名册才能管班主任，方案 §4.2 第 30–32 行）。
+   *
+   * ⚠️ **"只有自己那个年级"这一句在入口层说不出来**（M1/M2：`visibleFor` 只读 `roles`，
+   *    不许读数据行）—— 所以这里给它 V，**真正的范围由 RLS 与
+   *    `can_manage_grade_setup(grade_id)` 决定**（他看得见 `/grades`，但列表里只有本年级）。
+   *    这不是漏做：把年级 id 塞进入口判据就是前端在做权限判断（§11.3 那条硬约束）。
+   */
   '/grades': {
     label: '年级管理',
     visibleFor: (roles) => hasManagingRole(roles) || seesTeachingData(roles),

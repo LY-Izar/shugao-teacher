@@ -169,26 +169,17 @@ export default function TeacherAccounts() {
             <div className="mb-4">
               <Sect>建号</Sect>
               <Panel bodyClass="p-3">
-                <p style={{ fontSize: 12.5, color: 'var(--color-ink2)', lineHeight: 1.75 }}>
-                  建号时<b>必须选学科</b> —— 它决定两件事：这位老师第一次登录时新建作业预选哪一科，
-                  以及他登录后<b>看得见哪一科的作业</b>（同班别的科目他看不到，除非他同时是班主任或年级主任）。
-                </p>
-                <div className="mt-3">
-                  <Button
-                    block
-                    variant="primary"
-                    icon={<IconPlus size={16} />}
-                    onClick={() => {
-                      setNewKey((k) => k + 1)
-                      setOpenNew(true)
-                    }}
-                  >
-                    给老师建账号
-                  </Button>
-                </div>
-                <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 8, lineHeight: 1.7 }}>
-                  只有<b>最高管理员</b>和<b>教导处</b>能建号、指派身份（班主任 / 年级主任）。
-                </p>
+                <Button
+                  block
+                  variant="primary"
+                  icon={<IconPlus size={16} />}
+                  onClick={() => {
+                    setNewKey((k) => k + 1)
+                    setOpenNew(true)
+                  }}
+                >
+                  给老师建账号
+                </Button>
               </Panel>
             </div>
 
@@ -412,9 +403,7 @@ function DepartmentBatch({
       <Sect>部门 · 批量（谁属于哪个处室）</Sect>
       <Panel bodyClass="p-3">
         <p style={{ fontSize: 12.5, color: 'var(--color-ink2)', lineHeight: 1.75 }}>
-          部门决定<b>通知能不能发到他</b>：教务处发一条「发给教务处」的通知，这个部门里的人就收得到。
-          ⚠️ 一个人<b>可以属于多个部门</b>，也<b>可以一个都不属于</b>（纯任课老师）——
-          所以下面"加上 / 去掉"都是按 <b>(老师 × 部门)</b> 那一对算的。
+          一个人可以属于多个部门，也可以不属于任何部门。
         </p>
 
         <div className="mt-3">
@@ -490,12 +479,6 @@ function DepartmentBatch({
             从这些老师身上去掉
           </Button>
         </div>
-
-        <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 8, lineHeight: 1.7 }}>
-          谁能维护：<b>教务处 · 办公室 · 最高管理员</b>（部门是"档案属性"，
-          与建号同一档判据 —— 与"指派身份"不是同一件事）。
-          一个人在哪个部门也可以在这页点开他单独改。
-        </p>
       </Panel>
     </div>
   )
@@ -600,7 +583,7 @@ function CreateSheet({
         决定新作业预选哪一科，也决定他看得见哪一科的作业。
       */}
       <div className="mt-4">
-        <span className="label">主学科</span>
+        <span className="label">主学科 *</span>
         <div className="flex flex-wrap gap-1.5">
           {SUBJECTS.map((s) => {
             const on = code === s.code
@@ -626,8 +609,7 @@ function CreateSheet({
           })}
         </div>
         <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 6, lineHeight: 1.65 }}>
-          这一科决定他登录后看得见哪一科的成绩与错题。教两科的话，建完号在这里再加一条任课关系即可
-          （主学科只影响新建作业的预选）。
+          教两科的话，建完号在这里再加一条任课关系即可。
         </p>
       </div>
 
@@ -957,7 +939,7 @@ function TeacherSheet({
             ) : null}
             {isMe ? (
               <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 6, lineHeight: 1.65 }}>
-                这是你自己。最后一条「{roleName('super')}」摘不掉（摘了没人能再指派身份）。
+                这是你自己。最后一条「{roleName('super')}」摘不掉。
               </p>
             ) : null}
           </>
@@ -1015,8 +997,6 @@ function TeacherSheet({
             </div>
             <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 6, lineHeight: 1.65 }}>
               点一下加上、再点一下去掉。<b>可以多选</b>；<b>一个都不选也是正常的</b>（纯任课老师）。
-              部门决定"发给某个部门"的通知他收不收得到 —— 而"能发给谁"的判据在服务端
-              （你在这里改不动别人的可见范围）。
             </p>
           </>
         ) : (
@@ -1025,7 +1005,7 @@ function TeacherSheet({
               ? (teacher.departments ?? []).map((d) => departmentName(d)).join(' · ')
               : '不属于任何部门'}
             <br />
-            <b>改部门归属是教务处 · 办公室 · 最高管理员的事</b>（与建号同一档判据）——
+            <b>改部门归属是教务处 · 办公室 · 最高管理员的事</b> ——
             你现在没有这三档身份里的任何一个，所以这里只能看。
           </p>
         )}

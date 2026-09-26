@@ -26,6 +26,9 @@ import ExamGrade from './pages/ExamGrade'
 import ExamNew from './pages/ExamNew'
 import Exams from './pages/Exams'
 import ExamStats from './pages/ExamStats'
+import GradeDetail from './pages/GradeDetail'
+import Grades from './pages/Grades'
+import GradeSetup from './pages/GradeSetup'
 import ImportPaste from './pages/ImportPaste'
 import ImportPhoto from './pages/ImportPhoto'
 import Login from './pages/Login'
@@ -633,6 +636,44 @@ export default function App() {
           element={
             <Guard>
               <NoticeNew />
+            </Guard>
+          }
+        />
+        {/*
+          🆕 2026-09-30「开学准备」（P6，`年级管理与选科走班方案.md` §4.3.2）。
+          三条路由，**入口只在「我的」页那一行**（不摆进 NAV —— 见 `lib/pages.ts` 的说明）：
+
+            · `/grades`            年级列表（唯一有入口的那一条）
+            · `/grades/:id`        一个年级的只读概览
+            · `/grades/:id/setup`  开学准备那一条流水线（**写**都在这里）
+
+          ⚠️ 刻意**不套额外守卫**（与 `/accounts` / `/notices` 同款）：
+            手打 URL 进得来，然后
+              · 读：由**数据库 RLS** 决定看得见哪些年级（年级主任只看本年级）；
+              · 写：服务端拿调用者 JWT 问 `can_manage_grade_setup()` / `can_edit_student_subject()`。
+            "藏入口"不是安全边界，这里也不假装它是。
+        */}
+        <Route
+          path="/grades"
+          element={
+            <Guard>
+              <Grades />
+            </Guard>
+          }
+        />
+        <Route
+          path="/grades/:id"
+          element={
+            <Guard>
+              <GradeDetail />
+            </Guard>
+          }
+        />
+        <Route
+          path="/grades/:id/setup"
+          element={
+            <Guard>
+              <GradeSetup />
             </Guard>
           }
         />

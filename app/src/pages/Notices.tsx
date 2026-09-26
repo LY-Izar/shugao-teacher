@@ -130,7 +130,7 @@ export default function Notices() {
                     setBusy(null)
                     push(
                       res.ok
-                        ? { text: '已撤下（记录还在）', tone: 'ok' }
+                        ? { text: '已撤下', tone: 'ok' }
                         : { text: res.message, tone: 'bad' },
                     )
                   }}

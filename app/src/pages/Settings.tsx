@@ -349,6 +349,46 @@ export default function Settings() {
         <div className="mb-4">
           <Sect>我的</Sect>
           <Panel className="overflow-hidden">
+            {/*
+              🆕 2026-09-30「开学准备」（P6）：**年级管理**这一行。
+              🔴 判据与 `/accounts` / `/admin` 同款 —— 读 `ENTRIES`（`entryVisible('/grades', …)`），
+                 **不在这里另写一套**（M1/M2：那张表只回答"摆不摆"）。
+                 表里那一格是 `hasManagingRole || seesTeachingData`
+                 （超管 / 教务处 / 年级主任 / 校级三档 / 德育处）——
+                 年级主任看得见列表，**列表里只有他本年级**（那是 RLS，不是这一行）。
+              ⚠️ 与 `canManage` 一样加了 `isRemote`：这一页的**写**全走 `/api/grade-setup`，
+                 本地演示模式没有服务端 —— 摆一个点了必然失败的入口是"编出来的按钮"。
+                 （读那一半在本地模式仍然可用：年级表由 `demoGrades()` 提供。）
+            */}
+            {isRemote && entryVisible('/grades', myRoles) ? (
+              <button
+                type="button"
+                className="row"
+                style={{ padding: 14 }}
+                onClick={() => navigate('/grades')}
+              >
+                <span
+                  className="grid place-items-center shrink-0"
+                  style={{
+                    width: 36,
+                    height: 36,
+                    border: '1px solid var(--color-line2)',
+                    borderRadius: 4,
+                    background: 'var(--color-surface2)',
+                    color: 'var(--color-accent)',
+                  }}
+                >
+                  <IconUsers size={18} />
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span style={{ fontSize: 14.5, fontWeight: 620 }}>年级管理</span>
+                  <span className="mt-0.5 block" style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
+                    开学准备：录名单 · 建班 · 班型 · 选科 · 身份
+                  </span>
+                </span>
+                <IconChevronRight size={16} />
+              </button>
+            ) : null}
             {canManage ? (
               <button
                 type="button"
@@ -649,8 +689,7 @@ export default function Settings() {
             <p
               style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 8, lineHeight: 1.7 }}
             >
-              ⚠️ 打开教室端会把<b>这台设备</b>标记成教室端（浏览器共用一个标记）——
-              之后在这台机器上进教师端，会先要求重新输一次教师密码。
+              ⚠️ 打开教室端会把<b>这台设备</b>标记成教室端。
               要改回来，见下面「本机角色」。
             </p>
           </Panel>
@@ -801,7 +840,7 @@ export default function Settings() {
                 {fbBusy ? '正在发送…' : '提交反馈'}
               </Button>
               <span style={{ fontSize: 11.5, color: 'var(--color-ink4)' }}>
-                提交后你可以在下面看到处理进度。
+                提交后可以在下面看到处理进度。
               </span>
             </div>
             {fbMsg ? (
@@ -980,8 +1019,7 @@ export default function Settings() {
             placeholder={subjectName(fPrimary)}
           />
           <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 6, lineHeight: 1.65 }}>
-            只在顶部和设置页显示。留空就跟主学科一致；写「物理竞赛」这类也行 ——
-            它<b>不参与</b>任何判据。
+            只在顶部和设置页显示。留空就跟主学科一致；写「物理竞赛」这类也行。
           </p>
         </label>
       </Sheet>

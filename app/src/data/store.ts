@@ -15,6 +15,7 @@ import {
   DEFAULT_SUBJECT_CODE,
 } from '../lib/subjects'
 import * as remote from './remote'
+import type { GradeRow } from './gradeSetup'
 import * as noticeApi from '../lib/notices'
 import * as annApi from '../lib/announcements'
 import { makeClassrooms, makeDemoAssignments, makeDemoClasses, makeDemoExams, makeDemoSchedule, makeTemplates } from './seed'
@@ -25,6 +26,7 @@ import type {
   AssignmentTemplate,
   CallRecord,
   CallState,
+  ClassType,
   ClassroomClient,
   ImportRow,
   Klass,
@@ -112,6 +114,18 @@ function readCurrentClass(classes: Klass[]): string | null {
 type State = {
   teacher: Teacher | null
   classes: Klass[]
+  /**
+   * 🆕 2026-09-30：**年级表那一份**（`grades`）。
+   *
+   * 哪儿来的：
+   *   · 远程模式 = `remote.loadGrades()`（`loadSnapshot` **不管**年级表 —— 它是一条
+   *     独立的路，理由与考试/通知那两张表一样：年级表不在时不该让整份快照作废）；
+   *   · 本地演示模式 = `demoGrades()`（由 `classes.grade` 推出来的三个年级）。
+   *
+   * ⚠️ **只读**：这一轮没有任何写年级的入口（建年级 / 提档是 P3/P4 的活）。
+   *    它的唯一用途是"开学准备"页要知道有哪些年级、以及它们的届（`cohort`）。
+   */
+  grades: GradeRow[]
   currentClassId: string | null
   templates: AssignmentTemplate[]
   assignments: Assignment[]
@@ -263,6 +277,23 @@ type State = {
   setStudentStatus: (classId: string, studentId: string, status: StudentStatus) => void
   removeStudent: (classId: string, studentId: string) => void
   transferStudent: (studentId: string, fromClassId: string, toClassId: string) => void
+  /**
+   * 🆕 2026-09-30「开学准备」（P6）：把这一页**算好的一批班与学生**整体换进 store。
+   *
+   * 🔴 为什么不是"一个一个 `addStudents()`"：
+   *    开学准备的一条纪律是**一个事务**（要么全成、要么一行都不落）——
+   *    逐个调用就是 N 次局部更新，中间任何一次失败都会留下"导了一半"的状态。
+   *    这里进来的 `next` 已经是**算完整份**的班级数组（`applyRoster()` 的产物）。
+   *
+   * @param gradeName 只换这个年级里的班（别的年级一个字节都不动）
+   * @param next      同一个年级的**完整**班级数组（含新班与更新后的名单）
+   */
+  replaceGradeRoster: (gradeName: string, next: Klass[]) => void
+  /**
+   * 🆕 2026-09-30：改一个班的班型（`classes.class_type`）。
+   * 本地即时生效 + 后台落库（与 `updateClass` 同款的乐观更新）。
+   */
+  updateClassType: (classId: string, classType: ClassType) => void
 
   /* ---- S2 ---- */
   addAssignment: (input: {
@@ -486,12 +517,54 @@ function pickTransferNo(
   return candidate
 }
 
+/* ============================================================
+   🆕 年级表的**本地演示夹具**（2026-09-30「开学准备」）
+   ------------------------------------------------------------
+   🔴 为什么本地模式也要有它：`shots.mjs` 跑的是**本地演示模式**，而"年级管理"那一页
+      的第一句话就是"有哪些年级"。没有这份夹具时这一页在截图里永远是空态 ——
+      于是"名单 / 班型 / 选科那几步长什么样"**一句都断言不了**。
+   ⚠️ 它是从 `classes.grade` **推**出来的（不硬编码三个年级）：
+      演示数据里有哪些年级，这一页就有哪些 —— 加了演示班不会出现"年级对不上班"。
+   ⚠️ `cohort` 按演示数据的口径写死（高一 2026 / 高二 2025 / 高三 2024，Q18 给过的那三个），
+      推不出来就**留空串**（`grades.cohort` 的空串语义就是"还没填"）—— 不猜。
+   ------------------------------------------------------------ */
+const DEMO_COHORT: Record<string, string> = { 高一: '2026', 高二: '2025', 高三: '2024' }
+const DEMO_STAGE: Record<string, number> = { 高一: 1, 高二: 2, 高三: 3 }
+
+function demoGrades(classes?: readonly { grade: string }[]): GradeRow[] {
+  const names = [...new Set((classes ?? []).map((c) => c.grade).filter(Boolean))]
+  const out: GradeRow[] = names.map((name) => ({
+    id: `demo-grade-${name}`,
+    name,
+    cohort: DEMO_COHORT[name] ?? '',
+    stage: DEMO_STAGE[name] ?? 1,
+    year: '',
+  }))
+  /*
+   * 演示模式**至少**要有高一 / 高二 / 高三三行（就算演示班只挂在其中一个上）——
+   * 否则"一个年级 7 个班"那张清单在截图里只剩一行，看不出"三个年级并存"这个目标形态。
+   */
+  for (const name of ['高一', '高二', '高三']) {
+    if (!out.some((g) => g.name === name)) {
+      out.push({
+        id: `demo-grade-${name}`,
+        name,
+        cohort: DEMO_COHORT[name] ?? '',
+        stage: DEMO_STAGE[name] ?? 1,
+        year: '',
+      })
+    }
+  }
+  return out
+}
+
 function freshDemo() {
   const classes = makeDemoClasses()
   // 演示考试也来自 seed（结构与真实物理卷一致，见 seed.ts 的说明）
   const examDemo = makeDemoExams(classes)
   return {
     classes,
+    grades: demoGrades(classes),
     currentClassId: classes[0]?.id ?? null,
     templates: makeTemplates(),
     assignments: makeDemoAssignments(classes),
@@ -571,6 +644,8 @@ function demoAnnouncements(): Announcement[] {
 function initialState() {  if (!isRemote) return freshDemo()
   return {
     classes: [] as Klass[],
+    /* 🆕 年级表：远程模式由 `hydrate()` 里那句 `loadGrades()` 灌进来（这里先给空的） */
+    grades: [] as GradeRow[],
     currentClassId: null,
     templates: makeTemplates(),
     assignments: [] as Assignment[],
@@ -623,6 +698,16 @@ export const useStore = create<State>()(
       /* ---------------- 后端 ---------------- */
 
       hydrate: async () => {
+        /*
+         * 🆕 2026-09-30：**年级表那一份**（`grades`）——本地演示模式也要有。
+         * ⚠️ 顺序：这段必须在 `if (!isRemote)` 那一句**之前** ——
+         *    本地模式第一句就 return，放在后面永远读不到
+         *    （`demoAnnouncements` 踩过同一个坑，见它上面那段注释）。
+         * ⚠️ `loadGrades()` 在没有后端时回 `missing`，所以本地模式要另给一份
+         *    `demoGrades()`（由 `classes.grade` 推出来的三个年级）。
+         */
+        const g = await remote.loadGrades()
+        set({ grades: g.state === 'present' && g.grades.length ? g.grades : demoGrades() })
         if (!isRemote) {
           set({ hydrated: true })
           return
@@ -1060,6 +1145,40 @@ export const useStore = create<State>()(
           }),
         }))
         void remote.saveStudent(next, toClassId)
+      },
+
+      /* ---- 🆕 开学准备（P6）---- */
+
+      replaceGradeRoster: (gradeName, next) => {
+        /*
+         * 🔴 **只换这个年级里的班**（`c.grade === gradeName`）：别的年级一个字节都不动。
+         *    进来的 `next` 已经是"算完整份"的结果（`lib/gradeImport.ts` 的 `applyRoster()`）
+         *    —— 所以这一处**不做任何合并逻辑**，全成或全空由调用方那一个事务决定。
+         */
+        set((s) => {
+          const keep = s.classes.filter((c) => c.grade !== gradeName)
+          const replaced = next.map((k) => ({ ...k, grade: k.grade || gradeName }))
+          const classes = [...keep, ...replaced]
+          return {
+            isDemo: false,
+            classes,
+            currentClassId: classes.some((c) => c.id === s.currentClassId)
+              ? s.currentClassId
+              : (classes[0]?.id ?? null),
+          }
+        })
+        /* 远程模式：服务端那一个 RPC 已经把班与学生写完了（见 `lib/gradeSetup.ts`），
+           这里只是把**本地那一份**对齐 —— 不再逐个 upsert（那会变成第二条写入路径）。 */
+      },
+
+      updateClassType: (classId, classType) => {
+        set((s) => ({
+          isDemo: false,
+          classes: s.classes.map((c) => (c.id === classId ? { ...c, classType } : c)),
+        }))
+        const k = get().classes.find((c) => c.id === classId)
+        const tid = get().teacher?.id
+        if (k && tid) void remote.saveClass(k, tid)
       },
 
       /* ---- S2：作业档案 ---- */

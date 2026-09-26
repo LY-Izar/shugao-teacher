@@ -333,10 +333,7 @@ export default function Schedule() {
           style={{ fontSize: 11.5, color: 'var(--color-ink4)', lineHeight: 1.7 }}
         >
           <IconClock size={13} />
-          <span>
-            日程只在你的账号里保存。提醒走系统通知，需要浏览器授权；
-            未授权时会退化成打开平台时的页内提醒。
-          </span>
+          <span>日程只存在你的账号里。</span>
         </div>
       </Page>
 
