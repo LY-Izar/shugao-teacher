@@ -28,7 +28,7 @@
    ============================================================ */
 
 import type { ClassType, Klass, ScheduleItem } from '../data/types'
-import { classTypeOf, type StudentSubject } from './pick'
+import { classTypeOf, noRecordWalkOf, type StudentSubject } from './pick'
 import { subjectName, type SubjectCode } from './subjects'
 import { PERIOD_SLOTS } from './scheduleParse'
 import { toMinutes } from './schedule'
@@ -76,7 +76,14 @@ export const CLASS_TYPE_DEFAULT_SECOND: Record<string, readonly SubjectCode[]> =
    三、一个学生的走班科目（I41：唯一入口，返回值是**数组**）
    ============================================================ */
 
-export type StreamDiffReason = 'unset-class-type' | 'no-primary' | 'primary-mismatch' | 'other'
+export type StreamDiffReason =
+  | 'unset-class-type'
+  | 'no-primary'
+  | 'primary-mismatch'
+  /* 🆕 2026-10-08：**这一行根本还没录**（`student_subjects` 里没有他） */
+  | 'no-record'
+  /* 真·「其他」组合（录了，但不是 12 种之一）—— 与上面那一档**不是一件事** */
+  | 'other'
 
 export type StreamDiff = {
   /** 学生选的再选两门里**合法的**那些（认不出的一律丢掉，**不猜**） */
@@ -97,6 +104,25 @@ const EMPTY_DIFF = (reason: StreamDiffReason): StreamDiff => ({
 })
 
 /**
+ * 🔴 **没有选科记录 = 班型默认**（🆕 2026-10-08）—— 本档的**唯一语义**。
+ *
+ * 口径（本项目的既定口径，见上面 `CLASS_TYPE_DEFAULT_SECOND`）：**班型默认 = 理科班物化生 / 文科班史政地**。
+ * "还没采选科"**推不出**"这个学生要手工选走班班" —— 推出来的恰恰相反：
+ * 他跟着本班的默认组合上课，`walk = 他选的 − 本班默认教的 = 默认 − 默认 = 空`，
+ * 所以**一门都不用走**。只有"录了、但不是 12 种之一"（`kind === 'other'`）才必须手工选。
+ *
+ * ⚠️ 两门课的口径在 `pick.ts` 的 `noRecordWalkOf()`（**唯一实现**，那里挂着"别反着写"的理由）：
+ *    把本班默认那两门当成"要走"是**反的** —— 那会让整个班的人都进走班班，
+ *    而且 `walk` 缺了首选那一门（⑦ 选科分布会多出一行假组合）。
+ * 🔴 **不许静默**（`AGENTS.md` §三.5）：这一档不算走班，但**必须被报出来** ——
+ *    `planStreamClasses()` 把他收进 `noRecord` 清单，界面上写"选科还没录"，
+ *    与「其他」那一档**长得不一样**（前者去采选科、后者去手工选走班班）。
+ */
+function noRecordDiff(classType: ClassType | string | undefined): StreamDiff {
+  return { takes: [], walk: noRecordWalkOf(classType), drops: [], reason: 'no-record' }
+}
+
+/**
  * **这个学生要走哪几门**（I41 的唯一入口）。
  *
  * 口径（一句话，别记成两张表）：
@@ -110,6 +136,7 @@ const EMPTY_DIFF = (reason: StreamDiffReason): StreamDiff => ({
  * | 物化政（理科班） | 物化生 | **政治** | 生物 |
  * | 物化生（理科班） | 物化生 | 无（随班） | 无 |
  * | 史化生（文科班） | 史政地 | **化学 + 生物** | 政治、地理 |
+ * | 🆕 还没录选科 | 班型默认 | **无**（按班型默认随班） | 无 |
  *
  * ⚠️ **第一行正是"差 2 门"**（政治、地理都不是本班默认课）→ 他同时在**两个**走班班里。
  *    任何地方都不许写 `if (只差一门)` —— 那就是"他那一科没有课上，且不报错"。
@@ -118,13 +145,22 @@ const EMPTY_DIFF = (reason: StreamDiffReason): StreamDiff => ({
  *     走班补不了首选那一门（那是整个班的主线），方案 §2.2 的处置是"建议转班"（Q2），
  *     硬把他塞进走班班只会让他"物理没得上"而且不报错。
  * ⚠️ 未分科（`undivided` / 还没设）→ `unset-class-type`：**整班随班上课，不算走班**（方案 §2.4）。
+ * 🔴 **还没有选科记录**（`s === null`）→ `no-record`（🆕 2026-10-08）：**不是**「其他」。
+ *    这一档的语义 = **班型默认**（理科班物化生 / 文科班史政地），
+ *    所以 `walk` / `drops` 都是空 —— **不算走班**，`pending` 里也不列他（见 `planStreamClasses`）。
+ *    为什么要拆这一档（内测实测到的误导）：某个班的选科**根本还没采**时，
+ *    它全班几十个人都会被归进「其他」（界面文案是"必须手工选走班班"）→
+ *    老师会去手工处理几十个**根本没被调查过**的学生，而他们大多数人
+ *    （理科班默认物化生）**跟着本班上课就行、一门都不用走**。
  * ⚠️ 「其他」（结构都不满足）→ `other`：**必须手工选走班班**（Q1 = C），**绝不自动归类**。
+ *    ⚠️ `!s`（没有记录）与 `s.kind === 'other'`（真·其他组合）**必须分开** ——
+ *       混成一档就是上面那件误导，而且两种人**该做的事完全相反**。
  */
 export function streamDiff(
   s: StudentSubject | null | undefined,
   classType: ClassType | string | undefined,
 ): StreamDiff {
-  if (!s) return EMPTY_DIFF('other')
+  if (!s) return noRecordDiff(classType)
   if (s.kind === 'other') return EMPTY_DIFF('other')
 
   const t = classType === 'science' || classType === 'arts' ? classType : ''
@@ -226,6 +262,22 @@ export type StreamPending = {
   note: string
 }
 
+/**
+ * 🆕 2026-10-08：**选科还没录**的人（`student_subjects` 里没有他）。
+ *
+ * 🔴 与 `StreamPending` **分开列**，因为两种人该做的事**相反**：
+ *    · 这里的人（`no-record`）→ **去采选科**；采完之前他按班型默认跟着本班上课，**不走班**；
+ *    · `pending` 里的人（`other` / 没设班型 / 首选与班型不符）→ **去手工处理**。
+ * ⚠️ 混成一档就是内测那件误导：一个班还没采选科 → 全班几十人显示"必须手工选走班班"。
+ */
+export type StreamNoRecord = {
+  studentId: string
+  name: string
+  serial: string
+  studentNo: string
+  className: string
+}
+
 /** 选科分布里的一行（"物化政 18 人"那种；界面用它给人复核"生成结果对不对得上"） */
 export type StreamComboRow = {
   combination: string
@@ -239,18 +291,29 @@ export type StreamComboRow = {
 export type StreamPlan = {
   /** 要建的走班班（`kind='stream'`；按 `stream_key` 去重） */
   classes: StreamClassPlan[]
-  /** 待教导处手工处理的人 */
+  /** 待教导处手工处理的人（**不含"还没录选科"那一档** —— 见 `noRecord`） */
   pending: StreamPending[]
+  /** 🆕 选科还没录的人（**不算走班**：按班型默认跟着本班上课）；`noRecord === 0` ⇔ 选科采全了 */
+  noRecord: StreamNoRecord[]
   /** 选科分布（**复核用**：生成结果与它对得上） */
   combos: StreamComboRow[]
   /** 参与生成的学生总数（分母）—— **在读 + 休学**，不含已转出（Q28 = B） */
   students: number
 }
 
-const REASON_TEXT: Record<StreamDiffReason, string> = {
+/**
+ * 档位 → 人话（`StreamDiffReason` 的**唯一文案表**）。
+ *
+ * `Record<StreamDiffReason, string>` 这个类型就是防线：**加一档必须在这里补一条**，
+ * 否则 `tsc -b` 当场报"少一个属性"（不许出现 `undefined` 上屏）。
+ * ⚠️ 「选科还没录」与「其他」**必须长得不一样** —— 两句话对应两件相反的事。
+ */
+export const REASON_TEXT: Record<StreamDiffReason, string> = {
   'unset-class-type': '这个班还没设班型（走班只对理科班 / 文科班生成）',
   'no-primary': '还没选首选科目',
   'primary-mismatch': '首选与班型不符（建议转班，走班补不了首选那一科）',
+  /* 🆕 这两档**必须长得不一样**：一个去采选科，一个去手工选走班班 */
+  'no-record': '选科还没录（先按班型默认跟着本班上课，不算走班）',
   other: '「其他」组合（必须手工选走班班）',
 }
 
@@ -273,6 +336,8 @@ function labelOf(st: { serial?: string; studentNo: string; name: string }): stri
  * ⚠️ **排列顺序是确定的**：走班班按 `STREAM_SUBJECT_CODES` 的顺序，
  *    组合按人数从多到少、同数按名字 —— 同样的数据每次算出来**逐字相同**
  *    （生成是幂等的：第二次跑不会因为顺序变了而重建班）。
+ * 🔴 🆕 2026-10-08：**"选科还没录"的那一档不进 `pending`，进 `noRecord`** ——
+ *    他跟的是班型默认、`walk` 空、不入任何走班班；但**必须报出来**（见 `StreamNoRecord`）。
  */
 export function planStreamClasses(
   classes: readonly Klass[],
@@ -305,12 +370,27 @@ export function planStreamClasses(
   /* 每个走班科目收哪些人（一个学生可能进**多个**） */
   const members = new Map<SubjectCode, Set<string>>()
   const pending: StreamPending[] = []
+  const noRecord: StreamNoRecord[] = []
   const comboMap = new Map<string, { walk: Set<SubjectCode>; ids: Set<string>; classIds: Set<string> }>()
 
   for (const [studentId, info] of byStudent) {
     const s = subjects.get(studentId) ?? null
     const d = streamDiff(s, info.classType)
-    if (d.reason !== null) {
+    /*
+     * 🔴 **"还没录选科" ≠ "归不了类"**（🆕 2026-10-08）：
+     *    这一档的人**按班型默认跟着本班上课**，`d.walk` 是空的 → 他不进任何走班班
+     *    （下面的收人循环自然跳过），但他**必须被报出来**（`noRecord` 清单），
+     *    否则"选科还没采"就变成静默的"一切正常"（`AGENTS.md` §三.5）。
+     */
+    if (!s && d.reason === 'no-record') {
+      noRecord.push({
+        studentId,
+        name: info.name,
+        serial: info.serial,
+        studentNo: info.studentNo,
+        className: info.className,
+      })
+    } else if (d.reason !== null) {
       pending.push({
         studentId,
         name: info.name,
@@ -366,8 +446,9 @@ export function planStreamClasses(
     .sort((a, b) => b.count - a.count || a.combination.localeCompare(b.combination))
 
   pending.sort((a, b) => a.className.localeCompare(b.className) || labelOf(a).localeCompare(labelOf(b)))
+  noRecord.sort((a, b) => a.className.localeCompare(b.className) || labelOf(a).localeCompare(labelOf(b)))
 
-  return { classes: out, pending, combos, students: byStudent.size }
+  return { classes: out, pending, noRecord, combos, students: byStudent.size }
 }
 
 /* ============================================================

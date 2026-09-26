@@ -147,6 +147,32 @@ export function classTypeDefault(classType: ClassType) {
 }
 
 /**
+ * 🔴 **没有选科记录的人要走哪几门**（🆕 2026-10-08）—— 本档的唯一入口。
+ *
+ * 口径：**没有记录 = 班型默认**（本项目既定口径：理科班物化生 / 文科班史政地）→
+ *   把"**他选的**"就当成班型默认那两门（`d.second`），于是
+ *   `walk = 他选的 − 本班默认教的 = d.second − (d.primary + d.second) = 空` ——
+ *   一门都不用走（他上的就是本班教的那三门）。
+ * ⚠️ 写成函数是让语义**跟着定义走** —— 哪天默认组合里多出一门、而那一门不在走班四科里，
+ *    这里的推导**仍然成立**（不靠"恒为空"这个巧合撑着）。
+ *
+ * 🔴 **别把方向写反**：`noRecordWalkOf` 的**第一版**算的是"走班四科里不在本班默认里的那些"
+ *    （理科班 → 政治 + 地理），那等于把**没选过的**两门当成"他选的"→
+ *    **整个班的人**都被塞进政治 / 地理走班班，而本班本来就不教这两门 ——
+ *    `grade-checks` 的 R39b/R39e **当场红了**（实测抓下过一次写反）。
+ */
+export function noRecordWalkOf(classType: ClassType | string | undefined): SubjectCode[] {
+  const t = classType === 'science' || classType === 'arts' ? classType : ''
+  const d = t ? CLASS_TYPE_DEFAULT[t] : null
+  if (!d) return []
+  /** 他"选的"那两门 = 班型默认那两门（没有记录 = 按默认上） */
+  const takes: readonly string[] = SECOND_CODES.filter((c) => d.second.includes(c))
+  /** 🔴 本班默认教的（首选 + 再选两门）—— `walk` 要减掉的正是它 */
+  const taught: readonly string[] = [d.primary, ...d.second]
+  return SECOND_CODES.filter((c) => takes.includes(c) && !taught.includes(c))
+}
+
+/**
  * 这个班的种类（`classes.kind`）。**读的人一律走它**（兼容期那一处判断只有这里一份）：
  * 老库读不到这一列 → `undefined` → 等于 `'admin'`（行政班），老行为一个字节不变。
  */

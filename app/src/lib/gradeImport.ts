@@ -379,6 +379,8 @@ export type CollectResult = {
   unchanged: number
   /** 「其他」的学生：**必须手工选走班科目**，一键铺开**不覆盖**他们 */
   otherKept: number
+  /** 🆕 **选科还是空的**（`student_subjects` 里没有这一行）—— 铺的就是他们 */
+  filled: number
 }
 
 /**
@@ -389,6 +391,13 @@ export type CollectResult = {
  *   ② 班型是 `''`（还没设置）或 `'undivided'`（未分科）时**没有默认组合** →
  *      那几行**不写**，并把班列进 `skippedClasses`（"未分科"不是"默认物化生"）；
  *   ③ 与现有值相同的行**不写**（省掉几百次无意义的写；界面上的"已采集"也因此是准的）。
+ *
+ * 🆕 2026-10-08：**"还没有记录"（`existing` 里没有他）与「其他」是两件事，处理方式相反** ——
+ *   · 没有记录 → **要铺**（他从来没被人选过，一键铺成班型默认正是这一步的用途；
+ *     界面上"1/2 个班采全"说的就是这件事）；
+ *   · `kind === 'other'` → **不铺**（有人**手工**定过他的走班科目，一键改写就是覆盖人的决定）。
+ *   ⚠️ 所以这里判的是 `cur?.kind === 'other'`，**不能**写成 `!cur || cur.kind === 'other'`
+ *      —— 那会把"选科还没采"读成"手工定过"，于是那一批人永远铺不上（静默地少了人）。
  */
 export function collectByClassType(
   classes: readonly Klass[],
@@ -398,6 +407,7 @@ export function collectByClassType(
   const skippedClasses: CollectResult['skippedClasses'] = []
   let unchanged = 0
   let otherKept = 0
+  let filled = 0
 
   for (const k of classes) {
     if (!isAdminClass(k)) continue
@@ -405,10 +415,13 @@ export function collectByClassType(
     for (const st of k.students) {
       if (st.status !== 'active') continue
       const cur = existing.get(st.id) ?? null
+      /* 🔴 只放过**手工定过**的（`other`）；没有记录要照铺 —— 见上面那条 */
       if (cur?.kind === 'other') {
         otherKept++
         continue
       }
+      /* 这一行是空的（从没采过）→ 数出来，界面上与"采全 N/M"对得上 */
+      if (!cur) filled++
       const d = defaultSubjectFor(t, st.id)
       if (!d) {
         if (t === 'undivided' || t === '') {
@@ -435,7 +448,7 @@ export function collectByClassType(
     seen.add(s.classId)
     return true
   })
-  return { rows, skippedClasses: skipped, unchanged, otherKept }
+  return { rows, skippedClasses: skipped, unchanged, otherKept, filled }
 }
 
 /* ---------------- ④b 粘贴差异名单：一行一个人 ---------------- */

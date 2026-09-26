@@ -377,18 +377,42 @@ await withLock(async () => {
       r.skippedClasses.every((s) => s.why.includes('班型') || s.why.includes('未分科')),
       JSON.stringify(r.skippedClasses.map((s) => s.why)),
     )
+    /*
+     * 🆕 2026-10-08：**"选科还没录"要单独数出来**（它正是界面上"1/2 个班采全"的原因），
+     *   而它与「其他」（手工定过、一键不许覆盖）**是两件事**。
+     * ⚠️ 它是"**没有记录**的人数"，**不是"这次会写几行"**：未分科 / 没设班型那两个班
+     *    （丙 / 丁）也是空的，所以这里 4 而不是 2 —— 界面上的那一格与"采全 N/M"是同一件事。
+     */
+    eq(
+      'E1b：这 4 个人**原来都没有选科记录** → `filled = 4`（含未分科 / 没设班型那两个班的人）',
+      r.filled,
+      4,
+    )
 
     /* 已经是默认的人不重复写（反指标：不让人做无意义的确认） */
     const cur = new Map([[`s-高一(1)班-01`, { studentId: 's-高一(1)班-01', primaryCode: 'physics', secondCodes: ['chemistry', 'biology'], kind: 'standard', note: '' }]])
     const r2 = gi.collectByClassType([science], cur)
     eq('E5：已经是默认的那个人**不再写**', r2.rows.length, 1)
     eq('E6：他被记进 `unchanged`', r2.unchanged, 1)
+    eq('E6b：同一次里 `filled = 1`（另一个人是空的，不是"已经是默认"）', r2.filled, 1)
 
     /* 🔴 「其他」的学生**不许被一键覆盖** */
     const other = { studentId: 's-高一(1)班-02', primaryCode: '', secondCodes: ['chemistry', 'biology'], kind: 'other', note: '转学待定' }
     const r3 = gi.collectByClassType([science], new Map([['s-高一(1)班-02', other]]))
     eq('E7：「其他」的学生**不在一键的结果里**', r3.rows.some((x) => x.studentId === 's-高一(1)班-02'), false)
     eq('E8：他被记进 `otherKept`', r3.otherKept, 1)
+    /*
+     * 🔴 E8b：**「其他」不是"没有记录"** —— 这一条正是这次拆档在一键那条路上的边界。
+     *    甲（没记录）与乙（「其他」）在**同一个班**：乙要留在原地（`otherKept = 1`），
+     *    甲才是"还没录"的那一个（`filled = 1`）。
+     *    ⚠️ 若哪天把两者读成一件事（把"手工定过"当"还没录"，那就会**覆盖人的决定**），
+     *       这一条会红 —— 所以它钉的是"两档不许混"。
+     */
+    eq(
+      'E8b：🔴 同班里「其他」的那个人**不算"选科还没录"**（`filled` 只数没记录的那个 = 1）',
+      r3.filled,
+      1,
+    )
   }
 
   section('第六节 · 粘贴差异名单（逐行、报行号、只认合法组合）')
@@ -3582,6 +3606,300 @@ await withLock(async () => {
       )
       if (NEGATIVE !== 'p7-one-walk-only') rmSync(TMP9, { force: true })
     }
+
+    /*
+     * 🔴 R39（🆕 2026-10-08，内测实测到的误导修复）：**"选科还没录" ≠ 「其他」**。
+     *
+     *   内测现场：某个班的选科**根本还没采** → `subjects` 里一个人都没有 →
+     *   全班几十个人都被归进「其他」，而界面上那一档的文案是"**必须手工选走班班**"。
+     *   老师于是去手工处理几十个**根本没被调查过**的学生 ——
+     *   而他们大多数人的正确答案是"**跟着理科班默认的物化生走，不用走班**"。
+     *
+     *   口径（用户拍板）：**没有记录 → 跟随班型默认 → 不算走班**（`walk` / `drops` 都空），
+     *   但**必须被报出来**（`noRecord` 清单，界面上写"选科还没录"），不许静默。
+     */
+    const empty = mkClass('c-empty', '高一(7)班', 'science', [['01', '辰']])
+    const otherOnly = mkClass('c-otheronly', '高一(8)班', 'science', [
+      ['01', '巳'],
+      ['02', '午'],
+    ])
+    const noRecPlan = streamLib.planStreamClasses(
+      [empty, otherOnly],
+      new Map([['st-c-otheronly-01', subj('physics', ['chemistry', 'politics'], 'other', '转学插班，待定')]]),
+    )
+    const dNo = streamLib.streamDiff(null, 'science')
+    eq('R39：🔴 没有选科记录 → 原因是 `no-record`（**不是** `' + "'other'" + '）', dNo.reason, 'no-record')
+    eq('R39b：他**不算走班**（`walk` 空 —— 班型默认就是物化生，他一门都不用走）', dNo.walk, [])
+    eq('R39c：`drops` 也是空（没有"本班教、他不上"的科目）', dNo.drops, [])
+    ok(
+      'R39d：🔴 他**不进待处理清单**（那里是"必须手工选走班班"的人），进的是 `noRecord` 清单',
+      noRecPlan.pending.length === 1 &&
+        noRecPlan.pending[0].studentId === 'st-c-otheronly-01' &&
+        noRecPlan.noRecord.some((x) => x.studentId === 'st-c-empty-01'),
+      JSON.stringify({ pending: noRecPlan.pending, noRecord: noRecPlan.noRecord }),
+    )
+    eq(
+      'R39e：他**一个走班班都不进**（整班随班上课，不是"手工塞进某个班"）',
+      noRecPlan.classes.filter((c) => c.studentIds.includes('st-c-empty-01')).length,
+      0,
+    )
+    eq('R39f：全年级名单还是算他一个（分母不变 —— 他没被跳过）', noRecPlan.students, 3)
+    /*
+     * 🔴 R39k：**这一档的"空 `walk`"不是硬编码出来的**，而是"没有默认组合 → 没法随班"推出来的。
+     *    ⚠️ 反过来说清一件事：`noRecordDiff` 的**第一版**写成 `walk = 本班默认那两支`
+     *       （"把默认组合当成要走"）—— **R39b/R39e 当场红了**：
+     *       它会让**整个班**（物化生的学生）都进化学 / 生物两个走班班，而本班本来就在教这两门。
+     *       所以这几条断言不是"装饰"，它真的抓下过一次写反。
+     */
+    const unsetNoRec = streamLib.streamDiff(null, 'undivided')
+    eq(
+      'R39k：未分科（没有默认组合）+ 没有记录 → `walk` **也是空**（不是"拿班型默认顶上"）',
+      [unsetNoRec.reason, unsetNoRec.walk],
+      ['no-record', []],
+    )
+    /*
+     * R39l–n：**这一档必须"说出来"**（`AGENTS.md` §三.5：不可写的路径要显式报错，不许静默）——
+     *   纯逻辑算对了、界面上却是"一切正常"，等于没修（内测那件误导正是"界面没说"造成的）。
+     *   ⚠️ 静态钉住的是一个**名字**（`plan.noRecord`）：它一改名，这两条就红，
+     *      提醒改的人回来把界面那条链重新接上。
+     */
+    const gsSrcForNoRec = readFileSync(resolvePath(APP, 'src/pages/GradeSetup.tsx'), 'utf8')
+    ok(
+      'R39l：🔴 ⑥ 生成走班把 `noRecord` **单独列一块**（不是合进"待处理"里）',
+      /plan\.noRecord\.length \?/.test(gsSrcForNoRec) && /plan\.noRecord\.map|plan\.noRecord\.slice/.test(gsSrcForNoRec),
+    )
+    ok(
+      'R39m：🔴 屏上写的是"**选科还没录**"（与「其他」那一档"必须手工选走班班"长得不一样）',
+      gsSrcForNoRec.includes('选科还没录') && gsSrcForNoRec.includes('必须手工选走班科目'),
+    )
+    ok(
+      'R39n：④ 采集选科那一步也把"选科还没录"与"采全 N/M"**并排**说出来（两件事要连起来）',
+      /人选科还没录/.test(gsSrcForNoRec) && /个班采全/.test(gsSrcForNoRec),
+    )
+    /* ② **真的「其他」组合**（录了、但不是 12 种之一）—— 口径一个字节都不许变 */
+    eq(
+      'R39g：真·「其他」组合仍归 `other`（不许被新档吸走）',
+      streamLib.streamDiff(subj('physics', ['chemistry', 'politics'], 'other', '待定'), 'science').reason,
+      'other',
+    )
+    ok(
+      'R39h：他在待处理清单里的**人话原因仍是"必须手工选走班班"**',
+      noRecPlan.pending.some((x) => x.studentId === 'st-c-otheronly-01' && /必须手工选走班班/.test(x.note)),
+      JSON.stringify(noRecPlan.pending),
+    )
+    ok(
+      'R39i：两档的文案**长得不一样**（一个去采选科、一个去手工选走班班）',
+      /选科还没录/.test(streamLib.REASON_TEXT['no-record']) && /必须手工选走班班/.test(streamLib.REASON_TEXT.other),
+    )
+    eq(
+      'R39j：这一档的档位数（`REASON_TEXT` 一档一条，漏一条就是 `undefined` 上屏）',
+      Object.keys(streamLib.REASON_TEXT).length,
+      5,
+    )
+
+    /* 🔴 R40：**反向对照** —— 把 `if (!s)` 改回 `'other'`（修复前的原样）→ R39/R39b/R39d 必须红。
+       ⚠️ 做法与 R13/R38 同款：**只改内存里的副本**（写临时文件再 import），仓库里那份一个字节都不动。
+       🔴 这条对照**同时**证明"锚点没漂"：真被改回 `'other'` 时，
+          `poisoned === streamSrc` → R40a 自己先红（而不是静默地不对照）。 */
+    {
+      const FIXED = "  if (!s) return noRecordDiff(classType)\n"
+      const BEFORE = "  if (!s) return EMPTY_DIFF('other')\n"
+      const TMPNR = resolvePath(APP, 'src/lib/.__p7_norecord_tmp.ts')
+      /* ⚠️ 重新读一遍源码（上面 R13 那一份的块作用域已经结束了）—— 读文件是幂等的 */
+      const noRecSrc = readFileSync(resolvePath(APP, 'src/lib/stream.ts'), 'utf8')
+      const poisoned = noRecSrc.replace(FIXED, BEFORE)
+      eq(
+        'R40a：🔴 修复那一行**在仓库里是"新写法"**（`if (!s) return noRecordDiff(classType)`）—— ' +
+          '这一条**顺带**是"别人把修复改回去"时的告警：那一刻它会红',
+        noRecSrc.includes(FIXED),
+        true,
+      )
+      eq('R40b（对照自证）：改坏之后**确实变回修复前的样子**', poisoned.includes(BEFORE) && poisoned !== noRecSrc, true)
+      let badReason = '（没跑起来）'
+      let badPending = 0
+      let badWalk = null
+      try {
+        writeFileSync(TMPNR, poisoned)
+        const mod = await import(pathToFileURL(TMPNR).href)
+        badReason = mod.streamDiff(null, 'science').reason
+        badWalk = mod.streamDiff(null, 'science').walk.join(',')
+        badPending = mod.planStreamClasses(
+          [empty, otherOnly],
+          new Map([['st-c-otheronly-01', subj('physics', ['chemistry', 'politics'], 'other', '转学插班，待定')]]),
+        ).pending.length
+      } catch (e) {
+        badReason = `（求值失败：${String(e?.message ?? e).split('\n')[0]}）`
+      } finally {
+        rmSync(TMPNR, { force: true })
+      }
+      eq(
+        'R40c：🔴 改回 `' + "'other'" + '` 之后，「没有记录」**又被归成 `other`**（R39 会红）—— 这才是真对照',
+        badReason,
+        'other',
+      )
+      eq(
+        'R40d：🔴 改坏之后**整个班（没有记录的两个人）又进了"必须手工选走班班"那一档**（R39d 会红）',
+        badPending,
+        3,
+      )
+      eq('R40e：改坏之后他不再算"随班上课"（`walk` 那一列也没了）', badWalk, '')
+      eq('R40f：临时文件已经删掉（仓库里那份源码一个字节都没动）', existsSync(TMPNR), false)
+    }
+
+    /*
+     * 🔴 R41（🆕 2026-10-08）：**"选科读不到" ≠ "选科还没录"** —— 同一页上的**三态**。
+     *
+     *   现场：`loadGradeSetup()` 读 `student_subjects` **失败**时回**空 map**
+     *   （`subjectsState: 'missing' | 'unknown'`，缺省表示读到了）。上一个修复把
+     *   "没有记录"从「其他」里拆了出来，但页面上四处（④ 摘要那一行、④ 的 `pickDone`、
+     *   ⑥ 那一块、⑥ 的"没有要走班的学生"）都拿**空 map** 当"没有记录"用 →
+     *   库没跑 §27 / 断网 / 读失败时，屏上会写"**N 人选科还没录**"。
+     *   ⚠️ 这一档**不是**"没结论 → 灰"，而是**读不到 ≠ 没有**：真·没有记录是**确定的结论**，
+     *      照旧要明确说"选科还没录"（下面 R42 正是这一半，两个方向都钉住）。
+     *
+     *   做法：这一页是 `.tsx`（Node 的 TS 剥离不认 JSX，import 不了）——
+     *   所以**从源码里抠出那几处判据的原文**，再按它**真求值**（抠不到 / 改了就被抓住）。
+     */
+    const gsSource = readFileSync(resolvePath(APP, 'src/pages/GradeSetup.tsx'), 'utf8')
+    /*
+     * ① `PickSummary` 里那道闸：`if (!subjectsKnown) { … }` 的那一支 ——
+     *    抠出条件原文 + 那一支的原文，先验它是"读不到 → 灰的读不到"。
+     */
+    const pickGuard = gsSource.match(/if \((!subjectsKnown)\) \{[\s\S]{0,900}?\n  \}/)
+    ok(
+      'R41a：🔴 ④ 的摘要有一道"读不到"的闸（`if (!subjectsKnown)`）—— 上一个修复只做了"真的没有"那一档，没有它',
+      Boolean(pickGuard),
+    )
+    const pickBranch = pickGuard ? pickGuard[0] : ''
+    ok(
+      'R41b：🔴 那一支说"**读不到**"（灰 —— 本页既有的灰写法 `color: var(--color-ink3)`），**不是**"选科还没录"',
+      /读不到/.test(pickBranch) && /color-ink3/.test(pickBranch) && !/选科还没录/.test(pickBranch),
+      pickBranch.slice(0, 200),
+    )
+    /* ⚠️ 反向对照要能红：把那一支的原文改回"还没录 / 黄 Tag"（修复前的样子）→ R41b 必须红 */
+    if (pickGuard) {
+      const yellowBack = pickBranch.replace('选科读不到，采全进度没法算。', '{} 人选科还没录')
+      eq(
+        'R41b2（对照自证）：把那一支改回"选科还没录 / 黄 Tag"之后**确实不再是灰的读不到**（R41b 会红）',
+        /读不到/.test(yellowBack) && /color-ink3/.test(yellowBack) && !/选科还没录/.test(yellowBack),
+        false,
+      )
+      eq('R41b3（对照自证）：改坏之后源码确实变了（不是空改）', yellowBack !== pickBranch, true)
+    }
+    /*
+     * ② 那一行"N 人选科还没录"**被那道闸罩住**（同一个函数里，闸之后才轮到它）——
+     *    否则"读不到"时它照样上屏。
+     */
+    const pickFn = gsSource.match(/function PickSummary\(\{[\s\S]*?\n\/\* =+/)
+    const pickFnBody = pickFn ? pickFn[0] : ''
+    ok(
+      'R41c：🔴 那句"人选科还没录"**在闸之内**（`!subjectsKnown` 那一支之后）—— 读不到时上不了屏',
+      Boolean(pickFnBody) &&
+        pickFnBody.indexOf('!subjectsKnown') >= 0 &&
+        pickFnBody.indexOf('!subjectsKnown') < pickFnBody.indexOf('人选科还没录'),
+      JSON.stringify({
+        guard: pickFnBody.indexOf('!subjectsKnown'),
+        tag: pickFnBody.indexOf('人选科还没录'),
+      }),
+    )
+    /*
+     * ③ ⑥ 那一块（新加的那一处）**同样被罩住**：
+     *    `{subjectsKnown && plan.noRecord.length ? (…)}` —— 读不到时它一个字都不说。
+     */
+    const noRecBlock = gsSource.match(/\{subjectsKnown && plan\.noRecord\.length \? \(/)
+    ok(
+      'R41d：🔴 ⑥「选科还没录 N 人」那一块被 `subjectsKnown &&` 罩住（读不到时不说这句话）',
+      Boolean(noRecBlock),
+    )
+    /* ⚠️ 反向对照要能红：**把闸删掉（回到修复前的 `plan.noRecord.length ?`）** → R41d 必须红 */
+    const noRecUngated = gsSource.replace('{subjectsKnown && plan.noRecord.length ? (', '{plan.noRecord.length ? (')
+    eq(
+      'R41d2（对照自证）：把 `subjectsKnown &&` 删回原样之后源码确实变了（R41d 那一句会红）',
+      noRecUngated !== gsSource,
+      true,
+    )
+    ok(
+      'R41d3（对照自证）：改回去之后**那个被罩住的写法在源码里就找不到了**（R41d 的判据真的会红）',
+      !noRecBlock ? true : !/\{subjectsKnown && plan\.noRecord\.length \? \(/.test(noRecUngated),
+    )
+    /*
+     * ④ ⑥ 的另一半：读不到时**不许下"没有要走班的学生"这个结论**（那是拿空 map 推的）——
+     *    这一档必须是**灰的"读不到"**（`AGENTS.md` §三.4）。
+     */
+    ok(
+      'R41e：🔴 ⑥ 在读不到 + 算不出建议时说"选科读不到，走班建议没法算"（不写"这个年级没有要走班的学生"）',
+      /选科读不到，走班建议没法算/.test(gsSource) &&
+        /!plan\.classes\.length && !subjectsKnown/.test(gsSource),
+    )
+    /*
+     * ⑤ **闸的语义本身**（真求值，不是看字符串）：抠出 `subjectsKnown` 的定义原文，
+     *    证实它只认"读到了"（`'present'`）—— `missing` / `unknown` 两档都在"读不到"这一边。
+     *    🔴 **这就是这一页的三态口径**：一态 present / 两态非 present，**非 present 一律灰**。
+     */
+    const knownDef = gsSource.match(/const subjectsKnown = subjectsState === '([^']+)'/)
+    const knownSrc = knownDef ? knownDef[1] : ''
+    const knownFn = new Function('subjectsState', `return subjectsState === ${JSON.stringify(knownSrc)}`)
+    eq(
+      'R41f：🔴 「读到了没有」的判据就是 `subjectsState === ' + "'present'" + '`（抠出来真跑）',
+      ['present', 'missing', 'unknown', undefined, null, ''].map((s) => knownFn(s)),
+      [true, false, false, false, false, false],
+    )
+    /* ⚠️ 反向对照要能红：把判据写成"只要不是 missing 就算读到了"—— unknown（断网）就会被当成"读到了" */
+    const looseFn = new Function('subjectsState', 'return subjectsState !== "missing"')
+    eq(
+      'R41f2（对照自证）：写成"只要不是 missing 就算读到了"时，`unknown`（断网）会被误判成"读到了"—— 两种写法**必须不一样**（R41f 会红）',
+      ['present', 'missing', 'unknown'].map((s) => looseFn(s)),
+      [true, false, true],
+    )
+    /*
+     * ⑥ **读不到时的结论**：一个学生都没有选科记录 → ④ 那一行**不许**说"选科还没录"。
+     *    这里把"没有记录的人数"那段算术**真跑一遍**（数据取上面的空班夹具），
+     *    钉住"读不到时那个数一个都不许上屏"。
+     */
+    const noSubjMap = new Map()
+    const untakenNoSubj = pickLib.classPickProgress(empty, noSubjMap).total - noSubjMap.size
+    ok(
+      'R41g：🔴 选科读不到（空 map）时，"还没录 N 人"的那个数**没有意义**（' +
+        untakenNoSubj +
+        ' 人是**空 map 推出来的**，正是被闸挡住的那一格）',
+      untakenNoSubj === 1 && knownFn('missing') === false && knownFn('unknown') === false,
+    )
+
+    /*
+     * 🔴 R42：**另一半 —— "真的没有"照旧明确说，不许被一起变成灰**（用户点名的反向对照）。
+     *
+     *   能读到、但库里就是没有那几行（`subjectsState === 'present'` + 空 map）时，
+     *   "选科还没录 N 人"是**确定的结论**，必须照旧明确说出来（黄 Tag）——
+     *   把这一档也改灰、或把它一起藏掉，都是**另一个方向的错**。
+     *   判据（真跑）：同一个空 map，**只换"读到了没有"这一个变量**，结论必须相反。
+     */
+    const decidedNoRecord = knownFn('present') && untakenNoSubj > 0
+    const unknownNoRecord = knownFn('missing') && untakenNoSubj > 0
+    eq(
+      'R42a：🔴 同一个空 map —— **读到了**（present）→ 说"选科还没录"；**读不到**（missing）→ 一个字都不说',
+      [decidedNoRecord, unknownNoRecord],
+      [true, false],
+    )
+    eq(
+      'R42b（R42 的反向对照自证）：**把"真的没有"也一起变成灰/藏掉** → `decidedNoRecord` 变成 false（R42a 会红）',
+      knownFn('present') && false,
+      false,
+    )
+    /*
+     * ⑦ 真·没有记录时，⑥ 那一块**照旧渲染**（`subjectsKnown` 为真时那个闸是通的）——
+     *    这里直接拿真源码里的那两个条件求值。
+     */
+    const gateFn = new Function('subjectsKnown', 'plan', 'return !!(subjectsKnown && plan.noRecord.length)')
+    eq(
+      'R42c：🔴 present + 有"还没录"的人 → ⑥ 那一块照旧渲染（真的没有**没有被变灰**）',
+      gateFn(true, { noRecord: [1] }),
+      true,
+    )
+    eq(
+      'R42d：🔴 读不到 + 同样那批"还没录"的人 → 那一块**不渲染**（读不到不说"还没录"）',
+      gateFn(false, { noRecord: [1] }),
+      false,
+    )
   }
 
   /* ---------------- ⑬-2 真库：生成 + 分配老师 + 权限 ---------------- */

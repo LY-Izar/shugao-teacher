@@ -5,7 +5,7 @@ import { IconAlert, IconCheck, IconPaste } from '../components/icons'
 import { Button, PageHead, Panel, Sect, Sheet, Tag } from '../components/ui'
 import { useStore, useToast } from '../data/store'
 import { loadClassSubjects, loadGradeSetup, type ClassSubjectRow } from '../data/remote'
-import { loadStreams } from '../data/gradeSetup'
+import { loadStreams, type GradeSetupState } from '../data/gradeSetup'
 import { canAssignRoles } from '../lib/roles'
 import { CLASS_TYPE_NAME, type ClassType, type Klass, type Student } from '../data/types'
 import {
@@ -92,6 +92,14 @@ export default function GradeSetup() {
   const [bundle, setBundle] = useState<Awaited<ReturnType<typeof loadGradeSetup>> | null>(null)
   const [classes, setClasses] = useState<Klass[]>([])
   const [subjects, setSubjects] = useState<Map<string, StudentSubject>>(new Map())
+  /*
+   * 🔴 选科那一次读的**结论**（三态，`AGENTS.md` §三.4）—— 与 `subjects` 那张表**分开存**：
+   *    · `present` = 读到了。这时候"`subjects` 里没有他"是**确定的结论** → "选科还没录"；
+   *    · `missing` / `unknown` = 这张表**读不到**（§27 还没跑 / 读失败 / 断网 / 没权限）→
+   *      空 map **推不出"没有记录"**，那是**没结论** → 屏上必须是**灰的"读不到"**，
+   *      绝不能说成"选科还没录"（同一条不变量在 RLS 挡下写入、心跳条件恒假、探针读不到处都踩过）。
+   */
+  const [subjectsState, setSubjectsState] = useState<GradeSetupState>('present')
   const [csRows, setCsRows] = useState<ClassSubjectRow[] | null>(null)
   const [teachers, setTeachers] = useState<DirTeacher[]>([])
   /**
@@ -133,6 +141,7 @@ export default function GradeSetup() {
     const cls = b.classes.length ? b.classes : fromStore
     setClasses(cls)
     setSubjects(b.subjects)
+    setSubjectsState(b.subjectsState ?? 'present')
     /* 🆕 P7：走班班单独读一次（它不进 `loadGradeSetup()` —— 老库没有 `class_members`） */
     const s = await loadStreams(id)
     setStreams(s.classes)
@@ -187,8 +196,15 @@ export default function GradeSetup() {
   const plan = useMemo(() => planStreamClasses(admin, subjects), [admin, subjects])
 
   /* ---------------- 六步各自的"完成没" ---------------- */
+  /**
+   * 🔴 **选科读到了没有**（三态里的"有没有结论"）—— 这一页所有说"还没录"的地方都认它：
+   *    读不到（§27 没跑 / 读失败 / 断网）时 `subjects` 是空 map，**空 ≠ 没有记录**。
+   *    ⚠️ 真·"没有记录"是**确定的结论**（`subjectsKnown === true` + `subjects` 里没他），
+   *       照旧明确说"选科还没录"—— **不许**把它也一起变成灰的（那是另一个方向的错）。
+   */
+  const subjectsKnown = subjectsState === 'present'
   const typeDone = admin.length > 0 && admin.every((k) => classTypeOf(k) !== '')
-  const pickDone = students.length > 0 && students.every((s) => subjects.has(s.id))
+  const pickDone = subjectsKnown && students.length > 0 && students.every((s) => subjects.has(s.id))
   const headTeacherCount = teachers.filter((t) =>
     t.roles.some((r) => r.role === 'head_teacher' && admin.some((k) => k.id === r.scopeId)),
   ).length
@@ -373,7 +389,7 @@ export default function GradeSetup() {
         <div className="mb-2">
           <Sect>④ 采集选科</Sect>
           <Panel bodyClass="p-3">
-            <PickSummary classes={admin} subjects={subjects} />
+            <PickSummary classes={admin} subjects={subjects} subjectsKnown={subjectsKnown} />
             <div className="mt-2.5">
               <Button
                 size="sm"
@@ -430,6 +446,7 @@ export default function GradeSetup() {
           <Panel bodyClass="p-3">
             <StreamPanel
               plan={plan}
+              subjectsKnown={subjectsKnown}
               streams={streams}
               members={streamMembers}
               csRows={streamCsRows}
@@ -728,9 +745,12 @@ function RosterSummary({
 function PickSummary({
   classes,
   subjects,
+  subjectsKnown,
 }: {
   classes: readonly Klass[]
   subjects: ReadonlyMap<string, StudentSubject>
+  /** 选科那一次**读到了没有**（`false` = 读不到：§27 没跑 / 读失败 / 断网） */
+  subjectsKnown: boolean
 }) {
   if (!classes.length) {
     return <div style={{ fontSize: 13, color: 'var(--color-ink3)' }}>先录名单。</div>
@@ -738,11 +758,33 @@ function PickSummary({
   const rows = classes.map((k) => ({ k, p: classPickProgress(k, subjects) }))
   const done = rows.filter((r) => r.p.complete).length
   const other = [...subjects.values()].filter((s) => s.kind === 'other').length
+  /*
+   * 🆕 2026-10-08：**选科还没录的人**（在册学生 − 已经有选科记录的人）。
+   * 🔴 这一格就是"1/2 个班采全"那句话的原因，必须与它并排显示 ——
+   *    没有它的话，⑥ 生成走班那份清单上的"待处理"看起来像是需要人去手工选走班班，
+   *    而真相往往是"这个班的选科**根本还没采**"（内测实测到的误导）。
+   */
+  const untaken = classes.reduce((n, k) => n + classPickProgress(k, subjects).total, 0) - subjects.size
+  /*
+   * 🔴 **读不到 ≠ 没有记录**（§三.4 的三态）：`subjectsKnown === false` 时上面那些数
+   *    （`done` / `untaken` / `other`）全都是**空 map 推出来的**，一个都不许说 ——
+   *    否则"§27 还没跑 / 读失败"会被报成"这个年级一个人都没录选科"。
+   *    ⚠️ 这一支必须是**灰的**（`color-ink3`，本页既有的灰写法），不是 `tone="warn"`（黄 = 要处理）。
+   */
+  if (!subjectsKnown) {
+    return (
+      <div className="flex flex-wrap gap-1.5">
+        <span style={{ fontSize: 13, color: 'var(--color-ink3)' }}>选科读不到，采全进度没法算。</span>
+      </div>
+    )
+  }
   return (
     <div className="flex flex-wrap gap-1.5">
       <Tag tone={done === rows.length ? 'ok' : 'idle'}>
         {done}/{rows.length} 个班采全
       </Tag>
+      {/* 🆕 这一格只在**真读到了**（上面那一支）才说 —— 它是**确定的结论**，照旧明确说 */}
+      {untaken > 0 ? <Tag tone="warn">{untaken} 人选科还没录</Tag> : null}
       {other ? <Tag tone="warn">「其他」{other} 人（必须手工选走班科目）</Tag> : null}
     </div>
   )
@@ -1125,6 +1167,8 @@ function PickSheet({
             <>
               <div className="flex flex-wrap gap-1.5">
                 <Tag tone="accent">将铺开 {preview.rows.length} 人</Tag>
+                {/* 🆕 这批人就是"选科还没录"的（原来是空的）—— 与上面的"采全 N/M"是同一件事 */}
+                {preview.filled ? <Tag tone="warn">{preview.filled} 人选科还没录</Tag> : null}
                 {preview.unchanged ? <Tag tone="idle">{preview.unchanged} 人本来就是默认</Tag> : null}
                 {preview.otherKept ? <Tag tone="warn">{preview.otherKept} 个「其他」的学生不动</Tag> : null}
               </div>
@@ -1154,6 +1198,7 @@ function PickSheet({
                 setMsg(
                   [
                     ok ? `已铺开 ${preview.rows.length} 人` : `写了 ${preview.rows.length} 人，有几条被拒`,
+                    preview.filled ? `其中 ${preview.filled} 人的选科原来还没录` : '',
                     preview.unchanged ? `${preview.unchanged} 人本来就是默认` : '',
                     preview.otherKept ? `${preview.otherKept} 个「其他」的学生没动` : '',
                     preview.skippedClasses.length
@@ -1668,10 +1713,13 @@ const SUBJECT_OPTIONS: Array<{ code: string; name: string }> = [
    一节说清三件事（界面上只回答"这里是什么、我能做什么"）：
      · 要建哪几个走班班、每组多少人、分布在哪些行政班（**建议**，还没建）；
      · 归不了类的学生（「其他」/ 没设班型 / 首选与班型不符）—— 列出来让人处理；
+     · 🆕 **选科还没录的人** —— **单独一块**（他们按班型默认随班，不用手工选走班班，
+       与上面那一类**该做的事相反**，混在一起就是内测那件误导）；
      · 建好之后**分配老师**（选完自动补任课关系，提示补了几行）。
    ============================================================ */
 function StreamPanel({
   plan,
+  subjectsKnown,
   streams,
   members,
   csRows,
@@ -1683,6 +1731,8 @@ function StreamPanel({
   onAssign,
 }: {
   plan: StreamPlan
+  /** 选科那一次**读到了没有** —— `false` 时 `plan` 里那些"选科还没录"全是空 map 推出来的，一个字都不许说 */
+  subjectsKnown: boolean
   streams: readonly Klass[]
   members: Readonly<Record<string, string[]>>
   /** 走班班的任教关系（`class_subjects`）—— 老师下拉的当前值从它读 */
@@ -1710,11 +1760,26 @@ function StreamPanel({
   if (!plan.students) {
     return <div style={{ fontSize: 13, color: 'var(--color-ink3)' }}>还没有学生。</div>
   }
+  if (!plan.classes.length && !subjectsKnown) {
+    /*
+     * 🔴 **读不到选科时不许下"没有要走班的学生"这个结论**（§三.4：没结论必须是灰，绝不红）——
+     *    `plan` 是拿空 map 算出来的：`classes` 空只是"从这份读不到的数据里看不出有人要走班"。
+     *    ⚠️ 这一支只说这一句、不摆任何算出来的数（建议 / 生成 / 选科分布全是空 map 推的，
+     *       连"选科还没录 N 人"也不说 —— 那句的前提是**真读到了**，见下面那一块）。
+     */
+    return (
+      <div style={{ fontSize: 13, color: 'var(--color-ink3)', lineHeight: 1.7 }}>
+        选科读不到，走班建议没法算。
+      </div>
+    )
+  }
   if (!plan.classes.length) {
     return (
       <div style={{ fontSize: 13, color: 'var(--color-ink3)', lineHeight: 1.7 }}>
         这个年级没有要走班的学生。
         {plan.pending.length ? `（另有 ${plan.pending.length} 人要在下面单独处理）` : ''}
+        {/* 🆕 "没有走班的学生"与"选科还没采"必须分得开：后者一采完可能就有人要走班了 */}
+        {plan.noRecord.length ? `（另有 ${plan.noRecord.length} 人的选科还没录）` : ''}
       </div>
     )
   }
@@ -1783,6 +1848,33 @@ function StreamPanel({
           <p style={{ fontSize: 11.5, color: 'var(--color-ink4)', marginTop: 4, lineHeight: 1.65 }}>
             「其他」的学生在 ④ 采集选科里手工选走班班；没设班型的先回第③步设班型。
           </p>
+        </div>
+      ) : null}
+
+      {/*
+        🆕 2026-10-08：**选科还没录的人**（与上面那一档**分开列**）。
+        🔴 他们**不算走班**：跟着班型默认（理科班物化生 / 文科班史政地）上课就行，
+           **不要**去给他们手工选走班班 —— 上面那条待处理清单里**没有**他们。
+        🔴 这一块的前提是**选科真的读到了**（`subjectsKnown`）：读不到时 `noRecord`
+           是"空 map 推出来的全年级"，屏上会写成"选科还没录 N 人"，而真相是**读不到** ——
+           那正是这条不变量要挡的东西。⚠️ 真·没有记录时 `subjectsKnown === true`，这一块照旧明确说。
+      */}
+      {subjectsKnown && plan.noRecord.length ? (
+        <div className="mt-3">
+          <div style={{ fontSize: 12.5, fontWeight: 620, color: 'var(--color-ink2)' }}>
+            选科还没录 {plan.noRecord.length} 人（先按班型默认跟着本班上课，不用手工选走班班）
+          </div>
+          <div className="mt-1.5 flex flex-col gap-1">
+            {plan.noRecord.slice(0, 20).map((p) => (
+              <div key={p.studentId} style={{ fontSize: 12, lineHeight: 1.7, color: 'var(--color-ink3)' }}>
+                {p.className} · {p.name}
+                {p.serial ? ` （${p.serial}）` : p.studentNo ? ` （${p.studentNo}）` : ''}
+              </div>
+            ))}
+            {plan.noRecord.length > 20 ? (
+              <div style={{ fontSize: 11.5, color: 'var(--color-ink4)' }}>还有 {plan.noRecord.length - 20} 人</div>
+            ) : null}
+          </div>
         </div>
       ) : null}
 
