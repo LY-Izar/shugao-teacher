@@ -844,7 +844,7 @@ export default function Settings() {
             <textarea
               className="input mt-2.5"
               style={{ minHeight: 84, fontSize: 13, lineHeight: 1.75 }}
-              placeholder={`最多 ${FEEDBACK_MAX} 个字。写清在哪个页面、点了什么、看到什么。`}
+              placeholder={`${FEEDBACK_MIN}–${FEEDBACK_MAX} 个字。写清在哪个页面、点了什么、看到什么。`}
               value={fbBody}
               onChange={(e) => setFbBody(e.target.value)}
               data-feedback-input
