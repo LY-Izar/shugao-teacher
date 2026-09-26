@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Page } from '../components/AppShell'
 import {
@@ -11,12 +11,13 @@ import {
   IconPlus,
   IconUsers,
 } from '../components/icons'
-import { Button, PageHead, Panel, Sect } from '../components/ui'
+import { Button, PageHead, Panel, Sect, Tag } from '../components/ui'
 import { WordImport } from '../components/WordImport'
 import { useStore, useToast } from '../data/store'
-import { clampQuestionCount } from '../lib/assignments'
+import { UNASSIGNED_CLASS_ID, clampQuestionCount, isUnassigned } from '../lib/assignments'
 import { ensureISO, isoOffset } from '../lib/date'
 import { docxToParts } from '../lib/docx'
+import { isAdminClass, isStreamClass } from '../lib/pick'
 import {
   SUBJECTS,
   subjectCodeOf,
@@ -44,7 +45,22 @@ export default function AssignmentNew() {
   const navigate = useNavigate()
   const push = useToast((s) => s.push)
 
-  const firstClass = currentClassId ?? classes[0]?.id ?? ''
+  /*
+   * 🔴 默认选中的班（P5 的统一模型）：
+   *    · `currentClassId` 是**当前班**，但它可能是走班班 → 走班作业挂走班班那一行，照收；
+   *    · 否则退回**第一个行政班**（不是 `classes[0]`）——
+   *      `classes` 是按 `created_at` 排的，走班班一旦建出来就可能排在前面，
+   *      那时"默认班"会悄悄变成一个走班班（老师看不出区别，但那份作业收的是另一批人）。
+   *    · 一个行政班都没有时才退回第一个班；仍然没有就留空。
+   *    ⚠️ `UNASSIGNED`（空串）= **未归属**，由老师显式勾选，**绝不作为默认值** ——
+   *      默认值必须是"有归属"的班，否则老师一点"建立"就建出一份谁也看不见的档案。
+   */
+  const adminClasses = useMemo(() => classes.filter(isAdminClass), [classes])
+  const firstClass =
+    currentClassId ??
+    adminClasses[0]?.id ??
+    classes[0]?.id ??
+    ''
   /** 可以一次勾多个班 —— 提交时为每个班各建一份独立档案 */
   const [classIds, setClassIds] = useState<string[]>(firstClass ? [firstClass] : [])
   const [title, setTitle] = useState('')
@@ -505,12 +521,48 @@ export default function AssignmentNew() {
                           {on ? <IconCheck size={11} strokeWidth={3} /> : null}
                         </span>
                         <span style={{ fontSize: 13, fontWeight: 550 }}>{c.name}</span>
+                        {/*
+                          走班班也要能选中（P5：作业的归属可以是走班班那一行）。
+                          只是标一个"走班"，因为它的"应交人数"来自成员关系而不是 `students`。
+                        */}
+                        {isStreamClass(c) ? <Tag tone="idle">走班</Tag> : null}
                         <span className="num" style={{ fontSize: 11.5, opacity: 0.75 }}>
                           {c.students.filter((s) => s.status === 'active').length} 人
                         </span>
                       </button>
                     )
                   })}
+                  {/*
+                    🔴 **未归属**（P5 第 5 条验收：`assignments.class_id` 可空之后，
+                       "不属于任何班的作业"也能建）。它必须能被建、而且建完看得见 ——
+                       数据库那侧的口径见 `schema.sql` §31.3：**只有 super/admin 与建档人自己**
+                       能建未归属的档案，且**只有建档人自己看得见**（`teacher_id = auth.uid()`）。
+                    ⚠️ 它**只是"这条归属通道"**，不是必填项：老师不点它，一切都和以前一样
+                       （反指标：每次作业教师新增手工录入字段数 = 0）。
+                  */}
+                  {classes.length ? (
+                    <button
+                      type="button"
+                      onClick={() => setClassIds([UNASSIGNED_CLASS_ID])}
+                      className="flex items-center gap-2 px-3 py-2"
+                      style={{
+                        border: `1px solid ${
+                          classIds.includes(UNASSIGNED_CLASS_ID)
+                            ? 'var(--color-accent)'
+                            : 'var(--color-line2)'
+                        }`,
+                        background: classIds.includes(UNASSIGNED_CLASS_ID)
+                          ? 'var(--color-accentsoft)'
+                          : 'var(--color-surface)',
+                        borderRadius: 4,
+                        color: classIds.includes(UNASSIGNED_CLASS_ID)
+                          ? 'var(--color-accentink)'
+                          : 'var(--color-ink2)',
+                      }}
+                    >
+                      <span style={{ fontSize: 13, fontWeight: 550 }}>未归属</span>
+                    </button>
+                  ) : null}
                 </div>
                 {classIds.length > 1 ? (
                   <p
@@ -533,7 +585,11 @@ export default function AssignmentNew() {
               <div className="flex flex-wrap items-center gap-x-5 gap-y-2" style={{ fontSize: 12.5 }}>
                 <span className="flex items-center gap-1.5">
                   <IconClipboard size={14} />
-                  {klass?.name ?? '未选班级'}
+                  {/*
+                    ⚠️ 未归属那一档**不叫"未选班级"**：它是老师**明确选的**一种归属
+                    （见上面那个「未归属」按钮），与"还没选"是两件事。
+                  */}
+                  {isUnassigned(classIds[0]) ? '未归属（走班）' : (klass?.name ?? '未选班级')}
                 </span>
                 <span className="flex items-center gap-1.5">
                   <IconList size={14} />
@@ -549,7 +605,22 @@ export default function AssignmentNew() {
                 </span>
                 <span className="flex items-center gap-1.5">
                   <IconUsers size={14} />
-                  应交 <span className="num">{klass?.students.filter((s) => s.status === 'active').length ?? 0}</span> 人
+                  {/*
+                    ⚠️ 走班班的"应交人数"**不在这里算**：它的人来自 `class_members`（多对多），
+                    而那一列要按需懒加载（`loadClassMembers`，P7 的成员页才需要）。
+                    写 0 会让人以为"这个班没人" —— 所以照实说清。
+                  */}
+                  {isStreamClass(klass) ? (
+                    '走班班 · 应收按成员'
+                  ) : (
+                    <>
+                      应交{' '}
+                      <span className="num">
+                        {klass?.students.filter((s) => s.status === 'active').length ?? 0}
+                      </span>{' '}
+                      人
+                    </>
+                  )}
                 </span>
                 {kindSummary ? (
                   <span className="flex items-center gap-1.5" style={{ color: 'var(--color-ink3)' }}>

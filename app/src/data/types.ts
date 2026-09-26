@@ -270,6 +270,19 @@ export type QuestionMeta = {
 export type Assignment = {
   id: string
   title: string
+  /**
+   * 归属的班（**行政班 or 走班班**，同一张 `classes` 表、按 `kind` 区分 —— P5 的统一模型）。
+   *
+   * 🔴 **空串 = 未归属**（数据库 `assignments.class_id` 允许为空，`schema.sql` §31.2）。
+   *    前端**只有一种"空"的写法**：空串。`rowToAssignment` 把数据库的 `null` 归一成 `''`，
+   *    `assignmentToRow` 把 `''` 写回 `null` —— 页面里判"是不是未归属"一律走
+   *    `lib/assignments.ts` 的 `isUnassigned()`，别自己写第二种写法。
+   *
+   * ⚠️ 为什么类型仍是 `string` 而不是 `string | null`：`null` 会让全仓 60+ 处
+   *    `a.classId === c.id` / `find(c => c.id === a.classId)` 全都变成"两个空值的比较"，
+   *    而 TypeScript 抓不到其中的语义错误。空串在所有这些比较里**天然不等**，
+   *    与"没归属就不属于任何班"的语义一致。
+   */
   classId: string
   /**
    * 学科显示名。**它是 `subjectCode` 的显示缓存，没有第二种语义** ——

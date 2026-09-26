@@ -165,6 +165,27 @@ export function isAdminClass(k?: Pick<Klass, 'kind'> | null): boolean {
   return classKindOf(k) === 'admin'
 }
 
+/** 这个班是不是走班班 */
+export function isStreamClass(k?: Pick<Klass, 'kind'> | null): boolean {
+  return classKindOf(k) === 'stream'
+}
+
+/**
+ * 按 kind 把班级列表分成两半（界面上"行政班"与"走班班"分开显示的那一处）。
+ * 两半都保持**输入顺序**（`classes` 是按 `created_at` 排的），不要在这里重排。
+ *
+ * 🔴 **这是"整表按 kind 分两半"的唯一入口** —— 页面上不许再写 `c.kind === 'stream'`
+ *    或 `classes.filter(isStreamClass)`（那是第二个判定入口，两边一旦不一致就会打架）。
+ * ⚠️ 它**只数班、不数人**：走班班的人来自 `class_members`（多对多，要按需懒加载），
+ *    别在这里顺手算人数 —— 那会把 `loadSnapshot()` 拖成一次全表读成员关系。
+ */
+export function splitByKind(classes: readonly Klass[]): { admin: Klass[]; stream: Klass[] } {
+  const admin: Klass[] = []
+  const stream: Klass[] = []
+  for (const k of classes) (isStreamClass(k) ? stream : admin).push(k)
+  return { admin, stream }
+}
+
 /**
  * 一个班的选科完成度（界面上"采集选科"那一步的"完成没"）。
  * ⚠️ 它数的是**在册**学生（`active`）—— 转出的学生不该拖着这一步不算完成。

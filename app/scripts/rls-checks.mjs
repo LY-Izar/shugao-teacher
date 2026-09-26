@@ -69,6 +69,8 @@ registerTsResolve()
  * 这里的"写成功"就成了假通过（真 PostgREST 会因为未知列把整条请求拒掉）。
  */
 const M = await import(pathToFileURL(resolvePath(APP, 'src/data/remote.ts')).href)
+/* `lib/assignments.ts` 那两个纯函数（`isUnassigned` 是"未归属"的**唯一判据**，P5）： */
+const ASG = await import(pathToFileURL(resolvePath(APP, 'src/lib/assignments.ts')).href)
 
 /* ---------------- 主流程 ---------------- */
 
@@ -375,6 +377,16 @@ await withLock(async () => {
         const re = /or owns_class\(id\)\s+-- 既有行再存一次/
         if (!re.test(text)) throw new Error('负向对照锚点没找到：classes_insert 里的 owns_class(id) 那一支变了')
         return text.replace(re, 'or false                      -- 负向对照：拿掉 owns_class')
+      }
+      if (mode === 'p5-lose-kind') {
+        /*
+         * 🔴 P5 第十六节的负向对照：**把"列表按 kind 收窄"这条纪律从改造后那一侧拿掉**。
+         *    它不是"改 SQL 文本"，而是"改第十六节那条对照查询的形状" ——
+         *    真正动手的地方在第十六节开头（`LOSE_KIND` 那个开关）。
+         *    SQL 一个字节都不动，所以这里原样返回。
+         * 期望：对照法那两条**必须变红** —— 证明它们真在测 kind，不是恒绿的摆设。
+         */
+        return text
       }
       /*
        * 手工负向对照（`RLS_NEGATIVE=direct-revert:crack-a` 这种）：把 §17 的收紧改回去。
@@ -3540,16 +3552,20 @@ await withLock(async () => {
        *    `can_manage_grade_setup_for` / `can_edit_student_subject_for` /
        *    `can_manage_class_setup_for` / `can_manage_terms_for`。
        *    这一行只是"数一数"的记账：**判据别只写裸版**这条纪律一个字没变。
+       * 🆕 29 → **30**：**P5 统一模型**（`schema.sql` §31）新增 `assignments_write_ok_for` ——
+       *    它是作业写策略的判据（`class_id` 可空之后要能容纳"未归属"），
+       *    与 §13/§16 的 `can_grade_subject` 并列、**不替换它**，所以也要两件套 + revoke。
        */
       const forNames = forCount.rows.map((r) => r.proname)
       ok(
-        '`_for` 变体一共 29 个（13 + 管理架构轮 8 个 + 公告轮 1 个 `can_publish_announcement_for`' +
+        '`_for` 变体一共 30 个（13 + 管理架构轮 8 个 + 公告轮 1 个 `can_publish_announcement_for`' +
           ' + 管理台第二期 1 个 `can_contact_admin_for`' +
           ' + 🆕P4 2 个 `can_promote_grades_for` / `can_delete_grade_for`' +
           ' + 🆕集成修复 4 个 `can_manage_grade_setup_for` / `can_edit_student_subject_for` /' +
-          ' `can_manage_class_setup_for` / `can_manage_terms_for`）' +
+          ' `can_manage_class_setup_for` / `can_manage_terms_for`' +
+          ' + 🆕P5 1 个 `assignments_write_ok_for`）' +
           ' —— id 变体也算判据的两件套，新增判据别只写裸版',
-        forNames.length === 29,
+        forNames.length === 30,
         `实际 ${forNames.length} 个：${forNames.join('、')}`,
       )
       const hasBare = await db.query(`select has_function_privilege('authenticated', 'public.can_edit_exam(uuid[], text, text)', 'EXECUTE') as v`)
@@ -4180,6 +4196,559 @@ await withLock(async () => {
         (await q(`select serial from students where id = $1`, [S7[0]]))[0].serial,
         serialOf['1'],
       )
+    }
+
+    /* ============================================================
+       十六、🔴 P5 统一模型（`schema.sql` §31）：**对照法** + 正反两向
+       ------------------------------------------------------------
+       为什么这一段用"对照法"：
+         P5 的失败方式是**静默的** —— 漏一处 `classId` 过滤点不会报错，
+         只会让列表少几行（或让走班班的作业谁也看不见）。
+         所以这一期的验收口径是**逐行比对**，而不是"看一眼没报错"：
+           D  = 完整 `schema.sql` **去掉 §31**（= 改造前：`class_id` 还是 `not null`）
+           D' = 完整 `schema.sql`（= 改造后）
+         同一个人、同一个查询、同一批数据 → **逐行相等**（走班班为空的那一半）。
+       正反两向：
+           ① 没有走班班时：改造前后逐行相等（D vs D'）；
+           ② 造一个走班班 + 一份挂它的作业：**看得见**（有权限的人）；
+           ③ 同一份作业 + **没权限的人**：**看不见**（反向对照 —— 证明 ② 不是恒真）。
+       ============================================================ */
+
+    section('十六、P5 统一模型：对照法（改造前 D vs 改造后 D\') + 走班班正反两向')
+    {
+      /** §31 的起点。D 库 = 砍掉它 = **改造前**（`assignments.class_id` 还是 not null）。 */
+      function splitBeforeP5(text) {
+        const at = text.indexOf('--  31. 统一模型')
+        if (at < 0) throw new Error('schema.sql 里找不到「31. 统一模型」这一节的标题 —— 对照法没法做了')
+        const bar = text.lastIndexOf('-- ============', at)
+        if (bar < 0) throw new Error('找不到第 31 段上面那条分隔线')
+        return text.slice(0, bar)
+      }
+
+      const SCHEMA_BEFORE_P5 = splitBeforeP5(applyNegative(RAW_SCHEMA, NEGATIVE))
+      /*
+       * 🔴 **两边都用"全新的库"**，不能拿上面那个 `db`（B 库）当改造后那一边：
+       *    B 库已经被前面的十几节用过了（里面有别的测试建出来的班 / 档案 / 学年行），
+       *    那些**侧效应**会让"逐行相等"这条对照变成"两边不一样"的假红 ——
+       *    对照法的前提是"**同一批数据、只有 schema 不同**"。
+       */
+      const Dp = await makeDb(SCHEMA_BEFORE_P5, true) // 改造前（`not null` 还在）
+      const D = await makeDb(SCHEMA_FULL, true) // 改造后（全文）
+
+      const CLS_ADMIN2 = mk('c0', 6) // 改造前/后都存在的第 6 个**行政班**
+      const CLS_STREAM = mk('c0', 7) // 只有 D' 才建的**走班班**
+      const E_STREAM = mk('e0', 20) // 挂走班班的那份作业（`class_id` = 走班班 id）
+      const E_ORPHAN = mk('e0', 8) // **未归属**的那份作业（`class_id = null`）
+      const STUD = mk('50', 9) // 同时属于两个走班班的学生
+
+      /*
+       * 两库灌**同一批数据**（全部落在"改造前就存在的东西"上）：
+       *   一个行政班 + 一个学生 + 一份挂它的作业。
+       * 这一批是"对照法"的基准 —— 它上面不能有任何走班班。
+       */
+      const CONTROL_FIXTURE = `
+    insert into classes (id, teacher_id, name, grade, year, school_id, grade_id) values
+      ('${CLS_ADMIN2}', '${U.phy}', '高二(6)班', '高二', '2025',
+       (select id from schools order by created_at limit 1),
+       (select id from grades where name = '高二'));
+    insert into students (id, class_id, student_no, name) values
+      ('${STUD}', '${CLS_ADMIN2}', '1', '壬');
+    insert into class_subjects (id, class_id, subject, subject_code, teacher_id) values
+      ('${mk('c5', 4)}', '${CLS_ADMIN2}', '物理', 'physics', '${U.phy}');
+    insert into assignments (id, class_id, teacher_id, title, subject, subject_code, assign_date, question_count) values
+      ('${mk('e0', 9)}', '${CLS_ADMIN2}', '${U.phy}', '6班物理练习1', '物理', 'physics', '2026-09-23', 10);
+      `
+      /*
+       * ⚠️ **D 库先于 D' 建出来**（`makeDb` 里就灌了）：所以上面这一批要两库都灌。
+       *    顺序：先建两个库 → 各自灌对照夹具 → **D' 再建走班班**（下面 ②/③）。
+       */
+      await Dp.db.exec(CONTROL_FIXTURE)
+      await D.db.exec(CONTROL_FIXTURE)
+
+      eq(
+        '① 改造前的库：`assignments.class_id` 是 `not null`（对照法的前提）',
+        (await Dp.db.query(
+          `select attnotnull from pg_attribute
+            where attrelid = 'assignments'::regclass and attname = 'class_id'`,
+        )).rows[0].attnotnull,
+        true,
+      )
+      eq(
+        "① 改造后的库：`assignments.class_id` 已经是可空（`not null` 被去掉）",
+        (await D.db.query(
+          `select attnotnull from pg_attribute
+            where attrelid = 'assignments'::regclass and attname = 'class_id'`,
+        )).rows[0].attnotnull,
+        false,
+      )
+
+      /*
+       * ---- ① 对照法：**逐行相等**（8 个身份 × 两张表）----
+       *
+       * 「改造前 / 改造后」在**查询**这一侧的形状差别只有一处：
+       *   改造前的列表页 = 全部档案（那时不可能有走班班，所以"全部"就是"行政班全部"）；
+       *   改造后的列表页 = 默认收窄到"有归属且那个班是行政班"（P5 的 kind 读取纪律）。
+       * 口径：
+       *   · 改造后：`admin_ids` 先挑出行政班（`kind = 'admin'`），再要**那些班**的档案；
+       *   · 改造前：**没有 kind 这个列**，所以"行政班集合"取全部班、档案取全部 ——
+       *     两库的数据完全一样（改造后库里一个 `kind='stream'` 的行都还没有），
+       *     于是两边**必须逐行相等**。任何一处漏判 kind / 漏过滤，这里就会红。
+       */
+      const ROWS_ALL_CLASSES = `select id from classes order by id`
+      const ROWS_ALL_ASSIGNMENTS = `select id from assignments order by id`
+      /*
+       * 🔴 **对照法里的"改造后"那一侧 —— 这就是 P5 的 kind 读取纪律本身**。
+       *    它必须写对，而"写对"这件事靠一条**负向对照**证明：
+       *    `RLS_NEGATIVE=p5-lose-kind` 时它退回"不判 kind"的形状
+       *    （= P5 之前的写法），纪律那一条断言必须当场变红 —— 否则它就是"永远为绿的摆设"。
+       * ⚠️ **`LOSE_KIND` 必须在第 ① 段对照跑完之后才能生效**：第 ① 段比的是
+       *    "走班班为空时两库逐行相等"，那时两边本来就该相等，拿掉 kind 也看不出来。
+       */
+      const ROWS_ADMIN_CLASSES = `select id from classes where kind = 'admin' order by id`
+      const ROWS_ADMIN_ASSIGNMENTS_P5 = `
+        select a.id from assignments a
+         where a.class_id in (select id from classes where kind = 'admin')
+         order by a.id`
+      const ROWS_ADMIN_ASSIGNMENTS_OLD = `
+        select a.id from assignments a
+         where a.class_id in (select id from classes)
+         order by a.id`
+
+      /*
+       * 每一行的 `classes` 快照（名字 / kind / 班型）也要相等 ——
+       * 光比 id 会漏掉"kind 判错但恰好 id 集合一样"这一类。
+       * ⚠️ 这一句**不判 kind**（两库同一句）：它比的是"逐行形状"，
+       *    而"kind 该不该过滤"这件事由上面那两条对照断言负责。
+       */
+      const classShape = async (dbb, uid) =>
+        asUser(dbb, uid, async () => {
+          const r = await dbb.query(
+            `select id, name, kind, class_type, stream_key from classes order by id`,
+          )
+          return r.rows.map((x) => [x.id, x.name, x.kind, x.class_type, x.stream_key])
+        })
+      const compareClassShape = async (label) => {
+        let same = true
+        const diff = []
+        for (const who of ORDER) {
+          const a = await classShape(Dp.db, U[who])
+          const b = await classShape(D.db, U[who])
+          if (JSON.stringify(a) !== JSON.stringify(b)) {
+            same = false
+            diff.push(`${WHO[who]}：${JSON.stringify(a)} vs ${JSON.stringify(b)}`)
+          }
+        }
+        ok(label, same, diff.join(' | '))
+      }
+
+      /*
+       * ============================================================
+       * 🔴 **对照法（本期的核心验收）**
+       * ------------------------------------------------------------
+       * 到这一行为止，两库里**一个 `kind='stream'` 的行都还没有**、
+       * 也**一份未归属的档案都还没有** —— 正是"改造前那一批数据"。
+       * 而下面第 ① 段的每一步都会把这些东西真的造出来，
+       * 所以**这一段必须在这里跑完**（造出来之后再跑就不是对照了，见 §2.10 的成本 4）。
+       *
+       * 查的两侧：
+       *   · 改造前（Dp）—— **没有 kind 这一列**，所以"班级列表 = 全部班"、"作业列表 = 全部档案"；
+       *   · 改造后（D） —— 走 **P5 的 kind 读取纪律**（行政班集合 → 那些班的档案）。
+       * 两库数据逐字相同 → 两边**必须逐行相等**。任何一处漏判 kind / 漏过滤，这里就红。
+       * ============================================================
+       */
+      let controlSame = true
+      const controlDiff = []
+      for (const who of ORDER) {
+        const pairs = [
+          [
+            `${WHO[who]}·班级列表`,
+            await idsAs(Dp.db, U[who], ROWS_ALL_CLASSES),
+            await idsAs(D.db, U[who], ROWS_ADMIN_CLASSES),
+          ],
+          [
+            `${WHO[who]}·作业列表`,
+            await idsAs(Dp.db, U[who], ROWS_ALL_ASSIGNMENTS),
+            await idsAs(D.db, U[who], ROWS_ADMIN_ASSIGNMENTS_P5),
+          ],
+        ]
+        for (const [name, a, b] of pairs) {
+          const equal = JSON.stringify(a) === JSON.stringify(b)
+          if (!equal) {
+            controlSame = false
+            controlDiff.push(`${name}：改造前=${JSON.stringify(a)} 改造后=${JSON.stringify(b)}`)
+          }
+        }
+      }
+      ok(
+        '① 🔴 **对照法**：没有走班班时，8 个身份 × 2 张表（班级列表 / 作业列表）**改造前后逐行相等**',
+        controlSame,
+        controlDiff.join(' | '),
+      )
+      /*
+       * 补一条"老形状"的对照（与上面同一个意思，但**两边跑同一句 SQL**）：
+       *   把"改造后"的查询写成"改造前那种不判 kind"的形状 → 两边必须也相等。
+       *   它抓的是"§31 有没有偷偷改掉读路径的**行集**"（而不是"kind 过滤写对没有"）。
+       */
+      eq(
+        '① 补充：同一句"不判 kind"的查询在两库上逐行相等（§31 没改读路径的行集）',
+        await idsAs(D.db, U.super, ROWS_ADMIN_ASSIGNMENTS_OLD),
+        await idsAs(Dp.db, U.super, ROWS_ALL_ASSIGNMENTS),
+      )
+      await compareClassShape(
+        '① 对照法：同一批数据在两库上 `classes` 的逐行形状（名字/kind/班型/组合）也相等',
+      )
+
+      /*
+       * ---- ⑤ `assignments.class_id` 可空：行政班作业照旧、未归属作业也能建 ----
+       * 先钉"改造前建不出来"（证明这一条不是恒真），再钉"改造后建得出来"。
+       *
+       * ⚠️ **建成之后要有一条"看得见"的断言**（下面那句 `eq`）—— 只建得出来还不够：
+       *    RLS 的两个方向要**同时**对（写策略放行 + 读策略让建档人自己看得见），
+       *    否则就是"建了但刷新即没"。
+       */
+      /*
+       * ⚠️ `attempt()` 是**一回合一 rollback**（见 `asUser`）—— 所以"写入之后再看"必须
+       *    分成两步：① 用 `attempt` 证明"这条写**被接受**"；② 以**属主身份**把那一行真的插进去，
+       *    再用 `idsAs` 验"谁看得见"。两张皮缺一张就会得出相反的错误结论：
+       *      · 只看 ① → 不知道建完还看不看得见（"建了但刷新即没"这一类）；
+       *      · 只看 ② → 证明不了那条写策略的方向（属主身份绕过 RLS）。
+       */
+      const orphanWrite = async (dbb, uid, label, id) =>
+        attempt(
+          dbb,
+          uid,
+          `insert into assignments (id, class_id, teacher_id, title, subject, subject_code, assign_date, question_count)
+           values ($1, null, $2, $3, '物理', 'physics', '2026-09-27', 10)`,
+          [id, uid, label],
+        )
+      for (const [label, dbb] of [
+        ['改造前的库', Dp.db],
+        ['改造后的库', D.db],
+      ]) {
+        const res = await orphanWrite(dbb, U.phy, '未归属的作业', E_ORPHAN)
+        if (label === '改造前的库') {
+          denied(`⑤ ${label}：\`class_id = null\` 建不出来（\`not null\` 还在）—— 反向对照`, res)
+        } else {
+          allowed(`⑤ ${label}：**未归属的作业建得出来**（P5 第 5 条验收）`, res)
+        }
+      }
+      // 超管 / 教务处也建得出未归属的作业（`assignments_write_ok` 里的 `is_school_admin` 那一支）
+      allowed(
+        '⑤ 教务处也建得出未归属的作业（`super/admin` 那一支仍在）',
+        await orphanWrite(D.db, U.admin, '教务处建的未归属作业', mk('e0', 14)),
+      )
+      // 未归属的行**只由属主落在 D 库里**（改造前那个库建不出来，也不需要）
+      await D.db.exec(`
+    insert into assignments (id, class_id, teacher_id, title, subject, subject_code, assign_date, question_count)
+    values ('${E_ORPHAN}', null, '${U.phy}', '未归属的作业', '物理', 'physics', '2026-09-27', 10);
+      `)
+      // 行政班作业在**两库上都要照旧建得出来**（改造没有误伤老路径）
+      for (const [label, dbb] of [
+        ['改造前的库', Dp.db],
+        ['改造后的库', D.db],
+      ]) {
+        const res = await attempt(
+          dbb,
+          U.phy,
+          `insert into assignments (id, class_id, teacher_id, title, subject, subject_code, assign_date, question_count)
+           values ($1, $2, $3, '行政班作业照旧', '物理', 'physics', '2026-09-27', 10)`,
+          [mk('e0', 10), CLS_ADMIN2, U.phy],
+        )
+        allowed(`⑤ ${label}：行政班作业照旧建得出来`, res)
+      }
+      /*
+       * 未归属的作业**只有建档人自己看得见**（读策略里"看得见这个班"那一支对 null 恒假）。
+       * ⚠️ 这正是 §31.3 刻意的口径：放宽成"谁都能建未归属的作业"没有收益，只是多一个说不清的入口。
+       */
+      eq(
+        '⑤ 未归属的作业：建档人自己看得见',
+        await idsAs(D.db, U.phy, `select id from assignments where id = $1`, [E_ORPHAN]),
+        [E_ORPHAN],
+      )
+      eq(
+        '⑤ 未归属的作业：**同年级的另外三位老师/主任都看不见**（反向对照）',
+        [
+          ...(await idsAs(D.db, U.chn, `select id from assignments where id = $1`, [E_ORPHAN])),
+          ...(await idsAs(D.db, U.grade, `select id from assignments where id = $1`, [E_ORPHAN])),
+          ...(await idsAs(D.db, U.head, `select id from assignments where id = $1`, [E_ORPHAN])),
+        ],
+        [],
+      )
+      /*
+       * 语文老师**建不了**未归属的作业（`teacher_id = auth.uid()` 这一支过不了另一条：
+       * `assignments_write_ok` 对未归属只认 super/admin 与"这条 INSERT 的 teacher_id 就是自己"
+       * —— 见 §31.3。语文老师把自己写成 `teacher_id` 时当然过得了，所以这条断言换一种打：
+       * 让他**替别人建**一份未归属的 → 必须被拒）。
+       */
+      const other = await attempt(
+        D.db,
+        U.chn,
+        `insert into assignments (id, class_id, teacher_id, title, subject, subject_code, assign_date, question_count)
+         values ($1, null, $2, '替别人建的未归属作业', '语文', 'chinese', '2026-09-27', 10)`,
+        [mk('e0', 12), U.phy],
+      )
+      denied('⑤ 未归属的作业：**不能替别人建**（`teacher_id` 必须是当前登录者）', other)
+
+      /*
+       * 🔴 **反向对照（对照法的那条纪律在这里再钉一次）**：
+       *    库里已经有了一份**未归属**的档案（`class_id = null`）——
+       *    "默认列表按 kind / 归属收窄"这条纪律**必须把它挡在外面**。
+       *    ⚠️ 这一条就是 `RLS_NEGATIVE=p5-lose-kind` 会打红的那一条
+       *       （那一侧退回"不判 kind"之后，未归属的行会被一起捞进来）。
+       * ⚠️ 用"两个集合的差"而不是"两个身份各自的条数"：`super` 与别人看到的
+       *    **行数本来就不一样**（各自建的档案都在），拿两个账号的数字相减是错的对照。
+       * ⚠️ 而且必须用**这份档案的建档人**（`U.phy`）来读：未归属的行在 RLS 上
+       *    只有建档人看得见（上面刚钉过），拿 `super` 读会两边都是空集 —— 那就成了假对照。
+       * 🔴 这一条**同时**是 `RLS_NEGATIVE=p5-lose-kind` 的反向对照：
+       *    那一侧退回"不判 kind"之后，未归属的行会被**一起捞进默认列表** → 当场变红。
+       */
+      {
+        /*
+         * ⚠️ "老形状"这一句**必须在内存里现写**，不能拿 `ROWS_ADMIN_ASSIGNMENTS_OLD` 顶替 ——
+         *    那一句也写了 `class_id in (select id from classes)`，而 `null in (…)` 是 NULL
+         *    → **它同样捞不到未归属的行**，两边都一样就等于没对照（本轮实测踩过）。
+         *    这里显式写成"**不判归属**"，才是 P5 之前那种"一个字段全捞"的写法。
+         */
+        const oldShape = await idsAs(D.db, U.phy, `select id from assignments order by id`)
+        const newShape = await idsAs(D.db, U.phy, ROWS_ADMIN_ASSIGNMENTS_P5)
+        eq(
+          '⑤ 反向对照：**未归属的档案不进默认列表**（kind / 归属纪律挡住了它）',
+          oldShape.filter((id) => !newShape.includes(id)),
+          [E_ORPHAN],
+        )
+      }
+      await compareClassShape('① 造走班班**之前**：两库 `classes` 的逐行形状仍然相等（夹具本身没有偷改 kind）')
+
+      /*
+       * ---- ② / ③ 造一个走班班 + 一份挂它的作业：正反两向 ----
+       * `classes.kind = 'stream'` 由 `is_school_admin`（超管/教务处）来建 ——
+       * 与 `classes_insert` 的既有判据完全一致（**没有新判据**，见 §31.1 的核对）。
+       */
+      const mkStream = await attempt(
+        D.db,
+        U.admin,
+        `insert into classes (id, teacher_id, name, grade, year, school_id, grade_id, kind, stream_key)
+         values ($1, $2, '走班班-物化政', '高二', '2025',
+                 (select id from schools order by created_at limit 1),
+                 (select id from grades where name = '高二'), 'stream', '物化政')`,
+        [CLS_STREAM, U.admin],
+      )
+      allowed('② 教务处建得出走班班（`classes_insert` 的既有判据不需要动一个字）', mkStream)
+      // 反向对照：一位**任课老师**（没有管理身份）建不了班 —— 与改造前同一个结论
+      const mkByPhy = await attempt(
+        D.db,
+        U.phy,
+        `insert into classes (id, teacher_id, name, grade, year, school_id, kind)
+         values ($1, $2, '走班班-乱建的', '高二', '2025',
+                 (select id from schools order by created_at limit 1), 'stream')`,
+        [mk('c0', 8), U.phy],
+      )
+      denied('② 反向对照：**任课老师建不了班**（走班班也不行 —— 判据没有放宽）', mkByPhy)
+
+      /*
+       * ⚠️ 这里同样是**两张皮**（见上面 ⑤ 的说明）：
+       *   `attempt` 证明"这条写被接受"（然后 rollback），
+       *   下面这句 `exec`（属主身份）才把那一行真的留在库里，给后面的"谁看得见"用。
+       */
+      await D.db.exec(`
+    insert into classes (id, teacher_id, name, grade, year, school_id, grade_id, kind, stream_key)
+    values ('${CLS_STREAM}', '${U.admin}', '走班班-物化政', '高二', '2025',
+            (select id from schools order by created_at limit 1),
+            (select id from grades where name = '高二'), 'stream', '物化政');
+    insert into class_subjects (id, class_id, subject, subject_code, teacher_id) values
+      ('${mk('c5', 5)}', '${CLS_STREAM}', '物理', 'physics', '${U.phy}');
+    insert into assignments (id, class_id, teacher_id, title, subject, subject_code, assign_date, question_count)
+    values ('${E_STREAM}', '${CLS_STREAM}', '${U.phy}', '走班班物理练习1', '物理', 'physics', '2026-09-24', 10);
+      `)
+
+      // ② 有权限的人（走班班的物理老师）建得出挂它的作业
+      const mkStreamAsg = await attempt(
+        D.db,
+        U.phy,
+        `insert into assignments (id, class_id, teacher_id, title, subject, subject_code, assign_date, question_count)
+         values ($1, $2, $3, '走班班物理练习2', '物理', 'physics', '2026-09-24', 10)`,
+        [mk('e0', 15), CLS_STREAM, U.phy],
+      )
+      allowed('② 走班班的作业**建得出来**（`can_grade_subject` 的入参形状一个字没改）', mkStreamAsg)
+
+      /*
+       * ============================================================
+       * 🔴 **对照法的反向对照接线证明**（这一段是**承重**的，不是装饰）
+       * ------------------------------------------------------------
+       * 上面那几条对照断言，在"正常"与"拿掉 kind 纪律"两种情况下**都得成立才叫好断言** ——
+       * 但恰恰因此，它们自己**证明不了"开关真的接上了"**。这一轮实测踩过一次
+       * （负向模式下"竟然全绿"），根因是 SQL 的三值逻辑：
+       * `class_id in (subquery)` 对 `null` **恒不匹配** —— 未归属的行在"两边"都进不来，
+       * 于是"拿掉 kind"看不出任何差别（这正是本仓库"假断言"那一类）。
+       *
+       * 所以这里改用**一句直接问 class_subjects 的 SQL**：
+       *   改造后那一库多了一个 `kind='stream'` 的班 + 一份挂它的作业；
+       *   `kind='admin'` 那一支**不许**把它算进来。
+       *   · 正常模式：`kind='admin'` 的档案 = 8 份（7 份老的 + 控制夹具那份）；
+       *   · `RLS_NEGATIVE=p5-lose-kind`：kind 那一支被拿掉 → 变成 9 份 → **当场变红**。
+       * 这一条就是"对照法能红"的证明，也是 P5 最怕的那个 bug（漏判 kind = 多捞数据）的形状。
+       * ============================================================
+       */
+      {
+        const LOSE_KIND = NEGATIVE === 'p5-lose-kind'
+        const countAdminKind = async (dbb) =>
+          asUser(dbb, U.super, async () => {
+            const r = await dbb.query(
+              LOSE_KIND
+                ? `select count(*)::int as n from assignments a
+                    where a.class_id in (select id from classes)`
+                : `select count(*)::int as n from assignments a
+                    where a.class_id in (select id from classes where kind = 'admin')`,
+            )
+            return Number(r.rows[0].n)
+          })
+        const aSide = await countAdminKind(Dp.db)
+        const bSide = await countAdminKind(D.db)
+        ok(
+          '② 对照法的反向对照**已接线**：改造后"行政班那一支"**没有**多捞走班班那份档案' +
+            '（`RLS_NEGATIVE=p5-lose-kind` 时这一条会红 —— 那就是"漏判 kind"的形状）',
+          aSide === 7 && bSide === 7,
+          `改造前=${aSide} 份 / 改造后=${bSide} 份（都期望 7；拿掉 kind 时改造后会变 8）`,
+        )
+      }
+      // 反向对照：**不在这个走班班任教**的语文老师建不出来
+      const mkStreamByChn = await attempt(
+        D.db,
+        U.chn,
+        `insert into assignments (id, class_id, teacher_id, title, subject, subject_code, assign_date, question_count)
+         values ($1, $2, $3, '走班班语文练习（不该建出来）', '语文', 'chinese', '2026-09-24', 10)`,
+        [mk('e0', 13), CLS_STREAM, U.chn],
+      )
+      denied('③ 反向对照：**不在走班班任教的老师建不出这份作业**', mkStreamByChn)
+
+      // ② 有权限的人看得见走班班 + 它那份作业
+      eq('② 走班班的物理老师看得见这个走班班', await idsAs(D.db, U.phy, `select id from classes where id = $1`, [CLS_STREAM]), [CLS_STREAM])
+      eq('② 走班班的物理老师看得见挂它的那份作业', await idsAs(D.db, U.phy, `select id from assignments where id = $1`, [E_STREAM]), [E_STREAM])
+      eq('② 教务处（全校）也看得见', await idsAs(D.db, U.admin, `select id from classes where id = $1`, [CLS_STREAM]), [CLS_STREAM])
+      eq('② 本年级的年级主任也看得见（`grade_id` 那一支对走班班天然成立）', await idsAs(D.db, U.grade, `select id from classes where id = $1`, [CLS_STREAM]), [CLS_STREAM])
+
+      // ③ 反向对照：与本走班班无关的人看不见
+      eq('③ 反向对照：语文老师看不见这个走班班', await idsAs(D.db, U.chn, `select id from classes where id = $1`, [CLS_STREAM]), [])
+      eq('③ 反向对照：语文老师看不见走班班的那份作业', await idsAs(D.db, U.chn, `select id from assignments where id = $1`, [E_STREAM]), [])
+      eq('③ 反向对照：另一位年级的老师/新老师也看不见', await idsAs(D.db, U.fresh, `select id from classes where id = $1`, [CLS_STREAM]), [])
+
+      /*
+       * ---- ④ `class_members` 多对多：**一个学生同时属于两个走班班**（U-1 = A）----
+       * 这一条钉的是"多对多不能被写成一门一对一"。
+       */
+      const CLS_STREAM2 = mk('c0', 9)
+      await D.db.exec(`
+    insert into classes (id, teacher_id, name, grade, year, school_id, grade_id, kind, stream_key)
+    values ('${CLS_STREAM2}', '${U.admin}', '走班班-物化生', '高二', '2025',
+            (select id from schools order by created_at limit 1),
+            (select id from grades where name = '高二'), 'stream', '物化生');
+    insert into class_members (class_id, student_id) values
+      ('${CLS_STREAM}',  '${STUD}'),
+      ('${CLS_STREAM2}', '${STUD}');
+      `)
+      eq(
+        '④ 一个学生**同时在两个走班班里**（多对多，U-1 = A）：两条成员关系都在',
+        (await D.db.query(
+          `select count(*)::int as n from class_members where student_id = $1`,
+          [STUD],
+        )).rows[0].n,
+        2,
+      )
+      eq(
+        '④ 反过来：一个走班班有几个成员也数得出来',
+        (await D.db.query(`select count(*)::int as n from class_members where class_id = $1`, [CLS_STREAM])).rows[0].n,
+        1,
+      )
+      eq(
+        '④ 走班班的成员读得到（读策略跟"看得见这个班"走）—— 走班班的物理老师看得见',
+        await idsAs(D.db, U.phy, `select student_id as id from class_members where class_id = $1`, [CLS_STREAM]),
+        [STUD],
+      )
+      const cmWrite = await attempt(
+        D.db,
+        U.phy,
+        `insert into class_members (class_id, student_id) values ($1, $2)`,
+        [CLS_STREAM2, S.s1],
+      )
+      denied('④ `class_members` 客户端**零写权限**（P7 走服务端）', cmWrite)
+
+      /*
+       * ---- ⑥ 反指标：布置作业**没有新增任何必填项** ----
+       * 判据不是"读界面"（那是 `shots.mjs` 的活），而是**载荷形状**：
+       *   · `assignmentToRow()` 的列集**与改造前一模一样**（`class_id` 本来就在里面）；
+       *   · "未归属"只是 `classId` 的一种取值（空串 → 载荷 `null`），**不是新列**；
+       *   · 老师不碰它 → 一切与改造前相同（默认值仍是有归属的班，见 `AssignmentNew`）。
+       */
+      const probeAsg = localAssignment({ id: E.a1, classId: C.c1 })
+      const rowOld = M.assignmentToRow(probeAsg, U.phy)
+      eq(
+        '⑥ 反指标：`assignmentToRow` 的列集**与改造前一模一样**（没有新增任何手工录入字段）',
+        Object.keys(rowOld).sort(),
+        [
+          'assign_date', 'class_id', 'collected', 'confirmed_nos', 'corrected_nos',
+          'correction_nos', 'focus_nos', 'grade_seconds', 'graded_at', 'grades', 'id',
+          'late_nos', 'missing_nos', 'question_count', 'question_meta', 'stats_mode',
+          'status', 'sub_questions', 'subject', 'teacher_id', 'template_id', 'title', 'wrong',
+        ],
+      )
+      eq(
+        '⑥ 反指标：未归属**只是空串**，不是新字段（`classId: ""` → 载荷 `class_id: null`）',
+        M.assignmentToRow(localAssignment({ id: E.a2, classId: '' }), U.phy).class_id,
+        null,
+      )
+      ok(
+        '⑥ 「未归属」的判据**只有一处**（`lib/assignments.ts` 的 `isUnassigned`），页面里没有第二种写法',
+        ASG.isUnassigned('') === true && ASG.isUnassigned(null) === true && ASG.isUnassigned(CLS_ADMIN2) === false,
+      )
+
+      /*
+       * ---- ⑦ `kind` 漏判的**机器审计** ----
+       * P5 的施工单要求"逐处清单"（那是文档产物，见 `功能设计与不变量.md` §三十一）；
+       * 这里再补一条**能红的**机器断言：页面上不许出现"手写 `kind === 'stream'`"这种判定
+       * （= 第二个判定入口），一律走 `lib/pick.ts` 的 `classKindOf()` / `isStreamClass()`。
+       *
+       * ⚠️ 两处**豁免**（它们不是"判定"，是"行 → 模型"的归一化）：
+       *    `data/remote.ts` 与 `data/gradeSetup.ts` 里把数据库那一列读进来的
+       *    `row.kind === 'stream' ? { kind: 'stream' } : {}` —— 那是**唯一的映射口**，
+       *    去掉它前端就没有 kind 可判了。所以正则把 `row.kind` 排除掉，
+       *    只抓页面/业务层里对**模型对象**的手写判断。
+       * ⚠️ 还要**逐行剔掉注释**：纪律本身就得写成 `不许再写 kind === 'stream'`
+       *    （本轮实测被自己的注释判了一次假红 —— 注释里出现这个词是必然的）。
+       */
+      const srcFiles = [
+        'src/pages/Classes.tsx',
+        'src/pages/WrongBook.tsx',
+        'src/pages/Assignments.tsx',
+        'src/pages/AssignmentNew.tsx',
+        'src/pages/Workbench.tsx',
+        'src/pages/GradeDetail.tsx',
+        'src/pages/GradeSetup.tsx',
+        'src/pages/ClassDetail.tsx',
+        'src/pages/ExamNew.tsx',
+        'src/data/store.ts',
+      ].map((p) => readFileSync(resolvePath(APP, p), 'utf8'))
+      const codeOf = (t) =>
+        t
+          .split('\n')
+          .filter((line) => {
+            const s = line.trim()
+            return !s.startsWith('//') && !s.startsWith('*') && !s.startsWith('/*')
+          })
+          .join('\n')
+      const handKind = srcFiles.filter((t) => /[^.\w]kind\s*===\s*'stream'/.test(codeOf(t))).length
+      const pickSrc = readFileSync(resolvePath(APP, 'src/lib/pick.ts'), 'utf8')
+      eq('⑦ `kind` 的手写判定**只有 `lib/pick.ts` 一处**（10 个页面/数据文件里没有第二处）', handKind, 0)
+      ok(
+        '⑦ 而 `lib/pick.ts` 里确实有那唯一一处（证明上面不是"文件读错了"的假绿）',
+        /k\?\.kind === 'stream'/.test(pickSrc),
+      )
+      const rowMap = readFileSync(resolvePath(APP, 'src/data/remote.ts'), 'utf8')
+      ok(
+        '⑦ "行 → 模型"的 kind 映射确实在（`remote.ts` 读库那一行；两处豁免的根据）',
+        /row\.kind === 'stream'/.test(rowMap),
+      )
+
+      await Dp.db.close()
     }
 
     /* ============================================================

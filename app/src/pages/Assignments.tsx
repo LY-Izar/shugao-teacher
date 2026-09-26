@@ -17,7 +17,8 @@ import {
 import { Button, Empty, PageHead, Panel, Sect, Sheet, Tag } from '../components/ui'
 import { useStore, useToast } from '../data/store'
 import { STATUS_TEXT, type Assignment, type AssignmentStatus, type Klass } from '../data/types'
-import { collectStats } from '../lib/assignments'
+import { UNASSIGNED_CLASS_ID, collectStats, isUnassigned } from '../lib/assignments'
+import { isStreamClass } from '../lib/pick'
 import { friendlyDate, isoOffset, parseISODate, toISODate } from '../lib/date'
 import { SUBJECTS, subjectCodeOf, subjectName } from '../lib/subjects'
 import {
@@ -164,6 +165,15 @@ export default function Assignments() {
   const [dateFor, setDateFor] = useState<string | null>(null)
 
   /**
+   * `classId → 班` 的索引。
+   * ⚠️ 用 `Map` 而不是每次 `classes.find(...)`：走班班建出来之后班数会**成倍增长**
+   *    （一个年级 12 种组合就可能多 12 行），而这一页对每份档案要查一次
+   *    —— 现在是 O(档案数 × 班数)，目标规模下那是 1000+ 份 × 20+ 班的量级。
+   *    索引在这里建一次，与"目标规模 15 个班 / 1000+ 学生"那条基准对齐（`AGENTS.md` 一）。
+   */
+  const byId = useMemo(() => new Map(classes.map((c) => [c.id, c])), [classes])
+
+  /**
    * 学科筛选项只列**数据里真出现过的**学科。
    *
    * 不把字典 15 科全列出来的理由：没数据的那几项选了就是空列表，
@@ -180,11 +190,33 @@ export default function Assignments() {
     return SUBJECTS.filter((s) => seen.has(s.code))
   }, [assignments])
 
+  /*
+   * 🔴 P5 的 `kind` 读取纪律（这一页）：
+   *    · `showStream` 默认 **false** → 默认列表**与改造前逐字相同**
+   *      （没有走班班的库上，那条开关根本不渲染）；
+   *    · 库里真出现走班班 / 未归属作业时，开关出现，老师一键看得见它们
+   *      （**默认为假 + 看得见开关**，而不是"默认藏着、连开关都没有"——后者是静默漏数据）。
+   *    · 走班班与未归属的**计数**单独写在副标题里，藏了多少一眼看得见。
+   */
+  const [showStream, setShowStream] = useState(false)
+  const streamCount = useMemo(() => assignments.filter((a) => isStreamClass(byId.get(a.classId))).length, [assignments, byId])
+  const unassignedCount = useMemo(() => assignments.filter((a) => isUnassigned(a.classId)).length, [assignments])
+
   const rows = useMemo<Row[]>(
     () =>
       assignments
+        /*
+         * 归属过滤：默认**只留"有归属且那个班是行政班"的档案**。
+         * 走班班那一档：`isStreamClass(byId.get(a.classId))` —— `byId` 里没有的 id 一律 false
+         * （**认不出来就不假设它是走班班**，宁可显示也不静默藏）。
+         */
+        .filter((a) => {
+          if (isUnassigned(a.classId)) return showStream
+          const k = byId.get(a.classId)
+          return !isStreamClass(k) || showStream
+        })
         .map((a) => {
-          const klass = classes.find((c) => c.id === a.classId)
+          const klass = byId.get(a.classId)
           return { a, klass, stats: collectStats(klass?.students ?? [], a) }
         })
         .filter((r) => (filter === 'all' ? true : r.a.status === filter))
@@ -198,7 +230,7 @@ export default function Assignments() {
             (x.a.assignDate < y.a.assignDate ? 1 : x.a.assignDate > y.a.assignDate ? -1 : 0) ||
             y.a.createdAt - x.a.createdAt,
         ),
-    [assignments, classes, filter, classFilter, subjectFilter, timeFilter, termFilter, terms, currentTerm],
+    [assignments, byId, showStream, filter, classFilter, subjectFilter, timeFilter, termFilter, terms, currentTerm],
   )
 
   /** 有几种学科就有没有"分类"这回事：只有一科时不摆这个开关（摆了也是空转） */
@@ -255,7 +287,23 @@ export default function Assignments() {
     <>
       <PageHead
         title="作业"
-        sub={`${assignments.length} 份档案 · ${pending} 份待收缴`}
+        sub={
+          /*
+           * 🔴 默认那一句**逐字不变**（`${assignments.length} 份档案 · ${pending} 份待收缴`）——
+           *    P5 的验收第 1 条（"没有走班班时改造前后逐行相等"）也包括这一行文字。
+           *    只有在"真藏着走班班 / 未归属的档案、而开关没打开"时才多接一句，
+           *    否则老师看不出列表被收窄了。
+           */
+          `${assignments.length} 份档案 · ${pending} 份待收缴` +
+          (!showStream && streamCount + unassignedCount > 0
+            ? ` · 另有 ${[
+                streamCount ? `走班 ${streamCount}` : '',
+                unassignedCount ? `未归属 ${unassignedCount}` : '',
+              ]
+                .filter(Boolean)
+                .join(' · ')} 份未显示`
+            : '')
+        }
         right={
           <div className="flex items-center gap-1">
             {/*
@@ -282,6 +330,28 @@ export default function Assignments() {
       <Page>
         {/* 筛选：班级 · 时间 · 状态 */}
         <div className="mb-3 flex flex-col gap-2">
+          {/*
+            🔴 走班 / 未归属的显示开关（P5）。**只在库里真有这类档案时才渲染** ——
+              没有它们的库上，这一块不存在 → 列表与改造前**逐字相同**（验收第 1 条）。
+            ⚠️ 默认关 = 老行为不变；但**关着的时候副标题会写明藏了几份**，
+              所以"静默漏数据"这条风险（§2.10 成本 4）在这里是被显式说出来的。
+          */}
+          {streamCount + unassignedCount > 0 ? (
+            <label className="flex items-center gap-2" style={{ fontSize: 12.5, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={showStream}
+                onChange={(e) => setShowStream(e.target.checked)}
+                style={{ width: 15, height: 15, accentColor: 'var(--color-accent)' }}
+              />
+              <span style={{ color: 'var(--color-ink2)' }}>
+                显示走班 / 未归属的档案
+                <span className="num" style={{ color: 'var(--color-ink3)' }}>
+                  （{streamCount + unassignedCount} 份）
+                </span>
+              </span>
+            </label>
+          ) : null}
           <div className="flex flex-wrap items-center gap-2">
             <select
               className="input"
@@ -294,8 +364,10 @@ export default function Assignments() {
               {classes.map((c) => (
                 <option key={c.id} value={c.id}>
                   {c.name}
+                  {isStreamClass(c) ? '（走班）' : ''}
                 </option>
               ))}
+              <option value={UNASSIGNED_CLASS_ID}>未归属</option>
             </select>
             {subjectOptions.length > 1 ? (
               <select

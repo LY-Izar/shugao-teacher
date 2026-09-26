@@ -2,7 +2,7 @@ import { getSupabase } from './supabase'
 import { postApi, apiMessage } from './api'
 import { useStore, useToast } from '../data/store'
 import { toISODate } from './date'
-import { clampQuestionCount } from './assignments'
+import { clampQuestionCount, isUnassigned } from './assignments'
 import { isSerial, assignMissingSerials, yearLookupFromClasses } from './serial'
 import {
   DEFAULT_SUBJECT_CODE,
@@ -754,7 +754,17 @@ export async function pushBackupToCloud(b: Backup, teacherId: string): Promise<s
   }
 
   const classIds = new Set(b.classes.map((c) => c.id))
-  const keepAssignments = (b.assignments ?? []).filter((a) => classIds.has(a.classId))
+  /*
+   * 🔴 **未归属的档案必须留下**（P5：`assignments.class_id` 可空）。
+   *    这一句原来只认"归属的班在备份里"，而未归属的档案 `classId` 是**空串**
+   *    —— 空串永远不在 `classIds` 里，于是**回推云端时被静默丢掉**
+   *    （`dropped` 那个计数只说"丢了几行"，老师看不出丢的是哪一类）。
+   *    走班班那些行不用特殊处理：走班班也在 `b.classes` 里，`classIds.has()` 天然成立。
+   *    ⚠️ 判据走 `isUnassigned()`（**唯一一处**的"空"口径），不在这里再写一遍 `!a.classId`。
+   */
+  const keepAssignments = (b.assignments ?? []).filter(
+    (a) => isUnassigned(a.classId) || classIds.has(a.classId),
+  )
   const assignmentIds = new Set(keepAssignments.map((a) => a.id))
   const keepRooms = (b.classrooms ?? []).filter((c) => classIds.has(c.classId))
   const keepCalls = (b.calls ?? []).filter(

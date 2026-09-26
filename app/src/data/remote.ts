@@ -3,6 +3,7 @@ import { apiMessage, postApi } from '../lib/api'
 import { asSubjectCode, subjectCodeOfName } from '../lib/subjects'
 import { compareRoster } from '../lib/roster'
 import { classKindOf } from '../lib/pick'
+import { isUnassigned } from '../lib/assignments'
 import {
   currentTermId,
   sortTerms,
@@ -79,7 +80,14 @@ type StudentRow = {
 }
 type AssignmentRow = {
   id: string
-  class_id: string
+  /**
+   * 归属的班。⚠️ **可为空**（`schema.sql` §31.2，P5）：
+   *    · 有值 = 行政班 or 走班班的 id（同一张 `classes`，按 `kind` 区分）；
+   *    · `null` = **未归属**（前端一律走 `lib/assignments.ts` 的 `isUnassigned()`）。
+   * ⚠️ 老库（还没跑 §31）上它仍是 `not null` —— 所以**写空一定是 `null`**，
+   *    绝不可能写成空串（空串过不了 `uuid` 的类型转换，整条 upsert 会被拒）。
+   */
+  class_id: string | null
   teacher_id: string
   title: string
   subject: string
@@ -1147,7 +1155,10 @@ export async function studentWriteRow(
  */
 export const assignmentToRow = (a: Assignment, teacherId: string): AssignmentRow => ({
   id: a.id,
-  class_id: a.classId,
+  /* 未归属（空串）→ **写 `null`**，绝不写空串：`class_id` 是 `uuid`，
+     空串会当场 22P02 "invalid input syntax for type uuid" → 整条 upsert 被拒 = 刷新即丢。
+     ⚠️ 判据走 `isUnassigned()`（**唯一一处**的"空"口径），不在这里再写一遍 `=== ''`。 */
+  class_id: isUnassigned(a.classId) ? null : a.classId,
   teacher_id: teacherId,
   title: a.title,
   subject: a.subject,
@@ -1226,7 +1237,8 @@ const rowToStudent = (r: StudentRow): Student => ({
 
 const rowToAssignment = (r: AssignmentRow): Assignment => ({
   id: r.id,
-  classId: r.class_id,
+  /* `null` → 空串（**归一到唯一一种"未归属"的写法**，见 types.ts 的 Assignment.classId） */
+  classId: r.class_id ?? '',
   title: r.title,
   subject: r.subject,
   /*
@@ -1678,6 +1690,73 @@ export const saveStudents = async (classId: string, list: Student[]) =>
     ? upsert('students', await Promise.all(list.map((s) => studentWriteRow(s, classId))))
     : Promise.resolve()
 export const deleteStudent = (id: string) => remove('students', id)
+
+/* ---------------- 走班班成员（`class_members`，P6 建表 / P7 写 / **P5 有读取纪律**） ----------------
+
+   🔴 **它不进 `loadSnapshot()`**（与考试 / 通知 / 年级那几张表同一条纪律）：
+      `class_members` 是 §27.5 才有的表，**老库上没有它** ——
+      混进那组"任一失败就整份快照作废"里，会让整个平台在老库上打不开。
+
+   ⚠️ 因此读取一律**懒加载 + 先探针**（`ensureClassMembers()`）。探针用 `select('*')`
+      （`nav-checks` 的 D10 会静态抓 `select('具体列名')` —— 那类 bug 咬过两次）。 */
+
+type ClassMemberCols = { ok: boolean }
+
+let classMembersProbe: Promise<ClassMemberCols> | null = null
+
+async function probeClassMembers(): Promise<ClassMemberCols> {
+  const sb = getSupabase()
+  if (!sb) return { ok: false }
+  try {
+    const { error } = await sb.from('class_members').select('*').limit(1)
+    if (!error) return { ok: true }
+    const msg = String(error.message ?? '')
+    const code = String((error as { code?: string }).code ?? '')
+    /* 表不存在 = 还没跑 §27；别的错误（网络、权限）一律当作"有" */
+    return { ok: !(code === '42P01' || code === '42703' || /does not exist/i.test(msg)) }
+  } catch {
+    return { ok: true }
+  }
+}
+
+/** 探测一次（同一页面内只探一次） */
+export function ensureClassMembers(): Promise<ClassMemberCols> {
+  if (!classMembersProbe) {
+    classMembersProbe = watchProbe('classMembers', probeClassMembers(), (v) =>
+      v.ok ? 'present' : 'missing',
+    )
+  }
+  return classMembersProbe
+}
+
+/**
+ * 走班班的成员关系（**多对多**：一个学生可以同时在两个走班班里 —— U-1 = A）。
+ * 返回 `classId → 学生 id[]`；**读不到回 `null`（"不知道"），不回空对象**。
+ *
+ * ⚠️ 为什么回 `null` 而不是 `{}`：空对象在界面上是"这个走班班一个人都没有"，
+ *    与"没读到"完全是两回事（`loadClassSubjects` 同一条纪律）。
+ */
+export async function loadClassMembers(classIds: string[]): Promise<Record<string, string[]> | null> {
+  const sb = getSupabase()
+  if (!sb || !classIds.length) return sb ? {} : null
+  const cols = await ensureClassMembers()
+  if (!cols.ok) return null
+  try {
+    const { data, error } = await sb.from('class_members').select('*').in('class_id', classIds)
+    if (error) return null
+    const out: Record<string, string[]> = {}
+    for (const r of (data ?? []) as Array<{ class_id?: unknown; student_id?: unknown }>) {
+      const k = String(r.class_id ?? '')
+      if (!k) continue
+      const list = out[k] ?? []
+      list.push(String(r.student_id ?? ''))
+      out[k] = list
+    }
+    return out
+  } catch {
+    return null
+  }
+}
 
 /**
  * 作业档案的**落库载荷** —— `subject_code` 带不带，只有这一处说了算。

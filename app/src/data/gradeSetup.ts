@@ -18,7 +18,7 @@
 
 import { getSupabase, isRemote } from '../lib/supabase'
 import { compareRoster } from '../lib/roster'
-import { classTypeOf } from '../lib/pick'
+import { classTypeOf, isAdminClass } from '../lib/pick'
 import type { ClassType, Klass, Student } from './types'
 import type { StudentSubject } from '../lib/pick'
 
@@ -177,7 +177,16 @@ export async function loadGradeSetup(gradeId: string): Promise<GradeSetupBundle>
         state: isMissingError(code, String(c.error.message ?? '')) ? 'missing' : 'unknown',
       }
     }
-    const classes = rowsOf(c.data).map(asKlass)
+    /*
+     * 🔴 **只要行政班**（P5 的统一模型：走班班也是 `classes` 的一行）。
+     * 这一页的四步（建班 / 设班型 / 采选科 / 指派身份）**每一步都只对行政班有意义**：
+     *   · `class_type` 对走班班恒为 `''`（§2.10）；
+     *   · 名单是 `students.class_id`（走班班的人来自 `class_members`，多对多）；
+     *   · "按班型一键默认选科"按班型走 —— 走班班没有班型。
+     * 不加这一句的后果是**静默错**：走班班会混进"建班"那一步的表格里，
+     * 而它的名单永远读出来是空的（学生不在 `class_id` 上），看起来像"这个班还没录名单"。
+     */
+    const classes = rowsOf(c.data).map(asKlass).filter(isAdminClass)
     const ids = classes.map((k) => k.id)
 
     /* 名单：单独一个结论 —— "班在但名单读不到"与"班在、名单确实是空"要分得开 */

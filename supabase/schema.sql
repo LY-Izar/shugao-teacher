@@ -5614,9 +5614,11 @@ revoke all on function db_usage_report() from public, anon, authenticated;
 --      与那条按 (school_id, cohort) 的唯一索引；`academic_years` / `terms` /
 --      提档 / 毕业删除**一行都没有**。
 --    · P5 的「统一模型改造」**整期没做** —— 本段只补 `classes.kind` / `class_type` /
---      `stream_key` 三列。`assignments.class_id` 允许为空、以及那约 20 处 `classId`
+--      `stream_key` 三列。`assignments.class_id` 允许为空、以及那些 `classId`
 --      过滤点**一个字都没动**（今天库里没有任何 `kind='stream'` 的行，所以那些漏点
 --      暂时漏不出数据；**建走班班之前必须先做 P5**）。
+--      ✅ **2026-10-03 的 P5 已经补齐**（见本文件 §31）：`assignments.class_id` 可空 +
+--      写判据容纳"未归属" + 全仓 47 处归属判定点逐个过 + 对照法验收。
 --    · 本段落地之后，`grades.cohort` 这一段**不影响 P1 的序列号**：§20.3 的
 --      `serial_year_of_class()` 原本就用 `to_jsonb(g) ->> 'cohort'` 读它，
 --      列一出现就自动优先取它（函数体不用改）。
@@ -7806,4 +7808,175 @@ revoke all on grade_promotions, grade_removals from public, anon, authenticated;
 --  -- select public.grade_backup('00000000-0000-0000-0000-000000000000', '00000000-0000-0000-0000-000000000000');
 --  -- select public.grade_delete('00000000-0000-0000-0000-000000000000', '00000000-0000-0000-0000-000000000000', '高一');
 --  -- select public.grade_backup_by_token('bk000000x000000x000000x000000x000000');
+
+-- ============================================================
+--  31. 统一模型改造（P5，2026-10-03）🔴 **风险最高的一期**
+--      —— 行政班与走班班**同一张表**（Q21 = A）之后，读取路径与写判据要跟着改
+-- ------------------------------------------------------------
+--  ⚠️ §27 只补了 `classes.kind` / `class_type` / `stream_key` 三列，
+--     **P5 整期没做**（`选科走班实施计划.md:604`）。本段补上 P5 剩下的两件事：
+--       ① `assignments.class_id` 允许为空（走班作业可能不属于单一行政班）；
+--       ② 作业的写判据要能容纳"未归属（走班）"这类行 —— 否则建不出来（§2.17 第 2 条）。
+--
+--  🔴 **本段为什么单列一节、而不回填进 §16.3**：
+--     `schema.sql` 是一条**顺序执行**的流水线，`create policy` 与 SQL 函数体**当场解析名字**。
+--     §16 在 §31 之前已经跑过，所以"改策略"这件事必须在**后面**再收一次口 ——
+--     这与 §17 / §19 / §21 收紧教室端那条线的做法完全一样（同一个文件里可以有多次 `drop policy`）。
+--
+--  🔴 **本段破了"能不改 schema 就不改"这一条**（`选科走班实施计划.md` P5 的
+--     「会碰哪些不变量」已登记这次例外）：`assignments.class_id` 的 `not null` 被拿掉了。
+--     理由：走班作业的归属是**走班班那一行**（`classes.kind = 'stream'`），
+--     而"不属于任何班"的作业（还没定归属）必须能存在 —— 这就是 P5 的验收第 5 条。
+--     代价与回退见 §31.4。
+-- ============================================================
+
+-- -------- 31.1 `classes.kind` 的读取纪律（写在这里，代码在 `lib/pick.ts`）--------
+--  `kind` 有数据库默认值 `'admin'`（§27.2），所以**没判 kind 的老读取点行为不变**。
+--  ⚠️ 但它也可能**因此看不见走班班** —— 属于"静默漏数据"那一类（§2.10 成本 4）。
+--  读取纪律（一句话）：**读 `classes` 的每一处都要回答"这里要不要按 kind 收口"**，
+--  答案与逐处清单见 `功能设计与不变量.md` §三十一。
+--  ⚠️ 数据库层**不加**任何按 kind 的读策略：`visible_class_ids()` 一次算出"哪些班看得见"，
+--     行政班与走班班走**同一支判据**（任课老师那一支读 `class_subjects`，
+--     而走班班的任教关系在 P7 自动补进同一张表）—— 加第二处判据 = 两个判定入口。
+--
+--  🔴 「谁能建 / 谁能改一个走班班」**不需要新判据**（已逐条核过，结论写在这里免得后人再发明一次）：
+--     · 建：`classes_insert` 判 `teacher_id = 我` 且
+--       （`is_school_admin()` = 超管 + 教务处 ∪ `grade_head` ∪ `head_teacher` ∪ `owns_class`），
+--       走班班只多出 `kind='stream'` 一列，**照旧成立**（新班还没有 `grade_id`，所以只能判到身份那一档）；
+--     · 改：`classes_update` 判 `can_manage_class(id) or owns_class(id)` ——
+--       `can_manage_class_for` 的"年级主任"那一支是
+--       `r.scope_id = (select c.grade_id from classes c where c.id = p_class_id)`，
+--       **它按 `grade_id` 取，与 `kind` 无关 → 走班班天然复用**（正是 §2.17 第 1 条修订口径）；
+--       "科任老师只在自己教的那个走班班上能改"落在 `can_grade_subject` 的 `teaches_subject_for` 上，也在。
+--     · 删：同"改"。
+--     所以 `can_manage_stream_class` 这个名字**故意不建**：建了就是同一件事的第二个判定入口，
+--     而且两条判据一旦不一致就会打架（§十 的教训）。逐处核对清单见 `功能设计与不变量.md` §三十一。
+
+-- -------- 31.2 🔴 `assignments.class_id` 允许为空（**幂等**）--------
+--  ✅ **只需要一句，而且它天生幂等**：`drop constraint if exists … not null` ——
+--     第一次真的去掉 `assignments_class_id_not_null`，之后每次都是 no-op。
+--     PostgreSQL 的列级 `not null` 在 `pg_constraint` 里就是一条名为
+--     `<表>_<列>_not_null` 的 check（`contype = 'c'`），所以这一句就是它。
+alter table assignments drop constraint if exists assignments_class_id_not_null;
+
+--  ⚠️ **不要再补一条 `check (class_id is null or exists (select 1 from classes …))`** ——
+--     试过，PostgreSQL 直接回 `ERROR: cannot use subquery in check constraint`（CHECK 里不许有子查询）。
+--     而"指向不存在的班"这件事**本来就由外键管住**（`class_id uuid references classes (id)`），
+--     唯一的新增空间是"多了一个 null"，那正是这一期要的。所以这里**不需要**新约束。
+
+--  自检（**幂等**：跑两遍，`not_null` 必须是 false；第二遍不能报 42710/23514）：
+--  -- select a.attnotnull
+--  --   from pg_attribute a
+--  --  where a.attrelid = 'assignments'::regclass and a.attname = 'class_id';
+--  -- select conname from pg_constraint
+--  --  where conrelid = 'assignments'::regclass and contype = 'c' order by 1;
+
+-- -------- 31.3 作业的写判据：**多一支"未归属（走班）"** --------
+--  §2.17 第 2 条的正面解决：`assignments_insert/update` 原来只认
+--  `can_grade_subject(class_id, …)` —— 而 `class_id` 为空时那个判据恒假
+--  （`teaches_subject_for` 会拿 null 去比一个 uuid，比不中）→ **未归属的作业一行都建不出来**。
+--
+--  口径（**想清楚才写的，不是顺手放宽**）：
+--   · `class_id` 有值 → 走**老判据一个字不改**：`super/admin` 兜底 + 本班本科研课老师。
+--     走班作业挂走班班那一行（`kind='stream'`），所以本班本科 = 走班班的任教关系（P7 自动补）；
+--   · `class_id` 为空（空串也当空 —— 前端"未归属"的写法，见 `remote.ts` 的 `assignmentToRow`）
+--     → **`super/admin` ∪ "这条 INSERT 的 `teacher_id` 恰好是我自己"**。
+--     刻意**不**放宽成"任何老师都能把未归属的作业挂到别人名下"：
+--     那种作业没有任何班级能让别人看得见（读策略里"看得见这个班"那一支对 null 恒假），
+--     放宽的结果是"建了但只有自己看得见"，没有收益、只是多一个说不清的写入口。
+--     ⚠️ 于是**三条写策略的合取**收口成：未归属的作业 = 「我建的」——
+--       `assignments_insert` 的 `teacher_id = auth.uid()` 与 `assignments_update` 的
+--       `using`（要能选中那一行）都还在，所以 `p_uid` 只会在"是我自己"时才有意义。
+--
+--  ⚠️ `coalesce(btrim(p_class_id::text), '') = ''` 同时覆盖 `null` 与空串两种写法 ——
+--     "没有归属"这件事**只能有一个判据**，所以下面两个函数都走它。
+create or replace function public.assignment_unassigned(p_class_id uuid)
+returns boolean
+language sql
+immutable
+as $$ select coalesce(btrim(p_class_id::text), '') = '' $$;
+
+create or replace function public.assignments_write_ok_for(
+  p_uid uuid,
+  p_class_id uuid,
+  p_subject_code text,
+  p_subject text
+)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select case
+    /* 未归属：校级兜底 · **或"这条档案的建档人就是我自己"**（由调用方的策略把 `teacher_id` 钉死） */
+    when public.assignment_unassigned(p_class_id) then
+      public.is_school_admin_for(p_uid) or p_uid is not null
+    else public.can_grade_subject_for(p_uid, p_class_id, p_subject_code, p_subject)
+  end;
+$$;
+
+--  `_for` 变体接受任意 uid（"以任意人身份问权限"）→ **一律 revoke**（§16.2 / §27.12 的纪律）。
+--  ⚠️ 两个名字**都要 revoke**：`revoke … on function f(uuid)` 只撤那一个签名。
+revoke all on function public.assignment_unassigned(uuid) from public, anon, authenticated;
+revoke all on function public.assignments_write_ok_for(uuid, uuid, text, text) from public, anon, authenticated;
+
+--  裸版：给策略用（`auth.uid()` 由数据库自己取，前端插不上手）。
+--  ⚠️ 与 `can_grade_subject` 并列、**不替换它** —— 后者是"能不能改这个班的这一科"，
+--     它的签名与语义一个字都没改（I47 的入参形状不变）。
+create or replace function public.assignments_write_ok(
+  p_class_id uuid,
+  p_subject_code text,
+  p_subject text
+)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$ select public.assignments_write_ok_for(auth.uid(), p_class_id, p_subject_code, p_subject) $$;
+
+grant execute on function public.assignments_write_ok(uuid, text, text) to authenticated;
+revoke all on function public.assignments_write_ok(uuid, text, text) from anon;
+
+-- ---------- 31.3.1 重建三条写策略（`drop policy` 在前，`create policy` 在后）----------
+--  ⚠️ 为什么"先 drop 后 create"在这里是可以的：策略判据是**逐条求值**的，
+--     删掉旧的那一条的**同一瞬间**新的一条还没建 —— 中间态是"没有这一条策略"，
+--     也就是**更严**（INSERT / UPDATE 会被 RLS 直接拒），不是"更宽"。
+--     §16.3.0 里那句"先建新的再 drop 旧的"说的是**同一批策略之间**的可见量对照，
+--     与这里"换掉一条判据"是两件事 —— 而且 `create policy` **改不了已存在的策略**，
+--     必须 drop 才能重建（`create or replace` 对 policy 不存在）。
+drop policy if exists assignments_insert on assignments;
+create policy assignments_insert on assignments for insert to authenticated
+  with check (
+    teacher_id = auth.uid()
+    and assignments_write_ok(class_id, subject_code, subject)
+  );
+
+drop policy if exists assignments_update on assignments;
+create policy assignments_update on assignments for update to authenticated
+  using (assignments_write_ok(class_id, subject_code, subject))
+  with check (assignments_write_ok(class_id, subject_code, subject));
+
+--  删：口径不变（自己建的 · 管得着这个班 · 在本班教这一科）——
+--  `can_manage_class(null)` 与 `teaches_subject(null, …)` 都恒假，所以"自己建的"那一支
+--  独自兜住未归属的行，正是要的结果。**这一条一个字没改**，只是挨着上面两条写明它已经被核过。
+--  （`rls-checks.mjs` 第 31 节会断言：未归属的作业，建档人能删、别人删不掉。）
+
+-- -------- 31.4 回退 SQL（出问题时用；**与正向一起写、一起测**）--------
+--  ① 把未归属（`class_id is null`）的作业先挂到一个班里或删掉 —— 回退 `not null` 需要它；
+--  -- select id, title from assignments where class_id is null;
+--  -- update assignments set class_id = '<某个班 id>' where class_id is null;
+--  -- delete from assignments where class_id is null;
+--  ② 去掉"未归属"那一支并恢复两条写策略（删除策略本来就没改，不用回退）：
+--  -- drop policy if exists assignments_insert on assignments;
+--  -- create policy assignments_insert on assignments for insert to authenticated
+--  --   with check (teacher_id = auth.uid() and can_grade_subject(class_id, subject_code, subject));
+--  -- drop policy if exists assignments_update on assignments;
+--  -- create policy assignments_update on assignments for update to authenticated
+--  --   using (can_grade_subject(class_id, subject_code, subject))
+--  --   with check (can_grade_subject(class_id, subject_code, subject));
+--  -- alter table assignments add constraint assignments_class_id_not_null
+--  --   check (class_id is not null) not valid;   -- 再加 `validate constraint` 收口--  ③ ⚠️ **回退之后凡是建过"未归属作业"的库必须回头看一遍**：那些行会立刻违反 `not null`，
+--     所以第 ① 步不是可选项（这就是"破坏性迁移要单独一步 + 回退 SQL"的意思）。
 -- ============================================================

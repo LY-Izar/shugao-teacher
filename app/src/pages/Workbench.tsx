@@ -22,6 +22,7 @@ import { MOOD_TEXT, greetingWord } from '../lib/mood'
 import { awayText, weekdayOf } from '../lib/schedule'
 import { collectStats } from '../lib/assignments'
 import { friendlyDate } from '../lib/date'
+import { isAdminClass } from '../lib/pick'
 import { analyzeRoster } from '../lib/roster'
 import { currentIdentityLabel, IDENTITY_TAG_STYLE } from '../lib/roles'
 import { noticeScopeText } from '../lib/notices'
@@ -38,6 +39,12 @@ export default function Workbench() {
   /* 「当前身份」标签：有管理身份显示身份，没有才显示学科（与侧栏同一处实现，见 lib/roles.ts） */
   const myRoles = useStore((s) => s.myRoles)
   const classes = useStore((s) => s.classes)
+  /*
+   * 🔴 **人数只数行政班**（P5：走班班也是 `classes` 的一行，但它的人来自 `class_members`
+   *    的多对多关系，`/classes` 那一页列出的也是行政班）。
+   *    和"班级"那个数加起来才能成为一行不打架的话。
+   */
+  const adminClasses = useMemo(() => classes.filter(isAdminClass), [classes])
   const assignments = useStore((s) => s.assignments)
   const isDemo = useStore((s) => s.isDemo)
   const streakDays = useStore((s) => s.streakDays)
@@ -49,7 +56,7 @@ export default function Workbench() {
   const [newOpen, setNewOpen] = useState(false)
   const [form, setForm] = useState({ name: '', grade: '高二', year: '2025-2026' })
 
-  const total = classes.reduce((n, c) => n + activeStudents(c).length, 0)
+  const total = adminClasses.reduce((n, c) => n + activeStudents(c).length, 0)
 
   const moodState = useMood()
   const banner =
@@ -73,7 +80,7 @@ export default function Workbench() {
     [assignments, classes],
   )
 
-  const health = useMemo(() => classes.map((c) => ({ c, h: analyzeRoster(c.students) })), [classes])
+  const health = useMemo(() => adminClasses.map((c) => ({ c, h: analyzeRoster(c.students) })), [adminClasses])
 
   const today = new Date()
   const dateText = `${today.getMonth() + 1} 月 ${today.getDate()} 日 · 周${
@@ -100,13 +107,15 @@ export default function Workbench() {
       icon: <IconCamera size={19} />,
       title: '拍照录名单',
       desc: '录入新班级花名册',
-      onClick: () => navigate(classes[0] ? `/classes/${classes[0].id}/import/photo` : '/classes'),
+      /* ⚠️ 用 `adminClasses[0]`（不是 `classes[0]`）：录名单只对行政班有意义 */
+      onClick: () =>
+        navigate(adminClasses[0] ? `/classes/${adminClasses[0].id}/import/photo` : '/classes'),
     },
     {
       key: 'manage',
       icon: <IconUsers size={19} />,
       title: '班级管理',
-      desc: `${classes.length} 个班 · ${total} 人`,
+      desc: `${adminClasses.length} 个班 · ${total} 人`,
       onClick: () => navigate('/classes'),
     },
   ]
@@ -193,6 +202,11 @@ export default function Workbench() {
       <Panel className="anim-in mb-4 overflow-hidden">
         <StatStrip
           items={[
+            /*
+             * ⚠️ 这一格数的是**行政班 + 走班班**（= 我能看见的全部班）——
+             *    它原来的语义就是"我有几个班"，走班班也是我被分到的班（P5 的统一模型）。
+             *    真正按 kind 收口的是下面「班级管理」那一格的人数与入口。
+             */
             { k: '班级', v: classes.length },
             { k: '学生', v: total },
             {

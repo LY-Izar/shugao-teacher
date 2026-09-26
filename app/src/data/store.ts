@@ -501,6 +501,11 @@ function pickTransferNo(
   const taken = new Set(target.students.map((st) => st.studentNo))
   if (!keyedBySerial) {
     for (const a of s.assignments) {
+      /*
+       * ⚠️ 这里比的是 `classId === 目标班 id`（P5 之后也照旧）：
+       *    「未归属」的档案 `classId` 是**空串**，天然不相等 → **不会被算进别人的号池**。
+       *    这是"空串而不是 null"这个选择的直接收益（`types.ts` 的 `Assignment.classId`）。
+       */
       if (a.classId !== target.id) continue
       for (const list of [
         a.missingNos,

@@ -1,6 +1,31 @@
 import type { Assignment, Student } from '../data/types'
 import { archiveHas } from './keys'
 
+/* ---------------- 归属：行政班 / 走班班 / 未归属（P5 的统一模型） ---------------- */
+
+/**
+ * 「未归属」的作业 —— `assignments.class_id` 为**空**。
+ *
+ * 🔴 **一个字段一种语义**（§一）：`classId` 只有一张值表、只有一个"空"的写法 ——
+ *    空串 `''`（`remote.ts` 的 `rowToAssignment` 把数据库的 `null` 归一成它；
+ *    `assignmentToRow` 把 `''` 写回 `null`）。所以判据**只有这一处**，页面里不许自己写
+ *    `!a.classId` / `a.classId === null` 之类的变体 —— 那正是"同一件事多个判定入口"。
+ *
+ * 为什么它不是"挂在某个走班班上"：走班作业的归属**就是走班班那一行**
+ * （`classes.kind = 'stream'`，`classId` 填它的 id）。`null` 留给
+ * "还没定归属"的那些档案（P5 验收第 5 条：`class_id` 可空之后走班作业也能建）。
+ */
+export const isUnassigned = (classId: string | null | undefined): boolean =>
+  (classId ?? '') === ''
+
+/**
+ * 「未归属」在界面上的**值**（与 `isUnassigned` 同一条口径：空串）。
+ * 界面上勾它 = 这份档案**不属于任何班**（数据库那一列写 `null`）。
+ * ⚠️ 它**不是**一个真的班级 id，所以绝不能出现在 `classes` 的循环里
+ *    （`classId === x.id` 的每一处比较都会因为它而"看起来匹配"——空串不会，这是刻意的）。
+ */
+export const UNASSIGNED_CLASS_ID = ''
+
 /* ---------------- 题量：I8 的守门人（**只在这里定义一次**） ---------------- */
 
 /**

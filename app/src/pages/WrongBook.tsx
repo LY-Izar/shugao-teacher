@@ -10,6 +10,7 @@ import {
 } from '../components/icons'
 import { Button, PageHead, Panel, Sect, Tag } from '../components/ui'
 import { activeStudents, useStore } from '../data/store'
+import { splitByKind } from '../lib/pick'
 import { buildWrongBook, rankedCountOf } from '../lib/wrongbook'
 
 /**
@@ -22,11 +23,20 @@ import { buildWrongBook, rankedCountOf } from '../lib/wrongbook'
  * store 里的 `classes` 已经是**数据库 RLS 筛过**的结果 —— 学科老师登录后
  * 拿到的就是自己任教（或当班主任/年级主任管）的班。前端再筛一套判据，
  * 等于同一件事有两个判定入口，两边一旦不一致就会打架（见 §十 的教训）。
+ *
+ * 🔴 **但 `kind` 不是权限、必须自己判**（P5 的统一模型）：走班班也是 `classes` 的一行，
+ *    而这一页的每一行都按"这个班的学生名单 + 这个班的档案"算 —— 走班班的人来自
+ *    `class_members`（多对多，`students.class_id` 指向的是它的行政班），
+ *    直接列出来会让那一行永远显示"还没有批改过作业"（**静默错**，不报错）。
+ *    所以这一页只列**行政班**，走班班另有说明（`streamClassSummary`）。
  */
 export default function WrongBook() {
   const navigate = useNavigate()
   const classes = useStore((s) => s.classes)
   const assignments = useStore((s) => s.assignments)
+
+  /** 按 kind 分两半 —— 判定入口只有 `lib/pick.ts` 那一份 */
+  const { admin: adminClasses, stream: streamClasses } = useMemo(() => splitByKind(classes), [classes])
 
   /**
    * 每个班两件事：有几份「能进错题集」的作业、全班一共错了几处。
@@ -35,7 +45,7 @@ export default function WrongBook() {
   const stats = useMemo(
     () =>
       new Map(
-        classes.map((c) => {
+        adminClasses.map((c) => {
           const books = activeStudents(c).map((s) => buildWrongBook(s, c, assignments))
           return [
             c.id,
@@ -48,25 +58,25 @@ export default function WrongBook() {
           ] as const
         }),
       ),
-    [classes, assignments],
+    [adminClasses, assignments],
   )
 
-  const totalStudents = classes.reduce((n, c) => n + activeStudents(c).length, 0)
+  const totalStudents = adminClasses.reduce((n, c) => n + activeStudents(c).length, 0)
 
   return (
     <>
       <PageHead
         title="错题集"
         sub={
-          classes.length
-            ? `${classes.length} 个班 · ${totalStudents} 名学生`
+          adminClasses.length
+            ? `${adminClasses.length} 个班 · ${totalStudents} 名学生`
             : undefined
         }
         onBack={() => navigate('/')}
       />
 
       <Page>
-        {classes.length === 0 ? (
+        {adminClasses.length === 0 ? (
           <Panel className="overflow-hidden">
             <div className="empty">
               <IconUsers size={26} />
@@ -88,7 +98,7 @@ export default function WrongBook() {
           <div className="mb-4">
             <Sect>我任教的班级</Sect>
             <div className="flex flex-col gap-2.5 stagger">
-              {classes.map((c) => {
+              {adminClasses.map((c) => {
                 const st = stats.get(c.id)
                 const graded = st?.graded ?? 0
                 const wrong = st?.wrong ?? 0
@@ -158,6 +168,31 @@ export default function WrongBook() {
                 )
               })}
             </div>
+
+            {/*
+              走班班**不在上面的列表里**（P5 的统一模型）：它的人来自 `class_members`
+              （多对多），按"这个班的学生名单"算错题集就会永远算成空的。
+              这里只说明"有这几个"，不摆入口 —— 走班班的错题集是另一期的活。
+              ⚠️ 只在真有走班班时才渲染：没有走班班的库上这一整块不存在，
+                 所以"改造前后逐行相等"这条验收口径在这里也是逐字成立的。
+            */}
+            {streamClasses.length ? (
+              <div className="mt-4">
+                <Sect>走班班</Sect>
+                <Panel bodyClass="p-3">
+                  <div className="flex flex-wrap gap-2" style={{ fontSize: 12.5 }}>
+                    {streamClasses.map((k) => (
+                      <Tag key={k.id} tone="idle">
+                        {k.name}
+                      </Tag>
+                    ))}
+                  </div>
+                  <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 8, lineHeight: 1.7 }}>
+                    走班班的名单来自成员关系（一个学生可以在多个走班班），错题集按成员算。
+                  </p>
+                </Panel>
+              </div>
+            ) : null}
           </div>
         )}
       </Page>
