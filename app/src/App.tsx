@@ -27,6 +27,7 @@ import ExamNew from './pages/ExamNew'
 import Exams from './pages/Exams'
 import ExamStats from './pages/ExamStats'
 import GradeDetail from './pages/GradeDetail'
+import GradePromote from './pages/GradePromote'
 import Grades from './pages/Grades'
 import GradeSetup from './pages/GradeSetup'
 import ImportPaste from './pages/ImportPaste'
@@ -675,6 +676,31 @@ export default function App() {
           element={
             <Guard>
               <GradeSetup />
+            </Guard>
+          }
+        />
+        {/*
+          🆕 2026-10-01「提档 + 毕业删除」（P4，`选科走班实施计划.md` 的 P4 段）。
+
+          ⚠️ **地址是 `/grades/promote`，不是 `/grades/:id/promote`** ——
+             PAGES 里那一行原来是按"每个年级一页"登记的（`/grades/:id/promote`），
+             而这一件事实在是**全校一年一次**的动作（提档）+ **一次只可能有一个高三**
+             （毕业删除），所以本轮把地址改成登记表里那个**入口 key**
+             （`ENTRIES['/grades/promote']` 早就登记过、判据是 `canManageTeachers`），
+             两份矩阵文档同步改了一行（行数 / V·E·B 那些自检值**一个都没动**）。
+
+          ⚠️ 刻意**不套额外守卫**（与 `/grades` 同款）：手打 URL 进得来，然后
+            · 读：`promotion_overview()` 自己问 `is_school_admin_for(auth.uid())`，
+              不是教导处 / 超管就回 `allowed:false`；
+            · 写：服务端拿调用者 JWT 问数据库（`can_promote_grades()` /
+              `can_delete_grade()`），真删那一步只有 `is_super_admin()` 做得动。
+          "藏入口"不是安全边界，这里也不假装它是。
+        */}
+        <Route
+          path="/grades/promote"
+          element={
+            <Guard>
+              <GradePromote />
             </Guard>
           }
         />

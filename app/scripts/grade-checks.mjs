@@ -25,6 +25,12 @@
  *      · `columns-mismatch`     —— 把导出的表头改成另一套列名（导入导出不再同源）
  *      · `setup-broken-fn`      —— 🆕 让第十一节的桩去问"砍掉 `is_school_admin()` 那半边"的
  *                                  `can_manage_grade_setup` → **R1（超管 true）/ R2（教务处 true）必须红**
+ *      · 🆕 P4（第十二节）五条 —— 每一条都对着一条"必须红"的断言：
+ *        `p4-promote-not-idempotent`（提档幂等，T1e/T1f）·
+ *        `p4-promote-revokes-roles`（提档不撤回身份，T3a）·
+ *        `p4-mail-not-required`（备份没发出就删不了，T4e）·
+ *        `p4-no-name-check`（逐字输入年级全名，T5a）·
+ *        `p4-no-cleanup-exams`（清点表逐项 = 0，T6c）
  *
  * 前置条件：无（不需要 dev server，也不需要 Supabase）。
  */
@@ -579,6 +585,65 @@ await withLock(async () => {
      *    在那里把改坏的那份函数体落成 `_neg_grade_setup()` 真函数、让桩去问它
      *    （R21/R22：超管必须翻成 false，而本年级年级主任仍为 true）。
      */
+    /*
+     * 🆕 P4（§29）五条对照 —— 每一条都对着第十二节里一条**必须红**的断言：
+     *   · `p4-promote-not-idempotent` → 拿掉"本学年已提档"那一支 → T1e/T1f 红
+     *     （第二次会把全年级**再**提一级：高二直接跳到毕业，这就是 I44 说的那种事故）
+     *   · `p4-promote-revokes-roles`  → 在提档事务里塞回原方案那句 `delete from teacher_roles`
+     *     → T3a/T3g 红（Q16：提档不撤回任何身份）
+     *   · `p4-mail-not-required`      → 拿掉"备份没发出就不许删"那一支 → T4e 红
+     *   · `p4-no-name-check`          → 拿掉"逐字输入年级全名"那一支 → T5a 红
+     *   · `p4-no-cleanup-exams`       → 拿掉 `exams` 孤儿那座残留的显式删除 → T6c 红
+     *     （`class_ids` 是数组、建不了外键：删班不会带走它）
+     */
+    if (NEGATIVE === 'p4-promote-not-idempotent') {
+      const anchor = `  if found then
+    return jsonb_build_object(
+      'ok', true, 'alreadyPromoted', true, 'academicYear', v_year, 'promoted', 0,
+      'before', coalesce(v_detail -> 'before', '[]'::jsonb),
+      'after',  coalesce(v_detail -> 'after',  '[]'::jsonb));
+  end if;`
+      if (!text.includes(anchor)) throw new Error('p4-promote-not-idempotent 的锚点没找到')
+      return text.replace(anchor, '  -- （负向对照：拿掉"本学年已提档"那一支 —— 幂等就没了）')
+    }
+    if (NEGATIVE === 'p4-promote-revokes-roles') {
+      const anchor = `  update grades set stage = stage + 1
+   where school_id = v_school and stage in (1, 2);
+  get diagnostics v_rows = row_count;`
+      if (!text.includes(anchor)) throw new Error('p4-promote-revokes-roles 的锚点没找到')
+      return text.replace(
+        anchor,
+        `${anchor}
+  -- （负向对照：把原方案 §4.2.4(3) 第 4 步塞回来 —— 提档**撤回身份**）
+  delete from teacher_roles
+   where scope_type = 'grade' and scope_id in (select id from grades where school_id = v_school);`,
+      )
+    }
+    if (NEGATIVE === 'p4-mail-not-required') {
+      const anchor = `  if not v_rec.mail_ok then
+    raise exception '备份还没有发到超管邮箱（%）—— 删除流程停在这里：先把信发出去',
+      coalesce(nullif(v_rec.mail_reason, ''), '原因不明');
+  end if;`
+      if (!text.includes(anchor)) throw new Error('p4-mail-not-required 的锚点没找到')
+      return text.replace(anchor, '  -- （负向对照：拿掉"备份没发出就不许删"那一支）')
+    }
+    if (NEGATIVE === 'p4-no-name-check') {
+      const anchor = `  if replace(btrim(coalesce(p_confirm_name, '')), ' ', '') <> replace(v_full, ' ', '') then
+    raise exception '年级全名不对 —— 要**逐字**输入「%」才放行（这次收到的是「%」）',
+      v_full, btrim(coalesce(p_confirm_name, ''));
+  end if;`
+      if (!text.includes(anchor)) throw new Error('p4-no-name-check 的锚点没找到')
+      return text.replace(anchor, '  -- （负向对照：拿掉"逐字输入年级全名"那一支）')
+    }
+    if (NEGATIVE === 'p4-no-cleanup-exams') {
+      const anchor = `  delete from exams where class_ids && v_class_ids;
+  get diagnostics n_exams = row_count;`
+      if (!text.includes(anchor)) throw new Error('p4-no-cleanup-exams 的锚点没找到')
+      return text.replace(
+        anchor,
+        '  -- （负向对照：拿掉孤儿 exams 的显式删除 —— 数组建不了外键，没人替你删）\n  n_exams := 0;',
+      )
+    }
     return text
   }
 
@@ -1970,6 +2035,565 @@ await withLock(async () => {
       )
     } finally {
       globalThis.fetch = realFetch
+    }
+  }
+
+  /* ============================================================
+     第十二节 · 🔴 P4：提档 + 毕业删除（**真源码 + 真库 + 假 Resend**）
+     ------------------------------------------------------------
+     这一节的六条硬指标（`选科走班实施计划.md` 的 P4 验收口径）：
+       T1 提档**幂等**：跑两次，第二次**一行数据都不改**；
+       T2 提档**只改 `stage`**：班级的 `grade_id` 前后逐字相同；
+       T3 提档**不撤回任何身份**：`teacher_roles` / `class_subjects` 行数完全相等；
+       T4 **备份没发出 → 删不了**（反向对照：把信发成功 → 能删）；
+       T5 **输错年级全名 → 删不了**；**非超管 → 被拒**；
+       T6 删完**清点表逐项 = 0**（用真查询逐项核，不是读它自己的报告）；
+       T7 **删除幂等**：对同一个已删年级再删一次 → 不报错、不改动。
+
+     🔴 两处刻意的"替身"（都**只在测试库里**，仓库文件一个字节不动）：
+       ① `beijing_today()` 被改成固定的 `2026-09-01` —— 提档窗口是"每年 9/1 之后"，
+          不钉住日期的话，这一节会在 1–8 月**随机全红**（那是最糟的一类门禁）；
+       ② `api.resend.com` / `/auth/v1/admin/users` / `/storage/v1/object` 三个地址
+          由 fetch 桩接住 —— **一个字节都不出网**。
+     ============================================================ */
+
+  section('第十二节 · 🔴 P4 提档 + 毕业删除：幂等 / 只改 stage / 备份没发出就删不了 / 清点表 = 0')
+
+  {
+    const api = await import(pathToFileURL(resolvePath(APP, 'functions/api/grade-promote.ts')).href)
+    const gp = await import(pathToFileURL(resolvePath(APP, 'src/lib/gradePromote.ts')).href)
+
+    /* ---------- ① "今天"钉在 2026-09-01（提档窗口开着） ---------- */
+    await db.exec(`
+      create or replace function public.beijing_today()
+      returns date language sql stable as $bd$ select date '2026-09-01' $bd$;
+    `)
+    const todayRow = one(await db.query(`select public.beijing_today()::text as d`))
+    eq('T0：把测试库的"今天"钉在 2026-09-01（提档窗口开着的那一天）', todayRow.d, '2026-09-01')
+    eq(
+      'T0b：`current_academic_year()` 跟着推出来（与学年表的名字同一个口径）',
+      one(await db.query(`select public.current_academic_year() as y`)).y,
+      '2026-2027',
+    )
+
+    /* ---------- ② 夹具：一个"2023 级 高三"，每类残留都造一行 ---------- */
+    await db.exec(`
+      insert into grades (school_id, name, cohort, stage)
+      values (${school}, '高三', '2023', 3);
+
+      insert into classes (teacher_id, name, grade, school_id, grade_id, kind, class_type)
+      values ('${U.head}', '高三(9)班', '高三', ${school},
+              (select id from grades where cohort = '2023'), 'admin', 'science');
+
+      insert into students (class_id, student_no, name, serial)
+      select c.id, lpad(g::text, 2, '0'), '待删' || g::text, '2023' || lpad(g::text, 3, '0')
+        from classes c cross join generate_series(1, 3) g
+       where c.name = '高三(9)班';
+
+      insert into assignments (class_id, teacher_id, title, subject, assign_date)
+      select c.id, '${U.head}', '待删作业', '物理', date '2026-09-10'
+        from classes c where c.name = '高三(9)班';
+
+      insert into calls (teacher_id, assignment_id, class_id, student_nos, text)
+      select '${U.head}', a.id, a.class_id, array['01'], '来拿一下'
+        from assignments a join classes c on c.id = a.class_id
+       where c.name = '高三(9)班' and a.title = '待删作业';
+
+      /* 一场考试：**class_ids 是数组**（§2.6 的第一类残留） */
+      insert into exams (teacher_id, title, paper_key, subject, subject_code, scope, grade,
+                         source, mode, exam_date, question_count, class_ids, grade_id)
+      select '${U.head}', '待删月考', '待删月考', '物理', 'physics', 'grade', '高三',
+             'manual', 'scores', date '2026-09-20', 10, array[c.id],
+             (select id from grades where cohort = '2023')
+        from classes c where c.name = '高三(9)班';
+
+      insert into exam_scores (exam_id, class_id, student_no, name)
+      select e.id, e.class_ids[1], '01', '待删1' from exams e where e.title = '待删月考';
+
+      insert into schedule_items (teacher_id, weekday, start_time, end_time, title, class_id, scope)
+      select '${U.head}', 1, '08:00', '08:45', '物理', c.id, 'class'
+        from classes c where c.name = '高三(9)班';
+
+      /* 教室端账号：行会 cascade，auth.users 不会（要服务端去删账号） */
+      insert into auth.users (id, email, raw_user_meta_data)
+      values ('88888888-8888-8888-8888-888888888888', 'room9@test', '{"name":"高三(9)班教室端"}'::jsonb);
+      insert into classroom_accounts (id, class_id, school_id, name, email)
+      select '88888888-8888-8888-8888-888888888888', c.id, ${school}, '高三(9)班教室端', 'room9@test'
+        from classes c where c.name = '高三(9)班';
+
+      insert into class_subjects (class_id, subject, subject_code, teacher_id)
+      select c.id, '物理', 'physics', '${U.head}' from classes c where c.name = '高三(9)班';
+
+      insert into class_members (class_id, student_id)
+      select c.id, s.id from classes c join students s on s.class_id = c.id
+       where c.name = '高三(9)班';
+
+      insert into student_subjects (student_id, primary_code, second_codes)
+      select s.id, 'physics', array['chemistry','biology'] from students s
+        join classes c on c.id = s.class_id where c.name = '高三(9)班';
+
+      /* 🆕 第三类数组残留：shared_files.class_ids（§19.1） */
+      insert into shared_files (teacher_id, class_id, class_ids, name, mime, size, storage_path)
+      select '${U.head}', c.id, array[c.id], '讲义.pdf', 'application/pdf', 1024, 'p4-test/讲义.pdf'
+        from classes c where c.name = '高三(9)班';
+
+      /* 身份：年级主任（scope_id = 年级） + 班主任（scope_id = 班）—— §2.6 的第二类残留 */
+      insert into teacher_roles (teacher_id, role, scope_type, scope_id)
+      values ('${U.teacher}', 'grade_head', 'grade', (select id from grades where cohort = '2023')),
+             ('${U.head}',    'head_teacher', 'class', (select id from classes where name = '高三(9)班'));
+    `)
+
+    const G23 = one(await db.query(`select id::text as id from grades where cohort = '2023'`)).id
+    const C9 = one(await db.query(`select id::text as id from classes where name = '高三(9)班'`)).id
+    const ROOM9 = '88888888-8888-8888-8888-888888888888'
+    /** 第十一节建的那个"高二主任"（`U2.other` 在那一节的块作用域里，这里按 uid 引回来） */
+    const OTHER_HEAD = '66666666-6666-6666-6666-666666666666'
+
+    /* ---------- ③ fetch 桩：Supabase 三条链 + Resend + auth admin + storage ---------- */
+    const realFetch12 = globalThis.fetch
+    const TOK = new Map([
+      ['tok-super', U.super],
+      ['tok-admin', U.admin],
+      ['tok-grade', U.grade],
+      ['tok-head', U.head],
+    ])
+    /** 调用者 JWT 身份调的那几个（读 auth.uid()）；其余（写入口）以属主身份 = service_role 的形状 */
+    const CALLER_FNS = new Set([
+      'promotion_overview',
+      'can_promote_grades',
+      'can_delete_grade',
+      'is_super_admin',
+    ])
+    const RPC_SQL = {
+      promotion_overview: (_b) => [`select public.promotion_overview() as v`, []],
+      can_promote_grades: (_b) => [`select public.can_promote_grades() as v`, []],
+      can_delete_grade: (b) => [`select public.can_delete_grade($1::uuid) as v`, [b.p_grade_id]],
+      is_super_admin: (_b) => [`select public.is_super_admin() as v`, []],
+      promote_grades: (b) => [`select public.promote_grades($1::uuid) as v`, [b.p_actor]],
+      grade_backup: (b) => [
+        `select public.grade_backup($1::uuid, $2::uuid) as v`,
+        [b.p_actor, b.p_grade_id],
+      ],
+      grade_backup_mail: (b) => [
+        `select public.grade_backup_mail($1::uuid, $2::uuid, $3::boolean, $4::text) as v`,
+        [b.p_actor, b.p_removal_id, b.p_ok, b.p_reason],
+      ],
+      grade_delete: (b) => [
+        `select public.grade_delete($1::uuid, $2::uuid, $3::text) as v`,
+        [b.p_actor, b.p_grade_id, b.p_confirm_name],
+      ],
+      grade_backup_payload: (b) => [
+        `select public.grade_backup_payload($1::uuid, $2::uuid) as v`,
+        [b.p_actor, b.p_removal_id],
+      ],
+      grade_backup_by_token: (b) => [
+        `select public.grade_backup_by_token($1::text) as v`,
+        [b.p_token],
+      ],
+    }
+    const jsonRes = (v, status = 200) =>
+      new Response(JSON.stringify(v), { status, headers: { 'Content-Type': 'application/json' } })
+
+    let resendFail = false
+    const resendCalls = []
+    const authUserDeletes = []
+    const storageDeletes = []
+    let rpcMissing = false
+
+    globalThis.fetch = async (input, init = {}) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      const token = String(new Headers(init.headers ?? {}).get('authorization') ?? '').replace(
+        /^Bearer\s+/i,
+        '',
+      )
+      /* ① 调用者是谁 */
+      if (/\/auth\/v1\/user$/.test(url)) {
+        const uid = TOK.get(token)
+        return uid ? jsonRes({ id: uid }) : jsonRes({ message: 'invalid jwt' }, 401)
+      }
+      /* ② 留痕表（`audit()` / `mailedInLastDay()`）：这一节不验它，回一个空表 */
+      if (/\/rest\/v1\/admin_audit/.test(url)) return jsonRes([])
+      /* ③ 教室端账号：Supabase 的管理员删号（**桩里真的删 auth.users 那一行**） */
+      const delUser = /\/auth\/v1\/admin\/users\/([0-9a-f-]+)$/i.exec(url)
+      if (delUser) {
+        authUserDeletes.push(delUser[1])
+        await db.exec(`delete from auth.users where id = '${delUser[1]}'`)
+        return jsonRes({})
+      }
+      /* ④ 对象存储 */
+      if (/\/storage\/v1\/object\//.test(url)) {
+        storageDeletes.push(decodeURIComponent(url.split('/object/')[1] ?? ''))
+        return jsonRes({})
+      }
+      /* ⑤ Resend */
+      if (/api\.resend\.com\/emails$/.test(url)) {
+        const body = JSON.parse(String(init.body ?? '{}'))
+        resendCalls.push({ to: body.to, subject: body.subject, text: body.text })
+        if (resendFail) return jsonRes({ message: 'upstream boom' }, 500)
+        return jsonRes({ id: 'mail-1' })
+      }
+      /* ⑥ RPC */
+      const m = /\/rest\/v1\/rpc\/([a-z_]+)$/.exec(url)
+      if (!m) return realFetch12(input, init)
+      const fn = m[1]
+      const build = RPC_SQL[fn]
+      if (!build) return jsonRes({ message: `桩不认识这个 RPC：${fn}` }, 500)
+      if (rpcMissing) {
+        return jsonRes(
+          { code: 'PGRST202', message: `Could not find the function public.${fn} in the schema cache` },
+          404,
+        )
+      }
+      const body = JSON.parse(String(init.body ?? '{}'))
+      const [sql, params] = build(body)
+      const uid = TOK.get(token)
+      if (CALLER_FNS.has(fn)) {
+        if (!uid) return jsonRes({ message: 'JWT required' }, 401)
+        await db.exec('begin')
+        try {
+          await db.exec('set local role authenticated')
+          await db.query(`select set_config('request.jwt.claim.sub', $1, true)`, [uid])
+          const out = await db.query(sql, params)
+          await db.exec('commit')
+          return jsonRes(out.rows[0].v)
+        } catch (e) {
+          await db.exec('rollback')
+          return jsonRes({ code: 'P0001', message: String(e?.message ?? e).split('\n')[0] }, 400)
+        }
+      }
+      /* 写入口：service_role 的形状（属主身份 + 显式 `p_actor`） */
+      try {
+        const out = await db.query(sql, params)
+        return jsonRes(out.rows[0].v)
+      } catch (e) {
+        return jsonRes({ code: 'P0001', message: String(e?.message ?? e).split('\n')[0] }, 400)
+      }
+    }
+
+    const ENV12 = {
+      SUPABASE_URL: 'http://127.0.0.1:9',
+      SUPABASE_ANON_KEY: 'fake-anon',
+      SUPABASE_SERVICE_ROLE_KEY: 'fake-service-role',
+      RESEND_API_KEY: 'fake-resend-key',
+      ADMIN_NOTIFY_EMAIL: 'admin@test',
+    }
+    const post = async (token, body) => {
+      const res = await api.onRequestPost({
+        request: new Request('https://example.invalid/api/grade-promote', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify(body),
+        }),
+        env: ENV12,
+      })
+      return { status: res.status, json: await res.json() }
+    }
+    const count = async (sql) => Number(one(await db.query(`select count(*)::int as n from ${sql}`)).n)
+
+    try {
+      /* ---------------- T1 / T2 / T3：提档 ---------------- */
+      const stagesBefore = (await db.query(`select id::text as id, stage from grades order by id`)).rows
+      const clsBefore = (
+        await db.query(`select id::text as id, grade_id::text as gid from classes order by id`)
+      ).rows
+      const rolesBefore = await count('teacher_roles')
+      const csBefore = await count('class_subjects')
+
+      const r1 = await post('tok-super', { action: 'promote' })
+      eq('T1a：超管提档 → 200', r1.status, 200)
+      eq('T1b：提了两个年级（高一 / 高二各 +1）', [r1.json.promoted, r1.json.alreadyPromoted], [2, false])
+      eq('T1c：学年名 = 2026-2027', r1.json.academicYear, '2026-2027')
+
+      const stagesAfter = (await db.query(`select id::text as id, stage from grades order by id`)).rows
+      const map = (rows) => Object.fromEntries(rows.map((r) => [r.id, Number(r.stage)]))
+      const b = map(stagesBefore)
+      const a = map(stagesAfter)
+      const sameIds = Object.keys(b).sort().join() === Object.keys(a).sort().join()
+      ok('T1d：年级 id 集合一个都没变（提档不改 id）', sameIds)
+      ok(
+        'T2a：**只有 `stage` 变了**，而且只对原 stage ∈ {1,2} 的 +1（高三停在 3）',
+        sameIds &&
+          Object.keys(b).every((id) => a[id] === (b[id] === 3 ? 3 : b[id] + 1)),
+        JSON.stringify({ before: b, after: a }),
+      )
+
+      const clsAfter = (
+        await db.query(`select id::text as id, grade_id::text as gid from classes order by id`)
+      ).rows
+      eq(
+        'T2b：🔴 提档前后 **`classes.grade_id` 逐字相同**（一个字节都没改）',
+        clsAfter,
+        clsBefore,
+      )
+      eq('T3a：🔴 `teacher_roles` 行数前后完全相等（提档不撤回身份，Q16）', await count('teacher_roles'), rolesBefore)
+      eq('T3b：🔴 `class_subjects` 行数前后完全相等（任教关系保留，Q16）', await count('class_subjects'), csBefore)
+
+      /* 幂等：第二次 */
+      const r2 = await post('tok-super', { action: 'promote' })
+      eq('T1e：同一个学年再提一次 → 200 且 `alreadyPromoted=true`、`promoted=0`', [r2.status, r2.json.alreadyPromoted, r2.json.promoted], [200, true, 0])
+      const stagesAfter2 = (await db.query(`select id::text as id, stage from grades order by id`)).rows
+      eq('T1f：🔴 第二次**一行数据都不改**（stage 逐行相等）', stagesAfter2, stagesAfter)
+      eq('T1g：第二次的身份行数也不变', [await count('teacher_roles'), await count('class_subjects')], [rolesBefore, csBefore])
+
+      /* 非超管 / 年级主任：提档是 `is_school_admin()`，年级主任要 false */
+      const rHead = await post('tok-grade', { action: 'promote' })
+      eq('T1h：年级主任提档 → 403（`can_promote_grades()` = 教导处 / 超管）', rHead.status, 403)
+
+      /* 预览：走真源码 */
+      const ov = await post('tok-super', { action: 'overview' })
+      eq('T1i：预览接口 → 200 且 allowed', [ov.status, ov.json.allowed], [200, true])
+      eq('T1j：预览里已经写着"本学年已提档"', typeof ov.json.promotedAt, 'string')
+      eq(
+        'T1k：预览里那个 2023 级高三标着**毕业删除**（stage=3 不参与提档）',
+        (ov.json.grades ?? []).find((g) => g.id === G23)?.fullName,
+        '高三（2023 级）',
+      )
+      const ovAdmin = await post('tok-head', { action: 'overview' })
+      eq('T1l：班主任看预览 → `allowed:false`（数据层就把他挡住，不是靠不摆入口）', [ovAdmin.status, ovAdmin.json.allowed], [200, false])
+
+      /* ---------------- T4：备份没发出 → 删不了 ---------------- */
+      const canBefore = one(
+        await db.query(`select public.can_delete_grade_for($1::uuid, $2::uuid) as v`, [U.super, G23]),
+      ).v
+      eq('T4a：还没有备份时 `can_delete_grade()` = false（界面上那个按钮不解锁）', canBefore, false)
+
+      /* ⚠️ 这一条**故意让 Resend 失败**：备份生成得出来，但信发不出去 */
+      resendFail = true
+      const bk = await post('tok-super', { action: 'backup', gradeId: G23 })
+      eq('T4b：🔴 备份生成了、但信发不出去 → **接口报错**（502）', bk.status, 502)
+      eq('T4c：那句话明说"这个年级现在删不掉"', /删不掉|没有发出去/.test(String(bk.json.message)), true)
+      const mailOk1 = one(await db.query(`select mail_ok from grade_removals where grade_id = $1::uuid`, [G23])).mail_ok
+      eq('T4d：数据库里 `mail_ok` 仍然是 false（发信结果如实登记）', mailOk1, false)
+
+      const del0 = await post('tok-super', {
+        action: 'delete',
+        gradeId: G23,
+        confirmName: '高三（2023 级）',
+      })
+      eq('T4e：🔴 **备份没发出 → 删不了**（400 + 数据库那句人话）', [del0.status, /备份还没有发到超管邮箱/.test(String(del0.json.message))], [400, true])
+      eq('T4f：后置自证：年级还在、班还在、学生还在（一个字节都没删）', [
+        await count(`grades where id = '${G23}'`),
+        await count(`classes where id = '${C9}'`),
+        await count(`students where class_id = '${C9}'`),
+      ], [1, 1, 3])
+
+      /* 备份的**完整性**：六类数据都在 payload 里（不是一句"备份成功"） */
+      const pl = one(await db.query(`select payload from grade_removals where grade_id = $1::uuid`, [G23])).payload
+      const arr = (k) => (pl.tables?.[k] ?? []).length
+      eq(
+        'T4g：🔴 备份 payload 里**逐类都在**（学生 3 / 作业 1 / 呼叫 1 / 考试 1 / 评分 1 / 任教 1 / 身份 2 / 教室端 1 / 共享文件 1）',
+        [arr('students'), arr('assignments'), arr('calls'), arr('exams'), arr('examScores'), arr('classSubjects'), arr('teacherRoles'), arr('classroomAccounts'), arr('sharedFiles')],
+        [3, 1, 1, 1, 1, 1, 2, 1, 1],
+      )
+      eq('T4h：备份里有令牌与校验和（发信要用）', [
+        typeof one(await db.query(`select token from grade_removals where grade_id = $1::uuid`, [G23])).token,
+        one(await db.query(`select payload_md5 <> '' as v from grade_removals where grade_id = $1::uuid`, [G23])).v,
+      ], ['string', true])
+
+      /* ---------------- T4 的反向对照：把信发成功 → 能删 ---------------- */
+      resendFail = false
+      const bk2 = await post('tok-super', { action: 'backup', gradeId: G23 })
+      eq('T4i（反向对照）：把发信弄成功 → 200、`mailStatusRecorded=true`', [bk2.status, bk2.json.mailStatusRecorded], [200, true])
+      const mailOk2 = one(await db.query(`select mail_ok from grade_removals where grade_id = $1::uuid`, [G23])).mail_ok
+      eq('T4j（反向对照）：数据库里 `mail_ok` 变成 true', mailOk2, true)
+      const canAfter = one(
+        await db.query(`select public.can_delete_grade_for($1::uuid, $2::uuid) as v`, [U.super, G23]),
+      ).v
+      eq('T4k（反向对照）：`can_delete_grade()` 这才变 true —— **T4a 不是永远为绿的摆设**', canAfter, true)
+
+      /* 邮件正文**不含个人信息**（`_lib/mail.ts` 的三条硬要求之一） */
+      const mailText = resendCalls.length ? String(resendCalls[resendCalls.length - 1].text ?? '') : ''
+      ok(
+        'T4l：这一轮**真的发出了一封**（否则下面两条是在空串上通过 —— 假绿）',
+        resendCalls.length >= 1 && mailText.length > 100,
+        `resendCalls=${resendCalls.length} · 正文长度 ${mailText.length}`,
+      )
+      ok(
+        'T4l2：发出去的邮件正文里**没有**姓名 / 学号 / 成绩字样，也没有 7 位连号（否则信会被自己的体检拦下）',
+        !/(学号|姓名)\s*[:：]/.test(mailText) && !/\b\d{7}\b/.test(mailText) && !/(成绩|分数|得分|排名|名次)/.test(mailText),
+        mailText.slice(0, 200),
+      )
+      ok(
+        'T4m：邮件里带着**下载方式 + 令牌 + 有效期**（§4.2.7 的"链接 + 有效期"，不放附件）',
+        /\/api\/grade-promote\?token=/.test(mailText) && /90 天内有效/.test(mailText),
+        mailText.slice(0, 300),
+      )
+      ok(
+        'T4m2：那个下载地址是**相对路径**（绝对 URL 的 query 会被 `scrubSecrets()` 擦掉 → 令牌丢掉、链接变废）',
+        !/https?:\/\/[^\s?]*grade-promote\?token=/.test(mailText),
+      )
+
+      /* 令牌形状：**不许出现连续 7 位数字**（否则 `looksLikeStudentData` 会把信拦下） */
+      const tok = one(await db.query(`select token from grade_removals where grade_id = $1::uuid`, [G23])).token
+      ok('T4n：备份令牌里没有连续 7 位数字（否则会被邮件正文体检拦下 —— 那就是"有时发得出去有时发不出去"）', !/\d{7}/.test(tok), tok)
+
+      /* 下载链接那条路（令牌即凭据）：GET 拿到 payload */
+      const dl = await api.onRequestGet({
+        request: new Request(`https://example.invalid/api/grade-promote?token=${tok}`),
+        env: ENV12,
+      })
+      eq('T4o：邮件里那个下载链接 → 200（令牌即凭据）', dl.status, 200)
+      eq('T4p：下载回来的就是那一份备份（学生 3 人）', (await dl.json()).tables?.students?.length, 3)
+      const dlBad = await api.onRequestGet({
+        request: new Request('https://example.invalid/api/grade-promote?token=bk000000x000000x000000x000000x000000'),
+        env: ENV12,
+      })
+      eq('T4q（反向对照）：换个令牌 → 400（不认识这个链接）', dlBad.status, 400)
+      const dlCount = one(await db.query(`select download_count::int as n from grade_removals where grade_id = $1::uuid`, [G23])).n
+      eq('T4r：每一次下载都留痕（`download_count` = 1）', dlCount, 1)
+
+      /* ---------------- T5：输错全名 / 非超管 ---------------- */
+      const delBadName = await post('tok-super', { action: 'delete', gradeId: G23, confirmName: '高三' })
+      eq('T5a：输错年级全名 → 删不了（400）', delBadName.status, 400)
+      ok('T5b：那句话把要输入的**全名**写清楚了', /高三（2023 级）/.test(String(delBadName.json.message)), String(delBadName.json.message))
+      eq('T5c：年级还在（一个字节都没删）', await count(`grades where id = '${G23}'`), 1)
+
+      const delAdmin = await post('tok-admin', {
+        action: 'delete',
+        gradeId: G23,
+        confirmName: '高三（2023 级）',
+      })
+      eq('T5d：🔴 **非超管（教导处）删除 → 403**', [delAdmin.status, /只有最高管理员/.test(String(delAdmin.json.message))], [403, true])
+      eq('T5e：年级还在', await count(`grades where id = '${G23}'`), 1)
+
+      /* ---------------- T6：超管 + 正确全名 → 删 + 清点表逐项 = 0 ---------------- */
+      const del = await post('tok-super', {
+        action: 'delete',
+        gradeId: G23,
+        confirmName: '高三（2023 级）',
+      })
+      eq('T6a：超管 + 逐字全名 → 删除成功（200）', [del.status, del.json.alreadyDeleted], [200, false])
+      eq(
+        'T6b：报告里记着删掉了什么（班 1 / 学生 3 / 身份 2 / 考试 1）',
+        [
+          del.json.report?.deleted?.classes,
+          del.json.report?.counts?.students,
+          del.json.report?.deleted?.teacherRoles,
+          del.json.report?.deleted?.exams,
+        ],
+        [1, 3, 2, 1],
+      )
+
+      /* 🔴 清点表：**用真查询逐项核**（不是读它自己的报告 —— 报告说 0 不代表真是 0） */
+      const checks = {
+        '孤儿 exams': `exams where class_ids && array['${C9}']::uuid[]`,
+        '悬空 teacher_roles': `teacher_roles where scope_id = '${G23}' or (scope_type = 'class' and scope_id = '${C9}')`,
+        '残留 shared_files': `shared_files where class_ids && array['${C9}']::uuid[] or class_id = '${C9}'`,
+        '悬空 schedule_items': `schedule_items where class_id = '${C9}' or (scope = 'class' and class_id is null)`,
+        '教室端行': `classroom_accounts where class_id = '${C9}'`,
+        '教室端设备行': `classrooms where class_id = '${C9}'`,
+        '任教关系': `class_subjects where class_id = '${C9}'`,
+        '走班班成员': `class_members where class_id = '${C9}'`,
+        '学生选科': `student_subjects where student_id not in (select id from students)`,
+        '学生': `students where class_id = '${C9}'`,
+        '作业档案': `assignments where class_id = '${C9}'`,
+        '呼叫记录': `calls where class_id = '${C9}'`,
+        '考试评分行': `exam_scores where class_id = '${C9}'`,
+        '通知的年级收件人': `notice_targets where grade_id = '${G23}'`,
+        '班级': `classes where grade_id = '${G23}'`,
+        '年级': `grades where id = '${G23}'`,
+      }
+      let allZero = true
+      const nonzero = []
+      for (const [label, sql] of Object.entries(checks)) {
+        const n = await count(sql)
+        if (n !== 0) {
+          allZero = false
+          nonzero.push(`${label}=${n}`)
+        }
+      }
+      ok(
+        'T6c：🔴 **清点表逐项 = 0**（16 项，用真查询逐项核）',
+        allZero,
+        nonzero.join('、'),
+      )
+      ok(
+        'T6d：报告里的 `checks` 也逐项为 0（页面读的就是它）',
+        Object.values(del.json.report?.checks ?? {}).every((v) => Number(v) === 0),
+        JSON.stringify(del.json.report?.checks),
+      )
+      eq(
+        'T6e：教室端账号被服务端删掉了（`auth.users` 那一行）—— 不留"能登录但读不到东西"的账号',
+        [authUserDeletes.includes(ROOM9), await count(`auth.users where id = '${ROOM9}'`)],
+        [true, 0],
+      )
+      eq(
+        'T6f：整行被删的共享文件，在对象存储里的对象也被删了（否则留下不可达对象）',
+        storageDeletes.some((p) => p.includes('p4-test')),
+        true,
+      )
+      eq(
+        'T6g：另一个年级的年级主任身份**没有**被误删（只有本届的被撤回）',
+        await count(`teacher_roles where teacher_id = '${OTHER_HEAD}' and role = 'grade_head'`),
+        1,
+      )
+
+      /* ---------------- T7：删除幂等 ---------------- */
+      const delAgain = await post('tok-super', {
+        action: 'delete',
+        gradeId: G23,
+        confirmName: '高三（2023 级）',
+      })
+      eq('T7a：对同一个已删年级再删一次 → 200、`alreadyDeleted=true`', [delAgain.status, delAgain.json.alreadyDeleted], [200, true])
+      eq('T7b：它**不改动任何东西**（报告是上一次那一份）', delAgain.json.report?.deletedAt, del.json.report?.deletedAt)
+      eq('T7c：也没再动教室端账号 / 存储对象（幂等不是"重做一遍"）', [authUserDeletes.filter((x) => x === ROOM9).length, delAgain.json.classroomAccounts?.total], [1, 0])
+
+      /* ---------------- 权限：写入口只有服务端 ---------------- */
+      const priv = async (label, sig) =>
+        one(
+          await db.query(
+            `select has_function_privilege('authenticated', 'public.${label}(${sig})', 'execute') as p`,
+          ),
+        ).p
+      for (const [label, sig] of [
+        ['promote_grades', 'uuid'],
+        ['grade_backup', 'uuid,uuid'],
+        ['grade_backup_mail', 'uuid,uuid,boolean,text'],
+        ['grade_delete', 'uuid,uuid,text'],
+        ['grade_backup_payload', 'uuid,uuid'],
+        ['grade_backup_by_token', 'text'],
+        ['can_promote_grades_for', 'uuid'],
+        ['can_delete_grade_for', 'uuid,uuid'],
+      ]) {
+        eq(`T8：\`authenticated\` 对 ${label} **没有 execute 权限**（写入口只有服务端；\`_for\` 一律 revoke）`, await priv(label, sig), false)
+      }
+      eq('T8b：判据的**裸版**可以被 authenticated 调用（前端要靠它决定摆不摆按钮）', await priv('can_delete_grade', 'uuid'), true)
+      eq('T8c：`promotion_overview()` 可以被 authenticated 调用', await priv('promotion_overview', ''), true)
+      eq(
+        'T8d：两张新表 `authenticated` **读都读不到**（备份里有姓名与序列号）',
+        [
+          one(await db.query(`select has_table_privilege('authenticated','public.grade_removals','SELECT') as p`)).p,
+          one(await db.query(`select has_table_privilege('authenticated','public.grade_promotions','SELECT') as p`)).p,
+        ],
+        [false, false],
+      )
+
+      /* ---------------- 前端纯逻辑（真源码） ---------------- */
+      const plan = gp.promotePlan([
+        { id: 'x', name: '高一', cohort: '2026', stage: 1, fullName: '高一（2026 级）', classes: 7, students: 330, mailOk: false, mailAt: null, mailReason: '', backupAt: null, removedAt: null, removalId: '', canDelete: false, isSuper: false },
+        { id: 'y', name: '高三', cohort: '2024', stage: 3, fullName: '高三（2024 级）', classes: 3, students: 126, mailOk: false, mailAt: null, mailReason: '', backupAt: null, removedAt: null, removalId: '', canDelete: false, isSuper: false },
+      ])
+      eq('T9a：预览表：高一→高二 / 高三→毕业删除', [plan[0].to, plan[1].to], ['高二', '毕业删除'])
+      eq('T9b：预览表里 `kind`：一个 promote、一个 graduate', [plan[0].kind, plan[1].kind], ['promote', 'graduate'])
+      eq('T9c：二次确认的比对（空格不算差异）：`高三（2024级）` 也算对', gp.confirmMatches('高三（2024级）', '高三（2024 级）'), true)
+      eq('T9d（反向对照）：空 / 少一个字的都算不对', [gp.confirmMatches('', '高三（2024 级）'), gp.confirmMatches('高三', '高三（2024 级）')], [false, false])
+      const rows = gp.checklistRows(del.json.report)
+      eq('T9e：清点表 16 行、逐行 `ok`（页面显示"已清空"）', [rows.length, rows.every((r) => r.ok)], [16, true])
+      eq('T9f：三态：503 → `missing`（去跑 SQL，不是"你没权限"）', gp.readOverview({ ok: false, status: 503, data: { message: '第 29 段' } }).verdict, 'missing')
+      eq('T9g：三态：`allowed:false` → `denied`（只有这一档说"只能看"）', gp.readOverview({ ok: true, status: 200, data: { allowed: false, grades: [] } }).verdict, 'denied')
+      eq('T9h：三态：200 但没有结论 → `error`（不许静默当成没权限）', gp.readOverview({ ok: true, status: 200, data: {} }).verdict, 'error')
+
+      /* ---------------- §29 没跑（函数不存在）时的人话 ---------------- */
+      rpcMissing = true
+      const noFn = await post('tok-super', { action: 'promote' })
+      rpcMissing = false
+      eq('T10：§29 没跑 → 503（不是 200 / 不是"你没权限"）', noFn.status, 503)
+      ok('T10b：那句人话里写着"第 29 段"', /第 29 段/.test(String(noFn.json.message)), String(noFn.json.message))
+    } finally {
+      globalThis.fetch = realFetch12
     }
   }
 

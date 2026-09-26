@@ -3528,14 +3528,20 @@ await withLock(async () => {
        *    它守的是"**在册教师 且 不是教室端** 才能给管理员发消息"，
        *    被**用户反馈**（`/api/feedback`）与**备份通知**（`/api/mail` 的 `backup`）**共用**
        *    （一个判据一种语义：不为第二条路再发明一个名字相近的函数）。
+       * 🆕 23 → **25**：`can_promote_grades_for` / `can_delete_grade_for`（**P4**，`schema.sql` §29）——
+       *    提档与毕业删除的判据（"教导处/超管能不能提档"、"超管能不能删这个年级"）。
+       *    它们**必须**有 `_for` 版：§29 的写入口是 `revoke … from authenticated` 的，
+       *    服务端只能用 service_role 调，而 service_role 那条路上 `auth.uid()` 是 NULL ——
+       *    判据只能靠**显式传进来的 `p_actor`**（`grade-checks` 第十二节的 T1/T4/T5 就是拿它验的）。
        *    这一行只是"数一数"的记账：**判据别只写裸版**这条纪律一个字没变。
        */
       const forNames = forCount.rows.map((r) => r.proname)
       ok(
-        '`_for` 变体一共 23 个（13 + 管理架构轮 8 个 + 公告轮 1 个 `can_publish_announcement_for`' +
-          ' + 🆕管理台第二期 1 个 `can_contact_admin_for`）' +
+        '`_for` 变体一共 25 个（13 + 管理架构轮 8 个 + 公告轮 1 个 `can_publish_announcement_for`' +
+          ' + 管理台第二期 1 个 `can_contact_admin_for`' +
+          ' + 🆕P4 2 个 `can_promote_grades_for` / `can_delete_grade_for`）' +
           ' —— id 变体也算判据的两件套，新增判据别只写裸版',
-        forNames.length === 23,
+        forNames.length === 25,
         `实际 ${forNames.length} 个：${forNames.join('、')}`,
       )
       const hasBare = await db.query(`select has_function_privilege('authenticated', 'public.can_edit_exam(uuid[], text, text)', 'EXECUTE') as v`)

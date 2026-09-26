@@ -373,9 +373,11 @@ export const IDENTITY_TAG_STYLE: CSSProperties = {
 /**
  * 今天的入口清单（`key` 与 `PAGES` 登记表、与方案 §2.2 矩阵**逐行对应**）。
  *
- * ⚠️ 这一组 key 里有 4 个是**方案里预备、今天还没有页面**的
- * （`/grades`、`/grades/promote`、`/settings/terms`、`/admin`）；
- * `/admin` 的路由其实**已经在了**（超管面板第一期），只是入口在 `Settings.tsx` 里。
+ * ⚠️ 这一组 key 里有 3 个是**方案里预备、今天还没有页面**的
+ * （`/settings/terms`、`/admin/probes`…）；
+ * ⚠️ 2026-10-01（P4）：`/grades/promote` 的页面**已经做出来了**
+ * （`pages/GradePromote.tsx`，路由 `/grades/promote`），
+ * 这一条从"预备"变成真入口 —— 与 `/grades`（P6）/ `/settings/terms`（P3）同一条路。
  * 它们现在登记在这里是为了"加页面时不用回头看方案"，
  * `nav-checks.mjs` 的 D1 用 `PAGES` 的 `live` 字段把"已落地 / 规划中"分开核对。
  */
@@ -491,7 +493,8 @@ export const ENTRIES: Record<EntryKey, EntryRule> = {
     label: '年级管理',
     visibleFor: (roles) => hasManagingRole(roles) || seesTeachingData(roles),
   },
-  // ★ 将来（同方案 §4.2.5）：提档 = `is_school_admin()`（super + 教务处），**年级主任 ❌**。
+  // ★ ✅ 2026-10-01（P4）落地：提档 = `is_school_admin()`（super + 教务处），**年级主任 ❌**；
+  //    地址同时从 `/grades/:id/promote` 改成 `/grades/promote`（提档是全校一年一次的动作）。
   '/grades/promote': { label: '提档与毕业', visibleFor: canManageTeachers },
   /*
    * ★ 将来：**super / admin / 年级主任**（`hasManagingRole`）。

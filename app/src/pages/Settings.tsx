@@ -13,6 +13,7 @@ import {
   IconSend,
   IconSliders,
   IconSwap,
+  IconTarget,
   IconUpload,
   IconUsers,
   IconWifi,
@@ -384,6 +385,43 @@ export default function Settings() {
                   <span style={{ fontSize: 14.5, fontWeight: 620 }}>年级管理</span>
                   <span className="mt-0.5 block" style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
                     开学准备：录名单 · 建班 · 班型 · 选科 · 身份
+                  </span>
+                </span>
+                <IconChevronRight size={16} />
+              </button>
+            ) : null}
+            {/*
+              🆕 2026-10-01「提档 + 毕业删除」（P4）：**提档与毕业**这一行。
+              🔴 判据与上面那一行同款 —— 读 `ENTRIES`（`entryVisible('/grades/promote', …)`，
+                 表里那一格是 `canManageTeachers`：最高管理员 / 教务处 / 办公室主任），
+                 **不在这里另写一套**（M1/M2）。
+              ⚠️ 与 `canManage` 一样加了 `isRemote`：这一页的**写**全走 `/api/grade-promote`，
+                 本地演示模式没有服务端 —— 摆一个点了必然失败的入口是"编出来的按钮"。
+            */}
+            {isRemote && entryVisible('/grades/promote', myRoles) ? (
+              <button
+                type="button"
+                className="row"
+                style={{ padding: 14 }}
+                onClick={() => navigate('/grades/promote')}
+              >
+                <span
+                  className="grid place-items-center shrink-0"
+                  style={{
+                    width: 36,
+                    height: 36,
+                    border: '1px solid var(--color-line2)',
+                    borderRadius: 4,
+                    background: 'var(--color-surface2)',
+                    color: 'var(--color-accent)',
+                  }}
+                >
+                  <IconTarget size={18} />
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span style={{ fontSize: 14.5, fontWeight: 620 }}>提档与毕业</span>
+                  <span className="mt-0.5 block" style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
+                    学年提档（高一→高二→高三）· 高三毕业的备份与删除
                   </span>
                 </span>
                 <IconChevronRight size={16} />

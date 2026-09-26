@@ -6775,7 +6775,917 @@ select public.p3_backfill_terms_and_cohorts();
 --
 --  ⑤ 提档只改 `stage`（**年级 id 不变** → 班级的 `grade_id` 一个字都不用改）：
 --  -- select c.id, c.grade_id from classes c join grades g on g.id = c.grade_id where g.cohort = '2025';
---  -- update grades set stage = 3 where cohort = '2025';   -- 提档（P4 会做成函数）
+--  -- select public.promote_grades('<你的 teacher id>');   -- 提档（P4 已做成函数，见 §29）
 --  -- select c.id, c.grade_id from classes c join grades g on g.id = c.grade_id where g.cohort = '2025';
 --  -- 期望：两边的 grade_id **逐字相同**
+-- ============================================================
+
+-- ============================================================
+--  29. 提档 + 毕业删除（P4，2026-10-01）
+--      「一年一度把 `stage` +1 · 高三毕业**真删**一个年级的全部数据」
+-- ------------------------------------------------------------
+--  施工图：`选科走班实施计划.md` 的 **P4 段**；决策：`年级管理与选科走班方案.md`
+--  §2.6（毕业删除整节）/ §2.7（身份撤回的边界）/ §4.2.4(3)(4)（状态机 + 两个事务）/
+--  §4.2.5（权限矩阵）/ §4.2.6（每一步的校验与防呆）；
+--  用户拍板：**Q10 = A（真删，不归档、没有冷却期）· Q16（提档不撤回任何身份）·
+--  Q30（撤回只发生在毕业删除那一次，而且**随删除立刻**撤）**。
+--
+--  🔴 四条口径（改这一段之前先读这里）：
+--    ① **提档只改 `stage`，年级 id 不变** —— 班级 / 走班班 / 课表的 `grade_id`
+--       一个字都不用改（§28.3 的全部收益）。**一个学年只提一次**（`grade_promotions`
+--       的唯一键 `(school_id, academic_year)` 就是幂等的根据）；重跑**一行数据都不改**。
+--    ② **提档不撤回任何身份**（Q16）：这个事务里**没有** `delete from teacher_roles` ——
+--       原方案 §4.2.4(3) 的第 4 步（撤回年级主任 / 班主任）**搬到了 `grade_delete()` 里**。
+--    ③ **毕业删除是不可逆的 DELETE**（Q10 = A）：保护只有
+--       **备份已发出**（`grade_removals.mail_ok`）+ **逐字输入年级全名**
+--       + **只有 `is_super_admin()`**。**没有归档、没有冷却期、"删除"就是 DELETE。**
+--    ④ 🔴 **"清干净不留残留"= 一张清点表**（§2.6）：凡是**级联删不到**的都要显式删 ——
+--       · `exams.class_ids` 是 `uuid[]`、**建不了外键** → 会留下"一条分数都没有的孤儿考试档案"；
+--       · `teacher_roles.scope_id` **没有外键** → 会留下"管着一个不存在年级"的身份行；
+--       · 🆕 `shared_files.class_ids` **同样是 `uuid[]`**（§19.1）—— 这是**本轮新发现的
+--         第三类数组残留**（§2.6 的清点表只列了前两类）。处理方式：把本届班的 id 从数组里
+--         **减掉**（不是删行：一份文件可能同时发给两个年级），减空了才删行，
+--         并把 `storage_path` 交给服务端删对象存储（否则存储里留下不可达对象）；
+--       · `schedule_items.class_id` 是 **`on delete set null`**（不是 cascade）→ 悬空排课行；
+--       其余 11 处由 `classes` / `students` / `exams` / `grades` 的 cascade 带走，**逐条校验**。
+--
+--  ⚠️ **写入口一律只有服务端能调**（下面逐个 `revoke … from public, anon, authenticated`）：
+--     `app/functions/api/grade-promote.ts` 用 service_role 调它们，并把**显式 `p_actor`**
+--     传进来 —— 那个 id 是 Function 拿调用者 JWT 问过 `/auth/v1/user` 的（§18.1 的两件套）。
+--     🔴 **为什么不照 §27.12 那样"让 Function 拿调用者 JWT 去调"**：那些写函数已经被
+--     `revoke … from authenticated`，而 PostgREST 以 `authenticated` 角色执行 ——
+--     拿调用者 JWT 调**必然 42501**（`grade-setup.ts` 的三个写动作今天就是这个形状，
+--     已登记在报告里）。所以本段的写函数走"service_role + 显式人"，
+--     判据仍然是**数据库说了算**（`*_for(p_actor, …)`）。
+-- ============================================================
+
+-- -------- 29.1 两张新表（**都必须比 `grades` 行活得久**）--------
+
+-- 提档的**幂等根据 + 审计**：一个学校一个学年一行。
+create table if not exists grade_promotions (
+  id            uuid primary key default gen_random_uuid(),
+  school_id     uuid not null references schools (id) on delete cascade,
+  -- 学年名，口径与 `academic_years.name` 一致（形如 `2026-2027`，由 `current_academic_year()` 推）
+  academic_year text not null,
+  -- 谁提的档。**故意没有外键**：审计行不该因为教师账号被删而消失
+  actor_id      uuid,
+  promoted_at   timestamptz not null default now(),
+  -- 提档前后的 `{id, name, cohort, stage}` 快照（改了什么，一眼看得见）
+  detail        jsonb not null default '{}'::jsonb
+);
+create unique index if not exists grade_promotions_school_year_key
+  on grade_promotions (school_id, academic_year);
+
+-- 毕业删除的**完整状态**：备份（payload）→ 发信 → 删除报告。
+--  🔴 `grade_id` / `school_id` **故意没有外键** —— 年级行删掉以后，这一行必须还在
+--     （"这一届什么时候删的、删掉了什么、备份存哪、链接还有效吗"都得查得到）。
+--  🔴 `payload` 里有**学生姓名与序列号** → 这张表对 anon / authenticated
+--     **一个权限都不给**（RLS 开着 + 一条策略都没有 + 下面 revoke），只有服务端读得到。
+create table if not exists grade_removals (
+  id               uuid primary key default gen_random_uuid(),
+  grade_id         uuid not null,
+  school_id        uuid not null,
+  cohort           text not null default '',
+  -- 删除前记下的年级全名（年级行没了以后，界面与报告要靠它说话）
+  grade_name       text not null default '',
+  -- 二次确认要逐字输入的那串字（服务端算出来的唯一一份，前端只负责显示与回传）
+  confirm_name     text not null default '',
+  created_at       timestamptz not null default now(),
+  created_by       uuid,
+  payload          jsonb,
+  payload_bytes    bigint not null default 0,
+  -- 校验和（`md5`，**不是**安全哈希 —— 它只用来回答"这一份是不是那一份"）
+  payload_md5      text not null default '',
+  -- 备份那一刻的逐项条数（邮件与"给教导处弹提示"都用它，**不含任何个人信息**）
+  counts           jsonb not null default '{}'::jsonb,
+  mail_ok          boolean not null default false,
+  mail_at          timestamptz,
+  mail_reason      text not null default '',
+  token            text not null default '',
+  expires_at       timestamptz,
+  download_count   int not null default 0,
+  last_download_at timestamptz,
+  deleted_at       timestamptz,
+  deleted_by       uuid,
+  report           jsonb,
+  -- 删行时收集的对象存储路径（服务端拿它删 storage 里的对象）
+  storage_paths    jsonb not null default '[]'::jsonb
+);
+create unique index if not exists grade_removals_grade_key on grade_removals (grade_id);
+create unique index if not exists grade_removals_token_key on grade_removals (token) where token <> '';
+
+-- -------- 29.2 小工具与判据（**定义在引用它的东西之前**）--------
+
+-- 「这一天属于哪个学年」= 北京时间 **9/1 起算**的学年名（形如 `2026-2027`）。
+--  ⚠️ 与 `academic_years.name` **同一个口径**（教导处在 `/settings/terms` 设的就是它）——
+--     这样 `grade_promotions.academic_year` 与学期表对得上。
+create or replace function public.academic_year_name_of(p_date date)
+returns text
+language sql
+immutable
+as $$
+  select case
+           when p_date is null then null
+           when extract(month from p_date) >= 9
+             then to_char(p_date, 'YYYY') || '-' || to_char(p_date + interval '1 year', 'YYYY')
+           else to_char(p_date - interval '1 year', 'YYYY') || '-' || to_char(p_date, 'YYYY')
+         end;
+$$;
+
+-- 「现在是哪个学年」= 按**北京时间**推（与前端 `beijingNow()` 同源；别用 `current_date`）。
+create or replace function public.current_academic_year()
+returns text
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select public.academic_year_name_of(public.beijing_today());
+$$;
+
+-- 年级全名（**二次确认要逐字输入的那串字**，也是界面上显示的名字）。
+--  🔴 **只有这一处定义**：前端不另写一套渲染，服务端算出来、前端显示它、回传它。
+create or replace function public.grade_full_name(p_grade_id uuid)
+returns text
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select coalesce((
+    select (case g.stage when 1 then '高一' when 2 then '高二' when 3 then '高三'
+                         else '学段' || g.stage::text end)
+           || (case when coalesce(g.cohort, '') = '' then '（届未知）'
+                    else '（' || g.cohort || ' 级）' end)
+      from grades g
+     where g.id = p_grade_id
+  ), '');
+$$;
+
+-- 我能不能提档：**教导处 + 最高管理员**（方案 §4.2.5 那一行；年级主任 ❌）。
+create or replace function public.can_promote_grades_for(p_uid uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select public.is_school_admin_for(p_uid);
+$$;
+
+create or replace function public.can_promote_grades()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select public.can_promote_grades_for(auth.uid());
+$$;
+
+-- 我能不能**毕业删除**这个年级：🔴 `is_super_admin()` **且** 备份已成功发出
+--  **且** 备份链接还没过期 **且** 这个年级还在。
+--  ⚠️ "已二次确认"**不在这里**：那一件事没有持久状态（它是"这一次调用里输入的年级全名对不对"），
+--     判在 `grade_delete()` 里 —— 一件事只有一个判定入口，但它是**调用时**的判定。
+create or replace function public.can_delete_grade_for(p_uid uuid, p_grade_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select public.is_super_admin_for(p_uid)
+     and exists (select 1 from grades g where g.id = p_grade_id)
+     and exists (
+           select 1 from grade_removals r
+            where r.grade_id = p_grade_id
+              and r.mail_ok
+              and r.deleted_at is null
+              and (r.expires_at is null or r.expires_at > now())
+         );
+$$;
+
+create or replace function public.can_delete_grade(p_grade_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select public.can_delete_grade_for(auth.uid(), p_grade_id);
+$$;
+
+-- -------- 29.3 只读：提档预览 + 待删提示（**前端只读它**）--------
+--  返回的都是**非个人**的东西（年级 / 条数 / 备份状态）。非管理身份一律
+--  `{allowed:false, grades:[]}`（他们本来也到不了那一页，这里是纵深防御）。
+create or replace function public.promotion_overview()
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = public
+as $$
+declare
+  v_uid  uuid := auth.uid();
+  v_today date := public.beijing_today();
+  v_year text := public.academic_year_name_of(v_today);
+  v_school uuid;
+  v_promoted timestamptz;
+  v_grades jsonb;
+begin
+  if not public.is_school_admin_for(v_uid) then
+    return jsonb_build_object('allowed', false, 'grades', '[]'::jsonb);
+  end if;
+
+  select id into v_school from schools order by created_at limit 1;
+  if v_school is null then
+    return jsonb_build_object('allowed', false, 'grades', '[]'::jsonb, 'message', '还没有学校行');
+  end if;
+
+  select promoted_at into v_promoted
+    from grade_promotions
+   where school_id = v_school and academic_year = v_year;
+
+  select coalesce(jsonb_agg(jsonb_build_object(
+           'id',        g.id,
+           'name',      g.name,
+           'cohort',    g.cohort,
+           'stage',     g.stage,
+           'fullName',  public.grade_full_name(g.id),
+           'classes',   (select count(*) from classes c where c.grade_id = g.id),
+           'students',  (select count(*) from students s
+                           join classes c2 on c2.id = s.class_id
+                          where c2.grade_id = g.id),
+           -- 备份那一行（服务端下载备份要用它的 id；`deleted_at` 不为空 = 已经删过了）
+           'removalId', r.id,
+           'mailOk',    coalesce(r.mail_ok, false),
+           'mailAt',    r.mail_at,
+           'mailReason', coalesce(r.mail_reason, ''),
+           'backupAt',  r.created_at,
+           'removedAt', r.deleted_at
+         ) order by g.stage, g.cohort), '[]'::jsonb)
+    into v_grades
+    from grades g
+    left join grade_removals r on r.grade_id = g.id
+   where g.school_id = v_school;
+
+  return jsonb_build_object(
+    'allowed',      true,
+    'today',        v_today,
+    'academicYear', v_year,
+    -- 提档窗口：**每年 9/1 之后**（9 月之前跑提档 = 让全年级白读一年，必须拦住）
+    'windowOpen',   extract(month from v_today) >= 9,
+    'promotedAt',   v_promoted,
+    'grades',       v_grades
+  );
+end $$;
+
+-- -------- 29.4 🔑 提档（**一个事务 · 幂等 · 只改 `stage`**）--------
+create or replace function public.promote_grades(p_actor uuid)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_school uuid;
+  v_year   text := public.current_academic_year();
+  v_rows   int := 0;
+  v_before jsonb;
+  v_after  jsonb;
+  v_detail jsonb;
+begin
+  if not public.can_promote_grades_for(p_actor) then
+    raise exception '只有教导处 / 最高管理员能提档';
+  end if;
+  if extract(month from public.beijing_today()) < 9 then
+    raise exception '提档在每年 9 月 1 日之后做 —— 今天是 %，还没到那一年', public.beijing_today();
+  end if;
+
+  select id into v_school from schools order by created_at limit 1;
+  if v_school is null then
+    raise exception '还没有学校行，先跑 schema.sql 第 10 段';
+  end if;
+
+  /*
+   * 🔴 **幂等**：这一个学年提过 → 直接返回，**一行数据都不改**。
+   *    根据是 `grade_promotions` 的唯一键（(school_id, academic_year)），
+   *    不是"猜 stage 跑到哪了" —— 后者在"高一高二并存"的库里一定会猜错。
+   */
+  select detail into v_detail
+    from grade_promotions
+   where school_id = v_school and academic_year = v_year;
+  if found then
+    return jsonb_build_object(
+      'ok', true, 'alreadyPromoted', true, 'academicYear', v_year, 'promoted', 0,
+      'before', coalesce(v_detail -> 'before', '[]'::jsonb),
+      'after',  coalesce(v_detail -> 'after',  '[]'::jsonb));
+  end if;
+
+  select coalesce(jsonb_agg(jsonb_build_object(
+           'id', g.id, 'name', g.name, 'cohort', g.cohort, 'stage', g.stage)
+           order by g.stage, g.cohort), '[]'::jsonb)
+    into v_before
+    from grades g where g.school_id = v_school;
+
+  insert into grade_promotions (school_id, academic_year, actor_id)
+  values (v_school, v_year, p_actor);
+
+  /*
+   * 🔴 **只有这一句改数据**：`stage + 1`，而且只对 1 / 2 提（高三停在 3，
+   *    等 §29.5 的毕业删除）。年级 id 不变 → 班级 / 走班班 / 课表的 `grade_id` 不用改。
+   * 🔴 这里**没有** `delete from teacher_roles`（Q16：提档不撤回任何身份）。
+   */
+  update grades set stage = stage + 1
+   where school_id = v_school and stage in (1, 2);
+  get diagnostics v_rows = row_count;
+
+  select coalesce(jsonb_agg(jsonb_build_object(
+           'id', g.id, 'name', g.name, 'cohort', g.cohort, 'stage', g.stage)
+           order by g.stage, g.cohort), '[]'::jsonb)
+    into v_after
+    from grades g where g.school_id = v_school;
+
+  update grade_promotions
+     set detail = jsonb_build_object('before', v_before, 'after', v_after, 'rows', v_rows)
+   where school_id = v_school and academic_year = v_year;
+
+  return jsonb_build_object(
+    'ok', true, 'alreadyPromoted', false, 'academicYear', v_year, 'promoted', v_rows,
+    'before', v_before, 'after', v_after);
+end $$;
+
+-- -------- 29.5 🔑 备份（**payload 的唯一构造处**，服务端与下载链接共用）--------
+--  ⚠️ 里面一律写 `array(select id from classes where grade_id = p_grade_id)`，**不写**
+--     `(select coalesce(array_agg(...), '{}'))` 再 `= any (…)` ——
+--     后者会被 PostgreSQL 解析成 `expr = ANY (子查询)`（= `IN (子查询)`），
+--     子查询那一列是 **uuid[]**，于是报 `operator does not exist: uuid = uuid[]`
+--     （实测：建函数那一刻就断，整份 schema 跑不过去）。`array(子查询)` 才是"数组表达式"。
+create or replace function public.grade_backup_payload_json(p_grade_id uuid)
+returns jsonb
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  with c as (
+    select * from classes where grade_id = p_grade_id
+  ), s as (
+    select st.* from students st join c on c.id = st.class_id
+  ), ex as (
+    select e.* from exams e
+     where e.class_ids && array(select c2.id from c c2)
+  ), tids as (
+    select array(select c3.id from c c3) as v
+  )
+  select jsonb_build_object(
+    'format', 'grade-backup.v1',
+    'at', now(),
+    'grade', (select to_jsonb(g) from grades g where g.id = p_grade_id),
+    'counts', jsonb_build_object(
+      'classes',      (select count(*) from c),
+      'students',     (select count(*) from s),
+      'assignments',  (select count(*) from assignments a where a.class_id in (select id from c)),
+      'calls',        (select count(*) from calls x where x.class_id in (select id from c)),
+      'exams',        (select count(*) from ex),
+      'examScores',   (select count(*) from exam_scores es where es.class_id in (select id from c)),
+      'classSubjects', (select count(*) from class_subjects cs where cs.class_id in (select id from c)),
+      'classMembers', (select count(*) from class_members cm where cm.class_id in (select id from c)),
+      'studentSubjects', (select count(*) from student_subjects ss
+                           where ss.student_id in (select id from s)),
+      'scheduleItems', (select count(*) from schedule_items si where si.class_id in (select id from c)),
+      'classroomAccounts', (select count(*) from classroom_accounts ca where ca.class_id in (select id from c)),
+      'sharedFiles',  (select count(*) from shared_files f
+                        where coalesce(f.class_ids, '{}'::uuid[]) && (select v from tids)
+                           or f.class_id in (select id from c)),
+      'teacherRoles', (select count(*) from teacher_roles r
+                        where r.scope_id = p_grade_id
+                           or (r.scope_type = 'class' and r.scope_id in (select id from c)))
+    ),
+    'tables', jsonb_build_object(
+      'grades',     coalesce((select jsonb_agg(to_jsonb(g)) from grades g where g.id = p_grade_id), '[]'::jsonb),
+      'classes',    coalesce((select jsonb_agg(to_jsonb(x)) from c x), '[]'::jsonb),
+      'students',   coalesce((select jsonb_agg(to_jsonb(x)) from s x), '[]'::jsonb),
+      'studentSubjects', coalesce((select jsonb_agg(to_jsonb(x)) from student_subjects x
+                                    where x.student_id in (select id from s)), '[]'::jsonb),
+      'classMembers', coalesce((select jsonb_agg(to_jsonb(x)) from class_members x
+                                 where x.class_id in (select id from c)
+                                    or x.student_id in (select id from s)), '[]'::jsonb),
+      'classSubjects', coalesce((select jsonb_agg(to_jsonb(x)) from class_subjects x
+                                  where x.class_id in (select id from c)), '[]'::jsonb),
+      'assignments', coalesce((select jsonb_agg(to_jsonb(x)) from assignments x
+                                where x.class_id in (select id from c)), '[]'::jsonb),
+      'calls',      coalesce((select jsonb_agg(to_jsonb(x)) from calls x
+                               where x.class_id in (select id from c)), '[]'::jsonb),
+      'exams',      coalesce((select jsonb_agg(to_jsonb(x)) from ex x), '[]'::jsonb),
+      'examScores', coalesce((select jsonb_agg(to_jsonb(x)) from exam_scores x
+                               where x.class_id in (select id from c)), '[]'::jsonb),
+      'scheduleItems', coalesce((select jsonb_agg(to_jsonb(x)) from schedule_items x
+                                  where x.class_id in (select id from c)), '[]'::jsonb),
+      'classroomAccounts', coalesce((select jsonb_agg(to_jsonb(x)) from classroom_accounts x
+                                      where x.class_id in (select id from c)), '[]'::jsonb),
+      'classrooms', coalesce((select jsonb_agg(to_jsonb(x)) from classrooms x
+                               where x.class_id in (select id from c)), '[]'::jsonb),
+      'sharedFiles', coalesce((select jsonb_agg(to_jsonb(x)) from shared_files x
+                                where coalesce(x.class_ids, '{}'::uuid[]) && (select v from tids)
+                                   or x.class_id in (select id from c)), '[]'::jsonb),
+      'teacherRoles', coalesce((select jsonb_agg(to_jsonb(x)) from teacher_roles x
+                                 where x.scope_id = p_grade_id
+                                    or (x.scope_type = 'class' and x.scope_id in (select id from c))), '[]'::jsonb)
+    )
+  );
+$$;
+
+-- -------- 29.6 🔑 生成备份（**一个事务**：payload + 链接令牌 + 状态行）--------
+--  ① 谁：教导处 / 最高管理员（备份是防呆的第一步，不是删除本身）
+--  ② 幂等：一个年级一行（`unique (grade_id)`），重做 = 覆盖并把 `mail_ok` 打回 false
+--     （**必须重新发信**：新备份 = 新链接）
+create or replace function public.grade_backup(p_actor uuid, p_grade_id uuid)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_full    text;
+  v_cohort  text;
+  v_school  uuid;
+  v_payload jsonb;
+  v_token   text;
+  v_h       text;
+  v_id      uuid;
+  v_expires timestamptz := now() + interval '90 days';
+  v_paths   jsonb;
+begin
+  if not public.is_school_admin_for(p_actor) then
+    raise exception '只有教导处 / 最高管理员能生成毕业备份';
+  end if;
+
+  select public.grade_full_name(g.id), g.cohort, g.school_id
+    into v_full, v_cohort, v_school
+    from grades g where g.id = p_grade_id;
+  if coalesce(v_full, '') = '' then
+    raise exception '这个年级不存在（可能已经删了）';
+  end if;
+
+  v_payload := public.grade_backup_payload_json(p_grade_id);
+  v_paths   := coalesce(v_payload #> '{tables,sharedFiles}', '[]'::jsonb);
+
+  /*
+   * 🔴 令牌**不许出现连续 7 位数字**：`_lib/mail.ts` 的正文体检把"7 位数字"
+   *    当成序列号形状，命中就**整封信不发**（`reason:'pii_blocked'`）——
+   *    而裸 uuid 的十六进制段里出现 7 连数字是有概率的，那就成了
+   *    "有时发得出去、有时发不出去"（最坏的一种失败：删除流程随机卡住）。
+   *    所以：6 位一组、组间插一个字母（每组最多 6 位数字 → 永远不会有 7 连）。
+   */
+  v_h := replace(gen_random_uuid()::text || replace(gen_random_uuid()::text, '-', ''), '-', '');
+  v_token := 'bk' || substr(v_h, 1, 6) || 'x' || substr(v_h, 7, 6) || 'x'
+                  || substr(v_h, 13, 6) || 'x' || substr(v_h, 19, 6) || 'x' || substr(v_h, 25, 6);
+
+  insert into grade_removals (
+    grade_id, school_id, cohort, grade_name, confirm_name, created_by,
+    payload, payload_bytes, payload_md5, counts, token, expires_at, storage_paths,
+    mail_ok, mail_at, mail_reason)
+  values (
+    p_grade_id, v_school, v_cohort, v_full, v_full, p_actor,
+    v_payload, octet_length(v_payload::text), md5(v_payload::text),
+    coalesce(v_payload -> 'counts', '{}'::jsonb), v_token, v_expires, v_paths,
+    false, null, '')
+  on conflict (grade_id) do update
+     set cohort        = excluded.cohort,
+         grade_name    = excluded.grade_name,
+         confirm_name  = excluded.confirm_name,
+         created_at    = now(),
+         created_by    = excluded.created_by,
+         payload       = excluded.payload,
+         payload_bytes = excluded.payload_bytes,
+         payload_md5   = excluded.payload_md5,
+         counts        = excluded.counts,
+         token         = excluded.token,
+         expires_at    = excluded.expires_at,
+         storage_paths = excluded.storage_paths,
+         mail_ok       = false,
+         mail_at       = null,
+         mail_reason   = ''
+  returning id into v_id;
+
+  return jsonb_build_object(
+    'ok', true,
+    'removalId', v_id,
+    'token', v_token,
+    'expiresAt', v_expires,
+    'confirmName', v_full,
+    'gradeName', v_full,
+    'cohort', v_cohort,
+    'checksum', md5(v_payload::text),
+    'byteSize', octet_length(v_payload::text),
+    'counts', coalesce(v_payload -> 'counts', '{}'::jsonb));
+end $$;
+
+-- 登记"信发出去了没有"（服务端在 `sendAuditedMail()` 之后调它）。
+--  🔴 **它自己不是安全边界**：真正的闸门是 `is_super_admin()` + 逐字全名。
+--     它的作用是让"备份没发出 = 删不了"这条规则**在数据库里有据可查**。
+create or replace function public.grade_backup_mail(
+  p_actor uuid,
+  p_removal_id uuid,
+  p_ok boolean,
+  p_reason text
+) returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if not public.is_school_admin_for(p_actor) then
+    raise exception '只有教导处 / 最高管理员能登记备份发信结果';
+  end if;
+  update grade_removals
+     set mail_ok     = coalesce(p_ok, false),
+         mail_at     = case when coalesce(p_ok, false) then now() else mail_at end,
+         mail_reason = coalesce(p_reason, '')
+   where id = p_removal_id;
+  if not found then
+    raise exception '找不到这条备份记录';
+  end if;
+  return jsonb_build_object('ok', true, 'mailOk', coalesce(p_ok, false));
+end $$;
+
+-- 服务端（超管）在页面上下载备份：判据 = 教导处 / 超管。
+create or replace function public.grade_backup_payload(p_actor uuid, p_removal_id uuid)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = public
+as $$
+declare
+  v_rec grade_removals;
+begin
+  if not public.is_school_admin_for(p_actor) then
+    raise exception '只有教导处 / 最高管理员能取备份';
+  end if;
+  select * into v_rec from grade_removals where id = p_removal_id;
+  if v_rec.id is null then
+    raise exception '找不到这条备份记录';
+  end if;
+  return jsonb_build_object(
+    'ok', true, 'gradeName', v_rec.grade_name, 'cohort', v_rec.cohort,
+    'deletedAt', v_rec.deleted_at, 'checksum', v_rec.payload_md5,
+    'byteSize', v_rec.payload_bytes, 'counts', v_rec.counts, 'payload', v_rec.payload);
+end $$;
+
+-- 邮件里那个**下载链接**（令牌即凭据，有效期是唯一的访问控制 —— §4.2.7 / U-14 = C）。
+--  🔴 **每一次下载都记一笔**（`download_count` / `last_download_at`）：
+--     备份会离开系统，出去以后只能靠这条记录回答"谁什么时候取过"。
+create or replace function public.grade_backup_by_token(p_token text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_rec grade_removals;
+begin
+  select * into v_rec from grade_removals where token = btrim(coalesce(p_token, ''));
+  if v_rec.id is null then
+    raise exception '这个下载链接不认识（重新生成过备份的链接会失效）';
+  end if;
+  if v_rec.expires_at is not null and v_rec.expires_at <= now() then
+    raise exception '这个下载链接已经过期（%）—— 让超管重新生成一份备份', v_rec.expires_at;
+  end if;
+  update grade_removals
+     set download_count = download_count + 1, last_download_at = now()
+   where id = v_rec.id;
+  return jsonb_build_object(
+    'ok', true, 'gradeName', v_rec.grade_name, 'cohort', v_rec.cohort,
+    'deletedAt', v_rec.deleted_at, 'checksum', v_rec.payload_md5,
+    'byteSize', v_rec.payload_bytes, 'counts', v_rec.counts, 'payload', v_rec.payload);
+end $$;
+
+-- -------- 29.7 🔴🔴 毕业删除（**一个事务 · 五道保护 · 清残留清点表**）--------
+--  保护（§2.6 的五步落成代码，**这就是全部保护** —— 没有归档、没有冷却期）：
+--    ① 备份成功（`grade_removals` 有行、有 payload）
+--    ② 备份**已发出**（`mail_ok`）—— 没发出 = 这一步走不下去
+--    ③ 给教导处弹提示：由 `promotion_overview()` + 页面横幅承担（数据层不做弹窗）
+--    ④ 二次确认：**逐字输入年级全名**（比对的就是 `grade_full_name()`）
+--    ⑤ 清干净：下面**逐项显式删** + 逐项后置校验（任何一项非 0 → **整件事回滚**）
+--  权限：**只有 `is_super_admin()`**（`can_delete_grade_for()` 问了同一个判据）。
+create or replace function public.grade_delete(
+  p_actor uuid,
+  p_grade_id uuid,
+  p_confirm_name text
+) returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_rec        grade_removals;
+  v_full       text;
+  v_cohort     text;
+  v_class_ids  uuid[] := '{}'::uuid[];
+  v_teachers   uuid[] := '{}'::uuid[];
+  v_shared_ids uuid[] := '{}'::uuid[];
+  v_accounts   jsonb := '[]'::jsonb;
+  v_storage    jsonb := '[]'::jsonb;
+  v_counts     jsonb;
+  v_checks     jsonb;
+  v_report     jsonb;
+  v_bad        text;
+  n_exams      int := 0;
+  n_roles      int := 0;
+  n_sched      int := 0;
+  n_classes    int := 0;
+  n_trim       int := 0;
+  n_files      int := 0;
+  n_tmp        int := 0;
+begin
+  /* ---- ① 权限：**只有超管** ---- */
+  if not public.is_super_admin_for(p_actor) then
+    raise exception '毕业删除只有最高管理员能做 —— 教导处可以备份、可以看提示，但不能删';
+  end if;
+
+  /* ---- 幂等：这个年级已经删过了 → 把上一次的报告原样返回，**一个字都不改** ---- */
+  if not exists (select 1 from grades g where g.id = p_grade_id) then
+    select * into v_rec from grade_removals where grade_id = p_grade_id;
+    if v_rec.id is not null and v_rec.deleted_at is not null then
+      return jsonb_build_object(
+        'ok', true, 'alreadyDeleted', true, 'gradeName', v_rec.grade_name,
+        'deletedAt', v_rec.deleted_at, 'confirmName', v_rec.confirm_name,
+        'report', v_rec.report, 'storagePaths', '[]'::jsonb,
+        'classroomAccounts', '[]'::jsonb);
+    end if;
+    raise exception '这个年级不存在（可能已经删了，也可能 id 不对）';
+  end if;
+
+  /* ---- ② 备份：存在 + 已发出 + 没过期 ---- */
+  select * into v_rec from grade_removals where grade_id = p_grade_id;
+  if v_rec.id is null then
+    raise exception '还没有备份 —— 毕业删除的第一步是「生成备份并发到超管邮箱」，先做那一步';
+  end if;
+  if not v_rec.mail_ok then
+    raise exception '备份还没有发到超管邮箱（%）—— 删除流程停在这里：先把信发出去',
+      coalesce(nullif(v_rec.mail_reason, ''), '原因不明');
+  end if;
+  if v_rec.expires_at is not null and v_rec.expires_at <= now() then
+    raise exception '备份的下载链接已经过期（%）—— 重新生成一份备份、重新发信之后再删', v_rec.expires_at;
+  end if;
+  if v_rec.payload is null then
+    raise exception '这条备份记录里没有内容 —— 重新生成一份备份';
+  end if;
+
+  /* ---- ④ 二次确认：**逐字**输入年级全名 ----
+     ⚠️ 比对时把**空格**两边都去掉（"高三（2024 级）"里那个空格是渲染出来的，
+        不该因为少打一个空格就让人以为"名字错了"）；其余字符逐字比。 */
+  v_full := public.grade_full_name(p_grade_id);
+  select g.cohort into v_cohort from grades g where g.id = p_grade_id;
+  if replace(btrim(coalesce(p_confirm_name, '')), ' ', '') <> replace(v_full, ' ', '') then
+    raise exception '年级全名不对 —— 要**逐字**输入「%」才放行（这次收到的是「%」）',
+      v_full, btrim(coalesce(p_confirm_name, ''));
+  end if;
+
+  /* ---- 清残留：先取一份"这一届的范围"（后面的显式删都靠它） ---- */
+  select coalesce(array_agg(c.id), '{}'::uuid[]) into v_class_ids
+    from classes c where c.grade_id = p_grade_id;
+
+  select coalesce(array_agg(distinct t), '{}'::uuid[]) into v_teachers
+    from (
+      select c.teacher_id as t from classes c where c.grade_id = p_grade_id
+      union
+      select cs.teacher_id from class_subjects cs where cs.class_id = any (v_class_ids)
+      union
+      select r.teacher_id from teacher_roles r
+       where r.scope_id = p_grade_id
+          or (r.scope_type = 'class' and r.scope_id = any (v_class_ids))
+    ) x
+   where t is not null;
+
+  /* 删之前各有多少（给教导处看"什么将永久消失"，也是报告的一半） */
+  v_counts := jsonb_build_object(
+    'classes',      coalesce(array_length(v_class_ids, 1), 0),
+    'students',     (select count(*) from students where class_id = any (v_class_ids)),
+    'assignments',  (select count(*) from assignments where class_id = any (v_class_ids)),
+    'calls',        (select count(*) from calls where class_id = any (v_class_ids)),
+    'examScores',   (select count(*) from exam_scores where class_id = any (v_class_ids)),
+    'exams',        (select count(*) from exams where class_ids && v_class_ids),
+    'classSubjects', (select count(*) from class_subjects where class_id = any (v_class_ids)),
+    'classMembers', (select count(*) from class_members where class_id = any (v_class_ids)),
+    'studentSubjects', (select count(*) from student_subjects
+                         where student_id in (select id from students where class_id = any (v_class_ids))),
+    'scheduleItems', (select count(*) from schedule_items
+                       where class_id = any (v_class_ids)
+                          or (scope = 'class' and class_id is null and teacher_id = any (v_teachers))),
+    'classroomAccounts', (select count(*) from classroom_accounts where class_id = any (v_class_ids)),
+    'classrooms',   (select count(*) from classrooms where class_id = any (v_class_ids)),
+    'sharedFiles',  (select count(*) from shared_files
+                      where coalesce(class_ids, '{}'::uuid[]) && v_class_ids
+                         or class_id = any (v_class_ids)),
+    'teacherRoles', (select count(*) from teacher_roles
+                      where scope_id = p_grade_id
+                         or (scope_type = 'class' and scope_id = any (v_class_ids))),
+    'noticeTargets', (select count(*) from notice_targets where grade_id = p_grade_id));
+
+  /* 教室端账号：**行会被 cascade 带走，`auth.users` 不会** ——
+     服务端拿这份清单去删账号（否则留下"能登录但什么都读不到"的账号）。 */
+  select coalesce(jsonb_agg(jsonb_build_object(
+           'id', ca.id::text, 'email', ca.email, 'name', ca.name)), '[]'::jsonb)
+    into v_accounts
+    from classroom_accounts ca where ca.class_id = any (v_class_ids);
+
+  /* ---- ⑤-1 `exams` 孤儿（`class_ids` 是 uuid[]、建不了外键） ---- */
+  delete from exams where class_ids && v_class_ids;
+  get diagnostics n_exams = row_count;
+
+  /* ---- ⑤-2 `shared_files`（第三个数组残留）：先减数组、再删变成无归属的行 ---- */
+  select coalesce(array_agg(f.id), '{}'::uuid[]) into v_shared_ids
+    from shared_files f
+   where coalesce(f.class_ids, '{}'::uuid[]) && v_class_ids
+      or f.class_id = any (v_class_ids);
+
+  /*
+   * ⚠️ 这里**不能用 `class_ids - v_class_ids`**：PostgreSQL 没有"数组相减"这个运算符
+   *    （`operator does not exist: uuid[] - uuid[]`，PGlite 上实测建函数那一刻就断）。
+   *    用 `array(select … where e <> all (v_class_ids))` 才是"把本届的班从数组里减掉"。
+   */
+  update shared_files f
+     set class_ids = array(
+           select e from unnest(coalesce(f.class_ids, '{}'::uuid[])) as e
+            where e <> all (v_class_ids)
+         )
+   where f.id = any (v_shared_ids);
+  get diagnostics n_trim = row_count;
+
+  with del as (
+    delete from shared_files f
+     where f.id = any (v_shared_ids)
+       and coalesce(array_length(coalesce(f.class_ids, '{}'::uuid[]), 1), 0) = 0
+       and f.class_id is null
+    returning f.storage_path
+  )
+  select coalesce(jsonb_agg(storage_path), '[]'::jsonb) into v_storage from del;
+
+  /* 老形状（`class_ids` 空、`class_id` 指着本届班）：行由 cascade 带走，**对象要记下来** */
+  v_storage := v_storage || coalesce((
+    select jsonb_agg(f.storage_path) from shared_files f
+     where f.id = any (v_shared_ids)
+       and f.class_id = any (v_class_ids)
+       and coalesce(array_length(coalesce(f.class_ids, '{}'::uuid[]), 1), 0) = 0), '[]'::jsonb);
+  n_files := jsonb_array_length(v_storage);
+
+  /* ---- ⑤-3 `teacher_roles`（`scope_id` 没有外键）----
+     🔴 **这就是 Q30 说的"撤回身份"那一步，而且是立刻撤**（不留宽限）。 */
+  delete from teacher_roles
+   where scope_id = p_grade_id
+      or (scope_type = 'class' and scope_id = any (v_class_ids));
+  get diagnostics n_roles = row_count;
+
+  /* ---- ⑤-4 `schedule_items`（`class_id` 是 set null，不是 cascade）---- */
+  delete from schedule_items where class_id = any (v_class_ids);
+  get diagnostics n_sched = row_count;
+  /* 顺手清掉"班级课表却没有班"的残骸（按定义就是垃圾行） */
+  delete from schedule_items
+   where scope = 'class' and class_id is null and teacher_id = any (v_teachers);
+  get diagnostics n_tmp = row_count;
+  n_sched := n_sched + n_tmp;
+
+  /* ---- ⑤-5 级联：删 `classes` → 学生 / 作业 / 呼叫 / 分数 / 任教关系 /
+            走班成员 / 选科 / 教室端行 / 排课归属 / 通知的年级收件人 一起走 ---- */
+  delete from classes where grade_id = p_grade_id;
+  get diagnostics n_classes = row_count;
+
+  /* ---- ⑤-6 **最后**删 `grades`（顺序不能反）---- */
+  delete from grades where id = p_grade_id;
+
+  /* ---- 后置校验：逐项必须为 0（非 0 就把整件事回滚，绝不留下半截状态）---- */
+  v_checks := jsonb_build_object(
+    'grades',       (select count(*) from grades where id = p_grade_id),
+    'classes',      (select count(*) from classes where grade_id = p_grade_id),
+    'students',     (select count(*) from students where class_id = any (v_class_ids)),
+    'assignments',  (select count(*) from assignments where class_id = any (v_class_ids)),
+    'calls',        (select count(*) from calls where class_id = any (v_class_ids)),
+    'examScores',   (select count(*) from exam_scores where class_id = any (v_class_ids)),
+    'exams',        (select count(*) from exams where class_ids && v_class_ids),
+    'teacherRoles', (select count(*) from teacher_roles
+                      where scope_id = p_grade_id
+                         or (scope_type = 'class' and scope_id = any (v_class_ids))),
+    'classSubjects', (select count(*) from class_subjects where class_id = any (v_class_ids)),
+    'classMembers', (select count(*) from class_members where class_id = any (v_class_ids)),
+    'studentSubjects', (select count(*) from student_subjects where student_id in (select id from students where class_id = any (v_class_ids))),
+    'scheduleItems', (select count(*) from schedule_items
+                       where class_id = any (v_class_ids)
+                          or (scope = 'class' and class_id is null and teacher_id = any (v_teachers))),
+    'classroomAccounts', (select count(*) from classroom_accounts where class_id = any (v_class_ids)),
+    'classrooms',   (select count(*) from classrooms where class_id = any (v_class_ids)),
+    'sharedFiles',  (select count(*) from shared_files
+                      where coalesce(class_ids, '{}'::uuid[]) && v_class_ids
+                         or class_id = any (v_class_ids)),
+    'noticeTargets', (select count(*) from notice_targets where grade_id = p_grade_id));
+
+  select string_agg(format('%s=%s', k, v), '、')
+    into v_bad
+    from jsonb_each_text(v_checks) as t(k, v)
+   where v <> '0';
+  if v_bad is not null then
+    raise exception '清残留校验没过（%）—— 整件事已经回滚，这个年级一个字节都没删', v_bad;
+  end if;
+
+  v_report := jsonb_build_object(
+    'gradeId',   p_grade_id,
+    'gradeName', v_full,
+    'cohort',    v_cohort,
+    'confirmedName', btrim(p_confirm_name),
+    'deletedAt', now(),
+    'counts',    v_counts,
+    'deleted',   jsonb_build_object(
+      'classes', n_classes, 'exams', n_exams, 'teacherRoles', n_roles,
+      'scheduleItems', n_sched, 'sharedFilesTrimmed', n_trim,
+      'sharedFilesDeletedOrOrphaned', n_files),
+    'checks',    v_checks,
+    'classIds',  to_jsonb(v_class_ids));
+
+  update grade_removals
+     set deleted_at = now(), deleted_by = p_actor, report = v_report, storage_paths = v_storage
+   where id = v_rec.id;
+
+  return jsonb_build_object(
+    'ok', true, 'alreadyDeleted', false, 'report', v_report,
+    'storagePaths', v_storage, 'classroomAccounts', v_accounts);
+end $$;
+
+-- -------- 29.8 权限：判据给 authenticated，**写入口只有服务端** --------
+revoke all on function public.can_promote_grades_for(uuid) from public, anon, authenticated;
+revoke all on function public.can_delete_grade_for(uuid, uuid) from public, anon, authenticated;
+revoke all on function public.promote_grades(uuid) from public, anon, authenticated;
+revoke all on function public.grade_backup(uuid, uuid) from public, anon, authenticated;
+revoke all on function public.grade_backup_mail(uuid, uuid, boolean, text) from public, anon, authenticated;
+revoke all on function public.grade_delete(uuid, uuid, text) from public, anon, authenticated;
+revoke all on function public.grade_backup_payload(uuid, uuid) from public, anon, authenticated;
+revoke all on function public.grade_backup_by_token(text) from public, anon, authenticated;
+revoke all on function public.grade_backup_payload_json(uuid) from public, anon, authenticated;
+
+grant execute on function public.academic_year_name_of(date) to authenticated;
+grant execute on function public.current_academic_year() to authenticated;
+grant execute on function public.grade_full_name(uuid) to authenticated;
+grant execute on function public.can_promote_grades() to authenticated;
+grant execute on function public.can_delete_grade(uuid) to authenticated;
+grant execute on function public.promotion_overview() to authenticated;
+revoke all on function public.promotion_overview() from anon;
+
+-- -------- 29.9 RLS：两张新表**对 anon / authenticated 一个权限都不给** --------
+alter table grade_promotions enable row level security;
+alter table grade_removals  enable row level security;
+revoke all on grade_promotions, grade_removals from public, anon, authenticated;
+
+-- -------- 29.10 核对（把下面整段粘进 SQL 编辑器）--------
+--  ① 提档 **幂等**（跑两遍：第二遍 `alreadyPromoted=true`、`promoted=0`）：
+--  -- select public.promote_grades('<超管的 teacher id>');
+--  -- select public.promote_grades('<超管的 teacher id>');
+--
+--  ② 提档 **只改 `stage`**（班级 / 走班班的 `grade_id` 前后逐字相同）：
+--  -- select c.id, c.grade_id from classes c join grades g on g.id = c.grade_id order by 1;
+--  -- select public.promote_grades('<超管的 teacher id>');   -- 第二次：什么都没改
+--  -- select c.id, c.grade_id from classes c join grades g on g.id = c.grade_id order by 1;
+--
+--  ③ 提档 **不撤回任何身份**（前后行数完全相等）：
+--  -- select (select count(*) from teacher_roles) as 身份行, (select count(*) from class_subjects) as 任教行;
+--
+--  ④ **备份没发出 = 删不了**（`mail_ok=false` 时 `can_delete_grade` 必须是 false）：
+--  -- select public.can_delete_grade('<某个高三的 grade id>');      -- 期望 false
+--  -- select mail_ok from grade_removals where grade_id = '<高三 id>';  -- 期望 false
+--
+--  ⑤ **输错全名 = 删不了**：
+--  -- select public.grade_delete('<超管的 teacher id>', '<高三 id>', '高三');
+--  -- 期望：报「年级全名不对 —— 要**逐字**输入「高三（2024 级）」才放行」
+--
+--  ⑥ **非超管 = 被拒**（拿教务处的 id 调用那一句，必须报"只有最高管理员能做"）
+--
+--  ⑦ 删完 **清点表逐项 = 0**（每一项都是一条能跑的查询；`<班 id 数组>` 从
+--     `grade_removals.report -> 'classIds'` 里取，或直接写死删除前记下来的那几个 id）：
+--  -- select '孤儿 exams',        count(*) from exams            where class_ids && '<班 id 数组>'::uuid[];
+--  -- select '悬空 teacher_roles', count(*) from teacher_roles    where scope_id = '<年级 id>'
+--  --        or (scope_type = 'class' and scope_id = any('<班 id 数组>'::uuid[]));
+--  -- select '悬空 schedule_items', count(*) from schedule_items   where class_id = any('<班 id 数组>'::uuid[])
+--  --        or (scope = 'class' and class_id is null);
+--  -- select '教室端行',            count(*) from classroom_accounts where class_id = any('<班 id 数组>'::uuid[]);
+--  -- select '残留 shared_files',   count(*) from shared_files     where class_ids && '<班 id 数组>'::uuid[];
+--  -- select '班级',                count(*) from classes          where grade_id = '<年级 id>';
+--  -- select '年级',                count(*) from grades           where id = '<年级 id>';
+--  -- select '学生',                count(*) from students         where class_id = any('<班 id 数组>'::uuid[]);
+--  -- select '作业',                count(*) from assignments      where class_id = any('<班 id 数组>'::uuid[]);
+--  -- select '呼叫',                count(*) from calls            where class_id = any('<班 id 数组>'::uuid[]);
+--  -- select '考试分数行',          count(*) from exam_scores      where class_id = any('<班 id 数组>'::uuid[]);
+--  -- select '通知的年级收件人',    count(*) from notice_targets   where grade_id = '<年级 id>';
+--
+--  ⑧ **删除幂等**（对同一个已删年级再删一次：`alreadyDeleted=true`、不改动任何东西）：
+--  -- select public.grade_delete('<超管的 teacher id>', '<高三 id>', '高三（2024 级）');
+--
+--  ⑨ 两张新表**谁都读不到**（期望两条都是 0 行 / 775 权限不足）：
+--  -- select * from grade_promotions;   -- 以 authenticated 身份跑
+--  -- select * from grade_removals;     -- 以 authenticated 身份跑
+--
+--  ⑩ 写入口**只有服务端能调**（四条都要 42501）：
+--  -- select public.promote_grades('00000000-0000-0000-0000-000000000000');
+--  -- select public.grade_backup('00000000-0000-0000-0000-000000000000', '00000000-0000-0000-0000-000000000000');
+--  -- select public.grade_delete('00000000-0000-0000-0000-000000000000', '00000000-0000-0000-0000-000000000000', '高一');
+--  -- select public.grade_backup_by_token('bk000000x000000x000000x000000x000000');
 -- ============================================================

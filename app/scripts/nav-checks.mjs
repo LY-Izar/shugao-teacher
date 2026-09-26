@@ -1049,7 +1049,7 @@ const MATRIX_PATHS = [
   '/assignments/:id/stats', '/assignments/:id/call', '/calls', '/exams', '/exams/new',
   '/exams/:id/grade', '/exams/:id/stats', '/schedule', '/files', '/wrong', '/wrong/:classId',
   '/settings', '/accounts', '/grades', '/grades/:id', '/grades/:id/setup',
-  '/grades/:id/promote', '/settings/terms', '/admin', '/admin/probes',
+  '/grades/promote', '/settings/terms', '/admin', '/admin/probes',
 ]
 
 const appSrc = readApp('src/App.tsx')
@@ -1085,12 +1085,17 @@ const realRoutes = routes.filter((p) => p !== '*')
    *    `PAGES` 里那一行也去掉了 `live: false`。
    *    ⚠️ 与 P6 那三条同一条教训：它**原来就在矩阵里**（§2.2 带 ★ 的那一行），
    *       所以 `MATRIX_SHAPE` / `MATRIX_SHAPE_13` 那几个数**一个都不动**。
+   * 🆕 2026-10-01（P4）「提档 + 毕业删除」落地：这一组从 **2 条降到 1 条** ——
+   *    `/grades/promote` 的页面真的做出来了（`pages/GradePromote.tsx` + `App.tsx` 的路由）。
+   *    ⚠️ 本轮**同时改了那一行的地址**（`/grades/:id/promote` → `/grades/promote`）：
+   *       提档是全校一年一次、毕业删除一次只有一个高三，做成"每个年级一页"没有意义。
+   *       改地址的地方是**四处**：`MATRIX_PATHS`（这里）+ `PLANNED2`（下面）+
+   *       `lib/pages.ts` + 两份矩阵文档那一行 —— 行数与 V·E·B 自检值一个都没动。
    */
   const PLANNED2 = [
-    '/grades/:id/promote',
     '/admin/probes',
   ]
-  eqSet('D1：规划中的路径就是那 2 条（写死核对，不看 live 字段）', planned, PLANNED2)
+  eqSet('D1：规划中的路径就是那 1 条（写死核对，不看 live 字段）', planned, PLANNED2)
   check(
     realRoutes.includes('/admin'),
     'D1：`/admin` 是**真路由**（★ 里唯一一个已经落地的，见注释）',

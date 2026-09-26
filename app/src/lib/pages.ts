@@ -133,7 +133,20 @@ export const PAGES: PageRow[] = [
    *    ⚠️ 它的 `entry` 是 `null`（页内页，只能从 `/grades/:id` 点进来）——
    *       所以 §4.2 里它与 `/grades/:id` **逐格相同**（对非入口身份都是 E）。
    */
-  { path: '/grades/:id/promote', group: '★ 页内', entry: '/grades/promote', live: false },
+  /*
+   * 🆕 2026-10-01（P4）「提档 + 毕业删除」落地：这一行**从 ★ 变成真路由**，
+   * 而且**地址改了** —— 原来是 `/grades/:id/promote`（按"每个年级一页"登记的），
+   * 现在是 `/grades/promote`（= `ENTRIES` 里那个入口 key）。
+   *
+   * 🔴 为什么改地址：提档是**全校一年一次**的动作（一个页面看三个年级的改前/改后），
+   *    毕业删除**一次只可能有一个高三** —— 做成"每个年级一页"会造出两个各自只有
+   *    一半内容的地址。改地址要**四处一起动**（本轮都动了）：
+   *      ① 这里；② `App.tsx` 的路由；③ `nav-checks.mjs` 的 `MATRIX_PATHS` + `PLANNED2`；
+   *      ④ 两份矩阵文档（`按身份显示导航方案.md` §2.2 第 32 行、
+   *         `管理架构与角色权限方案.md` §4.2 第 33 行）——⚠️ **只改那一行的地址**，
+   *         行数 34 / 36 与 V·E·B 的自检值（145/27/32、344/60/34）**一个都没动**。
+   */
+  { path: '/grades/promote', group: '我的 → 年级管理', entry: '/grades/promote' },
   /*
    * 🆕 2026-09-30（P3）：`/settings/terms` **从 ★ 变成真路由** —— 页面做出来了
    * （`pages/Terms.tsx`）。它的入口 key 早就登记在 `ENTRIES` 里（`hasManagingRole`＝
@@ -172,9 +185,12 @@ export const PAGES: PageRow[] = [
  *
  * 🔴 **2026-09-30（P3）再把它从 3 改成 2**：`/settings/terms`（学期与学年）
  *    也**真的做出来了**（`pages/Terms.tsx` + `App.tsx` 里那条路由）。
- *    剩下两条规划项：`/grades/:id/promote`（P4 提档）与 `/admin/probes`（运维探针）。
+ *
+ * 🔴 **2026-10-01（P4）再把它从 2 改成 1**：`/grades/promote`（提档 + 毕业删除）
+ *    也**真的做出来了**（`pages/GradePromote.tsx` + `App.tsx` 里那条路由）。
+ *    剩下唯一一条规划项：`/admin/probes`（运维探针）。
  */
-export const PLANNED_PAGE_COUNT = 2
+export const PLANNED_PAGE_COUNT = 1
 
 /**
  * 方案 §2.2 矩阵的规模（D2 的自证值：从文档里读回来必须逐项相等）
