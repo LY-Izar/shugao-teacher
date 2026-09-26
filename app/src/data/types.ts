@@ -68,7 +68,8 @@ export const CLASS_TYPE_DEFAULT: Record<ClassType, { primary: string; second: st
  * 班级的**种类**（`classes.kind`）。
  *
  *   `'admin'`   行政班（高一(1)班这种）
- *   `'stream'`  走班班（「走班班-物化政」这种，`streamKey` 是它的组合标识）
+ *   `'stream'`  走班班（「走班班-政治」这种，`streamKey` = **这个班教的科目代码**；
+ *                按科目建班 → 通常是单科；`politics+geography` 那种多科串只出现在手工建的老行上）
  *
  * ⚠️ 默认值必须是 `'admin'`：老的写入路径不送这一列，默认值让老代码行为不变。
  */

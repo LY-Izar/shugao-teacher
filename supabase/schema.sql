@@ -5886,9 +5886,19 @@ set search_path = public
 as $$ select public.can_manage_grade_setup_for(auth.uid(), p_grade_id) $$;
 
 --  这个学生的选科归谁改：**最高管理员 · 教务处 · 本年级的年级主任 · 本班班主任**。
---  ⚠️ 与 `can_manage_grade_setup` 的差别只有"班主任"这一档 —— 两条判据分开写，
---     因为"能改一个学生的选科"与"能设定整个年级的班型"是**两种权限**。
---  🔴 同样拆两件套（理由见 `can_manage_grade_setup_for` 上面那段与 §27.13）。
+--  🔴 **2026-10-06 收窄**：原来第三支写的是 `visible_class_ids_for(p_uid)`（= **任教班**），
+--     那等于**任何一个科任老师都能在他任教的班里改学生的选科**。用户拍板收窄成上面这四档：
+--     **选科一变，走班名单、课表、已布置的作业全都跟着变** —— 影响面比"改个学号"大得多，
+--     不该由任何科任老师顺手改（口径出处：方案 §4.2.5 的权限矩阵 + Q27 的原话
+--     「班主任，或者是年级主任，或者是教导处」—— **科任老师不在里面**）。
+--  ✅ **不另写一套 `role in (…)`**：这四档恰好就是 `can_manage_class_for()`（§16.2 里那个）定义的那一档 ——
+--     校级（超管 + 教务处）∪ 本年级的年级主任 ∪ 本班班主任，而且它**故意不含任课老师**。
+--     再写一遍就是同一件事的第二个判定入口（I17）。`_for` 变体照旧 revoke（理由见上面那段与 §27.13）。
+--  ⚠️ **读没有跟着收窄**：`student_subjects` 的读策略走 `visible_class_ids()`（§27.8）——
+--     科任老师照旧**看得见**名单上的选科，收窄的只有"写"与"选科变更记录的读"这两处。
+--  ⚠️ 断言：`grade-checks` 第十八节 S22（班主任 / 年级主任 / 教务处 / 超管 true；
+--     **科任老师 / 别班班主任 / 别年级年级主任 / 教室端 false**）+ S22j–S22n 的反向对照
+--     （把"任教班"那一支装回去 → 科任老师那条**必须红**）。
 create or replace function public.can_edit_student_subject_for(p_uid uuid, p_student_id uuid)
 returns boolean
 language sql
@@ -5896,22 +5906,9 @@ stable
 security definer
 set search_path = public
 as $$
-  select public.is_school_admin_for(p_uid)
-      or exists (
-           select 1
-             from students s
-             join classes c on c.id = s.class_id
-            where s.id = p_student_id
-              and (
-                   c.id in (select visible_class_ids_for(p_uid))
-                or exists (
-                     select 1 from teacher_roles r
-                      where r.teacher_id = p_uid
-                        and r.role = 'grade_head'
-                        and r.scope_type = 'grade'
-                        and r.scope_id = c.grade_id
-                   )
-              )
+  select public.can_manage_class_for(
+           p_uid,
+           (select s.class_id from students s where s.id = p_student_id)
          );
 $$;
 
@@ -5961,7 +5958,8 @@ create policy student_subjects_read on student_subjects for select to authentica
     )
   );
 
---  写：只有 `can_edit_student_subject()` 那一档。
+--  写：只有 `can_edit_student_subject()` 那一档（🔴 2026-10-06 收窄成四档：
+--  **超管 / 教务处 / 本年级年级主任 / 本班班主任** —— 科任老师不在里面，见 §27.7 上面那段）。
 --  🔴 **写策略仍然要给**（哪怕写入永远走服务端）：只给 select 的策略意味着
 --     客户端 upsert 会被拒 —— 那不是"静默失败"，是**显式报错**，符合 §三.5 那条纪律。
 drop policy if exists student_subjects_write on student_subjects;
@@ -8023,11 +8021,16 @@ create unique index if not exists classes_stream_key_uniq
 --      **同一个学生不能在同一科上被塞进两个走班班**（漏一条就是"他那一科没有课上"）。
 --
 --  入参形状（服务端已经把"建议"摊成这个样子）：
---    p_groups = [{ "stream_key": "chemistry+geography",
---                  "name": "走班班-化学地理",
---                  "subjects": ["chemistry", "geography"],
+--    p_groups = [{ "stream_key": "politics",
+--                  "name": "走班班-政治",
+--                  "subjects": ["politics"],
 --                  "class_id": null | "<已有的走班班 id>",
 --                  "student_ids": ["…", …] }, …]
+--  ⚠️ **走班班按科目建**（2026-10-06 用户拍板 = C）：`planStreamClasses()` 每个走班科目
+--     只出一个班，所以 `stream_key` 是**单科代码**、`subjects` 恰好一项 ——
+--     "所有要上政治的人（不管另两门选什么）都在同一个政治班"就是这条口径的落地。
+--     但本函数**照旧认多科键**（`chemistry+geography`）：手工建过 / 老库里留下的多科走班班
+--     要能被认回来、也要能被"同一科不许进两个班"那条判据正确拦住（`grade-checks` R21 就是这么用的）。
 --
 --  🔴 **确认是必经**（Q7 = B）：这个函数**不会**被页面自动调用 —— 只有教导处点了
 --     「确认生成」才会打过来；它**不删**任何走班班（老师的调课 / 改名不会被一次重算抹掉）。
@@ -8648,10 +8651,13 @@ alter table student_subject_changes enable row level security;
 --     权限矩阵（方案 §4.2.5）里"改学生选科"与"看选科变更记录"本来就写着**同一档人**，
 --     多写一个函数就是"同一件事两个判定入口"，两条判据一旦不一致就会打架。
 --  🔴 **教室端一个字节都读不到**（`and not is_classroom_account()`）：
---     `can_edit_student_subject_for` 走的是 `visible_class_ids_for`，而它有一条
---     "教室端：本班"的分支 —— 也就是说**不加这一句，教室里那块屏能读到"谁改了谁的选科"**。
---     那块屏是给学生看的（§十七·补），而"谁改的、什么时候改的"是**人事留痕**，不是教学内容。
---     ⚠️ 与 `schedule_mine_write` 那处收紧同一个手法：`and not is_classroom_account()`，正文其余不动。
+--     ⚠️ 这一句是**纵深防御**，今天它已经"多"了一层 —— 2026-10-06 收窄之后
+--     `can_edit_student_subject_for` 走的是 `can_manage_class_for`（不含教室端），
+--     所以教室端本来就问不出 true。**仍然留着它**：那块屏是给学生看的（§十七·补），
+--     而"谁改的、什么时候改的"是**人事留痕** —— 这种守卫少一层就是少一层保险；
+--     ⚠️ 另外 `rls-checks` 的 `RLS_NEGATIVE=p10-no-audit` 那一段**锚在它上面**（别删）。
+--     （原写法之所以必须加它：当时判据走 `visible_class_ids_for`，而它有一条
+--      "教室端：本班"的分支 —— 不加这一句，教室里那块屏能读到"谁改了谁的选科"。）
 --  ⚠️ 方案里还写着"学生本人看自己的" —— **平台上没有学生的登录身份**
 --     （只有教师与教室端 `classroom_accounts`），所以这一支**今天不存在**；
 --     登记在此，免得后人以为漏了。

@@ -35,7 +35,8 @@
  *        `p7-one-walk-only`（生成时**只取第一门**走班科目）→ **R2/R6/R7 必须红**
  *        （这就是"差 2 门的学生被漏掉一门、且不报错"那件事的原样）；
  *        另外两条对照不靠 `GRADE_NEGATIVE`（它们在第十三节里**当场**改坏内存里的源码再跑）：
- *        「其他」不归类那一支被拿掉 → **R9 会红**；老师撞课那一段被拿掉 → **R27 会红**。
+ *        「其他」不归类那一支被拿掉 → **R9 会红**；老师撞课那一段被拿掉 → **R27 会红**；
+ *        🆕 分组改回"按 `walk` 集合" → **R37b 会红**（R38，2026-10-06 按科目建班那条口径的对照）。
  *      · 🆕 P4（第十二节）五条 —— 每一条都对着一条"必须红"的断言：
  *        `p4-promote-not-idempotent`（提档幂等，T1e/T1f）·
  *        `p4-promote-revokes-roles`（提档不撤回身份，T3a）·
@@ -670,6 +671,9 @@ await withLock(async () => {
      *                                    → S11 红（"不确认 → 删不掉"）
      *   · `p10-suspend-removes-members` → 把触发器放宽成"休学也移出"
      *                                    → S16 红（"休学保留"）
+     * 🆕 2026-10-06「谁能改学生选科」收窄（S22）的对照**不靠** `GRADE_NEGATIVE`：
+     *    它在 S22l–S22n 里**当场**把老函数体（任教班那一支）装回库里再问一遍 → **S22d/S22j 必红**，
+     *    随后用**改动前取下来的真定义**（`pg_get_functiondef`）原样还原（S22o 钉住"还回去了"）。
      */
     if (NEGATIVE === 'p10-no-audit') {
       const re = /if v_before is distinct from v_after then\s*\n\s*insert into student_subject_changes[\s\S]*?returning id into v_change_id;\s*\n\s*end if;/
@@ -3226,7 +3230,7 @@ await withLock(async () => {
   /* ============================================================
      第十三节 · 🔴 P7 走班班（真源码 + 真库）
      ------------------------------------------------------------
-     这一节钉四件事，每一件都"做错了不报错"：
+     这一节钉五件事，每一件都"做错了不报错"：
        ① **生成建议**：走班科目怎么算（`lib/stream.ts`）。
           🔴 **差 2 门的学生同时在两个走班班里**（U-1 的多对多）；
           🔴 **化学能走班**（`subjects.can_stream` 当年漏的正是它 —— Q24 的直接防线）；
@@ -3238,9 +3242,13 @@ await withLock(async () => {
           **静默拒掉**（0 行、不报错）—— 所以这里**正反两向**都跑真的 INSERT。
        ④ **课表冲突两个维度**（I58）：**学生撞课**与**老师撞课**分开断言
           （只算学生集合交集会漏掉"一个老师带两个走班班、学生完全不相交"）。
+       ⑤ 🆕 2026-10-06（**分组口径 = 按科目**，用户拍板 C 方案）：**每个走班科目最多一个班**、
+          `stream_key` = **单科代码**。🔴 R37 正向钉"**所有要上政治的学生都在同一个政治班**"
+          （不管他的三科组合是什么、`walk` 集合是否相同）；R38 是它的**反向对照** ——
+          把源码改回"按 `walk` 集合分组"（`politics` / `politics+geography` 两个班）→ **必须红**。
      ============================================================ */
 
-  section('第十三节 · P7 走班班：生成建议 / 多对多 / 两个维度的课表冲突')
+  section('第十三节 · P7 走班班：生成建议（**按科目建班**）/ 多对多 / 两个维度的课表冲突')
 
   /** 生成建议的实现：默认是真源码；`p7-one-walk-only` 时换成"只进第一门"的那份副本 */
   let streamPlanForDb = streamLib.planStreamClasses
@@ -3374,6 +3382,141 @@ await withLock(async () => {
     const plan4 = streamLib.planStreamClasses([mismatch], new Map([['st-c-mis-01', subj('history', ['politics', 'geography'])]]))
     eq('R12：首选与班型不符 → 不生成走班（走班补不了首选那一科）', plan4.classes.length, 0)
     eq('R12b：原因是"建议转班"（Q2 的口径）', plan4.pending[0]?.reason, 'primary-mismatch')
+
+    /*
+     * 🔴 R37（2026-10-06，用户拍板 C 方案）：**走班班按科目建** —— 每个走班科目**最多一个班**，
+     *    "所有要上政治的人（不管另两门选什么）都在同一个政治班"。
+     *
+     * ⚠️ 这一条用**新夹具**（不碰上面 `sci` / `art` —— 它们挂着 R5/R8b 的期望值）。
+     *    辛 / 壬 / 癸 三种组合的 `walk` 集合**并不相同**（`{政治,地理}` / `{政治}` / `{政治}`），
+     *    但按科目建班 → 政治那**一个**班必须收下全部三个人。
+     *    R38 是它的**反向对照**（改回"按 walk 集合分组"→ 这一条必须红）。
+     */
+    const sci2 = mkClass('c-sci2', '高一(5)班', 'science', [['01', '辛'], ['02', '壬'], ['03', '癸']])
+    const subjects2 = new Map([
+      ['st-c-sci2-01', subj('physics', ['politics', 'geography'])], // 物政地 → walk = 政治 + 地理
+      ['st-c-sci2-02', subj('physics', ['chemistry', 'politics'])], // 物化政 → walk = 政治
+      ['st-c-sci2-03', subj('physics', ['biology', 'politics'])], // 物政生 → walk = 政治（生物是本班默认课）
+    ])
+    const planPol = streamLib.planStreamClasses([sci2], subjects2)
+    const polIds = ['st-c-sci2-01', 'st-c-sci2-02', 'st-c-sci2-03']
+    /** 🔴 这条判据的**唯一写法**：教政治的走班班恰好 1 个，且这三个人**全在里面** */
+    const politicsClassesOf = (p) => p.classes.filter((c) => c.subjectCodes.includes('politics'))
+    const allPoliticsInOneClass = (p) =>
+      politicsClassesOf(p).length === 1 && polIds.every((id) => politicsClassesOf(p)[0].studentIds.includes(id))
+    eq(
+      'R37：🔴 三个组合不同、都要上政治 → **只建一个政治走班班**（每个走班科目最多一个班）',
+      politicsClassesOf(planPol).length,
+      1,
+    )
+    ok(
+      'R37b：🔴 **所有要上政治的学生都在同一个政治班里**（物政地 / 物化政 / 物政生，不管另两门选什么）',
+      allPoliticsInOneClass(planPol),
+      JSON.stringify(planPol.classes.map((c) => [c.streamKey, c.studentIds])),
+    )
+    eq('R37c：政治班的成员 = 3 人（不是按组合拆成两个班、每班 1~2 人）', politicsClassesOf(planPol)[0]?.studentIds.length, 3)
+    eq(
+      'R37d：`stream_key` = 这个班教的**单科代码**（`politics`，不是 `politics+geography` 那种集合串）',
+      planPol.classes.map((c) => c.streamKey),
+      ['politics', 'geography'],
+    )
+    eq(
+      'R37e：班名按**科目**起（「走班班-政治」/「走班班-地理」），不是按学生的三科组合',
+      planPol.classes.map((c) => c.name),
+      ['走班班-政治', '走班班-地理'],
+    )
+    eq(
+      'R37f：🔴 **这个年级没人走的科目不建班**（化学 / 生物一个 0 人的班都没有）',
+      planPol.classes.filter((c) => c.subjectCodes.includes('chemistry') || c.subjectCodes.includes('biology')).length,
+      0,
+    )
+    eq('R37f2：只建了"真的有人要走"的那两门（政治 / 地理）', planPol.classes.length, 2)
+
+    /*
+     * 🔴 R37g–i：**同一个行政班**里的两个人（物化政 / 物化地）—— 本班默认课相同（都不上生物），
+     *    但要走的走班课**分别是政治 / 地理** → 他们在**不同**的走班班里。
+     *    "同一个行政班"推不出"同一个走班班"。
+     */
+    const sci3 = mkClass('c-sci3', '高一(6)班', 'science', [['01', '子'], ['02', '丑']])
+    const subjects3 = new Map([
+      ['st-c-sci3-01', subj('physics', ['chemistry', 'politics'])], // 物化政 → walk = 政治
+      ['st-c-sci3-02', subj('physics', ['chemistry', 'geography'])], // 物化地 → walk = 地理
+    ])
+    const plan2in1 = streamLib.planStreamClasses([sci3], subjects3)
+    const streamKeysOf = (p, id) => p.classes.filter((c) => c.studentIds.includes(id)).map((c) => c.streamKey)
+    eq(
+      'R37g：这两人都在本班的**默认课**上（同一个行政班、`drops` 都是生物 —— 化学/生物他们不走）',
+      [
+        streamLib.streamDiff(subjects3.get('st-c-sci3-01'), 'science').drops,
+        streamLib.streamDiff(subjects3.get('st-c-sci3-02'), 'science').drops,
+      ],
+      [['biology'], ['biology']],
+    )
+    eq(
+      'R37h：他们要上的走班课**分别是政治 / 地理**',
+      [streamKeysOf(plan2in1, 'st-c-sci3-01'), streamKeysOf(plan2in1, 'st-c-sci3-02')],
+      [['politics'], ['geography']],
+    )
+    ok(
+      'R37i：🔴 因此他们在**不同**的走班班里（同一个行政班 ≠ 同一个走班班）',
+      streamKeysOf(plan2in1, 'st-c-sci3-01')[0] !== streamKeysOf(plan2in1, 'st-c-sci3-02')[0],
+      JSON.stringify(plan2in1.classes.map((c) => [c.streamKey, c.studentIds])),
+    )
+
+    /* 🔴 R38：**反向对照** —— 把分组改回"按 `walk` 集合分组"（用户否掉的旧口径），R37/R37b 必须红。
+       做法与 R13 同款：**只改内存里的副本**（写成临时文件再 import），仓库里那份一个字节都不动
+       —— ⚠️ 上一版直接写回 `src/lib/stream.ts`，中途一崩就把仓库留成改坏的样子（实测踩过）。 */
+    {
+      const streamSrc = readFileSync(resolvePath(APP, 'src/lib/stream.ts'), 'utf8')
+      const TMP7C = resolvePath(APP, 'src/lib/.__p7_setgroup_tmp.ts')
+      /* ① 收人时按"他整个 `walk` 集合"建键（`politics+geography`），而不是按单科 */
+      let setGrouped = streamSrc.replace(
+        '    for (const code of d.walk) {',
+        '    for (const code of (d.walk.length ? [streamKeyOf(d.walk)] : [])) {',
+      )
+      /* ② 出班时按"收到的那几个键"建班，而不是按走班四科的常量表 */
+      setGrouped = setGrouped.replace(
+        '  for (const code of STREAM_SUBJECT_CODES) {\n    const ids = members.get(code)',
+        '  for (const code of [...members.keys()].sort()) {\n    const ids = members.get(code)',
+      )
+      /* ③ 键已经是集合串了：不能再 `streamKeyOf([code])`（那会把集合串过滤成空串） */
+      setGrouped = setGrouped
+        .replace('    const streamKey = streamKeyOf([code])', '    const streamKey = code')
+        .replace('      name: streamClassNameOf([code]),', '      name: streamClassNameOf(code.split(STREAM_KEY_SEP)),')
+        .replace('      subjectCodes: [code],', '      subjectCodes: code.split(STREAM_KEY_SEP),')
+      eq(
+        'R38a（对照自证）：四处锚点都找得到（源码确实被改成了"按 walk 集合分组"）',
+        setGrouped !== streamSrc &&
+          setGrouped.includes('streamKeyOf(d.walk)') &&
+          setGrouped.includes('[...members.keys()].sort()') &&
+          setGrouped.includes('subjectCodes: code.split(STREAM_KEY_SEP)'),
+        true,
+      )
+      let badKeys = '（没跑起来）'
+      let badVerdict = null
+      try {
+        writeFileSync(TMP7C, setGrouped)
+        const mod = await import(pathToFileURL(TMP7C).href)
+        const bad = mod.planStreamClasses([sci2], subjects2)
+        badKeys = bad.classes.map((c) => c.streamKey).join(',')
+        badVerdict = allPoliticsInOneClass(bad)
+      } catch (e) {
+        badKeys = `（求值失败：${String(e?.message ?? e).split('\n')[0]}）`
+      } finally {
+        rmSync(TMP7C, { force: true })
+      }
+      eq(
+        'R38b（对照自证）：改坏之后**真的按 walk 集合分了班**（政治被拆成 `politics` 与 `politics+geography`）',
+        badKeys,
+        'politics,politics+geography',
+      )
+      ok(
+        'R38c：🔴 同一次里那三个人**不再在同一个政治班**（R37b 因此会红）—— 它不是永远为绿的摆设',
+        badVerdict === false,
+        `allPoliticsInOneClass(改坏的那份) = ${String(badVerdict)}`,
+      )
+      eq('R38d：临时文件已经删掉（仓库里那份源码一个字节都没动）', existsSync(TMP7C), false)
+    }
 
     /* 🔴 R13：《「其他」组合的学生不能自动归类》的反向对照 —— 真跑一遍 */
     {
@@ -3578,6 +3721,22 @@ await withLock(async () => {
     ok('R19a：他**不在**政治 / 地理班（文科班默认就教这两门）', !polMembers.includes(sBing) && !geoMembers.includes(sBing))
     eq('R19b：物化政的学生走**政治**（差 1 门）', polMembers.includes(sYi), true)
     eq('R19c：他不走化学（化学是本班默认课）', chemMembers.includes(sYi), false)
+    /*
+     * 🔴 R19d/R19e（2026-10-06 按科目建班）：**真库里**也是"所有要上政治的人在一个政治班" ——
+     *    甲（物政地，`walk = 政治 + 地理`）与乙（物化政，`walk = 政治`）的 `walk` 集合**不同**，
+     *    但库里只有**一个**政治走班班，而且两个人都在它里面（上面 R18/R19b 是分开问的，
+     *    这一条问的是"**同一个**班" —— 退回"按 walk 集合分组"时它会红）。
+     */
+    eq(
+      'R19d：🔴 真库里只有一个政治走班班（不是按 walk 集合各建一个）',
+      (await db.query(`select count(*)::int as n from classes where kind = 'stream' and grade_id = ${g1} and stream_key = 'politics'`)).rows[0].n,
+      1,
+    )
+    eq(
+      'R19e：🔴 甲（物政地）与乙（物化政）在**同一个**政治走班班里（他们的 walk 集合并不相同）',
+      [polMembers.includes(sJia), polMembers.includes(sYi)],
+      [true, true],
+    )
 
     /* ---- 幂等：重跑不重复建、成员不多不少 ---- */
     const gen2 = one(
@@ -4121,6 +4280,196 @@ await withLock(async () => {
       const fn = read('functions/api/grade-setup.ts')
       ok('S21i：服务端用 **service_role + 显式 `p_actor`** 调那两个 `_for` 函数（§30 的形状）', /svcRpc\(env, 'purge_old_subject_data'/.test(fn) && /p_actor: me\.id/.test(fn) && /svcRpc\(env, 'old_subject_data_counts_for'/.test(fn))
       ok('S21j：服务端**不自己判二审**（`p_confirm` 原样传下去，判断在数据库）', /p_confirm: body\.confirm === true/.test(fn))
+    }
+
+    /* ============================================================
+       S22 🆕 2026-10-06：**谁能改这个学生的选科**（用户拍板收窄成四档）
+       ------------------------------------------------------------
+       口径：`最高管理员 / 教务处` ∪ `本年级的年级主任` ∪ `本班班主任`
+       （方案 §4.2.5 的权限矩阵 + Q27 的原话「班主任，或者是年级主任，或者是教导处」）。
+       🔴 改之前第三支是 `visible_class_ids_for()`（**任教班**）—— 任何科任老师
+          都能在他任教的班里改学生的选科。S22d/S22j 就是那次收窄的**直接防线**，
+       S22l–S22n 是**反向对照**（把"任教班"那一支装回去 → 那两条必须红）。
+       ⚠️ 夹具是**全新的**一个班 + 一个学生 + 五个身份，不碰别的节（"同一批数据、只有一个变量"）。
+       ============================================================ */
+    {
+      const X = {
+        head: 'cccc0001-0000-4000-8000-000000000001', // 本班班主任
+        myCls: 'cccc0002-0000-4000-8000-000000000002', // 这个学生所在的行政班
+        otherCls: 'cccc0003-0000-4000-8000-000000000003', // 别的班
+        otherHead: 'cccc0004-0000-4000-8000-000000000004', // 别的班的班主任
+        /*
+         * 别的年级的年级主任：**复用前面夹具里那一位**（第九节的 `U2.other` = 高二主任）——
+         * ⚠️ 这里**不能**自己 insert 一个 grade_head：`teacher_roles_one_grade_head`
+         *    是"**一个年级只许一个年级主任**"的全局唯一索引，高二已经有了（实测踩过：
+         *    自建那一条当场 `duplicate key value violates unique constraint`，整个脚本崩掉）。
+         */
+        otherGh: '66666666-6666-6666-6666-666666666666', // 高二年级主任（第九节的夹具）
+        teacher: 'cccc0006-0000-4000-8000-000000000006', // 本班任教的**科任老师**（不带班）
+        room: 'cccc0007-0000-4000-8000-000000000007', // 这个班的教室端账号
+        stu: 'cccc0008-0000-4000-8000-000000000008', // 那个学生
+      }
+      const g1s = gradeOf('高一')
+      await db.exec(`
+        insert into auth.users (id, email, raw_user_meta_data) values
+          ('${X.head}',      's22-head@test',  '{"name":"本班班主任"}'::jsonb),
+          ('${X.otherHead}', 's22-head2@test', '{"name":"别班班主任"}'::jsonb),
+          ('${X.teacher}',   's22-t@test',     '{"name":"科任老师"}'::jsonb),
+          ('${X.room}',      's22-room@test',  '{"name":"S22教室端"}'::jsonb);
+        insert into classes (id, teacher_id, name, grade, school_id, grade_id, kind, class_type) values
+          ('${X.myCls}'::uuid,    '${X.head}',      '高一(S22)班',    '高一', ${school}, ${g1s}, 'admin', 'science'),
+          ('${X.otherCls}'::uuid, '${X.otherHead}', '高一(S22别)班',  '高一', ${school}, ${g1s}, 'admin', 'science');
+        insert into students (id, class_id, student_no, name, serial) values
+          ('${X.stu}'::uuid, '${X.myCls}'::uuid, 'S22-01', '癸', '2026999');
+        insert into teacher_roles (teacher_id, role, scope_type, scope_id) values
+          ('${X.head}',      'head_teacher', 'class', '${X.myCls}'::uuid),
+          ('${X.otherHead}', 'head_teacher', 'class', '${X.otherCls}'::uuid);
+        /* 🔴 科任老师：在这个班**任教**（但不带班）—— 收窄之前他就是"能改选科"的那个人 */
+        insert into class_subjects (class_id, subject, subject_code, teacher_id) values
+          ('${X.myCls}'::uuid, '物理', 'physics', '${X.teacher}');
+        insert into classroom_accounts (id, class_id, school_id, name, email) values
+          ('${X.room}'::uuid, '${X.myCls}'::uuid, ${school}, '高一(S22)班教室端', 's22-room@test');
+      `)
+
+      /** 以某个身份问"我能不能改这个学生的选科" —— **走裸版判据**（前端就是这么问的，§27.4） */
+      const canEditAs = async (uid) => {
+        await db.exec('begin')
+        try {
+          await db.query(`select set_config('request.jwt.claim.sub', $1, true)`, [uid])
+          await db.exec('set local role authenticated')
+          const v = one(await db.query(`select public.can_edit_student_subject($1::uuid) as v`, [X.stu])).v
+          await db.exec('commit')
+          return v
+        } catch {
+          await db.exec('rollback')
+          return '(问不出来)'
+        }
+      }
+      /**
+       * 让某个身份当 `p_actor` 去写**这个学生**的选科（§30 的形状：服务端 service_role
+       * + 显式 `p_actor` —— 这里以属主身份调，正是服务端那一层的替身）。
+       * ⚠️ **不能用上面那个 `tryWr`**：它把学生写死成 `sP10`（那是第十八节前面的夹具），
+       *    拿它问 X.head 会得到"没有权限"——因为 X.head 不是 **sP10** 那个班的班主任。
+       *    第一版就是这么写错的，S22i 当场红了（**这正是断言的价值**）。
+       */
+      const writeForX = async (actor, primary, second) => {
+        try {
+          await db.query(WRITE, [actor, X.stu, 'standard', primary, second, '', []])
+          return { ok: true, message: '' }
+        } catch (e) {
+          return { ok: false, message: String(e?.message ?? e).split('\n')[0] }
+        }
+      }
+      /**
+       * 客户端**直写** `student_subjects`（RLS 那条路）→ 返回改动的行数。
+       * ⚠️ 线上 `authenticated` **连 update 权限都没有**（§27.8 只 grant 了 select）——
+       *    所以这里在**一个事务里临时 grant update**、测完**一定回滚**：
+       *    不这么做就只能撞上 `permission denied`，**测不到写策略本身**，
+       *    而写策略正是 §27.8 那句"写策略仍然要给"的存在理由。
+       */
+      const directWriteAs = async (uid) => {
+        await db.exec('begin')
+        try {
+          await db.exec('grant update on student_subjects to authenticated')
+          await db.query(`select set_config('request.jwt.claim.sub', $1, true)`, [uid])
+          await db.exec('set local role authenticated')
+          return (
+            await db.query(`update student_subjects set primary_code = 'history' where student_id = $1::uuid returning student_id`, [
+              X.stu,
+            ])
+          ).rows.length
+        } catch {
+          return -1
+        } finally {
+          await db.exec('rollback')
+        }
+      }
+
+      eq('S22：本班班主任 → **能**改这个学生的选科', await canEditAs(X.head), true)
+      eq('S22b：本年级的年级主任 → **能**', await canEditAs(U.grade), true)
+      eq(
+        'S22c：教务处 / 最高管理员 → **能**（两级校级的兜底没被误伤）',
+        [await canEditAs(U.admin), await canEditAs(U.super)],
+        [true, true],
+      )
+      eq(
+        'S22d：🔴 **科任老师（在本班任教、但不是班主任）→ 不能**（2026-10-06 收窄的直接防线）',
+        await canEditAs(X.teacher),
+        false,
+      )
+      eq('S22e：别的班的班主任 → 不能（他只管自己那个班）', await canEditAs(X.otherHead), false)
+      eq('S22f：别的年级的年级主任 → 不能', await canEditAs(X.otherGh), false)
+      eq('S22g：教室端（哪怕就是他那个班的屏）→ 不能', await canEditAs(X.room), false)
+
+      /* 真的走一遍那两个写入路径：RPC（服务端形状，§30）+ 客户端直写（RLS 写策略） */
+      const tBad = await writeForX(X.teacher, 'physics', ['chemistry', 'biology'])
+      ok(
+        'S22h：🔴 科任老师当 `p_actor` 调 `write_student_subject` → **拦住**（人话是"你没有改这个学生选科的权限"）',
+        !tBad.ok && /没有改这个学生选科的权限/.test(tBad.message),
+        tBad.message,
+      )
+      const tHead = await writeForX(X.head, 'physics', ['chemistry', 'biology'])
+      ok('S22i（对照）：本班班主任当 `p_actor` → **写得进去**（收窄不是"谁都改不了"）', tHead.ok, tHead.message)
+      eq('S22j：🔴 科任老师**直写** `student_subjects`（RLS 写策略）→ **0 行**', await directWriteAs(X.teacher), 0)
+      eq('S22k（对照）：本班班主任直写 → **1 行**（写策略那一侧真放行）', await directWriteAs(X.head), 1)
+
+      /* 🔴 S22l–S22n：**反向对照** —— 把"任教班"那一支装回去（= 收窄之前的样子），
+         S22d / S22j 必须红。
+         ⚠️ 还原用的是**改动前那份真定义**（`pg_get_functiondef` 取下来存着），
+            不是在这里再抄一遍新函数体 —— 抄一遍就会"抄错一处 = 后面全歪"。 */
+      const realDef = one(
+        await db.query(`select pg_get_functiondef('public.can_edit_student_subject_for(uuid,uuid)'::regprocedure) as d`),
+      ).d
+      const OLD_FN = `create or replace function public.can_edit_student_subject_for(p_uid uuid, p_student_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select public.is_school_admin_for(p_uid)
+      or exists (
+           select 1
+             from students s
+             join classes c on c.id = s.class_id
+            where s.id = p_student_id
+              and (
+                   c.id in (select visible_class_ids_for(p_uid))
+                or exists (
+                     select 1 from teacher_roles r
+                      where r.teacher_id = p_uid
+                        and r.role = 'grade_head'
+                        and r.scope_type = 'grade'
+                        and r.scope_id = c.grade_id
+                   )
+              )
+         );
+$$;`
+      let poisonedDef = ''
+      let poisonedTeacher = '(没跑起来)'
+      let poisonedDirect = '(没跑起来)'
+      try {
+        await db.exec(OLD_FN)
+        poisonedDef = one(
+          await db.query(`select pg_get_functiondef('public.can_edit_student_subject_for(uuid,uuid)'::regprocedure) as d`),
+        ).d
+        poisonedTeacher = await canEditAs(X.teacher)
+        poisonedDirect = await directWriteAs(X.teacher)
+      } finally {
+        await db.exec(realDef.endsWith(';') ? realDef : `${realDef};`)
+      }
+      ok(
+        'S22l（对照自证）："任教班"那一支**真的装上了**（函数定义里出现了 `visible_class_ids_for`）',
+        /visible_class_ids_for/.test(poisonedDef),
+        poisonedDef.split('\n').slice(0, 3).join(' / '),
+      )
+      ok(
+        'S22m：🔴 装回去之后科任老师**就能改**了（S22d 会红）—— 它不是永远为绿的摆设',
+        poisonedTeacher === true,
+        `can_edit_student_subject(科任老师) = ${String(poisonedTeacher)}`,
+      )
+      eq('S22n：🔴 装回去之后他**直写也写得进去**（S22j 会红）', poisonedDirect, 1)
+      eq('S22o：还原成真定义之后，科任老师又是 `false`（对照用完没把库留成改坏的样子）', await canEditAs(X.teacher), false)
     }
   }
 
