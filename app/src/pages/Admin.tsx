@@ -459,7 +459,7 @@ function PanelLogin({ reason }: { reason: string }) {
             <button
               type="button"
               className="mt-2"
-              style={{ color: 'var(--color-accent)', fontSize: 12 }}
+              style={{ color: 'var(--color-accenttext)', fontSize: 12 }}
               onClick={() => navigate('/login')}
             >
               去普通登录页 →
@@ -1808,7 +1808,7 @@ export default function Admin() {
                         <button
                           type="button"
                           className="mt-1"
-                          style={{ fontSize: 11.5, color: 'var(--color-accent)' }}
+                          style={{ fontSize: 11.5, color: 'var(--color-accenttext)' }}
                           onClick={() => navigate(`/assignments/${d.assignmentId}/grade`)}
                         >
                           去这份档案 →
@@ -2925,7 +2925,7 @@ function DbCard({
                   {over ? <span className="tag tag-bad">超预算</span> : null}
                   <button
                     type="button"
-                    style={{ fontSize: 11.5, color: 'var(--color-accent)' }}
+                    style={{ fontSize: 11.5, color: 'var(--color-accenttext)' }}
                     onClick={() => window.open(`/assignments/${a.assignmentId}/grade`, '_blank')}
                   >
                     去这份档案 →

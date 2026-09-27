@@ -943,7 +943,7 @@ export default function AssignmentCollect() {
                 <button
                   type="button"
                   onClick={() => setZoom(true)}
-                  style={{ color: 'var(--color-accent)', fontSize: 12.5, fontWeight: 600 }}
+                  style={{ color: 'var(--color-accenttext)', fontSize: 12.5, fontWeight: 600 }}
                 >
                   查看原图
                 </button>

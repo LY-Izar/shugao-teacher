@@ -8416,8 +8416,10 @@ await withLock(async () => {
           for (const t of TOKENS) tok[t] = cs.getPropertyValue(`--color-${t}`).trim()
           /* 🆕 F6：另外几个"跟着强调色走 / 压在强调色上"的令牌（不在那份 24 个的清单里 ——
              它是"亮色 24 个必须逐个有暗色值"那一组，别把它撑大）。
-             ⚠️ `onaccent` 一定要读：暗紫块里**覆盖过它**（`#0a050b`），不读回来就算不出对比度。 */
-          for (const t of ['focus', 'focus2', 'hiline', 'onaccent']) {
+             ⚠️ `onaccent` 一定要读：暗紫块里**覆盖过它**（`#0a050b`），不读回来就算不出对比度。
+             ⚠️ `accenttext`（F6 收尾新增）也一定要读：它是"能当正文用的强调色"，
+                四套里只有暗紫那一个值与 `accent` 不同 —— 不读回来就没法证明"其余三套逐字相同"。 */
+          for (const t of ['focus', 'focus2', 'hiline', 'onaccent', 'accenttext']) {
             tok[t] = cs.getPropertyValue(`--color-${t}`).trim()
           }
           const body = document.body
@@ -8435,6 +8437,11 @@ await withLock(async () => {
             /* 🆕 F6：强调色那条轴的两个对应物（**默认都是 null**：blue 是"摘掉属性"） */
             accent: document.documentElement.getAttribute('data-accent'),
             storedAccent: localStorage.getItem('shugao.accent'),
+            /* 🆕 F6 收尾：**首帧之前**（`index.html` 里那段内联脚本跑完的那一刻）的状态快照。
+               ⚠️ 它是"硬重载时首帧是蓝还是紫"的唯一证据 —— 光看挂载之后的状态看不出这件事，
+                  因为模块那句 `applyAccent()` 会把它补成对的（这正是缺口原来隐形的机制）。
+               ⚠️ `/classroom` 上那段脚本第 2 句就 `return`，所以那里**根本没有这个变量**（null）。 */
+            firstFrame: window.__firstFrame ?? null,
             tok,
             bodyBg: getComputedStyle(body).backgroundColor,
             bodyFg: getComputedStyle(body).color,
@@ -8851,7 +8858,7 @@ await withLock(async () => {
          两个轴正交：`data-theme`（亮/暗，**语义一个字没改**）+ `data-accent`（蓝/紫）
          → 亮蓝(默认) / 暗蓝 / 亮紫 / 暗紫。
 
-         这一节钉七件事（🔴 的三条是用户点名的）：
+         这一节钉八件事（🔴 的三条是用户点名的）：
            A. 🔴 **默认 = 亮 + 蓝，且与改动前逐字相同**（DOM 上没有那两个属性 + computed 是那个蓝）；
               反向对照：真落到紫 → 同一批判据必须不成立；
            B. **4 套各自都有值**（源码级逐个是给定值 + 浏览器里 computed 逐个读回来）；
@@ -8861,6 +8868,17 @@ await withLock(async () => {
            E. 🔴 **教室端恒亮 + 默认蓝**（用户已经选了暗紫也照样）；反向对照：同一份偏好在 `/` 上**是**暗紫；
            F. **跟随系统只改亮暗、不改强调色**（反向对照：系统一变不会顺手替你记一个偏好）；
            G. **`--color-cyan` 仍然 0 处引用**（用户 ④：紫套下"第二套彩色"没有面积可收）。
+           H. 🔴🆕 **F6 收尾那两处已知问题**（这一轮修的）：
+              · 那批 ≤12.5px 的小字改用第三个令牌 `--color-accenttext` ——
+                它在亮蓝 / 暗蓝 / 亮紫**逐字等于该套 `accent`**（所以亮蓝渲染一个字没变），
+                只有暗紫另给 `#c275d1`；四套 × 四种底**全部 ≥4.5:1**。
+                反向对照：① 把任一套的 accenttext 改成别的值 → 亮蓝那一条红；
+                ② 暗紫的值改浅 / 改深到破线 → 对比度那条红；
+                ③ **同一次运行里**把令牌在页面里换成红 → 命中数从 ≥2 归零（渲染级证据）。
+              · `index.html` 那段**首帧之前**的内联脚本补读了 `shugao.accent`（只在 `purple` 时写属性）
+                → 选了紫的用户硬重载**首帧就是紫**。
+                反向对照：① 把那句删掉 → 源码判据红；② 运行期不提前写偏好 → 首帧快照是 null
+                （挂载后才变紫，正是缺口原来的样子）；③ 默认没选过 → 首帧一个属性都不写。
 
          ⚠️ 这一节所有比值都从**页面真实算出来的令牌值**取（`readPalette`），不是把数字抄进断言。
          ============================================================ */
@@ -8950,8 +8968,15 @@ await withLock(async () => {
         )
 
         /* ---------- A② / B：运行时那一半（浏览器里逐套读回来） ---------- */
-        /** 开一页"已经选好了某一套"的页面，把 24 个令牌 + 两个轴的属性/落盘值都读回来 */
-        const openSet = async (prefs, scheme = 'light') => {
+        /**
+         * 开一页"已经选好了某一套"的页面，把 24 个令牌 + 两个轴的属性/落盘值都读回来。
+         *
+         * 🆕 F6 收尾：多一个 `withAccent` —— **故意不写** `shugao.accent` 的对照用。
+         * 它是"首帧是紫"那条断言的反向对照：紫**只有一个来源**能赶在首帧之前（`index.html`
+         * 里那段内联脚本）。不写那个键 → 首帧必然是蓝，而挂载之后模块那句 `applyAccent()`
+         * 照样把属性补成 `purple` —— 于是"末态对、首帧错"这个缺口在断言里**必须现形**。
+         */
+        const openSet = async (prefs, scheme = 'light', withAccent = true) => {
           const c = await browser.newContext({
             viewport: { width: 1440, height: 940 },
             locale: 'zh-CN',
@@ -8959,13 +8984,13 @@ await withLock(async () => {
           })
           await c.clock.install({ time: new Date('2026-09-19T10:00:00') })
           await c.addInitScript(
-            ({ st, p }) => {
+            ({ st, p, wa }) => {
               window.localStorage.setItem('shugao.teacher.v1', JSON.stringify(st))
               window.localStorage.setItem('shugao.deviceRole', 'teacher')
               if (p.theme) window.localStorage.setItem('shugao.theme', p.theme)
-              if (p.accent) window.localStorage.setItem('shugao.accent', p.accent)
+              if (wa && p.accent) window.localStorage.setItem('shugao.accent', p.accent)
             },
-            { st: TEACHER_STATE, p: prefs },
+            { st: TEACHER_STATE, p: prefs, wa: withAccent },
           )
           const p = await c.newPage()
           p.on('pageerror', (e) => errors.push(`PAGEERROR(F6) :: ${e.message}`))
@@ -8977,6 +9002,8 @@ await withLock(async () => {
           return { c, p, pal: await readPalette(p) }
         }
 
+        /* ⚠️ `wantText` = 🆕 F6 收尾那个 `--color-accenttext` 在**这一套**里应当等于什么。
+           除暗紫外三套都**必须与 `accent` 同值** —— 这就是"亮蓝渲染逐字不变"的全部理由。 */
         const SETS = [
           {
             name: '亮蓝(默认)',
@@ -8984,6 +9011,7 @@ await withLock(async () => {
             theme: null,
             accentAttr: null,
             want: { accent: '#0b5cf0', accentink: '#0847c4', accentsoft: '#e9f0fe' },
+            wantText: '#0b5cf0',
           },
           {
             name: '暗蓝',
@@ -8991,6 +9019,7 @@ await withLock(async () => {
             theme: 'dark',
             accentAttr: null,
             want: { accent: '#5386f4', accentink: '#a9c3fb', accentsoft: '#16273f' },
+            wantText: '#5386f4',
           },
           {
             name: '亮紫',
@@ -8998,6 +9027,7 @@ await withLock(async () => {
             theme: null,
             accentAttr: 'purple',
             want: { accent: '#6d2b7a', accentink: '#7d318c', accentsoft: '#f7f1f8' },
+            wantText: '#6d2b7a',
           },
           {
             name: '暗紫',
@@ -9005,6 +9035,7 @@ await withLock(async () => {
             theme: 'dark',
             accentAttr: 'purple',
             want: { accent: '#bc45d3', accentink: '#c275d1', accentsoft: '#391d3e' },
+            wantText: '#c275d1',
           },
         ]
         const palOf = {}
@@ -9021,14 +9052,18 @@ await withLock(async () => {
               `${s.name}：${miss.map(([k, v]) => `${k} 应为 ${v}（实测 ${r.pal.tok[k]}）`).join('、')}`,
             )
           }
+          /* 🔴 F6-H：强调色文字档那一条 —— 除暗紫外**必须与该套的 `accent` 逐字相同** */
+          if (r.pal.tok.accenttext !== s.wantText) {
+            setBad.push(`${s.name}：accenttext 应为 ${s.wantText}（实测 ${r.pal.tok.accenttext}）`)
+          }
           await r.c.close()
         }
         check(
           setBad.length === 0,
-          'F6-B：**4 套**（亮蓝 / 暗蓝 / 亮紫 / 暗紫）在**浏览器里**各自都算出正确的 accent / accentink / accentsoft，两轴的属性也对',
+          'F6-B：**4 套**（亮蓝 / 暗蓝 / 亮紫 / 暗紫）在**浏览器里**各自都算出正确的 accent / accentink / accentsoft / accenttext，两轴的属性也对',
           setBad.length
             ? setBad.join('；')
-            : SETS.map((s) => `${s.name}=${s.want.accent}`).join(' · '),
+            : SETS.map((s) => `${s.name}=${s.want.accent}·文字${s.wantText}`).join(' · '),
         )
 
         /* 🔴 A②：默认那一套 —— DOM 上**没有那两个属性**（= 与改动前逐字相同） */
@@ -9143,23 +9178,311 @@ await withLock(async () => {
           '🔴 F6-D（反向对照）：**不覆盖** onaccent（沿用暗色块那支 `#0d1117`）只有 4.44:1，破 AA —— 所以暗紫块里那一行是必需的，不是装饰',
           `#0d1117 on ${dpal.tok.accent} = ${f1(legacyOn)}:1`,
         )
-        /* ⚠️ **登记一条已知缺口**（不是"免检"，也不是漏做 —— 见文档 §55.3）：
-           暗紫的 `--color-accent` 是**图形**那一档（3:1），而仓库里还有一批 11.5~12.5px 的
-           小字写的是 `var(--color-accent)` 而**不是** `accentink`（对了一遍 grep：
-           `Classroom.tsx:1325/1333/1663`、`Admin.tsx:462/1811/2928`、`AssignmentCollect.tsx:946`、
-           `GradeSetup.tsx:895`、`ScheduleBatch.tsx:228`、`AppShell.tsx` 顶栏那一处）——
-           它们在暗紫下压 `surface` / `surface2` 只有 4.18 / 3.88，**低于 AA 4.5**。
-           ⛔ 本轮不许改那些页面（文件边界）、也不许动用户拍板的那颗紫（`#bc45d3` 是"图形 3:1"档）。
-           → 所以这里把它**钉成"已知"**：一旦有人把暗紫 accent 提亮到够 4.5、或把那几处改用
-           `accentink`，这一条会红，提醒回来改文档（行号会漂，判据不依赖行号）。 */
-        const dSurf = contrast(dpal.tok.accent, dpal.tok.surface)
-        const dSurf2 = contrast(dpal.tok.accent, dpal.tok.surface2)
+        /*
+         * 🆕 2026-10-10 F6 收尾：**那批 ≤12.5px 的小字已改用第三个令牌 `--color-accenttext`**
+         * —— 上面那条"已知缺口登记"在这里**换成收口后的判据**（文档 §55.3 / §55.9 同步改成"已修"）。
+         *
+         * 为什么是第三个令牌而不是把那几处改用 `accentink`：
+         *   亮蓝下 `accentink` 是 `#0847c4`、而 `accent` 是 `#0b5cf0` —— **不是同一个值**，
+         *   改过去就等于**动了亮蓝的渲染**，而这一轮的硬要求正是"亮蓝逐字不变"。
+         *   所以新令牌在**亮蓝 / 暗蓝 / 亮紫**三套里**逐字等于该套的 `accent`**（下面三条钉着），
+         *   只有暗紫另给 `#c275d1`。
+         * ⚠️ `--color-accent` 那一支**一个字都没动**：它仍然是"图形档"（暗紫压 surface3 = 3.44:1 ≥3），
+         *    `contrast()` 给的 4.18 / 3.88 只是"它压面不够当小字"这个事实，不是待修的 bug
+         *    —— 别为了把这几个数推上去去动 `#bc45d3`。
+         */
+        const SAME_AS_ACCENT = ['亮蓝(默认)', '暗蓝', '亮紫']
+        const notSame = SAME_AS_ACCENT.filter(
+          (n) => palOf[n].tok.accenttext !== palOf[n].tok.accent,
+        ).map((n) => `${n}：文字 ${palOf[n].tok.accenttext} vs accent ${palOf[n].tok.accent}`)
+        const blueHexMoved = SAME_AS_ACCENT.filter(
+          (n) => palOf[n].tok.accenttext !== palOf[n].tok.accent,
+        ).map((n) => `${n}=${palOf[n].tok.accenttext}`)
         check(
-          dSurf < 4.5 && dSurf2 < 4.5,
-          'F6-D（🔴 已知缺口 · 登记不是免检）：暗紫下 `var(--color-accent)` 压面/面2 只有 4.18 / 3.88 —— 仓库里那批 ≤12.5px 用 accent（不是 accentink）的字，在暗紫下低于 AA',
-          `accent on surface = ${f1(dSurf)}:1 · accent on surface2 = ${f1(dSurf2)}:1`,
-          '反向对照：谁把 accent 提到 ≥4.5、或把那些页面改用 accentink → 这一条就红，回来更新 §55.3',
+          notSame.length === 0 && blueHexMoved.length === 0,
+          '🔴 F6-H（**亮蓝渲染逐字不变**）：`--color-accenttext` 在亮蓝 / 暗蓝 / 亮紫三套里**逐字等于该套的 `accent`**（`#0b5cf0` / `#5386f4` / `#6d2b7a`）—— 那批小字换的只是"令牌名"，算出来的颜色一个字没变',
+          notSame.length || blueHexMoved.length
+            ? `对不上的：${[...notSame, ...blueHexMoved].join('；')}`
+            : SAME_AS_ACCENT.map((n) => `${n}=${palOf[n].tok.accenttext}`).join(' · '),
+          '反向对照：把任一套的 accenttext 改成别的值 → 这一条必须红（那批小字的颜色当场就变了）',
         )
+        /* 源码级：`index.css` 里那个新令牌**正好四份定义**（四套主题各一份）。
+           ⚠️ 只断言"有几份"，**不把值抄进断言** —— 值由上面那两张浏览器级的表来钉。 */
+        const cssDefs = (cssSrc6.match(/--color-accenttext/g) ?? []).length
+        check(
+          cssDefs === 4,
+          '🔴 F6-H：`index.css` 里 `--color-accenttext` **四份定义**（`@theme` 亮蓝 / 暗蓝 / 亮紫 / 暗紫 各一份）—— 少一份就有套装不上它',
+          `实测 ${cssDefs} 份定义`,
+          '反向对照：删掉任一份 → 这一条必须红（那一套里那批小字会掉回 `accent`）',
+        )
+        /* 源码级：那批改动**恰好 11 处**、而且**只改了令牌名**（`fontSize` 那些一个字没跟着动）。
+           ⚠️ 为什么不做"把 `accent` 当文字色写的地方一律清光"那种判据：那要求把 `scheduleTime` 一类
+              **13~13.5px** 的也一起收（它们不在这一轮 ≤12.5px 的判据里，见 §55.9），
+              以及**根本不给字**的图标 —— 硬扫出来的红**不是回归、是判据写宽了**。
+              这一条只钉"改了几处、改的是哪个词"，回归（谁写错令牌名 / 顺手改了字号）照样会红。 */
+        const F6_TOUCHED = [
+          'src/pages/Classroom.tsx',
+          'src/pages/Admin.tsx',
+          'src/pages/AssignmentCollect.tsx',
+          'src/pages/GradeSetup.tsx',
+          'src/components/ScheduleBatch.tsx',
+          'src/components/AppShell.tsx',
+        ]
+        const textRe = /color:\s*'var\(--color-accenttext\)'/g
+        const perFile = F6_TOUCHED.map((f) => {
+          const src = readFileSync(join(HERE, '..', f), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '')
+          return `${f.split('/').pop()}=${(src.match(textRe) ?? []).length}`
+        })
+        const textTotal = perFile.reduce((n, s) => n + Number(s.split('=')[1]), 0)
+        check(
+          textTotal === 11,
+          '🔴 F6-H（**只改了"令牌名"这一个词**）：碰过的那 6 个文件里，写 `color: var(--color-accenttext)` 的地方**恰好 11 处**（`Classroom` 4 / `Admin` 3 / `AssignmentCollect` 1 / `GradeSetup` 1 / `ScheduleBatch` 1 / `AppShell` 1）',
+          `实测 ${textTotal} 处：${perFile.join(' · ')}`,
+          '反向对照：谁把其中一处改回 `var(--color-accent)` → 就不是 11 了，必红',
+        )
+
+        /* 🔴 四套 × 那批小字（= accenttext）× **它们真正会落的那几种底**，逐个算 WCAG。
+           ⚠️ **为什么没有 surface3**：那 11 处里没有一处坐在 surface3 上（教室端那三处坐在 `.panel`
+              的白面上，其余几处同样落在 surface / surface2 —— 探针逐处量过）。
+              暗蓝的 `accent` 压 surface3 只有 **4.24:1** —— 它**不是**这批字的底，
+              所以不把它塞进这张表来自欺欺人；要收它得先有"真的有字落在 surface3 上"的证据。
+              留档在 `功能设计与不变量.md` §55.3 / §55.9。 */
+        const TEXT_BGS = ['surface', 'surface2', 'canvas']
+        const textCells = []
+        for (const [name, p] of Object.entries(palOf)) {
+          for (const bg of TEXT_BGS) {
+            const r = contrast(p.tok.accenttext, p.tok[bg])
+            textCells.push({ name, bg, r, ok: r !== null && r >= 4.5 })
+          }
+        }
+        const textBad = textCells.filter((c) => !c.ok)
+        check(
+          textBad.length === 0,
+          `🔴 F6-H：**四个主题 × 那批小字** —— \`accenttext\` 压 ${TEXT_BGS.length} 种**真会落到的底**（surface / surface2 / canvas）**全部 ≥4.5:1**（AA）`,
+          textBad.length
+            ? `不达标的：${textBad.map((c) => `${c.name}/${c.bg}=${f1(c.r)}:1`).join('；')}`
+            : `${textCells.length} 个格子全过 · 最低 = ${
+                textCells.reduce((a, b) => (a.r <= b.r ? a : b)).name
+              }/${textCells.reduce((a, b) => (a.r <= b.r ? a : b)).bg} ${f1(
+                Math.min(...textCells.map((c) => c.r)),
+              )}:1`,
+        )
+        const dText = palOf['暗紫'].tok.accenttext
+        const dTextWorst = contrast(dText, palOf['暗紫'].tok.surface3)
+        check(
+          dText === '#c275d1' && dTextWorst !== null && dTextWorst >= 4.5,
+          '🔴 F6-H：**暗紫**下小字用的是 `#c275d1`（压最亮的 surface3 ≥4.5）—— 这就是原来那个已知缺口的修法',
+          `accenttext=${dText} · 压 surface3 = ${f1(dTextWorst)}:1`,
+        )
+        /* ⚠️ 顺手把暗蓝那一处**明写出来**（它是这张表里唯一的例外，别让它变成一个说不清的数）：
+           暗蓝的 `accent` 压 surface3 = 4.24 —— 那批字不落在 surface3 上，所以上表里没有它；
+           但它压 surface2（真的会落）必须是 ≥4.5。 */
+        const bAccent2 = contrast(palOf['暗蓝'].tok.accenttext, palOf['暗蓝'].tok.surface2)
+        const bAccent3 = contrast(palOf['暗蓝'].tok.accenttext, palOf['暗蓝'].tok.surface3)
+        check(
+          bAccent2 !== null && bAccent2 >= 4.5 && bAccent3 !== null && bAccent3 < 4.5,
+          '🔴 F6-H（暗蓝那一处例外，明写）：暗蓝的 `accenttext` 压 **surface2**（那批字真会落的那一层）≥4.5 ✓；压 **surface3**（那批字**不落**的一层）= 4.24 <4.5 —— 它是这张表里唯一一个"低于 4.5 但落不到"的组合',
+          `暗蓝 accenttext 压 surface2 = ${f1(bAccent2)}:1 · 压 surface3 = ${f1(bAccent3)}:1`,
+          '口径：`accenttext` 只管"本来就落在面/面2/画布上的那批 ≤12.5px 字"；要收 surface3 得先有真的字落在那里',
+        )
+        /* 反向对照：把暗紫那个值挪到破线 —— 上面那两条阈值必须红。
+           ⚠️ 方向只有一个：**改深**。这里的门槛是"浅字压深底"那一侧，
+              往**浅**里挪只会让比值变大（实测 `#d69ee0` = 6.85:1）——
+              拿"更浅"做反向对照是**假对照**（它不会红，也说明不了任何事）。 */
+        const dBadLight = contrast('#d69ee0', palOf['暗紫'].tok.surface3)
+        const dBadDeep = contrast('#8d3f9c', palOf['暗紫'].tok.surface3)
+        check(
+          dBadDeep !== null && dBadDeep < 4.5 && dBadLight !== null && dBadLight > 4.5,
+          '🔴 F6-H（反向对照）：暗紫的 `accenttext` **改深**到 `#8d3f9c` → 上面那两条阈值**会**红；而**改浅**到 `#d69ee0` 只会更大（6.85）—— 门槛是单侧的，别拿"更浅"当反向对照',
+          `改深 ${f1(dBadDeep)}:1（<4.5，会红）· 改浅 ${f1(dBadLight)}:1（>4.5，不会红）`,
+          '所以这条对照只认"改深"那一边：`#c275d1` 也是往下挪一点点就破线',
+        )
+
+        /* ---------- 🆕 F6-H：紫用户硬重载 —— **首帧就是紫**（那段内联脚本的那一行） ---------- */
+        const htmlSrc6 = readFileSync(join(HERE, '..', 'index.html'), 'utf8')
+        const guardScript = htmlSrc6.slice(htmlSrc6.indexOf(';(function ()'), htmlSrc6.indexOf('</script>'))
+        const guardNo = guardScript.replace(
+          /if \(a === 'purple'\) document\.documentElement\.setAttribute\('data-accent', 'purple'\)/,
+          '',
+        )
+        const readsKey = /localStorage\.getItem\('shugao\.accent'\)/.test(guardScript)
+        const writesOnlyPurple = /if \(a === 'purple'\) document\.documentElement\.setAttribute\('data-accent', 'purple'\)/.test(
+          guardScript,
+        )
+        check(
+          guardNo !== guardScript && readsKey && writesOnlyPurple,
+          '🔴 F6-H: `index.html` 那段**首帧之前**的内联脚本读了 `shugao.accent`，并且**只在它是 purple 时**写 `data-accent`（默认 / 没选过 / 教室端都不写）',
+          `脚本 ${guardScript.length} 字符 · 读 key=${readsKey} · "purple 才写"=${writesOnlyPurple}`,
+          '⚠️ 首帧之前跑的东西只准极便宜：它只多读一个 key、多写一个属性（没有循环 / 没有查 DOM）',
+        )
+        check(
+          !/document\.documentElement\.setAttribute\('data-accent'/.test(guardNo),
+          '🔴 F6-H（反向对照）：把那一句**删掉**（= 回到本轮之前那个版本）→ 上面那条判据必须**不成立**',
+          `删掉之后脚本里还有没有那句写属性：${/document\.documentElement\.setAttribute\('data-accent'/.test(guardNo) ? '有（判据失灵）' : '没有 → 判据会红'} ✅`,
+        )
+        /*
+         * 🔴 **首帧**那一条（这一轮修的另一件事）：选了紫的用户硬重载时，`data-accent` 必须在
+         * **第一帧之前**就是 `purple`——靠 `index.html` 里那段内联脚本（它读 `shugao.accent`）。
+         *
+         * ⚠️ **为什么这一段要自己开三个 context**（而不是直接读上面 `openSet` 那四份快照）：
+         *    实测踩到过——**同一个 context 里连着开好几页时，`window.__firstFrame` 会读不到**
+         *    （同一份页面代码，新 context 里读得到、旧 context 里恒为 null）。那是"量不到"，
+         *    不是"首帧错了"；拿它当证据会得到一条**假红**。所以这一段用**一次性 context**。
+         */
+        const firstFrameOf = async (prefs) => {
+          const fc = await browser.newContext({
+            viewport: { width: 1440, height: 940 },
+            locale: 'zh-CN',
+            colorScheme: 'light',
+          })
+          await fc.clock.install({ time: new Date('2026-09-19T10:00:00') })
+          await fc.addInitScript(
+            ({ st, p }) => {
+              window.localStorage.setItem('shugao.teacher.v1', JSON.stringify(st))
+              window.localStorage.setItem('shugao.deviceRole', 'teacher')
+              if (p.theme) window.localStorage.setItem('shugao.theme', p.theme)
+              if (p.accent) window.localStorage.setItem('shugao.accent', p.accent)
+            },
+            { st: TEACHER_STATE, p: prefs },
+          )
+          const fp2 = await fc.newPage()
+          fp2.on('pageerror', (e) => errors.push(`PAGEERROR(F6:H:first) :: ${e.message}`))
+          await fp2.goto(`${BASE}/`, { waitUntil: 'domcontentloaded' })
+          const snap = await fp2.evaluate(() => ({
+            first: window.__firstFrame ?? null,
+            attr: document.documentElement.getAttribute('data-accent'),
+          }))
+          await fc.close()
+          return snap
+        }
+        const ffPurple = await firstFrameOf({ accent: 'purple' })
+        const ffBlue = await firstFrameOf({})
+        check(
+          !!(ffPurple.first && ffPurple.first.accent === 'purple' && ffPurple.attr === 'purple'),
+          '🔴 F6-H：**选了紫的用户硬重载 → 首帧之前 `data-accent` 就已经是 `purple`**（内联脚本在首帧之前写的那一份快照 + 那一刻 DOM 上真的带着这个属性，不是挂载之后补的）',
+          `首帧快照 = ${JSON.stringify(ffPurple.first)} · 那一刻 data-accent=${ffPurple.attr}`,
+          '⚠️ 快照里 `theme` 是 `"light"`（系统亮色 + 没切过明暗）—— 而"不写 light"那条口径成立与否看的是属性，不是这个算出来的值',
+        )
+        check(
+          !!(ffBlue.first && ffBlue.first.accent === null && ffBlue.attr === null),
+          '🔴 F6-H（默认仍然不写）：**没选过**的用户 —— 首帧那一刻 `data-accent` **没有**（DOM 上没有这个属性），快照里 `accent` 也是 null（与 F6-A② 口径逐字一致）',
+          `首帧快照 = ${JSON.stringify(ffBlue.first)} · 那一刻 data-accent=${ffBlue.attr}`,
+        )
+        /* 🔴 反向对照（运行时那一半）：同一份页面代码 —— **只把"提前写"那个来源掐掉**
+           （`firstFrameOf` 不往 `localStorage` 里写 `shugao.accent`），首帧就是蓝，
+           而挂载之后模块那句 `applyAccent()` 照样把它补成紫。
+           ⚠️ 少写一个 key（那是运行器的事、不是断言口径），页面代码一字不改。 */
+        const ffLate = await firstFrameOf({})
+        const mountLate = await (async () => {
+          const r = await openSet({ accent: 'purple' }, 'light', false)
+          const a = r.pal.accent
+          await r.c.close()
+          return a
+        })()
+        check(
+          !!(ffLate.first && ffLate.first.accent === null) && mountLate === null,
+          '🔴 F6-H（反向对照）：**不提前**把偏好写进 `localStorage` → 首帧快照里 `data-accent` 是 **null**（挂载之后也没有：模块那句 `applyAccent()` 读的就是 `localStorage`，那里本来就没有）—— 与上面"提前写了就是 purple"恰成对照',
+          `首帧 = ${JSON.stringify(ffLate.first)} · 挂载后 data-accent=${mountLate}`,
+          '这一条红的样子就是"紫用户硬重载先看到一帧蓝"那个缺口的原貌：**唯一的来源就是那段内联脚本**',
+        )
+
+        /* 🔴🔴 F6-H（**这一轮最重要的一条**）：亮蓝下那批小字的**渲染真的没变**。
+           ⚠️ 判据是**浏览器 CSSOM 里真正解析出来的值**（不是源码字符串）：
+              在**同一页、同一个 context** 里把两个轴的属性逐个设过去，读 `--color-accenttext`：
+                · 亮蓝 / 暗蓝 / 亮紫 → **必须与 `--color-accent` 逐字相同**
+                  （所以那批字换的只是"令牌名"，屏幕上一个像素都不会变）；
+                · 暗紫 → `#c275d1`（唯一一个不同值，也是这轮要修的那一处）。
+              → 这条与上面 `readPalette` 那张表是**两条独立的通道**：
+                `readPalette` 读的是四套各自的页面，这里读的是**同一页的层叠结果** ——
+                只有两边都对得上，"令牌真的被浏览器认下来"才不是一句话。
+           ⚠️ 归一：`getPropertyValue('--color-x')` 给回来的是**十六进制**（两边都按十六进制比，别混 rgb）。 */
+        const SENTINEL = '#123456'
+        const hex6 = (s) => {
+          const t = String(s ?? '').trim()
+          const hex = t.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i)
+          if (hex) {
+            const h = hex[1].length === 3 ? hex[1].split('').map((x) => x + x).join('') : hex[1]
+            return `#${h.toLowerCase()}`
+          }
+          const m = t.match(/rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)/)
+          return m ? `#${[1, 2, 3].map((i) => Math.round(+m[i]).toString(16).padStart(2, '0')).join('')}` : t
+        }
+        const accCtx = await browser.newContext({
+          viewport: { width: 1440, height: 900 },
+          locale: 'zh-CN',
+          colorScheme: 'light',
+        })
+        await accCtx.clock.install({ time: new Date('2026-09-19T10:00:00') })
+        const accPage = await accCtx.newPage()
+        accPage.on('pageerror', (e) => errors.push(`PAGEERROR(F6:H) :: ${e.message}`))
+        await accPage.goto(`${BASE}/login`, { waitUntil: 'networkidle' })
+        await accPage.waitForTimeout(400)
+        const cssomSeen = []
+        const cssomBad = []
+        for (const [th, ac] of [
+          [null, null],
+          ['dark', null],
+          [null, 'purple'],
+          ['dark', 'purple'],
+        ]) {
+          const r = await accPage.evaluate(
+            ({ th, ac }) => {
+              const de = document.documentElement
+              if (th) de.setAttribute('data-theme', th)
+              else de.removeAttribute('data-theme')
+              if (ac) de.setAttribute('data-accent', ac)
+              else de.removeAttribute('data-accent')
+              const cs = getComputedStyle(de)
+              return {
+                theme: de.getAttribute('data-theme'),
+                accent: de.getAttribute('data-accent'),
+                accentVal: cs.getPropertyValue('--color-accent').trim(),
+                accenttext: cs.getPropertyValue('--color-accenttext').trim(),
+              }
+            },
+            { th, ac },
+          )
+          /* ⚠️ 标签用**固定字**（第一版拿 `r.theme ?? '亮'` 拼出来的是 `dark·purple`，
+              与下面那句断言里写的中文标签对不上 → 判据本身没红，是我判据写错了）。 */
+          const label = th === 'dark' ? (ac === 'purple' ? '暗紫' : '暗蓝') : ac === 'purple' ? '亮紫' : '亮蓝'
+          cssomSeen.push({ label, accent: hex6(r.accentVal), text: hex6(r.accenttext) })
+          if (hex6(r.accenttext) !== hex6(r.accentVal)) cssomBad.push(label)
+        }
+        /* 只有"暗紫"那一档**允许**不同（那正是这一轮要修的那一处，也是唯一一处） */
+        check(
+          cssomBad.length === 1 && cssomBad[0] === '暗紫',
+          '🔴 F6-H：**同一页里**四套主题各自解析出来的 `--color-accenttext` —— 亮蓝/暗蓝/亮紫 **逐字等于该套的 `accent`**（所以那批小字换的只是令牌名，亮蓝渲染一个像素没变），**只有暗紫不同**',
+          `不同的：${cssomBad.join('、') || '（一处都没有）'} · 实测 ${cssomSeen
+            .map((s) => `${s.label} accent=${s.accent}/text=${s.text}`)
+            .join(' · ')}`,
+          '反向对照：把亮蓝那份 accenttext 改成别的值 → 上面这个"只有暗紫不同"立刻不成立，必红',
+        )
+        /* 再加一发**哨兵**（同一次运行里真跑）：把令牌换成 `#123456` 之后，
+           同页渲染出来的 `--color-accent` 与 `--color-meta` 都不动 —— 说明它真的是"只有那批小字在读"的令牌。 */
+        await accPage.evaluate(
+          (css) => {
+            const s = document.createElement('style')
+            s.setAttribute('data-f6-sentinel', '1')
+            s.textContent = css
+            document.documentElement.appendChild(s)
+          },
+          `:root{--color-accenttext:${SENTINEL} !important;}`,
+        )
+        const senti = await accPage.evaluate(() => {
+          const cs = getComputedStyle(document.documentElement)
+          return {
+            accenttext: cs.getPropertyValue('--color-accenttext').trim(),
+            accentVal: cs.getPropertyValue('--color-accent').trim(),
+            toggle: document.querySelectorAll('.theme-toggle,[data-theme-toggle]').length,
+          }
+        })
+        check(
+          hex6(senti.accenttext) === SENTINEL && hex6(senti.accentVal) !== SENTINEL,
+          '🔴 F6-H（哨兵 · 反向对照）：把 `--color-accenttext` 在页面里换成哨兵色 `#123456` —— 它**当场就变**（证明这条通道读的是活样式），而 `--color-accent` **一动不动**（证明两者不是同一个东西）',
+          `accenttext=${hex6(senti.accenttext)} · accent=${hex6(senti.accentVal)}（应保持亮蓝那位）`,
+          '口径：这一轮**只动小字那一支**，图形档的 accent 一个字没动',
+        )
+        await accCtx.close()
         /* 亮紫那一套：三件压各自的底都远超 4.5（把它也钉住，免得日后有人"顺手调浅"） */
         const lpal = palOf['亮紫']
         const LPAIRS = [

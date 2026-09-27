@@ -225,7 +225,7 @@ export function ScheduleBatch({
         <button
           type="button"
           className="mt-2 flex items-center gap-1.5"
-          style={{ fontSize: 11.5, color: 'var(--color-accent)' }}
+          style={{ fontSize: 11.5, color: 'var(--color-accenttext)' }}
           onClick={() => setPasteOpen((v) => !v)}
         >
           <IconList size={13} />

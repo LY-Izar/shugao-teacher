@@ -892,7 +892,7 @@ function RosterSheet({
                 <button
                   type="button"
                   className="mt-1.5"
-                  style={{ fontSize: 12, color: 'var(--color-accent)' }}
+                  style={{ fontSize: 12, color: 'var(--color-accenttext)' }}
                   onClick={() => setShowAll((v) => !v)}
                 >
                   {showAll ? '收起' : `还有 ${plan.checked.length - 12} 行`}

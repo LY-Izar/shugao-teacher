@@ -2437,7 +2437,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               type="button"
               onClick={() => navigate('/schedule')}
               className="mt-2.5 flex w-full items-center gap-1.5"
-              style={{ fontSize: 11.5, color: 'var(--color-accent)' }}
+              style={{ fontSize: 11.5, color: 'var(--color-accenttext)' }}
             >
               <IconCalendar size={13} />
               <span>{mood.day.items.length ? '调整日程' : '去录入日程'}</span>

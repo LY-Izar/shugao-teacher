@@ -41,18 +41,22 @@ import { useCallback, useEffect, useState } from 'react'
  *   ③ 🔴 **教室端恒亮 + 默认蓝**：`/classroom` 上连 `data-accent` 也**不写**（"今天什么样就什么样"）。
  *      ⚠️ **机制要说准**（别照着 F4 那句想当然）：`/classroom` 是**独立的一整屏、不套 `AppShell`**
  *      （`App.tsx` 那条路由），而 `Guard` 又在挂 `AppShell` **之前**就做 `hydrate` 与跳转 ——
- *      所以教室端上**本模块的 `apply()` 根本不会被调用**：首帧那段内联脚本不写 `data-accent`，
- *      AppShell 也没挂上 → 那块屏天然就是默认蓝。`Classroom.tsx` 只摘 `data-theme`
- *      （它不该知道强调色这一轴），**它也不需要知道**。
+ *      所以教室端上**本模块的 `apply()` 根本不会被调用**，AppShell 也没挂上 → 那块屏天然就是默认蓝。
+ *      `Classroom.tsx` 只摘 `data-theme`（它不该知道强调色这一轴），**它也不需要知道**。
+ *      ⚠️ **首帧那段内联脚本现在是"读到 `purple` 才写"**（F6 收尾补的那一句）——
+ *      教室端所以仍然不写：内联脚本第 2 句就 `return` 了，`data-accent` 与 `data-theme` 一起不写。
  *      下面 `effectiveAccent()` 里那一句 `isClassroom() → 'blue'` 是**第二道**：
  *      万一将来有人把教室端套进应用壳，这条判据仍然把强调色按住（不赌"谁先谁后"）。
  *      `shots.mjs` F6-E 用"用户已经选了暗紫"的偏好直接开 `/classroom` 钉这件事（含反向对照）。
  *
- * ⚠️ **已知缺口（登记在 `功能设计与不变量.md` §F6）**：`index.html` 里那段内联脚本
- *    （首帧之前写 `data-theme`，防暗色白闪）**这一轮不许改**（文件边界），
- *    所以选了紫的用户**硬重载时会先看到一帧蓝**，再由 `apply()` 换成紫。
- *    SPA 内切换没有这个问题（属性是当场写的）。修法只有一行（内联脚本里补读
- *    `shugao.accent` 并写上 `data-accent`），留给下一轮。
+ * ✅ **2026-10-10 F6 收尾：那段内联脚本已经补上强调色那一句** ——
+ *    它现在也读 `localStorage['shugao.accent']`，是 `purple` 就写 `data-accent="purple"`
+ *    （**默认 / 没选过 / 教室端 → 三个属性一律不写**，与下面口径①逐字一致）。
+ *    于是"选了紫的用户硬重载先看到一帧蓝"这个缺口**关掉了**：首帧之前属性就在。
+ *    ⚠️ 它在 `index.html` 的 `<head>` 里、是**首帧之前**跑的，所以那一句必须**极便宜**：
+ *    只多读一个 key、多写一个属性，没有循环 / 没有查询 / 没有正则（`shots.mjs` F6-H 钉来源）。
+ *    ⚠️ 两处的键名与属性名仍然必须**同字**：`shugao.theme` / `shugao.accent` /
+ *    `data-theme` / `data-accent` / `/classroom` 那一句 —— 改一处就要同时改两处。
  */
 
 /** `localStorage` 的键。⚠️ 与 `index.html` 里那段内联脚本**必须同字** */
@@ -182,16 +186,17 @@ export function setAccent(next: Accent): Accent {
  * 🔴 **模块级那一下**（F6）：强调色这条轴**不依赖"谁调用 `apply()`"**。
  *
  * 为什么必须要有它：`/admin`、`/login` 这些页面**不套 `AppShell`**（各自是独立的一整屏）——
- * 没人调 `apply()`，而 `index.html` 那段内联脚本这一轮**不在文件边界内**（写不了这个属性）→
- * 用户选的紫在这些页面上会**掉回蓝**（`shots.mjs` F6 拍 `/admin` 那张暗紫图时**真的红过一次**，
- * 实测 `data-accent=null`、`accent=#5386f4` —— 这条就是那次红的修法）。
+ * 没人调 `apply()`，用户选的紫在这些页面上会**掉回蓝**（`shots.mjs` F6 拍 `/admin` 那张暗紫图时
+ * **真的红过一次**，实测 `data-accent=null`、`accent=#5386f4` —— 这条就是那次红的修法）。
  *
  * 它只做两件事：**路径不是 `/classroom` 且存了 `purple` → 写上；否则（默认蓝 / 教室端）→ 摘掉**。
  * 于是教室端那一条也顺带被这一句守住（`effectiveAccent()` 里的 `isClassroom()` 是**真会被走到**的，
  * 不是摆设）。
  *
- * ⚠️ 它是**模块副作用**、跑在首帧之后（ES module 是 defer 的）—— 与 §F6「硬重载先看到一帧蓝」
- *    是同一件事的两半；另一半要等内联脚本补上那一行才会消失（登记在文档 §55.9）。
+ * ✅ F6 收尾之后它的角色变了一点（**别以为可以删**）：首帧那段内联脚本也写 `data-accent` 了，
+ *    所以"挂载之前那一帧"不再靠它 —— 但**它仍然是唯一一股"页面上没人调 `apply()` 时也生效"的力**，
+ *    而且 SPA 里改完 `localStorage` 之后就靠它重算（内联脚本只在**文档加载**时跑一次）。
+ * ⚠️ 它是**模块副作用**、跑在首帧之后（ES module 是 defer 的）。
  * ⚠️ `typeof document === 'undefined'` 这个守卫**不能删**：Node 下的脚本
  *    （`grade-checks` 之类）也会 import 到这个模块。
  * ⚠️ 别把它挪进某个 `useEffect`："不套应用壳的页面也要生效"正是它存在的理由。

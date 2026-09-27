@@ -1322,7 +1322,7 @@ export default function Classroom() {
                           setPasteText('')
                           setPasteOpen(true)
                         }}
-                        style={{ fontSize: 11.5, color: 'var(--color-accent)' }}
+                        style={{ fontSize: 11.5, color: 'var(--color-accenttext)' }}
                       >
                         粘贴课表
                       </button>
@@ -1330,7 +1330,7 @@ export default function Classroom() {
                         type="button"
                         disabled={schedBusy}
                         onClick={() => schedRef.current?.click()}
-                        style={{ fontSize: 11.5, color: 'var(--color-accent)' }}
+                        style={{ fontSize: 11.5, color: 'var(--color-accenttext)' }}
                       >
                         {schedBusy ? '识别中…' : '拍课表'}
                       </button>
@@ -1660,7 +1660,7 @@ export default function Classroom() {
                           setBkBusy(false)
                         }
                       }}
-                      style={{ fontSize: 11.5, color: 'var(--color-accent)' }}
+                      style={{ fontSize: 11.5, color: 'var(--color-accenttext)' }}
                     >
                       {bkBusy ? '处理中…' : needsGrant ? '点一下恢复' : '设置文件夹'}
                     </button>
@@ -1953,7 +1953,7 @@ export default function Classroom() {
                         className="px-3 py-2.5"
                         style={{
                           fontSize: 12.5,
-                          color: 'var(--color-accent)',
+                          color: 'var(--color-accenttext)',
                           borderBottom: '1px solid var(--color-line)',
                         }}
                       >

@@ -15,29 +15,44 @@
     <title>树高教师平台</title>
     <script>
       /*
-       * 主题的**门卫版**（2026-10-09 F4）。
+       * 主题的**门卫版**（2026-10-09 F4；🆕 2026-10-10 F6 收尾补了强调色那一句）。
        *
        * 为什么要有这一段：`src/lib/theme.ts` 是模块，跑起来时第一帧早就画完了 ——
        * 暗色用户每次打开都会先白闪一下。这一段在**首帧之前**把 `data-theme` 写上，
        * 于是首帧就是对的。三条口径与 `theme.ts` 逐条相同（口径写在那份文件的文件头）：
        *   ① 默认跟随系统；② 手动切过就记住（localStorage）；③ 教室端恒亮。
        * ⚠️ 键名 `shugao.theme` / 属性名 `data-theme` / `/classroom` 那一句 —— 三处都要同字。
+       *
+       * 🆕 F6 收尾：**强调色那条轴也在这里补上** —— 不补的话，选了紫的用户**硬重载时首帧是蓝**
+       *    （模块那句 `applyAccent()` 要等到挂载，比首帧晚）。这一条与 `theme.ts` 的强调色口径
+       *    逐条相同：**只有存了 `'purple'` 才写** `data-accent="purple"`，默认 / 没选过 / 教室端
+       *    一律**不写**（与"蓝 = 摘掉属性"那条口径一致，`shots.mjs` F6-A② 钉着）。
+       * ⚠️ 这一段是**首帧之前**跑的，所以只准**极便宜**：多读一个 key、多写一个属性，
+       *    不查 DOM、不建对象、不跑循环。
        */
       ;(function () {
         try {
           if (/^\/classroom(\/|$)/.test(location.pathname)) return
           var t
+          var a
           try {
             t = localStorage.getItem('shugao.theme')
+            a = localStorage.getItem('shugao.accent')
           } catch (e) {
             t = null
+            a = null
           }
           if (t !== 'light' && t !== 'dark') {
             t = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
           }
           if (t === 'dark') document.documentElement.setAttribute('data-theme', 'dark')
+          if (a === 'purple') document.documentElement.setAttribute('data-accent', 'purple')
+          /* 把"首帧那一刻的两个属性"记一份（**这一句只记、不写**）——
+             `shots.mjs` 的 F6-H 靠它证明"选了紫的用户硬重载就是紫"：
+             光看挂载之后的状态看不出这件事，因为模块那句 applyAccent() 会把它补成对的。 */
+          window.__firstFrame = { theme: t, accent: a }
         } catch (e) {
-          /* 读不到就当亮色（全站默认），绝不让它挡住页面 */
+          /* 读不到就当亮色 + 默认蓝（全站默认），绝不让它挡住页面 */
         }
       })()
     </script>
