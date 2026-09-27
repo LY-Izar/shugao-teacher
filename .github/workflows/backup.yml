@@ -36,6 +36,14 @@ on:
 jobs:
   backup:
     runs-on: ubuntu-latest
+    # 🔴 强制 pg_wrapper 用 17。
+    #    runner 镜像里装了 PostgreSQL 16 的**服务端集群**，而 Debian 的 pg_wrapper
+    #    会优先跟"集群那一版"——所以即使装了 17 的客户端，/usr/bin/pg_dump 仍然
+    #    解析到 16（2026-09-27 运行 #14 实测：安装步骤绿的，pg_dump 还是 16.15）。
+    #    设了 PGVERSION 不但会切到 17，而且**17 没装时会直接报错**，
+    #    而不是"绿着但悄悄用旧版"。
+    env:
+      PGVERSION: '17'
     steps:
       # ── 第 1 步：先看 secret 在不在（缺 secret 是最常见的失败原因）──────
       - name: 环境自检（只报 secret 存在性，绝不打印值）
@@ -129,8 +137,11 @@ jobs:
           #    带版本号的包名不可能是"已满足"，才会真的把 17 装上。
           #    pg_wrapper 会把 /usr/bin/pg_dump 指到已装的最高版本，所以装上了就会用它。
           sudo apt-get install -y -qq postgresql-client-17
+          # 🔴 断言 17 真的装上了：装不上就【当场红】——绝不留"步骤绿着、却在用旧版"的状态。
+          test -x /usr/lib/postgresql/17/bin/pg_dump || { echo "::error::postgresql-client-17 没装上（PGDG 源或包名有问题）"; exit 1; }
           # 装上的是哪个版本必须打出来：pg_dump 主版本低于服务器主版本时会
           # 直接拒绝导出（server version mismatch），那时第一个要看的就是这两行。
+          # 有了 PGVERSION=17，下面这两行**必须**打出 17.x；打出 16 就说明 PGVERSION 没生效。
           pg_dump --version
           psql --version
 
