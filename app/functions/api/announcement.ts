@@ -371,7 +371,7 @@ export async function onRequestPost(context: {
       const r = await sendAuditedMail(env, {
         action: 'mail.announcement',
         actorId: me.id,
-        subject: `【树高公告】${f.title.slice(0, 60)} · ${beijingStamp()}`,
+        subject: `【树高教务通】${f.title.slice(0, 60)} · ${beijingStamp()}`,
         /*
          * 🔴 正文从 `SYSTEM_MAIL_BODIES.announcement` 来（**唯一一处构造**）。
          *    ⚠️ 这里原来在正文里印 `MAIL_FROM` 的值 —— 2026-10-06 逐条体检当场抓到：

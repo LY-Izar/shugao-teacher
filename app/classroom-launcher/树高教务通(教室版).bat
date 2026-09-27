@@ -1,5 +1,5 @@
 @echo off
-title Shugao Teacher Platform - Classroom
+title Shugao Jiaowu Console - Classroom
 setlocal
 set "URL=https://shugao-teacher.pages.dev/classroom"
 set "FLAGS=--app=%URL% --start-fullscreen --autoplay-policy=no-user-gesture-required --disable-features=Translate"

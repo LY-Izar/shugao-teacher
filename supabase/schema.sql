@@ -1,5 +1,5 @@
 -- ============================================================
---  树高教师平台 · Supabase 数据库结构
+--  树高教务通 · Supabase 数据库结构
 --
 --  用法：Supabase 控制台 → SQL Editor → 新建查询 → 粘贴全文 → Run
 --  可重复执行（全部是 if not exists / drop policy if exists）

@@ -384,10 +384,10 @@ const dupWrites = []
 function check(ok, label, observed, extra = '') {
   if (ok) {
     passed++
-    console.log(`     ✅ ${label}\n          实测：${observed}${extra ? `　（${extra}）` : ''}`)
+    console.log(`     ✅ ${label}\n          实测：${observed}${extra ? ` （${extra}）` : ''}`)
   } else {
     failures.push(`[${currentStep}] ${label} —— 实测：${observed}${extra ? `（${extra}）` : ''}`)
-    console.log(`     ❌ ${label}\n          实测：${observed}${extra ? `　（${extra}）` : ''}`)
+    console.log(`     ❌ ${label}\n          实测：${observed}${extra ? ` （${extra}）` : ''}`)
   }
 }
 
@@ -819,7 +819,7 @@ await withLock(async () => {
       const D0919 = '9 月 19 日 · 周六'
 
       await goto(page, '01 登录页', '/login', {
-        markers: ['树高教师平台', '账号登录', 'TEACHER CONSOLE'],
+        markers: ['树高教务通', '账号登录', 'TEACHER CONSOLE'],
         // 演示模式（无 Supabase）下不该出现"登录过期"的提示
         absent: ['距上次在这台设备上登录已超过'],
       })
@@ -9309,8 +9309,15 @@ await withLock(async () => {
               那个 px 边界**真的漏了东西**：`Admin.tsx` 里那个 `<summary>`（11.5px **借父级字号**，
               静态 grep 看不见 `fontSize`）与 13~13.5px 那几处。
               这一版按用户拍板**不再留 px 边界**：判据 = 全仓 `color:` 前景色的两半之和：
-                · `var(--color-accenttext)` = **29 处**（上一轮 11 + 这一轮 18）
-                · `var(--color-accent)`   = **0 处**
+                 · `var(--color-accenttext)` = **25 处**
+                 · `var(--color-accent)`   = **0 处**
+           🔴 **为什么从 29 变成 25（2026-10-10 徽标轮）—— 不是为了让门禁变绿**：
+              少掉的那 4 处（`AppShell.tsx` ×2 · `Login.tsx` ×1 · `Classroom.tsx` ×1）**不是小字**，
+              是**围着矢量树形图标的那个 `color: currentColor` 容器**（`<span style={{color:…}}><Logo/></span>`）。
+              本轮品牌标从矢量图标换成**校徽位图**（`components/Emblem.tsx`）——
+              位图**不能被 CSS 染色**，而且校徽**不许改色** → 那 4 个容器整条删掉
+              （`徽标方案\落地清单.md` §七 之 4 明确要求"删掉原来给矢量树形图标上色的那一行"）。
+              **所以变的是分母，不是口径**：`accent` 仍是 **0 处**，那批 ≤13.5px 的小字仍**逐个**用 `accenttext`。
            ⚠️ `accentColor`（原生 checkbox 的图形档）与 `background:` / `border…:` / 渐变**不在内**：
               它们不是文字、是图形（≥3:1 那一条），本轮一个字没动 —— 共 8 处，留档见 §55.9。 */
         const textSites = { next: 0, old: 0 }
@@ -9327,10 +9334,10 @@ await withLock(async () => {
           if (n) perNext.push(`${f.split('/').pop()}=${n}`)
         }
         check(
-          textSites.next === 29 && textSites.old === 0,
-          '🔴 F6-H（**不再留 px 边界**）：全仓 `color:` 前景色 —— 用 `accenttext` 的**恰好 29 处**、还用 `accent` 的**恰好 0 处**（上一轮那 11 处 ≤12.5px 的 + 这一轮 18 处 13~13.5px 与"图标容器继承色"的，一次收干净）',
+          textSites.next === 25 && textSites.old === 0,
+          '🔴 F6-H（**不再留 px 边界**）：全仓 `color:` 前景色 —— 用 `accenttext` 的**恰好 25 处**、还用 `accent` 的**恰好 0 处**（29 → 25 那 4 处是"给矢量图标上色"的容器，徽标轮换成校徽位图时整条删掉 —— 理由见上面那段注释）',
           `accenttext=${textSites.next} 处（${perNext.join(' · ')}）· accent=${textSites.old} 处`,
-          '反向对照：把其中任一处改回 `var(--color-accent)` → 两个数就不再是 29 / 0，必红',
+          '反向对照：把其中任一处改回 `var(--color-accent)` → 两个数就不再是 25 / 0，必红',
         )
 
         /* 🔴 四套 × 那批小字（= accenttext）× **它们真正会落的那几种底**，逐个算 WCAG。
@@ -9782,6 +9789,379 @@ await withLock(async () => {
           '数据库',
         ])
       })
+
+    /*
+     * ================= S22：改名收口 + 校徽（2026-10-10 徽标轮） =================
+     *
+     * 这一节**不截图**：它钉的是"名字改干净了 + 徽标在四套主题下都对"，不是某张图长什么样。
+     * 每一条都带 🧪 反向对照（同一个函数喂坏值 → 必须判假），做法照 `AGENTS.md` 三·2
+     * 与本文件既有那批（见 2968 / 3012 行）：**就地改内存里的那份文本/对象，不动磁盘**。
+     *
+     * 🔴 扫描用的旧名要**拼出来**（`OLD.join('')`），不能写成连着的字面量 ——
+     *    否则 `shots.mjs` 自己就成了"旧名 1 处"，第 ① 条**永远红**。
+     */
+    await step('S22：改名收口 + 校徽四套主题', async () => {
+      const ROOT22 = join(HERE, '..', '..')
+      const PUB22 = join(HERE, '..', 'public')
+      const OLD22 = ['树高', '教师平台'].join('')
+
+      /* ---------- ① 旧名：全仓**文本文件** 0 处 ----------
+       * ⚠️ 二进制跳过（`.lnk` 存的是**仓库所在目录**的名字，那是文件夹不是平台名）；
+       * ⚠️ `-c core.quotePath=false -z`：git 默认会把中文路径转义成八进制，那样的路径读不开，
+       *    会被 `catch` 悄悄跳掉 —— 那就成了"读不到 = 0 处"的假绿（`AGENTS.md` 三·1）。
+       */
+      const tracked22 = execSync('git -c core.quotePath=false ls-files -z', { cwd: ROOT22 })
+        .toString('utf8')
+        .split('\0')
+        .filter(Boolean)
+      const texts22 = []
+      let bin22 = 0
+      let fail22 = 0
+      for (const rel of tracked22) {
+        let buf
+        try {
+          buf = readFileSync(join(ROOT22, rel))
+        } catch {
+          fail22++
+          continue
+        }
+        if (buf.includes(0)) {
+          bin22++
+          continue
+        }
+        texts22.push({ path: rel, text: buf.toString('utf8') })
+      }
+      check(
+        fail22 === 0 && texts22.length > 150,
+        'S22 ①：下面那条扫的是**真的**仓库文件树（不是"读不到就当成 0 处"）',
+        `git ls-files ${tracked22.length} 个 → 文本 ${texts22.length} / 二进制 ${bin22} / 读失败 ${fail22}`,
+      )
+      const scanOld22 = (list) => list.filter((f) => f.text.includes(OLD22)).map((f) => f.path)
+      const oldHits22 = scanOld22(texts22)
+      check(
+        oldHits22.length === 0,
+        `🔴 S22 ① 改名收口：「${OLD22}」在仓库**全部文本文件**里 0 处`,
+        oldHits22.length
+          ? `${oldHits22.length} 处：${oldHits22.slice(0, 8).join('、')}`
+          : `扫了 ${texts22.length} 个文本文件，0 处`,
+      )
+      const negOld22 = scanOld22([
+        ...texts22,
+        { path: '🧪（反向对照塞回来的那一处）', text: `  · ${OLD22}\n` },
+      ])
+      check(
+        negOld22.length === 1,
+        '🧪 S22 ① 反向对照：往同一批文本里塞回一处旧名 → 同一个扫描函数**当场判假**（这条不是"永远为绿"的摆设）',
+        `命中 ${negOld22.length} 处：${negOld22.join('、')}`,
+      )
+
+      /* ---------- ② localStorage 的键：一个都没变 ----------
+       * 🔴 改名轮最容易顺手改的就是这些键名 —— 改一个，所有人的主题偏好、班级选择、
+       *    草稿、设备角色**全丢**（`AGENTS.md` 四、`落地清单.md` B9）。所以把键表钉死。
+       */
+      const KEYS22 = [
+        'shugao.accent',
+        'shugao.accountKindProbe',
+        'shugao.admin.build',
+        'shugao.ann.hideDay',
+        'shugao.ann.preview',
+        'shugao.ann.seen',
+        'shugao.ann.sessSeen',
+        'shugao.backup',
+        'shugao.backupDir',
+        'shugao.classroom',
+        'shugao.classroom.classId',
+        'shugao.classroom.v1',
+        'shugao.currentClass',
+        'shugao.deviceRole',
+        'shugao.deviceRoleAt',
+        'shugao.exam.grade.draft.${id}',
+        'shugao.grade.draft.${id}',
+        'shugao.lastAuthAt',
+        'shugao.local',
+        'shugao.mood.celebrated',
+        'shugao.mood.welcomed',
+        'shugao.remind.seen',
+        'shugao.teacher.v1',
+        'shugao.theme',
+      ]
+      const walk22 = (dir) =>
+        readdirSync(dir, { withFileTypes: true }).flatMap((d) =>
+          d.isDirectory()
+            ? d.name === 'node_modules'
+              ? []
+              : walk22(join(dir, d.name))
+            : [join(dir, d.name)],
+        )
+      const keyFiles22 = ['src', 'scripts', 'functions']
+        .flatMap((d) => walk22(join(HERE, '..', d)))
+        .filter((f) => /\.(ts|tsx|mjs|js)$/.test(f))
+      const collectKeys22 = (files) => {
+        const s = new Set()
+        for (const f of files) {
+          for (const m of readFileSync(f, 'utf8').matchAll(/['"`](shugao\.[A-Za-z0-9_.${}-]+)['"`]/g)) {
+            s.add(m[1])
+          }
+        }
+        return [...s].sort()
+      }
+      /** 键表里"多出来的"那些（反向对照也用它） */
+      const keyExtra22 = (list) => list.filter((k) => !KEYS22.includes(k))
+      const keysNow22 = collectKeys22(keyFiles22)
+      const keyMiss22 = KEYS22.filter((k) => !keysNow22.includes(k))
+      const keyNew22 = keyExtra22(keysNow22)
+      check(
+        keyMiss22.length === 0 && keyNew22.length === 0 && keysNow22.length === KEYS22.length,
+        `S22 ②：\`localStorage\` 的键**一个都没变**（${KEYS22.length} 个，含 \`shugao.theme\` / \`shugao.accent\` / \`shugao.teacher.v1\`）`,
+        keyMiss22.length || keyNew22.length
+          ? `少了 ${keyMiss22.join('、') || '（无）'}；多了 ${keyNew22.join('、') || '（无）'}`
+          : `${keysNow22.length} 个键逐个相同`,
+      )
+      check(
+        keyFiles22.length > 100,
+        'S22 ②：上面那张键表扫的是真的源码树（不是扫了个空目录就绿）',
+        `扫了 ${keyFiles22.length} 个 .ts/.tsx/.mjs/.js 文件（src + scripts + functions）`,
+      )
+      /* ⚠️ 反向对照用的那个"坏键名"要**拼出来**：写成连着的字面量会被上面那个扫描器
+         自己收进键表（`shots.mjs` 也在被扫的目录里），于是第 ② 条永远红。 */
+      const BADKEY22 = 'shugao.theme' + '2'
+      const negKeys22 = keysNow22.map((k) => (k === 'shugao.theme' ? BADKEY22 : k))
+      check(
+        keyExtra22(negKeys22).length === 1 &&
+          KEYS22.filter((k) => !negKeys22.includes(k)).length === 1,
+        `🧪 S22 ② 反向对照：把 \`shugao.theme\` 在**内存里**改成 \`${BADKEY22}\` → 同一张键表**当场对不上**`,
+        `改后少了 \`shugao.theme\`、多了 ${keyExtra22(negKeys22).join('、')}`,
+      )
+
+      /* ---------- ③ manifest：名字换了，但**底色那两个色值一个都没动** ---------- */
+      const mf22 = JSON.parse(readFileSync(join(PUB22, 'manifest.webmanifest'), 'utf8'))
+      check(
+        mf22.background_color === '#E8EBF2' && mf22.theme_color === '#E8EBF2',
+        'S22 ③：manifest 的 `background_color` / `theme_color` **没变**（都还是 `#E8EBF2`）',
+        `background_color=${mf22.background_color} · theme_color=${mf22.theme_color}`,
+        '反向对照：把 theme_color 顺手改成强调色 → 这条红（它决定 Android 状态栏，不是我们的强调色）',
+      )
+      const negMf22 = { ...mf22, theme_color: '#6d2b7a' }
+      check(
+        !(negMf22.background_color === '#E8EBF2' && negMf22.theme_color === '#E8EBF2'),
+        '🧪 S22 ③ 反向对照：把 `theme_color` 在内存里改成 `#6d2b7a` → 上面那条判据**当场不成立**',
+        `坏值 ${negMf22.theme_color} → 判据值 ${negMf22.background_color === '#E8EBF2' && negMf22.theme_color === '#E8EBF2'}`,
+      )
+      check(
+        mf22.name === '树高教务通' && mf22.short_name === '树高教务通',
+        'S22 ③：manifest 的 `name` 与 `short_name` 都是新名（`short_name` 原来是「树高教师」那个短形态，最容易漏）',
+        `name=${mf22.name} · short_name=${mf22.short_name}`,
+      )
+
+      /* ---------- ④ PWA 图标：文件都在、真实像素对得上、manifest 引用落得到文件上 ---------- */
+      const ICON22 = [
+        'favicon.ico',
+        'favicon.svg',
+        'icons/icon-16.png',
+        'icons/icon-32.png',
+        'icons/icon-48.png',
+        'icons/icon-128.png',
+        'icons/icon-192.png',
+        'icons/icon-256.png',
+        'icons/icon-512.png',
+        'icons/icon-maskable-192.png',
+        'icons/icon-maskable-512.png',
+        'icons/apple-touch-icon-180.png',
+      ]
+      const missIcons22 = ICON22.filter((f) => !existsSync(join(PUB22, f)))
+      check(
+        missIcons22.length === 0,
+        `S22 ④：PWA 图标清单齐全 —— ${ICON22.length} 个文件都在（favicon.ico 多帧 + 7 档位图 + 2 个 maskable + apple-touch）`,
+        missIcons22.length ? `缺 ${missIcons22.join('、')}` : `${ICON22.length} 个都在 app/public/ 下`,
+      )
+      /** 只读 PNG 的 IHDR 拿真实尺寸（不引第三方解码器） */
+      const pngSize22 = (p) => {
+        const b = readFileSync(join(PUB22, p))
+        return `${b.readUInt32BE(16)}x${b.readUInt32BE(20)}`
+      }
+      const badSize22 = ICON22.filter((f) => f.endsWith('.png'))
+        .map((f) => ({ f, want: f.match(/(\d+)\.png$/)[1], got: pngSize22(f) }))
+        .filter((x) => `${x.want}x${x.want}` !== x.got)
+      check(
+        badSize22.length === 0,
+        'S22 ④：每一个 PNG 图标的**真实像素**都与文件名那一档相符（不是"改了个名"）',
+        badSize22.length
+          ? badSize22.map((x) => `${x.f} 实际 ${x.got}`).join('、')
+          : `${ICON22.filter((f) => f.endsWith('.png')).length} 个 PNG 逐个相符`,
+      )
+      const mfSrc22 = (mf22.icons ?? []).map((i) => i.src.replace(/^\//, ''))
+      const mfSrcMiss22 = mfSrc22.filter((s) => !existsSync(join(PUB22, s)))
+      check(
+        mfSrc22.length >= 5 && mfSrcMiss22.length === 0,
+        'S22 ④：manifest 的 `icons` **逐个都落得到文件上**，而且不再是"只有一条 `image/svg+xml`"（Android 因此才有图标）',
+        mfSrcMiss22.length
+          ? `引用了不存在的 ${mfSrcMiss22.join('、')}`
+          : `${mfSrc22.length} 条：${mfSrc22.join('、')}`,
+      )
+      check(
+        (mf22.icons ?? []).some((i) => i.purpose === 'maskable' && /192x192/.test(i.sizes)) &&
+          (mf22.icons ?? []).some((i) => i.purpose === 'maskable' && /512x512/.test(i.sizes)),
+        'S22 ④：manifest 里有 192 / 512 两条 `purpose: maskable`（Android 自适应图标）',
+        (mf22.icons ?? [])
+          .filter((i) => i.purpose === 'maskable')
+          .map((i) => i.sizes)
+          .join(' · ') || '一条都没有',
+      )
+      const negMfSrc22 = mfSrc22.map((s) => (s === 'icons/icon-192.png' ? 'icons/icon-192x.png' : s))
+      check(
+        negMfSrc22.filter((s) => !existsSync(join(PUB22, s))).length === 1,
+        '🧪 S22 ④ 反向对照：把 manifest 里 `icons/icon-192.png` 在内存里改坏一个字母 → "引用落得到文件上"那条**当场判假**',
+        `改后落空的：${negMfSrc22.filter((s) => !existsSync(join(PUB22, s))).join('、')}`,
+      )
+      const html22 = readFileSync(join(HERE, '..', 'index.html'), 'utf8')
+      check(
+        /rel="icon"[^>]*favicon\.ico/.test(html22) &&
+          /rel="apple-touch-icon"[^>]*apple-touch-icon-180\.png/.test(html22),
+        'S22 ④：`index.html` 的 `<head>` 补齐了 `favicon.ico` 与 `apple-touch-icon`（iOS 加主屏不再是白图）',
+        (html22.match(/<link rel="(icon|apple-touch-icon)"[^>]*>/g) ?? []).join(' '),
+      )
+
+      /* ---------- ⑤ 校徽：四套主题下都在 / 暗色提亮 / 亮色不提亮 / 无盘 / 无框线 ----------
+       * 探针量的是 `[data-emblem]`（`Emblem.tsx` 那一层）**页面自己算出来的**值，
+       * 不是把期望值抄进断言。四套并排本身就是一组对照：亮色那两条必须是 `none`。
+       */
+      const BOOST22 = { light: 'none', dark: 'brightness(1.7)' }
+      const readEmblem22 = (p) =>
+        p.evaluate(() => {
+          const list = []
+          for (const host of document.querySelectorAll('[data-emblem]')) {
+            const hcs = getComputedStyle(host)
+            const img = host.querySelector('img')
+            list.push({
+              n: Number(host.getAttribute('data-emblem')),
+              hostFilter: hcs.filter,
+              hostW: Math.round(parseFloat(hcs.width) * 100) / 100,
+              hostBgImage: hcs.backgroundImage,
+              hostShadow: hcs.boxShadow,
+              hostBorder: `${hcs.borderTopWidth} ${hcs.borderTopStyle}`,
+              /* 徽所在那一行的高度（左栏标题行 / 移动顶栏 / 登录卡那一格）——
+                 徽从 34px 盒换成 46px 盒时，这一行只差 2px 就会把 `TEACHER CONSOLE` 挤成两行
+                 （实测 40 → 63.3px），所以它要能被判红。 */
+              rowH: Math.round(host.parentElement.getBoundingClientRect().height * 10) / 10,
+              enH: host.nextElementSibling?.children?.[1]
+                ? Math.round(host.nextElementSibling.children[1].getBoundingClientRect().height * 10) / 10
+                : null,
+              imgW: img ? getComputedStyle(img).width : null,
+              natural: img ? img.naturalWidth : 0,
+              complete: img ? img.complete : false,
+              src: img ? img.getAttribute('src') : null,
+              srcset: img ? img.getAttribute('srcset') : null,
+            })
+          }
+          return {
+            boost: getComputedStyle(document.documentElement).getPropertyValue('--emblem-boost').trim(),
+            list,
+          }
+        })
+      const COMBOS22 = [
+        { label: '亮·蓝', theme: null, accent: null, dark: false },
+        { label: '亮·紫', theme: null, accent: 'purple', dark: false },
+        { label: '暗·蓝', theme: 'dark', accent: null, dark: true },
+        { label: '暗·紫', theme: 'dark', accent: 'purple', dark: true },
+      ]
+      for (const cb of COMBOS22) {
+        const c = await browser.newContext({
+          viewport: { width: 1440, height: 940 },
+          locale: 'zh-CN',
+          colorScheme: cb.dark ? 'dark' : 'light',
+        })
+        await c.clock.install({ time: new Date('2026-09-19T10:00:00') })
+        await c.addInitScript(
+          ({ st, p }) => {
+            window.localStorage.setItem('shugao.teacher.v1', JSON.stringify(st))
+            window.localStorage.setItem('shugao.deviceRole', 'teacher')
+            if (p.theme) window.localStorage.setItem('shugao.theme', p.theme)
+            if (p.accent) window.localStorage.setItem('shugao.accent', p.accent)
+          },
+          { st: TEACHER_STATE, p: { theme: cb.theme, accent: cb.accent } },
+        )
+        for (const path22 of ['/', '/login']) {
+          const want22 = cb.dark ? BOOST22.dark : BOOST22.light
+          const p = await c.newPage()
+          await p.goto(`${BASE}${path22}`, { waitUntil: 'networkidle' })
+          await p.waitForTimeout(400)
+          const pr = await readEmblem22(p)
+          const bad22 = pr.list.filter(
+            (e) =>
+              !e.complete ||
+              e.natural === 0 ||
+              e.hostFilter !== want22 ||
+              Math.abs(e.hostW - e.n / 0.87) > 0.6 ||
+              e.hostBgImage !== 'none' ||
+              e.hostShadow !== 'none' ||
+              !/^0px /.test(e.hostBorder) ||
+              /* 左栏那一行（40px 那一处）**不许被徽撑成两行**：46 的盒 + 10 的间距会把
+                 `TEACHER CONSOLE` 断成 "TEACHER / CONSOLE"（行高 40 → 63.3）。
+                 实测口径：一行时行高 46（= 盒），断了就是 63.3 —— 门槛取 52。 */
+              (e.n === 40 && e.rowH > 52),
+          )
+          check(
+            pr.list.length > 0 && bad22.length === 0 && pr.boost === want22,
+            `S22 ⑤ 校徽「${cb.label}」${path22}：徽都在（真图元）= 提亮 \`${want22}\` = 无盘 = 无框线 = 盒子 = 徽 / 0.87 = 左栏那一行没被撑成两行`,
+            pr.list.length
+              ? `${pr.list.map((e) => `${e.n}px→盒${e.hostW}(图${e.imgW},天然${e.natural},行高${e.rowH})`).join('；')} filter=${pr.list[0].hostFilter} · --emblem-boost=${pr.boost}`
+              : '这一页一个 `[data-emblem]` 都没有',
+          )
+          const ns22 = pr.list.map((e) => e.n).sort((a, b) => a - b)
+          const wantNs22 = path22 === '/' ? [32, 40] : [48]
+          check(
+            JSON.stringify(ns22) === JSON.stringify(wantNs22),
+            `S22 ⑤ 校徽「${cb.label}」${path22}：尺寸档对得上（${wantNs22.join(' / ')}px，左栏 40 · 移动顶栏 32 · 登录卡 48）`,
+            `实际 ${ns22.join(' / ')}px`,
+          )
+        }
+        await c.close()
+      }
+
+      /* 🧪 ⑤ 的两条反向对照（同一次运行里真跑）：
+       *   A. 注入 `--emblem-boost: brightness(2.4)` + 一圈 `border` → 提亮那条与"无框线"那条**必须**都不成立；
+       *   B. 把 `src` 指到一张不存在的图 → "徽都在（真图元）"那条**必须**不成立。
+       */
+      {
+        const c = await browser.newContext({ viewport: { width: 1440, height: 940 }, locale: 'zh-CN' })
+        await c.addInitScript((st) => {
+          window.localStorage.setItem('shugao.teacher.v1', JSON.stringify(st))
+          window.localStorage.setItem('shugao.deviceRole', 'teacher')
+          window.localStorage.setItem('shugao.theme', 'dark')
+        }, TEACHER_STATE)
+        const p = await c.newPage()
+        await p.goto(`${BASE}/`, { waitUntil: 'networkidle' })
+        await p.addStyleTag({
+          content:
+            ':root{--emblem-boost:brightness(2.4)!important}[data-emblem]{border:1px solid red!important}',
+        })
+        await p.waitForTimeout(200)
+        const negA = await readEmblem22(p)
+        check(
+          negA.list.length > 0 &&
+            negA.list.every((e) => e.hostFilter !== BOOST22.dark && !/^0px /.test(e.hostBorder)),
+          '🧪 S22 ⑤ 反向对照 A：注入 `--emblem-boost: brightness(2.4)` + 一圈 `border` → 同一个探针**当场读到坏值**（提亮那条与"无框线"那条都不成立）',
+          negA.list.map((e) => `filter=${e.hostFilter} border=${e.hostBorder}`).join('；'),
+        )
+        await p.evaluate(() => {
+          /* ⚠️ 必须**连 `srcset` 一起摘掉**：`<img>` 上两档都在（1x / 2x），
+             只改 `src` 的话浏览器会从 `srcset` 重新挑回那一张真图 —— 天然宽度照样是 40/32，
+             这个对照就成了"怎么都不会红"的假对照（第一版就是这么写的，实测没红）。 */
+          for (const i of document.querySelectorAll('[data-emblem] img')) {
+            i.removeAttribute('srcset')
+            i.src = '/emblem/nope-does-not-exist.png'
+          }
+        })
+        await p.waitForTimeout(500)
+        const negB = await readEmblem22(p)
+        check(
+          negB.list.length > 0 && negB.list.every((e) => e.natural === 0),
+          '🧪 S22 ⑤ 反向对照 B：把 `srcset` + `src` 一起指到一张不存在的图 → "徽都在（真图元）"那条**当场不成立**（证明它不是恒真）',
+          negB.list.map((e) => `src=${e.src} 天然宽=${e.natural}`).join('；'),
+        )
+        await c.close()
+      }
+    })
 
     } catch (e) {
       console.log(`\n💥 脚本在第「${currentStep}」步异常中断：${e instanceof Error ? e.message : String(e)}`)

@@ -313,7 +313,7 @@ export async function onRequestPost(context: { request: Request; env: Env }): Pr
     const mail = await sendAuditedMail(env, {
       action: 'mail.gradeBackup',
       actorId: me.id,
-      subject: `【树高平台】${name} 毕业备份 · ${beijingStamp()}`,
+      subject: `【树高教务通】${name} 毕业备份 · ${beijingStamp()}`,
       /* 正文在 `SYSTEM_MAIL_BODIES.gradeBackup`（唯一一处构造；自测逐条喂它） */
       text: SYSTEM_MAIL_BODIES.gradeBackup({
         stamp: beijingStamp(),

@@ -94,7 +94,7 @@ export async function onRequestPost(context: { request: Request; env: Env }): Pr
     const r = await sendAuditedMail(env, {
       action: 'mail.test',
       actorId: me.id,
-      subject: `【树高平台】邮件通道自测 · ${beijingStamp()}`,
+      subject: `【树高教务通】邮件通道自测 · ${beijingStamp()}`,
       /*
        * 🔴 正文从 `SYSTEM_MAIL_BODIES.test` 来（**唯一一处构造**）——
        *    线上恒 502 的那次事故就是这一条：正文里印了发件人地址，
@@ -137,7 +137,7 @@ export async function onRequestPost(context: { request: Request; env: Env }): Pr
     const r = await sendAuditedMail(env, {
       action: 'mail.backup',
       actorId: me.id,
-      subject: `【树高备份】${beijingStamp()}`,
+      subject: `【树高教务通】${beijingStamp()}`,
       /* 正文在 `SYSTEM_MAIL_BODIES.backup`（唯一一处构造；自测逐条喂它） */
       text: SYSTEM_MAIL_BODIES.backup({
         stamp: beijingStamp(),

@@ -24,6 +24,7 @@ import type React from 'react'
 import { useEffect, useState } from 'react'
 import { useLocation } from 'react-router-dom'
 import { Button } from './ui'
+import { Emblem } from './Emblem'
 import { IconAlert, IconClock, IconRefresh } from './icons'
 import { useMaintenanceStatus } from '../lib/useMaintenance'
 import { beijingNow } from '../lib/holiday'
@@ -99,8 +100,12 @@ export function MaintenanceScreen({
         className="fixed inset-0 z-40 flex flex-col items-center justify-center px-10 text-center"
         style={{ background: 'var(--color-canvas)' }}
       >
+        {/* 教室端维护屏：校徽 **64px 全徽**（盒子 73.6 = 64 / 0.87）。
+            这一屏挂在教室里给学生看，所以徽比顶栏那两处大一号；
+            它的读者隔着一间教室的距离 —— 32px 那一档在这个距离上只剩一个点。 */}
+        <Emblem n={64} style={{ marginBottom: 16 }} />
         <div style={{ fontSize: 22, fontWeight: 620, color: 'var(--color-ink2)' }}>
-          {school || '树高教师平台'}
+          {school || '成都市树德实验高级中学 · 树高教务通'}
         </div>
         <div style={{ fontSize: 56, fontWeight: 700, marginTop: 10 }} data-maintenance-title>
           系统维护中

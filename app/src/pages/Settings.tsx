@@ -691,7 +691,7 @@ export default function Settings() {
         <div className="mb-4">
           <Sect>关于</Sect>
           <Panel bodyClass="px-4 py-2">
-            <KV k="平台" v="树高教师平台" />
+            <KV k="平台" v="树高教务通" />
             <KV k="版本" v={<span className="num">v{APP_VERSION}</span>} />
             <KV k="学段学科" v={`高中 · ${subjectName(teacherPrimarySubjectCode(teacher))}`} />
             <KV

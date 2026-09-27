@@ -1329,7 +1329,7 @@ await withLock(async () => {
        开跑
        ============================================================ */
 
-    console.log('树高教师平台 · 权限体系回归（PGlite = WASM 版真 PostgreSQL 17）')
+    console.log('树高教务通 · 权限体系回归（PGlite = WASM 版真 PostgreSQL 17）')
     console.log(`schema 原文：${SCHEMA_FILE}`)
     console.log('载荷形状来自：app/src/data/remote.ts 的 *ToRow（Node 原生 import 真文件）')
     if (NEGATIVE) {

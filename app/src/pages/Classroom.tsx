@@ -13,9 +13,9 @@ import {
   IconMegaphone,
   IconTarget,
   IconWifi,
-  Logo,
 } from '../components/icons'
 import { Button, Panel, Sect, Sheet, Tag } from '../components/ui'
+import { Emblem } from '../components/Emblem'
 import { useStore, useToast } from '../data/store'
 import { collectStats } from '../lib/assignments'
 import { BAND_META, gradeStats } from '../lib/grading'
@@ -1082,10 +1082,11 @@ export default function Classroom() {
           style={{ height: 62, borderBottom: '1px solid var(--color-line)' }}
         >
           <span className="flex items-center gap-2.5">
-            <span style={{ color: 'var(--color-accenttext)', display: 'grid', placeItems: 'center' }}>
-              <Logo size={22} />
-            </span>
-            <span style={{ fontSize: 15.5, fontWeight: 650 }}>树高教师平台</span>
+            {/* 教室端顶栏：校徽 **40px 全徽**（盒子 46.0 = 40 / 0.87）。
+                这一条与桌面左栏那一处同形（徽左字右的平台名），顶栏 62 高装得下。
+                ⚠️ 教室端**恒亮**（`lib/theme.ts` 里判路由，见 `index.css`），所以这里永远不带提亮。 */}
+            <Emblem n={40} />
+            <span style={{ fontSize: 15.5, fontWeight: 650 }}>树高教务通</span>
             <Tag tone="accent">教室端</Tag>
             {/* 🔴 Q17：走班班的屏 —— 有屏但只读，只看作业与考试，不接呼叫 */}
             {streamMode ? <Tag tone="warn">走班班 · 只读</Tag> : null}

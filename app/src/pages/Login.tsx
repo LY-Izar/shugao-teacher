@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { Logo, IconChevronRight, IconWifi } from '../components/icons'
+import { IconChevronRight, IconWifi } from '../components/icons'
+import { Emblem } from '../components/Emblem'
 import { Button } from '../components/ui'
 import { useStore, useToast } from '../data/store'
 import { toEmail } from '../lib/accounts'
@@ -74,23 +75,17 @@ export default function Login() {
       <div className="w-full anim-in" style={{ maxWidth: 372 }}>
         {/* 品牌 */}
         <div className="mb-7 flex flex-col items-center text-center">
+          {/* 登录卡：校徽 **48px 全徽**（盒子 55.2 = 48 / 0.87，正好落在 48 这道阈值下限上）。
+              🔴 这一格原来有 `border: 1px solid var(--color-line2)` —— 那是"围着盘的第二个框"，
+                 §11.2 已整条删掉；**盒子尺寸、位置、间距一个像素没动，只是不画线**。 */}
           <span
             className="draw-all grid place-items-center"
-            style={{
-              width: 58,
-              height: 58,
-              border: '1px solid var(--color-line2)',
-              borderRadius: 6,
-              background: 'var(--color-surface)',
-              color: 'var(--color-accenttext)',
-              position: 'relative',
-              overflow: 'hidden',
-            }}
+            style={{ width: 58, height: 58, position: 'relative' }}
           >
-            <Logo size={32} strokeWidth={1.5} />
+            <Emblem n={48} />
           </span>
           <h1 style={{ fontSize: 21, fontWeight: 680, letterSpacing: '-.01em', marginTop: 14 }}>
-            树高教师平台
+            树高教务通
           </h1>
           <div
             style={{

@@ -32,9 +32,9 @@ import {
   IconTarget,
   IconUser,
   IconUsers,
-  Logo,
   type IconProps,
 } from './icons'
+import { Emblem } from './Emblem'
 import { Button, Sheet, Tag } from './ui'
 import { cx } from '../lib/cx'
 import type { ComponentType } from 'react'
@@ -1457,7 +1457,7 @@ function ClockPanel() {
    🆕 2026-10-09 F4：**亮 / 暗切换**那颗小圆钮（🆕 F6 起它同时是**主题选择器的入口**）
 
    放哪儿（用户原话：「切换的按钮就放在**平台标题的右侧**，用一个小圆钮」）：
-     · **桌面**：左栏最上面那一行（树形图标 + 「树高教师平台」+ TEACHER CONSOLE）的**右端** ——
+     · **桌面**：左栏最上面那一行（校徽 + 「树高教务通」+ TEACHER CONSOLE）的**右端** ——
        就是"平台标题的右侧"字面意思。那里原来只有品牌标，右边是空的，加一颗不挤任何东西。
      · **移动端**：左栏在窄屏是**没有的**（`<aside>` 是 `hidden lg:block`），
        所以放**顶部那一条玻璃顶栏**里、平台名右侧、班级标签左边。
@@ -1579,7 +1579,7 @@ function ThemeSeg({
  *      入口钮的**位置与尺寸**没动，所以肌肉记忆仍然是"平台标题右侧那颗"。
  *
  * **两处摆放**（用户点名"两处都要照顾"）——与原来完全一致，只换了"点开之后"：
- *   · **桌面**：左栏最上面那一行（树形图标 + 「树高教师平台」+ TEACHER CONSOLE）的**右端**；
+ *   · **桌面**：左栏最上面那一行（校徽 + 「树高教务通」+ TEACHER CONSOLE）的**右端**；
  *   · **移动端**：顶部那条**玻璃顶栏**、平台名右侧、班级标签**左边**（左栏在窄屏没有，
  *     理由见 F4 那一段：平台级设置只有这条顶栏是全局位置）。
  *   面板是**贴着钮往下弹**的（`right: 0`），所以在移动端它**向左**展开、不会顶出屏幕；
@@ -2062,23 +2062,20 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             height: 'calc(100vh - 28px - var(--top-stack-h, 0px))',
           }}
         >
-          <div className="mb-4 flex items-center gap-2.5 px-1">
-            <span
-              className="grid place-items-center"
-              style={{
-                width: 34,
-                height: 34,
-                border: '1px solid var(--color-line2)',
-                borderRadius: 6,
-                background: 'var(--color-surface)',
-                color: 'var(--color-accenttext)',
-              }}
-            >
-              <Logo size={20} />
-            </span>
+          {/*
+            ⚠️ 这一行的 `gap-2`（= 8px）**不能再调大**：徽从 34px 盒换成 40px 全徽的 46px 盒之后，
+               这一行只差 2px 就会把右边那行 `TEACHER CONSOLE` 挤成两行（实测：`gap-2.5` 时
+               行高 40 → 63.3px，"TEACHER / CONSOLE" 断成两截）。
+               8px 也正好是 `落地清单.md` §9.3 之①要求的下限「盘外至少留徽高 1/5」。
+          */}
+          <div className="mb-4 flex items-center gap-2 px-1">
+            {/* 左栏标题行：校徽 **40px 全徽**（盒子 46.0 = 40 / 0.87）。
+                40 是"这一行放得下"的近似门槛 —— 34px 那一档圆环还发虚（§9.1）。
+                🔴 原来这里是个 34px 的**方框 + 矢量树形图标**，框线按 §11.2 不许再画。 */}
+            <Emblem n={40} />
             <span>
               <span style={{ display: 'block', fontSize: 14, fontWeight: 650, lineHeight: 1.2 }}>
-                树高教师平台
+                树高教务通
               </span>
               <span style={{ fontSize: 11, color: 'var(--color-ink3)', letterSpacing: '.06em' }}>
                 TEACHER CONSOLE
@@ -2217,10 +2214,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           style={{ height: 50, top: 'var(--top-stack-h, 0px)', borderBottom: '1px solid var(--color-line)' }}
         >
           <span className="flex items-center gap-2">
-            <span style={{ color: 'var(--color-accenttext)', display: 'grid', placeItems: 'center' }}>
-              <Logo size={19} />
-            </span>
-            <span style={{ fontSize: 14.5, fontWeight: 650 }}>树高教师平台</span>
+            {/* 移动端顶栏：校徽 **32px 全徽**（盒子 36.8 = 32 / 0.87）。
+                32 是"还认得出是枚校徽"的下限；22px 那一档全徽外圈线只有 0.46px = 一坨（§9.1）。 */}
+            <Emblem n={32} />
+            <span style={{ fontSize: 14.5, fontWeight: 650 }}>树高教务通</span>
           </span>
           <span className="flex-1" />
           {/* 🆕 亮 / 暗 + 强调色 —— 移动端摆在这里（左栏在窄屏没有，理由见 `ThemeToggle` 的说明）。

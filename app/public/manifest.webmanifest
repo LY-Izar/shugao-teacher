@@ -1,6 +1,6 @@
 {
-  "name": "树高教师平台",
-  "short_name": "树高教师",
+  "name": "树高教务通",
+  "short_name": "树高教务通",
   "description": "面向高中教师的作业全链路工具",
   "start_url": "/",
   "scope": "/",
@@ -10,6 +10,36 @@
   "theme_color": "#E8EBF2",
   "lang": "zh-CN",
   "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-256.png",
+      "sizes": "256x256",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-maskable-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/icons/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
     {
       "src": "/favicon.svg",
       "sizes": "any",
