@@ -139,11 +139,15 @@ jobs:
           sudo apt-get install -y -qq postgresql-client-17
           # 🔴 断言 17 真的装上了：装不上就【当场红】——绝不留"步骤绿着、却在用旧版"的状态。
           test -x /usr/lib/postgresql/17/bin/pg_dump || { echo "::error::postgresql-client-17 没装上（PGDG 源或包名有问题）"; exit 1; }
-          # 装上的是哪个版本必须打出来：pg_dump 主版本低于服务器主版本时会
-          # 直接拒绝导出（server version mismatch），那时第一个要看的就是这两行。
-          # 有了 PGVERSION=17，下面这两行**必须**打出 17.x；打出 16 就说明 PGVERSION 没生效。
-          pg_dump --version
-          psql --version
+          # 🔴🔴 出口：把 17 的 bin 目录交给后面的步骤，**以后一律用绝对路径调**。
+          #    为什么不用 /usr/bin/pg_dump：那是 Debian 的 pg_wrapper，它会按"集群那一版"
+          #    解析，runner 镜像里有 16 的服务端集群 —— 实测 PGVERSION=17 也没能把它掰过来
+          #    （2026-09-27 运行 #15：断言绿、pg_dump 仍报 16.15）。绝对路径没有这个问题。
+          echo "PG_BIN=/usr/lib/postgresql/17/bin" >> "$GITHUB_ENV"
+          # 装上的是哪个版本必须打出来。⚠️ 要打【绝对路径那个】，因为它才是后面真正用的；
+          # /usr/bin/pg_dump 可能仍是 16（wrapper 的事），打它反而误导。
+          /usr/lib/postgresql/17/bin/pg_dump --version
+          /usr/lib/postgresql/17/bin/psql --version
 
       # ── 第 3 步：先单独连一次，把「连不上 / 密码错」和「pg_dump 自己的毛病」分开 ──
       - name: 数据库预检 + pg_dump + 加密（失败时按类型给诊断）
@@ -259,8 +263,11 @@ jobs:
 
           echo
           echo "── 2) 先单独连一次（把「连不上」和「pg_dump 的毛病」彻底分开）──"
+          # 🔴 一律走 17 的【绝对路径】。PG_BIN 由"安装 postgres 客户端"那一步写进 GITHUB_ENV；
+          #    这里再兜底写死一次，免得那一步没跑到时又悄悄用上 /usr/bin 的 16。
+          PG_BIN="${PG_BIN:-/usr/lib/postgresql/17/bin}"
           pre_rc=0
-          server_raw="$(psql "$DB_URL" -Atqc 'show server_version' 2>/tmp/pre.err)" || pre_rc=$?
+          server_raw="$("$PG_BIN/psql" "$DB_URL" -Atqc 'show server_version' 2>/tmp/pre.err)" || pre_rc=$?
           if [ "$pre_rc" -ne 0 ]; then
             echo "::error::连不上数据库（psql 退出码 $pre_rc）—— pg_dump 也一定会失败，先修这个"
             diagnose_pg_error < /tmp/pre.err
@@ -272,7 +279,7 @@ jobs:
           server_ver="$(trim "$server_raw")"
           echo "  ✅ 连上了。服务器版本 = $server_ver"
 
-          client_full="$(pg_dump --version 2>&1 | awk '{print $3}')"
+          client_full="$("$PG_BIN/pg_dump" --version 2>&1 | awk '{print $3}')"
           pg_major() { printf '%s' "$1" | sed -E 's/^([0-9]+).*/\1/'; }
           client_major="$(pg_major "$client_full")"
           server_major="$(pg_major "$server_ver")"
@@ -294,7 +301,7 @@ jobs:
           # 先落 .sql 再压缩：不再用管道，否则管道里 `$?` 是 gzip 的退出码，
           # pg_dump 失败会被吞掉，留下一个「合法但空」的 .gz 还显示绿灯。
           dump_rc=0
-          pg_dump "$DB_URL" --schema=public --no-owner --no-privileges > "$raw" 2>/tmp/dump.err || dump_rc=$?
+          "$PG_BIN/pg_dump" "$DB_URL" --schema=public --no-owner --no-privileges > "$raw" 2>/tmp/dump.err || dump_rc=$?
           if [ "$dump_rc" -ne 0 ]; then
             echo "::error::pg_dump 失败（退出码 $dump_rc），备份没有生成"
             diagnose_pg_error < /tmp/dump.err
