@@ -151,8 +151,6 @@ export function MaintenanceScreen({
           ) : null}
           <div className="mt-3" style={{ fontSize: 12, color: 'var(--color-ink3)', lineHeight: 1.8 }}>
             · 维护期间平台功能暂停使用，你的登录状态不会被登出（维护结束后直接继续用）。
-            <br />· 正在填的表先别关页面。
-            <br />· 这一页每 10 秒自己检查一次；好了它自己会让开。
           </div>
         </div>
         <div className="flex items-center gap-2 border-t border-line px-4 py-3">
