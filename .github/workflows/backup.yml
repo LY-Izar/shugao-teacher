@@ -121,7 +121,14 @@ jobs:
           sudo install -d /usr/share/postgresql-common/pgdg
           curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo tee /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc >/dev/null
           echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
-          sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+          sudo apt-get update -qq
+          # 🔴🔴 必须装【带版本号】的那个包（postgresql-client-17），不能装不带版本号的。
+          #    2026-09-27 实测：加了 PGDG 源、再 `apt-get install postgresql-client`，
+          #    pg_dump 仍然是 16 —— 因为 runner 镜像里**预装了 postgresql-client-16**，
+          #    不带版本号的包名会被 apt 判成"依赖已满足"，于是【什么都不做】。
+          #    带版本号的包名不可能是"已满足"，才会真的把 17 装上。
+          #    pg_wrapper 会把 /usr/bin/pg_dump 指到已装的最高版本，所以装上了就会用它。
+          sudo apt-get install -y -qq postgresql-client-17
           # 装上的是哪个版本必须打出来：pg_dump 主版本低于服务器主版本时会
           # 直接拒绝导出（server version mismatch），那时第一个要看的就是这两行。
           pg_dump --version
