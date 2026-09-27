@@ -12,7 +12,7 @@ import {
   IconUpload,
 } from '../components/icons'
 import { Button, PageHead, Panel, Portal, Sect, StatStrip, Tag } from '../components/ui'
-import { StatusMark } from '../components/StatusMark'
+import { StatusMark, STATUS_MARK_HOLD_MS, type StatusMarkStatus } from '../components/StatusMark'
 import { useStore, useToast } from '../data/store'
 import type { ParsedRow } from '../lib/roster'
 import { FLAG_TEXT, simulateScan, validateRows } from '../lib/roster'
@@ -83,6 +83,17 @@ export default function ImportPhoto() {
   const [lowConf, setLowConf] = useState<Set<string>>(new Set())
   const [ocrErr, setOcrErr] = useState('')
   const [ocrNotes, setOcrNotes] = useState('')
+  /**
+   * 「正在识别」那颗状态标记的**终态**（`running` → `done` 绿勾 / `failed` 红叉）。
+   *
+   * 🔴 为什么要这个 state：StatusMark **自己不会结束** —— 它只画 `status` 给它的那一档
+   * （原版组件里没有任何定时器；ReactBits 演示站上"跑一秒变勾"是演示代码里的定时器）。
+   * 所以"跑完亮一下勾再走"这件事必须由这里驱动：
+   *   · 认出学生 → `done`，停留 `STATUS_MARK_HOLD_MS` 再进「核对名单」那一步；
+   *   · 认不出  → `failed`，**停在这一屏不再往下走**（下面那块错误提示同时把原因说清楚）。
+   * ⚠️ `failed` 不自动跳走：出了问题还自己消失，就是"不报错但就是不对"。
+   */
+  const [scanMark, setScanMark] = useState<StatusMarkStatus>('running')
 
   const rows = useMemo(() => validateRows(raw, klass?.students ?? []), [raw, klass])
   const bad = rows.filter((r) => r.flag).length
@@ -109,10 +120,27 @@ export default function ImportPhoto() {
     }
   }
 
+  /**
+   * 🔴 "识别成功"的收束：绿勾亮满 `STATUS_MARK_HOLD_MS`，**然后**才进「核对名单」。
+   *
+   * 为什么单独成一个函数：这条时序有两处入口（真识别 / 本地演示那个按钮），
+   * 而"停留多久"必须只有一个来源 —— 抄成两份，早晚有一份忘了跟着改。
+   * ⚠️ 进这一屏时 `setStep(SCAN_STEPS.length)` 已经把四步进度推满，
+   *    所以停这 1.2 秒不会让进度条看起来卡住；它正是"最后一格 + 状态标记打勾"的收尾。
+   */
+  const finishScan = async () => {
+    setScanMark('done')
+    await new Promise((r) => window.setTimeout(r, STATUS_MARK_HOLD_MS))
+    setStage('review')
+  }
+
   /** 真识别：花名册照片 → 学号 + 姓名 */
   const runScan = async () => {
     if (!prep) return
     setOcrErr('')
+    /* 🔴 每次开跑都从 `running` 起 —— 上一次失败留下的红叉**不许带进这一次**
+       （`scanMark` 是这一屏的状态机，不能只靠"重选照片"那条路去复位）。 */
+    setScanMark('running')
     setStage('scanning')
     setStep(0)
     SCAN_STEPS.forEach((_, i) => window.setTimeout(() => setStep(i + 1), 600 * (i + 1)))
@@ -126,6 +154,9 @@ export default function ImportPhoto() {
     })
 
     if (out.status !== 'ok') {
+      /* 🔴 失败 → 红叉（停在下面那块错误提示上，不再往下走）。
+         原因由同一块提示说清楚；红叉一直留到"重拍 / 重新识别"那一动作发生。 */
+      setScanMark('failed')
       setOcrErr(out.message)
       setStage('preview')
       return
@@ -136,6 +167,7 @@ export default function ImportPhoto() {
       .filter((r) => r.studentNo || r.name)
 
     if (!rows.length) {
+      setScanMark('failed')
       setOcrErr('没从这张照片里认出学生。试试拍正一点、光线均匀一些，或改用「粘贴导入」。')
       setStage('preview')
       return
@@ -145,7 +177,8 @@ export default function ImportPhoto() {
     setLowConf(new Set(out.students.filter((s) => s.confidence === 'low').map((s) => s.studentNo)))
     setOcrNotes(out.notes)
     setStep(SCAN_STEPS.length)
-    setStage('review')
+    /* ✅ 认出来了 → 绿勾亮满 `STATUS_MARK_HOLD_MS` 再进下一步（时长只有 `finishScan` 那一处） */
+    await finishScan()
   }
 
   if (!klass) {
@@ -325,6 +358,15 @@ export default function ImportPhoto() {
                           <IconAlert size={14} />
                         </span>
                         <span>
+                          {/* 🔴 红叉跟着这块提示走：它说的是"这一次识别**没成**"，
+                              而下面那句说的是"为什么没成"。原来这一屏只有文字，
+                              老师看不出"是还在跑、还是已经停了"。 */}
+                          <StatusMark
+                            status="failed"
+                            size={16}
+                            strike={false}
+                            style={{ marginRight: 6, verticalAlign: -2 }}
+                          />
                           {ocrErr}
                           <br />
                           识别不了也不影响建班 —— 可以改用「粘贴导入」，或先手工建班再逐个加学生。
@@ -359,7 +401,13 @@ export default function ImportPhoto() {
                             })),
                           )
                           setLowConf(new Set())
-                          setStage('review')
+                          /* ⚠️ 演示也走**同一条收束**（绿勾亮满再进核对）——
+                             否则"演示时看着是好的、真识别时多了 1.2 秒停顿"，
+                             而这一屏本来就是为了看真实观感。
+                             ⚠️ 也要先把上一次可能留下的红叉复位成 `running`。 */
+                          setScanMark('running')
+                          setStep(SCAN_STEPS.length)
+                          void finishScan()
                         }}
                       >
                         演示（模拟结果）
@@ -401,7 +449,11 @@ export default function ImportPhoto() {
                   `await recognize()` 走服务端 OCR，2~20s）。 */}
               <Sect>
                 <span className="flex items-center gap-2" data-scan-mark>
-                  <StatusMark status="running" size={16} />
+                  {/* 🔴 两档都由 `runScan` 驱动（**不是**写死 `"running"`）：
+                      `running` 是识别在跑，`done` 是"这一屏最后一格"的那 1.2 秒 ——
+                      绿勾亮满才进「核对名单」，老师才有"这件事成了"的收束。
+                      ⚠️ `strike={false}`：平台气质偏克制，见同一处 Settings 那条注释。 */}
+                  <StatusMark status={scanMark} size={16} strike={false} />
                   正在识别
                 </span>
               </Sect>

@@ -49,6 +49,12 @@ export interface StatusMarkProps {
   fillOpacity?: number
   strike?: boolean
   strikeDelay?: number
+  /**
+   * 终态（`done` / `failed`）该停留多久 —— ⚠️ **只是把 `STATUS_MARK_HOLD_MS` 这个约定
+   * 摆在 prop 上，组件自己不启动任何定时器**（它仍然只由 `status` 驱动，
+   * 与 `progress` / `strike` 一样是"给我什么就画什么"）。传它的调用方负责 `setTimeout`。
+   */
+  holdMs?: number
   className?: string
   style?: CSSProperties
 }
@@ -65,6 +71,21 @@ const TEXT: Record<StatusMarkStatus, string> = {
   cancelled: 'Cancelled',
 }
 const IDLE_DASH = 0.3
+
+/**
+ * 「跑完了」那一档在屏幕上**停留多久**（毫秒），默认值 —— 两个落点共用一处，不许各写各的。
+ *
+ * 为什么由调用方管这件事：原版组件**自己不会结束**（它里面没有 `setTimeout`／`setInterval`，
+ * 状态机纯由 `status` 驱动；ReactBits 演示站上那个"跑 1 秒变勾"是**演示代码里的定时器**）。
+ * 所以"跑完 → 亮一下绿勾/红叉 → 再走下一步"这件事必须写在调用方，
+ * 而"亮多久"是**一处视觉决策**，不是每页各拍一次脑袋 —— 两个落点的值必须一样，
+ * 否则同一个组件在两页上停顿不同，看着像坏了。
+ *
+ * 1200ms 的依据：短于 MORPH_MS(300) + 描边动画 `--sm-draw`(240) 就看不清勾是"画出来"的，
+ * 而"看到它画完了"才有"这件事成了"的信息量；再长就开始让人等。
+ * 单个落点要不同时传 `holdMs` prop（别去改这个常量）。
+ */
+export const STATUS_MARK_HOLD_MS = 1200
 
 const clamp01 = (v: number) => Math.min(1, Math.max(0, v))
 /* 形态切换的缓动：两端零斜率的单调曲线（smoothstep 及其反向读法） */
@@ -88,6 +109,7 @@ export function StatusMark({
   fillOpacity = 0.06,
   strike = true,
   strikeDelay = 60,
+  holdMs = STATUS_MARK_HOLD_MS,
   className = '',
   style,
 }: StatusMarkProps) {
@@ -196,6 +218,10 @@ export function StatusMark({
       data-status={status}
       data-indeterminate={indeterminate ? '' : undefined}
       data-strike={strike ? '' : undefined}
+      /* 🔴 「这一档该停多久」挂在 DOM 上（= 调用方的 `setTimeout` 用多少）——
+         它不是动画参数，是**约定**：门禁按它断言"两个落点用的是同一个数"，
+         也顺带让"这个 prop 有没有被吃掉"在运行期看得见。 */
+      data-hold-ms={holdMs}
       style={
         {
           '--sm-size': `${size}px`,

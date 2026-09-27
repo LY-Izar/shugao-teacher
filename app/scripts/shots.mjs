@@ -11085,6 +11085,279 @@ await withLock(async () => {
     })
 
     /*
+     * ================= S25：StatusMark 终态 ×  1.0.0 发版（2026-09-27） =================
+     *
+     * 🔴 **这一节只做源码级断言**（用户明确要求：不做"真跑一遍看勾出现"的验收）。
+     * 理由写清楚，免得后来的人以为是偷懒：那两条时序（`await recognize()` / 上传整库）
+     * 一个要走服务端 OCR、一个要走真云端 —— 在本地演示模式里都走不到，
+     * 而"勾有没有画出来"是 CSS 的事，S23 已经在真浏览器里量过（圆心漂移 0.000px）。
+     * 这一节钉的是**接线**：两处落点到底会不会把 `done` / `failed` 传下去。
+     *
+     * ⚠️ 扫的是**去掉注释之后**的源码：注释里写满了 `'done'` / `'failed'` 这些词，
+     *    不剔掉的话下面每一条都恒真（AGENTS.md 三·2「永远为绿的摆设」）。
+     */
+    await step('S25：StatusMark 终态接线 · 1.0.0 版本号与更新日志', async () => {
+      const root25 = join(HERE, '..')
+      const readSrc = (rel) => readFileSync(join(root25, rel), 'utf8').replace(/\r\n/g, '\n')
+      /** 剔掉 `//` 与块注释（剩下的才是真代码） */
+      const noComment = (s) =>
+        s
+          /* 先掐掉行尾注释：`//` 前面那半行的引号必须是偶数个（否则它只是字符串里的 `//`） */
+          .replace(/(^|[^:'"`\w])\/\/[^\n]*/gm, '$1')
+          .replace(/\/\*[\s\S]*?\*\//g, '')
+
+      const markSrc = noComment(readSrc('src/components/StatusMark.tsx'))
+      const importRaw = readSrc('src/pages/ImportPhoto.tsx')
+      const importSrc = noComment(importRaw)
+      const settingsSrc = noComment(readSrc('src/pages/Settings.tsx'))
+      const verSrc = noComment(readSrc('src/lib/version.ts'))
+      const pkgRaw = readSrc('package.json')
+      const pkg = JSON.parse(pkgRaw)
+      /* 更新日志**不剔注释**：它整段就是数组字面量，没有注释可剔 */
+      const logSrc = readSrc('src/lib/changelog.ts')
+
+      /* ---------- ① 两个落点各自传了哪几档 ---------- */
+      /**
+       * 从一个 `<StatusMark …>` 的开标签里取出：每个 prop 名 → 实参原文。
+       * ⚠️ 用**逐字符认括号配对**，不用正则 —— `style={{ justifyContent: 'center' }}`
+       *    里有两层 `{}`，正则数不过来（这地方错一次，下面所有断言都变成假绿）。
+       */
+      const markArgs = (src) => {
+        const out = []
+        /* 🔴 认 `<StatusMark` **后面跟空白或 `>`** 的那些 —— 不这样锚，
+           `import { StatusMark, … } from …` 那一行也会被当成一个落点（第一版就多出两个空对象）。 */
+        const re = /<StatusMark(?=[\s>])/g
+        let hit
+        while ((hit = re.exec(src)) !== null) {
+          const close = src.indexOf('>', hit.index)
+          if (close < 0) break
+          const tag = src.slice(hit.index + '<StatusMark'.length, close)
+          const args = {}
+          let j = 0
+          while (j < tag.length) {
+            while (j < tag.length && /[\s\n]/.test(tag[j])) j++
+            const prop = /^([A-Za-z][\w-]*)\s*=/.exec(tag.slice(j))
+            if (!prop) break
+            j += prop[0].length
+            const start = j
+            if (tag[j] === '{') {
+              let depth = 0
+              while (j < tag.length) {
+                if (tag[j] === '{') depth++
+                else if (tag[j] === '}') {
+                  depth--
+                  if (depth === 0) {
+                    j++
+                    break
+                  }
+                }
+                j++
+              }
+            } else {
+              while (j < tag.length && !/[\s\n]/.test(tag[j])) j++
+            }
+            args[prop[1]] = tag.slice(start, j)
+          }
+          out.push(args)
+          re.lastIndex = close
+        }
+        return out
+      }
+      /** 一个实参是"变量"还是"字面量字符串" */
+      const asVar = (argSrc) => {
+        const m = /^\{\s*([A-Za-z_$][\w$]*)\s*\}$/.exec(argSrc ?? '')
+        return m ? m[1] : null
+      }
+      const asLit = (argSrc) => {
+        const m = /^(['"])(.*?)\1$/.exec(argSrc ?? '')
+        return m ? m[2] : null
+      }
+      /**
+       * 这个 state 变量**有没有真的被写到某一档**：
+       * 认 `setX('done')` 这种字面量调用，也认 `setX(res.ok ? 'done' : 'failed')` 那种三目。
+       */
+      const writesTo = (src, varName, status) => {
+        const setter = 'set' + varName[0].toUpperCase() + varName.slice(1)
+        if (!src.includes(`${setter}(`)) return false
+        return new RegExp(`${setter}\\((?:(?!\\))[\\s\\S]){0,160}?['"]${status}['"]`).test(src)
+      }
+      const importMarks = markArgs(importSrc)
+      /* 「正在识别」那一颗：`status` 是 state（不是写死 running），且**三档都真的会被写到**
+         ⚠️ 认法用 `asVar` 解析（**不能**只看 `size` —— 旁边那颗红叉也是 `size={16}`，
+            只看 size 会挑中红叉，于是 `scanVar` 是 null、下面三条一起变成假红）。 */
+      const scanVar = (() => {
+        const hit = importMarks.find((a) => !('label' in a) && asVar(a.status) !== null)
+        return hit ? asVar(hit.status) : null
+      })()
+      /** `scanMark` → `setScanMark`（观察值与反向对照都用它拼） */
+      const scanSet = scanVar ? 'set' + scanVar[0].toUpperCase() + scanVar.slice(1) : ''
+      /* 🔴 顺序判据**不能**拿"全文第一次出现 `set…('done')`"去比 "`set…('failed')`"：
+         `finishScan` 是**函数声明**（写在 `runScan` 之前），所以它体内的 `'done'`
+         天然比 `runScan` 失败分支里的 `'failed'` 更靠前 —— 那样比是**恒真**的假绿。
+         真正要钉的是**同一条路上的先后**：先失败、再说原因、再回到「拍摄」那屏。 */
+      const failBranch = importSrc.match(
+        new RegExp(`${scanSet}\\('failed'\\)[\\s\\S]{0,120}?setOcrErr\\(out\\.message\\)[\\s\\S]{0,200}?setStage\\('preview'\\)`),
+      )
+      check(
+        scanVar !== null &&
+          ['running', 'done', 'failed'].every((st) => writesTo(importSrc, scanVar, st)) &&
+          failBranch !== null,
+        '🔴 S25 ①「正在识别」：`status` 接的是 state（不再写死 `running`），`running` / `done` / `failed` **三档都真的会被写到**，且失败那条路是"先红叉 → 再说原因 → 回拍摄那屏"',
+        `status={${scanVar}} · 失败分支 ${failBranch ? '在' : '缺'}（failed → setOcrErr → setStage(preview)）`,
+        '反向对照：把 `status={scanMark}` 改回 `status="running"` → 这一条当场判假（本节的对照 D 实测跑过）',
+      )
+      /* 失败那颗红叉：**跟着 `ocrErr` 那块提示走**（不是"识别失败就跳走"）
+         ⚠️ 这一条查的是"那块提示在不在"（`{ocrErr ? (`），所以用**原始源码** ——
+            剔注释那一步是按行做的，`ocrErr` 这类词在注释里也出现，两边都不该影响它。 */
+      const failMarks = importMarks.filter((a) => asLit(a.status) === 'failed')
+      check(
+        failMarks.length === 1 && failMarks[0].strike === '{false}' && importRaw.includes('{ocrErr ? ('),
+        '🔴 S25 ①「识别失败」：红叉是**字面量 `failed`** 的一颗（`strike={false}`），挂在 `ocrErr` 那块提示里 —— 失败时红叉与原因同时在屏上，不会一闪就没',
+        `failed 字面量 ${failMarks.length} 颗 · strike=${failMarks.map((a) => a.strike).join('/')}`,
+      )
+      /* 「备份到云端」那一颗：`status` 是 state，终态由**真结果**决定 */
+      const backupVar = (() => {
+        const hit = markArgs(settingsSrc).find((a) => 'label' in a)
+        return hit ? asVar(hit.status) : null
+      })()
+      const okIdx = settingsSrc.indexOf('res.ok ?')
+      const doneIdx = backupVar ? settingsSrc.indexOf(`'done'`) : -1
+      check(
+        backupVar !== null &&
+          writesTo(settingsSrc, backupVar, 'running') &&
+          writesTo(settingsSrc, backupVar, 'done') &&
+          writesTo(settingsSrc, backupVar, 'failed') &&
+          /set[A-Za-z]+\(res\.ok\s*\?\s*'done'\s*:\s*'failed'\)/.test(settingsSrc) &&
+          okIdx > 0 &&
+          doneIdx > okIdx,
+        '🔴 S25 ②「备份到云端」：`running` → `done` **由 `res.ok` 决定**（不是"忙完了就当成功"）· 失败 → `failed` 停住',
+        `status={${backupVar}} · res.ok 在第 ${okIdx} 字符 · done/failed 三目 ${/set[A-Za-z]+\(res\.ok\s*\?\s*'done'\s*:\s*'failed'\)/.test(settingsSrc) ? '在' : '不在'}`,
+        '反向对照：把那一行改成 `setBackupMark(\'done\')`（不看 res.ok）→ 这一条当场判假',
+      )
+      /* `bkNotifyBusy` 只管"按钮禁用"，**不许**再拿它推状态（原来就是这么写的） */
+      check(
+        !/status=\{[^}]*bkNotifyBusy[^}]*\}/.test(settingsSrc),
+        '🔴 S25 ②：状态**不再从** `bkNotifyBusy` 推 —— 那个布尔量只说"忙不忙"，说不出"成了还是没成"（绿勾/红叉的信息全在后者）',
+        `status 里引用 bkNotifyBusy 的落点 = ${(settingsSrc.match(/status=\{[^}]*bkNotifyBusy[^}]*\}/g) ?? []).length} 处`,
+      )
+
+      /* ---------- ② 停留时长：一个常量，不是三处硬编 ---------- */
+      const constDecl = markSrc.match(/export const STATUS_MARK_HOLD_MS\s*=\s*(\d+)/)
+      const importUse = (importSrc.match(/STATUS_MARK_HOLD_MS/g) ?? []).length
+      const settingsUse = (settingsSrc.match(/STATUS_MARK_HOLD_MS/g) ?? []).length
+      const rawLiterals = [
+        ...(importSrc.match(/\b1200\b/g) ?? []),
+        ...(settingsSrc.match(/\b1200\b/g) ?? []),
+      ]
+      check(
+        constDecl !== null &&
+          Number(constDecl[1]) > 0 &&
+          importUse >= 2 &&
+          settingsUse >= 2 &&
+          rawLiterals.length === 0,
+        '🔴 S25 ③ 停留时长是**一个导出常量**（`STATUS_MARK_HOLD_MS`）—— 两个落点都 import 它，两个页面里 `1200` 这个字面量一处都没有',
+        `常量=${constDecl ? constDecl[1] : '（没有）'} · 引用数 ImportPhoto ${importUse} / Settings ${settingsUse} · 硬编 1200 = ${rawLiterals.length} 处`,
+        '反向对照：把 ImportPhoto 里那处 `await finishScan()` 换回 `setStage(\'review\')`（= 不等）→ 第 ④ 条当场判假',
+      )
+      /* 时长必须**真的被 await**（只声明常量、不等一下 = 勾根本来不及被看见） */
+      const finishDef = /const finishScan\s*=\s*async\s*\(\)\s*=>\s*\{[\s\S]{0,400}?STATUS_MARK_HOLD_MS[\s\S]{0,200}?setStage\('review'\)/.test(importSrc)
+      check(
+        finishDef && /await finishScan\(\)/.test(importSrc) && importSrc.indexOf('await finishScan()') > importSrc.indexOf('const finishScan'),
+        '🔴 S25 ④：成功那条路**真的 await 了**这个时长（`finishScan` 里 `setTimeout(HOLD)` 之后才 `setStage(\'review\')`）—— 否则 `done` 一帧就被卸载，老师根本看不见绿勾',
+        `finishScan 时序 ${finishDef ? '在' : '不在'} · await 调用 ${(importSrc.match(/await finishScan\(\)/g) ?? []).length} 处`,
+      )
+      /* 失败那一路：红叉、原因、回「拍摄」那屏三者是**同一段**（见 ① 那条的 `failBranch`）。
+         这里补一条"`setOcrErr(out.message)` 只出现在失败分支之后"的静态秩序（防止有人把
+         红叉挪到 success 那条路上 —— 那样"失败亮红叉"就名存实亡）。 */
+      const okAfterFail = importSrc.indexOf('await finishScan()')
+      const failFirst = importSrc.indexOf(`${scanSet}('failed')`)
+      check(
+        failFirst > 0 && okAfterFail > failFirst && failBranch !== null,
+        '🔴 S25 ④：`failed` 与成功那条 `await finishScan()` **是两段互斥的路**（失败在前面、成功在后面），不是"失败也往下走"',
+        `set…(failed)@${failFirst} · await finishScan()@${okAfterFail}`,
+      )
+
+      /* ---------- ③ 版本号三处一致 ---------- */
+      const verMatch = verSrc.match(/APP_VERSION\s*=\s*'([^']+)'/)
+      const ver = verMatch ? verMatch[1] : null
+      const top = logSrc.match(/v:\s*'([^']+)'/)
+      check(
+        ver === '1.0.0' && pkg.version === ver && top !== null && top[1] === ver,
+        '🔴 S25 ⑤ 版本号**三处一致**：`lib/version.ts` · `app/package.json` · `lib/changelog.ts` 顶部那一段',
+        `version.ts=${ver} · package.json=${pkg.version} · changelog[0]=${top ? top[1] : '（读不到）'}`,
+        '反向对照：只把 `version.ts` 改回 `0.9.9` → 这一条当场判假（对照 A 实测跑过）',
+      )
+      /* 更新日志顶部那一段的条目数与 `at`（`at` 用"落进仓库的那一天"口径） */
+      const seg = logSrc.slice(logSrc.indexOf("v: '1.0.0'"), logSrc.indexOf("v: '0.9.9'"))
+      const items100 = (seg.match(/^\s{6}'/gm) ?? []).length
+      check(
+        items100 >= 10 && /at:\s*'9月27日'/.test(seg),
+        '🔴 S25 ⑥ `1.0.0` 那一段**真的覆盖了 0.9.9 之后的改动**（不是占位一行），发版日按"落进仓库的那一天"填',
+        `条目 ${items100} 条 · at=${(seg.match(/at:\s*'([^']+)'/) ?? [])[1] ?? '（没有）'}`,
+      )
+      /* 🔴 §七 的钉子：给老师看的那一屏**不许出现**「内测」「公测」 */
+      const banned = ['内' + '测', '公' + '测']
+      const bannedHit = banned.filter((w) => logSrc.includes(w))
+      check(
+        bannedHit.length === 0,
+        '🔴 S25 ⑦ §七 文案纪律：`changelog.ts`（给老师看的）里**不出现**「内测」「公测」—— 那是软件行业用语，老师不关心',
+        `命中 ${bannedHit.length} 处（${bannedHit.join(' / ') || '无'}）`,
+        '反向对照：往 `1.0.0` 那一段塞一句含该词的文案 → 这一条当场判假（对照 B 实测跑过）',
+      )
+      /* 同一句话要写进**内部**文档（给后来的 agent 看），两边分工不许串 */
+      const docSrc = (() => {
+        try {
+          return readFileSync(join(root25, '..', '功能设计与不变量.md'), 'utf8').replace(/\r\n/g, '\n')
+        } catch {
+          return ''
+        }
+      })()
+      check(
+        docSrc.includes(banned[0]) && docSrc.includes(banned[1]) && docSrc.includes('1.0.0'),
+        'S25 ⑦：`1.0.0 = 内测转公测、第一次小范围公测` 这句写在**内部**文档（`功能设计与不变量.md` §15.6）里 —— 内部话归内部，界面话归界面',
+        `功能设计与不变量.md：字数 ${docSrc.length} · 两个词 ${banned.map((w) => (docSrc.includes(w) ? '有' : '没有')).join('/')}`,
+      )
+
+      /* ---------- 🧪 反向对照（**实测跑红**，见 §S25 报告） ---------- */
+      /* A：同一个 sourceCheck，只把 version.ts 的号改掉 → "三处一致"必须判假 */
+      const sourceCheckVer = (verSrcIn, pkgVer) => {
+        const v = (verSrcIn.match(/APP_VERSION\s*=\s*'([^']+)'/) ?? [])[1] ?? null
+        return v === '1.0.0' && pkgVer === v && top !== null && top[1] === v
+      }
+      check(
+        sourceCheckVer(verSrc, pkg.version) === true && sourceCheckVer(verSrc.replace("'1.0.0'", "'0.9.9'"), pkg.version) === false,
+        '🧪 S25 对照 A：**同一个判据**喂改过号的源码（`1.0.0`→`0.9.9`）→ 当场判假 —— ⑤ 不是恒真的摆设',
+        `真源码=${sourceCheckVer(verSrc, pkg.version)} · 改过号=${sourceCheckVer(verSrc.replace("'1.0.0'", "'0.9.9'"), pkg.version)}`,
+      )
+      /* B：往更新日志里塞一个禁词 → "不出现"那条必须判假 */
+      const bannedOf = (s) => banned.filter((w) => s.includes(w))
+      const poisoned = logSrc.replace('从这一版起，平台正式给全校用', `从这一版起，平台正式给全校用（结束${banned[0]}）`)
+      check(
+        bannedOf(logSrc).length === 0 && bannedOf(poisoned).length === 1 && poisoned !== logSrc,
+        '🧪 S25 对照 B：往 `1.0.0` 段里**塞一个禁词** → 同一个判据当场判假（⑦ 真的在扫屏上那句话）',
+        `原=${bannedOf(logSrc).length} 处 · 塞过=${bannedOf(poisoned).length} 处`,
+      )
+      /* C：把一个 `setX('done')` 删掉 → "三档都真被写到"必须判假 */
+      const scanAll = (src, v) => ['running', 'done', 'failed'].every((st) => writesTo(src, v, st))
+      const donePoisoned = importSrc.replace(`${scanSet}('done')`, `${scanSet}('running')`)
+      check(
+        scanVar !== null && scanAll(importSrc, scanVar) === true && scanAll(donePoisoned, scanVar) === false,
+        '🧪 S25 对照 C：把成功那条路上的 `done` 换回 `running` → 同一个判据当场判假（① 钉的是"终态真的会被写下去"）',
+        `原=${scanVar ? scanAll(importSrc, scanVar) : 'n/a'} · 换回后=${scanVar ? scanAll(donePoisoned, scanVar) : 'n/a'}`,
+      )
+      /* D：把落点的 `status` 改回写死 → "接的是 state"必须判假 */
+      const statusWritten = scanVar ? `status={${scanVar}}` : ''
+      const writtenDead = markArgs(importSrc.replace(statusWritten, 'status="running"'))
+      check(
+        statusWritten !== '' &&
+          importMarks.some((a) => a.status === `{${scanVar}}`) &&
+          !writtenDead.some((a) => a.status === `{${scanVar}}`),
+        '🧪 S25 对照 D：把 `status={…}` 改回 `status="running"`（就是改动前那一版）→ 同一个判据当场判假',
+        `改成写死后还认得出这个 state 的落点 = ${writtenDead.filter((a) => a.status === `{${scanVar}}`).length} 处`,
+      )
+    })
+
+    /*
      * ================= S24：「我的身份」那颗 24px 校徽（2026-10-11） =================
      *
      * 背景：`Settings.tsx` 的"我的身份"卡上那颗 24px 图标原来是**平台的旧品牌标**

@@ -17,7 +17,7 @@ import {
 } from '../components/icons'
 import { Button, KV, PageHead, Panel, Sect, Sheet, Tag } from '../components/ui'
 import { Emblem } from '../components/Emblem'
-import { StatusMark } from '../components/StatusMark'
+import { StatusMark, STATUS_MARK_HOLD_MS, type StatusMarkStatus } from '../components/StatusMark'
 import { activeStudents, useStore, useToast } from '../data/store'
 import { signOutEverywhere } from '../hooks/useAuthBootstrap'
 import { connectionMode, getSupabase, isRemote } from '../lib/supabase'
@@ -65,6 +65,19 @@ import {
   type SubjectCode,
 } from '../lib/subjects'
 
+/**
+ * 「备份到云端」那颗状态标记四档各自的文案（见下面 `backupMark` 那处注释）。
+ * ⚠️ `done` / `failed` **必须与 `pending` / `running` 不同** —— 否则同一句话
+ *    会配着绿勾（或红叉）显示，一句文案说了两件事。
+ */
+const BACKUP_MARK_LABEL: Record<StatusMarkStatus, string> = {
+  pending: '备份到云端',
+  running: '正在备份…',
+  done: '备份成功',
+  failed: '备份失败',
+  cancelled: '已取消',
+}
+
 export default function Settings() {
   const teacher = useStore((s) => s.teacher)
   const classes = useStore((s) => s.classes)
@@ -88,6 +101,18 @@ export default function Settings() {
   const [fbLoadErr, setFbLoadErr] = useState('')
   /** 🆕 备份通知（邮件）正在发 */
   const [bkNotifyBusy, setBkNotifyBusy] = useState(false)
+  /**
+   * 「备份到云端」那颗状态标记的**四档**（`pending` → `running` → `done` / `failed`）。
+   *
+   * 🔴 为什么不能从 `bkNotifyBusy` 推：那个布尔量只说"忙不忙"，
+   * **说不出"成了还是没成"** —— 而绿勾与红叉恰恰是这一档的全部信息量。
+   * 所以终态由**真的结果**（`res.ok`）决定，不是"忙完了就当成功"。
+   * （StatusMark 自己不会结束：原版组件里没有任何定时器，`running` 会一直转，见组件文件头。）
+   */
+  const [backupMark, setBackupMark] = useState<StatusMarkStatus>('pending')
+  /** 终态那 1.2 秒的计时器：离开这一页就别再 setState */
+  const backupMarkTimer = useRef(0)
+  useEffect(() => () => window.clearTimeout(backupMarkTimer.current), [])
 
   /**
    * 「我提过的」：进页面读一次。
@@ -528,34 +553,45 @@ export default function Settings() {
                   const r = await exportWithProfiles(useStore.getState())
                   downloadJson(r.data, `树高备份-${ymdOf(beijingNow())}.json`)
                   setBkNotifyBusy(true)
-                  void notifyBackupDone(`本机备份已导出：${backupSummary(r.data)}`, `文件：树高备份-${ymdOf(beijingNow())}.json`).then(
-                    (res) => {
-                      setBkNotifyBusy(false)
-                      if (res.ok) {
-                        push({
-                          text: '备份已存到云端',
-                          tone: 'ok',
-                          ...(r.issues.length ? { desc: `这份文件里没有学生/教师档案（${r.issues[0]}）` } : {}),
-                        })
-                      } else {
-                        /* 🔴 **不发假成功**：没存上就说没存上，并把"不许删"讲清楚 */
-                        push({
-                          text: '备份已导出，但没能存到云端',
-                          tone: 'warn',
-                          desc: `${res.message}，没存上就先别删刚才那份备份文件`,
-                        })
-                      }
-                    },
-                  )
+                  window.clearTimeout(backupMarkTimer.current)
+                  setBackupMark('running')
+                  const res = await notifyBackupDone(`本机备份已导出：${backupSummary(r.data)}`, `文件：树高备份-${ymdOf(beijingNow())}.json`)
+                  setBkNotifyBusy(false)
+                  /* 🔴 终态取**真结果**：`res.ok` 是绿勾、否则红叉（红叉停住不回到 `pending`） */
+                  setBackupMark(res.ok ? 'done' : 'failed')
+                  if (res.ok) {
+                    push({
+                      text: '备份已存到云端',
+                      tone: 'ok',
+                      ...(r.issues.length ? { desc: `这份文件里没有学生/教师档案（${r.issues[0]}）` } : {}),
+                    })
+                    /* ✅ 绿勾亮满 `STATUS_MARK_HOLD_MS` 再回到常态（时长只有共享常量那一处） */
+                    backupMarkTimer.current = window.setTimeout(
+                      () => setBackupMark('pending'),
+                      STATUS_MARK_HOLD_MS,
+                    )
+                  } else {
+                    /* 🔴 **不发假成功**：没存上就说没存上，并把"不许删"讲清楚 */
+                    push({
+                      text: '备份已导出，但没能存到云端',
+                      tone: 'warn',
+                      desc: `${res.message}，没存上就先别删刚才那份备份文件`,
+                    })
+                  }
                 }}
               >
                 {/* StatusMark 是**替换**那句 `{busy ? '正在备份…' : '备份到云端'}` —— 这一处是
                     全站最长的等待（导出整库 + 上传，秒级到十秒级），原来十秒里屏幕上没有任何
-                    "还活着"的迹象。`cancelled` 那一档**不给 `--color-bad`**（照原版）。 */}
+                    "还活着"的迹象。`cancelled` 那一档**不给 `--color-bad`**（照原版）。
+                    ⚠️ 文案按四档给全（`done` / `failed` 各自不同），否则"正在备份…"会
+                       配着绿勾/红叉显示，等于一句话说两件事。 */}
                 <StatusMark
-                  status={bkNotifyBusy ? 'running' : 'pending'}
+                  status={backupMark}
                   size={16}
-                  label={bkNotifyBusy ? '正在备份…' : '备份到云端'}
+                  label={BACKUP_MARK_LABEL[backupMark]}
+                  /* 🔴 `strike={false}`：平台气质偏克制，那个删除线表达的是"作废"，
+                     而这两处说的都是"跑完了" —— 见组件文件头。 */
+                  strike={false}
                   style={{ justifyContent: 'center' }}
                 />
               </Button>
