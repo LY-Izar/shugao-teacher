@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Page } from '../components/AppShell'
 import {
-  Logo,
   IconAlert,
   IconCalendar,
   IconCheck,
@@ -17,6 +16,8 @@ import {
   IconWifi,
 } from '../components/icons'
 import { Button, KV, PageHead, Panel, Sect, Sheet, Tag } from '../components/ui'
+import { Emblem } from '../components/Emblem'
+import { StatusMark } from '../components/StatusMark'
 import { activeStudents, useStore, useToast } from '../data/store'
 import { signOutEverywhere } from '../hooks/useAuthBootstrap'
 import { connectionMode, getSupabase, isRemote } from '../lib/supabase'
@@ -264,7 +265,10 @@ export default function Settings() {
                 color: 'var(--color-accenttext)',
               }}
             >
-              <Logo size={24} />
+              {/* 🔴 校徽，不是平台的旧品牌标 —— 24px 用**纯徽**（`落地清单.md` §9.1：
+                  全徽 24px 外圈线只有 0.50px、"刚够半个像素"、圆是半实半虚 → 认不出是枚校徽）。
+                  位图见 `public/emblem/emblem-pure-24.png`。 */}
+              <Emblem n={24} pure data-settings-emblem />
             </span>
             <div className="min-w-0 flex-1">
               <div style={{ fontSize: 17, fontWeight: 660 }}>{teacher?.name ?? '未登录'}</div>
@@ -522,7 +526,15 @@ export default function Settings() {
                   )
                 }}
               >
-                {bkNotifyBusy ? '正在备份…' : '备份到云端'}
+                {/* StatusMark 是**替换**那句 `{busy ? '正在备份…' : '备份到云端'}` —— 这一处是
+                    全站最长的等待（导出整库 + 上传，秒级到十秒级），原来十秒里屏幕上没有任何
+                    "还活着"的迹象。`cancelled` 那一档**不给 `--color-bad`**（照原版）。 */}
+                <StatusMark
+                  status={bkNotifyBusy ? 'running' : 'pending'}
+                  size={16}
+                  label={bkNotifyBusy ? '正在备份…' : '备份到云端'}
+                  style={{ justifyContent: 'center' }}
+                />
               </Button>
               <Button block icon={<IconUpload size={16} />} onClick={() => bkRef.current?.click()}>
                 从备份文件恢复

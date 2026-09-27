@@ -12,6 +12,7 @@ import {
   IconUpload,
 } from '../components/icons'
 import { Button, PageHead, Panel, Portal, Sect, StatStrip, Tag } from '../components/ui'
+import { StatusMark } from '../components/StatusMark'
 import { useStore, useToast } from '../data/store'
 import type { ParsedRow } from '../lib/roster'
 import { FLAG_TEXT, simulateScan, validateRows } from '../lib/roster'
@@ -395,7 +396,15 @@ export default function ImportPhoto() {
         {stage === 'scanning' ? (
           <div className="anim-in">
             <div className="mb-2">
-              <Sect>正在识别</Sect>
+              {/* StatusMark 接在「正在识别」这个小标题上 —— 这一屏原本只有"4 步步骤条 + 进度轨"，
+                  它们是**流程**信息；"到底还在不在跑"缺一个**不确定型**的指示（最久的一屏：
+                  `await recognize()` 走服务端 OCR，2~20s）。 */}
+              <Sect>
+                <span className="flex items-center gap-2" data-scan-mark>
+                  <StatusMark status="running" size={16} />
+                  正在识别
+                </span>
+              </Sect>
               <Panel bodyClass="p-3">
                 <div
                   className="relative overflow-hidden"

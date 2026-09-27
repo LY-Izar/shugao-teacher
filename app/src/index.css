@@ -296,8 +296,15 @@
       与 `accent` **不是同一个值** → 改了就等于**动了亮蓝的渲染**（用户这轮的硬要求正是"不许动"）。
       ⚠️ 收进来的那批字**只有"令牌名"这一个词变了**（字号 / 颜色值 / 结构 / 文案一个字没动）：
       `Classroom.tsx:1325/1333/1663/1956`、`Admin.tsx:462/1811/2928`、`AssignmentCollect.tsx:946`、
-      `GradeSetup.tsx:895`、`ScheduleBatch.tsx:228`、`AppShell.tsx:2440`（`AppShell.tsx:2220` 那颗
-      是 14.5px 的 Logo，**刻意不动** —— 那批的判据是"字号 ≤12.5px"）。
+      `GradeSetup.tsx:895`、`ScheduleBatch.tsx:228`、`AppShell.tsx:2440`（`AppShell.tsx:2220` 那处
+      14.5px 的坐标**刻意不动** —— 那批的判据是"字号 ≤12.5px"）。
+      ⚠️ **本节这些行号是"改名前"（8f6af27 之前）的**，改名后整体有偏移。
+      ⚠️ **旧品牌标的两处已经在徽标轮 + 微交互轮清掉了**（2026-10-11 收口）：
+      `AppShell.tsx` 左栏标题行 34px 与移动顶栏 22px 那两颗矢量标 → 换成「校徽位图」
+      （`components/Emblem.tsx`，`n={40}` / `n={32}`）；
+      `Settings.tsx`「我的身份」卡上那颗 **24px** → 换成 24px 那一档的**纯徽**
+      （`<Emblem n={24} pure />`）。`icons.tsx` 的 `Logo` 组件**已整条删除**（全仓 0 引用）。
+      📌 上面那处 14.5px 说的是**平台名那行字**（`AppShell.tsx:2220`），与徽标无关。
       ⚠️ **还没收的（下一轮的账，不是漏做）**：`Admin.tsx:3592`（11.5px，夹在折叠块里）、
       `Classroom.tsx:1177` 与 `ScheduleBatch.tsx:212`（只有图标、没有字）、
       `ScheduleBatch.tsx:391` / `Classroom.tsx:1511` / `AppShell.tsx:2413` 这几处是 **13~13.5px**。
@@ -1684,10 +1691,322 @@ body::before {
   animation: scan 2.1s cubic-bezier(0.22, 0.8, 0.24, 1) infinite;
 }
 
-.live-dot {
-  animation: pulse-dot 1.7s ease-in-out infinite;
+/* ============================================================
+   🆕 2026-10-11 微交互轮 · 星光（`components/StarBorder.tsx`）
+   ------------------------------------------------------------
+   几何用「细高光」，**不是原版字面** —— 用户拍的板，理由与原版两组实测数
+   写在 `components/StarBorder.tsx` 的文件头（原版 12 相位 min/mean/max = 0.0/5.0/12.8、
+   有 6 个相位是 0；细高光 = 7.0/13.0/14.1、12 相位全 ≥7%，底沿 77.5 vs 62.5）。
+   一句话：`height:50%` + `bottom:-12px` 让光片整片落在 42px 按钮的外沿之下，
+   而原版自己的 demo 按钮 54px / padding 16px 才好看；**不能为一个装饰去改按钮尺寸**。
+
+   · 不透明度用**原版的 0.7**（写进 keyframe —— 原版那两条 keyframes 的 `opacity:1→0`
+     把它元素上的静态 `opacity:.7` 盖掉了，参数从来没生效；这里不用那套
+     `--sb-op` 死旋钮，前两轮实测调 .4 / .95 出来的 computed 一模一样）。
+   · 发光色跟 `--color-accent`。
+   · **只暗色出现**（亮色 `display:none`）；**reduced-motion 也 `display:none`**
+     （停住的星光 = 一颗卡在边上的光斑，比没有更糟；**别用全局兜底**）。
+   ============================================================ */
+.sb {
+  position: relative;
+  display: flex;
+  overflow: hidden;
+  border-radius: var(--radius-sm);
+  isolation: isolate;
 }
 
+/* `block` 那颗按钮要满宽；普通按钮也是块级，与 `.btn` 的排布一致 */
+.sb {
+  width: 100%;
+}
+
+.sb > .sb-glow {
+  position: absolute;
+  width: 300%;
+  height: 50%;
+  border-radius: 999px;
+  pointer-events: none;
+  z-index: 0;
+  background: radial-gradient(circle, var(--color-accent), transparent 10%);
+}
+
+.sb > .sb-glow-b {
+  bottom: -7px;
+  right: -250%;
+  animation: sb-move-b var(--sb-speed, 6s) linear infinite alternate;
+}
+
+.sb > .sb-glow-t {
+  top: -7px;
+  left: -250%;
+  animation: sb-move-t var(--sb-speed, 6s) linear infinite alternate;
+}
+
+.sb > .sb-body {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  width: 100%;
+  align-items: stretch;
+}
+
+/* 两颗按钮都是 42 高（`.btn`），光片就压在它下面那 3~4px 的 padding 带上 —— 那一条是
+   `--color-canvas`，不是在实心 accent 底上（同色压同色会看不见）。 */
+.sb > .sb-body > .btn {
+  flex: 1;
+}
+
+/* 🔴 只暗色 —— 选择器写成 `:root[data-theme=…]`（与 `index.css` 其余门控同一套写法）。 */
+:root:not([data-theme='dark']) .sb > .sb-glow {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sb > .sb-glow {
+    display: none;
+  }
+}
+
+@keyframes sb-move-b {
+  0% {
+    transform: translate(-33.333%, 0);
+    opacity: 0;
+  }
+  28% {
+    opacity: 0.7;
+  }
+  72% {
+    opacity: 0.7;
+  }
+  100% {
+    transform: translate(-66.667%, 0);
+    opacity: 0;
+  }
+}
+
+@keyframes sb-move-t {
+  0% {
+    transform: translate(33.333%, 0);
+    opacity: 0;
+  }
+  28% {
+    opacity: 0.7;
+  }
+  72% {
+    opacity: 0.7;
+  }
+  100% {
+    transform: translate(66.667%, 0);
+    opacity: 0;
+  }
+}
+
+/* ============================================================
+   🆕 2026-10-11 微交互轮 · StatusMark（`components/StatusMark.tsx`）
+   ------------------------------------------------------------
+   逐字照 ReactBits `StatusMark.css`，类名也对齐 → 可直接替换。
+   · **`transform` 一个字都没写** —— `rotate(-90 12 12)` 是 JSX 上的**静态属性**，
+     每帧只有 `stroke-dashoffset` 被写（原版 3/代码.txt:120-124 就是这么转的）。
+     前两版在 CSS 里 `@keyframes spin`，属性三函数列表 vs CSS 单函数列表 → 矩阵插值
+     → 圆心漂 4.07px。判据：圆心漂移 0.000px / `transform` 取值 1 个（`shots.mjs`）。
+   · `travel.jump(0)` 那条降级分支在 JS 里，弧停在**正上方**。
+   · `cancelled` **不上色**（照原版：`solid` 不含它、也不给 `--color-bad`）。
+   ============================================================ */
+.status-mark {
+  --sm-size: 20px;
+  --sm-stroke: 2;
+  --sm-color: currentColor;
+  --sm-done: #22c55e;
+  --sm-error: #ef4444;
+  --sm-fill: 0.06;
+  --sm-font: 14px;
+  --sm-draw: 240ms;
+  --sm-strike-delay: 180ms;
+  --sm-muted: 0.55;
+  --sm-check-delay: 120ms;
+  --sm-label-o: 0.65;
+  --sm-ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --sm-ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: calc(var(--sm-size) * 0.5);
+  vertical-align: middle;
+  line-height: 1;
+}
+
+.status-mark__glyph {
+  flex: none;
+  overflow: visible;
+  color: var(--sm-color);
+  transition: color 200ms ease;
+}
+
+.status-mark[data-status='done'] .status-mark__glyph {
+  color: var(--sm-done);
+}
+
+.status-mark[data-status='failed'] .status-mark__glyph {
+  color: var(--sm-error);
+}
+
+.status-mark__track {
+  fill: currentColor;
+  stroke: currentColor;
+  stroke-width: var(--sm-stroke);
+  fill-opacity: 0;
+  stroke-opacity: 0;
+  transition:
+    fill-opacity 180ms ease,
+    stroke-opacity 200ms ease;
+}
+
+.status-mark[data-status='running'] .status-mark__track {
+  stroke-opacity: 0.2;
+}
+
+.status-mark[data-status='done'] .status-mark__track,
+.status-mark[data-status='failed'] .status-mark__track {
+  fill-opacity: var(--sm-fill);
+}
+
+.status-mark__ring {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: var(--sm-stroke);
+  stroke-linecap: round;
+  opacity: var(--sm-muted);
+  transition: opacity 200ms ease;
+}
+
+.status-mark[data-status='running'] .status-mark__ring,
+.status-mark[data-status='done'] .status-mark__ring,
+.status-mark[data-status='failed'] .status-mark__ring {
+  opacity: 1;
+}
+
+.status-mark__check,
+.status-mark__cross {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: var(--sm-stroke);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-dasharray: 1 2;
+  stroke-dashoffset: 1.05;
+  opacity: 0;
+  transition:
+    stroke-dashoffset 160ms var(--sm-ease-out),
+    opacity 0ms linear 160ms;
+}
+
+.status-mark[data-status='done'] .status-mark__check,
+.status-mark[data-status='failed'] .status-mark__cross,
+.status-mark[data-status='cancelled'] .status-mark__cross {
+  stroke-dashoffset: 0;
+  opacity: 1;
+  transition:
+    stroke-dashoffset var(--sm-draw) var(--sm-ease-out) var(--sm-check-delay),
+    opacity 0ms linear var(--sm-check-delay);
+}
+
+.status-mark__label {
+  position: relative;
+  color: var(--sm-color);
+  font-size: var(--sm-font);
+  line-height: 1.25;
+  opacity: var(--sm-label-o);
+  transition: opacity 200ms ease;
+}
+
+.status-mark[data-status='running'] {
+  --sm-label-o: 1;
+}
+
+.status-mark[data-status='done'] {
+  --sm-label-o: 0.6;
+}
+
+.status-mark[data-status='failed'] {
+  --sm-label-o: 1;
+}
+
+.status-mark[data-status='cancelled'] {
+  --sm-label-o: 0.55;
+}
+
+.status-mark__strike {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  left: 0;
+  height: max(1px, calc(var(--sm-font) / 14));
+  background: currentColor;
+  transform: scaleX(0);
+  transform-origin: left center;
+  translate: 0 -50%;
+  pointer-events: none;
+  transition: transform 160ms var(--sm-ease-out);
+}
+
+.status-mark[data-status='done'][data-strike] .status-mark__strike {
+  transform: scaleX(1);
+  transition: transform 280ms var(--sm-ease-out) var(--sm-strike-delay);
+}
+
+.status-mark__sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+@keyframes sm-breathe {
+  50% {
+    opacity: 0.45;
+  }
+}
+
+/* ⚠️ 原版这里**没有** `stroke-dasharray: none` —— dasharray 是 JS 写的，
+   降级时 JS 走 `travel.jump(0)`，弧形状照旧（0.68 圈），只是不动。照抄。 */
+@media (prefers-reduced-motion: reduce) {
+  .status-mark__check,
+  .status-mark__cross {
+    stroke-dashoffset: 0;
+    transition: opacity 200ms ease;
+  }
+
+  .status-mark__strike {
+    opacity: 0;
+    transform: scaleX(1) !important;
+    transition: opacity 200ms ease;
+  }
+
+  .status-mark[data-status='done'][data-strike] .status-mark__strike {
+    opacity: 1;
+  }
+}
+
+/* ============================================================
+   🆕 2026-10-11 微交互轮 · reduced-motion 的三处「功能性动作指示」
+   ------------------------------------------------------------
+   下面那条全局兜底把**一切**动画压成 `0.001ms / 一次`。对"一次性入场动画"没问题
+   （跑完就停在终态），但对 `infinite` 的**功能性**动作指示就是"冻住"：
+     · `.live-dot`（`pulse-dot`，`ImportPhoto` 那 4 步进度正在用）→ 呼吸小点是**死的**；
+     · `.status-mark[data-indeterminate] .status-mark__ring`（`sm-breathe`）→ 同上；
+     · `.sb > .sb-glow`（星光）→ 停成一颗卡在边上的光斑。
+   前两条**要真的动**（它们是"在跑"的唯一指示）→ 用同特异度 + `!important` 顶回去；
+   星光那条**直接不显示**（星光的全部意义就是运动）。
+
+   顺手扫过的**其它** `infinite` 动画（都**没有**被误伤，列出来免得下一个人再查一遍）：
+     · `.scanline`（`scan`）：全局兜底那一段里已有 `display: none`；
+     · `.skeleton`（`shimmer`）：无 `fill-mode`，跑完回静态渐变，读数正常；
+     · `.sheen`（`.glass-liquid > .sheen` / `.rail-pill::after`）：同上，跑完停在 0% 那一帧，
+       是一团静态高光，不是"坏掉"（它是装饰，不传达状态）。
+   ============================================================ */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -1702,5 +2021,14 @@ body::before {
   .draw-check circle,
   .draw-check path {
     stroke-dashoffset: 0;
+  }
+  /* 🔴 顶回全局兜底：那个呼吸小点是 `ImportPhoto` 四步进度里"这一步在跑"的**唯一**指示，
+     冻住 = 那 4 步全程看起来是卡住的（线上实测它一直是死的）。 */
+  .live-dot {
+    animation: pulse-dot 1.7s ease-in-out infinite !important;
+  }
+  /* 同上：`sm-breathe` 是 StatusMark 降级后唯一的"在跑"指示（原版自己就写了这条）。 */
+  .status-mark[data-indeterminate] .status-mark__ring {
+    animation: sm-breathe 1400ms var(--sm-ease-in-out) infinite !important;
   }
 }

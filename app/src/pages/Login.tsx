@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { IconChevronRight, IconWifi } from '../components/icons'
 import { Emblem } from '../components/Emblem'
+import { StarBorder } from '../components/StarBorder'
 import { Button } from '../components/ui'
 import { useStore, useToast } from '../data/store'
 import { toEmail } from '../lib/accounts'
@@ -165,29 +166,33 @@ export default function Login() {
               />
             </label>
 
-            <Button
-              type="submit"
-              variant="primary"
-              block
-              disabled={busy}
-              icon={
-                busy ? (
-                  <span
-                    className="live-dot"
-                    style={{
-                      width: 7,
-                      height: 7,
-                      borderRadius: 99,
-                      background: 'var(--color-onaccent)',
-                      display: 'inline-block',
-                    }}
-                  />
-                ) : null
-              }
-            >
-              {busy ? '正在进入…' : '进入平台'}
-              {!busy ? <IconChevronRight size={16} /> : null}
-            </Button>
+            {/* 星光（`StarBorder`）—— 只暗色出现；亮色 / reduced-motion 下连元素都不画。
+                这一屏**唯一**的动作，独占性满分（判据见 `说明.md` §1.2 P0）。 */}
+            <StarBorder data-nav="login-enter">
+              <Button
+                type="submit"
+                variant="primary"
+                block
+                disabled={busy}
+                icon={
+                  busy ? (
+                    <span
+                      className="live-dot"
+                      style={{
+                        width: 7,
+                        height: 7,
+                        borderRadius: 99,
+                        background: 'var(--color-onaccent)',
+                        display: 'inline-block',
+                      }}
+                    />
+                  ) : null
+                }
+              >
+                {busy ? '正在进入…' : '进入平台'}
+                {!busy ? <IconChevronRight size={16} /> : null}
+              </Button>
+            </StarBorder>
 
             <p
               style={{

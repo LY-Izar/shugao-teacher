@@ -2427,7 +2427,47 @@ await withLock(async () => {
       const SN = '35–37 移动端底部导航'
       let hiBefore = null
 
+      /*
+       * 🔴 **2026-10-11：这三条"等固定毫秒"的等待换成了"等条件"** —— 根因是**实测**出来的，不是保险起见。
+       *
+       * 现象：同一条断言时红时绿（同一台机、同一份代码，一次红 4 条、一次红 1 条，
+       * 而"再展开一次导航又是透明的"那条**三次里红了两次**）。
+       *
+       * 根因：**页面在后台时，CSS 过渡的时钟不动**。实测（临时诊断，4 组对照）：
+       *   · 被测页在前台：`opacity-0` 类已加上 → computed `opacity = 0`、`getAnimations() = []` ✅
+       *   · 先把**另一个标签页** `bringToFront()`（= 被测页进后台）：
+       *     **类还是 `opacity-0`、`aria-expanded=true`、Sheet 也在**，但 computed `opacity = 1`、
+       *     `getAnimations() = ['running']` —— 过渡**卡在起点**，后台 2/2 复现 ❌
+       *   · 再 `bringToFront()` 拿回前台 → 立刻又变回 `opacity = 0`（2/2）✅
+       * 而 `shots.mjs` 跑到这一节时，**前面已经开过好几个 page**（S1–S34 各自 `newPage`），
+       * 谁是前台页并没有保证 —— 这就是"时红时绿"的来源。
+       *
+       * 所以三条修法（都不是"把等待调长"）：
+       *   ① **`bringToFront()`**：断言之前显式把被测页拿到前台；
+       *   ② **等条件**（`pollUntil`）：等 computed 值真的到位，而不是等固定毫秒；
+       *   ③ 超时后**照常断言** —— 红的时候读数里带着 `timeout` 标记，一眼看出是"没等到"还是"值不对"。
+       */
+      const ENV_SN = { front: false }
+      const ensureFront = async () => {
+        if (ENV_SN.front) return
+        ENV_SN.front = true
+        await page.bringToFront()
+        await page.waitForTimeout(120)
+      }
+      /** 等 `readFn()` 返回期望值；超时返回最后一次读数 + `timeout: true`（**不抛**，让断言去红） */
+      const pollUntil = async (readFn, okFn, ms = 4000) => {
+        const t0 = Date.now()
+        let last = null
+        for (;;) {
+          last = await readFn()
+          if (okFn(last)) return last
+          if (Date.now() - t0 > ms) return { ...(last ?? {}), timeout: true }
+          await page.waitForTimeout(50)
+        }
+      }
+
       await step(SN, async () => {
+        await ensureFront()
         await page.goto(`${BASE}/`, { waitUntil: 'networkidle' })
         await expectPage(page, SN, { url: '/', markers: ['今日待办'], date: D0919 })
         await page.evaluate(() => window.scrollTo(0, 560))
@@ -2745,16 +2785,33 @@ await withLock(async () => {
           `url=${after.url} sheetOpen=${after.sheetOpen}`,
         )
         /* 收回导航（上一步跳页时已经自动收起，这里显式再点一次展开，给下面的"真点一下"用） */
+        await ensureFront()
         await page.locator('nav[aria-label="主导航"] button[aria-haspopup="dialog"]').click({
           force: true,
         })
-        await page.waitForTimeout(700)
+        /* 🔴 等**条件**（`opacity` 真的变成 0），不是等固定毫秒 —— 理由见上面 `ensureFront` 那段 */
+        await pollUntil(
+          () =>
+            page.evaluate(() => {
+              const nav = document.querySelector('nav[aria-label="主导航"]')
+              return { opacity: getComputedStyle(nav).opacity }
+            }),
+          (r) => r.opacity === '0',
+        )
+        await page.waitForTimeout(80)
         const reopened = await stackProbe('real')
         check(
           reopened.nav?.opacity === '0',
           `${SNM}：再展开一次，导航又是透明的（下面那条"真点一下"要在展开态量）`,
           `opacity=${reopened.nav?.opacity} · sheet.top=${reopened.sheet?.top} · 圆按钮中心=${JSON.stringify(reopened.circle?.center)}`,
         )
+        /* ⚠️ 圆按钮的坐标要在**等停稳之后**重取：`stackProbe` 只给形状，
+           坐标交给 Playwright（它自己会等元素稳定），别拿旧坐标去点。 */
+        const circleBox = await page
+          .locator('nav[aria-label="主导航"] button[aria-haspopup="dialog"]')
+          .boundingBox()
+        if (!circleBox) throw new Error(`${SNM}：量不到圆按钮的位置`)
+        const clickAt = [circleBox.x + circleBox.width / 2, circleBox.y + circleBox.height / 2]
         /* ⑤ 🔴 **真点一下**：在圆按钮中心点一次 —— 那里现在没有导航，
               点下去命中的是 Sheet 自己的东西，并且 **URL 绝不许动**
               （"点了导航跳页"正是本轮要防的那个回归）。
@@ -2762,7 +2819,7 @@ await withLock(async () => {
                  点到「收起」把它关掉是**正常语义**（上一轮实测也是这么记的）。
               ⚠️ 这一条必须放在**最后**：它会把 Sheet 关掉，后面不能再有 `.sheet` 断言。 */
         const urlBeforeClick = page.url()
-        await page.mouse.click(reopened.circle.center[0], reopened.circle.center[1])
+        await page.mouse.click(clickAt[0], clickAt[1])
         await page.waitForTimeout(320)
         check(
           page.url() === urlBeforeClick,
@@ -3109,13 +3166,27 @@ await withLock(async () => {
               }
             })
           })
-        await page.waitForTimeout(400)
-        const sig1 = await sig()
+        /*
+         * 🔴 2026-10-11：这里原来只 `waitForTimeout(400)` —— 那**不够**。
+         * `.glass-light` 那一格的颜色是 `transition: color .22s`（`AppShell.tsx`），
+         * 而**页面在后台时过渡时钟不走**（同 `ensureFront` 那段实测）：类/属性都已经对了、
+         * computed 颜色却还停在上一次路由的值（实测 `作业(当前)` 读成未选中的灰）。
+         * → 改成"等颜色真的对上"，超时照样断言（读数里带 `timeout`）。
+         */
+        await ensureFront()
+        const sigStable = await pollUntil(
+          sig,
+          (rows) => {
+            const act = rows.find((c) => c.active)
+            return Boolean(act) && rows.filter((c) => !c.active).every((c) => c.color !== act.color)
+          },
+        )
+        const sig1 = sigStable
         const activeColor = sig1.find((c) => c.active)?.color ?? null
         check(
           Boolean(activeColor) && sig1.filter((c) => !c.active).every((c) => c.color !== activeColor),
           `${SG}：当前页的图标颜色与其余**明显不同**（色盲 / 强光下也不能只靠那块指示器）`,
-          sig1.map((c) => `${c.name}${c.active ? '(当前)' : ''} ${c.color}`).join(' · '),
+          `${sig1.map((c) => `${c.name}${c.active ? '(当前)' : ''} ${c.color}`).join(' · ')}${sig1.timeout ? ' · ⏳等颜色等到超时' : ''}`,
         )
         /*
          * 反向对照：把未选中项的文字刷成同一个颜色 → 上面那条的颜色判据必须红。
@@ -3211,7 +3282,24 @@ await withLock(async () => {
            同一段采样**必须**红 —— 见下面第二条 check。
            ============================================================ */
         await page.goto(`${BASE}/`, { waitUntil: 'networkidle' })
-        await page.waitForTimeout(900)
+        await ensureFront()
+        /* 🔴 等"高亮真的回到当前那一格"再开始逐帧采样 —— 原来只等 900ms：
+           若过渡时钟因后台页面冻住，900ms 之后高亮还在路上，逐帧采到的就是
+           **上一格→这一格**的飞行中段，读数会从 1.6px 跳到 8px 那一档（实测过一次 8.1px）。 */
+        const ringHome = () =>
+          page.evaluate(() => {
+            const nav = document.querySelector('nav[aria-label="主导航"]')
+            const ring = nav.querySelector('[data-hi-ring]')
+            const fill = nav.querySelector('[data-jelly] span[aria-hidden]')
+            const rr = ring.getBoundingClientRect()
+            const fr = fill.getBoundingClientRect()
+            return {
+              dLeft: Math.round((fr.left - rr.left) * 10) / 10,
+              dRight: Math.round((fr.right - rr.right) * 10) / 10,
+            }
+          })
+        await pollUntil(ringHome, (r) => Math.abs(r.dLeft) <= 1 && Math.abs(r.dRight) <= 1)
+        await page.waitForTimeout(120)
         /** 逐帧量"白块相对那圈蓝框的最大外露量"（正数 = 露在外面） */
         const blobOutsideRing = () =>
           page.evaluate(async () => {
@@ -3220,7 +3308,8 @@ await withLock(async () => {
             const layer = nav.querySelector('[data-jelly]')
             const spans = [...layer.querySelectorAll('span[aria-hidden]')]
             const rows = []
-            for (let i = 0; i < 70; i++) {
+            /* 85 帧（原来 70）：容差没放松，只是**多采一点**，免得机器忙时一帧掉队就抽不到峰值 */
+            for (let i = 0; i < 85; i++) {
               await new Promise((r) => requestAnimationFrame(r))
               const rr = ring.getBoundingClientRect()
               const boxes = spans.map((s) => s.getBoundingClientRect())
@@ -10108,6 +10197,10 @@ await withLock(async () => {
               : '这一页一个 `[data-emblem]` 都没有',
           )
           const ns22 = pr.list.map((e) => e.n).sort((a, b) => a - b)
+          /* ⚠️ 这一节探的是 `/` 与 `/login` 两个路由 —— 「我的身份」卡那颗 24px 纯徽在
+             `/settings` 上，**不在这一节**（它在 S24 里逐条钉）。2026-10-11 第一次改这里时
+             把 24 加进 `/` 的期望值，实测红——原因是"改错了期望值"，不是"漏了徽"。
+             左栏 40 · 移动顶栏 32 · 登录卡 48 三档一个字没动。 */
           const wantNs22 = path22 === '/' ? [32, 40] : [48]
           check(
             JSON.stringify(ns22) === JSON.stringify(wantNs22),
@@ -10161,6 +10254,536 @@ await withLock(async () => {
         )
         await c.close()
       }
+    })
+
+    /*
+     * ================= S23：星光 / StatusMark / `.live-dot`（2026-10-11 微交互轮） =================
+     *
+     * 这一节**不截图**：钉的是三个"动的东西"到底动没动、颜色跟不跟强调色、降级对不对。
+     * 每条都带 🧪 反向对照（同一个探针喂坏值 → 必须当场判假），做法照 `AGENTS.md` 三·2。
+     *
+     * ⚠️ 四套主题在**同一个页面里**由 `documentElement` 上的 `data-theme` / `data-accent`
+     *    切出来（与 F6-H 同一套做法），切完**立刻在同一个 evaluate 里读** computed 值 ——
+     *    这样"读到的就是刚设的那一套"，不依赖 localStorage 与重载。
+     */
+    await step('S23：星光 / StatusMark / live-dot（微交互）', async () => {
+      const mkCtx23 = async (extra = {}) => {
+        const c = await browser.newContext({
+          viewport: { width: 1440, height: 940 },
+          locale: 'zh-CN',
+          ...extra,
+        })
+        await c.clock.install({ time: new Date('2026-09-19T10:00:00') })
+        await c.addInitScript((st) => {
+          window.localStorage.setItem('shugao.teacher.v1', JSON.stringify(st))
+          window.localStorage.setItem('shugao.deviceRole', 'teacher')
+        }, TEACHER_STATE)
+        return c
+      }
+
+      /* ---------------- ① 星光：只暗色出现 + 发光色跟强调色（四套逐套量） ----------------
+       * 值**从 CSSOM 读**（`getPropertyValue('--color-accent')`），不把十六进制抄进断言 ——
+       * 那样"跟强调色"才是真判据，而不是"跟我在断言里抄的那个值"。
+       */
+      {
+        const c = await mkCtx23()
+        for (const [path23, who23] of [
+          ['/login', '登录页「进入平台」'],
+          ['/assignments/a-demo-2/collect', '收缴页「保存登记」'],
+        ]) {
+          const p = await c.newPage()
+          p.on('pageerror', (e) => errors.push(`PAGEERROR(S23:${who23}) :: ${e.message}`))
+          await p.goto(`${BASE}${path23}`, { waitUntil: 'networkidle' })
+          await p.waitForTimeout(400)
+          const r23 = await p.evaluate(() => {
+            const de = document.documentElement
+            /* hex → `rgb(r, g, b)`：CSSOM 把 `#5386f4` 解析成 RGB 写进 gradient 里，
+               两边要用**同一种写法**比（拿 hex 去 includes 是恒假 —— 第一次就栽在这儿）。 */
+            const toRgb = (v) => {
+              const mm = v.trim().match(/^#([0-9a-f]{6})$/i)
+              if (!mm) return v.trim()
+              const n = parseInt(mm[1], 16)
+              return `rgb(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255})`
+            }
+            const rows = []
+            for (const [th, ac] of [
+              [null, null],
+              ['dark', null],
+              [null, 'purple'],
+              ['dark', 'purple'],
+            ]) {
+              if (th) de.setAttribute('data-theme', th)
+              else de.removeAttribute('data-theme')
+              if (ac) de.setAttribute('data-accent', ac)
+              else de.removeAttribute('data-accent')
+              const label = th === 'dark' ? (ac === 'purple' ? '暗紫' : '暗蓝') : ac === 'purple' ? '亮紫' : '亮蓝'
+              const accent = getComputedStyle(de).getPropertyValue('--color-accent').trim()
+              /* 落点用**显式钩子**找（`data-nav` / `data-collect-save`），不用 `.sb` 这个类名 ——
+                 类名会被任何一处复制粘贴带出来，钩子是"这一处就是这一处"。
+                 ⚠️ 钩子就挂在 `.sb` **它自己**身上（`StarBorder` 的 `...rest`）→ 用 `.sb[data-nav]`
+                 这种**同一元素**的写法；写成后代选择器 `[data-nav] .sb` 会恒空（第一次就是这么红的）。 */
+              const stars = [...document.querySelectorAll('.sb[data-nav], .sb[data-collect-save]')]
+              rows.push({
+                label,
+                accent,
+                accentRgb: toRgb(accent),
+                stars: stars.length,
+                glows: stars.reduce((n, s) => n + s.querySelectorAll(':scope > .sb-glow').length, 0),
+                display: [...document.querySelectorAll('.sb > .sb-glow')].map((g) => getComputedStyle(g).display),
+                image: [...document.querySelectorAll('.sb > .sb-glow')].map((g) => getComputedStyle(g).backgroundImage),
+                /* 光片就压在按钮下面那 3~4px 的 padding 带上（不在实心 accent 底上）——
+                   这条是"能看见"的结构前提，前两轮踩过"同色压同色"。 */
+                bottom: [...document.querySelectorAll('.sb > .sb-glow-b')].map((g) => getComputedStyle(g).bottom),
+              })
+            }
+            return rows
+          })
+          const light23 = r23.filter((r) => r.label.startsWith('亮'))
+          const dark23 = r23.filter((r) => r.label.startsWith('暗'))
+          check(
+            r23.every((r) => r.stars === 1 && r.glows === 2),
+            `S23 ① 星光「${who23}」：这一屏有且只有 **1 颗星光**（只出现在用户拍板的那两处落点）、每颗 **2 片光**（下沿 + 上沿）—— 稀缺才有效，超过 3 处就退化成装饰`,
+            r23.map((r) => `${r.label} ${r.stars} 颗 / ${r.glows} 片`).join(' · '),
+          )
+          check(
+            light23.length === 2 && light23.every((r) => r.display.length === 2 && r.display.every((d) => d === 'none')),
+            `🔴 S23 ① 星光「${who23}」：**只暗色出现** —— 亮蓝 / 亮紫两套下 \`display: none\``,
+            light23.map((r) => `${r.label} ${r.display.join('/') || '（没有 .sb-glow）'}`).join(' · '),
+          )
+          check(
+            dark23.length === 2 && dark23.every((r) => r.display.length === 2 && r.display.every((d) => d !== 'none')),
+            `S23 ① 星光「${who23}」：暗色两套下光片是**画出来的**（不是 \`display:none\`）`,
+            dark23.map((r) => `${r.label} ${r.display.join('/')}`).join(' · '),
+          )
+          /* 🔴 发光色**跟强调色**：从 CSSOM 取当前那套的 `--color-accent`，逐套比对 */
+          const accentOK23 = dark23.every((r) => r.image.length === 2 && r.image.every((s) => s.includes(r.accentRgb)))
+          const seen23 = new Set(r23.map((r) => r.accent.toLowerCase()))
+          check(
+            accentOK23 && seen23.size === 4 && !seen23.has('#ffffff'),
+            `🔴 S23 ① 星光「${who23}」：发光色 = **当前那套的** \`var(--color-accent)\`（写死白色的原版写法会当场判假）`,
+            `四套 accent = ${[...seen23].join(' / ')} · ${dark23.map((r) => r.label + '→' + r.image[0]).join(' · ')}`,            '反向对照：把 `.sb-glow` 的 background 改回 `radial-gradient(circle,#fff,transparent 10%)` → 这一条必红',
+          )
+          check(
+            dark23.every((r) => r.bottom.length === 1 && parseFloat(r.bottom[0]) < 0 && parseFloat(r.bottom[0]) > -12),
+            `S23 ① 星光「${who23}」：光片贴着按钮底沿（\`bottom\` 在 −12px ~ 0 之间）—— 压在 padding 带上，不是压在实心 accent 底上`,
+            dark23.map((r) => `${r.label} bottom=${r.bottom[0]}`).join(' · '),
+          )
+        }
+        await c.close()
+      }
+
+          /* ---------------- ② StatusMark：圆心漂移 0.000px / transform 只 1 种取值 ----------------
+       * 探针里用**虚拟 rAF 垫片**把 24 帧一次跑完（`getBoundingClientRect().x` 在同步循环里
+       * 不会重新布局，所以用几何算屏幕坐标）。判据是**屏幕坐标的圆心**，不是"仿射不动点"
+       * —— 上一轮那个不动点判据对 A / C 都给 0，挂错图层它看不出来（`说明.md` §1.3 bug③）。
+       *
+       * ⚠️ 两个"第一次写就踩了"的点（写在这里免得下一个人再踩）：
+       *   ① **必须用页面自己那份 React**（`/node_modules/.vite/deps/react.js?v=<hash>`）。
+       *      再 import 一个不带 `?v=` 的会拿到另一份实例 → `createRoot` 渲染时 Invalid hook call。
+       *      ⚠️ `?v=` **不能从 `performance.getEntriesByType('resource')` 读** —— 这个脚本
+       *      装了假时钟（`ctx.clock.install()`），在假时钟下那条路径**读出来是空的**
+       *      （第一次就是栽在这儿：探针报"读不到 Vite 的 dep hash"）。
+       *      正解：**去拿应用自己那个入口的 URL** —— `main.tsx` 在浏览器里显示的 `src`
+       *      已经是 Vite 解析**带 `?v=`** 的完整地址（应用自己就是这么加载的）。
+       *   ② **先垫 rAF 再 render**：组件那个 effect 只在依赖变化时跑一次，
+       *      render 完再垫就拦不到它那一发（第一次读到 0 帧）。
+       */
+      {
+        const c = await mkCtx23()
+        const p = await c.newPage()
+        p.on('pageerror', (e) => errors.push(`PAGEERROR(S23:drift) :: ${e.message}`))
+        await p.goto(`${BASE}/login`, { waitUntil: 'networkidle' })
+        await p.waitForTimeout(400)
+        /** 这两个页面里每次注入的探针体（渲染一个真 StatusMark、虚拟 rAF 跑 24 帧） */
+        const SM_PROBE = async (bad) => {
+          const entry = [...document.querySelectorAll('script[type=module]')]
+            .map((s) => s.src)
+            .find((u) => /\/src\/main\.tsx/.test(u))
+          const entrySrc = entry || '/src/main.tsx'
+          const mainSrc = await (await fetch(entrySrc, { cache: 'no-cache' })).text()
+          const m = mainSrc.match(/[?&]v=([0-9a-f]+)/)
+          const depV = m ? m[1] : null
+          if (!depV) return { why: `读不到 Vite 的 dep hash（入口 ${entrySrc}）` }
+          const rmod = await import(`/node_modules/.vite/deps/react.js?v=${depV}`)
+          const rdc = await import(`/node_modules/.vite/deps/react-dom_client.js?v=${depV}`)
+          /* ⚠️ 动态 import 这两个 prebundle 拿到的是 **CJS interop** 形状：具名导出挂在
+             模块对象的 `.default` 上（`{default: {createElement, …}}`），**不是**顶层具名导出。
+             （直接从 `/src/*.tsx` 静态 import 时才拿到顶层具名 —— 两回事，别照抄。） */
+          const createElement = rmod.createElement ?? rmod.default?.createElement
+          const createRoot = rdc.createRoot ?? rdc.default?.createRoot
+          const mod = await import('/src/components/StatusMark.tsx')
+          const StatusMark = mod.StatusMark ?? mod.default
+          if (!createElement || !createRoot || !StatusMark) return { why: 'React / StatusMark 没加载上' }
+
+          const host = document.createElement('div')
+          host.style.position = 'fixed'
+          host.style.left = '0'
+          host.style.top = '0'
+          host.style.zIndex = '-1'
+          document.body.appendChild(host)
+          let st = null
+          if (bad === 'cssRotate') {
+            /* 🧪 反向对照 = **前两版那个写法**：旋转挂回 CSS 的 `@keyframes`
+               （属性上那条静态 `rotate(-90 12 12)` 仍在）。 */
+            st = document.createElement('style')
+            st.textContent =
+              '@keyframes _smSpinProbe{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}' +
+              '.status-mark__ring{transform-box:fill-box;transform-origin:center;animation:_smSpinProbe 1100ms linear infinite}'
+            document.head.appendChild(st)
+          }
+
+          /* 🔴 先垫 rAF，再 render（见文件头那段说明） */
+          const realRAF = window.requestAnimationFrame
+          const realCAF = window.cancelAnimationFrame
+          const queue = []
+          window.requestAnimationFrame = (cb) => {
+            queue.push(cb)
+            return queue.length
+          }
+          window.cancelAnimationFrame = () => {}
+          const root = createRoot(host)
+          root.render(createElement(StatusMark, { status: 'running', size: 20, label: '正在识别' }))
+          await new Promise((r) => setTimeout(r, 60))
+
+          const svg = host.querySelector('svg')
+          const ring = host.querySelector('.status-mark__ring')
+          const finish = (out) => {
+            window.requestAnimationFrame = realRAF
+            window.cancelAnimationFrame = realCAF
+            root.unmount()
+            host.remove()
+            if (st) st.remove()
+            return out
+          }
+          if (!svg || !ring) return finish({ why: '没渲染出来（.status-mark__ring 找不到）' })
+          const spinAnim = bad === 'cssRotate' ? (ring.getAnimations()[0] ?? null) : null
+
+          const rect = svg.getBoundingClientRect()
+          const k = rect.width / 24 // 屏幕 px / viewBox 单位
+          const r = +ring.getAttribute('r')
+          /* 🔴 圆心用 **computed 矩阵**反解出来的角度算（不是属性上那个静态 −90）：
+             属性那条是"JSX 上写死的静态属性"，computed 那条才是"屏幕上真正转了多少"。
+             静态写法下两个角度恒等 → 圆心恒在 (12,12)；一旦有人把 rotate 挂回 CSS，
+             computed 角度就每帧都在变 → 圆心会离开 (12,12)（判据能红的机制就是这个）。 */
+          const angleOf = (el) => {
+            const t = getComputedStyle(el).transform
+            const m = t.startsWith('matrix') ? t.slice(t.indexOf('(') + 1, -1).split(',').map(Number) : null
+            return m ? (Math.atan2(m[1], m[0]) * 180) / Math.PI : 0
+          }
+          const samples = []
+          let guard = 0
+          while (queue.length && guard++ < 40) {
+            const cb = queue.shift()
+            cb(performance.now() + guard * (1000 / 60))
+            /* 反向对照里那条 CSS 旋转动画：虚拟 rAF 把动画时间线也冻住了，
+               所以要**手工推**它的 currentTime（否则每帧 computed 矩阵一模一样）。 */
+            if (spinAnim) spinAnim.currentTime = guard * (1100 / 24)
+            const ang = angleOf(ring)
+            samples.push({
+              off: Math.round(+ring.getAttribute('stroke-dashoffset') * 1000) / 1000,
+              attr: ring.getAttribute('transform'),
+              tr: getComputedStyle(ring).transform,
+              /* 屏幕坐标的圆心：cx/cy 就在 (12,12)，rotate 绕的就是它 → 它必须**一动不动** */
+              x: rect.x + (12 + r * Math.cos((ang * Math.PI) / 180)) * k,
+              y: rect.y + (12 + r * Math.sin((ang * Math.PI) / 180)) * k,
+            })
+            if (samples.length >= 24) break
+          }
+          const xs = samples.map((s) => s.x)
+          const ys = samples.map((s) => s.y)
+          const offs = samples.map((s) => s.off)
+          let maxStep = 0
+          for (let i = 1; i < samples.length; i++) {
+            maxStep = Math.max(
+              maxStep,
+              Math.abs(samples[i].x - samples[i - 1].x),
+              Math.abs(samples[i].y - samples[i - 1].y),
+            )
+          }
+          return finish({
+            frames: samples.length,
+            driftX: Math.max(...xs) - Math.min(...xs),
+            driftY: Math.max(...ys) - Math.min(...ys),
+            maxStep,
+            offMin: Math.min(...offs),
+            offMax: Math.max(...offs),
+            offDistinct: new Set(offs).size,
+            trDistinct: new Set(samples.map((s) => s.tr)).size,
+            attrDistinct: new Set(samples.map((s) => s.attr)).size,
+            trSample: samples[0]?.tr ?? null,
+          })
+        }
+        const drift23 = await p.evaluate(SM_PROBE, null)
+        if (drift23.why) {
+          check(false, 'S23 ② StatusMark：探针能注入一个正在跑的 StatusMark', drift23.why)
+        } else {
+          check(
+            drift23.frames >= 20 && drift23.offDistinct > 5,
+            'S23 ② StatusMark：弧**真的在跑**（虚拟 rAF 跑满帧、`stroke-dashoffset` 每帧都在变）—— 否则下面那两条是恒真的摆设',
+            `${drift23.frames} 帧 · dashoffset ${drift23.offMin}→${drift23.offMax}（${drift23.offDistinct} 个取值）`,
+          )
+          check(
+            drift23.trDistinct === 1 && drift23.attrDistinct === 1,
+            '🔴 S23 ② StatusMark：**`transform` 只 1 种取值**（computed 与属性都是）—— `rotate(-90 12 12)` 是 JSX 上的静态属性，全程一个字都没被改',
+            `${drift23.trDistinct} 种取值（逐字：${JSON.stringify(drift23.trSample)}）· 属性 ${drift23.attrDistinct} 种`,
+          )
+          check(
+            drift23.driftX < 0.01 && drift23.driftY < 0.01 && drift23.maxStep < 0.01,
+            '🔴 S23 ② StatusMark：**屏幕坐标圆心漂移 = 0.000px**（含逐帧最大位移）—— 判据是屏幕坐标，不是"仿射不动点"',
+            `漂移 x=${drift23.driftX.toFixed(3)}px / y=${drift23.driftY.toFixed(3)}px · 逐帧最大 ${drift23.maxStep.toFixed(3)}px`,
+          )
+          /* 🧪 反向对照：把 `rotate` 挂回 CSS（前两版那个写法）→ 同一个探针必须读到圆心在漂 */
+          const neg23 = await p.evaluate(SM_PROBE, 'cssRotate')
+          check(
+            !neg23.why && neg23.trDistinct > 1 && (Math.abs(neg23.driftX) > 0.5 || Math.abs(neg23.driftY) > 0.5),
+            '🧪 S23 ② 反向对照：把 `rotate` 挂回 **CSS**（前两版那个写法）→ 同一个探针**当场读到 transform 多种取值 + 圆心漂移**（证明它不是恒真的摆设）',
+            neg23.why
+              ? neg23.why
+              : `transform ${neg23.trDistinct} 种取值 · 圆心漂了 x=${neg23.driftX.toFixed(2)}px / y=${neg23.driftY.toFixed(2)}px`,
+          )
+        }
+        await c.close()
+      }
+
+      /* ---------------- ③ reduced-motion：StatusMark 停在正上方 + `.live-dot` 真的在动 ----------------
+       * 这一节在**真的开了系统级 reduced-motion** 的 context 里跑（`reducedMotion: 'reduce'`），
+       * 不是注入 class。
+       */
+      {
+        const c = await mkCtx23({ reducedMotion: 'reduce' })
+        const p = await c.newPage()
+        p.on('pageerror', (e) => errors.push(`PAGEERROR(S23:rm) :: ${e.message}`))
+        await p.goto(`${BASE}/classes/c-3/import/photo`, { waitUntil: 'networkidle' })
+        await p.waitForTimeout(400)
+        const rm23 = await p.evaluate(async () => {
+          const mq = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+          /* ① StatusMark：虚拟 rAF 垫片 —— 降级时组件**根本不该启动循环** */
+          const host = document.createElement('div')
+          host.setAttribute('data-sm-probe-rm', '')
+          document.body.appendChild(host)
+          const realRAF = window.requestAnimationFrame
+          let rafCalls = 0
+          window.requestAnimationFrame = (cb) => {
+            rafCalls++
+            return realRAF(cb)
+          }
+          const entry = [...document.querySelectorAll('script[type=module]')]
+            .map((s) => s.src)
+            .find((u) => /\/src\/main\.tsx/.test(u))
+          const entrySrc = entry || '/src/main.tsx'
+          const mainSrc = await (await fetch(entrySrc, { cache: 'no-cache' })).text()
+          const depM = mainSrc.match(/[?&]v=([0-9a-f]+)/)
+          const depV = depM ? depM[1] : null
+          if (!depV) return { why: `读不到 Vite 的 dep hash（入口 ${entrySrc}）` }
+          const rdc = await import(`/node_modules/.vite/deps/react-dom_client.js?v=${depV}`)
+          const rmod = await import(`/node_modules/.vite/deps/react.js?v=${depV}`)
+          /* ⚠️ 动态 import 这两个 prebundle 拿到的是 **CJS interop** 形状：具名导出挂在
+             模块对象的 `.default` 上（`{default: {createRoot, …}}`），不是顶层具名导出。 */
+          const createRoot = rdc.createRoot ?? rdc.default?.createRoot
+          const createElement = rmod.createElement ?? rmod.default?.createElement
+          const mod = await import('/src/components/StatusMark.tsx')
+          const StatusMark = mod.StatusMark ?? mod.default
+          if (!createRoot || !createElement || !StatusMark) return { why: 'React / StatusMark 没加载上（reduced-motion）' }
+          const root = createRoot(host)
+          root.render(createElement(StatusMark, { status: 'running', size: 20, label: '正在识别' }))
+          await new Promise((r) => setTimeout(r, 120))
+          const ring = host.querySelector('.status-mark__ring')
+          const off = ring ? ring.getAttribute('stroke-dashoffset') : null
+          const ringAnim = ring ? getComputedStyle(ring).animationName : null
+          const ringDur = ring ? getComputedStyle(ring).animationDuration : null
+          const ringIter = ring ? getComputedStyle(ring).animationIterationCount : null
+          const strike = host.querySelector('.status-mark__strike')
+          root.unmount()
+          host.remove()
+          window.requestAnimationFrame = realRAF
+          return {
+            mq,
+            rafCalls,
+            off,
+            ringAnim,
+            ringDur,
+            ringIter,
+            strikeScale: strike ? getComputedStyle(strike).transform : null,
+            /* ⚠️ 不硬比 `matrix(1…`：这条删除线是 `position:absolute` 的零高元素，
+               实测读到 `""`（浏览器对零尺寸元素不给计算值）—— 所以判据是
+               "**不是** `scaleX(0)` 那条初始值"，而不是"等于某个具体矩阵"。 */
+            strike: !!strike,
+            strikeZero: strike ? /^matrix\(0[,\s]/.test(getComputedStyle(strike).transform) : null,
+          }
+        })
+        check(
+          rm23.mq && rm23.off === '0',
+          '🔴 S23 ③ reduced-motion：StatusMark 的弧停在**正上方**（`dashoffset = 0`，不是某个随机相位）—— 原版那条 `travel.jump(0)`',
+          `prefers-reduced-motion=${rm23.mq} · dashoffset=${rm23.off} · 这一段窗口内 rAF 调用 ${rm23.rafCalls} 次（页面自己还有别的循环，故不当判据）`,
+          '反向对照：把 `travel.jump(0)` 删掉 → dashoffset 会停在别的相位，这一条必红',
+        )
+        check(
+          rm23.ringAnim === 'sm-breathe' && rm23.ringIter === 'infinite' && parseFloat(rm23.ringDur) > 0.5,
+          '🔴 S23 ③ reduced-motion：环挂的是 `sm-breathe`（**1400ms 且 `infinite`**）—— 平台那条全局 `animation-duration:.001ms !important` 没有把它压成"只播一帧"（`index.css` 里顶回来了）',
+          `animation = ${rm23.ringAnim} ${rm23.ringDur} ${rm23.ringIter}`,
+          '反向对照：把 `index.css` 里 `.status-mark[data-indeterminate] .status-mark__ring` 那条 `!important` 删掉 → 这里读到 0.001ms / 1，必红',
+        )
+        check(
+          rm23.strike === true && rm23.strikeZero === false,
+          'S23 ③ reduced-motion：删除线**在**，而且**不是**那条 `scaleX(0)` 的初始值（直接一条，不走 280ms 动画）',
+          `元素在 = ${rm23.strike} · 读到 scaleX(0) = ${rm23.strikeZero} · transform = ${JSON.stringify(rm23.strikeScale)}`,
+        )
+
+        /* ② `.live-dot`（线上正坏的那个 bug）：先证明这个应用里真有它，再看它是不是真的在动 */
+        const dots23 = await p.evaluate(() => document.querySelectorAll('.live-dot').length)
+        check(
+          dots23 > 0,
+          'S23 ③ `.live-dot` 探针：这一屏（拍照录名单的"识别中"）真的用着 `.live-dot` —— 下面那条不是空跑',
+          `${dots23} 个 .live-dot`,
+        )
+        const dot23 = await p.evaluate(async () => {
+          /* 自己造一颗，不依赖"此刻正好停在哪一步" */
+          const d = document.createElement('span')
+          d.className = 'live-dot'
+          d.setAttribute('data-dot-probe', '')
+          document.body.appendChild(d)
+          await new Promise((r) => setTimeout(r, 60))
+          const cs = getComputedStyle(d)
+          const anim = d.getAnimations()[0]
+          const seen = []
+          for (const t of [0, 425, 850]) {
+            if (anim) anim.currentTime = t
+            seen.push(getComputedStyle(d).opacity)
+          }
+          if (anim) anim.currentTime = 0
+          const out = {
+            name: cs.animationName,
+            dur: cs.animationDuration,
+            iter: cs.animationIterationCount,
+            seen,
+            distinct: new Set(seen).size,
+          }
+          d.remove()
+          return out
+        })
+        check(
+          dot23.name === 'pulse-dot' && dot23.iter === 'infinite' && parseFloat(dot23.dur) > 0.5 && dot23.distinct > 1,
+          '🔴 S23 ③ `.live-dot` 真的在动（reduced-motion 下也不再被冻住）—— 修法是给它补同特异度的 `!important` 顶回全局兜底',
+          `${dot23.name} ${dot23.dur} ${dot23.iter} · 三帧 opacity = ${dot23.seen.join('/')}（${dot23.distinct} 个取值）`,
+          '反向对照：把 `index.css` 里 `.live-dot { animation: … !important }` 那条删掉 → 这里读到 0.001ms / 1 / 一个取值，必红',
+        )
+        const dotNeg23 = await p.evaluate(async () => {
+          const d = document.createElement('span')
+          d.className = 'live-dot'
+          d.style.animation = 'none important'
+          d.style.setProperty('animation', 'none', 'important')
+          document.body.appendChild(d)
+          await new Promise((r) => setTimeout(r, 60))
+          const seen = []
+          const anim = d.getAnimations()[0]
+          if (anim) {
+            for (const t of [0, 425, 850]) {
+              anim.currentTime = t
+              seen.push(getComputedStyle(d).opacity)
+            }
+          } else {
+            seen.push(getComputedStyle(d).opacity, getComputedStyle(d).opacity, getComputedStyle(d).opacity)
+          }
+          const out = { anims: d.getAnimations().length, distinct: new Set(seen).size, seen }
+          d.remove()
+          return out
+        })
+        check(
+          dotNeg23.distinct === 1,
+          '🧪 S23 ③ 反向对照：把 `.live-dot` 的动画整个关掉 → **同一个读数当场退化成"一个取值"**（证明上面那条真的在量动画，不是恒真）',
+          `动画数 ${dotNeg23.anims} · 三帧 opacity = ${dotNeg23.seen.join('/')}`,
+        )
+        await c.close()
+      }
+    })
+
+    /*
+     * ================= S24：「我的身份」那颗 24px 校徽（2026-10-11） =================
+     *
+     * 背景：`Settings.tsx` 的"我的身份"卡上那颗 24px 图标原来是**平台的旧品牌标**
+     * （`icons.tsx` 的 `Logo`：蓝色圆角方块 + 坐标轴折线），**不是校徽**。
+     * 这一轮换成校徽，并顺手把已经没人用的 `Logo` 组件删掉。
+     *
+     * ⚠️ 24px 用**纯徽**（`emblem-pure-24.png`）：`徽标方案\落地清单.md` §9.1 实测
+     *    全徽 24px 的外圈线只有 **0.50px**（"刚够半个像素"）、圆半实半虚 → 认不出是枚校徽。
+     */
+    await step('S24：我的身份 · 24px 校徽（纯徽）', async () => {
+      const c = await browser.newContext({ viewport: { width: 1440, height: 940 }, locale: 'zh-CN' })
+      await c.clock.install({ time: new Date('2026-09-19T10:00:00') })
+      await c.addInitScript((st) => {
+        window.localStorage.setItem('shugao.teacher.v1', JSON.stringify(st))
+        window.localStorage.setItem('shugao.deviceRole', 'teacher')
+      }, TEACHER_STATE)
+      const p = await c.newPage()
+      p.on('pageerror', (e) => errors.push(`PAGEERROR(S24) :: ${e.message}`))
+      await p.goto(`${BASE}/settings`, { waitUntil: 'networkidle' })
+      await p.waitForTimeout(500)
+
+      const read24 = (page) =>
+        page.evaluate(() => {
+          const all = [...document.querySelectorAll('[data-emblem]')]
+          const marked = all.filter((e) => e.hasAttribute('data-settings-emblem'))
+          const host = marked[0] ?? null
+          const img = host ? host.querySelector('img') : null
+          return {
+            n: all.length,
+            before: marked.length === 0 ? all.length : all.indexOf(host),
+            markedSrc: img ? img.getAttribute('src') : null,
+            markedPure: host ? host.hasAttribute('data-emblem-pure') : null,
+            natural: img ? img.naturalWidth : 0,
+            complete: img ? img.complete : false,
+            hostW: host ? Math.round(parseFloat(getComputedStyle(host).width) * 100) / 100 : null,
+            srcset: img ? img.getAttribute('srcset') : null,
+            /* 旧品牌标的几何指纹：坐标轴那条 `M3.8 3.6v16.8h16.8`（`icons.tsx` 的 `Logo`） */
+            legacyLogo: document.querySelectorAll('svg path[d="M3.8 3.6v16.8h16.8"]').length,
+          }
+        })
+
+      const r24 = await read24(p)
+      check(
+        r24.n >= 1 && r24.markedSrc === '/emblem/emblem-pure-24.png' && r24.markedPure === true,
+        'S24：「我的身份」那颗 24px 现在是**校徽**（而且是 24px 那一档的**纯徽** —— 全徽 24px 外圈线只有 0.50px，认不出是枚校徽）',
+        `[data-settings-emblem] src=${r24.markedSrc} · 纯徽=${r24.markedPure}`,
+      )
+      check(
+        r24.complete && r24.natural === 24 && Math.abs((r24.hostW ?? 0) - 24 / 0.87) < 0.6 && r24.srcset === null,
+        'S24：徽的**真图元**在（天然 24px）、盒子 = 徽 / 0.87（盒子那 13% 就是"徽到文字"的间距）、纯徽没有 2x 档（不写 `srcset`，否则 2x 屏会去取一张不存在的图）',
+        `天然 ${r24.natural}px · 盒 ${r24.hostW}px · srcset = ${r24.srcset === null ? '（未写）' : r24.srcset}`,
+      )
+      check(
+        r24.before >= 0 && r24.n === 3 && r24.legacyLogo === 0,
+        '🔴 S24：那一颗是"我的身份"卡上那颗（带 `data-settings-emblem` 标记；同一页还有左栏 40 / 移动顶栏 32 两颗），而且**旧品牌标一个都没有了**（`<Logo>` 的坐标轴折线 0 处）',
+        `页面上 ${r24.n} 个校徽、那颗在第 ${r24.before + 1} 位 · 旧 Logo 折线 ${r24.legacyLogo} 处`,
+      )
+      /* 🧪 反向对照 A：把校徽换成旧 Logo 的 SVG（= 换回去）→ "是校徽"那条必须判假 */
+      const negA24 = await p.evaluate(() => {
+        const host = document.querySelector('[data-settings-emblem]')
+        if (!host) return { ok: false, why: '找不到那一颗' }
+        host.innerHTML =
+          '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor">' +
+          '<path d="M3.8 3.6v16.8h16.8"></path></svg>'
+        host.removeAttribute('data-emblem-pure')
+        return { ok: true }
+      })
+      const negR24 = negA24.ok ? await read24(p) : { markedSrc: null, markedPure: null }
+      check(
+        negA24.ok && negR24.markedSrc !== '/emblem/emblem-pure-24.png',
+        '🧪 S24 反向对照 A：把那颗换回**旧品牌标的 SVG** → 同一个探针**当场判假**（`src` 不再是纯徽那张）',
+        `换回去之后 src=${negR24.markedSrc} · 纯徽=${negR24.markedPure}`,
+      )
+      /* 🧪 反向对照 B：把 `data-settings-emblem` 摘掉 → "它在第一位"那条必须判假 */
+      const negR24b = await p.evaluate(() => {
+        const marked = document.querySelector('[data-settings-emblem]')
+        if (marked) marked.removeAttribute('data-settings-emblem')
+        const all = [...document.querySelectorAll('[data-emblem]')]
+        return { marked: all.filter((e) => e.hasAttribute('data-settings-emblem')).length }
+      })
+      check(
+        negR24b.marked === 0,
+        '🧪 S24 反向对照 B：把 `data-settings-emblem` 摘掉 → "它就是那一颗"那条**当场判假**（证明这个探针真的在找标记，不是恒真）',
+        `摘掉之后带标记的：${negR24b.marked} 个`,
+      )
+      await c.close()
     })
 
     } catch (e) {

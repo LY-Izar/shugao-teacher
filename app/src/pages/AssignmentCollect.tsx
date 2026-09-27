@@ -13,6 +13,7 @@ import {
   IconUpload,
   IconX,
 } from '../components/icons'
+import { StarBorder } from '../components/StarBorder'
 import { Button, PageHead, Panel, Portal, Sect, Sheet, StatStrip, Tag } from '../components/ui'
 import { useStore, useToast } from '../data/store'
 import type { Assignment, Student } from '../data/types'
@@ -1071,14 +1072,18 @@ export default function AssignmentCollect() {
           </Panel>
         ) : null}
 
-        <Button
-          block
-          variant="primary"
-          icon={<IconChevronRight size={16} />}
-          onClick={save}
-        >
-          保存登记
-        </Button>
+        {/* 星光（`StarBorder`）—— 核心业务链路的"落库"那一按（判据见 `说明.md` §1.2 P0）。
+            只暗色出现；亮色 / reduced-motion 下连元素都不画。 */}
+        <StarBorder data-collect-save>
+          <Button
+            block
+            variant="primary"
+            icon={<IconChevronRight size={16} />}
+            onClick={save}
+          >
+            保存登记
+          </Button>
+        </StarBorder>
       </Page>
 
       {/* 绿 → 红：这个人已经批改过，改成未交就得连批改记录一起删 */}

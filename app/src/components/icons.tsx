@@ -31,15 +31,6 @@ function Svg({ size = 22, strokeWidth = 1.6, children, ...rest }: IconProps) {
   )
 }
 
-/* ---------- 品牌标：坐标轴 + 上升折线 + 节点（物理与进度的双关） ---------- */
-export const Logo = ({ size = 24, ...p }: IconProps) => (
-  <Svg size={size} strokeWidth={1.7} {...p}>
-    <path d="M3.8 3.6v16.8h16.8" />
-    <path d="m7.4 15.8 3.5-4.3 2.7 2.4 3.7-5.2" />
-    <circle cx="17.3" cy="8.7" r="1.35" />
-  </Svg>
-)
-
 /* ---------- 导航 ---------- */
 export const IconGauge = (p: IconProps) => (
   <Svg {...p}>

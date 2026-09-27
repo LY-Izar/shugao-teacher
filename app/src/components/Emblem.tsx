@@ -1,4 +1,4 @@
-import type { CSSProperties } from 'react'
+import type { CSSProperties, HTMLAttributes } from 'react'
 
 /* ============================================================
    校徽（成都市树德实验高级中学）—— **位图**，不是矢量
@@ -28,25 +28,38 @@ import type { CSSProperties } from 'react'
    ⚠️ **favicon 那一档（16px）用的是"纯徽"**，不在这个组件里 —— 理由见 `落地清单.md` §11.1。
    ============================================================ */
 
-/** 徽本体的像素尺寸（只开放全徽成立的那几档） */
-export type EmblemSize = 32 | 40 | 48 | 64
+/** 徽本体的像素尺寸（只开放全徽成立的那几档 + 24px 那一档纯徽） */
+export type EmblemSize = 24 | 32 | 40 | 48 | 64
 
 /** 盒子的留白比例：盒 = 徽 / 0.87（§12.3；盘没了之后它就是"徽到文字"的间距） */
 const PAD_RATIO = 0.87
 
 export function Emblem({
   n,
+  pure = false,
   style,
   className,
+  ...rest
 }: {
   n: EmblemSize
+  /**
+   * 🔴 **纯徽**（`public/emblem/emblem-pure-24.png`，只 24px 这一档）。
+   *
+   * 用在"全徽装不下"的位置（`落地清单.md` §9.1 实测）：24px 全徽的外圈线只有 **0.50px**，
+   * "刚够半个像素"、圆半实半虚 → 认不出是枚校徽；纯徽丢了校名环，但轮廓立得住。
+   * ⚠️ 它**不再是一枚"校徽"**（丢了校名环那层信息），只该出现在"反正读不清"的小位。
+   */
+  pure?: boolean
   style?: CSSProperties
   className?: string
-}) {
+} & Omit<HTMLAttributes<HTMLSpanElement>, 'style' | 'className' | 'children'>) {
   const box = n / PAD_RATIO
+  const prefix = pure ? 'emblem-pure' : 'emblem'
+  const src = `/emblem/${prefix}-${n}.png`
   return (
     <span
       data-emblem={n}
+      data-emblem-pure={pure ? '' : undefined}
       className={className}
       style={{
         display: 'inline-grid',
@@ -59,10 +72,13 @@ export function Emblem({
         filter: 'var(--emblem-boost)',
         ...style,
       }}
+      {...rest}
     >
       <img
-        src={`/emblem/emblem-${n}.png`}
-        srcSet={`/emblem/emblem-${n}.png 1x, /emblem/emblem-${n * 2}.png 2x`}
+        src={src}
+        /* 纯徽只生成了 1x 那一张 —— 别写 2x 的 `srcSet`，否则浏览器会去取一个不存在的
+           `emblem-pure-48.png`（2x 屏上真会请求）。 */
+        srcSet={pure ? undefined : `${src} 1x, /emblem/${prefix}-${n * 2}.png 2x`}
         width={n}
         height={n}
         alt=""
