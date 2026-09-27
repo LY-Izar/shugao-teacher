@@ -1082,7 +1082,7 @@ export default function Classroom() {
           style={{ height: 62, borderBottom: '1px solid var(--color-line)' }}
         >
           <span className="flex items-center gap-2.5">
-            <span style={{ color: 'var(--color-accent)', display: 'grid', placeItems: 'center' }}>
+            <span style={{ color: 'var(--color-accenttext)', display: 'grid', placeItems: 'center' }}>
               <Logo size={22} />
             </span>
             <span style={{ fontSize: 15.5, fontWeight: 650 }}>树高教师平台</span>
@@ -1174,7 +1174,7 @@ export default function Classroom() {
                 borderRadius: 6,
               }}
             >
-              <span style={{ color: 'var(--color-accent)' }}>
+              <span style={{ color: 'var(--color-accenttext)' }}>
                 <IconInfo size={17} />
               </span>
               <div

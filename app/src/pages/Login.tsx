@@ -82,7 +82,7 @@ export default function Login() {
               border: '1px solid var(--color-line2)',
               borderRadius: 6,
               background: 'var(--color-surface)',
-              color: 'var(--color-accent)',
+              color: 'var(--color-accenttext)',
               position: 'relative',
               overflow: 'hidden',
             }}

@@ -3589,7 +3589,7 @@ function ErrorsCard({
                     </div>
                     {r.stack ? (
                       <details style={{ fontSize: 11.5, color: 'var(--color-ink2)' }}>
-                        <summary style={{ cursor: 'pointer', color: 'var(--color-accent)' }}>
+                        <summary style={{ cursor: 'pointer', color: 'var(--color-accenttext)' }}>
                           堆栈（默认折叠 —— 它可能夹到学生姓名）
                         </summary>
                         <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', margin: '4px 0 0' }}>

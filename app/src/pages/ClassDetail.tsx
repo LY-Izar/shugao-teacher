@@ -214,15 +214,37 @@ export default function ClassDetail() {
   const [roomInfo, setRoomInfo] = useState(false)
   /** 换了一个班就重读一次（底下的 `loadRoom` 依赖它） */
   const [roomTick, setRoomTick] = useState(0)
+  /** 走班班「移出一个人」那一张轻确认浮层：要移出的是谁 / 正在写 / 失败原因 */
+  const [leaveWho, setLeaveWho] = useState<Student | null>(null)
+  const [leaveBusy, setLeaveBusy] = useState(false)
+  const [leaveErr, setLeaveErr] = useState('')
+  /* 🔴 这个班**是不是走班班**：一处判定，下面全靠它（`classKindOf` 是唯一入口）。 */
+  const isStream = classKindOf(klass) === 'stream'
+  /*
+   * 走班班的成员（`class_members`，多对多）—— 在下面那个 effect 里读。
+   * 声明在这儿是因为**屏上那一份名单**（`roster`）在 `if (!klass)` 之前就要用。
+   */
+  const [members, setMembers] = useState<Student[]>([])
+  /*
+   * 屏上那一份名单 = **这一页唯一的名单**：
+   *   · 行政班 → `klass.students`（`students.class_id`）；
+   *   · 走班班 → `members`（`class_members`，多对多，在下面那个 effect 里读）。
+   * 搜索 / 人数 / 档案 / 行内操作**全部从它算** —— 哪一处单独回去读 `klass.students`，
+   * 在走班班上就查不到人（2026-10-09 行内那颗铅笔点了没反应，根因就是它）。
+   */
+  const roster = isStream ? members : (klass?.students ?? [])
   /** 名单里那些 id（拼成串当依赖：学生一增一删就要重读一次） */
-  const profileIds = (klass?.students ?? []).map((s) => s.id).join(',')
+  const profileIds = roster.map((s) => s.id).join(',')
   /** 教室端账号那一块的班 id（`''` = 班还没读出来；换班时它变 → 下面那个 effect 重读） */
   const roomId = klass?.id ?? ''
 
   useEffect(() => {
     if (!klass) return
     let alive = true
-    void loadStudentProfiles(klass.students.map((s) => s.id)).then((r) => {
+    /* 🔴 "读哪些人" = **上面那一份名单**（`profileIds`：行政班 = `klass.students`、
+       走班班 = `class_members` 来的 `members`）。这里若回去读 `klass.students`，
+       走班班学生的档案就永远读成"未录入" —— 与那颗铅笔同一个根因的另一半。 */
+    void loadStudentProfiles(profileIds ? profileIds.split(',') : []).then((r) => {
       if (!alive) return
       if (r.ok) {
         setProfiles(r.profiles)
@@ -282,8 +304,6 @@ export default function ClassDetail() {
    * 而 0 人又恰好"没有缺号、没有重号" → 体检写「学号 1–0 连续无缺号」、写「名单完整」。
    * 同一份数据在「开学准备 ⑥」说 2 人、在这一页说 0 人 —— 两个页面自相矛盾。
    */
-  const isStream = classKindOf(klass) === 'stream'
-  const [members, setMembers] = useState<Student[]>([])
   const [membersKnown, setMembersKnown] = useState(true)
   const [membersErr, setMembersErr] = useState('')
   useEffect(() => {
@@ -374,12 +394,10 @@ export default function ClassDetail() {
   }
 
   /*
-   * 屏上那一份名单 = **这一页唯一的名单**：
-   *   · 行政班 → `klass.students`（`students.class_id`）；
-   *   · 走班班 → `members`（`class_members`，多对多）。
-   * 其余（搜索 / 人数 / 空态）全部从它算 —— 两边各写一套就是第二个判定入口。
+   * 屏上那一份名单 = **这一页唯一的名单**（`roster`，定义在上面 —— 它必须在
+   * `if (!klass)` 之前，因为**学生档案那一次读**也要按它读）。
+   * 下面的搜索 / 排序全部从它算 —— 两边各写一套就是第二个判定入口。
    */
-  const roster = isStream ? members : klass.students
   const list = roster
     .filter((s) => {
       if (!q.trim()) return true
@@ -429,13 +447,15 @@ export default function ClassDetail() {
     setChanges(rows)
   }
 
-  /** 正在编辑的那个学生 —— 编辑面板上要显示他的**序列号（只读）** */
-  const editingStudent = klass.students.find((x) => x.id === editing)
+  /** 正在编辑的那个学生 —— 编辑面板上要显示他的**序列号（只读）**
+   *  ⚠️ 这颗铅笔**只在行政班里摆**（`!isStream`）：改姓名 / 学号 / 在班状态是
+   *     **行政班**的事（`students.class_id`），走班班那一格摆的是「移出」。 */
+  const editingStudent = roster.find((x) => x.id === editing)
 
   /* ---- 学生档案 ------------------------------------------------------------------
      ⚠️ "摆不摆修改入口"用的就是上面那一个 `canManageThis`（判据只有一处）——
         这里不再算第二遍，也不再另起一个名字。 */
-  const profileStudent = klass.students.find((x) => x.id === profileFor)
+  const profileStudent = roster.find((x) => x.id === profileFor)
   const shownProfile = profileFor ? (profiles.get(profileFor) ?? emptyProfile(profileFor)) : null
 
   const openProfile = (sid: string) => {
@@ -443,6 +463,43 @@ export default function ClassDetail() {
     setProfileEdit(false)
     setProfileSaveErr('')
     setProfileForm(profiles.get(sid) ?? emptyProfile(sid))
+  }
+
+  /* ---- 走班班：把一个人**移出这个走班班** ------------------------------------------
+   *
+   * 🔴 走班班那一格的语义定死在这里（2026-10-09 用户实测「铅笔点了没反应」之后拍的）：
+   *   · 学生的**姓名 / 学号 / 档案**属于他的**行政班**（`students.class_id`）——
+   *     在走班班的页面上改它不合理，所以那一格**不摆**"编辑学生"；
+   *   · 走班班这一格该做的事是「**移出这个走班班**」（他不再上这门课），
+   *     写的是 `class_members`（多对多）—— **碰都不碰 `students.class_id`**。
+   *
+   * ⚠️ **不新写写路径**：走的是走班班那一轮已有的 `saveStreamMembers()`
+   *    （`schema.sql` §37.1 的 `write_stream_members()`，整份替换）。
+   *    "移出一个人" = 集合减他一个，再整份写回去。
+   * ⚠️ 摆不摆这个入口 = `canManageThis`（`can_manage_class_for` 的前端影子，与这一页
+   *    别处**同一个判据**）；真正那一刀在函数里（`can_manage_class`），失败**显式报错**。
+   * ⚠️ 读不到成员时（`membersKnown === false`）**不发这个请求**：`saveStreamMembers`
+   *    是整份替换，拿一份"没读到"的空名单去写就是把全班清空。
+   */
+  const goOut = async () => {
+    if (!klass || !leaveWho) return
+    if (!membersKnown) {
+      setLeaveErr('成员名单没读到，这时不能改（整份替换会把人清空）。刷新再来。')
+      return
+    }
+    setLeaveBusy(true)
+    setLeaveErr('')
+    const next = members.filter((m) => m.id !== leaveWho.id).map((m) => m.id)
+    const r = await remote.saveStreamMembers(klass.id, next)
+    setLeaveBusy(false)
+    if (!r.ok) {
+      /* 🔴 失败**显式上屏**（被策略挡下是"0 行且不报错"，绝不能静默当"已移出"） */
+      setLeaveErr(r.message)
+      return
+    }
+    setMembers((prev) => prev.filter((m) => m.id !== leaveWho.id).sort(compareStudentNo))
+    push({ text: `已把 ${leaveWho.name || leaveWho.studentNo} 移出`, tone: 'ok', desc: `现在 ${r.members} 人` })
+    setLeaveWho(null)
   }
 
   const saveProfile = async () => {
@@ -823,14 +880,38 @@ export default function ClassDetail() {
                           </button>
                         </td>
                         <td>
-                          <button
-                            type="button"
-                            onClick={() => openEdit(s.id)}
-                            aria-label="编辑"
-                            style={{ color: 'var(--color-ink3)' }}
-                          >
-                            <IconPencil size={16} />
-                          </button>
+                          {/*
+                            🔴 走班班这一格 = **移出这个走班班**（不是"编辑学生"）。
+                               走班班的人不在 `students.class_id` 上，而姓名 / 学号 / 状态
+                               都是**行政班**的事 —— 在这里摆铅笔既改不动也不该改
+                               （2026-10-09 用户实测：那颗铅笔点了没反应）。
+                            行政班那一格照旧是铅笔，一个字没动。
+                          */}
+                          {isStream ? (
+                            canManageThis ? (
+                              <button
+                                type="button"
+                                data-stream-leave="1"
+                                onClick={() => {
+                                  setLeaveErr('')
+                                  setLeaveWho(s)
+                                }}
+                                aria-label={`把 ${s.name || s.studentNo} 移出这个走班班`}
+                                style={{ color: 'var(--color-ink3)', fontSize: 12 }}
+                              >
+                                移出
+                              </button>
+                            ) : null
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => openEdit(s.id)}
+                              aria-label="编辑"
+                              style={{ color: 'var(--color-ink3)' }}
+                            >
+                              <IconPencil size={16} />
+                            </button>
+                          )}
                         </td>
                       </tr>
                     ))}
@@ -842,7 +923,9 @@ export default function ClassDetail() {
         </div>
 
         <div className="mt-3 px-1" style={{ fontSize: 11.5, color: 'var(--color-ink4)', lineHeight: 1.7 }}>
-          转班学生请使用「设为已转出」而非删除，历史作业数据会随之保留。
+          {isStream
+            ? '移出只是不上这门课了 —— 他还是行政班里的人，作业与成绩档案都留着。'
+            : '转班学生请使用「设为已转出」而非删除，历史作业数据会随之保留。'}
         </div>
 
         {/*
@@ -1388,6 +1471,41 @@ export default function ClassDetail() {
             ) : null}
           </div>
         )}
+      </Sheet>
+
+      {/*
+        走班班：把一个人移出这个走班班（**轻确认** —— 一句话 + 一个按钮）。
+        为什么要有这一步：移出之后他不再上这门课，而这**只影响这一个走班班**
+        （另一个走班班里的他、行政班里的他都照旧 —— 多对多，§27.5）。
+        写的是 `class_members`，失败显式上屏。
+      */}
+      <Sheet
+        open={!!leaveWho}
+        onClose={() => {
+          setLeaveWho(null)
+          setLeaveErr('')
+        }}
+        title="移出这个走班班"
+        footer={
+          <div className="flex gap-2">
+            <Button block onClick={() => setLeaveWho(null)}>
+              取消
+            </Button>
+            <Button block variant="danger" disabled={leaveBusy} onClick={() => void goOut()}>
+              {leaveBusy ? '正在移出…' : '移出'}
+            </Button>
+          </div>
+        }
+      >
+        <div style={{ fontSize: 12.5, color: 'var(--color-ink2)', lineHeight: 1.85 }}>
+          <p>
+            把 <b>{leaveWho?.name || `（无姓名 · ${leaveWho?.studentNo ?? ''}）`}</b> 移出「{klass.name}」？
+          </p>
+          <p className="mt-2">他不再上这个走班班的课；行政班的名单、作业与成绩档案都不动。</p>
+          {leaveErr ? (
+            <p className="mt-2" style={{ color: 'var(--color-bad)' }}>{leaveErr}</p>
+          ) : null}
+        </div>
       </Sheet>
 
       {/*

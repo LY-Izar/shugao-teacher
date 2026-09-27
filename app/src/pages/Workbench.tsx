@@ -285,7 +285,7 @@ export default function Workbench() {
                       border: '1px solid var(--color-line2)',
                       borderRadius: 4,
                       background: 'var(--color-surface2)',
-                      color: 'var(--color-accent)',
+                      color: 'var(--color-accenttext)',
                     }}
                   >
                     {a.status === 'collected' ? <IconZap size={17} /> : <IconScan size={17} />}
@@ -419,7 +419,7 @@ export default function Workbench() {
                   height: 32,
                   border: '1px solid var(--color-line2)',
                   borderRadius: 4,
-                  color: 'var(--color-accent)',
+                  color: 'var(--color-accenttext)',
                   background: 'var(--color-surface2)',
                 }}
               >

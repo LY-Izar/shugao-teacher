@@ -209,7 +209,7 @@ export function ScheduleBatch({
         }}
       >
         <div className="flex items-center gap-2">
-          <span style={{ color: 'var(--color-accent)', display: 'grid', placeItems: 'center' }}>
+          <span style={{ color: 'var(--color-accenttext)', display: 'grid', placeItems: 'center' }}>
             {busy ? <IconRefresh size={16} /> : <IconUpload size={16} />}
           </span>
           <span style={{ fontSize: 13, fontWeight: 620, flex: 1 }}>
@@ -388,7 +388,7 @@ export function ScheduleBatch({
           border: '1px dashed var(--color-line2)',
           borderRadius: 4,
           fontSize: 13,
-          color: 'var(--color-accent)',
+          color: 'var(--color-accenttext)',
           background: 'var(--color-surface2)',
         }}
       >

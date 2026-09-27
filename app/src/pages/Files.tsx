@@ -178,7 +178,7 @@ export default function Files() {
                 cursor: busy ? 'wait' : 'pointer',
               }}
             >
-              <span style={{ color: 'var(--color-accent)' }}>
+              <span style={{ color: 'var(--color-accenttext)' }}>
                 <IconUpload size={22} />
               </span>
               <span style={{ fontSize: 13.5, fontWeight: 600 }}>
@@ -345,7 +345,7 @@ export default function Files() {
                       aria-label={viewable ? '打开' : '下载'}
                       onClick={() => void open(f)}
                       className="grid place-items-center shrink-0"
-                      style={{ width: 32, height: 32, color: 'var(--color-accent)' }}
+                      style={{ width: 32, height: 32, color: 'var(--color-accenttext)' }}
                     >
                       {viewable ? <IconEye size={16} /> : <IconDownload size={16} />}
                     </button>

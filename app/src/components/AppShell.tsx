@@ -2071,7 +2071,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 border: '1px solid var(--color-line2)',
                 borderRadius: 6,
                 background: 'var(--color-surface)',
-                color: 'var(--color-accent)',
+                color: 'var(--color-accenttext)',
               }}
             >
               <Logo size={20} />
@@ -2217,7 +2217,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           style={{ height: 50, top: 'var(--top-stack-h, 0px)', borderBottom: '1px solid var(--color-line)' }}
         >
           <span className="flex items-center gap-2">
-            <span style={{ color: 'var(--color-accent)', display: 'grid', placeItems: 'center' }}>
+            <span style={{ color: 'var(--color-accenttext)', display: 'grid', placeItems: 'center' }}>
               <Logo size={19} />
             </span>
             <span style={{ fontSize: 14.5, fontWeight: 650 }}>树高教师平台</span>
@@ -2527,7 +2527,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   </span>
                 </span>
                 {on ? (
-                  <span style={{ color: 'var(--color-accent)', display: 'grid', placeItems: 'center' }}>
+                  <span style={{ color: 'var(--color-accenttext)', display: 'grid', placeItems: 'center' }}>
                     <IconCheck size={16} />
                   </span>
                 ) : null}

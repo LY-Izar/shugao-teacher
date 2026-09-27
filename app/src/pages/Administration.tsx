@@ -109,7 +109,7 @@ export default function Administration() {
                     border: '1px solid var(--color-line2)',
                     borderRadius: 4,
                     background: 'var(--color-surface2)',
-                    color: 'var(--color-accent)',
+                    color: 'var(--color-accenttext)',
                   }}
                 >
                   <Icon size={18} />

@@ -53,6 +53,7 @@
  *    所以它**永远覆盖不到云端路径 / 权限** —— 那是 `rls-checks.mjs` 的活，别在这里补。
  */
 import { mkdirSync, writeFileSync, readdirSync, existsSync, readFileSync } from 'node:fs'
+import { execSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { registerTsResolve } from './lib/ts-resolve.mjs'
@@ -1930,7 +1931,9 @@ await withLock(async () => {
         const clSrc = readFileSync(join(HERE, '..', 'src', 'pages', 'Classes.tsx'), 'utf8')
         check(
           /loadClassMembersFull\(\[id\]\)/.test(cdSrc) &&
-            /const roster = isStream \? members : klass\.students/.test(cdSrc),
+            /* ⚠️ 2026-10-11：名单那一份挪到 `if (!klass)` **之前**了（档案那一次读也要按它读），
+               所以现在是 `(klass?.students ?? [])`，不再是 `klass.students`（这一句跟着改） */
+            /const roster = isStream \? members : \(klass\?\.students \?\? \[\]\)/.test(cdSrc),
           `${S8}：班级页的名单 —— 走班班那一支从 class_members 读（loadClassMembersFull），不是 klass.students`,
           /loadClassMembersFull/.test(cdSrc) ? '读成员那一路在' : '搜不到（改回旧写法这条就红）',
         )
@@ -1948,6 +1951,92 @@ await withLock(async () => {
           /loadClassMembersFull/.test(readFileSync(join(HERE, '..', 'src', 'data', 'remote.ts'), 'utf8')),
           `${S8}：读成员那一份（带姓名 / 学号）在 data/remote.ts 里**只有一处实现**`,
           'loadClassMembersFull 在',
+        )
+
+        /* ---------- ④ 走班班的**行内那一格**：不是"编辑学生"，是「移出这个走班班」 ----------
+         *
+         * 内测现场（2026-10-09）：走班班-地理 的班级档案页，名单每行右边那颗**铅笔点了没反应**。
+         * 根因：`openEdit` 拿 `klass.students`（= `students.class_id`）去 `find` 这个人，
+         *   而走班班的人**永远不在** `students.class_id` 上（在 `class_members`，§27.5）
+         *   → `s` 是 `undefined` → 早退、`editing` 不设 → 浮层不打开。
+         *   ⚠️ 按钮本身**摆着**，所以看起来"点了没反应"，不是"没权限"。
+         *
+         * 语义（本轮拍板）：姓名 / 学号 / 在班状态属于他的**行政班**，在走班班的页面上改不合理；
+         *   走班班这一格该做的事是「移出这个走班班」（他不再上这门课，写 `class_members`）。
+         *
+         * ⚠️ 能验到哪一层（如实登记）：本地演示模式读不到 `class_members`（`isRemote` 是构建期
+         *   常量 false，见上面那段已知限制）→ **点一下真发请求那一段在本地跑不出来**。
+         *   所以这里钉三件事：① 那一格的**摆法**（源码层）② 移出的**写路径**（已有函数，不新写）
+         *   ③「移出一个人」= 集合减一个，且**碰不到 `students.class_id`**（判据层真算一遍）。
+         */
+        /* ⚠️ 取**第二处** `{isStream ? (` —— 这一页**前面**还有一个同形的块（走班班老师那一行），
+           不加锚点会切到那儿去（实测切错一次）。 */
+        const cellAt = cdSrc.indexOf('{isStream ? (', cdSrc.indexOf('{isStream ? (') + 1)
+        const cell = cdSrc.slice(cellAt, cellAt + 1100)
+        check(
+          cellAt > 0 &&
+            /data-stream-leave="1"/.test(cell) &&
+            !/openEdit\(s\.id\)/.test(cell.split(') : (')[0] ?? ''),
+          `${S8} ④ 🔴 **走班班那一格摆的是「移出」**（反向对照：把它改回 \`openEdit(s.id)\` → 这条红）`,
+          short(cell.match(/\{isStream \?[^]{0,160}/)?.[0] ?? cell, 170),
+        )
+        check(
+          /openEdit\(s\.id\)/.test(cell) &&
+            /<button[\s\S]{0,200}?aria-label="编辑"[\s\S]{0,200}?<IconPencil/.test(cell),
+          `${S8} ④ **行政班那一格照旧是铅笔**（改姓名 / 学号 / 在班状态是行政班的事）；` +
+            `反向对照：把它一起换掉 → 这条红`,
+          short(cell.match(/\) : \([\s\S]{0,150}/)?.[0] ?? cell, 170),
+        )
+        check(
+          /remote\.saveStreamMembers\(klass\.id, next\)/.test(cdSrc) &&
+            !/from\('class_members'\)[\s\S]{0,120}\.(insert|delete|upsert)\(/.test(cdSrc),
+          `${S8} ④ 🔴 移出走的是**已有的** ` + '`saveStreamMembers()`' + `（§37.1 \`write_stream_members\`）` +
+            `—— 页面里**没有第二条写 \`class_members\` 的路**（不新写写路径）`,
+          `saveStreamMembers=${/remote\.saveStreamMembers\(/.test(cdSrc)} · 页面里直接写 class_members=${/from\('class_members'\)[\s\S]{0,120}\.(insert|delete|upsert)\(/.test(cdSrc)}`,
+        )
+        /* ③ 判据层：真算一遍"移出一个人" + 那个写函数**只碰 `class_members`** */
+        const before = ['s1', 's2', 's3']
+        const after = before.filter((x) => x !== 's2')
+        check(
+          after.length === before.length - 1 && !after.includes('s2') && JSON.stringify(after) === '["s1","s3"]',
+          `${S8} ④ 移出一个人 = **整份替换里少他一个**（` + '`class_members`' + ` 真的少一行）`,
+          `${before.join(',')} → ${after.join(',')}`,
+        )
+        /*
+         * ⚠️ 只切**移出那个函数体**（`goOut`）—— 这一页开头的 `const updateStudent = useStore(…)`
+         *   与**行政班**那个编辑浮层里的 `updateStudent(klass…)` 是**对的那条路**，
+         *   拿整份文件去搜会把它们一起搜出来（实测踩过：这条一开始就是那样假红的）。
+         */
+        const goOutBody = cdSrc.slice(cdSrc.indexOf('const goOut = async'), cdSrc.indexOf('const saveProfile = async'))
+        check(
+          goOutBody.includes('saveStreamMembers') &&
+            !/update students[\s\S]{0,80}class_id/i.test(goOutBody) &&
+            !/updateStudent\(klass/.test(goOutBody) &&
+            !/removeStudent\(klass/.test(goOutBody),
+          `${S8} ④ 🔴 「移出」那个函数体**只写 ` + '`class_members`' + `**，一个字节都没碰 ` +
+            '`students.class_id`' + `（学生还在他的行政班里）；反向对照：把它写成 \`updateStudent(klass…\` → 这条红`,
+          `saveStreamMembers=${goOutBody.includes('saveStreamMembers')} · updateStudent(klass=${/updateStudent\(klass/.test(goOutBody)} · removeStudent(klass=${/removeStudent\(klass/.test(goOutBody)}`,
+        )
+        /* ②b 读哪些人的档案 = **同一份名单**（不是回去读 klass.students） */
+        check(
+          /loadStudentProfiles\(profileIds \? profileIds\.split\(','\) : \[\]\)/.test(cdSrc) &&
+            !/loadStudentProfiles\(klass\.students/.test(cdSrc),
+          `${S8} ④ 走班班学生的**档案也读得出来**（读的是同一份名单）：` +
+            `反向对照：把这一句改回 \`klass.students\` → 走班班成员的档案恒「未录入」，这条红`,
+          /loadStudentProfiles\(profileIds/.test(cdSrc) ? '按名单读' : '又回去读 klass.students',
+        )
+        /* ②c 摆不摆那个「移出」入口 = 与这一页别处**同一个判据**（不新发明）。
+           ⚠️ 顺序是 `{isStream ? ( canManageThis ? ( … data-stream-leave …` ——
+              `data-stream-leave` **在** `canManageThis ? (` **之后**，别写反（实测写反过）。
+           ⚠️ 别拿 `…\) : null` 去跨那一段收尾（`)` 与 `null` 之间隔着别的括号）——
+              只钉"判据就是 canManageThis + 里面确实是那颗按钮"。 */
+        check(
+          /\{isStream \? \(\s*canManageThis \? \([\s\S]{0,300}?data-stream-leave="1"/.test(
+            cdSrc.slice(cellAt, cellAt + 1400),
+          ),
+          `${S8} ④ 「移出」入口的判据就是 \`canManageThis\`（= \`can_manage_class_for\` 的前端影子）` +
+            `—— 老师这一档**看不到**这个按钮，直接调接口仍由函数里的 \`can_manage_class\` 拒`,
+          'canManageThis ? (…移出… ) : null',
         )
       })
 
@@ -9215,35 +9304,38 @@ await withLock(async () => {
           `实测 ${cssDefs} 份定义`,
           '反向对照：删掉任一份 → 这一条必须红（那一套里那批小字会掉回 `accent`）',
         )
-        /* 源码级：那批改动**恰好 11 处**、而且**只改了令牌名**（`fontSize` 那些一个字没跟着动）。
-           ⚠️ 为什么不做"把 `accent` 当文字色写的地方一律清光"那种判据：那要求把 `scheduleTime` 一类
-              **13~13.5px** 的也一起收（它们不在这一轮 ≤12.5px 的判据里，见 §55.9），
-              以及**根本不给字**的图标 —— 硬扫出来的红**不是回归、是判据写宽了**。
-              这一条只钉"改了几处、改的是哪个词"，回归（谁写错令牌名 / 顺手改了字号）照样会红。 */
-        const F6_TOUCHED = [
-          'src/pages/Classroom.tsx',
-          'src/pages/Admin.tsx',
-          'src/pages/AssignmentCollect.tsx',
-          'src/pages/GradeSetup.tsx',
-          'src/components/ScheduleBatch.tsx',
-          'src/components/AppShell.tsx',
-        ]
-        const textRe = /color:\s*'var\(--color-accenttext\)'/g
-        const perFile = F6_TOUCHED.map((f) => {
-          const src = readFileSync(join(HERE, '..', f), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '')
-          return `${f.split('/').pop()}=${(src.match(textRe) ?? []).length}`
-        })
-        const textTotal = perFile.reduce((n, s) => n + Number(s.split('=')[1]), 0)
+        /* 源码级：**凡是拿 `accent` 当前景色（`color`）写的地方，已经一律改用 `accenttext`**。
+           ⚠️ 上一版这里是"恰好 11 处 + 只扫碰过的 6 个文件 + 判据是 ≤12.5px" ——
+              那个 px 边界**真的漏了东西**：`Admin.tsx` 里那个 `<summary>`（11.5px **借父级字号**，
+              静态 grep 看不见 `fontSize`）与 13~13.5px 那几处。
+              这一版按用户拍板**不再留 px 边界**：判据 = 全仓 `color:` 前景色的两半之和：
+                · `var(--color-accenttext)` = **29 处**（上一轮 11 + 这一轮 18）
+                · `var(--color-accent)`   = **0 处**
+           ⚠️ `accentColor`（原生 checkbox 的图形档）与 `background:` / `border…:` / 渐变**不在内**：
+              它们不是文字、是图形（≥3:1 那一条），本轮一个字没动 —— 共 8 处，留档见 §55.9。 */
+        const textSites = { next: 0, old: 0 }
+        const perNext = []
+        for (const f of execSync('git ls-files src', { cwd: join(HERE, '..'), encoding: 'utf8' })
+          .trim()
+          .split('\n')
+          .filter((x) => x.endsWith('.tsx') || x.endsWith('.ts'))) {
+          const s = readFileSync(join(HERE, '..', f), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '')
+          const n = (s.match(/color:\s*'var\(--color-accenttext\)'/g) ?? []).length
+          const o = (s.match(/color:\s*'var\(--color-accent\)'/g) ?? []).length
+          textSites.next += n
+          textSites.old += o
+          if (n) perNext.push(`${f.split('/').pop()}=${n}`)
+        }
         check(
-          textTotal === 11,
-          '🔴 F6-H（**只改了"令牌名"这一个词**）：碰过的那 6 个文件里，写 `color: var(--color-accenttext)` 的地方**恰好 11 处**（`Classroom` 4 / `Admin` 3 / `AssignmentCollect` 1 / `GradeSetup` 1 / `ScheduleBatch` 1 / `AppShell` 1）',
-          `实测 ${textTotal} 处：${perFile.join(' · ')}`,
-          '反向对照：谁把其中一处改回 `var(--color-accent)` → 就不是 11 了，必红',
+          textSites.next === 29 && textSites.old === 0,
+          '🔴 F6-H（**不再留 px 边界**）：全仓 `color:` 前景色 —— 用 `accenttext` 的**恰好 29 处**、还用 `accent` 的**恰好 0 处**（上一轮那 11 处 ≤12.5px 的 + 这一轮 18 处 13~13.5px 与"图标容器继承色"的，一次收干净）',
+          `accenttext=${textSites.next} 处（${perNext.join(' · ')}）· accent=${textSites.old} 处`,
+          '反向对照：把其中任一处改回 `var(--color-accent)` → 两个数就不再是 29 / 0，必红',
         )
 
         /* 🔴 四套 × 那批小字（= accenttext）× **它们真正会落的那几种底**，逐个算 WCAG。
-           ⚠️ **为什么没有 surface3**：那 11 处里没有一处坐在 surface3 上（教室端那三处坐在 `.panel`
-              的白面上，其余几处同样落在 surface / surface2 —— 探针逐处量过）。
+           ⚠️ **为什么没有 surface3**：那 29 处里没有一处坐在 surface3 上（探针逐处量过：
+              教室端那三处坐在 `.panel` 的白面上，其余几处同样落在 surface / surface2）。
               暗蓝的 `accent` 压 surface3 只有 **4.24:1** —— 它**不是**这批字的底，
               所以不把它塞进这张表来自欺欺人；要收它得先有"真的有字落在 surface3 上"的证据。
               留档在 `功能设计与不变量.md` §55.3 / §55.9。 */

@@ -261,7 +261,7 @@ export default function Settings() {
                 border: '1px solid var(--color-line2)',
                 borderRadius: 6,
                 background: 'var(--color-surface2)',
-                color: 'var(--color-accent)',
+                color: 'var(--color-accenttext)',
               }}
             >
               <Logo size={24} />
@@ -362,7 +362,7 @@ export default function Settings() {
                     border: '1px solid var(--color-line2)',
                     borderRadius: 4,
                     background: 'var(--color-surface2)',
-                    color: 'var(--color-accent)',
+                    color: 'var(--color-accenttext)',
                   }}
                 >
                   <IconSliders size={18} />
@@ -385,7 +385,7 @@ export default function Settings() {
                   border: '1px solid var(--color-line2)',
                   borderRadius: 4,
                   background: 'var(--color-surface2)',
-                  color: 'var(--color-accent)',
+                  color: 'var(--color-accenttext)',
                 }}
               >
                 <IconUpload size={18} />
@@ -407,7 +407,7 @@ export default function Settings() {
                   border: '1px solid var(--color-line2)',
                   borderRadius: 4,
                   background: 'var(--color-surface2)',
-                  color: 'var(--color-accent)',
+                  color: 'var(--color-accenttext)',
                 }}
               >
                 <IconCalendar size={18} />
