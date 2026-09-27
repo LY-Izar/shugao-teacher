@@ -3083,6 +3083,205 @@ await withLock(async () => {
           `${SG}：🧪 反向对照 —— 正常动效下果冻是开的、位置是**带过渡**的（上面那条不是恒真）`,
           `data-jelly=${nm.jelly} · 拖尾数=${nm.tails} · 填充层 transition=${nm.bodyTrans} · 高光边层=${nm.ringTrans}`,
         )
+        /* ============================================================
+           ---- ⑦ 🔴 2026-10-09 F5-1：那圈"蓝框"（切换时白块永远在框内）----
+           ------------------------------------------------------------
+           用户原话：「仔细看，这个白色的按钮旁边是有**蓝色的框**的…在切换的时候因为它很**Q弹**，
+           晃的时候**就像超出了界限**一样」。那圈框 = 高光边那一层 `[data-hi-ring]`
+           （判据与来龙去脉写在 `AppShell.tsx` 的「蓝框到底是什么」那一段）。
+           这一条量的是**修完之后的几何关系**：切换的整段飞行里，
+           "白块"（= goo 层里的填充 + 拖尾圆，两者一起被糊成一坨）**任何一帧都不许露到框外**。
+           反向对照：把框按**修复前的口径**钉死在"终点那一格"上（那时它只包住终点格），
+           同一段采样**必须**红 —— 见下面第二条 check。
+           ============================================================ */
+        await page.goto(`${BASE}/`, { waitUntil: 'networkidle' })
+        await page.waitForTimeout(900)
+        /** 逐帧量"白块相对那圈蓝框的最大外露量"（正数 = 露在外面） */
+        const blobOutsideRing = () =>
+          page.evaluate(async () => {
+            const nav = document.querySelector('nav[aria-label="主导航"]')
+            const ring = nav.querySelector('[data-hi-ring]')
+            const layer = nav.querySelector('[data-jelly]')
+            const spans = [...layer.querySelectorAll('span[aria-hidden]')]
+            const rows = []
+            for (let i = 0; i < 70; i++) {
+              await new Promise((r) => requestAnimationFrame(r))
+              const rr = ring.getBoundingClientRect()
+              const boxes = spans.map((s) => s.getBoundingClientRect())
+              rows.push(
+                Math.round(
+                  Math.max(...boxes.map((b) => Math.max(rr.left - b.left, b.right - rr.right))) * 10,
+                ) / 10,
+              )
+            }
+            return {
+              frames: rows.length,
+              worst: Math.max(...rows),
+              outside2: rows.filter((v) => v > 2).length,
+              outside6: rows.filter((v) => v > 6).length,
+            }
+          })
+        const f5TabBox = await page.getByRole('link', { name: '作业' }).boundingBox()
+        if (!f5TabBox) throw new Error(`${SG}：量不到「作业」那一格的位置`)
+        /* ⚠️ 和上面 ④ 同一条纪律：先开逐帧轮询，再用 `mouse.click(坐标)` 点下去
+              （`locator.click()` 会等元素连续两帧不动 → 整段飞行都过去了，量到 0 = 假绿）。 */
+        const blobPolling = blobOutsideRing()
+        await page.mouse.click(f5TabBox.x + f5TabBox.width / 2, f5TabBox.y + f5TabBox.height / 2)
+        const blobFix = await blobPolling
+        await page.waitForTimeout(900)
+        check(
+          blobFix.frames >= 60 && blobFix.worst <= 6 && blobFix.outside6 === 0,
+          `${SG}：🔴 切换时"白块"**不许露到那圈蓝框外面**（用户："晃的时候就像超出了界限"）`,
+          `逐帧最大外露 = ${blobFix.worst}px · 超过 2px 的帧 ${blobFix.outside2}/${blobFix.frames} · 超过 6px 的帧 ${blobFix.outside6}`,
+          '容差 6px：剩下那点（实测 ~4px、5 帧左右）来自两层 `scaleX` 拉伸的关键帧（1→1.16→0.97→1，' +
+            '0.97 那一下框缩得比本体多一点）+ 两层拉伸的中心不同（本体在那一格的中心、框在走廊的中心）；' +
+            '修之前（框只包住终点那一格 + 欠阻尼弹簧）实测最大 13.1px、83 帧里 28 帧在外面',
+        )
+
+        /* 反向对照：把框钉回"终点那一格"（= 修复前的口径，走廊没了）→ 上面那条**必须**红。
+           ⚠️ 用 `<style>` + `!important`：React 每帧写的行内 `left/width` 是**不带 important** 的，
+              压不过它；直接对元素 `setProperty` 则会被 React 的下一次渲染覆盖掉（那对照就假绿了）。 */
+        const nextCell = await page.evaluate(() => {
+          const wrap = document.querySelector('nav[aria-label="主导航"] .glass-light')
+          const a = wrap.querySelector('a[aria-label="我的"]')
+          const r = a.getBoundingClientRect()
+          const pr = wrap.getBoundingClientRect()
+          return { left: r.left - pr.left - wrap.clientLeft, width: r.width }
+        })
+        const oldRingId = '__tmp-ring-no-corridor'
+        await page.evaluate(
+          ({ id, cell }) => {
+            const s = document.createElement('style')
+            s.id = id
+            s.textContent = `[data-hi-ring]{left:${cell.left}px!important;width:${cell.width}px!important}`
+            document.head.appendChild(s)
+          },
+          { id: oldRingId, cell: nextCell },
+        )
+        const myBox = await page.getByRole('link', { name: '我的' }).boundingBox()
+        if (!myBox) throw new Error(`${SG}：量不到「我的」那一格的位置`)
+        const blobPollingOld = blobOutsideRing()
+        await page.mouse.click(myBox.x + myBox.width / 2, myBox.y + myBox.height / 2)
+        const blobOld = await blobPollingOld
+        await page.evaluate((id) => document.getElementById(id)?.remove(), oldRingId)
+        await page.waitForTimeout(900)
+        check(
+          blobOld.worst > 6 && blobOld.outside6 > 0,
+          `${SG}：🧪 反向对照 —— 把框钉回"终点那一格"（修复前的口径），上面那条**必须**红`,
+          `同一段逐帧采样：最大外露 = ${blobOld.worst}px · 超过 6px 的帧 ${blobOld.outside6}/${blobOld.frames}`,
+          '这一条红了才说明上面那条不是在放水：框只要不含"活动走廊"，欠阻尼的尾巴就会探出去',
+        )
+        /* 对照拆掉之后，框必须回到"当前那一格"上（否则后面几节都在一个坏了的框上跑） */
+        await page.goto(`${BASE}/`, { waitUntil: 'networkidle' })
+        await page.waitForTimeout(700)
+        const ringBack = await page.evaluate(() => {
+          const nav = document.querySelector('nav[aria-label="主导航"]')
+          const ring = nav.querySelector('[data-hi-ring]').getBoundingClientRect()
+          const fill = nav.querySelector('[data-jelly] span[aria-hidden]').getBoundingClientRect()
+          return {
+            dLeft: Math.round((fill.left - ring.left) * 10) / 10,
+            dRight: Math.round((fill.right - ring.right) * 10) / 10,
+          }
+        })
+        check(
+          Math.abs(ringBack.dLeft) <= 1 && Math.abs(ringBack.dRight) <= 1,
+          `${SG}：静止时那圈框**严丝合缝地落在当前那一格上**（走廊已经收回，不是停在"两格宽"上）`,
+          `框与填充的偏差：左 ${ringBack.dLeft}px / 右 ${ringBack.dRight}px`,
+        )
+
+        /* ============================================================
+           ---- ⑧ 🔴 2026-10-09 F5-2：移动端导航的**通透性**（"改低一点点"）----
+           ------------------------------------------------------------
+           `.glass-light` 全仓只有两处用（底部胶囊 + 旁边那颗圆按钮）→ 它就是"移动端导航栏"。
+           用户要的是"通透性改低" = **更实**（⛔ 不是更透明）：这一条从 computed style 里
+           把白底那两档 alpha 读出来，要求最浅那一档 **≥ 0.30**（F5 之前是 0.24）。
+           反向对照：插一条把值改回 0.24/0.34 的规则 → 同一段读取**必须**红。
+           ⚠️ 桌面左栏那块玻璃走的是 `.floating-rail`，这一轮**一个字没动** —— 它由
+              「桌面左栏的玻璃观感没变」那一条（下面的 ⑨）逐字钉住。
+           ============================================================ */
+        const glassAlpha = () =>
+          page.evaluate(() => {
+            const el = document.querySelector('nav[aria-label="主导航"] .glass-light')
+            if (!el) return null
+            const img = getComputedStyle(el).backgroundImage
+            const alphas = [...img.matchAll(/rgba?\([^)]*?([\d.]+)\)/g)].map((m) => Number(m[1]))
+            return {
+              raw: img,
+              min: alphas.length ? Math.min(...alphas) : null,
+              max: alphas.length ? Math.max(...alphas) : null,
+            }
+          })
+        const gNow = await glassAlpha()
+        check(
+          gNow !== null && gNow.min !== null && gNow.min >= 0.3,
+          `${SG}：🔴 移动端导航的白底**更实了一档**（"通透性改低一点点" = 更不透明）`,
+          `白底两档 alpha = ${gNow?.min} / ${gNow?.max}（F5 之前是 0.24 / 0.34）`,
+          '方向别弄反：用户要的是"改低通透性"，所以是**抬白底**、不是减模糊（blur 36px 一个字没动）',
+        )
+        const oldGlassId = '__tmp-glass-transparent'
+        await page.evaluate((id) => {
+          const s = document.createElement('style')
+          s.id = id
+          /* F5 之前那一版（白 24/34%）—— 只覆盖 `.glass-light`，不动别的 */
+          s.textContent =
+            '.glass-light{background:linear-gradient(180deg,rgb(255 255 255/.24),rgb(255 255 255/.34))!important}'
+          document.head.appendChild(s)
+        }, oldGlassId)
+        const gBack = await glassAlpha()
+        await page.evaluate((id) => document.getElementById(id)?.remove(), oldGlassId)
+        const gRestored = await glassAlpha()
+        check(
+          gBack !== null && gBack.min !== null && gBack.min < 0.3,
+          `${SG}：🧪 反向对照 —— 把白底改回 0.24/0.34（F5 之前的值），上面那条**必须**红`,
+          `改回去之后读到 = ${gBack?.min} / ${gBack?.max}`,
+        )
+        check(
+          gRestored !== null && gRestored.min !== null && gRestored.min >= 0.3,
+          `${SG}：对照拆掉之后回到这一轮的值（探针读的是真样式，不是缓存）`,
+          `恢复后 = ${gRestored?.min} / ${gRestored?.max}`,
+        )
+
+        /* ============================================================
+           ---- ⑨ 🔴 2026-10-09 F5-2：桌面左栏的玻璃**一个字没变** ----
+           ------------------------------------------------------------
+           用户只说了"**移动端**把导航栏的通透性改低一点点" → 桌面左栏那块玻璃
+           （`.floating-rail`：白 92%/80% + `blur(18px) saturate(170%)`）**逐字钉住**。
+           ⚠️ `.floating-rail` 与 `.glass-light` 是两块**不同**的材料：
+              前者是桌面左栏，后者只有移动端导航那两处用（上面 ⑧ 已断言）。
+           ============================================================ */
+        const railGlass = () =>
+          page.evaluate(() => {
+            const el = document.querySelector('.floating-rail')
+            if (!el) return null
+            const cs = getComputedStyle(el)
+            return { bg: cs.backgroundImage, backdrop: cs.backdropFilter }
+          })
+        const railNow = await railGlass()
+        check(
+          railNow !== null &&
+            /0\.92/.test(railNow.bg) &&
+            /0\.8/.test(railNow.bg) &&
+            /blur\(18px\)/.test(railNow.backdrop) &&
+            /saturate\(1\.7/.test(railNow.backdrop),
+          `${SG}：桌面左栏的玻璃观感**没变**（白 92%/80% + blur 18px saturate 170% —— 逐字同值）`,
+          `background=${railNow?.bg} · backdrop-filter=${railNow?.backdrop}`,
+          '用户只要求改移动端：桌面左栏这块玻璃这一轮一个字都没动',
+        )
+        const tmpRailId = '__tmp-rail-glass'
+        await page.evaluate((id) => {
+          const s = document.createElement('style')
+          s.id = id
+          s.textContent = '.floating-rail{background:linear-gradient(180deg,rgb(255 255 255/.5),rgb(255 255 255/.4))!important}'
+          document.head.appendChild(s)
+        }, tmpRailId)
+        const railTouched = await railGlass()
+        await page.evaluate((id) => document.getElementById(id)?.remove(), tmpRailId)
+        check(
+          railTouched !== null && !/0\.92/.test(railTouched.bg),
+          `${SG}：🧪 对照 —— 这条读的是**真样式**（把「.floating-rail」改坏，同一段读取立刻变）`,
+          `改坏之后读到 = ${railTouched?.bg}`,
+        )
+
         await page.emulateMedia({ reducedMotion: 'no-preference' })
         await page.goto(`${BASE}/assignments`, { waitUntil: 'networkidle' })
         await page.waitForTimeout(300)
@@ -3573,6 +3772,130 @@ await withLock(async () => {
           `data-rail-flow=${rmFlow?.flow} · 位移=${rmFly.travel}px / 中间位置=${rmFly.mids} 个 · 最大 scaleY=${rmFly.maxScale} · 落到「${rmAfter?.label}」`,
           '和②同一条采样：正常动效下 mids>2（路上有中间位置），reduced 下必须一步到位',
         )
+        /* ⚠️ **先把 reduced-motion 关回来**：上一节 ④ 把它开成了 `reduce`，而这一节量的正是
+           "弹簧的过冲" —— 在 reduced 下高亮是**直接跳**的（过冲恒为 0），那这条断言会变成
+           **假绿**（量到 ratio=0 却什么也没测）。所以这里先复位，并且下面那条 check 里
+           额外要求 `data-rail-flow === 'on'`（开关不在就是"没测"）。 */
+        await navPage.emulateMedia({ reducedMotion: 'no-preference' })
+        await navGoto('/', 'super')
+        await navPage.waitForTimeout(400)
+
+        /* ⑤ 🔴 2026-10-09 F5-3：**晃动幅度**（用户原话：「电脑端导航栏按钮切换的时候
+         *    **晃动幅度改小，太大了**」）—— 判据三条，各带反向对照：
+         *      ① 静态扫源码：左栏那套常数里**阻尼被压小**（≤ 0.70）★ 而移动端那颗果冻的
+         *         `SPRING_DAMP` **仍然是 0.78**（用户只说了电脑端，移动端不许跟着改）；
+         *         反向对照：把源码里那个 0.66 改回 0.78，**同一个扫描函数必须判假**；
+         *      ② 逐帧实测**过冲比例**（冲过落点再荡回来的最大幅度 ÷ 行程）：这一轮 ~10%、
+         *         上一轮（阻尼 0.78）实测 31%（行程 125px 时是 39px —— 就是"晃动太大"）；
+         *      ③ 把源码里读到的**两组参数**喂给**同一套弹簧算式**重跑：新参数 ≤ 0.13、
+         *         旧参数 ≥ 0.25 —— 这一条用来证明②那个阈值不是恒真的摆设。 */
+        const railSrc = readFileSync(join(HERE, '..', 'src', 'components', 'AppShell.tsx'), 'utf8')
+        /** 扫左栏那套常数（同一个函数要能在"改回旧值"的副本上判假） */
+        const scanRailSpring = (src) => ({
+          railDamp: Number(/const RAIL_SPRING_DAMP = ([\d.]+)/.exec(src)?.[1] ?? NaN),
+          railStiffShared: /const RAIL_SPRING_STIFF = SPRING_STIFF/.test(src),
+          mobileDamp: Number(/const SPRING_DAMP = ([\d.]+)/.exec(src)?.[1] ?? NaN),
+          /* 左栏那个弹簧**真的**用了这套常数（逐字钉住那一行，不是只定义了没人用） */
+          railTickUses:
+            /st\.vh = \(st\.vh \+ \(tg\.height - st\.height\) \* RAIL_SPRING_STIFF \* k\) \* Math\.pow\(RAIL_SPRING_DAMP, k\)/.test(
+              src,
+            ),
+        })
+        const rs = scanRailSpring(railSrc)
+        check(
+          Number.isFinite(rs.railDamp) &&
+            rs.railDamp <= 0.7 &&
+            rs.railStiffShared &&
+            rs.mobileDamp === 0.78 &&
+            rs.railTickUses,
+          `${SNAV}：🔴 桌面左栏的**阻尼压小了**（≤0.70），而移动端那颗果冻**一个字没动**（0.78）`,
+          `RAIL_SPRING_DAMP=${rs.railDamp} · RAIL_SPRING_STIFF=SPRING_STIFF:${rs.railStiffShared} · SPRING_DAMP（移动端）=${rs.mobileDamp} · 左栏弹簧真的用了它:${rs.railTickUses}`,
+          '用户只说了"电脑端"：移动端那颗果冻的 Q 弹（0.14 / 0.78）不许跟着改',
+        )
+        const rsBroken = scanRailSpring(
+          railSrc
+            .replace(/const RAIL_SPRING_DAMP = [\d.]+/, 'const RAIL_SPRING_DAMP = 0.78')
+            .replace(/RAIL_SPRING_STIFF/g, 'SPRING_STIFF')
+            .replace(/RAIL_SPRING_DAMP/g, 'SPRING_DAMP'),
+        )
+        check(
+          !(rsBroken.railDamp <= 0.7 && rsBroken.railStiffShared && rsBroken.railTickUses),
+          `${SNAV}：🧪 反向对照 —— 把源码改回旧参数（0.78），上面那条**必须**红`,
+          `改回之后扫到：${JSON.stringify(rsBroken)}`,
+        )
+
+        /* ② 逐帧实测过冲比例（先开轮询再点，理由同②上面那段） */
+        const railOvershoot = async (name) => {
+          const box = await navPage
+            .locator(`nav[aria-label="主导航 · 桌面"] a[aria-label="${name}"]`)
+            .boundingBox()
+          if (!box) throw new Error(`${SNAV}：量不到左栏「${name}」的位置`)
+          const polling = navPage.evaluate(async () => {
+            const nav = document.querySelector('nav[aria-label="主导航 · 桌面"]')
+            const pill = nav.querySelector('.rail-pill')
+            const rows = []
+            for (let i = 0; i < 70; i++) {
+              await new Promise((r) => requestAnimationFrame(r))
+              const p = pill.getBoundingClientRect()
+              const n = nav.getBoundingClientRect()
+              rows.push(p.top - n.top)
+            }
+            return rows
+          })
+          await navPage.mouse.click(box.x + box.width / 2, box.y + box.height / 2)
+          const rows = await polling
+          await navPage.waitForTimeout(900)
+          const target = await navPage.evaluate(() => {
+            const nav = document.querySelector('nav[aria-label="主导航 · 桌面"]')
+            const n = nav.getBoundingClientRect()
+            return nav.querySelector('span[data-active="true"]').getBoundingClientRect().top - n.top
+          })
+          const start = rows[0]
+          const dir = Math.sign(target - start) || 1
+          const travel = Math.abs(target - start)
+          const overshoot = Math.max(...rows.map((t) => (t - target) * dir))
+          return {
+            travel: Math.round(travel * 10) / 10,
+            overshoot: Math.round(overshoot * 10) / 10,
+            ratio: travel > 1 ? Math.round((overshoot / travel) * 1000) / 1000 : 0,
+          }
+        }
+        /** 同一套逐帧算式（k=1）离线重跑一遍：给出的过冲比例 */
+        const springSim = (stiff, damp, travel = 42) => {
+          let x = 0
+          let v = 0
+          let max = 0
+          for (let i = 0; i < 200; i++) {
+            v = (v + (travel - x) * stiff) * damp
+            x += v
+            max = Math.max(max, x)
+          }
+          return Math.round(((max - travel) / travel) * 1000) / 1000
+        }
+        const overNow = await railOvershoot('考试')
+        /* 🔴 **开关必须在**：`data-rail-flow=off` 时高亮是直接跳的，过冲恒为 0 ——
+           那种情况下这条断言就算"绿"也什么都没测到（本仓库最贵的一类坑：假绿）。 */
+        const flowOn = await navPage.evaluate(
+          () =>
+            document.querySelector('nav[aria-label="主导航 · 桌面"]')?.getAttribute('data-rail-flow') ??
+            null,
+        )
+        check(
+          flowOn === 'on' && overNow.travel >= 30 && overNow.ratio <= 0.13,
+          `${SNAV}：🔴 晃动幅度**压到 13% 以内**（用户："晃动幅度改小，太大了"；上一轮是 31%）`,
+          `data-rail-flow=${flowOn} · 行程 ${overNow.travel}px · 过冲 ${overNow.overshoot}px · 比例 ${(overNow.ratio * 100).toFixed(1)}%`,
+          '判据是**比例**不是绝对 px：过冲本来就随行程走（换项跨几行，行程就有多大）；' +
+            '⚠️ `data-rail-flow=off`（reduced-motion / 直接跳）时过冲恒为 0，所以必须连开关一起判',
+        )
+        const simNew = springSim(0.14, rs.railDamp)
+        const simOld = springSim(0.14, 0.78)
+        check(
+          simNew <= 0.13 && simOld >= 0.25,
+          `${SNAV}：🧪 反向对照 —— 同一套算式下，源码里那对新参数 ≤13%、旧参数（0.78）≥25%`,
+          `新参数（DAMP=${rs.railDamp}）过冲 ${(simNew * 100).toFixed(1)}% · 旧参数（0.78）过冲 ${(simOld * 100).toFixed(1)}%`,
+          '这一条保证上面那条阈值不是"恒真的摆设"：参数退回去，同一个算式立刻算回 31%',
+        )
+
         await navPage.emulateMedia({ reducedMotion: 'no-preference' })
         await navGoto('/', 'super')
         await navPage.waitForTimeout(400)
@@ -8292,6 +8615,98 @@ await withLock(async () => {
         /* 切回暗色，把这一档留给下面几张暗色图 */
         await dp.locator('[data-theme-toggle]').nth(visibles[0] ?? 0).click()
         await dp.waitForTimeout(250)
+
+        /* ============================================================
+           ---- 🔴 2026-10-09 F5-1：那颗圆钮外面那圈"蓝框" ----
+           ------------------------------------------------------------
+           用户指着它说：「这个白色的按钮旁边是有**蓝色的框**的」。
+           判据（这一节在真浏览器里量的，写在 `index.css` 的 `[data-theme-toggle]:focus-visible`
+           那一段与 `AppShell.tsx` 的 `ThemeToggle` 上方）：
+             · 那圈蓝框 = **键盘 Tab 聚焦时的 `:focus-visible` 焦点环**
+               （2px `var(--color-focus)` / 亮色 `#0b5cf0`、暗色 `#7aa2f8`）；
+             · ⛔ **它是无障碍功能，不许删** —— 这一条钉的是"它在、够粗、留了余量、没被祖先裁掉"；
+             · 鼠标点它**不会**出现这圈框（Chromium 的 `:focus-visible` 启发式）→ 第二条钉住这件事，
+               免得以后有人按"点一下也该有框"去改。
+           ============================================================ */
+        await dp.keyboard.press('Escape')
+        /* ⚠️ 先回一趟干净的 `/`：免得前几节留下的浮层把 Tab 困住（那样"没聚焦到"会变成假红） */
+        await dp.goto(`${BASE}/`, { waitUntil: 'networkidle' })
+        await dp.waitForTimeout(600)
+        await dp.evaluate(() => document.body.focus())
+        let ringFocus = null
+        for (let i = 0; i < 40; i++) {
+          await dp.keyboard.press('Tab')
+          ringFocus = await dp.evaluate(() => {
+            const b = [...document.querySelectorAll('[data-theme-toggle]')].find(
+              (e) => e.getBoundingClientRect().width > 0,
+            )
+            if (!b || document.activeElement !== b) return null
+            const c = getComputedStyle(b)
+            const r = b.getBoundingClientRect()
+            const off = parseFloat(c.outlineOffset) || 0
+            const w = parseFloat(c.outlineWidth) || 0
+            /* 焦点环画在**钮自己身上**（不是别的容器）：把它外扩后的盒子与每个祖先的
+               padding box 比一遍 —— 只要有一个祖先真的会裁，就记下来 */
+            let clipped = null
+            for (let el = b.parentElement; el; el = el.parentElement) {
+              const cs = getComputedStyle(el)
+              if (
+                cs.overflow === 'visible' &&
+                cs.overflowX === 'visible' &&
+                cs.overflowY === 'visible'
+              )
+                continue
+              const pr = el.getBoundingClientRect()
+              if (
+                r.left - off - w < pr.left + el.clientLeft + 1 ||
+                r.right + off + w > pr.right - el.clientLeft - 1
+              )
+                clipped = `${el.tagName.toLowerCase()}.${String(el.className).slice(0, 40)}`
+            }
+            return {
+              focusVisible: b.matches(':focus-visible'),
+              outline: `${c.outlineStyle} ${c.outlineWidth} ${c.outlineColor} · outline-offset=${off}px`,
+              off,
+              w,
+              clipped,
+            }
+          })
+          if (ringFocus) break
+        }
+        check(
+          ringFocus?.focusVisible === true && ringFocus.w >= 2 && ringFocus.off >= 2 && ringFocus.clipped === null,
+          'F5-1：键盘 Tab 聚焦那颗圆钮时，焦点环**在、够粗、外扩留了余量、没被祖先裁掉**',
+          ringFocus ? `${ringFocus.outline} · 被祖先裁掉=${ringFocus.clipped ?? '没有'}` : 'Tab 40 次都没聚焦到它',
+          '焦点环是无障碍功能（⛔ 不许删）：这一轮只把外扩从 1px 提到 2px，"白圆"与"蓝框"之间留出空隙',
+        )
+        /* ⚠️ **重新载一趟再点**：那颗钮此刻还是"键盘聚焦"状态，而 Chromium 的 `:focus-visible`
+           启发式只在**焦点发生变化**时重算 —— 对着一颗已经键盘聚焦的钮按鼠标，它可能仍然算
+           "键盘聚焦" → 这一条会假红。换一张干净的页面再点，才是"纯鼠标"的那条路径。 */
+        await dp.goto(`${BASE}/`, { waitUntil: 'networkidle' })
+        await dp.waitForTimeout(500)
+        await toggle.nth(visibles[0] ?? 0).click()
+        await dp.waitForTimeout(250)
+        const mouseRing = await dp.evaluate(() => {
+          const b = [...document.querySelectorAll('[data-theme-toggle]')].find(
+            (e) => e.getBoundingClientRect().width > 0,
+          )
+          const c = getComputedStyle(b)
+          return {
+            focusVisible: b.matches(':focus-visible'),
+            outlineStyle: c.outlineStyle,
+            outlineWidth: c.outlineWidth,
+            isActive: document.activeElement === b,
+          }
+        })
+        await toggle.nth(visibles[0] ?? 0).click()
+        await dp.waitForTimeout(250)
+        check(
+          mouseRing.isActive === true && mouseRing.focusVisible === false && mouseRing.outlineStyle === 'none',
+          'F5-1：**鼠标点**那颗钮时不出焦点环（所以"点一下就晃出框"其实是移动端底部导航那圈框）',
+          `聚焦到它=${mouseRing.isActive} · :focus-visible=${mouseRing.focusVisible} · outline=${mouseRing.outlineStyle} ${mouseRing.outlineWidth}`,
+          '这条是"那圈蓝框到底是什么"的判据之一：键盘 == 焦点环；鼠标 == 没有环' +
+            '（⚠️ 判据是 `outline-style`：Chromium 在 `none` 时仍然把 `outline-width` 算成 3px，拿宽度判会假红）',
+        )
       })
 
       /* 关掉这个暗色 context：它已经把偏好写成了 dark（同一 context 里后续页面都会是暗的），

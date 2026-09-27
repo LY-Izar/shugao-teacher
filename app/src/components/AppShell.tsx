@@ -638,6 +638,30 @@ const SPRING_STIFF = 0.14
 const SPRING_DAMP = 0.78
 
 /**
+ * 🔴 **2026-10-09 F5：桌面左栏那一层高亮单独一套常数**（用户原话：
+ *   「电脑端导航栏按钮切换的时候**晃动幅度改小，太大了**」）。
+ *
+ * **只动阻尼，刚度一个数没动**（`RAIL_SPRING_STIFF` 仍然等于移动端那个 `SPRING_STIFF`）：
+ *   · 这套逐帧写法里 `DAMP` 是"每帧保留的速度比例" → **调小 = 阻尼变大 = 过冲变小**；
+ *   · 同一段模拟（行程 48px）：`DAMP=0.78` → 过冲 **31%**、停下要 768ms；
+ *     `DAMP=0.66` → 过冲 **8.7%**、停下 484ms。晃动幅度降到约 **1/3.6**，
+ *     但仍然要流 480ms 才到位 —— **不是瞬移**（用户要的是"别晃那么大"，不是"别动"）。
+ *   · ⛔ **别拿"调小 `STIFF`"当手段**：刚度管的是"追得紧不紧"，调小只会让它变肉、变慢，
+ *     过冲该有还是有；要压过冲就是压阻尼。
+ *   · ⛔ **移动端那颗果冻仍然用 `SPRING_*`（0.14 / 0.78）**：用户只说了电脑端，
+ *     移动端的 Q 弹一个字都没动（口径：只有"切换/流动"发生在左栏时才用 `RAIL_*`）。
+ *
+ * 判据在 `shots.mjs` 的「液态玻璃 · 左栏流动」那一节，两条：
+ *   ① **逐帧实测过冲比例**（冲过落点再荡回来的最大幅度 ÷ 行程）≤ **13%** ——
+ *      这一轮实测 **9.7%**（上一轮的参数是 **31%**）；
+ *   ② **静态扫源码**：`RAIL_SPRING_DAMP ≤ 0.7`、且移动端那个 `SPRING_DAMP` 仍然是 0.78、
+ *      且左栏那个弹簧**真的**用了这套常数（逐字钉住那一行）。
+ * 两条都带反向对照：源码改回 0.78 → ② 必须红；把两组参数喂给**同一套算式**重跑 → 旧参数 31%。
+ */
+const RAIL_SPRING_STIFF = SPRING_STIFF
+const RAIL_SPRING_DAMP = 0.66
+
+/**
  * 胶囊里的一个图标：可点区域 48×48，当前页高亮由父级的滑动胶囊负责。
  *
  * ⚠️ 类型上带着可选的 `dot`（`pinned.map((n) => <PinTab key={n.to} {...n} />)` 会把
@@ -740,6 +764,40 @@ function MobileNav() {
   const lastIdx = useRef(-1)
   const [hi, setHi] = useState({ left: 4, width: 48, show: false })
 
+  /* ============================================================
+     🔴 **2026-10-09 F5：「蓝框」到底是什么、以及为什么要有"活动走廊"**
+
+     用户原话：「仔细看，这个白色的按钮旁边是有**蓝色的框**的，这样在切换的时候因为它很**Q弹**，
+     晃的时候**就像超出了界限**一样」（附的截图是底部导航「工作台」那一格的放大图 ——
+     白色高亮块 + 一圈细蓝框，块底透出页面的字，正是这一族的形态）。
+
+     **判据（在真浏览器里量的，别靠猜）**：
+       · 那圈蓝框 = **高光边那一层** `[data-hi-ring]`：`1px solid rgb(var(--color-hiline) / .3)`
+         + 一圈蓝色外扩影（`0 8px 18px -10px rgb(HI_LINE / .45)`）。它**不是** `:focus-visible`
+         的焦点环（那条是 `2px solid var(--color-focus,#0b5cf0)`，只在**键盘 Tab** 时出现 ——
+         鼠标点过之后实测 `outline: none`），也**不是**按钮自己的 `border`（那是 `--color-line2` 的灰）。
+       · 它以前只包住**终点那一格**（`left: hi.left; width: hi.width`），而拖尾圆由一个
+         **欠阻尼**弹簧驱动（`SPRING_DAMP=0.78`，实测过冲 **31%**）：逐帧量到行程 48px 时
+         尾巴最多探出蓝框 **13.1px**（83 帧里 28 帧在外面）→ 就是"晃的时候像超出了界限"。
+
+     **修法（两条一起，缺一条都堵不住）**：
+       ① 拖尾圆的活动区间从"整个胶囊内容盒"收紧到 **[起点那一格, 终点那一格]** ——
+          滞后再大也不会冲过终点那一格（果冻还在：路上照样拖，只是不再荡出去）；
+       ② 高光边那一层在切换期间也**放大到同一条走廊**（弹簧停稳之后收回那一格）——
+          这样"白块"与"蓝框"共用同一个活动范围，视觉上**永远在框内**。
+     ⚠️ 走廊必须与 `hi`（终点那一格）**在同一次提交里落地**：晚一帧的话会有一帧
+        "尾巴已经在终点、蓝框还在路上"（实测那一帧 48px 露在外面）。所以它在 `measure()`
+        里算、和 `setHi` 并排，**不是**另起一个 effect。
+     ⚠️ 收尾那条缓动**故意不带过冲**（缩回时过冲 = 框比那一格还小 = 白块又露出来），
+        理由写在 `data-hi-ring` 那一层的注释里。
+     ============================================================ */
+  /** 切换期间的"活动走廊"（起点那一格 ∪ 终点那一格）；`null` = 没在切换（停在某一格上） */
+  const [ringFly, setRingFly] = useState<{ left: number; width: number } | null>(null)
+  /** 同一个走廊，给下面那个 rAF 弹簧用（它要按同一区间夹住拖尾圆） */
+  const corridorRef = useRef<{ left: number; width: number } | null>(null)
+  /** 上一次的落点（走廊的"起点那一格"从这里来；`null` = 还没量过第一格） */
+  const hiPrevRef = useRef<{ left: number; width: number } | null>(null)
+
   /* 高亮块的落点靠**量**（不写死 48×序号）：字号/间距将来变了也不会错位 */
   useEffect(() => {
     const measure = () => {
@@ -753,7 +811,21 @@ function MobileNav() {
       const r = el.getBoundingClientRect()
       const pr = wrap.getBoundingClientRect()
       /* 绝对定位的 `left` 是相对**内边距盒**算的，所以要减掉左边框那 1px */
-      setHi({ left: r.left - pr.left - wrap.clientLeft, width: r.width, show: true })
+      const next = { left: r.left - pr.left - wrap.clientLeft, width: r.width }
+      const prev = hiPrevRef.current
+      hiPrevRef.current = next
+      setHi({ ...next, show: true })
+      /*
+       * 🔴 **活动走廊**（见上面那一段）：`prev === null`（首屏第一次量）时**不设走廊** ——
+       * 那一帧没有"起点那一格"，设了会凭空张出一格宽；`measure()` 在滚动/尺寸变化时也会跑，
+       * 所以只在**落点真的变了**的时候动它（否则每帧一次 setState = 白重渲染）。
+       */
+      if (!jelly || !prev || (prev.left === next.left && prev.width === next.width)) return
+      const left = Math.min(prev.left, next.left)
+      const right = Math.max(prev.left + prev.width, next.left + next.width)
+      const box = { left, width: right - left }
+      corridorRef.current = box
+      setRingFly(box)
     }
     measure()
     const t = window.setTimeout(measure, 80)
@@ -762,7 +834,7 @@ function MobileNav() {
       window.clearTimeout(t)
       window.removeEventListener('resize', measure)
     }
-  }, [pathname])
+  }, [pathname, jelly])
 
   /* 切页时给高亮块一段拉伸回弹（液态手感，与桌面左栏同一套缓动） */
   useEffect(() => {
@@ -828,8 +900,19 @@ function MobileNav() {
     /* 拖尾圆只能在**内容盒**里跑：跑出胶囊外面就不像"一块玻璃"了（那是两坨东西） */
     const minX = 4
     const maxX = Math.max(minX, wrap.clientWidth - 4 - hi.width)
+    /*
+     * 🔴 **切换时再收紧一层：只许在"起点那一格 → 终点那一格"之间跑**（见上面
+     *    「蓝框到底是什么」那一段的判据）。拖动（`dragX !== null`）**不走这条**：
+     *    那是"跟手"，区间仍是整个内容盒（本来的口径，一个字没改）。
+     */
+    const corridor = corridorRef.current
+    const lo = dragX === null && corridor ? Math.max(minX, corridor.left) : minX
+    const hiRaw =
+      dragX === null && corridor ? Math.min(maxX, corridor.left + corridor.width - hi.width) : maxX
+    /* `Math.max(lo, …)`：走廊理论上不可能比一格还窄，这里只是"任何状态下都不许夹反"的兜底 */
+    const hiEdge = Math.max(lo, hiRaw)
     let last = performance.now()
-    const clamp = (x: number) => Math.min(Math.max(x, minX), maxX)
+    const clamp = (x: number) => Math.min(Math.max(x, lo), hiEdge)
     if (!st.init) {
       st.x = targetX
       st.init = true
@@ -845,6 +928,16 @@ function MobileNav() {
         st.x = targetX
         st.v = 0
         tail.style.transform = 'translateX(0px)'
+        /*
+         * 🔴 **走廊在这里收回**（弹簧真的停稳了才收）：
+         *    拖尾圆的内部状态是欠阻尼的，就算渲染位置被夹在走廊端点，它自己还会来回摆一阵
+         *    （0.78 的阻尼 → 回摆约 24% 行程）。走廊提前收掉 = 那段回摆又会甩到蓝框外面去，
+         *    所以判据是"弹簧停稳"（与上面那个 `st.raf = 0` 同一时刻）。
+         *    收回之后由 `transition: left/width .36s`（**不带过冲**那条）平滑收到**终点那一格** ——
+         *    缓动的口径见 `data-hi-ring` 那一层的注释。
+         */
+        corridorRef.current = null
+        setRingFly(null)
         st.raf = 0
         return
       }
@@ -885,6 +978,9 @@ function MobileNav() {
     if (!d.active) {
       if (Math.abs(e.clientX - d.startX) < 8) return
       d.active = true
+      /* 🔴 开始"跟手"了：切换那条走廊作废（跟手期间高亮边与填充本来就是同一套坐标） */
+      corridorRef.current = null
+      setRingFly(null)
       try {
         e.currentTarget.setPointerCapture(e.pointerId)
       } catch {
@@ -1097,8 +1193,11 @@ function MobileNav() {
                 position: 'absolute',
                 top: 4,
                 bottom: 4,
-                left: dragX ?? hi.left,
-                width: hi.width,
+                /* 🔴 切换期间（`ringFly`）这一层**放大到与拖尾圆同一条走廊**，
+                   切换完（弹簧停稳）自动收回终点那一格 —— 白块与蓝框共用同一个活动范围，
+                   所以"回弹时永远在框内"。判据与来龙去脉见上面「蓝框到底是什么」那一段。 */
+                left: ringFly ? ringFly.left : (dragX ?? hi.left),
+                width: ringFly ? ringFly.width : hi.width,
                 borderRadius: LG_RADIUS - 4,
                 border: `1px solid rgb(${HI_LINE} / .3)`,
                 /* ⚠️ 这一串里三个颜色全部走**材料令牌**（亮色与收编前逐字相同）：
@@ -1106,10 +1205,24 @@ function MobileNav() {
                 boxShadow: `inset 0 1px 0 rgb(${GLASS_LINE} / .95), 0 1px 2px rgb(var(--color-shadow) / .08), 0 8px 18px -10px rgb(${HI_LINE} / .45)`,
                 opacity: hi.show ? 1 : 0,
                 pointerEvents: 'none',
+                /*
+                 * 🔴 **三档过渡（2026-10-09 F5 重排）**：
+                 *   ① **切换中（`ringFly`）= 只留透明度** —— 走廊那一步必须**立刻**到位：
+                 *      拖尾圆被夹在走廊端点、**几帧内**就贴到终点那一格上，而这条 `left/width`
+                 *      过渡要 0.44s 才把框张到走廊 —— 实测这中间有 19 帧、最多 17.6px 的
+                 *      "白块已经到终点、蓝框还在半路上"（正是用户看到的"超出界限"）。
+                 *      走廊是**一瞬间张开、事后收回**，所以这一步不需要动画。
+                 *   ② 静止 / 收尾 = `left/width .36s cubic-bezier(.22,.8,.24,1)`：
+                 *      ⚠️ **故意不带过冲**（填充那条 `.34,1.32,.5,1` 是带过冲的）——
+                 *      收尾是从"两格宽的走廊"缩回"一格"，带过冲就会**缩过头**（实测约 5px），
+                 *      那一瞬间白块又会露到框外。这条缓动只服务"收尾"这一件事
+                 *      （切换中的定位不归它管，见 ①）。
+                 *   ③ 拖动 / reduced-motion = 只留透明度（照旧，一个字没改）。
+                 */
                 transition:
-                  dragX !== null || reduced
-                    ? 'opacity .2s'
-                    : 'left .44s cubic-bezier(.34,1.32,.5,1), width .44s cubic-bezier(.34,1.32,.5,1), opacity .2s',
+                  ringFly === null && dragX === null && !reduced
+                    ? 'left .36s cubic-bezier(.22,.8,.24,1), width .36s cubic-bezier(.22,.8,.24,1), opacity .2s'
+                    : 'opacity .2s',
               }}
             />
             {pinned.map((n) => (
@@ -1505,7 +1618,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
    * 高亮**本来就已经是一层**（`.rail-pill` 那颗绝对定位的 span，`top`/`height` 由测量给出），
    * 这一轮改的是**它怎么动**：
    *   · 位移从"CSS 过渡 + 一次 `scaleY(1.24)` 的 WAAPI 拉伸"换成**一个 rAF 弹簧**
-   *     （与移动端那颗果冻同一套常数：`SPRING_STIFF` / `SPRING_DAMP`）——
+   *     （与移动端那颗果冻**同一套刚度**，阻尼单独一档：`RAIL_SPRING_STIFF` /
+   *      `RAIL_SPRING_DAMP` —— 2026-10-09 F5 按用户「晃动幅度改小」把阻尼从 0.78 压到 0.66）——
    *     所以有"略欠阻尼"的过冲与回弹；
    *   · **沿运动方向轻轻拉长**：`scaleY = 1 + min(6%, |v| × 0.012)` —— 速度决定拉伸量，
    *     到位自动收回 1（⛔ 不用 1.24 那种大变形，也不加 gooey：矩形做融合会很难看）；
@@ -1647,9 +1761,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       /* ⚠️ 目标没变够几帧**不许判定"停稳"**：否则第一帧就可能把还在路上的动画收掉（移动端踩过） */
       stable = tg.top === lastTarget ? stable + 1 : 0
       lastTarget = tg.top
-      st.v = (st.v + (tg.top - st.top) * SPRING_STIFF * k) * Math.pow(SPRING_DAMP, k)
+      st.v = (st.v + (tg.top - st.top) * RAIL_SPRING_STIFF * k) * Math.pow(RAIL_SPRING_DAMP, k)
       st.top += st.v * k
-      st.vh = (st.vh + (tg.height - st.height) * SPRING_STIFF * k) * Math.pow(SPRING_DAMP, k)
+      st.vh = (st.vh + (tg.height - st.height) * RAIL_SPRING_STIFF * k) * Math.pow(RAIL_SPRING_DAMP, k)
       st.height += st.vh * k
       /* "液体在管子里流过去"：动的时候沿运动方向拉长一点点，到位收圆 */
       const stretch = Math.min(0.06, Math.abs(st.v) * 0.012)
