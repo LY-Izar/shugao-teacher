@@ -184,6 +184,7 @@ const EXPECTED_FILES = [
   '32-classroom.png',
   '33-classroom-list.png',
   '34-classroom-broadcast.png',
+  '120-classroom-paste-sheet.png',
   '35-nav-frost.png',
   '36-nav-travel.png',
   '37-nav-settled.png',
@@ -1672,6 +1673,48 @@ await withLock(async () => {
         await expectRoom(SR)
       })
       await shotRaw(room, SR, '32-classroom')
+
+      /* ---------------- 🆕 粘贴课表的示例必须带班名（2026-09-28 用户实测） ----------------
+       *
+       * 现场：他在教室端粘了课表，**教室里看不见**，屏上也没说为什么。
+       * 根因：粘贴框的示例写的是「周一 08:00-08:40 英语」——没有班名；
+       * 而这条链路里 `classId` 只能从标题里的班名认出来（`matchClass`），认不出就是空的，
+       * 教室端那条线（`scope='class'` + `classId === 本班`）一条都不显示。
+       * **示例在教人做一个"导进去看不见"的格式** → 现在示例由**本班班名**拼出来。
+       * 这一条量的是屏上那句 placeholder（绿/红由 `clock-checks.mjs` 逐行量）。
+       */
+      await step(SR, async () => {
+        await room.getByRole('button', { name: '粘贴课表' }).click()
+        await room.waitForTimeout(300)
+        const cls = await room.evaluate(() => {
+          const sel = [...document.querySelectorAll('select')].find((s) =>
+            [...s.options].some((o) => /班/.test(o.textContent ?? '')),
+          )
+          const name = sel?.selectedOptions?.[0]?.textContent?.trim() ?? ''
+          const ph = document.querySelector('textarea')?.getAttribute('placeholder') ?? ''
+          const body = document.body.innerText ?? ''
+          return {
+            name,
+            ph,
+            hint: body.split('\n').find((l) => l.includes('不写班名')) ?? '',
+            same: Boolean(name) && ph.includes(name) && body.includes(name),
+          }
+        })
+        check(
+          cls.same,
+          `🔴 ${SR}：粘贴框的示例带**当前班名**「${cls.name || '(没读到班名)'}」`,
+          cls.ph ? `placeholder 第二行：${short(cls.ph.split('\n')[1] ?? '', 90)}` : '没找到 textarea',
+          '示例不带班名时，照着写导进去 classId 是空的 —— 教室里一条都不显示',
+        )
+        check(
+          cls.hint.includes('不写班名'),
+          `${SR}：并且**明说**"不写班名，这一条在教室里不会显示"`,
+          cls.hint || '没看到那句提示',
+        )
+        await shot(room, SR, '120-classroom-paste-sheet')
+        await room.keyboard.press('Escape')
+        await room.waitForTimeout(300)
+      })
 
       /* ---------------- 🆕 每日名言（2026-09-29 用户拍板） ----------------
        *

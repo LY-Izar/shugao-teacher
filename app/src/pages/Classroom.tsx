@@ -42,7 +42,7 @@ const BACKUP_NAME = '树高备份.json'
 import { checkScheduleConflicts, awayText, dayState, maybeShift, toMinutes, weekdayOf } from '../lib/schedule'
 import { beijingNow, dayKind, holidayOn, isRestDay, nextHoliday, ymdOf } from '../lib/holiday'
 import { pickDailyQuote } from '../lib/quotes'
-import { parseScheduleText, type ParsedScheduleItem } from '../lib/scheduleParse'
+import { matchClassName, parseScheduleText, type ParsedScheduleItem } from '../lib/scheduleParse'
 import { preparePhoto } from '../lib/photo'
 import { recognize } from '../lib/ocr'
 import { WEEKDAY_TEXT } from '../data/types'
@@ -373,6 +373,7 @@ export default function Classroom() {
   /* 今天的课表 —— 教师端维护，这里只读；也支持现场拍一张课表自动识别 */
   const schedule = useStore((s) => s.schedule)
   const addScheduleMany = useStore((s) => s.addScheduleMany)
+  const removeSchedule = useStore((s) => s.removeSchedule)
   const schedRef = useRef<HTMLInputElement>(null)
   const [schedBusy, setSchedBusy] = useState(false)
   const [schedErr, setSchedErr] = useState('')
@@ -907,6 +908,60 @@ export default function Classroom() {
    */
   const streamMode = isStreamClass(klass)
 
+  /**
+   * 核对页每一条只有三种状态，**不许混**：
+   *   · `ok`    —— 认出了班名（绿）：教室端会显示；
+   *   · `red`   —— 班名认不出（红）：`classId` 是空的，**教室里一条都不会显示**；
+   *   · `unknown` —— 班级列表根本没读到（**灰**，不是红）：判不了，不能说人家错。
+   * ⚠️ 第三种必须是灰（§三.4 三态）：`classes` 空 = 数据没读回来，那是"没结论"。
+   */
+  const classMark = (r: ParsedScheduleItem): 'ok' | 'red' | 'unknown' => {
+    if (!classes.length) return 'unknown'
+    if (!r.title.trim()) return 'unknown'
+    const name = matchClassName(r.title, classes)
+    if (!name) return 'red'
+    return name === klass?.name ? 'ok' : 'red'
+  }
+
+  /**
+   * 粘贴框里的示例 —— **必须带本班班名**（用户 2026-09-28 实测栽在这）。
+   *
+   * 教室端只显示 `scope='class'` 且 `classId` 等于本班的行，而 `classId` 是
+   * `matchClass()` 从**标题文本**里认班名才给的（见 lib/scheduleParse.ts）。
+   * 原来的示例只有「周一 08:00-08:40 英语」——**照着它写，导进去 classId 是空的，
+   * 教室里一条都不显示**，而且屏上连个招呼都不打。所以这里用**本班真实班名**拼示例，
+   * 并且说明这个班名是给谁看的（不然老师会以为该把它抄进标题）。
+   */
+  const pasteSample = klass?.name
+    ? `一行一条，例如：\n周一 08:00-08:40 ${klass.name} 英语 张老师\n周一 08:50-09:30 ${klass.name} 语文 李老师\n周三 10:50-11:30 ${klass.name} 化学 王老师`
+    : '一行一条，例如：\n周一 08:00-08:40 高二(1)班 英语 张老师\n周一 08:50-09:30 高二(1)班 语文 李老师'
+  const pasteHint = klass?.name
+    ? `每行要写上班名「${klass.name}」——教室端靠它认出这节课是哪个班的；不写班名，这一条在教室里不会显示。`
+    : null
+
+  /**
+   * 核对页要摊开的两件事：
+   *   · `noShow` —— 这批里有几条 **教室里不会显示**（认不出班名）。**必须说出来**：
+   *     用户实测就是"粘了、看不见、也没人告诉他为什么"（2026-09-28）。
+   *   · `existing` —— 本班**已经**有多少条课。`addScheduleMany` 是**只追加**，
+   *     所以再导一次就是两批（《功能设计与不变量.md》§重复导入）。
+   */
+  const noShow = (schedReview ?? []).filter((r) => classMark(r) === 'red').length
+  const existing = schedule.filter((s) => s.scope === 'class' && s.classId === klass?.id).length
+
+  /** 清掉本班旧课表（重复导入的出路）—— 删的是本班全部 `scope='class'` 行，不是"这一批" */
+  const dropAllOld = () => {
+    if (!klass) return
+    const ok = window.confirm(
+      `确定清掉${klass.name}的全部旧课表吗？共 ${existing} 条，本班之前导错、重复的那些会一起没掉。`,
+    )
+    if (!ok) return
+    const old = schedule.filter((s) => s.scope === 'class' && s.classId === klass.id)
+    if (!old.length) return
+    old.forEach((s) => removeSchedule(s.id))
+    push({ text: `已清掉旧课表 ${old.length} 条`, tone: 'warn' })
+  }
+
   return (
     <Shell>
       {/* 照片识别的结果先给教师核对 —— 时间最容易认错，不能直接入库 */}
@@ -916,6 +971,53 @@ export default function Classroom() {
             <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.7, marginBottom: 10 }}>
               照片识别最容易在<b>时间</b>上出错。一条条对着原表核一遍，改完再导入。
             </p>
+
+            {/* 🔴 教室端看的是「本班 + classId」这一条线 —— 认不出班名的行，教室里一条都不会显示。
+                这件事以前核对页一个字都不说（用户 2026-09-28 就是这么"粘了、看不见"的）。 */}
+            {noShow > 0 ? (
+              <div
+                style={{
+                  background: 'var(--color-badsoft)',
+                  border: '1px solid var(--color-badline)',
+                  borderRadius: 4,
+                  padding: '8px 10px',
+                  fontSize: 11.5,
+                  color: 'var(--color-badink)',
+                  lineHeight: 1.7,
+                  marginBottom: 10,
+                }}
+              >
+                这 {schedReview.length} 条里有 <b>{noShow} 条没认出班名，教室里不会显示</b>
+                {klass ? `（下面标红的那几条就是）。把它改成「${klass.name} 科目 老师」再导入。` : '。'}
+              </div>
+            ) : null}
+
+            {/* 重复导入：`addScheduleMany` **只追加**，所以再导一次就是两批。
+                这里明说，并给一条出路（清掉旧的），不走静默覆盖。 */}
+            {existing > 0 ? (
+              <div
+                style={{
+                  background: 'var(--color-warnsoft)',
+                  border: '1px solid var(--color-warnline)',
+                  borderRadius: 4,
+                  padding: '8px 10px',
+                  fontSize: 11.5,
+                  color: 'var(--color-warnink)',
+                  lineHeight: 1.7,
+                  marginBottom: 10,
+                }}
+              >
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="flex-1">
+                    {klass ? `${klass.name}已有 ` : '本班已有 '}
+                    <b>{existing} 条课</b>，再导入会变成两批（旧的不会自动顶掉）。
+                  </span>
+                  <Button size="sm" variant="danger" onClick={dropAllOld}>
+                    先清掉旧的 {existing} 条
+                  </Button>
+                </div>
+              </div>
+            ) : null}
 
             <div className="flex flex-col gap-2">
               {schedReview.map((r, i) => (
@@ -964,6 +1066,47 @@ export default function Classroom() {
                     placeholder="课程名"
                     onChange={(e) => patchRow(i, { title: e.target.value })}
                   />
+                  {/* 这一行教室端会不会显示 —— 三态：认出来（绿）/ 没认出来（红）/ 判不了（灰）。
+                      `data-cf-mark` 是给门禁数的（`clock-checks.mjs` 要精确数
+                      "几条会显示 / 几条不会"），不是样式钩子。 */}
+                  {(() => {
+                    const mark = classMark(r)
+                    if (mark === 'ok')
+                      return (
+                        <div
+                          data-cf-mark="ok"
+                          style={{ fontSize: 11, color: 'var(--color-okink)', marginTop: 4 }}
+                        >
+                          ✓ 认出班名「{matchClassName(r.title, classes)}」，教室端会显示
+                        </div>
+                      )
+                    if (mark === 'red')
+                      return (
+                        <div
+                          data-cf-mark="red"
+                          style={{
+                            fontSize: 11,
+                            color: 'var(--color-bad)',
+                            marginTop: 4,
+                            lineHeight: 1.6,
+                          }}
+                        >
+                          ⚠ 这条没认出班名，教室里不会显示 —— 标题里写上班名
+                          {klass ? `「${klass.name}」` : ''}
+                        </div>
+                      )
+                    /* classes 有、标题空 → 那是"还没填"，不用再说一句（下面「课程名」那个框空着就是提示） */
+                    if (classes.length) return null
+                    /* 🔴 班级列表没读到 = **判不了**，这里是灰不是红（§三.4 三态） */
+                    return (
+                      <div
+                        data-cf-mark="unknown"
+                        style={{ fontSize: 11, color: 'var(--color-ink3)', marginTop: 4 }}
+                      >
+                        班级列表没读到，暂时看不出教室端会不会显示
+                      </div>
+                    )
+                  })()}
                   {r.raw ? (
                     <div
                       style={{ fontSize: 10.5, color: 'var(--color-ink4)', marginTop: 4, lineHeight: 1.5 }}
@@ -1028,7 +1171,26 @@ export default function Classroom() {
                   addScheduleMany(items)
                   setSchedReview(null)
                   setSchedErr('')
-                  push({ text: `已导入 ${rows.length} 条课`, tone: 'ok' })
+                  /*
+                   * 追加了多少要**明说**（不许静默）：认不出班名的那几条照样入库了，
+                   * 只是在教室里不会显示 —— 这句话就是"上一批怎么还有旧行"的答案。
+                   */
+                  const hidden = rows.filter((r) => classMark(r) === 'red').length
+                  if (hidden) {
+                    push({
+                      text: `已导入 ${rows.length} 条课`,
+                      tone: 'warn',
+                      desc: `${hidden} 条没认出班名，教室里不会显示`,
+                    })
+                  } else {
+                    push({
+                      text:
+                        existing > 0
+                          ? `已导入 ${rows.length} 条课（本班原有 ${existing} 条，没有顶掉）`
+                          : `已导入 ${rows.length} 条课`,
+                      tone: 'ok',
+                    })
+                  }
                 }}
               >
                 确认导入（{schedReview.length} 条）
@@ -1043,12 +1205,17 @@ export default function Classroom() {
         <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.7, marginBottom: 8 }}>
           把课表复制粘贴进来即可。识别出来会先让你<b>核对时间</b>，不会直接入库。
         </p>
+        {pasteHint ? (
+          <p style={{ fontSize: 11.5, color: 'var(--color-bad)', lineHeight: 1.7, marginBottom: 8 }}>
+            {pasteHint}
+          </p>
+        ) : null}
         <textarea
           className="input"
           rows={11}
           value={pasteText}
           onChange={(e) => setPasteText(e.target.value)}
-          placeholder={'一行一条，例如：\n周一 08:00-08:40 英语\n周一 08:50-09:30 语文\n周三 10:50-11:30 化学'}
+          placeholder={pasteSample}
           style={{ width: '100%', fontFamily: 'inherit', lineHeight: 1.7, resize: 'vertical' }}
         />
         <div className="mt-3 flex gap-2">
@@ -1063,7 +1230,11 @@ export default function Classroom() {
               const parsed = parseScheduleText(pasteText, classes)
               setPasteOpen(false)
               if (!parsed.items.length) {
-                setSchedErr('没解析出课程。按「周一 08:00-08:40 英语」一行一条写最稳。')
+                setSchedErr(
+                  klass?.name
+                    ? `没解析出课程。一行一条写最稳，例如「周一 08:00-08:40 ${klass.name} 英语」。`
+                    : '没解析出课程。一行一条写最稳，例如「周一 08:00-08:40 高二(1)班 英语」。',
+                )
                 return
               }
               setSchedErr('')

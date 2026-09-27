@@ -121,14 +121,31 @@ const ROOM_RE =
 const OTHER_KW = /备课|教研|会议|活动|培训|值班|例会|讲座|监考|阅卷|自习|升旗|社团/
 
 function matchClass(title: string, classes: Klass[]): string | undefined {
+  return findByName(title, classes)?.id
+}
+
+/** 上面那一步的内部：认出的是哪一行（`matchClass` 只要 id，核对页要名字给人看） */
+function findByName(title: string, classes: Klass[]): Klass | undefined {
   const flat = title.replace(/[()（）\s]/g, '')
   for (const c of classes) {
     if (!c.name) continue
-    if (title.includes(c.name)) return c.id
+    if (title.includes(c.name)) return c
     const loose = c.name.replace(/[()（）\s]/g, '')
-    if (loose && flat.includes(loose)) return c.id
+    if (loose && flat.includes(loose)) return c
   }
   return undefined
+}
+
+/**
+ * 标题里认出来的**班名**（认不出返回 `undefined`）。
+ *
+ * 🔴 这个函数存在的唯一理由是**核对页要能说出"这条教室端会不会显示"**，
+ * 而那个判据必须和真正入库时用的**是同一套**（`matchClass` 就是它）——
+ * 在页面里另写一遍 `title.includes(c.name)` 迟早在括号/空格上分叉，
+ * 于是核对页说"认得"，教室里却一条都不显示。判据只有一处（§12.3 I13）。
+ */
+export function matchClassName(title: string, classes: Klass[]): string | undefined {
+  return findByName(title, classes)?.name
 }
 
 function build(

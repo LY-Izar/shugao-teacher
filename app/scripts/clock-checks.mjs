@@ -58,6 +58,12 @@ const { ranked } = await import('../src/lib/wrongbook.ts')
 /* 🆕 每日名言（2026-09-29 用户拍板）：库与取句口径都从源码里拿，脚本里不许再抄一份 */
 const { DAILY_QUOTES, pickDailyQuote } = await import('../src/lib/quotes.ts')
 const { beijingNow } = await import('../src/lib/holiday.ts')
+/*
+ * 「这个班名认出来了吗」的判据**也从源码里拿**（`matchClassName`）——
+ * 它就是 `matchClass()` 内部那一步，教室端有没有这节课全靠它给不给 `classId`。
+ * 脚本里另写一遍 `title.includes(班名)` 就是两份实现，全角/半角括号上迟早分叉（§12.3 I13）。
+ */
+const { matchClassName, parseScheduleText } = await import('../src/lib/scheduleParse.ts')
 
 /* ---------------- 配置 ---------------- */
 
@@ -227,6 +233,30 @@ function readConsts(src, names) {
 async function readSource(url) {
   const { readFileSync } = await import('node:fs')
   return readFileSync(url, 'utf8')
+}
+
+/**
+ * 演示种子里那两个班（`seed.ts`）+ 一个**别的班**（用来演"认不出班名"）。
+ * ⚠️ 只在这里定义一次：核对页那几条断言的期望值全从它推。
+ */
+const CLASSES = [
+  { id: DEMO_CLASS_ID, name: DEMO_CLASS },
+  { id: 'c-demo-2', name: '高二(4)班' },
+  { id: 'c-demo-9', name: '高二(9)班' },
+]
+
+/**
+ * 核对页每一条会显示成什么 —— **照 `Classroom.tsx` 里 `classMark` 的三态**：
+ *   `ok`（认出本班，绿）/ `red`（班名认不出，红，教室端不显示）/ `unknown`（读不到班级列表，灰）
+ * ⚠️ 判据用**产品那份** `matchClassName`（`matchClass` 的内部那一步），不另写一份。
+ * ⚠️ `unknown` 不是 red：§三.4 三态 —— 没结论只能是灰。
+ */
+function classMark(title, classes, currentName) {
+  if (!classes.length) return 'unknown'
+  if (!String(title ?? '').trim()) return 'unknown'
+  const name = matchClassName(title, classes)
+  if (!name) return 'red'
+  return name === currentName ? 'ok' : 'red'
 }
 
 /* ---------------- 日期/时刻小算术（静音时段、下课铃都要拿它算具体某天） ---------------- */
@@ -696,6 +726,104 @@ await withLock(async () => {
         throw new Error('没能从 Classroom.tsx 里读到 BUBBLE_MIN_MS / BUBBLE_MS_PER_CHAR')
       }
 
+      /* ================= 第 -1 节：「粘贴课表」的示例必须带班名 =================
+       *
+       * 现场（用户 2026-09-28 实测）：在教室端粘了课表、**教室里看不见**，
+       * 屏上也没说为什么不显示。查下来是粘贴框的示例写的是「周一 08:00-08:40 英语」——
+       * 没有班名；而这条链路里 `classId` 只能从标题里的班名认出来（`matchClass`），
+       * 认不出就是空的，教室端那一条线（`scope='class'` + `classId === 本班`）一条都不显示。
+       * **示例在教人做一个"导进去看不见"的格式** —— 这一节把它钉住。
+       *
+       * 两条断言：
+       *   ① 源码里那句示例**由本班班名拼出来**（`klass.name`），而且是给 placeholder 用的；
+       *   ② 带班名的示例**真的能解析出 classId**（拿真解析器跑一遍，不是看字符串像不像）。
+       * 反向对照：把示例换回不带班名的写法 → ① 当场红；把示例换成"语文 张老师"→ ② 当场红
+       * （② 那条就在下面，跑的是同一套解析器）。
+       */
+      say('【准备】粘贴课表的示例必须带班名（教室端「粘了看不见」那一例）')
+      {
+        const dyn =
+          /placeholder=\{pasteSample\}/.test(srcClassroom) && /pasteSample[\s\S]{0,600}?klass\.name/.test(srcClassroom)
+        check(
+          dyn,
+          '粘贴框的示例由**当前班名**拼出来（不是写死的"某班"，也不是不带班名的老写法）',
+          dyn ? 'placeholder={pasteSample} 且 pasteSample 里用了 klass.name' : '源码里找不到 klass.name 拼的示例',
+          '老写法是「一行一条，例如：\\n周一 08:00-08:40 英语」——照着写导进去 classId 是空的',
+        )
+        const PLAIN = parseScheduleText('周一 08:00-08:40 英语', CLASSES)
+        const WITH_NAME = parseScheduleText(`周一 08:00-08:40 ${DEMO_CLASS} 英语 张老师`, CLASSES)
+        check(
+          PLAIN.items.length === 1 && !PLAIN.items[0].classId && WITH_NAME.items[0]?.classId === DEMO_CLASS_ID,
+          '反向对照：**不带班名**的写法解析出来 classId 是空的（教室端不会显示），带班名的才有',
+          `不带班名 → classId=${PLAIN.items[0]?.classId ?? '(空)'}；带班名 → classId=${WITH_NAME.items[0]?.classId ?? '(空)'}`,
+          '这条证明"示例有没有班名"不是文案问题：它就是"教室里看不看得见"',
+        )
+      }
+
+      /* ================= 第 0 节：核对页的"教室端会不会显示"判据（三态 + 计数） =================
+       *
+       * 核对页原来只把行摊开，**不说哪一条 `classId` 是空的** —— 用户"粘了看不见"时
+       * 屏上没有任何提示。现在每一条都给一个标记，判据 = `matchClassName`（与入库同源）。
+       *
+       * 这一节量的是**纯函数那一层**（`classMark` 的输入输出，见 lib/scheduleParse.ts），
+       * 页面上那个标记/红横幅由浏览器那一段再量一次（直接数 `[data-cf-mark]` 节点）。
+       *
+       * 🔴 三态纪律（AGENTS.md §三.4）：班级列表**没读到**时是 `unknown`（灰），
+       *    **不是** `red` —— "没结论"绝不能红。
+       */
+      say('【准备】核对页的"教室端会不会显示"：认出来 / 没认出来 / 读不到班级列表')
+      {
+        const L = [
+          `周四 08:55-09:35 ${DEMO_CLASS} 语文 张老师`,
+          '周四 11:05-11:45 英语 陈老师',
+          `周四 14:00-14:40 高二(9)班 化学 李老师`,
+        ]
+        const rows = parseScheduleText(L.join('\n'), CLASSES).items
+        const marks = rows.map((r) => classMark(r.title, CLASSES, DEMO_CLASS))
+        check(
+          rows.length === 3 && marks.join(',') === 'ok,red,red',
+          '一批里混着"认出来 / 没认出来"时，标记逐行分得开（三行 → ok,red,red）',
+          `标题 ${rows.map((r) => `「${r.title}」`).join(' / ')} → ${marks.join(',')}`,
+          '第 2 行没写班名、第 3 行写的是别的班：两条都不会在教室里显示',
+        )
+        check(
+          marks.filter((m) => m === 'red').length === 2,
+          '这一批"教室里不会显示"的条数 = 2（横幅要报的就是这个数）',
+          `red 计数 = ${marks.filter((m) => m === 'red').length}`,
+        )
+        check(
+          marks.filter((m) => m === 'ok').length === 1 && marks[0] === 'ok',
+          '认出来的那条是绿的（用真班名写的第 1 行）',
+          `第 1 行 = ${marks[0]}`,
+        )
+        /* 🔴 三态：读不到班级列表 → 灰 */
+        check(
+          classMark(`周四 08:55-09:35 ${DEMO_CLASS} 语文 张老师`, [], DEMO_CLASS) === 'unknown',
+          '🔴 读不到班级列表时是 **unknown（灰）**，不是 red（"没结论"不许红）',
+          'classes=[] → unknown',
+          '§三.4：探测没结论 → 灰；红只在"确实坏了"时出现',
+        )
+        /* 反向对照：把班名的匹配拿掉 → 上面那些 ok 必须变红（对照本身也要能红） */
+        const noMatch = parseScheduleText(`周四 08:55-09:35 ${DEMO_CLASS} 语文 张老师`, []).items
+        check(
+          noMatch.length === 1 && !noMatch[0].classId && classMark(noMatch[0].title, [], DEMO_CLASS) !== 'ok',
+          '反向对照：班级列表为空时，**带班名的那一行也给不出 ok**（不会"看着认出来了"其实没有）',
+          `classId=${noMatch[0]?.classId ?? '(空)'}，mark=${classMark(noMatch[0].title, [], DEMO_CLASS)}`,
+        )
+        check(
+          classMark('   ', CLASSES, DEMO_CLASS) === 'unknown',
+          '标题还没填的行不算"没认出班名"（那是"待补全"，不占红）',
+          '空标题 → unknown',
+        )
+        check(
+          classMark(`周四 08:55-09:35 ${DEMO_CLASS} 语文 张老师`, CLASSES, DEMO_CLASS) === 'ok' &&
+            parseScheduleText(`周四 08:55-09:35 ${DEMO_CLASS} 语文 张老师`, CLASSES).items[0].classId ===
+              DEMO_CLASS_ID,
+          '页面那个标记与真正入库的 classId **同源**：标 ok 的那行，解析出的 classId 就是本班',
+          `mark=ok；解析 classId=${parseScheduleText(`周四 08:55-09:35 ${DEMO_CLASS} 语文 张老师`, CLASSES).items[0].classId}`,
+        )
+      }
+
       /* ---- 假期日期不从天上掉下来：直接从官方数据里挑，并核对它的性质 ---- */
       const holiday = srcHolidays.match(/name: '中秋节', start: '([\d-]+)', end: '([\d-]+)'/)
       const makeup = srcHolidays.match(/workdays: \[([^\]]+)\]/)
@@ -790,6 +918,35 @@ await withLock(async () => {
       const reviewed = await page.evaluate(() =>
         [...document.querySelectorAll('textarea, input.input')].length,
       )
+      /*
+       * 核对页上那三行"教室端会不会显示"必须**真的渲染出来** ——
+       * 上面第 -1/0 节量的是判据，这里量的是屏上有没有。
+       * 这一次粘的 4 行都带本班班名 → 4 绿、0 红、没有红横幅。
+       */
+      const marks1 = await page.evaluate(() => {
+        const all = [...document.querySelectorAll('[data-cf-mark]')].map((n) =>
+          n.getAttribute('data-cf-mark'),
+        )
+        return {
+          all,
+          okText: [...document.querySelectorAll('[data-cf-mark="ok"]')].every((n) =>
+            n.textContent.includes('教室端会显示'),
+          ),
+          banner: [...document.querySelectorAll('div')].some((n) =>
+            /条没认出班名，教室里不会显示/.test(n.textContent ?? ''),
+          ),
+        }
+      })
+      check(
+        marks1.all.length === 4 && marks1.all.every((m) => m === 'ok') && marks1.okText,
+        '核对页逐行标出"教室端会显示"：这次 4 条全认出来了 → 4 个绿标、没有一个红的',
+        `data-cf-mark = [${marks1.all.join(', ')}]`,
+      )
+      check(
+        !marks1.banner,
+        '反向对照：**全都认出来**时不弹红横幅（红横幅只该在真有不显示的行时出现）',
+        marks1.banner ? '屏上出现了"条没认出班名"的红横幅' : '屏上没有红横幅',
+      )
       await page.getByRole('button', { name: /确认导入（\d+ 条）/ }).click()
       await page.waitForTimeout(600)
 
@@ -811,6 +968,226 @@ await withLock(async () => {
         `class=${saved.cls.length} 条，班号 ${[...new Set(saved.cls.map((r) => r[4]))].join('/')}`,
         `不写班名的话 matchClass 给不出 classId，教室端一条都不显示`,
       )
+
+      /* ================= 第 0.5 步：重复导入 + 混着一批 + 「怎么删」 =================
+       *
+       * `addScheduleMany` 是**只追加**（名字就写着 Many）：粘两次 = 两批都在。
+       * 所以口径是 **(b) 不去重、但导入前明说**（§重复导入）：核对页要报
+       * 「本班已有 N 条课，再导入会变成两批（旧的不会自动顶掉）」并给一条出路。
+       * **不许静默**（§三.5 不可写的路径要显式报错）。
+       *
+       * 同时量：一批里混着"认出来 / 没认出来"时，红标个数与横幅里的条数都要对。
+       */
+      say('【准备】再粘一次：旧课不顶掉（明说），并且逐行标出"教室里不会显示"的那几条')
+      {
+        const MIXED = `
+周四 14:00-14:40 ${DEMO_CLASS} 化学 李老师
+周五 15:45-16:25 英语 陈老师
+周五 16:35-17:15 高二(9)班 生物 赵老师
+`.trim()
+        await page.getByRole('button', { name: '粘贴课表' }).click()
+        const ph = await page.locator('textarea').getAttribute('placeholder')
+        check(
+          (ph ?? '').includes(DEMO_CLASS) && (ph ?? '').includes('一行一条'),
+          '粘贴框的 placeholder 里出现**当前班名**（用户照着写，导入才看得见）',
+          `placeholder 第一、二行：${short((ph ?? '').split('\n').slice(0, 2).join(' / '), 120)}`,
+        )
+        await page.locator('textarea').fill(MIXED)
+        await page.getByRole('button', { name: '解析并核对' }).click()
+        await page.waitForTimeout(250)
+
+        const review = await page.evaluate(() => {
+          const marks = [...document.querySelectorAll('[data-cf-mark]')].map((n) =>
+            n.getAttribute('data-cf-mark'),
+          )
+          const banner = [...document.querySelectorAll('div')]
+            .map((n) => n.textContent ?? '')
+            .find((t) => /条没认出班名，教室里不会显示/.test(t))
+          const dup = [...document.querySelectorAll('div')]
+            .map((n) => n.textContent ?? '')
+            .find((t) => /已有\s*\d+\s*条课/.test(t) && /两批/.test(t))
+          return { marks, banner: banner ?? '', dup: dup ?? '' }
+        })
+        check(
+          review.marks.length === 3 && review.marks[0] === 'ok' && review.marks[1] === 'red' &&
+            review.marks[2] === 'red',
+          '混着一批：逐行标出"教室端会不会显示"（本班的 1 条绿、没认出的 2 条红）',
+          `data-cf-mark = [${review.marks.join(', ')}]`,
+          '第 2 行没写班名、第 3 行写的是别的班 —— 两条导进去教室端都不显示',
+        )
+        check(
+          /有\s*2\s*条没认出班名，教室里不会显示/.test(review.banner),
+          '🔴 横幅**明说有几条看不到**（这一批里 2 条）',
+          short(review.banner, 160),
+          '反向对照：去掉红横幅 → 这条当场红（就是把"粘了看不见"那件事咽回去）',
+        )
+        check(
+          /已有\s*4\s*条课/.test(review.dup) && /两批/.test(review.dup) && /先清掉旧/.test(review.dup),
+          '🔴 重复导入**不静默**：说清"本班已有 N 条课、再导会变成两批"，并给一条出路（清掉旧的）',
+          short(review.dup, 180),
+          '口径走 (b)：不去重（重贴一次就顶掉旧的会丢数据），明说 + 给出路',
+        )
+
+        const beforeSecond = await page.evaluate((k) => {
+          const st = JSON.parse(localStorage.getItem(k) ?? '{}').state ?? {}
+          return (st.schedule ?? []).filter((s) => s.scope === 'class').length
+        }, CLS_KEY)
+        await page.getByRole('button', { name: /确认导入（\d+ 条）/ }).click()
+        await page.waitForTimeout(600)
+        const afterSecond = await page.evaluate((k) => {
+          const st = JSON.parse(localStorage.getItem(k) ?? '{}').state ?? {}
+          const rows = (st.schedule ?? []).filter((s) => s.scope === 'class')
+          return { n: rows.length, noClass: rows.filter((s) => !s.classId).length }
+        }, CLS_KEY)
+        check(
+          afterSecond.n === beforeSecond + 3 && afterSecond.noClass === 2,
+          '重复导入的行为与上面说的一致：**只追加**（4 → 7 条），其中 2 条 classId 是空的',
+          `导入前 ${beforeSecond} 条 → 导入后 ${afterSecond.n} 条；classId 为空 ${afterSecond.noClass} 条`,
+          '这两条空 classId 就是"上一批粘进去、教室里看不见"的那种行 —— 所以必须能删掉',
+        )
+      }
+
+      /*
+       * 🔧 只给**跑反向对照**用的临时开关（正常跑不受影响、不设它就没有任何变化）：
+       * 上面那几节（粘贴示例 / 核对页标记 / 重复导入）跑完就收工，不跑后面十来分钟的
+       * 下课铃 / 静音 / 呼叫场景。改这一块时整套要几分钟，这几条只要几十秒。
+       * ⚠️ 带了它就**不会**跑完整的门禁，别在正式验收里用。
+       */
+      if (process.env.SHUGAO_ONLY_PASTE) {
+        console.log('\n（SHUGAO_ONLY_PASTE：只跑到「粘贴 / 核对 / 重复导入」这一节）')
+        return
+      }
+
+      /* ================= 第 0.6 步：教室端没有删课入口 —— 清空入口在核对页里 =================
+       *
+       * 现场问的第二个问题：「上次那批怎么删？」查下来：**教师端「日程表」只看 `scope!=='class'`**
+       * （Schedule.tsx: mine = schedule.filter(s => s.scope !== 'class')），
+       * **管理台没有课表那一页** —— 也就是说界面上**根本没有**删班级课表的地方，
+       * 以前只能进 SQL（`removeSchedule` 只有一个调用点，只删 `scope='mine'` 的行）。
+       * 现在把入口放在**核对页那条警告里**（就是"再导会变成两批"的那句旁边）。
+       *
+       * 这一段开一个**独立 context**：删完本班课表会破坏后面所有场景的前提，
+       * 不能在主 context 里删（那段"教室端看不到"的断言全靠这 7 条）。
+       */
+      say('【准备】删班级课表的入口：核对页的「先清掉旧的 N 条」（独立 context，不污染后面）')
+      {
+        let iso = null
+        try {
+          /* ⚠️ 新 context = 全新 localStorage（会落在 /login）→ 这里要把主 context 那套
+             登录态 + 设备角色 + 假时钟重来一遍，否则页面根本不进教室端。 */
+          iso = await browser.newContext({ viewport: { width: 1440, height: 900 }, locale: 'zh-CN' })
+          await iso.clock.install({ time: new Date(SEED_TIME) })
+          await iso.addInitScript(() => {
+            try {
+              localStorage.setItem('shugao.deviceRole', 'teacher')
+              const cur = JSON.parse(localStorage.getItem('shugao.teacher.v1') ?? '{}')
+              if (!cur?.state?.teacher) {
+                localStorage.setItem(
+                  'shugao.teacher.v1',
+                  JSON.stringify({
+                    state: { teacher: { id: 't-1', name: '王老师', subject: '物理', school: '树高中学' } },
+                    version: 1,
+                  }),
+                )
+              }
+            } catch {
+              /* 注不进去就算了：下面那句断言会当场红 */
+            }
+          })
+          const ip = await iso.newPage()
+          await ip.addInitScript(() => {
+            try {
+              window.confirm = () => true
+            } catch {
+              /* 同上 */
+            }
+          })
+          await ip.goto(`${BASE}/classroom`, { waitUntil: 'networkidle' })
+          // 等演示种子 hydrate 完（classes 非空）再改存档，否则改完会被随后的 persist 覆盖
+          await ip.waitForFunction(
+            () => {
+              const st = JSON.parse(localStorage.getItem('shugao.teacher.v1') ?? '{}').state ?? {}
+              return (st.classes ?? []).length > 0
+            },
+            null,
+            { timeout: 15000 },
+          )
+          /*
+           * ⚠️ 只**改 schedule**、其余原样保留：persist 的那份 state 里还有 teacher / classes，
+           *    整份换掉的话 `klass` 会变成 undefined，核对页根本开不出来（那是自己把场景弄坏）。
+           */
+          await ip.evaluate((cid) => {
+            const raw = JSON.parse(localStorage.getItem('shugao.teacher.v1') ?? '{}')
+            raw.state = raw.state ?? {}
+            raw.state.schedule = [
+              {
+                id: 'sch-del-1',
+                weekday: 4,
+                start: '08:55',
+                end: '09:35',
+                title: '语文 张老师',
+                classId: cid,
+                kind: 'class',
+                notify: true,
+                scope: 'class',
+              },
+              {
+                id: 'sch-del-2',
+                weekday: 5,
+                start: '10:50',
+                end: '11:30',
+                title: '化学 李老师',
+                classId: cid,
+                kind: 'class',
+                notify: true,
+                scope: 'class',
+              },
+            ]
+            localStorage.setItem('shugao.teacher.v1', JSON.stringify(raw))
+          }, DEMO_CLASS_ID)
+          await ip.goto(`${BASE}/classroom`, { waitUntil: 'networkidle' })
+          await ip.waitForTimeout(400)
+          note(
+            `独立 context 里先放了 2 条本班旧课；` +
+              `存档里 scope=class 现有 ${await ip.evaluate(() => {
+                const st = JSON.parse(localStorage.getItem('shugao.teacher.v1') ?? '{}').state ?? {}
+                return (st.schedule ?? []).filter((s) => s.scope === 'class').length
+              })} 条`,
+          )
+          await ip.getByRole('button', { name: '粘贴课表' }).click()
+          await ip.locator('textarea').fill(`周四 14:00-14:40 ${DEMO_CLASS} 化学 李老师`)
+          await ip.getByRole('button', { name: '解析并核对' }).click()
+          await ip.waitForTimeout(250)
+          const btn = ip.getByRole('button', { name: /先清掉旧的 \d+ 条/ })
+          const btnSeen = (await btn.count()) > 0
+          if (btnSeen) await btn.click()
+          await ip.waitForTimeout(400)
+          const afterDel = await ip.evaluate(() => {
+            const st = JSON.parse(localStorage.getItem('shugao.teacher.v1') ?? '{}').state ?? {}
+            return (st.schedule ?? []).filter((s) => s.scope === 'class').length
+          })
+          const toast = await ip.evaluate(() =>
+            [...document.querySelectorAll('div')]
+              .map((n) => n.textContent ?? '')
+              .find((t) => /已清掉旧课表/.test(t)) ?? '',
+          )
+          check(
+            btnSeen && afterDel === 0,
+            '🔴 界面上**有**删班级课表的入口：核对页「先清掉旧的 N 条」→ 本班旧课清零',
+            `按钮${btnSeen ? '在' : '不在'}；${
+              btnSeen ? '点完 scope=class 剩' : '没点到；scope=class 仍为'
+            } ${afterDel} 条`,
+            '以前没有任何界面入口（教师端日程表只看 scope!=="class"、管理台没有课表页）',
+          )
+          check(
+            /已清掉旧课表/.test(toast),
+            '清掉之后**有回执**（不是悄悄删掉）',
+            short(toast, 120) || '(没看到回执)',
+          )
+        } finally {
+          if (iso) await iso.close()
+        }
+      }
 
       // ②.5 端到端验一次**粘贴链路的真实数据**：库里的标题是「高二(3)班 语文 张老师」，
       //      direct 进教室端看卡上写什么（这一段就是"标题里必须有班名"的现场）

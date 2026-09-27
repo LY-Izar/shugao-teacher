@@ -12,7 +12,7 @@ import { Button, Sheet, Tag } from './ui'
 import type { Klass, ScheduleItem } from '../data/types'
 import { WEEKDAY_TEXT } from '../data/types'
 import { docxToText } from '../lib/docx'
-import { PERIOD_SLOTS, parseScheduleRows, parseScheduleText } from '../lib/scheduleParse'
+import { PERIOD_SLOTS, matchClassName, parseScheduleRows, parseScheduleText } from '../lib/scheduleParse'
 import { normalizeTime, toMinutes } from '../lib/schedule'
 import { xlsxToRows } from '../lib/xlsx'
 
@@ -146,7 +146,15 @@ export function ScheduleBatch({
       setErr('至少填一条：课程名 + 起止时间（结束要晚于开始）')
       return
     }
-    const cls = (name: string) => classes.find((c) => name.includes(c.name))?.id
+    /*
+     * 认班名**走解析器那一套**（`matchClassName`）—— 这里原来是自己写的
+     * `name.includes(c.name)`：与 `scheduleParse.ts` 的 `matchClass` 是两份实现，
+     * 全角/半角括号、空格上的差别迟早分叉（同一判据只有一处，§12.3 I13）。
+     */
+    const cls = (name: string) => {
+      const hit = matchClassName(name, classes)
+      return classes.find((c) => c.name === hit)?.id
+    }
     const payload = valid.map((r) => {
       const title = r.title.trim()
       const isOther = /备课|教研|会议|活动|培训|值班|例会|讲座|监考|阅卷|升旗|社团/.test(title)
@@ -240,6 +248,11 @@ export function ScheduleBatch({
               value={paste}
               onChange={(e) => setPaste(e.target.value)}
             />
+            {/* 标题里写不写班名，决定的**不是这一页**（自己的排课表），而是教室里那块屏：
+                教室端的课靠 `classId` 认班，而 `classId` 只能从标题里的班名认出来。 */}
+            <p style={{ fontSize: 11, color: 'var(--color-ink3)', marginTop: 6, lineHeight: 1.6 }}>
+              要让这节课出现在教室里那块屏上，标题里要带上班名（像上面第一条）。
+            </p>
             <Button
               size="sm"
               className="mt-2"
