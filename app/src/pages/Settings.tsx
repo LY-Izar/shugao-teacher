@@ -330,6 +330,29 @@ export default function Settings() {
               }
             />
           </div>
+          {/*
+            🔴 2026-10-09：**退出登录从整页最底下挪到这里**（用户实测："我的"这一页很长，
+               那个按钮在最底下 = 找不到 = "应该有一个"）。
+               ⚠️ 是**挪，不是复制** —— 这一页上只有这一处（`shots.mjs` 有一条断言钉着）。
+               ⚠️ 那两句行为**一个字都没改**（`signOutEverywhere()` + `navigate('/login', {replace:true})`）：
+                  一次误触 = 全校 100 多人重登，这套口径是用户拍板过的，别顺手"优化"它。
+               ⚠️ 也不碰 `MaintenanceGate` 那句"维护期间不会被登出"的口径（那是**另一件事**：
+                  它说的是"维护不会把你踢出去"，与这个按钮无关）。
+          */}
+          <div className="px-4 pb-4">
+            <div className="border-t border-line pt-3">
+              <Button
+                block
+                icon={<IconLogout size={16} />}
+                onClick={() => {
+                  void signOutEverywhere()
+                  navigate('/login', { replace: true })
+                }}
+              >
+                退出登录
+              </Button>
+            </div>
+          </div>
         </Panel>
 
         {/* 日程表（教师个人的排课表，scope='mine' —— 与班级课表是两套数据） */}
@@ -852,17 +875,6 @@ export default function Settings() {
             ))}
           </Panel>
         </div>
-
-        <Button
-          block
-          icon={<IconLogout size={16} />}
-          onClick={() => {
-            void signOutEverywhere()
-            navigate('/login', { replace: true })
-          }}
-        >
-          退出登录
-        </Button>
       </Page>
 
       {/* 编辑教师身份 */}

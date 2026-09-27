@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Page } from '../components/AppShell'
-import { IconAlert, IconCheck, IconPlus, IconRefresh, IconUser, IconX } from '../components/icons'
+import { IconAlert, IconCheck, IconPlus, IconRefresh, IconTrash, IconUser, IconX } from '../components/icons'
 import { Button, Empty, Panel, PageHead, Sect, Sheet, Tag } from '../components/ui'
 import { useStore, useToast } from '../data/store'
 import {
@@ -22,6 +22,11 @@ import { DEPARTMENTS, departmentName } from '../lib/departments'
 import { goBackOr } from '../lib/back'
 import { canAssignRoles, canManageTeachers, roleName } from '../lib/roles'
 import { SUBJECTS, asSubjectCode, subjectName } from '../lib/subjects'
+import {
+  deleteTeacherAccount,
+  probeTeacherDelete,
+  type TeacherDeleteProbe,
+} from '../data/remote'
 import {
   TEACHER_PROFILE_FIELDS,
   loadTeacherProfiles,
@@ -131,6 +136,13 @@ export default function TeacherAccounts() {
    */
   const [profiles, setProfiles] = useState<Map<string, TeacherProfile>>(new Map())
   const [profileErr, setProfileErr] = useState<string | null>(null)
+  /**
+   * 🆕 2026-10-09 **删除**那一个入口摆不摆 —— 🔴 判据是**服务端回的那个布尔**
+   * （`/api/admin/teacher-delete` 的 `probe`，它拿你的 JWT 去问数据库的
+   * `can_manage_teachers()`）。这一页**不在这里另写角色判断**（`canRevoke` 那套先例）。
+   * `null` = 还没问过 / 问不通 → **不摆**（宁可不摆，也不摆一个点了会被拒的按钮）。
+   */
+  const [delPerm, setDelPerm] = useState<TeacherDeleteProbe | null>(null)
 
   // 读名单 + 状态。⚠️ 不写成 useCallback：这一页没有需要稳定引用的下游，
   // 而 effect 里"同步 setState"的告警会盯着 useCallback 里的 setState（与 Files.tsx 同一写法）
@@ -155,6 +167,12 @@ export default function TeacherAccounts() {
       setProfiles(new Map())
       setProfileErr(p.message)
     }
+    /*
+     * 🆕 删除入口的**许可**：与名单分开问（它走的是另一条 Function、另一档判据）。
+     * 问不通 → `null` → 不摆入口（**不报成"你不能删"**：那是"读不到"，不是"没权限"）。
+     */
+    const dp = await probeTeacherDelete()
+    setDelPerm(dp.ok ? dp.data : null)
   }
 
   // 首屏拉一次（loading 初值就是 true，这里不再同步 setState）
@@ -408,12 +426,23 @@ export default function TeacherAccounts() {
         canAssign={canAssign}
         canManage={canManage}
         isMe={target?.id === userId}
+        /*
+         * 🆕 删除入口：**只看服务端回的那个布尔**（外加"这是最后一位最高管理员"那一格 ——
+         * 它也是服务端给的，前端只是**不摆一个点了必然被拒的按钮**；闸门仍在服务端）。
+         */
+        canDelete={delPerm?.canDelete === true}
+        isLastSuper={target != null && target.id === (delPerm?.lastSuperId ?? '')}
         profile={target ? (profiles.get(target.id) ?? null) : null}
         profileErr={profileErr}
         onProfileSaved={afterProfileSaved}
         onClose={() => setTarget(null)}
         onChanged={afterRoleChange}
         onRenamed={afterRename}
+        /* 🔴 删完：关面板 + **重拉名单**（那一行要真的从屏上消失，不是只关掉弹层） */
+        onDeleted={() => {
+          setTarget(null)
+          void load()
+        }}
       />
     </>
   )
@@ -759,6 +788,8 @@ function TeacherSheet({
   dir,
   canAssign,
   canManage,
+  canDelete,
+  isLastSuper,
   isMe,
   profile,
   profileErr,
@@ -766,12 +797,21 @@ function TeacherSheet({
   onClose,
   onChanged,
   onRenamed,
+  onDeleted,
 }: {
   teacher: DirTeacher | null
   dir: Directory | null
   canAssign: boolean
   /** 🆕 能不能维护**档案属性**（部门归属 / 显示姓名 / 🆕教师档案）—— 与"建号"同一档：超管 / 教务处 / 办公室主任 */
   canManage: boolean
+  /**
+   * 🆕 2026-10-09 能不能**真删**这位老师 —— 🔴 判据是**服务端回的那一个布尔**
+   * （`/api/admin/teacher-delete` 的 `probe` → 它拿调用者 JWT 去问 `can_manage_teachers()`）。
+   * 这里只是"摆不摆入口"，服务端在 `delete` 那一支**再判一次**。
+   */
+  canDelete: boolean
+  /** 服务端说"这是最后一位最高管理员"（删了平台就没人管了）→ 不摆那个按钮 */
+  isLastSuper: boolean
   isMe: boolean
   /** 🆕 这位老师的档案（`teacher_profiles`）；`null` = 没读到 / 没这行 —— 两者由 `profileErr` 分开说 */
   profile: TeacherProfile | null
@@ -783,6 +823,8 @@ function TeacherSheet({
   onChanged: (teacherId: string) => Promise<void>
   /** 🆕 改完姓名：把新名字就地写回那一行（`id` + `name`） */
   onRenamed: (id: string, name: string) => void
+  /** 🆕 删完：关面板 + 重拉名单（那一行要真的消失） */
+  onDeleted: () => void
 }) {
   const push = useToast((s) => s.push)
   const [busy, setBusy] = useState(false)
@@ -802,6 +844,15 @@ function TeacherSheet({
     phone: profile?.phone ?? '',
     email: profile?.email ?? '',
   }))
+  /**
+   * 🆕 删除的二次确认（**两步**，与班级页「删除这个走班班」同款）：
+   * 第一步点按钮 → 把代价摊开；第二步才是真删。
+   * ⚠️ 用户点名：**二次确认必须说清代价**，不能只写"确定删除吗"。
+   */
+  const [confirmDel, setConfirmDel] = useState(false)
+  /** 🆕 删除失败要**显式上屏**（不许静默）—— 这一句就摆在按钮下面 */
+  const [delErr, setDelErr] = useState<string | null>(null)
+  const [deleting, setDeleting] = useState(false)
 
   if (!teacher || !dir) {
     return (
@@ -1251,6 +1302,106 @@ function TeacherSheet({
         </div>
         {pwd ? <div className="mt-2"><CopyRow label="新密码" value={pwd} onCopy={push} /></div> : null}
       </div>
+
+      {/*
+        ---- 🆕 删除账号（2026-10-09）----
+        🔴 摆不摆**只看服务端那一个布尔**（`canDelete`）+ 服务端给的"最后一位最高管理员"那一格。
+           前端这里**不判角色**（`canRevoke` / `canPin` 那套先例）。
+        🔴 「删自己」也不摆：`isMe` 那一位是服务端 probe 回来的 `selfId` 与这一行比出来的，
+           而服务端在 delete 那一支**再拒一次**（藏入口从来不是安全边界）。
+        ⚠️ 危险操作 → `variant="danger"`，而且**两步**：先说清代价，再删。
+      */}
+      {canDelete && !isMe && !isLastSuper ? (
+        <div className="mt-5 border-t border-line pt-4">
+          <span className="label">删除账号</span>
+          {confirmDel ? (
+            <>
+              <p style={{ fontSize: 12.5, color: 'var(--color-ink2)', lineHeight: 1.75 }}>
+                删除「{teacher.name}」是<b>真删</b>，不可恢复：他的作业记录 / 成绩 / 通知
+                会一并消失，登录账号也不能再用（平台上不再留副本）。
+              </p>
+              {delErr ? (
+                <div
+                  className="mt-2"
+                  style={{ fontSize: 12, color: 'var(--color-bad)', lineHeight: 1.7 }}
+                >
+                  {delErr}
+                </div>
+              ) : null}
+              <div className="mt-2 flex gap-2">
+                <Button
+                  block
+                  size="sm"
+                  disabled={deleting}
+                  onClick={() => {
+                    setConfirmDel(false)
+                    setDelErr(null)
+                  }}
+                >
+                  先不删
+                </Button>
+                <Button
+                  block
+                  size="sm"
+                  variant="danger"
+                  disabled={deleting}
+                  onClick={() => {
+                    if (deleting) return
+                    setDeleting(true)
+                    setDelErr(null)
+                    void (async () => {
+                      const r = await deleteTeacherAccount(teacher.id)
+                      setDeleting(false)
+                      if (!r.ok) {
+                        /* 🔴 失败**显式上屏**（这一栏 + 一条提示）：绝不静默 */
+                        setDelErr(r.detail ? `${r.message}（${r.detail}）` : r.message)
+                        push({ text: r.message, tone: 'bad', desc: r.detail })
+                        return
+                      }
+                      push({ text: `已删除「${teacher.name}」`, tone: 'ok' })
+                      onDeleted()
+                    })()
+                  }}
+                >
+                  {deleting ? '正在删除…' : '确认删除'}
+                </Button>
+              </div>
+            </>
+          ) : (
+            <>
+              <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.65 }}>
+                连着登录账号一起删掉。他的人和他的数据都不会留在平台上。
+              </p>
+              <div className="mt-2">
+                <Button
+                  block
+                  size="sm"
+                  variant="danger"
+                  icon={<IconTrash size={14} />}
+                  onClick={() => {
+                    setDelErr(null)
+                    setConfirmDel(true)
+                  }}
+                >
+                  删除这个账号
+                </Button>
+              </div>
+            </>
+          )}
+        </div>
+      ) : null}
+
+      {/* 不能删的两档，各自说清**为什么**（不摆一个点了必然被拒的按钮） */}
+      {canDelete && (isMe || isLastSuper) ? (
+        <div className="mt-5 border-t border-line pt-4">
+          <span className="label">删除账号</span>
+          <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.65 }}>
+            {isMe
+              ? '不能删除自己的账号 —— 那会立刻丢掉你现在的全部身份。'
+              : '这是最后一位最高管理员，删不得：零个最高管理员 = 谁也管不了平台。要交接的话，先把另一个人也设成最高管理员。'}
+          </p>
+        </div>
+      ) : null}
     </Sheet>
   )
 }

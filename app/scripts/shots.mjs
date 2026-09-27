@@ -7910,6 +7910,49 @@ await withLock(async () => {
         await annPage.fill('[data-feedback-input]', '作业导入的图太大，点导出没反应')
         await annPage.waitForTimeout(200)
         check(!(await submitBtn.isDisabled()), `${S2}：写了正文之后按钮可以点（本地模式点了也只会得到人话错误）`, 'disabled = false')
+
+        /*
+         * 🆕 2026-10-09：**登出按钮挪到显眼处**（用户实测原话：「（退出登录）应该有一个」——
+         *    而它本来就有，只是**在整页最底下**，而这一页很长 → 找不到）。
+         *    这一轮把它挪进**第一张卡（身份卡）**，与账号有关的事放在一起。
+         * 🔴 这里钉的是**真 DOM**（不是源码）：
+         *      ① 整页**只有 1 个**「退出登录」按钮 —— **挪，不是复制**；
+         *      ② 它在**第一张卡**里，而且排在后面那些节（备份与恢复 / 关于 / 更新日志）**之前**
+         *         —— 也就是真的从页尾挪上来了（不是挪到了另一个看不见的地方）。
+         * ⚠️ 反向对照：把那段按钮复制一份塞回页尾 → 这一条的 `count === 1` **当场红**。
+         *    源码那一侧（`signOutEverywhere()` 只有一处 + 那两句行为一个字没改）在
+         *    `rls-checks` 第二十四节，那边**真跑过**这个反向对照。
+         */
+        const logout = await annPage.evaluate(() => {
+          const txt = String(document.body.innerText)
+          const btns = [...document.querySelectorAll('button')].filter(
+            (b) => (b.innerText ?? '').replace(/\s+/g, '') === '退出登录',
+          )
+          const firstPanel = btns[0]?.closest('section.panel') ?? null
+          return {
+            count: btns.length,
+            iLogout: txt.indexOf('退出登录'),
+            /* 用**靠后**那一节当锚：「关于」在页头副标题里也出现（"账号 · 数据 · 关于"），拿它当锚会假绿 */
+            iBackup: txt.indexOf('备份与恢复'),
+            iLog: txt.indexOf('更新日志'),
+            /* "第一张卡"= 那块**身份卡**（它的标志是「任教班级」那一行），不靠 `.panel` 的先后顺序 */
+            inIdentityCard: firstPanel ? /任教班级/.test(firstPanel.innerText ?? '') : false,
+          }
+        })
+        check(
+          logout.count === 1,
+          `${S2}：🔴 整页**只有 1 个**「退出登录」按钮（**挪，不是复制**）`,
+          `数到 ${logout.count} 个`,
+        )
+        check(
+          logout.inIdentityCard &&
+            logout.iLogout >= 0 &&
+            logout.iBackup > logout.iLogout &&
+            logout.iLog > logout.iLogout,
+          `${S2}：🔴 它就在**身份卡**里（与「任教班级 / 我的身份 / 当前班级」同一张卡），` +
+            '排在「备份与恢复 / 更新日志」**之前** —— 真的挪到显眼处了',
+          `在身份卡里=${logout.inIdentityCard} · 退出登录=${logout.iLogout} < 备份与恢复=${logout.iBackup} < 更新日志=${logout.iLog}`,
+        )
         await shot(annPage, S2, '103-settings-feedback', { full: true })
       })
 

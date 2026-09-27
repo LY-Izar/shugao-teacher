@@ -49,10 +49,12 @@
  *   $env:RLS_NEGATIVE='p10-purge-no-confirm' ; node scripts/rls-checks.mjs # 拿掉旧科目数据的二次确认（不确认也能删）
  *   $env:RLS_NEGATIVE='p10-suspend-removes-members' ; node scripts/rls-checks.mjs # 让"休学也移出走班名单"（Q28 = B 明确否掉）
  *   $env:RLS_NEGATIVE='one-super-index-drop' ; node scripts/rls-checks.mjs     # 🆕 拿掉"全平台只有一个 super"那条部分唯一索引（插第二个超管必须变红）
+ *   $env:RLS_NEGATIVE='teacher-delete-noguard' ; node scripts/rls-checks.mjs   # 🆕 拿掉"不能删自己 / 最后一个超管"那两条护栏（必须变红）
+ *   $env:RLS_NEGATIVE='teacher-delete-trust-client' ; node scripts/rls-checks.mjs # 🆕 让删教师接口**不再自校验**（非管理员那条必须变红）
  *   （改的全是**内存里的 SQL 文本**，仓库文件一个字节都不动。）
  */
 
-import { readFileSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync } from 'node:fs'
 import { dirname, join, resolve as resolvePath } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -806,6 +808,24 @@ await withLock(async () => {
          * 那一支改的是**服务端源码**（`functions/api/classroom-account.ts` 的 `mayManage()`），
          * 真正动手的地方在第二十一节开头那个 `widened` 开关（与 `p5-lose-kind` 同一套路）。
          * 期望：那一节里"别的年级的年级主任"那几条**必须变红**。
+         */
+        return text
+      }
+      if (mode === 'teacher-delete-noguard') {
+        /*
+         * 🆕 第二十三节的负向对照：**SQL 一个字节都不动** ——
+         * 改的是**服务端源码**（`functions/api/admin/teacher-delete.ts` 里那两条护栏），
+         * 真正动手的地方在第二十三节开头那个 `modSrc` 开关（与 `room-account-wider` 同一套路）。
+         * 期望：那两条"不能删自己 / 不能删最后一个最高管理员"**必须变红**。
+         */
+        return text
+      }
+      if (mode === 'teacher-delete-trust-client') {
+        /*
+         * 🆕 第二十三节的负向对照②：**把"信前端"那一档改回来** ——
+         * 源码里那句 `if (!mayDelete) { …403… }` 被拿掉 = "服务端不做自校验"。
+         * 期望：第二十三节里"科任老师直接打接口 → 403 / 一次删除都没发出去"那几条**必须变红**。
+         * （SQL 一个字节都不动；真正动手的地方在第二十三节那个 `TRUST_CLIENT` 开关。）
          */
         return text
       }
@@ -7445,6 +7465,850 @@ await withLock(async () => {
     }
 
 
+
+    /* ============================================================
+       二十三、🆕 教师账号**真删除**（`functions/api/admin/teacher-delete.ts`）
+       ------------------------------------------------------------
+       用户口径（2026-10-09）：「教师管理里要能**真删**一个账号」（不是停用）。
+       删一个账号 = 删**两处**：`auth.users` 那一行 + `teachers` 那一行；
+       而删 `auth.users` 要 `service_role` → 所以它只能在服务端。
+
+       本节钉四件事，**全部在真库 + 真服务端源码上跑**（不是照着注释念）：
+         ① **哪些外键是级联、哪些要手工先清** —— 从 `pg_constraint.confdeltype` 里读出来逐条比对，
+            并核服务端那份 `RESTRICT_COLS` 与真库**逐字相同**；
+         ② **护栏不能被绕过**：非管理员 403（请求体里自称管理员也一样）/ 未登录 401 /
+            判据函数没建 503（**不是** 403）/ 不能删自己 400 / 不能删最后一个最高管理员 400；
+         ③ 删完**两处都没了**、子表**级联清干净**、那四列**被置空**（行还在）、审计**写在删除之前**；
+         ④ `service_role` **不外泄**：响应体 / 前端源码（去掉注释后）/ 本 Function 里都没有日志。
+
+       🔴 反向对照（`RLS_NEGATIVE=teacher-delete-noguard`）：把两条护栏从**内存里的源码文本**里
+          拿掉 → ② 里"不能删自己 / 不能删最后一个超管"那两条**必须变红**（改的是临时目录里的副本，
+          仓库一个字节都不动）。⚠️ 为了让它"红了也对得上"，那两条护栏用的是**专用夹具身份**，
+          而且排在本节最后 —— 对照跑起来真会删掉那两个夹具，但不会污染前面任何一条断言。
+       ============================================================ */
+    section('二十三、🆕 教师账号真删除：判据在服务端 · 两条护栏 · 外键先清后删 · service_role 不外泄')
+    {
+      /* ---------------- ① 外键清单：从**真库结构**里读出来 ---------------- */
+      const fkOf = async (confrel) =>
+        (
+          await db.query(
+            `select c.conrelid::regclass::text as tbl,
+                    a.attname as col,
+                    c.confdeltype::text as del
+               from pg_constraint c
+               join pg_attribute a on a.attrelid = c.conrelid and a.attnum = c.conkey[1]
+              where c.contype = 'f' and c.confrelid = $1::regclass
+              order by tbl, col`,
+            [confrel],
+          )
+        ).rows.map((r) => ({ k: `${r.tbl}.${r.col}`, del: String(r.del) }))
+      const casc = (rows) => rows.filter((r) => r.del === 'c').map((r) => r.k)
+      /**
+       * 🔴 **会拦住删除的那一批**：`confdeltype` 是 `a`（NO ACTION）或 `r`（RESTRICT）。
+       * ⚠️ `n`（SET NULL）**不在里面** —— 那种外键在删的时候数据库自己把列置空，
+       *    根本拦不住人（`admin_audit.actor_id` / `announcements.created_by` / `site_state.updated_by`
+       *    等七条都是 `n`）。一开始把"不是 cascade"都算成拦人的，是**假红**（这一轮真踩过）。
+       */
+      const setNull = (rows) => rows.filter((r) => r.del === 'n').map((r) => r.k)
+      const notCasc = (rows) => rows.filter((r) => r.del === 'a' || r.del === 'r').map((r) => `${r.k}(${r.del})`)
+
+      const RESTRICT_EXPECT = [
+        'classroom_accounts.created_by',
+        'student_subject_changes.changed_by',
+        'student_subject_changes.purged_by',
+        'student_subjects.updated_by',
+      ]
+
+      eq(
+        '① 指向 `auth.users` 的两张表**都是 cascade**（删登录账号 → 教师行 / 教室端账号行跟着走）',
+        casc(await fkOf('auth.users')).sort(),
+        ['classroom_accounts.id', 'teachers.id'],
+      )
+      const toTeachers = await fkOf('teachers')
+      eq(
+        '🔴 ① 指向 `teachers` 的外键里，**会拦住删除的恰好是这四列**（= 要手工先清的那一份清单）',
+        notCasc(toTeachers).sort(),
+        RESTRICT_EXPECT.map((k) => `${k}(a)`).sort(),
+      )
+      ok(
+        '🔴 ① 另外六条是 `on delete set null`（数据库自己置空，**不拦人**）—— 别把它们也算进"要手工清"里',
+        setNull(toTeachers).length === 6,
+        `${setNull(toTeachers).length} 条 set null · ${setNull(toTeachers).join(' / ')}`,
+      )
+      ok(
+        '🔴 ① 其余**全部 cascade**（任课关系 / 身份 / 部门 / 档案 / 作业 / 考试 / 通知 / 呼叫 / 课表 …）',
+        casc(toTeachers).length >= 14,
+        `${casc(toTeachers).length} 条 cascade · ${casc(toTeachers).join(' / ')}`,
+      )
+      {
+        const src = readFileSync(resolvePath(APP, 'functions/api/admin/teacher-delete.ts'), 'utf8')
+        const declared = [...src.matchAll(/\{ table: '([a-z_]+)', col: '([a-z_]+)' \}/g)].map(
+          (m) => `${m[1]}.${m[2]}`,
+        )
+        eq(
+          '🔴 ① 服务端 `RESTRICT_COLS` 与真库那四列**逐字相同**（少一列 → 23503 整次回滚；多一列 → 白清一次）',
+          declared.sort(),
+          [...RESTRICT_EXPECT].sort(),
+        )
+        /*
+         * 反面：**不清那四列会怎样** —— 这一条不靠断言，靠下面"真删"那一步顺带验到：
+         *   `clearRestrict` 跑完之后才删得掉。这里只核一句"顺序不许颠倒"（先清后删）。
+         */
+        ok(
+          '🔴 ① 顺序**不许颠倒**：源码里 `clearRestrict(` 出现在 `deleteAuthUser(` 之前',
+          src.indexOf('await clearRestrict(env, id)') > 0 &&
+            src.indexOf('await clearRestrict(env, id)') < src.indexOf('const del = await deleteAuthUser(env, id)'),
+        )
+      }
+
+      /* ---------------- 夹具：一个有"历史"的老师 + 一个被 stub 成"登录里没有"的 ---------------- */
+      const TD = {
+        victim: mk('a2', 1),
+        victim2: mk('a2', 6),
+        spare: mk('a2', 2),
+        room: mk('a2', 3),
+        caller: mk('a2', 4),
+        callerSelf: mk('a2', 5),
+        cls: mk('c9', 1),
+        cs: mk('c9', 2),
+        stu: mk('54', 1),
+        asg: mk('e2', 1),
+        role: mk('43', 1),
+        asg2: mk('e2', 2),
+      }
+      await db.exec(`
+    insert into auth.users (id, email, raw_user_meta_data) values
+      ('${TD.victim}',     'victim@shugao.test',  '{"name":"待删老师","subject":"物理","subject_code":"physics"}'::jsonb),
+      ('${TD.spare}',      'spare@shugao.test',   '{"name":"备用老师","subject":"物理"}'::jsonb),
+      ('${TD.room}',       'g2-9@shugao.test',    '{"name":"高二(9)班教室"}'::jsonb),
+      ('${TD.caller}',     'delcaller@shugao.test','{"name":"教务干事","subject":"物理"}'::jsonb),
+      ('${TD.callerSelf}', 'delself@shugao.test', '{"name":"自删测试","subject":"物理"}'::jsonb),
+      ('${TD.victim2}',    'victim2@shugao.test', '{"name":"待删老师二号","subject":"物理"}'::jsonb);
+
+    -- 两个"能管账号"的调用者（§13.2：can_manage_teachers = super ∪ admin）
+    insert into teacher_roles (id, teacher_id, role, scope_type, scope_id) values
+      ('${mk('43', 5)}', '${TD.caller}',     'admin', 'school', (select id from schools order by created_at limit 1)),
+      ('${mk('43', 6)}', '${TD.callerSelf}', 'admin', 'school', (select id from schools order by created_at limit 1));
+
+    insert into classes (id, teacher_id, name, grade, year, school_id) values
+      ('${TD.cls}', '${TD.caller}', '高二(9)班', '高二', '2025', (select id from schools order by created_at limit 1));
+    insert into students (id, class_id, student_no, name) values ('${TD.stu}', '${TD.cls}', '1', '壬');
+
+    -- 他的"历史"：任课关系 / 身份 / 部门 / 档案 / 作业 —— 全部 cascade
+    insert into class_subjects (id, class_id, subject, subject_code, teacher_id)
+      values ('${TD.cs}', '${TD.cls}', '物理', 'physics', '${TD.victim}');
+    insert into teacher_roles (id, teacher_id, role, scope_type, scope_id)
+      values ('${TD.role}', '${TD.victim}', 'head_teacher', 'class', '${TD.cls}');
+    insert into teacher_departments (teacher_id, department) values ('${TD.victim}', 'academic');
+    insert into teacher_profiles (teacher_id, home_address, phone)
+      values ('${TD.victim}', '某路 1 号', '13900139000');
+    insert into assignments (id, class_id, teacher_id, title, subject, subject_code, assign_date, question_count)
+      values ('${TD.asg}', '${TD.cls}', '${TD.victim}', '9班物理练习1', '物理', 'physics', '2026-10-01', 5);
+    -- 备用老师也要有一条作业（第二条能删的路径）
+    insert into assignments (id, class_id, teacher_id, title, subject, subject_code, assign_date, question_count)
+      values ('${TD.asg2}', '${TD.cls}', '${TD.spare}', '9班物理练习2', '物理', 'physics', '2026-10-02', 5);
+
+    -- 🔴 那四列（**不级联**）：他建过教室端账号 / 改过学生的选科 —— 删之前要**置空**
+    insert into classroom_accounts (id, class_id, name, email, created_by)
+      values ('${TD.room}', '${TD.cls}', '高二(9)班教室', 'g2-9@shugao.local', '${TD.victim}');
+    insert into student_subjects (student_id, primary_code, second_codes, kind, updated_by)
+      values ('${TD.stu}', 'physics', '{}', 'standard', '${TD.victim}');
+    insert into student_subject_changes (id, student_id, before, after, changed_by, purged_at, purged_by)
+      values ('${mk('43', 7)}', '${TD.stu}', '{}'::jsonb, '{}'::jsonb, '${TD.victim}', now(), '${TD.victim}');
+    `)
+
+      /* ---------------- ②③④ 真服务端 onRequestPost + 真库 ---------------- */
+      const SVC = 'svc-teacher-delete-fixture'
+      const ENV = {
+        SUPABASE_URL: 'https://sb.shugao.test',
+        SUPABASE_ANON_KEY: 'anon-teacher-delete',
+        SUPABASE_SERVICE_ROLE_KEY: SVC,
+      }
+      let TOKEN_OF = new Map()
+      /** 那个老师在 stub 的 GoTrue 里"删掉时回 404"（= 造"登录里本来就没有他"那一条分支） */
+      const AUTH_404 = new Set([TD.spare])
+      /**
+       * 🔴 "先清那四列"这一步的**反向对照**：让 PATCH 变成**什么都不做**（200 + 0 行）——
+       * 于是"手工先清"等于没做，`auth.users` 那条 DELETE 会真的撞上 `23503`。
+       * ⚠️ 这是**真外键**在拦人，不是桩自己编一个错误码出来。
+       */
+      let SKIP_PATCH = false
+      const authDeletes = []
+      const order = []
+      const rpcAuth = []
+      /** 本节的每一个响应体（`service_role` 不外泄那一条要逐个扫） */
+      const bodies = []
+      /** 本节里打给数据库的**每一次**写（断言"审计在删除之前"用） */
+      const dbWrites = []
+
+      const TABLES = new Set([
+        'teachers',
+        'teacher_roles',
+        'classroom_accounts',
+        'student_subjects',
+        'student_subject_changes',
+        'admin_audit',
+      ])
+      const ident = (s) => `"${String(s).replace(/"/g, '""')}"`
+      const lit = (v) => `'${String(v).replace(/'/g, "''")}'`
+      const whereOf = (params) =>
+        [...params.entries()]
+          .filter(([k]) => k !== 'select' && k !== 'order' && k !== 'limit')
+          .map(([k, v]) => `${ident(k)} = ${lit(String(v).replace(/^eq\./, ''))}`)
+      const jsonRes = (v, status = 200) =>
+        new Response(JSON.stringify(v), { status, headers: { 'Content-Type': 'application/json' } })
+
+      const realFetch = globalThis.fetch
+      globalThis.fetch = async (input, init = {}) => {
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+        const method = String(init?.method ?? 'GET').toUpperCase()
+        const token = String(new Headers(init.headers ?? {}).get('authorization') ?? '').replace(
+          /^Bearer\s+/i,
+          '',
+        )
+        let body = {}
+        try {
+          body = init?.body ? JSON.parse(String(init.body)) : {}
+        } catch {
+          body = {}
+        }
+
+        /* ---- GoTrue：认调用者 / 删登录账号 / 复核在不在 ---- */
+        if (/\/auth\/v1\/user$/.test(url)) {
+          const uid = TOKEN_OF.get(token)
+          return uid
+            ? jsonRes({ id: uid, email: `${uid}@shugao.test` })
+            : jsonRes({ message: 'invalid jwt' }, 401)
+        }
+        if (/\/auth\/v1\/admin\/users\//.test(url)) {
+          const id = url.split('/').pop()
+          if (method === 'DELETE') {
+            authDeletes.push(id)
+            order.push(`auth-delete:${id}`)
+            if (AUTH_404.has(id)) return jsonRes({ message: 'User not found' }, 404)
+            /* 真 GoTrue：`delete from auth.users where id = $1` —— 级联在一个事务里把子表带走。
+               ⚠️ 外键挡住时 GoTrue 回 500（整个事务回滚，**两处都没删掉**）。 */
+            try {
+              const r = await db.query('delete from auth.users where id = $1 returning id', [id])
+              return r.rows.length ? jsonRes({ message: 'ok' }) : jsonRes({ message: 'User not found' }, 404)
+            } catch (e) {
+              return jsonRes({ code: '500', message: shortErr(e) }, 500)
+            }
+          }
+          /* GET（复核"还在不在"）也照 404 那一档走 —— 否则桩自己前后矛盾（删了说没有、查了说在） */
+          if (AUTH_404.has(id)) return jsonRes({ message: 'User not found' }, 404)
+          const r = await db.query('select id from auth.users where id = $1', [id])
+          return r.rows.length ? jsonRes({ id, email: `${id}@shugao.test` }) : jsonRes({ message: 'User not found' }, 404)
+        }
+        if (!/\/rest\/v1\//.test(url)) return realFetch(input, init)
+
+        const u = new URL(url)
+        const rest = u.pathname.replace('/rest/v1/', '')
+        const params = u.searchParams
+
+        /* ---- RPC：**走调用者自己的身份**（authenticated + 假 uid）→ 真跑 schema 里那个判据 ---- */
+        if (rest.startsWith('rpc/')) {
+          const fn = rest.slice(4)
+          rpcAuth.push(String(new Headers(init.headers ?? {}).get('authorization') ?? ''))
+          /* ⚠️ 会话里要放的是**调用者的 uid**（不是 token）—— JWT 声明里的 `sub` 必须是 uuid */
+          const asUid = TOKEN_OF.get(token)
+          if (!asUid) return jsonRes({ message: 'invalid jwt' }, 401)
+          await db.exec('begin')
+          try {
+            await db.query(`select set_config('request.jwt.claims', $1, true)`, [claimsOf(asUid)])
+            await db.exec('set local role authenticated')
+            const r = await db.query(`select public.${ident(fn)}() as v`)
+            return jsonRes(r.rows[0].v)
+          } catch (e) {
+            return jsonRes({ code: '42501', message: shortErr(e) }, 403)
+          } finally {
+            await db.exec('rollback')
+          }
+        }
+
+        const table = rest.split('/')[0]
+        if (!TABLES.has(table)) {
+          return jsonRes(
+            { code: 'PGRST205', message: `Could not find the table 'public.${table}' in the schema cache` },
+            404,
+          )
+        }
+        const w = whereOf(params)
+        const whereSql = w.length ? ` where ${w.join(' and ')}` : ''
+        /* service_role 那条链 → **属主身份**（与真的 service_role 同款：绕 RLS） */
+        try {
+          if (method === 'GET') {
+            const r = await db.query(`select * from ${ident(table)}${whereSql}`)
+            return jsonRes(r.rows)
+          }
+          if (method === 'DELETE') {
+            const r = await db.query(`delete from ${ident(table)}${whereSql} returning *`)
+            dbWrites.push({ table, method })
+            order.push(`db-delete:${table}`)
+            return jsonRes(r.rows)
+          }
+          if (method === 'PATCH') {
+            const cols = Object.keys(body)
+            if (cols.length !== 1) return jsonRes({ code: 'PGRST100', message: '桩只支持单列 PATCH' }, 400)
+            /* 🔴 反向对照：装作清了、其实一行没动 → 真外键会在下面 `auth-delete` 那一步拦住 */
+            if (SKIP_PATCH) return jsonRes([], 200)
+            const r = await db.query(
+              `update ${ident(table)} set ${ident(cols[0])} = $1${whereSql} returning *`,
+              [body[cols[0]]],
+            )
+            dbWrites.push({ table, method })
+            return jsonRes(r.rows)
+          }
+          if (method === 'POST') {
+            const cols = Object.keys(body)
+            const r = await db.query(
+              `insert into ${ident(table)} (${cols.map(ident).join(', ')})
+               values (${cols.map((_, i) => `$${i + 1}`).join(', ')}) returning *`,
+              cols.map((c) => body[c]),
+            )
+            dbWrites.push({ table, method })
+            if (table === 'admin_audit') order.push('audit')
+            return jsonRes(r.rows, 201)
+          }
+          return jsonRes({ message: `unsupported ${method}` }, 405)
+        } catch (e) {
+          const m = String(e?.message ?? e)
+          return jsonRes(
+            { code: /violates foreign key/.test(m) ? '23503' : 'XX000', message: shortErr(e) },
+            409,
+          )
+        }
+      }
+
+      /*
+       * 🔴 负向对照：把两条护栏从**内存里的源码文本**里拿掉。
+       * 写进一个临时目录：`admin/teacher-delete.ts` + 它相对引用的 `_lib/supa.ts` 各一份副本 ——
+       * 这样相对 import 照旧能解析，而**仓库一个字节都不动**。
+       */
+      const fnSrc = readFileSync(resolvePath(APP, 'functions/api/admin/teacher-delete.ts'), 'utf8')
+      let modSrc = fnSrc
+      if (NEGATIVE === 'teacher-delete-noguard') {
+        const a = 'if (targetId === meId) {'
+        const b = 'if (supers.includes(targetId) && supers.length <= 1) {'
+        if (!modSrc.includes(a) || !modSrc.includes(b)) {
+          throw new Error(
+            '负向对照锚点没找到：teacher-delete.ts 里那两条护栏的形状变了（模式 teacher-delete-noguard）',
+          )
+        }
+        modSrc = modSrc
+          .replace(a, 'if (false) { /* 负向对照：拿掉"不能删自己" */')
+          .replace(b, 'if (false) { /* 负向对照：拿掉"最后一位超管" */')
+      }
+      if (NEGATIVE === 'teacher-delete-trust-client') {
+        /* 🔴 负向对照②：**服务端不自校验**（只看前端说的话）—— 非管理员那条断言必须变红 */
+        const c = 'if (!mayDelete) {'
+        if (!modSrc.includes(c)) {
+          throw new Error(
+            '负向对照锚点没找到：teacher-delete.ts 里那句 `if (!mayDelete) {` 变了（模式 teacher-delete-trust-client）',
+          )
+        }
+        modSrc = modSrc.replace(c, 'if (false) { /* 负向对照：服务端不再自校验 */')
+      }
+      const tmpDir = mkdtempSync(join(tmpdir(), 'shugao-tdel-'))
+      mkdirSync(join(tmpDir, 'admin'), { recursive: true })
+      mkdirSync(join(tmpDir, '_lib'), { recursive: true })
+      writeFileSync(
+        join(tmpDir, '_lib', 'supa.ts'),
+        readFileSync(resolvePath(APP, 'functions/api/_lib/supa.ts'), 'utf8'),
+        'utf8',
+      )
+      writeFileSync(join(tmpDir, 'admin', 'teacher-delete.ts'), modSrc, 'utf8')
+      let mod
+      try {
+        mod = await import(pathToFileURL(join(tmpDir, 'admin', 'teacher-delete.ts')).href)
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true })
+      }
+
+      /** 以某个人打一次接口（`token` 传 `null` = 根本没带 Authorization） */
+      const call = async (uid, body, token = 'tok-td') => {
+        TOKEN_OF = new Map(uid ? [[token, uid]] : [])
+        const req = new Request('https://x.test/api/admin/teacher-delete', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(uid ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify(body),
+        })
+        const res = await mod.onRequestPost({ request: req, env: ENV })
+        const b = await res.json().catch(() => ({}))
+        bodies.push(b)
+        return { status: res.status, body: b }
+      }
+      const rowCount = async (sql, params) =>
+        Number((await db.query(sql, params)).rows[0].n)
+
+      try {
+        /* ---- ②-a 探针：判据在数据库（教务处能删 / 科任老师被拒）---- */
+        eq(
+          '② `probe`：教务处的 `canDelete` = true（判据问的是数据库的 `can_manage_teachers()`）',
+          (await call(TD.caller, { action: 'probe' })).body.canDelete,
+          true,
+        )
+        ok(
+          '🔴 ② 而且问 RPC 时带的是**调用者自己的 JWT**（不是 service_role）',
+          rpcAuth.every((a) => a === 'Bearer tok-td'),
+          rpcAuth.join(' | '),
+        )
+        {
+          const r = await call(U.phy, { action: 'probe' })
+          eq('🔴 ② 科任老师 `probe` → **403**', r.status, 403)
+        }
+
+        /* ---- ②-b 🔴 最要紧的那一条：**不信前端** —— 非管理员直接打 delete 接口 ---- */
+        {
+          const before = authDeletes.length
+          const r = await call(U.phy, {
+            action: 'delete',
+            teacherId: TD.victim,
+            /* 前端自称管理员 / 自称超管 —— 请求体里这些字段**一个都不作数** */
+            role: 'super',
+            isAdmin: true,
+          })
+          eq(
+            '🔴🔴 ② 科任老师直接打 `delete` 接口 → **403**（就算请求体里自称 super / isAdmin）',
+            r.status,
+            403,
+          )
+          eq('🔴 ② 而且**一次删除都没发出去**', authDeletes.length - before, 0)
+          ok(
+            '🔴 ② 而且**一行都没被改到**（那四列一个字节都没动）',
+            !dbWrites.some((x) => x.method === 'PATCH'),
+            JSON.stringify(dbWrites),
+          )
+          ok(
+            '🔴 ② 回话里说清"谁能删"（最高管理员 / 教务处），不是一句"没权限"',
+            String(r.body.message ?? '').includes('最高管理员') &&
+              String(r.body.message ?? '').includes('教务处'),
+            String(r.body.message ?? ''),
+          )
+        }
+
+        /* ---- ②-c 未登录 → 401；判据函数没建 → **503 而不是 403** ---- */
+        eq('② 没带 Authorization → 401', (await call(null, { action: 'delete', teacherId: TD.victim })).status, 401)
+        {
+          /* 把 RPC 桩暂时换成"函数不存在"（真 PostgREST 的形状：404 + PGRST202） */
+          const keep = globalThis.fetch
+          globalThis.fetch = async (input, init = {}) => {
+            const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+            if (/\/rest\/v1\/rpc\//.test(url)) {
+              return jsonRes(
+                {
+                  code: 'PGRST202',
+                  message: 'Could not find the function public.can_manage_teachers without parameters in the schema cache',
+                },
+                404,
+              )
+            }
+            return keep(input, init)
+          }
+          const r = await call(TD.caller, { action: 'probe' })
+          globalThis.fetch = keep
+          eq('🔴 ② 判据函数没建（第 13 段没跑）→ **503**（不是 403）', r.status, 503)
+          ok(
+            '🔴 ② 话里写"第 13 段"（把"环境没准备好"说成"你没权限"会让人去改权限，越改越乱）',
+            String(r.body.message ?? '').includes('第 13 段'),
+            String(r.body.message ?? ''),
+          )
+        }
+        /* 环境变量没配 → 503 not_configured（也**不能**是 403） */
+        {
+          const req = new Request('https://x.test/api/admin/teacher-delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: 'Bearer tok-td' },
+            body: JSON.stringify({ action: 'probe' }),
+          })
+          const res = await mod.onRequestPost({ request: req, env: { ...ENV, SUPABASE_SERVICE_ROLE_KEY: '' } })
+          eq('② 服务端没配管理员密钥 → 503（不是 403）', res.status, 503)
+        }
+
+        /* ---- ③ 真删：一个有"历史"的老师 ---- */
+        {
+          const beforeAudit = order.length
+          const r = await call(TD.caller, { action: 'delete', teacherId: TD.victim })
+          eq('③ 教务处删一位有历史的老师 → 200', r.status, 200)
+          eq('③ 回话里两处都标了"复核过没了"', [r.body.deleted?.teacherRow, r.body.deleted?.authUser], [true, true])
+          eq('🔴 ③ 走的是 `auth.users` 那条路（级联带走 `teachers`）', r.body.deleted?.via, 'auth-cascade')
+          /*
+           * 🔴 **审计写在删除之前**：流水里 `audit` 必须早于 `auth-delete:<那个 id>`。
+           *    ⚠️ 这条是"删之前写"这句话唯一的可执行证据（回话里只给一个布尔，看不出先后）。
+           */
+          const ev = order.slice(beforeAudit)
+          ok(
+            '🔴 ③ 审计**写在删除之前**（流水里 audit 早于 auth-delete）',
+            ev.indexOf('audit') >= 0 && ev.indexOf('audit') < ev.indexOf(`auth-delete:${TD.victim}`),
+            ev.join(' → '),
+          )
+          eq(
+            '🔴 ③ 两处都真的没了：`teachers` 行 + `auth.users` 行',
+            [
+              await rowCount('select count(*)::int as n from teachers where id = $1', [TD.victim]),
+              await rowCount('select count(*)::int as n from auth.users where id = $1', [TD.victim]),
+            ],
+            [0, 0],
+          )
+          eq(
+            '🔴 ③ 子表**级联清干净**（任课关系 / 身份 / 部门 / 档案 / 他的作业）',
+            [
+              await rowCount('select count(*)::int as n from class_subjects where teacher_id = $1', [TD.victim]),
+              await rowCount('select count(*)::int as n from teacher_roles where teacher_id = $1', [TD.victim]),
+              await rowCount('select count(*)::int as n from teacher_departments where teacher_id = $1', [TD.victim]),
+              await rowCount('select count(*)::int as n from teacher_profiles where teacher_id = $1', [TD.victim]),
+              await rowCount('select count(*)::int as n from assignments where teacher_id = $1', [TD.victim]),
+            ],
+            [0, 0, 0, 0, 0],
+          )
+          /*
+           * 🔴 那四列**置空、行还在** —— "手工先清"清的是**列**，不是行：
+           *    教室端账号还是那个班的账号，选科记录还是那个学生的事，只是"经手人"空了。
+           */
+          eq(
+            '🔴 ③ 不级联的那四列**被置空**（行都还在，只是"经手人"空了）',
+            [
+              (await db.query('select created_by from classroom_accounts where id = $1', [TD.room])).rows[0]
+                ?.created_by ?? null,
+              (await db.query('select updated_by from student_subjects where student_id = $1', [TD.stu])).rows[0]
+                ?.updated_by ?? null,
+              (await db.query('select changed_by, purged_by from student_subject_changes where student_id = $1', [TD.stu])).rows[0]
+                ?.changed_by ?? null,
+              (await db.query('select changed_by, purged_by from student_subject_changes where student_id = $1', [TD.stu])).rows[0]
+                ?.purged_by ?? null,
+            ],
+            [null, null, null, null],
+          )
+          eq(
+            '🔴 ③ 反向对照：那四列的 `confdeltype` 是 `a`（NO ACTION）而**不是** `c` —— 所以"先清"这一步不是多余的',
+            notCasc(toTeachers).length,
+            RESTRICT_EXPECT.length,
+          )          /* 审计那一行的内容 */
+          const a = (
+            await db.query(
+              `select actor_id::text as actor, action, target, detail, affected from admin_audit
+                where action = 'teacher.delete' order by id desc limit 1`,
+            )
+          ).rows[0]
+          ok(
+            '🔴 ③ 审计那一行记了"谁 / 对谁 / 影响几行"，`target` 里留着 id 与姓名快照',
+            a &&
+              a.actor === TD.caller &&
+              String(a.target).includes(TD.victim) &&
+              String(a.target).includes('待删老师') &&
+              Number(a.affected) === 1,
+            JSON.stringify(a),
+          )
+          ok(
+            '🔴 ③ `detail` 里写着**代价**（"一并消失 / 不可恢复"）—— 台账要能说清删了什么',
+            /一并消失/.test(String(a?.detail ?? '')) && /不可恢复/.test(String(a?.detail ?? '')),
+            String(a?.detail ?? ''),
+          )
+          eq('③ 回话里 `audited` = true（留痕失败不会被咽下去）', r.body.audited, true)
+        }
+
+        /* ---- ③-b 那条兜底路：GoTrue 说"登录里本来就没有他" → 显式删 `teachers` 行 ---- */
+        {
+          const r = await call(TD.caller, { action: 'delete', teacherId: TD.spare })
+          ok(
+            '③ 兜底路（stub 让 GoTrue 说"登录里没有他"）→ 仍然 200',
+            r.status === 200,
+            `HTTP ${r.status} · ${String(r.body.message ?? '')}`,
+          )
+          eq('③ 走的是 `teachers-only`', r.body.deleted?.via, 'teachers-only')
+          eq(
+            '🔴 ③ 而且 `teachers` 那一行真的没了（不是"回个 ok 就算了"）',
+            await rowCount('select count(*)::int as n from teachers where id = $1', [TD.spare]),
+            0,
+          )
+        }
+
+        /* ---- ③-c 目标不存在 → 404（"没有这个老师"与"删掉了"必须分得开）---- */
+        eq(
+          '③ 删一个**不存在**的 id → 404',
+          (await call(TD.caller, { action: 'delete', teacherId: mk('a2', 99) })).status,
+          404,
+        )
+        eq(
+          '③ 乱传一个不是 uuid 的 id → 400（在打库之前就挡住）',
+          (await call(TD.caller, { action: 'delete', teacherId: 'not-a-uuid' })).status,
+          400,
+        )
+
+        /*
+         * ---- ③-d 🔴 "先清那四列"这一步的**反向对照**：不清就删不掉（真外键拦人）----
+         * 让 PATCH 装作清了、其实一行没动 → `auth.users` 那条 DELETE 真的撞上 23503。
+         * 期望（**三条一起看才算数**）：
+         *   · HTTP 502（**不是 200** —— 绝不把"什么都没删"报成成功）；
+         *   · 话里说清"两处都还在"；
+         *   · 两处**真的都还在**（这正是"宁可什么都没删，也不要删一半"）。
+         */
+        {
+          await db.query(`update student_subjects set updated_by = $1 where student_id = $2`, [
+            TD.victim2,
+            TD.stu,
+          ])
+          SKIP_PATCH = true
+          const r = await call(TD.caller, { action: 'delete', teacherId: TD.victim2 })
+          SKIP_PATCH = false
+          eq('🔴 ③ 反向对照：不清那四列 → **502**（不是 200）', r.status, 502)
+          ok(
+            '🔴 ③ 反向对照：话里说清"这个账号两处都还在"（外键把它整次拦下了）',
+            String(r.body.message ?? '').includes('两处都还在'),
+            String(r.body.message ?? ''),
+          )
+          eq(
+            '🔴 ③ 反向对照：两处**真的都还在**（宁可什么都没删，也不要删一半）',
+            [
+              await rowCount('select count(*)::int as n from teachers where id = $1', [TD.victim2]),
+              await rowCount('select count(*)::int as n from auth.users where id = $1', [TD.victim2]),
+            ],
+            [1, 1],
+          )
+          /* 清回来（下面那条护栏还要用干净的夹具） */
+          await db.query(`update student_subjects set updated_by = null where student_id = $1`, [TD.stu])
+        }
+
+        /* ---- ②-d 🔴 两条护栏（负向对照 `teacher-delete-noguard` 时这两条必须红）---- */
+        {
+          const before = authDeletes.length
+          const r = await call(TD.callerSelf, { action: 'delete', teacherId: TD.callerSelf })
+          eq('🔴 ② 护栏一：**不能删自己** → 400', r.status, 400)
+          ok(
+            '🔴 ② 而且话里说清"你正在用的就是这个账号"',
+            String(r.body.message ?? '').includes('自己'),
+            String(r.body.message ?? ''),
+          )
+          eq('🔴 ② 而且一次删除都没发出去', authDeletes.length - before, 0)
+        }
+        {
+          const before = authDeletes.length
+          const r = await call(TD.caller, { action: 'delete', teacherId: U.super })
+          eq('🔴 ② 护栏二：**不能删最后一个最高管理员** → 400', r.status, 400)
+          ok(
+            '🔴 ② 而且话里给出出路（"先把另一个人也设成最高管理员"），并点明 0 个超管的后果',
+            String(r.body.message ?? '').includes('最后一位最高管理员') &&
+              String(r.body.message ?? '').includes('最高管理员'),
+            String(r.body.message ?? ''),
+          )
+          eq(
+            '🔴 ② 而且那位超管还在',
+            await rowCount('select count(*)::int as n from teachers where id = $1', [U.super]),
+            1,
+          )
+          eq('🔴 ② 而且一次删除都没发出去', authDeletes.length - before, 0)
+        }
+        /* 探针也说得出"这两位不能删"（前端只是不摆一个点了必然被拒的按钮） */
+        {
+          const r = await call(TD.caller, { action: 'probe' })
+          eq(
+            '🔴 ② `probe` 回 `selfId` 与"最后一位最高管理员"的 id（前端照这两个不摆入口）',
+            [r.body.selfId, r.body.lastSuperId],
+            [TD.caller, U.super],
+          )
+        }
+
+        /* ---- ④ `service_role` 不外泄 ---- */
+        {
+          eq(
+            '🔴 ④ 本节拿到的**每一个**响应体里都没有管理员密钥的值',
+            bodies.filter((b) => JSON.stringify(b).includes(SVC)).length,
+            0,
+          )
+          ok(
+            '🔴 ④ 响应体里也没有 `service_role` 这个词（连"它是什么"都不回）',
+            bodies.every((b) => !/\bservice_role\b/i.test(JSON.stringify(b))),
+            JSON.stringify(bodies).slice(0, 200),
+          )
+          /*
+           * 🔴 前端那一侧（这才是真正会发到浏览器的代码）：**去掉注释之后**，
+           *    `service_role` 这个词、以及"从环境变量读服务端密钥"的形状，都不许出现。
+           *
+           * ⚠️ 为什么要去注释：这个仓库**刻意**在很多前端文件的注释里解释"服务端用 service_role 代劳"
+           *    （那是有用的文档，不是泄漏）；判据要卡的是**代码**。
+           * ⚠️ 为什么用 `\bservice_role\b` 而不是 `service_role`：`adminChart.ts` 里**代码**中
+           *    有一个字符串 `'SUPABASE_SERVICE_ROLE_KEY'`（它是面板上那一格的**显示名**，
+           *    配置键名不是密钥）。`\b` 恰好把它们分开 —— 前者匹配、后者不匹配。
+           */
+          const stripComments = (s) =>
+            s
+              .replace(/\/\*[\s\S]*?\*\//g, ' ')
+              .replace(/\/\/[^\n]*/g, ' ')
+          ok(
+            '🔴 ④ 本 Function 里**一句日志都没有**（`console.*`）—— 密钥不会顺着日志漏出去',
+            !/console\.(log|warn|error|info|debug|trace)\s*\(/.test(stripComments(fnSrc)),
+          )
+          /* 反向对照（先证明这个判据**能红**）：写成代码要被抓到、写成注释不该被抓到 */
+          ok(
+            '🔴 ④ 反向对照：这个判据**能红**（`const k = service_role` 会被抓到）',
+            /\bservice_role\b/i.test(stripComments('const k = service_role\n')),
+          )
+          ok(
+            '🔴 ④ 反向对照：而**注释里写它**不该红（`// service_role` 只是文档，不是泄漏）',
+            !/\bservice_role\b/i.test(stripComments('// 服务端用 service_role 代劳\nconst k = 1\n')),
+          )
+          ok(
+            '🔴 ④ 反向对照：`SUPABASE_SERVICE_ROLE_KEY` 这个**键名**不会被误判成泄漏（`\\b` 把它们分开了）',
+            !/\bservice_role\b/i.test('text: "`SUPABASE_SERVICE_ROLE_KEY` 未配置"'),
+          )
+          const walk = (dir) =>
+            readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+              const full = join(dir, e.name)
+              if (e.isDirectory()) return e.name === 'node_modules' ? [] : walk(full)
+              return /\.(ts|tsx)$/.test(e.name) ? [full] : []
+            })
+          const srcFiles = walk(resolvePath(APP, 'src'))
+          const leaks = srcFiles
+            .filter((f) => /\bservice_role\b/i.test(stripComments(readFileSync(f, 'utf8'))))
+            .map((f) => f.slice(APP.length + 1).replace(/\\/g, '/'))
+          /*
+           * 🔴 **自证清单**：前端代码里出现 `service_role` 这个词的地方，**只允许一处**，
+           *    而且它是一句**给人看的说明文案**（`/admin` 面板上的"正在读…（服务端拿 service_role 跑
+           *    `db_usage_report()`）"），不是凭据、也不是从环境变量读来的东西。
+           *    ⚠️ 它**不在本轮允许改动的文件里**（`Admin.tsx` 是别人的地盘），所以这里**如实把它列出来**
+           *      而不是悄悄放过 —— 清单多一条就要有人来这儿认领、说明为什么它不是泄漏。
+           *    ✅ 本轮新增/改动的两个前端文件（`data/remote.ts` / `pages/TeacherAccounts.tsx`）**一处都没有**。
+           */
+          eq(
+            `🔴 ④ 前端 \`src/**\` 的**代码**里出现它的地方（${srcFiles.length} 个 .ts/.tsx，去掉注释后）`,
+            leaks,
+            ['src/pages/Admin.tsx'],
+          )
+          for (const f of ['src/data/remote.ts', 'src/pages/TeacherAccounts.tsx']) {
+            ok(
+              `🔴 ④ 本轮改动的前端文件 \`${f}\` 里一处都没有`,
+              !/\bservice_role\b/i.test(stripComments(readFileSync(resolvePath(APP, f), 'utf8'))),
+            )
+          }
+          const allSrc = srcFiles.map((f) => readFileSync(f, 'utf8')).join('\n')
+          ok(
+            '🔴 ④ 而且前端**没有任何一处从环境变量读服务端密钥**（`env.SUPABASE_SERVICE_ROLE_KEY` / `VITE_SERVICE_ROLE…`）',
+            !/env\.SUPABASE_SERVICE_ROLE_KEY/.test(allSrc) && !/VITE_SERVICE_ROLE/i.test(allSrc),
+          )
+        }
+
+        /* ---- ④-b 前端那一层：判据是服务端回的布尔，前端不另写一套 ---- */
+        {
+          const remoteSrc = readFileSync(resolvePath(APP, 'src/data/remote.ts'), 'utf8')
+          ok(
+            '🔴 ④ 前端**只**打自家接口 `/api/admin/teacher-delete`（不是直连 Supabase、也没有任何 key）',
+            /postApi\('\/api\/admin\/teacher-delete'/.test(remoteSrc) &&
+              !/createClient\(/.test(remoteSrc) &&
+              !/supabaseKey/.test(remoteSrc),
+          )
+          const pageSrc = readFileSync(resolvePath(APP, 'src/pages/TeacherAccounts.tsx'), 'utf8')
+          ok(
+            '🔴 ④ 界面上摆不摆删除入口**只看服务端回的那个布尔**（`canDelete`）+ 服务端给的 `lastSuperId`',
+            /delPerm\?\.canDelete === true/.test(pageSrc) &&
+              /delPerm\?\.lastSuperId/.test(pageSrc),
+          )
+          ok(
+            '🔴 ④ 页面上**没有**为删除另写一套角色判断（没有 `role === \'admin\'` 这种）',
+            !/role === 'admin'/.test(pageSrc) && !/role === 'super'/.test(pageSrc),
+          )
+          ok(
+            '🔴 ④ 二次确认**说清代价**（"作业记录 / 成绩 / 通知" + "不可恢复"），不是一句"确定删除吗"',
+            /作业记录 \/ 成绩 \/ 通知/.test(pageSrc) && /不可恢复/.test(pageSrc),
+          )
+          ok(
+            '🔴 ④ 危险操作用危险样式（`variant="danger"`）',
+            /variant="danger"/.test(pageSrc),
+          )
+          ok(
+            '🔴 ④ 失败**显式上屏**（`delErr` 那一栏 + 一条提示）—— 不许静默',
+            /setDelErr\(/.test(pageSrc) && /tone: 'bad'/.test(pageSrc),
+          )
+          ok(
+            '🔴 ④ 删完**重拉名单**（那一行要真的从屏上消失）',
+            /setTarget\(null\)[\s\S]{0,40}void load\(\)/.test(pageSrc),
+          )
+        }
+      } finally {
+        globalThis.fetch = realFetch
+      }
+    }
+
+    /* ============================================================
+       二十四、🆕 登出按钮**挪到显眼处**（`src/pages/Settings.tsx`）
+       ------------------------------------------------------------
+       用户实测原话：「（退出登录）应该有一个」——
+       而它**本来就有**，只是**在整页最底下**，而「我的」这一页很长 → 找不到。
+       这一轮把它**挪进「我的身份」那张卡**（账号相关的事放一起）。
+
+       本节钉三件事：
+         · **只有一处**（挪，不是复制）—— 复制一份的话，屏上会出现两个"退出登录"；
+         · 它**在第一张卡里**（排在「我的」那一节之前 = 真的挪上去了，不是挪到别处）；
+         · 那两句行为**一个字都没改**（`signOutEverywhere()` + `navigate('/login',{replace:true})`），
+           而且 `MaintenanceGate` 那句"维护期间不会被登出"的口径照旧（那是**另一件事**）。
+
+       🔴 反向对照（**在内存里做，仓库一个字节都不动**）：把那段按钮**复制一份**塞回页尾 →
+          "只有一处"那一条**必须当场红**。
+       ============================================================ */
+    section('二十四、🆕 登出按钮挪进「我的身份」卡（只有一处 · 行为没变）')
+    {
+      const settingsPath = resolvePath(APP, 'src/pages/Settings.tsx')
+      const settingsSrc = readFileSync(settingsPath, 'utf8')
+      /** 去掉注释再数 —— 这一节自己的说明文字里也会写到那个函数名（不然会把文档也数进去） */
+      const noComment = settingsSrc
+        .replace(/\/\*[\s\S]*?\*\//g, ' ')
+        .replace(/\/\/[^\n]*/g, ' ')
+      /** 数一份源码里有几个"退出登录"按钮 —— `signOutEverywhere()` 是它唯一的动作，拿它当锚 */
+      const countExit = (s) =>
+        (
+          s
+            .replace(/\/\*[\s\S]*?\*\//g, ' ')
+            .replace(/\/\/[^\n]*/g, ' ')
+            .match(/signOutEverywhere\(\)/g) ?? []
+        ).length
+
+      eq('🔴 整页**只有一处**"退出登录"（挪，不是复制）', countExit(settingsSrc), 1)
+      {
+        const btnAt = settingsSrc.indexOf('void signOutEverywhere()')
+        const cardAt = settingsSrc.indexOf('{/* 身份 */}')
+        const cardEnd = settingsSrc.indexOf('</Panel>', cardAt)
+        const aboutAt = settingsSrc.indexOf('<Sect>关于</Sect>')
+        ok(
+          '🔴 它**在第一张卡（身份卡）里面** —— 也就是真的从页尾挪上来了',
+          cardAt > 0 && btnAt > cardAt && btnAt < cardEnd,
+          `身份卡第 ${settingsSrc.slice(0, cardAt).split('\n').length} 行 · 按钮第 ${settingsSrc.slice(0, btnAt).split('\n').length} 行 · 卡尾第 ${settingsSrc.slice(0, cardEnd).split('\n').length} 行`,
+        )
+        ok(
+          '🔴 而且它在「关于 / 更新日志」**之前**（页尾那一段里已经没有了）',
+          aboutAt > 0 && btnAt < aboutAt,
+        )
+        ok(
+          '🔴 落点在「当前班级」那一行**之后**（账号相关的事放一起，排在卡片末尾）',
+          settingsSrc.indexOf('k="当前班级"') > 0 && settingsSrc.indexOf('k="当前班级"') < btnAt,
+        )
+      }
+      ok(
+        '🔴 那两句行为**一个字都没改**（`void signOutEverywhere()` + `navigate(\'/login\', { replace: true })`）',
+        /void signOutEverywhere\(\)\s*\n\s*navigate\('\/login', \{ replace: true \}\)/.test(
+          noComment,
+        ),
+      )
+      ok(
+        '🔴 没碰 `MaintenanceGate` 那句"维护期间不会被登出"的口径（那是另一件事：维护不踢人）',
+        readFileSync(resolvePath(APP, 'src/components/MaintenanceGate.tsx'), 'utf8').includes('不会被登出'),
+      )
+      /*
+       * 🔴 反向对照：把按钮**复制一份**塞回页尾 —— "只有一处"必须当场红。
+       *    改的是内存里的字符串，仓库文件一个字节都不动（与 `RLS_NEGATIVE` 那套同一个纪律）。
+       */
+      {
+        const block =
+          "\n        <Button block icon={<IconLogout size={16} />} onClick={() => { void signOutEverywhere() }}>退出登录</Button>\n"
+        const duplicated = settingsSrc.replace(/\n      <\/Page>\n/, `${block}      </Page>\n`)
+        ok(
+          '🔴 反向对照：把这段按钮**复制一份**塞回页尾 → "只有一处"当场红（2 处）',
+          duplicated !== settingsSrc && countExit(duplicated) === 2,
+          `复制后数到 ${countExit(duplicated)} 处（原文 ${countExit(settingsSrc)} 处）`,
+        )
+      }
+    }
 
     await B.db.close()
     await A.db.close()

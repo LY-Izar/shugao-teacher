@@ -2135,6 +2135,91 @@ export const saveClassroom = (c: ClassroomClient, teacherId: string) =>
 
 export const saveCall = (c: CallRecord, teacherId: string) => upsert('calls', callToRow(c, teacherId))
 
+/* ============================================================
+   🆕 2026-10-09 · 教师账号**真删除** —— 前端调 `/api/admin/teacher-delete` 的那一层
+   ------------------------------------------------------------
+   用户口径：「教师管理里要能**真删**一个账号」（不是停用、不是只摘身份）。
+
+   🔴 **判据全在服务端**：`functions/api/admin/teacher-delete.ts` 拿**调用者的 JWT**
+      去问数据库的 `can_manage_teachers()`（超管 / 教务处），并用 service_role 删
+      `auth.users` + `teachers` 两处。这一层**只做三件事**：递 JWT、解析回话、翻人话。
+      ——「摆不摆那个删除入口」由服务端回的 `canDelete` 决定（`canRevoke` / `canPin` 那套先例），
+      前端**不在这里另写一套角色判断**。
+
+   ⚠️ `service_role` **不经过这里、也永远不会到浏览器**：本文件里没有任何 key，
+      只有 `fetch('/api/admin/teacher-delete')`。
+   ============================================================ */
+
+/** 服务端回话：能不能摆删除入口 + 两个人不能删（自己 / 最后一位最高管理员） */
+export type TeacherDeleteProbe = {
+  /** 🔴 判据：`can_manage_teachers()` 在服务端问出来的那个布尔 */
+  canDelete: boolean
+  /** 调用者自己（= `teachers.id`）—— 他不能删自己 */
+  selfId: string
+  /** 只有一位最高管理员时给它的 id（`null` = 这一档没有"不能删"的人） */
+  lastSuperId: string | null
+  /** `canDelete` 为假时的一句人话（为什么这一页不摆入口） */
+  reason: string | null
+}
+
+export type TeacherDeleteResult = {
+  id: string
+  name: string
+  /** `teachers` 那一行复核过没了 */
+  teacherRow: boolean
+  /** `auth.users` 那一行复核过没了（`'unknown'` = 复核不了，但 teachers 已经没了） */
+  authUser: boolean | 'unknown'
+  /** `auth-cascade`（正常，级联）/ `teachers-only`（孤儿行那一条兜底路） */
+  via: string
+}
+
+type DeleteProbe = { ok: true; data: TeacherDeleteProbe } | { ok: false; message: string }
+
+/**
+ * 问服务端：这个人能不能删？
+ * ⚠️ 失败时 `canDelete:false` + 一句话 —— **不摆入口**是安全的默认，
+ *    但必须把原因说出来（"读不到"与"没权限"是两件事，见三态纪律）。
+ */
+export async function probeTeacherDelete(): Promise<DeleteProbe> {
+  const r = await postApi('/api/admin/teacher-delete', { action: 'probe' })
+  if (!r.ok) return { ok: false, message: apiMessage(r, '读不到删除权限') }
+  const d = r.data ?? {}
+  return {
+    ok: true,
+    data: {
+      canDelete: d.canDelete === true,
+      selfId: typeof d.selfId === 'string' ? d.selfId : '',
+      lastSuperId: typeof d.lastSuperId === 'string' ? d.lastSuperId : null,
+      reason: typeof d.reason === 'string' && d.reason ? d.reason : null,
+    },
+  }
+}
+
+/**
+ * 真删一个教师账号。**失败一律回 `{ok:false,message}`** —— 页面必须显式上屏（不许静默）。
+ * ⚠️ 这是个**不可逆**的动作：二次确认在页面上，代价（作业 / 成绩 / 通知一并消失）在确认里说清。
+ */
+export async function deleteTeacherAccount(
+  teacherId: string,
+): Promise<{ ok: true; data: TeacherDeleteResult } | { ok: false; message: string; detail?: string }> {
+  const r = await postApi('/api/admin/teacher-delete', { action: 'delete', teacherId })
+  if (!r.ok) {
+    const detail = typeof r.data?.detail === 'string' ? r.data.detail : undefined
+    return { ok: false, message: apiMessage(r, '删除失败'), detail }
+  }
+  const d = (r.data?.deleted ?? {}) as Record<string, unknown>
+  return {
+    ok: true,
+    data: {
+      id: typeof d.id === 'string' ? d.id : teacherId,
+      name: typeof d.name === 'string' ? d.name : '',
+      teacherRow: d.teacherRow === true,
+      authUser: d.authUser === true || d.authUser === 'unknown' ? d.authUser : false,
+      via: typeof d.via === 'string' ? d.via : '',
+    },
+  }
+}
+
 /** 清空该教师的全部业务数据。teachers 那一行保留（它绑定 auth 用户，删了不会再自动生成）。 */
 export async function purgeAll(teacherId: string) {
   const sb = getSupabase()
