@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Page } from '../components/AppShell'
 import { IconAlert, IconCheck, IconPaste } from '../components/icons'
@@ -78,6 +78,83 @@ const STEPS = [
   { key: 'roles', label: '分配身份' },
   { key: 'stream', label: '生成走班' },
 ] as const
+
+/* ============================================================
+   页头那条六步进度：**一条会画下去的脊** + 每一步的 ✅/⬜
+   ------------------------------------------------------------
+   🔴 画的是**顺序**：① 录名单 → ② 建班 → … → ⑥ 生成走班是一条流水线，
+      **不是层级**（所以借的是"连线画出来"那一个技巧，不是整个树形组件 ——
+      `分支菜单评估/BranchedMenu` 只借了这一段，**没有**任何依赖被引进来）。
+
+   借来的技巧（约 15 行、零依赖）：`stroke-dasharray = 段长` `stroke-dashoffset`
+   从"段长"走到 0 → 浏览器自己把它**画**出来。这就是 `SPINE_CSS` 里那一行 transition。
+
+   🔴 **脊画到第几步** = ①…⑥ 里**从头连续**完成的步数（`reached`）：
+      脊的末端落在**第 `reached` 个节点**上 —— 第 i 段（节点 i 与 i+1 之间那段，
+      i = 1…5）在 `reached > i` 时画下，所以完成 k 步 → 画到第 k 个节点（k 段里的前 k−1 段）。
+      ⚠️ 不按"完成的总步数"算：[✅ ⬜ ✅ ⬜ ⬜ ⬜] 也有 2 步完成，但顺序只走到 ① ——
+         把它画到 ③ 就是在替用户说一句没发生的事。这条脊说的是**顺序**。
+      ⚠️ 一步都没完成时不画（`reached = 0`），全完成时五段画满（`reached = 6`）。
+
+   ⚠️ `prefers-reduced-motion: reduce` → **不过渡、直接终态**（不是"一帧帧爬完"）。
+   ⚠️ `color-mix()` 这里一个都没用 —— 轨与脊用的是既有的 `--color-*` 令牌，
+      老浏览器上也照旧有颜色（`AGENTS.md` §四：教师端不往外推新 CSS 特性）。
+   ============================================================ */
+/** 段长 = 12（**整数**：`dashoffset` 要正好等于它，否则"还没画到"会漏出一个点） */
+const SPINE_SEG = 12
+const SPINE_SEG_D = 'M 0 4 H 12'
+
+const SPINE_CSS = `
+.gs-spine { fill: none; stroke-width: 1.6; stroke-linecap: round; }
+.gs-spine__track { stroke: var(--color-line2); }
+.gs-spine__reach { stroke: var(--color-ok); transition: stroke-dashoffset 420ms ease-out; }
+@media (prefers-reduced-motion: reduce) { .gs-spine__reach { transition: none; } }
+`
+
+/** 那一条进度条（`done` 与 `STEPS` 一一对应；判据由页面按 `stepDone` 逐条喂进来） */
+export function SetupSpine({ done }: { done: boolean[] }) {
+  const lead = done.findIndex((d) => !d)
+  const reached = lead < 0 ? done.length : lead
+  /** 第 i 段（节点 i 与 i+1 之间）在这时候画下 —— 它说的是"顺序已经走到第 i+1 步" */
+  const drawn = (i: number) => reached > i
+  return (
+    <>
+      <style>{SPINE_CSS}</style>
+      <div className="flex flex-wrap gap-x-3 gap-y-1.5">
+        {done.map((ok, i) => (
+          <Fragment key={STEPS[i].key}>
+            {i > 0 ? (
+              <svg
+                className="gs-spine"
+                width={SPINE_SEG}
+                height={8}
+                viewBox="0 0 12 8"
+                aria-hidden="true"
+                data-spine-seg={i}
+                data-spine-drawn={drawn(i) ? '1' : '0'}
+                style={{ alignSelf: 'center', margin: '0 -4px' }}
+              >
+                {/* 底轨：还没画到的那一段画成**灰线**（不是红的 —— 三态纪律） */}
+                <path className="gs-spine__track" d={SPINE_SEG_D} />
+                <path
+                  className="gs-spine__reach"
+                  d={SPINE_SEG_D}
+                  style={{
+                    strokeDasharray: SPINE_SEG,
+                    strokeDashoffset: drawn(i) ? 0 : SPINE_SEG,
+                  }}
+                />
+              </svg>
+            ) : null}
+            <span style={{ fontSize: 12, color: ok ? 'var(--color-ok)' : 'var(--color-ink3)' }}>
+              {ok ? '✅' : '⬜'} {['①', '②', '③', '④', '⑤', '⑥'][i]} {STEPS[i].label}
+            </span>
+          </Fragment>
+        ))}
+      </div>
+    </>
+  )
+}
 
 export default function GradeSetup() {
   const { id = '' } = useParams()
@@ -287,19 +364,9 @@ export default function GradeSetup() {
       <Page>
         {/* ---------------- 页头那一条进度（把"还差什么"摊开，不用他记） ---------------- */}
         <Panel bodyClass="p-3">
-          <div className="flex flex-wrap gap-x-3 gap-y-1.5">
-            {STEPS.map((s, i) => (
-              <span
-                key={s.key}
-                style={{
-                  fontSize: 12,
-                  color: stepDone[s.key] ? 'var(--color-ok)' : 'var(--color-ink3)',
-                }}
-              >
-                {stepDone[s.key] ? '✅' : '⬜'} {['①', '②', '③', '④', '⑤', '⑥'][i]} {s.label}
-              </span>
-            ))}
-          </div>
+          {/* 🔴 判据**逐条照旧**：还是 `stepDone[s.key]`（六个 key 一个字没动），
+              只是把"✅/⬜ 那一行"交付给 `SetupSpine()` —— 它顺手把顺序那条脊画下去。 */}
+          <SetupSpine done={STEPS.map((s) => stepDone[s.key])} />
           {/*
             「能不能改」只在**真的不能改**时说一句，而且说的是**真实原因**
             （没权限 / §27 没跑 / 没登 / 连不上）—— 见 `lib/gradeSetup.ts` 的 `readCanSetup`。

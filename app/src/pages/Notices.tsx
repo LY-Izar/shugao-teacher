@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Page } from '../components/AppShell'
-import { IconBell, IconCheck, IconPlus, IconTrash } from '../components/icons'
+import { IconBell, IconCheck, IconEyeOff, IconPlus } from '../components/icons'
 import { Button, Empty, PageHead, Panel, Sect, StatStrip, Tag } from '../components/ui'
 import { useStore, useToast } from '../data/store'
 import { canPublishNotice } from '../lib/roles'
@@ -245,7 +245,11 @@ function NoticeCard({
           {(notice.canRevoke || notice.canPin) && !revoked ? (
             <div className="mt-2 flex flex-wrap items-center gap-2">
               {notice.canRevoke && !revoked ? (
-                <Button size="sm" variant="ghost" icon={<IconTrash size={15} />} disabled={busy} onClick={onRevoke}>
+                /* 🔴 图标是 `IconEyeOff`（"不再显示"），**不是垃圾桶**：
+                   这一颗是**撤下**（停止生效、历史照旧留着），不是删除 ——
+                   图标说"会删"而实际不删，就是"一个字段两种语义"长在图标上。
+                   ⚠️ 垃圾桶 `IconTrash` 只留给**真删除**那类按钮（别的页面还在用）。 */
+                <Button size="sm" variant="ghost" icon={<IconEyeOff size={15} />} disabled={busy} onClick={onRevoke}>
                   撤下
                 </Button>
               ) : null}

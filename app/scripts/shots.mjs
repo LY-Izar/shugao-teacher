@@ -419,6 +419,18 @@ const short = (s, n = 150) => {
 }
 
 /**
+ * 🆕 2026-09-27：那颗图标是不是 `icons.tsx` 里的 **`IconEyeOff`（"不再显示"）**、
+ * **不是 `IconTrash`（垃圾桶）** —— 按 **path 的形状**判，不按类名、不按属性名：
+ *   · `IconEyeOff` 那一撇 = `m4 4 16 16`；
+ *   · `IconTrash` 的盖子 = `M4.6 7.2h14.8`（第一笔）。
+ * 传进来的是一组 `<path d="…">` 的 `d`（DOM 里取回来的、或 `icons.tsx` 源码里解析出来的 ——
+ * 两处用**同一个**判据，所以"它能不能红"只需要验一次，见「撤下图标」那一节）。
+ */
+const looksLikeEyeOff = (ds) =>
+  (ds ?? []).some((d) => String(d).includes('m4 4 16 16')) &&
+  !(ds ?? []).some((d) => String(d).startsWith('M4.6 7.2h14.8'))
+
+/**
  * 🆕 F6：在那颗入口钮打开的**主题选择器**里选一档。
  *
  * 为什么要有这个函数：F6 起入口钮"点一下"= **开选择器**（不是直接翻一档），
@@ -8218,17 +8230,22 @@ await withLock(async () => {
         /**
          * 那一张通知卡里有没有**正文刚好是「撤下」的那个按钮**。
          * ⚠️ 「已撤下」是卡片里的一行 div（不是按钮）**不算** —— 所以比的是按钮文字。
+         * 🆕 2026-09-27：顺手把那一颗按钮里 `<path d="…">` 的 `d` 全带回来 ——
+         * 「撤下」的**图标语义**（"不再显示" vs 垃圾桶）由上面那个 `looksLikeEyeOff()` 判。
          */
         const cardRevoke = (p, title) =>
           p.evaluate((t) => {
             const card = [...document.querySelectorAll('section.panel')].find((s) =>
               String(s.innerText ?? '').includes(t),
             )
-            if (!card) return { found: false, has: null }
+            if (!card) return { found: false, has: null, ds: [] }
             const btn = [...card.querySelectorAll('button')].filter(
               (b) => String(b.innerText ?? '').trim() === '撤下',
             )
-            return { found: true, has: btn.length > 0, n: btn.length }
+            const ds = btn.length
+              ? [...btn[0].querySelectorAll('path')].map((x) => String(x.getAttribute('d') ?? ''))
+              : []
+            return { found: true, has: btn.length > 0, n: btn.length, ds }
           }, title)
 
         const RBAC = [
@@ -8263,6 +8280,13 @@ await withLock(async () => {
             revoked.found && revoked.has === false && noPerm.found && noPerm.has === false,
             `${SRV}：${who} → **已撤下的**不摆（状态），**服务端说不能撤的**也不摆（许可）—— 两者是两件事`,
             `已撤下：${revoked.has ? '还在摆' : '已收起'} · 没许可：${noPerm.has ? '还在摆' : '已收起'}`,
+          )
+          /* 🆕 2026-09-27：那颗按钮的**图标**说的是"不再显示"（`IconEyeOff`），不是"删除" */
+          check(
+            own.found && own.has === true && looksLikeEyeOff(own.ds) === true,
+            `${SRV}：${who} → 屏上那颗「撤下」的图标是 **"不再显示"**（\`IconEyeOff\` 那一撇在、垃圾桶的盖子不在）`,
+            own.found ? `按钮上的 d：${short((own.ds ?? []).join(' | '), 120)}` : '没找到那一张卡',
+            '反向对照：`Notices.tsx` 换回 `IconTrash` → 这一条必须红（判据本身能不能红，见「撤下图标」那一节）',
           )
           if (as === 'super') {
             /* 顺手钉一句：这一页**真的**渲染了那四条（不然上面全是"没找到卡"的假绿） */
@@ -8553,6 +8577,326 @@ await withLock(async () => {
           }
         }
         await ctxPin.close()
+      })
+
+      /* ============================================================
+         🆕 2026-09-27 两句小活：图标语义 + 那条六步的脊
+         ------------------------------------------------------------
+         A.「撤下」那颗按钮的**图标**（`撤下图标` 那一节）：
+            原来是垃圾桶（`IconTrash`）。用户看到垃圾桶以为"点了会删"，
+            而它实际是**撤下**（停止生效、历史照旧留着）——
+            这是平台那条"**一个字段只有一种语义**"长在图标上的翻版。
+            → 换成 `IconEyeOff`（"不再显示"），**按钮文案 / onClick / disabled / size / variant
+              一个字都没动**（下面那条**逐字**钉住整行）。
+            ⚠️ 垃圾桶**没被顺手删掉**：`IconTrash` 只留给真删除那一类按钮，别的页面还在用。
+
+         B.「开学准备」那条六步进度（`开学准备 · 六步脊` 那一节）：
+            从"只有 ✅/⬜"换成**一条会画下去的脊** —— 借的是
+            `分支菜单评估/BranchedMenu` 的**那一个 SVG 技巧**
+            （`stroke-dasharray = 段长` + `stroke-dashoffset` 从段长走到 0，约 15 行、零依赖），
+            **没有**把那个组件（或它的任何依赖）引进来；也**不动布局骨架**。
+            🔴 画的是**顺序**：脊的末端落在"从头连续完成的最后一步"那个节点上
+              （完成 k 步 → 画到第 k 个节点；[✅ ⬜ ✅ …] 只画到第 1 个 —— 顺序没走到 ③）。
+            🔴 判据一个字没动：还是 `STEPS.map((s) => stepDone[s.key])`，六个 key 与改前逐字相同。
+            ⚠️ `prefers-reduced-motion: reduce` → **不过渡、直接终态**（两个方向都量）。
+
+         ⚠️ 这一节为什么要把组件**直接挂进浏览器**（写法照 S23 那一段）：
+            `loadGradeSetup()` 在本地演示模式（`!isRemote`）恒回 `state: 'missing'`，
+            而 `GradeSetup.tsx` 在那一支是**早退**的 —— 六步那条进度条在真路由上
+            **根本渲染不出来**（本轮实测：`/grades/<id>/setup` 屏上是"数据库还没跑 §27"）。
+            所以 DOM 那一半只能"挂组件"（喂 `done`），页面那一半（判据怎么喂进去）
+            钉在源码断言上；**两半合起来**才是"完成几步 → 脊画到第几步"。
+
+         🧪 反向对照（都在**同一条判据**上真跑过）：
+            · 图标：把那一行换回 `IconTrash`（in-process 改串）+ 拿 `icons.tsx` 里
+              `IconTrash` **真实那几笔** `d` 喂给判据 → 必须 false；
+            · 脊：给那一撇强塞 `stroke-dashoffset:0 !important`（= 画满）→ 同一条判据 false；
+            · reduced-motion：正常动效下那一段**确实**有 `stroke-dashoffset` 过渡（0.42s），
+              reduce 下是 `0s` —— 少了那一段 `@media` 就会红。
+         ============================================================ */
+      await step('撤下图标 + 开学准备 · 六步脊', async () => {
+        const src = (p) => readFileSync(join(HERE, '..', p), 'utf8')
+        const pageSrc = src('src/pages/Notices.tsx')
+        const iconsSrc = src('src/components/icons.tsx')
+        const gsSrc = src('src/pages/GradeSetup.tsx')
+        const REV = '撤下图标'
+        const GS = '开学准备 · 六步脊'
+
+        /* ---------------- A.「撤下」的图标 ---------------- */
+        const REVOKE_BTN =
+          '<Button size="sm" variant="ghost" icon={<IconEyeOff size={15} />} disabled={busy} onClick={onRevoke}>'
+        /** 🧪 反向对照 = 换回垃圾桶（**只动图标这半句**，其余一字不碰） */
+        const backToTrash = (t) =>
+          t.replace('icon={<IconEyeOff size={15} />}', 'icon={<IconTrash size={15} />}')
+        check(
+          pageSrc.includes(REVOKE_BTN),
+          `${REV}：🔴「撤下」那颗按钮**逐字**还是原来那一行，只有图标换成了 \`IconEyeOff\`（"不再显示"；文案 / onClick / disabled / size / variant 一个字没动）`,
+          short(
+            (pageSrc.match(/<Button size="sm" variant="ghost" icon=\{<IconEyeOff size=\{15\} \/>\} disabled=\{busy\} onClick=\{onRevoke\}>/) ?? ['没找到那一行'])[0],
+            120,
+          ),
+        )
+        check(
+          !backToTrash(pageSrc).includes(REVOKE_BTN) && !/icon=\{<IconTrash/.test(pageSrc),
+          `${REV}：🔴 这一页**没有任何一颗垃圾桶图标**了（"撤下"不是"删除"，用户不该读到"会删"）`,
+          /icon=\{<IconTrash/.test(pageSrc) ? '还有一处垃圾桶' : '一处都没有',
+          '反向对照：换回 `IconTrash` → 上面那条必须红',
+        )
+        check(
+          backToTrash(pageSrc) !== pageSrc && !backToTrash(pageSrc).includes(REVOKE_BTN),
+          `${REV}（反向对照）：那一行换回 \`IconTrash\` 之后，**同一条判据**算出来是 false（不是恒真）`,
+          `改回之后还含原来那行：${backToTrash(pageSrc).includes(REVOKE_BTN)}`,
+        )
+        check(
+          /export const IconTrash = /.test(iconsSrc) && /IconTrash/.test(src('src/pages/Schedule.tsx')),
+          `${REV}：垃圾桶 \`IconTrash\` **没被顺手删掉**（它只留给真删除）—— 定义还在、别的页面还在用它`,
+          `icons.tsx 里定义 ${/export const IconTrash = /.test(iconsSrc)} · Schedule.tsx 里有调用者 ${/IconTrash/.test(src('src/pages/Schedule.tsx'))}`,
+        )
+        /* 判据本身能不能红：拿 `icons.tsx` 里**真实**那几笔 `d` 喂进去（同一套 DOM 里用的判据） */
+        const iconDsOf = (name) => {
+          const at = iconsSrc.indexOf(`export const ${name} = `)
+          const seg = at < 0 ? '' : iconsSrc.slice(at, iconsSrc.indexOf('export const ', at + 10))
+          return [...seg.matchAll(/d="([^"]+)"/g)].map((m) => m[1])
+        }
+        const EYE_D = iconDsOf('IconEyeOff')
+        const TRASH_D = iconDsOf('IconTrash')
+        check(
+          EYE_D.length > 0 &&
+            TRASH_D.length > 0 &&
+            looksLikeEyeOff(EYE_D) === true &&
+            looksLikeEyeOff(TRASH_D) === false,
+          `${REV}：判据本身两个方向都对 —— \`IconEyeOff\` 的真实那几笔 → true；\`IconTrash\` 的真实那几笔 → false`,
+          `IconEyeOff ${EYE_D.length} 笔 → ${looksLikeEyeOff(EYE_D)} · IconTrash ${TRASH_D.length} 笔 → ${looksLikeEyeOff(TRASH_D)}`,
+        )
+
+        /* ---------------- B. 六步那条脊：源码那一半 ---------------- */
+        check(
+          gsSrc.includes('<SetupSpine done={STEPS.map((s) => stepDone[s.key])} />'),
+          `${GS}：🔴 六步的判据**逐条照旧**（\`STEPS.map((s) => stepDone[s.key])\` —— 还是那六个 key、同一处算出来的布尔）`,
+          short((gsSrc.match(/<SetupSpine[^\n]*/) ?? ['没找到'])[0], 120),
+        )
+        const JUDGE = [
+          'roster: students.length > 0',
+          'classes: admin.length > 0',
+          'type: typeDone',
+          'pick: pickDone',
+          'roles: rolesDone',
+          'stream: streams.length > 0',
+        ]
+        const missingJ = JUDGE.filter((t) => !gsSrc.includes(t))
+        check(
+          missingJ.length === 0,
+          `${GS}：🔴 六条的完成判据**与改前逐条相同**（六条表达式逐字都在）`,
+          missingJ.length ? `找不到：${missingJ.join(' / ')}` : '六条逐字一致',
+          '这六条就是 `stepDone` 里那六个 key 改前的写法',
+        )
+        check(
+          gsSrc.includes("{ok ? '✅' : '⬜'} {['①', '②', '③', '④', '⑤', '⑥'][i]} {STEPS[i].label}"),
+          `${GS}：每一步的 ✅/⬜、序号 ①②③④⑤⑥、步名**逐字照旧**（这一轮只换"画法"）`,
+          short(
+            (gsSrc.match(/\{ok \? '✅' : '⬜'\}[^\n]*/) ?? ['没找到'])[0],
+            120,
+          ),
+        )
+        check(
+          /strokeDasharray: SPINE_SEG/.test(gsSrc) &&
+            /strokeDashoffset: drawn\(i\) \? 0 : SPINE_SEG/.test(gsSrc) &&
+            /\.gs-spine__reach \{ stroke: var\(--color-ok\); transition: stroke-dashoffset/.test(gsSrc),
+          `${GS}：🔴 借的是 BranchedMenu 的**那一个 SVG 技巧**（\`dasharray = 段长\` + \`dashoffset\` 从段长走到 0 的**一行** transition）`,
+          'dasharray / dashoffset / transition 三处都在，且都是 12 行以内的常量',
+        )
+        /*
+         * ⚠️ 这两条**只扫代码**，不扫注释 —— 本文件的注释里就写着那个组件的名字
+         *    （"只借了这一段技巧"），第一版拿 `/BranchedMenu/` 扫整份源码，自己把自己判红了。
+         */
+        check(
+          !/(^|\n)\s*import[^\n]*BranchedMenu/.test(gsSrc) && !/branched-menu__/.test(gsSrc),
+          `${GS}：🔴 那个**组件**（与它的任何依赖）都没被引进来 —— 抄的只是那 15 行技巧`,
+          `有 import ${/(^|\n)\s*import[^\n]*BranchedMenu/.test(gsSrc)} · 有它的类名 ${/branched-menu__/.test(gsSrc)}`,
+        )
+        check(
+          /const lead = done\.findIndex\(\(d\) => !d\)/.test(gsSrc) &&
+            /const reached = lead < 0 \? done\.length : lead/.test(gsSrc) &&
+            /const drawn = \(i: number\) => reached > i/.test(gsSrc),
+          `${GS}：🔴 脊画到第几步 = **从头连续**完成的步数（\`reached\`），第 i 段在 \`reached > i\` 时画下 → 完成 k 步就画到第 k 个节点`,
+          'lead / reached / drawn 三处都在（顺序，不是"做了几件事"的计数）',
+          '反向对照：把 `reached > i` 改成恒真（画满）→ 下面 DOM 那几条必须红',
+        )
+        /* 那一段 CSS **按字面切出来**再判（不扫注释：注释里也写了 `color-mix()` 这个词） */
+        const spineCss = (gsSrc.match(/const SPINE_CSS = `([\s\S]*?)`/) ?? [])[1] ?? ''
+        check(
+          spineCss.includes('.gs-spine__track { stroke: var(--color-line2); }') &&
+            spineCss.includes('.gs-spine__reach { stroke: var(--color-ok);') &&
+            !/color-mix/.test(spineCss),
+          `${GS}：轨与脊用的是**既有令牌**（\`--color-line2\` / \`--color-ok\`），那段 CSS 里**没上** \`color-mix()\` → 教师端不需要再补一层兜底`,
+          `切出 CSS ${spineCss.length} 字符 · 令牌 ${spineCss.includes('var(--color-line2)')}/${spineCss.includes('var(--color-ok)')} · 有 color-mix ${/color-mix/.test(spineCss)}`,
+          '反向对照：把 `var(--color-ok)` 换成 `color-mix(…)` → 这一条必须红',
+        )
+        check(
+          gsSrc.includes(
+            '@media (prefers-reduced-motion: reduce) { .gs-spine__reach { transition: none; } }',
+          ),
+          `${GS}：🔴 \`prefers-reduced-motion: reduce\` → **不过渡**（终态是直接算出来的，不是一帧帧爬出来的）`,
+          '那一行 @media 在（下面还要在真浏览器里量两个方向）',
+        )
+
+        /* ---------------- B②. 真浏览器里挂组件：完成 k 步 → 脊画到第 k 个节点 ----------------
+         * ⚠️ 为什么是"挂组件"而不是打开 `/grades/:id/setup`：见本节文件头的说明
+         *    （演示模式下 `loadGradeSetup()` 恒 `missing` → 那一页早退，这条进度条不在屏上）。
+         */
+        const ctxGs = await browser.newContext({ viewport: { width: 1440, height: 940 }, locale: 'zh-CN' })
+        const gsPage = await ctxGs.newPage()
+        gsPage.on('pageerror', (e) => errors.push(`PAGEERROR(${GS}) :: ${e.message}`))
+        gsPage.on('console', (m) => {
+          if (m.type() === 'error') errors.push(`CONSOLE(${GS}) :: ${m.text()}`)
+        })
+        await gsPage.goto(`${BASE}/login`, { waitUntil: 'networkidle' })
+        await gsPage.waitForTimeout(400)
+
+        /** 挂一次 `SetupSpine({done})` 并把它算出来的东西读回来（`extraCss` 只给反向对照用） */
+        const mountSpine = (done, extraCss = '') =>
+          gsPage.evaluate(
+            async ([doneArr, css]) => {
+              const entry = [...document.querySelectorAll('script[type=module]')]
+                .map((s) => s.src)
+                .find((u) => /\/src\/main\.tsx/.test(u))
+              const entrySrc = entry || '/src/main.tsx'
+              const mainSrc = await (await fetch(entrySrc, { cache: 'no-cache' })).text()
+              const depM = mainSrc.match(/[?&]v=([0-9a-f]+)/)
+              const depV = depM ? depM[1] : null
+              if (!depV) return { why: `读不到 Vite 的 dep hash（入口 ${entrySrc}）` }
+              const rmod = await import(`/node_modules/.vite/deps/react.js?v=${depV}`)
+              const rdc = await import(`/node_modules/.vite/deps/react-dom_client.js?v=${depV}`)
+              /* 动态 import 这两个 prebundle 拿到的是 CJS interop 形状，具名导出挂在 `.default` 上（同 S23） */
+              const createElement = rmod.createElement ?? rmod.default?.createElement
+              const createRoot = rdc.createRoot ?? rdc.default?.createRoot
+              const mod = await import('/src/pages/GradeSetup.tsx')
+              const SetupSpine = mod.SetupSpine
+              if (!createElement || !createRoot || !SetupSpine) return { why: 'React / SetupSpine 没加载上' }
+              const host = document.createElement('div')
+              document.body.appendChild(host)
+              let st = null
+              if (css) {
+                st = document.createElement('style')
+                st.textContent = css
+                document.head.appendChild(st)
+              }
+              const root = createRoot(host)
+              root.render(createElement(SetupSpine, { done: doneArr }))
+              await new Promise((r) => setTimeout(r, 80))
+              const segs = [...host.querySelectorAll('svg[data-spine-seg]')].map((s) => {
+                const reach = s.querySelector('.gs-spine__reach')
+                const cs = getComputedStyle(reach)
+                return {
+                  i: +String(s.getAttribute('data-spine-seg')),
+                  drawn: s.getAttribute('data-spine-drawn') === '1',
+                  offset: String(cs.strokeDashoffset),
+                  dash: String(cs.strokeDasharray),
+                  prop: String(cs.transitionProperty),
+                  dur: String(cs.transitionDuration),
+                  stroke: String(cs.stroke),
+                }
+              })
+              const marks = [...host.querySelectorAll('span')].map((s) =>
+                String(s.textContent ?? '').trim(),
+              )
+              root.unmount()
+              host.remove()
+              if (st) st.remove()
+              return { segs, marks }
+            },
+            [done, extraCss],
+          )
+
+        /** 第 i 段（节点 i 与 i+1 之间，i = 1…5）该不该画：完成 k 步 → i < k */
+        const wantSegs = (k) => [1, 2, 3, 4, 5].map((i) => i < k)
+        /* ⚠️ 长度一律**按数值**比，不拍 `'12px'` 这种字符串 —— 各单位在浏览器里怎么写是它的事 */
+        const num = (v) => {
+          const n = parseFloat(String(v))
+          return Number.isFinite(n) ? n : NaN
+        }
+        const segsMatch = (segs, want) =>
+          segs.length === 5 && segs.every((s, i) => s.drawn === want[i])
+        /** 屏幕上"画没画下"：画下的必须 `dashoffset = 0`，没画的停在段长（12） */
+        const offsetOk = (segs, want) =>
+          segs.length === 5 &&
+          segs.every((s, i) =>
+            want[i] ? num(s.offset) === 0 && num(s.dash) > 0 : num(s.offset) > 0,
+          )
+
+        for (let k = 0; k <= 6; k++) {
+          const done = Array.from({ length: 6 }, (_, i) => i < k)
+          const r = await mountSpine(done)
+          if (r.why) {
+            check(false, `${GS}：${r.why}`, r.why)
+            break
+          }
+          const want = wantSegs(k)
+          const got = r.segs.map((s) => s.drawn)
+          const marksOk =
+            r.marks.length === 6 && r.marks.every((t, i) => (done[i] ? t.startsWith('✅') : t.startsWith('⬜')))
+          check(
+            segsMatch(r.segs, want),
+            `${GS}：🔴 完成 ${k} 步 → 脊画到**第 ${k} 个节点**（${k === 0 ? '一段都不画' : `第 1…${k - 1} 段已画，第 ${k} 段起是空轨`}）`,
+            `五段：${got.map((b, i) => `${i + 1}${b ? '画' : '空'}`).join(' ')}`,
+            '反向对照：把 `reached > i` 改成恒真（画满）→ 这一条必须红',
+          )
+          check(
+            marksOk && offsetOk(r.segs, want),
+            `${GS}：完成 ${k} 步 → 画下那几段的 \`stroke-dashoffset\` **真的走到 0**（没画的停在段长 12px），✅/⬜ 也逐条对上`,
+            `offset：${r.segs.map((s) => s.offset).join(' / ')} · 屏上：${r.marks.join(' ')}`,
+          )
+        }
+
+        /* 🔴 reduced-motion 两个方向都量：正常动效下那一撇**确实有** stroke-dashoffset 过渡（"会画下去"），
+              reduce 下 `transition: none`、而且是**终态**（不是停在半路） */
+        const D3 = [true, true, true, false, false, false]
+        await gsPage.emulateMedia({ reducedMotion: 'no-preference' })
+        const rNorm = await mountSpine(D3)
+        await gsPage.emulateMedia({ reducedMotion: 'reduce' })
+        const rRed = await mountSpine(D3)
+        await gsPage.emulateMedia({ reducedMotion: 'no-preference' })
+        const n0 = (rNorm.segs ?? [])[0] ?? {}
+        const rd0 = (rRed.segs ?? [])[0] ?? {}
+        const rd2 = (rRed.segs ?? [])[2] ?? {}
+        /* ⚠️ 单位是秒：`parseFloat('0.42s')=0.42` · `parseFloat('1e-06s')=1e-06`。
+           ⚠️ 为什么时长不判严格 `'0s'`：`index.css` 里还有一条**全局** reduce 兜底
+           （`* { transition-duration: .001ms !important }`，它只压时长、**不碰** `transition-property`），
+           所以真读数会是 `1e-06s` —— 那也**正是"不过渡"**。
+           🔴 "该不该过渡"这一半由本页自己那一行 `@media … { transition: none }` 说了算
+           （reduce 下 `transition-property` 必须变成 `none`），所以下面两个方向都判。 */
+        const secs = (v) => {
+          const n = parseFloat(String(v))
+          return Number.isFinite(n) ? n : NaN
+        }
+        check(
+          String(n0.prop ?? '').includes('stroke-dashoffset') &&
+            secs(n0.dur) > 0.1 &&
+            !String(rd0.prop ?? '').includes('stroke-dashoffset') &&
+            secs(rd0.dur) < 0.01 &&
+            num(rd0.offset) === 0 &&
+            num(rd2.offset) > 0,
+          `${GS}：🔴 \`prefers-reduced-motion: reduce\` → **不过渡、直接终态**（\`transition-property: none\` + 全局那条 0.001ms 兜底）；正常动效下才有一行 \`stroke-dashoffset\` 过渡（0.42s，"会画下去"）`,
+          `正常：${n0.prop}/${n0.dur} · reduce：${rd0.prop}/${rd0.dur} · reduce 下 offset：${(rRed.segs ?? []).map((s) => s.offset).join(' / ')}`,
+          '反向对照：删掉本页那一行 `@media (prefers-reduced-motion: reduce) { … transition: none }` → reduce 下 `transition-property` 变回 `stroke-dashoffset`，这一条必须红',
+        )
+
+        /* 🧪 反向对照（真跑）：给那一撇强塞 `stroke-dashoffset:0 !important` = **画满** →
+              同一条判据（`offsetOk`）**必须**算成 false（完成 1 步时它本该一段都不画） */
+        const rFull = await mountSpine(
+          [true, false, false, false, false, false],
+          '.gs-spine__reach{stroke-dashoffset:0 !important}',
+        )
+        const fullSegs = rFull.segs ?? []
+        check(
+          fullSegs.length === 5 &&
+            fullSegs.every((s) => num(s.offset) === 0) &&
+            fullSegs[0]?.drawn === false &&
+            offsetOk(fullSegs, wantSegs(1)) === false,
+          `${GS}（反向对照）：把那一撇**强塞成"画满"**（\`stroke-dashoffset:0 !important\`）→ 完成 1 步时 offset 也会全变 0，\`offsetOk\` 那条判据**会**红`,
+          `强塞画满后 offset：${fullSegs.map((s) => s.offset).join(' / ')} · data 里仍是 ${fullSegs.map((s) => (s.drawn ? '画' : '空')).join(' ')} · offsetOk=${offsetOk(fullSegs, wantSegs(1))}`,
+        )
+        await ctxGs.close()
       })
 
       /* ============================================================
