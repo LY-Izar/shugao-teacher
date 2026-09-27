@@ -18,9 +18,15 @@ name: 数据库备份
 # 管道里 `$?` 拿到的是 gzip 的退出码，pg_dump 挂了会被吞掉，
 # 留下一个「合法但空」的 .gz，工作流还显示绿灯。现在先落 .sql、查退出码、再压缩。
 # 现在的失败一定是四类里的一类，日志直接点名：
-#   ① 连不上数据库（DNS / TCP / 超时）  ② 密码或用户名不对
-#   ③ pg_dump 与服务器版本不兼容        ④ R2 上传失败（含配置不全）
-# 🔴 连接方式不动：用 Direct connection（5432）那条串，实测能跑通。
+#   ① 连不上数据库（DNS / TCP / IPv6 / 超时）  ② 密码或用户名不对
+#   ③ pg_dump 与服务器版本不兼容              ④ R2 上传失败（含配置不全）
+# 🔴 连接方式：**别用 Direct connection**（db.<ref>.supabase.co:5432）——
+#    它只解析出 IPv6，而 GitHub runner 没有 IPv6 出口，
+#    **实测报 `Network is unreachable`**（2026-09-27；原来那句"实测能跑通"是错的）。
+#    要用 **Session pooler**：`aws-0-<region>.pooler.supabase.com` + 端口 5432，
+#    ⚠️ 用户名必须带项目 ref 后缀（`postgres.<ref>`）。
+#    ⚠️ Session pooler 与 Direct 的端口**都是 5432** —— 光看端口分不出来，要看 host。
+#    ⚠️ 别用 Transaction pooler（6543）：事务模式，pg_dump 会挂。
 
 on:
   schedule:
@@ -188,8 +194,10 @@ jobs:
             }
             hit_if 'could not translate host name|name or service not known|nodename nor servname|temporary failure in name resolution' \
               'DNS 解析失败 —— 连接串的 host 段有问题（拼错，或值里混进了空白/换行）'
+            hit_if 'network is unreachable|network unreachable' \
+              'IPv6 走不通 —— 连接串多半是 Direct connection（db.<ref>.supabase.co 只有 IPv6），而 GitHub runner 没有 IPv6 出口。换成 Session pooler：aws-0-<region>.pooler.supabase.com:5432，用户名带 postgres.<ref> 后缀'
             hit_if 'connection refused' \
-              'TCP 连接被拒 —— 端口不通（Direct connection 用 5432；6543 的 pooler 串在 pg_dump 下常常不通）'
+              'TCP 连接被拒 —— 端口不通（Session pooler 用 5432；Transaction pooler 的 6543 在 pg_dump 下常常不通）'
             hit_if 'timeout expired|connection timed out|timed out' \
               '连接超时 —— 网络到 *.supabase.co 被阻断（见 AI交接文档 §8.7 坑 1）'
             hit_if 'password authentication failed|authentication failed|invalid password' \
