@@ -112,6 +112,15 @@ jobs:
 
       - name: 安装 postgres 客户端
         run: |
+          # 🔴 必须从 PGDG 官方源装：Ubuntu 24.04 自带的是 16，而 Supabase 的服务器是 17.6 ——
+          #    pg_dump 主版本低于服务器会【直接拒绝导出】（server version mismatch）。
+          #    2026-09-27 实测：psql 能连上（psql 可以连更高的服务器），但 pg_dump 当场 abort。
+          #    PGDG 的 `postgresql-client` 跟的是最新主版本 → 这样装出来就是 17。
+          #    以后服务器升主版本时，这里跟着 PGDG 走即可；真遇上不匹配，
+          #    下面预检那步会打出「pg_dump 版本不兼容」并给出 sudo apt-get install -y postgresql-client-<N>。
+          sudo install -d /usr/share/postgresql-common/pgdg
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo tee /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc >/dev/null
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
           sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
           # 装上的是哪个版本必须打出来：pg_dump 主版本低于服务器主版本时会
           # 直接拒绝导出（server version mismatch），那时第一个要看的就是这两行。
