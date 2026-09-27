@@ -342,6 +342,16 @@ const EXPECTED_FILES = [
   '117-dark-classes.png',
   '118-dark-admin.png',
   '119-classroom-still-light.png',
+  // 🆕 2026-10-10 F6：**强调色轴**（`data-accent` = blue | purple，见最后那一节）。
+  //  ⚠️ 上面那 129 张（含 116~119 四张暗色）**一张都不许变**：蓝套一个令牌没动，
+  //     所以"没选过强调色的用户"看到的画面与这一轮之前逐字相同。
+  //  120/121 = **亮紫**（工作台 / 班级）；122/123 = **暗紫**（工作台 / 管理台）；
+  //  124 = **选择器本身**（亮紫下把那张小面板打开）—— 它是"4 套"这个交互的留档。
+  '120-purple-workbench.png',
+  '121-purple-classes.png',
+  '122-darkpurple-workbench.png',
+  '123-darkpurple-admin.png',
+  '124-theme-picker.png',
 ]
 
 /* ---------------- 断言与日志 ---------------- */
@@ -405,6 +415,23 @@ async function step(name, fn) {
 const short = (s, n = 150) => {
   const t = String(s ?? '').replace(/\s+/g, ' ').trim()
   return t.length > n ? `${t.slice(0, n)}…` : t
+}
+
+/**
+ * 🆕 F6：在那颗入口钮打开的**主题选择器**里选一档。
+ *
+ * 为什么要有这个函数：F6 起入口钮"点一下"= **开选择器**（不是直接翻一档），
+ * 所以"切亮/切暗/换强调色"这三件事都要走"开面板 → 选一下"。
+ * ⚠️ **幂等**：面板已经开着就**不再点**入口钮（第二下是"关"，接下来那一下会点空、
+ *    变成一条假红）。判据是 `[data-theme-panel]` 在不在。
+ */
+async function panelPick(page, kind, value) {
+  if ((await page.locator('[data-theme-panel]').count()) === 0) {
+    await page.locator('[data-theme-toggle]:visible').first().click()
+    await page.waitForTimeout(150)
+  }
+  await page.locator(`[data-${kind}-option="${value}"]`).first().click()
+  await page.waitForTimeout(220)
 }
 
 /** 面包屑：真出错时（超时、找不到元素）至少知道是**哪一步的哪一句** */
@@ -8387,6 +8414,12 @@ await withLock(async () => {
           const cs = getComputedStyle(document.documentElement)
           const tok = {}
           for (const t of TOKENS) tok[t] = cs.getPropertyValue(`--color-${t}`).trim()
+          /* 🆕 F6：另外几个"跟着强调色走 / 压在强调色上"的令牌（不在那份 24 个的清单里 ——
+             它是"亮色 24 个必须逐个有暗色值"那一组，别把它撑大）。
+             ⚠️ `onaccent` 一定要读：暗紫块里**覆盖过它**（`#0a050b`），不读回来就算不出对比度。 */
+          for (const t of ['focus', 'focus2', 'hiline', 'onaccent']) {
+            tok[t] = cs.getPropertyValue(`--color-${t}`).trim()
+          }
           const body = document.body
           const panel = document.querySelector('.panel')
           const textIn = (root) => {
@@ -8399,6 +8432,9 @@ await withLock(async () => {
           return {
             theme: document.documentElement.getAttribute('data-theme'),
             stored: localStorage.getItem('shugao.theme'),
+            /* 🆕 F6：强调色那条轴的两个对应物（**默认都是 null**：blue 是"摘掉属性"） */
+            accent: document.documentElement.getAttribute('data-accent'),
+            storedAccent: localStorage.getItem('shugao.accent'),
             tok,
             bodyBg: getComputedStyle(body).backgroundColor,
             bodyFg: getComputedStyle(body).color,
@@ -8589,13 +8625,13 @@ await withLock(async () => {
         /* ⚠️ 这一节**不截图**：工作台/班级/管理台三张暗色图由下面那一节统一出
            （在这里再截一张 = 同一个文件名写两次，`EXPECTED_FILES` 的"只写一次"那条会红） */
 
-        /* ---- C. 手动切换 + 记忆 ---- */
-        await toggle.nth(visibles[0] ?? 0).click()
-        await dp.waitForTimeout(250)
+        /* ---- C. 手动切换 + 记忆 ----
+           🆕 F6：入口钮点开的是**选择器**了，所以"切一档"= 开面板 + 选一下（`panelPick`）。 */
+        await panelPick(dp, 'theme', 'light')
         const after = await readPalette(dp)
         check(
           after.theme === null && after.stored === 'light',
-          'F4②：点一下 → 切到亮色，并且**落盘** `shugao.theme=light`',
+          'F4②：在入口钮的选择器里选「亮」→ 切到亮色，并且**落盘** `shugao.theme=light`',
           `data-theme = ${after.theme}；shugao.theme = ${after.stored}`,
         )
         await dp.reload({ waitUntil: 'networkidle' })
@@ -8612,9 +8648,8 @@ await withLock(async () => {
           'F4②：切回亮色之后，页面底是**原来那个亮色**（#e8ebf2，逐字相同）',
           `body background-color = ${reloaded.bodyBg}`,
         )
-        /* 切回暗色，把这一档留给下面几张暗色图 */
-        await dp.locator('[data-theme-toggle]').nth(visibles[0] ?? 0).click()
-        await dp.waitForTimeout(250)
+        /* 切回暗色，把这一档留给下面几张暗色图（⚠️ 刚 reload 过，面板是关的） */
+        await panelPick(dp, 'theme', 'dark')
 
         /* ============================================================
            ---- 🔴 2026-10-09 F5-1：那颗圆钮外面那圈"蓝框" ----
@@ -8684,6 +8719,9 @@ await withLock(async () => {
            "键盘聚焦" → 这一条会假红。换一张干净的页面再点，才是"纯鼠标"的那条路径。 */
         await dp.goto(`${BASE}/`, { waitUntil: 'networkidle' })
         await dp.waitForTimeout(500)
+        /* ⚠️ F6 起这一下**还会把选择器打开**（`[data-theme-panel]`）—— 那不影响焦点环：
+           环是画在这颗钮的 `:focus-visible` 上的，面板不是它的祖先也不是焦点。
+           紧接着的第二下会把面板关掉（"开/关"是同一个 `onClick`）。 */
         await toggle.nth(visibles[0] ?? 0).click()
         await dp.waitForTimeout(250)
         const mouseRing = await dp.evaluate(() => {
@@ -8804,6 +8842,530 @@ await withLock(async () => {
         written.push('119-classroom-still-light.png')
         console.log('     📷 119-classroom-still-light.png')
         await c.close()
+      })
+
+      /* ============================================================
+         F6（2026-10-10）：**强调色轴** —— `data-accent` = `blue`（默认）| `purple`
+
+         用户拍板：「**保留原来的蓝**，新增『校色紫』，合成 **4 套主题**」+「**原来的主题也要保留**」。
+         两个轴正交：`data-theme`（亮/暗，**语义一个字没改**）+ `data-accent`（蓝/紫）
+         → 亮蓝(默认) / 暗蓝 / 亮紫 / 暗紫。
+
+         这一节钉七件事（🔴 的三条是用户点名的）：
+           A. 🔴 **默认 = 亮 + 蓝，且与改动前逐字相同**（DOM 上没有那两个属性 + computed 是那个蓝）；
+              反向对照：真落到紫 → 同一批判据必须不成立；
+           B. **4 套各自都有值**（源码级逐个是给定值 + 浏览器里 computed 逐个读回来）；
+           C. 🔴 **切到紫再切回蓝 → 与原来逐字相同**（含焦点环那三个令牌）；
+           D. 🔴 **暗紫的对比度**：accent ≥3（图形）/ accentink ≥4.5（≤12.5px 小字）/ onaccent ≥4.5；
+              反向对照：值改深到破线 → 必须红；
+           E. 🔴 **教室端恒亮 + 默认蓝**（用户已经选了暗紫也照样）；反向对照：同一份偏好在 `/` 上**是**暗紫；
+           F. **跟随系统只改亮暗、不改强调色**（反向对照：系统一变不会顺手替你记一个偏好）；
+           G. **`--color-cyan` 仍然 0 处引用**（用户 ④：紫套下"第二套彩色"没有面积可收）。
+
+         ⚠️ 这一节所有比值都从**页面真实算出来的令牌值**取（`readPalette`），不是把数字抄进断言。
+         ============================================================ */
+      await step('F6 强调色轴（蓝 / 校色紫）', async () => {
+        const f1 = (x) => (x === null || x === undefined ? '算不出' : x.toFixed(2))
+
+        /* ---------- A① / B：源码级那一半 ---------- */
+        const cssRaw = readFileSync(join(HERE, '..', 'src', 'index.css'), 'utf8')
+        /* ⚠️ **先去注释**再判：这一轮自己的注释里就写着那两串十六进制（举例子用的），
+              不去注释的话"紫只许出现在紫块里"那条会被自己的注释骗成红。 */
+        const cssSrc6 = cssRaw.replace(/\/\*[\s\S]*?\*\//g, '')
+        const baseEnd = cssSrc6.indexOf(":root[data-theme='dark']")
+        const base = baseEnd > 0 ? cssSrc6.slice(0, baseEnd) : cssSrc6
+        const purpleAt = cssSrc6.indexOf(":root[data-accent='purple']")
+        const purpleDarkAt = cssSrc6.indexOf(":root[data-accent='purple'][data-theme='dark']")
+        check(
+          purpleAt > 0 && purpleDarkAt > purpleAt,
+          "F6-B：`index.css` 里有**两个**紫块（亮紫 = `:root[data-accent='purple']`，暗紫 = 再叠一层 `[data-theme='dark']`）",
+          `亮紫 @${purpleAt} · 暗紫 @${purpleDarkAt}`,
+          '⚠️ 暗紫那条必须是 0,3,0（与暗色块 0,2,0 同级会靠"谁在后面"决胜，不稳）',
+        )
+        const purpleLight = purpleAt > 0 ? cssSrc6.slice(purpleAt, purpleDarkAt) : ''
+        const purpleDark =
+          purpleDarkAt > 0 ? cssSrc6.slice(purpleDarkAt, cssSrc6.indexOf('@theme {', purpleDarkAt)) : ''
+
+        /* 🔴 A①：默认那一份（`@theme` 的底）还是原来那个蓝，**逐字** */
+        const defaultIsBlue = (src) => /--color-accent\s*:\s*#0b5cf0\s*;/.test(src)
+        check(
+          defaultIsBlue(base),
+          '🔴 F6-A①：默认强调色还是**改动前那个蓝** `#0b5cf0`（`@theme` 里逐字没动）',
+          `默认那一块里 ${/#0b5cf0/.test(base) ? '就是 #0b5cf0' : '没有这个值'}`,
+          '这是"没选过强调色的用户看到的画面与这一轮之前逐字相同"的第一半',
+        )
+        check(
+          !defaultIsBlue(base.replace('--color-accent: #0b5cf0', '--color-accent: #6d2b7a')),
+          '🔴 F6-A①（反向对照）：把默认强调色改成校色紫 → 上面那条**会**红',
+          '同一份源码、只换那一个十六进制值 → 同一个判据不成立',
+        )
+        const purpleElsewhere = base.includes('#6d2b7a') || base.includes('#bc45d3')
+        check(
+          !purpleElsewhere,
+          '🔴 F6-A①：**紫色只出现在那两个紫块里** —— 默认的亮·蓝与暗·蓝里一个紫值都没有',
+          purpleElsewhere ? '默认那两块里出现了紫色值' : '默认两块里没有紫色值',
+          '反向对照：把任意一个紫值抄回 `@theme` 或暗色块 → 这一条必须红',
+        )
+
+        /* B（源码级）：两个紫块里那三件**逐个是给定值** */
+        const WANT = {
+          亮紫: {
+            block: purpleLight,
+            vals: { accent: '#6d2b7a', accentink: '#7d318c', accentsoft: '#f7f1f8' },
+          },
+          暗紫: {
+            block: purpleDark,
+            vals: { accent: '#bc45d3', accentink: '#c275d1', accentsoft: '#391d3e' },
+          },
+        }
+        for (const [name, { block, vals }] of Object.entries(WANT)) {
+          const miss = Object.entries(vals).filter(
+            ([k, v]) => !new RegExp(`--color-${k}\\s*:\\s*${v}\\s*;`).test(block),
+          )
+          check(
+            miss.length === 0,
+            `F6-B：**${name}**的三件（accent / accentink / accentsoft）在紫块里**逐个是给定值**`,
+            miss.length
+              ? `对不上的：${miss.map(([k, v]) => `${k} 应为 ${v}`).join('、')}`
+              : `三件逐字一致（${Object.values(vals).join(' / ')}）`,
+          )
+        }
+        /* 🔴 焦点环必须跟着强调色走（用户点名"最容易漏"的那一处）+ 那两个分量写法 */
+        const followBad = []
+        for (const [name, { block }] of Object.entries(WANT)) {
+          if (!/--color-focus\s*:\s*#/.test(block)) followBad.push(`${name}:focus`)
+          if (!/--color-focus2\s*:\s*\d+ \d+ \d+/.test(block)) followBad.push(`${name}:focus2`)
+          if (!/--color-hiline\s*:\s*\d+ \d+ \d+/.test(block)) followBad.push(`${name}:hiline`)
+        }
+        check(
+          followBad.length === 0,
+          '🔴 F6：两个紫块里 `--color-focus` / `--color-focus2` / `--color-hiline` **都在**（焦点环不是那个蓝）',
+          followBad.length ? `缺的：${followBad.join('、')}` : '亮紫与暗紫三处齐全',
+          '`focus2` / `hiline` 是"同一个强调色的分量写法"（`rgb(var(--color-focus2) / .14)` 这样用）',
+        )
+        check(
+          !followBad.length && !/--color-focus\s*:\s*#0b5cf0/.test(purpleLight + purpleDark),
+          '🔴 F6：紫块里**没有**把焦点环写成那个蓝（`#0b5cf0`）—— 漏这一处 = 紫套下 Tab 跳出一圈蓝框',
+          '紫块里 focus 是 `#6d2b7a` / `#bc45d3`',
+        )
+
+        /* ---------- A② / B：运行时那一半（浏览器里逐套读回来） ---------- */
+        /** 开一页"已经选好了某一套"的页面，把 24 个令牌 + 两个轴的属性/落盘值都读回来 */
+        const openSet = async (prefs, scheme = 'light') => {
+          const c = await browser.newContext({
+            viewport: { width: 1440, height: 940 },
+            locale: 'zh-CN',
+            colorScheme: scheme,
+          })
+          await c.clock.install({ time: new Date('2026-09-19T10:00:00') })
+          await c.addInitScript(
+            ({ st, p }) => {
+              window.localStorage.setItem('shugao.teacher.v1', JSON.stringify(st))
+              window.localStorage.setItem('shugao.deviceRole', 'teacher')
+              if (p.theme) window.localStorage.setItem('shugao.theme', p.theme)
+              if (p.accent) window.localStorage.setItem('shugao.accent', p.accent)
+            },
+            { st: TEACHER_STATE, p: prefs },
+          )
+          const p = await c.newPage()
+          p.on('pageerror', (e) => errors.push(`PAGEERROR(F6) :: ${e.message}`))
+          p.on('console', (m) => {
+            if (m.type() === 'error') errors.push(`CONSOLE(F6) :: ${m.text()}`)
+          })
+          await p.goto(`${BASE}/`, { waitUntil: 'networkidle' })
+          await p.waitForTimeout(600)
+          return { c, p, pal: await readPalette(p) }
+        }
+
+        const SETS = [
+          {
+            name: '亮蓝(默认)',
+            prefs: {},
+            theme: null,
+            accentAttr: null,
+            want: { accent: '#0b5cf0', accentink: '#0847c4', accentsoft: '#e9f0fe' },
+          },
+          {
+            name: '暗蓝',
+            prefs: { theme: 'dark' },
+            theme: 'dark',
+            accentAttr: null,
+            want: { accent: '#5386f4', accentink: '#a9c3fb', accentsoft: '#16273f' },
+          },
+          {
+            name: '亮紫',
+            prefs: { accent: 'purple' },
+            theme: null,
+            accentAttr: 'purple',
+            want: { accent: '#6d2b7a', accentink: '#7d318c', accentsoft: '#f7f1f8' },
+          },
+          {
+            name: '暗紫',
+            prefs: { theme: 'dark', accent: 'purple' },
+            theme: 'dark',
+            accentAttr: 'purple',
+            want: { accent: '#bc45d3', accentink: '#c275d1', accentsoft: '#391d3e' },
+          },
+        ]
+        const palOf = {}
+        const setBad = []
+        for (const s of SETS) {
+          const r = await openSet(s.prefs)
+          palOf[s.name] = r.pal
+          const miss = Object.entries(s.want).filter(([k, v]) => r.pal.tok[k] !== v)
+          if (r.pal.theme !== s.theme || r.pal.accent !== s.accentAttr) {
+            setBad.push(`${s.name}：属性不对（theme=${r.pal.theme} / accent=${r.pal.accent}）`)
+          }
+          if (miss.length) {
+            setBad.push(
+              `${s.name}：${miss.map(([k, v]) => `${k} 应为 ${v}（实测 ${r.pal.tok[k]}）`).join('、')}`,
+            )
+          }
+          await r.c.close()
+        }
+        check(
+          setBad.length === 0,
+          'F6-B：**4 套**（亮蓝 / 暗蓝 / 亮紫 / 暗紫）在**浏览器里**各自都算出正确的 accent / accentink / accentsoft，两轴的属性也对',
+          setBad.length
+            ? setBad.join('；')
+            : SETS.map((s) => `${s.name}=${s.want.accent}`).join(' · '),
+        )
+
+        /* 🔴 A②：默认那一套 —— DOM 上**没有那两个属性**（= 与改动前逐字相同） */
+        const blue = palOf['亮蓝(默认)']
+        check(
+          blue.theme === null && blue.accent === null && blue.stored === null && blue.storedAccent === null,
+          '🔴 F6-A②：一个**没选过任何东西**的用户（系统是亮色）→ `<html>` 上没有 `data-theme`、也没有 `data-accent`，两个存储键都没写',
+          `data-theme=${blue.theme} · data-accent=${blue.accent} · shugao.theme=${blue.stored} · shugao.accent=${blue.storedAccent}`,
+          '这是"129 张图一张不变"的第二半：默认两档都是**摘掉属性**，不是"写上 blue/light"',
+        )
+        check(
+          blue.tok.accent === '#0b5cf0' && blue.tok.accentink === '#0847c4' && blue.tok.accentsoft === '#e9f0fe',
+          '🔴 F6-A②：默认算出来的强调色三件 === 改动前那三件（亮蓝）',
+          `accent=${blue.tok.accent} · accentink=${blue.tok.accentink} · accentsoft=${blue.tok.accentsoft}`,
+        )
+        check(
+          blue.bodyBg === 'rgb(232, 235, 242)',
+          '🔴 F6-A②：默认页面底还是那个亮色 #e8ebf2（逐字）',
+          `body background-color = ${blue.bodyBg}`,
+        )
+        /* 🔴 A②（反向对照）：真落到紫那一档 → 上面那批判据必须**不成立** */
+        const lpurple = palOf['亮紫']
+        check(
+          lpurple.accent === 'purple' && lpurple.tok.accent === '#6d2b7a' && !defaultIsBlue(`--color-accent: ${lpurple.tok.accent};`),
+          '🔴 F6-A②（反向对照）：**真的选了紫**之后 —— `data-accent=purple`、accent 变成 `#6d2b7a`，"默认是蓝"那几条判据此时**全部不成立**',
+          `data-accent=${lpurple.accent} · accent=${lpurple.tok.accent}`,
+          '所以 A② 那三条不是"怎么都不会红"的摆设',
+        )
+
+        /* ---------- C：🔴 切到紫再切回蓝 → 与原来逐字相同 ---------- */
+        const cC = await browser.newContext({
+          viewport: { width: 1440, height: 940 },
+          locale: 'zh-CN',
+          colorScheme: 'light',
+        })
+        await cC.clock.install({ time: new Date('2026-09-19T10:00:00') })
+        await cC.addInitScript((s) => {
+          window.localStorage.setItem('shugao.teacher.v1', JSON.stringify(s))
+          window.localStorage.setItem('shugao.deviceRole', 'teacher')
+        }, TEACHER_STATE)
+        const cp = await cC.newPage()
+        cp.on('pageerror', (e) => errors.push(`PAGEERROR(F6) :: ${e.message}`))
+        cp.on('console', (m) => {
+          if (m.type() === 'error') errors.push(`CONSOLE(F6) :: ${m.text()}`)
+        })
+        await cp.goto(`${BASE}/`, { waitUntil: 'networkidle' })
+        await cp.waitForTimeout(600)
+        const cStart = await readPalette(cp)
+        const ACCENT_SIX = ['accent', 'accentink', 'accentsoft', 'focus', 'focus2', 'hiline']
+        await panelPick(cp, 'accent', 'purple')
+        const cMid = await readPalette(cp)
+        check(
+          cMid.tok.accent === '#6d2b7a' && cMid.accent === 'purple' && cMid.storedAccent === 'purple',
+          'F6-C：在入口钮的选择器里选「紫」→ **当场**变成亮紫，并落盘 `shugao.accent=purple`',
+          `data-accent=${cMid.accent} · accent=${cMid.tok.accent} · shugao.accent=${cMid.storedAccent}`,
+        )
+        await panelPick(cp, 'accent', 'blue')
+        const cBack = await readPalette(cp)
+        const cDiff = ACCENT_SIX.filter((t) => cBack.tok[t] !== cStart.tok[t])
+        check(
+          cDiff.length === 0,
+          '🔴 F6-C：切到紫再**切回蓝** → 六个令牌（强调色三件 + 焦点环/光晕/高光边）**与切之前逐字相同**',
+          cDiff.length
+            ? `变了的：${cDiff.map((t) => `${t}: ${cStart.tok[t]} → ${cBack.tok[t]}`).join('；')}`
+            : `六个逐字一致（accent=${cBack.tok.accent} · focus=${cBack.tok.focus}）`,
+          '反向对照：把蓝套任意一个令牌改坏 → 这一条必须红',
+        )
+        check(
+          cBack.accent === null && cBack.storedAccent === 'blue',
+          '🔴 F6-C：切回蓝之后 `data-accent` **被摘掉**（DOM 回到"没有这个属性"），落盘是 `blue`',
+          `data-accent=${cBack.accent} · shugao.accent=${cBack.storedAccent}`,
+          '蓝不是"写上 blue"，是"摘掉" —— 这一条就是 DOM 层面与改动前逐字相同',
+        )
+        /* 顺手把那两张"选择器开着"的样子拍出来（124）：同一个页面、同一个 context */
+        await panelPick(cp, 'accent', 'purple')
+        check(
+          (await cp.locator('[data-theme-panel]').count()) === 1 &&
+            (await cp.locator('[data-theme-option]').count()) === 2 &&
+            (await cp.locator('[data-accent-option]').count()) === 2,
+          'F6：入口钮点开是**一个面板、两行、各 2 个选项**（明暗 2 + 强调色 2 = 4 套可达）',
+          `panel=${await cp.locator('[data-theme-panel]').count()} · 明暗=${await cp.locator('[data-theme-option]').count()} · 强调色=${await cp.locator('[data-accent-option]').count()}`,
+        )
+        await cp.screenshot({ path: join(OUT, '124-theme-picker.png'), fullPage: false })
+        written.push('124-theme-picker.png')
+        console.log('     📷 124-theme-picker.png')
+        await cC.close()
+
+        /* ---------- D：🔴 暗紫的对比度（用户点名的 3.44 / 4.71 那两个数） ---------- */
+        const dpal = palOf['暗紫']
+        const dAccent = contrast(dpal.tok.accent, dpal.tok.surface3)
+        const dInk = contrast(dpal.tok.accentink, dpal.tok.surface3)
+        const dOn = contrast(dpal.tok.onaccent, dpal.tok.accent)
+        const dInkSoft = contrast(dpal.tok.accentink, dpal.tok.accentsoft)
+        const dInkSoft2 = contrast(dpal.tok.ink, dpal.tok.accentsoft)
+        check(
+          dAccent >= 3 && dInk >= 4.5 && dOn >= 4.5 && dInkSoft >= 4.5 && dInkSoft2 >= 4.5,
+          '🔴 F6-D：**暗紫** —— `accent` 压**最亮的那层面**（surface3）≥3:1（图形）/ `accentink` 压同一面 ≥4.5:1（≤12.5px 小字）/ `onaccent` 压实心 accent ≥4.5:1 / `accentink`、`ink` 压 accentsoft ≥4.5:1',
+          `accent=${f1(dAccent)}:1 · accentink=${f1(dInk)}:1 · onaccent=${f1(dOn)}:1 · accentink/soft=${f1(dInkSoft)}:1 · ink/soft=${f1(dInkSoft2)}:1`,
+          '这就是"accent 与 accentink 必须是两个值"的原因：文字 4.5 / 图形 3 两个门槛靠一个值同时满足不了',
+        )
+        const badDeepA = contrast('#6d2b7a', dpal.tok.surface3)
+        const badDeepB = contrast('#8d3f9c', dpal.tok.surface3)
+        check(
+          badDeepA < 3 && badDeepB < 4.5,
+          '🔴 F6-D（反向对照）：把暗紫的 accent 改深到 `#6d2b7a` / accentink 改深到 `#8d3f9c` → 上面那两条阈值**会**红',
+          `实测 ${f1(badDeepA)}:1（要 ≥3）/ ${f1(badDeepB)}:1（要 ≥4.5）`,
+          '往深里挪一点点就破线 —— 说明那两个读数是真的卡在线上',
+        )
+        const legacyOn = contrast('#0d1117', dpal.tok.accent)
+        check(
+          legacyOn !== null && legacyOn < 4.5,
+          '🔴 F6-D（反向对照）：**不覆盖** onaccent（沿用暗色块那支 `#0d1117`）只有 4.44:1，破 AA —— 所以暗紫块里那一行是必需的，不是装饰',
+          `#0d1117 on ${dpal.tok.accent} = ${f1(legacyOn)}:1`,
+        )
+        /* ⚠️ **登记一条已知缺口**（不是"免检"，也不是漏做 —— 见文档 §55.3）：
+           暗紫的 `--color-accent` 是**图形**那一档（3:1），而仓库里还有一批 11.5~12.5px 的
+           小字写的是 `var(--color-accent)` 而**不是** `accentink`（对了一遍 grep：
+           `Classroom.tsx:1325/1333/1663`、`Admin.tsx:462/1811/2928`、`AssignmentCollect.tsx:946`、
+           `GradeSetup.tsx:895`、`ScheduleBatch.tsx:228`、`AppShell.tsx` 顶栏那一处）——
+           它们在暗紫下压 `surface` / `surface2` 只有 4.18 / 3.88，**低于 AA 4.5**。
+           ⛔ 本轮不许改那些页面（文件边界）、也不许动用户拍板的那颗紫（`#bc45d3` 是"图形 3:1"档）。
+           → 所以这里把它**钉成"已知"**：一旦有人把暗紫 accent 提亮到够 4.5、或把那几处改用
+           `accentink`，这一条会红，提醒回来改文档（行号会漂，判据不依赖行号）。 */
+        const dSurf = contrast(dpal.tok.accent, dpal.tok.surface)
+        const dSurf2 = contrast(dpal.tok.accent, dpal.tok.surface2)
+        check(
+          dSurf < 4.5 && dSurf2 < 4.5,
+          'F6-D（🔴 已知缺口 · 登记不是免检）：暗紫下 `var(--color-accent)` 压面/面2 只有 4.18 / 3.88 —— 仓库里那批 ≤12.5px 用 accent（不是 accentink）的字，在暗紫下低于 AA',
+          `accent on surface = ${f1(dSurf)}:1 · accent on surface2 = ${f1(dSurf2)}:1`,
+          '反向对照：谁把 accent 提到 ≥4.5、或把那些页面改用 accentink → 这一条就红，回来更新 §55.3',
+        )
+        /* 亮紫那一套：三件压各自的底都远超 4.5（把它也钉住，免得日后有人"顺手调浅"） */
+        const lpal = palOf['亮紫']
+        const LPAIRS = [
+          ['accent', 'surface'],
+          ['accent', 'canvas'],
+          ['accentink', 'surface'],
+          ['accentink', 'accentsoft'],
+          ['ink', 'accentsoft'],
+        ]
+        const lBad = []
+        for (const [fg, bg] of LPAIRS) {
+          const r = contrast(lpal.tok[fg], lpal.tok[bg])
+          if (r === null || r < 4.5) lBad.push(`${fg} on ${bg} = ${f1(r)}:1`)
+        }
+        check(
+          lBad.length === 0,
+          `F6-D：**亮紫** —— ${LPAIRS.length} 对（强调色 / 小字 × 各自的底）**全部 ≥4.5:1**`,
+          lBad.length
+            ? `不达标的：${lBad.join('；')}`
+            : `${LPAIRS.length} 对全过（最低 ≈ ${Math.min(...LPAIRS.map(([f, b]) => contrast(lpal.tok[f], lpal.tok[b]) ?? 99)).toFixed(2)}:1）`,
+        )
+
+        /* ---------- E：🔴 教室端恒亮 + 默认蓝 ---------- */
+        const cE = await browser.newContext({
+          viewport: { width: 1440, height: 900 },
+          locale: 'zh-CN',
+          colorScheme: 'dark',
+        })
+        await cE.clock.install({ time: new Date('2026-09-19T10:00:00') })
+        await cE.addInitScript((s) => {
+          window.localStorage.setItem('shugao.teacher.v1', JSON.stringify(s))
+          window.localStorage.setItem('shugao.deviceRole', 'teacher')
+          /* 🔴 系统是暗的 + 用户自己选过「暗紫」—— 教室端两条都要无视 */
+          window.localStorage.setItem('shugao.theme', 'dark')
+          window.localStorage.setItem('shugao.accent', 'purple')
+        }, TEACHER_STATE)
+        const ep = await cE.newPage()
+        ep.on('pageerror', (e) => errors.push(`PAGEERROR(F6:classroom) :: ${e.message}`))
+        ep.on('console', (m) => {
+          if (m.type() === 'error') errors.push(`CONSOLE(F6:classroom) :: ${m.text()}`)
+        })
+        /* ⚠️ **先开 `/` 再开 `/classroom`**：教室端那一页跑完可能把这台设备标成教室端
+              （`setDeviceRole`），那时再回 `/` 会被送去 `/login` —— 顺序反过来就是假红。 */
+        await ep.goto(`${BASE}/`, { waitUntil: 'networkidle' })
+        await ep.waitForTimeout(700)
+        const eHome = await readPalette(ep)
+        check(
+          eHome.theme === 'dark' && eHome.accent === 'purple' && eHome.tok.accent === '#bc45d3',
+          '🔴 F6-E（反向对照）：**同一份偏好**（系统暗色 + 选了紫）在教师端 `/` 上就是**暗紫**（`data-accent=purple`、accent=#bc45d3）',
+          `data-theme=${eHome.theme} · data-accent=${eHome.accent} · accent=${eHome.tok.accent}`,
+          '两边用同一套判据：教师端认、教室端不认 —— "教室端恒亮+默认蓝"才是有内容的断言',
+        )
+        await ep.goto(`${BASE}/classroom`, { waitUntil: 'networkidle' })
+        await ep.waitForTimeout(1200)
+        const eText = await bodyText(ep)
+        check(
+          eText.includes('这个班的课') || eText.includes('正在上课'),
+          'F6-E：这是教室端那一屏（不是登录页/教师端）',
+          eText.includes('这个班的课') || eText.includes('正在上课') ? '屏上有「这个班的课」/「正在上课」' : short(eText, 130),
+        )
+        const ePal = await readPalette(ep)
+        check(
+          ePal.theme === null && ePal.accent === null,
+          '🔴 F6-E：教室端在"用户选了暗紫 + 系统是暗色"下**仍然是亮色 + 默认蓝** —— `<html>` 上 `data-theme` 与 `data-accent` **都没有**',
+          `data-theme=${ePal.theme} · data-accent=${ePal.accent}`,
+          '反向对照就是上一条：同一份偏好在 `/` 上是**暗紫** —— 所以这条不是"怎么都不会红"',
+        )
+        check(
+          ePal.bodyBg === 'rgb(232, 235, 242)' && ePal.tok.accent === '#0b5cf0' && ePal.tok.accentsoft === '#e9f0fe',
+          '🔴 F6-E：教室端的强调色令牌还是**默认那份蓝**（`#0b5cf0`），页面底还是亮色那支',
+          `body=${ePal.bodyBg} · accent=${ePal.tok.accent} · accentsoft=${ePal.tok.accentsoft}`,
+        )
+        check(
+          (await ep.locator('[data-theme-toggle]').count()) === 0 &&
+            (await ep.locator('[data-theme-panel]').count()) === 0,
+          'F6-E：教室端上**既没有入口钮也没有选择器**（那块屏不该有人去点它）',
+          `入口钮=${await ep.locator('[data-theme-toggle]').count()} · 面板=${await ep.locator('[data-theme-panel]').count()}`,
+        )
+        await cE.close()
+
+        /* ---------- F：跟随系统只改亮暗、不改强调色 ---------- */
+        const cF = await browser.newContext({
+          viewport: { width: 1440, height: 940 },
+          locale: 'zh-CN',
+          colorScheme: 'dark',
+        })
+        await cF.clock.install({ time: new Date('2026-09-19T10:00:00') })
+        await cF.addInitScript((s) => {
+          window.localStorage.setItem('shugao.teacher.v1', JSON.stringify(s))
+          window.localStorage.setItem('shugao.deviceRole', 'teacher')
+          /* ⚠️ **只**写强调色：亮/暗那一轴交给系统（不写 `shugao.theme` = 跟随系统） */
+          window.localStorage.setItem('shugao.accent', 'purple')
+        }, TEACHER_STATE)
+        const fp = await cF.newPage()
+        fp.on('pageerror', (e) => errors.push(`PAGEERROR(F6) :: ${e.message}`))
+        fp.on('console', (m) => {
+          if (m.type() === 'error') errors.push(`CONSOLE(F6) :: ${m.text()}`)
+        })
+        await fp.goto(`${BASE}/`, { waitUntil: 'networkidle' })
+        await fp.waitForTimeout(600)
+        const fDark = await readPalette(fp)
+        check(
+          fDark.theme === 'dark' && fDark.accent === 'purple' && fDark.tok.accent === '#bc45d3',
+          'F6-F：系统暗色 + 选了强调色紫 → **暗紫**（强调色本身没有"跟随系统"这一档，但它跟着亮暗轴走）',
+          `data-theme=${fDark.theme} · data-accent=${fDark.accent} · accent=${fDark.tok.accent}`,
+        )
+        await fp.emulateMedia({ colorScheme: 'light' })
+        await fp.waitForTimeout(500)
+        const fLight = await readPalette(fp)
+        check(
+          fLight.theme === null && fLight.accent === 'purple' && fLight.tok.accent === '#6d2b7a',
+          '🔴 F6-F：系统切到亮色 → **亮暗跟着系统变**（暗紫 → 亮紫），**强调色一动不动**（还是 purple，没被改写成 blue）',
+          `data-theme=${fLight.theme} · data-accent=${fLight.accent} · accent ${fDark.tok.accent} → ${fLight.tok.accent}`,
+          '反向对照：若"跟随系统"顺手把强调色也重置了，这里会看到 data-accent 变 null / accent 变回 #0b5cf0',
+        )
+        check(
+          fLight.stored === null && fLight.storedAccent === 'purple',
+          '🔴 F6-F：系统那一下**没有替你记一个亮/暗偏好**（`shugao.theme` 仍是空）—— "跟随系统"不等于"替你做了选择"',
+          `shugao.theme=${fLight.stored} · shugao.accent=${fLight.storedAccent}`,
+        )
+        /* 反向对照：手动覆盖过之后，系统那一份就管不着了（说明 emulateMedia 那条路是真的通的） */
+        await panelPick(fp, 'theme', 'dark')
+        await fp.emulateMedia({ colorScheme: 'light' })
+        await fp.waitForTimeout(400)
+        const fPin = await readPalette(fp)
+        check(
+          fPin.theme === 'dark' && fPin.accent === 'purple',
+          '🔴 F6-F（反向对照）：手动选过暗色之后，系统再切成亮色**也改不动它**（`data-theme` 仍是 dark）—— 上面那条"跟着系统变"确实走的同一条监听',
+          `data-theme=${fPin.theme} · data-accent=${fPin.accent}`,
+        )
+        await cF.close()
+
+        /* ---------- G：用户 ④ —— `--color-cyan` 仍然 0 处引用 ---------- */
+        const walkSrc = (dir) =>
+          readdirSync(dir, { withFileTypes: true }).flatMap((d) =>
+            d.isDirectory() ? walkSrc(join(dir, d.name)) : [join(dir, d.name)],
+          )
+        const srcFiles = walkSrc(join(HERE, '..', 'src')).filter((f) => /\.(tsx?|css)$/.test(f))
+        const cyanRefs = srcFiles.filter((f) => /--color-cyan/.test(readFileSync(f, 'utf8')))
+        check(
+          cyanRefs.length === 1 && cyanRefs[0].endsWith('index.css'),
+          'F6-G（用户 ④）：`--color-cyan` 在 `src` 里**只有定义、0 处引用** —— 所以紫套下没有"第二套彩色"的面积要收（**这一轮刻意不改它**，理由见 `index.css` 那个紫块上方与文档 §F6）',
+          cyanRefs.length ? `${cyanRefs.length} 个文件命中：${cyanRefs.map((f) => f.slice(-40)).join('、')}` : '没有任何文件用它',
+          '反向对照：把 `var(--color-cyan)` 写进任意一个页面 → 这一条**会**红，那一轮必须回来决定"紫套下怎么收它"',
+        )
+        check(
+          srcFiles.some((f) => f.endsWith('index.css')) && srcFiles.length > 100,
+          'F6-G：上面那条扫的是**真的源码树**（不是扫了个空目录就绿）',
+          `扫到 ${srcFiles.length} 个 .ts/.tsx/.css 文件`,
+          '反向对照：把 `walkSrc` 指到一个不存在的目录 → 文件数归零、这一条必须红',
+        )
+
+        /* ---------- 图片：亮紫 2 页 / 暗紫 2 页 ---------- */
+        const mkSet = async (prefs, path6, name, markers, full = true) => {
+          const c = await browser.newContext({
+            viewport: { width: 1440, height: 940 },
+            locale: 'zh-CN',
+            colorScheme: prefs.theme === 'dark' ? 'dark' : 'light',
+          })
+          await c.clock.install({ time: new Date('2026-09-19T10:00:00') })
+          await c.addInitScript(
+            ({ st, p }) => {
+              window.localStorage.setItem('shugao.teacher.v1', JSON.stringify(st))
+              window.localStorage.setItem('shugao.deviceRole', 'teacher')
+              if (p.theme) window.localStorage.setItem('shugao.theme', p.theme)
+              if (p.accent) window.localStorage.setItem('shugao.accent', p.accent)
+            },
+            { st: TEACHER_STATE, p: prefs },
+          )
+          const p = await c.newPage()
+          p.on('pageerror', (e) => errors.push(`PAGEERROR(F6:${name}) :: ${e.message}`))
+          p.on('console', (m) => {
+            if (m.type() === 'error') errors.push(`CONSOLE(F6:${name}) :: ${m.text()}`)
+          })
+          await p.goto(`${BASE}${path6}`, { waitUntil: 'networkidle' })
+          await p.waitForTimeout(650)
+          const b = await bodyText(p)
+          check(
+            markers.every((t) => b.includes(t)),
+            `F6 紫套「${name}」：这一页真的画出来了（不是一张空白图）`,
+            markers.every((t) => b.includes(t)) ? `屏上有「${markers.join('」「')}」` : short(b, 130),
+          )
+          const pal = await readPalette(p)
+          check(
+            pal.accent === 'purple' && pal.theme === (prefs.theme ?? null),
+            `F6 紫套「${name}」：` + '`data-accent=purple` + 亮/暗与这一套相符',
+            `data-theme=${pal.theme} · data-accent=${pal.accent} · accent=${pal.tok.accent}`,
+          )
+          await p.screenshot({ path: join(OUT, name), fullPage: full })
+          written.push(name)
+          console.log(`     📷 ${name}${full ? '（整页）' : ''}`)
+          await c.close()
+        }
+        await mkSet({ accent: 'purple' }, '/', '120-purple-workbench.png', ['今日待办', '快捷操作'])
+        await mkSet({ accent: 'purple' }, '/classes', '121-purple-classes.png', [
+          '2 个班级 · 91 名学生',
+          '名单完整',
+        ])
+        await mkSet({ theme: 'dark', accent: 'purple' }, '/', '122-darkpurple-workbench.png', [
+          '今日待办',
+          '快捷操作',
+        ])
+        await mkSet({ theme: 'dark', accent: 'purple' }, '/admin', '123-darkpurple-admin.png', [
+          '隐私',
+          '数据库',
+        ])
       })
 
     } catch (e) {

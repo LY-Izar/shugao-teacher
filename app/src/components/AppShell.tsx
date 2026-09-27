@@ -11,7 +11,7 @@ import { classKindOf } from '../lib/pick'
 import { currentIdentityLabel, ENTRIES, entryVisible, IDENTITY_TAG_STYLE } from '../lib/roles'
 import { awayText, toMinutes, weekdayOf } from '../lib/schedule'
 import { connectionMode } from '../lib/supabase'
-import { useTheme } from '../lib/theme'
+import { useTheme, type Accent } from '../lib/theme'
 import { APP_VERSION_LABEL } from '../lib/version'
 import { DoneCelebration, MorningWelcome } from './MoodModals'
 import { AnnouncementStack } from './AnnouncementStack'
@@ -1454,7 +1454,7 @@ function ClockPanel() {
 /* ---------------- 应用壳 ---------------- */
 
 /* ============================================================
-   🆕 2026-10-09 F4：**亮 / 暗切换**那颗小圆钮
+   🆕 2026-10-09 F4：**亮 / 暗切换**那颗小圆钮（🆕 F6 起它同时是**主题选择器的入口**）
 
    放哪儿（用户原话：「切换的按钮就放在**平台标题的右侧**，用一个小圆钮」）：
      · **桌面**：左栏最上面那一行（树形图标 + 「树高教师平台」+ TEACHER CONSOLE）的**右端** ——
@@ -1473,7 +1473,8 @@ function ClockPanel() {
        这一颗是**每次会话用一次**的显示开关，按 34 走，但**不许更小**。）
 
    🔴 图标显示的是**当前档**（暗色显示太阳、亮色显示月亮，照 `more ? 收起 : 展开` 那条口径）——
-      点下去会变成什么，`title` / `aria-label` 里说清楚。
+      当前是哪一套、点开之后能选什么，`title` / `aria-label` 里说清楚。
+      ⚠️ F6 起"点一下"= **开选择器**（不是直接翻一档）——选择器本身的取舍见下面 F6 那一段。
    ============================================================ */
 
 /** 桌面左栏那颗的直径（⚠️ 与下面 `mt-4` 那一行的行高对齐，改尺寸要一起看） */
@@ -1481,39 +1482,248 @@ const THEME_BTN_DESKTOP = 30
 /** 移动端顶栏那颗的直径（顶栏只有 50 高，30 会显小、38 会顶到边） */
 const THEME_BTN_MOBILE = 34
 
-function ThemeToggle({
-  theme,
-  onToggle,
-  size = THEME_BTN_DESKTOP,
+/**
+ * 选择器里那两个色点的**字面量**。
+ *
+ * ⚠️ 这里**必须**写字面量、不能写 `var(--color-accent)`：那一行要在**同一时刻**把
+ *    "蓝长什么样"和"紫长什么样"并排摆出来，而画面上只有一套 `accent` 生效 ——
+ *    两个点写同一个令牌就会**同色**（这正是"选择器"最不能出的错）。
+ * ⚠️ 四个值**逐字等于** `index.css` 里那两份令牌（亮/暗各一套的 accent）——
+ *    改令牌要一起看这一处。
+ */
+const ACCENT_SWATCH: Record<'light' | 'dark', Record<Accent, string>> = {
+  light: { blue: '#0b5cf0', purple: '#6d2b7a' },
+  dark: { blue: '#5386f4', purple: '#bc45d3' },
+}
+
+/**
+ * 选择器里的一个选项（亮/暗 或 蓝/紫）。
+ *
+ * 选中态用 **`accentsoft` 底 + `accentink` 字 + `accentink` 描边**，⛔ 不是"实心 accent + onaccent"：
+ * 暗紫那一套里 `onaccent` 压 `accent` 只有 **4.44:1**（差一点破 AA），而这个选项上是 **12px 的字**。
+ * `accentink on accentsoft` 在四套里最低也有 **4.71:1**（暗紫）——一个写法四套全过。
+ * （"浅底 + 深字"本来就是这个仓库里 `.tag-*` / `.panel-head` 那一族的做法。）
+ */
+function ThemeSeg({
+  on,
+  onClick,
+  hook,
+  label,
+  dot,
 }: {
-  theme: 'light' | 'dark'
-  onToggle: () => void
-  size?: number
+  on: boolean
+  onClick: () => void
+  /** 给 `shots.mjs` 用的钩子（`data-theme-option` / `data-accent-option`） */
+  hook: Record<string, string>
+  label: string
+  dot?: string
 }) {
-  const dark = theme === 'dark'
-  const label = dark ? '切到亮色模式' : '切到暗色模式'
   return (
     <button
       type="button"
-      onClick={onToggle}
-      data-theme-toggle={theme}
-      aria-label={label}
+      onClick={onClick}
+      aria-pressed={on}
       title={label}
-      className="grid shrink-0 place-items-center"
+      {...hook}
+      className="flex items-center justify-center gap-1.5"
       style={{
-        width: size,
-        height: size,
-        borderRadius: 999,
-        border: '1px solid var(--color-line2)',
-        /* 圆钮是"浮在标题行上的一颗"：底色比它所在的底**高一档**（暗色下就是"更亮"那一档） */
-        background: 'var(--color-surface2)',
-        color: dark ? 'var(--color-accentink)' : 'var(--color-ink2)',
+        flex: 1,
+        height: 30,
+        borderRadius: 6,
         cursor: 'pointer',
-        transition: 'color .18s cubic-bezier(.22,.8,.24,1), background-color .18s',
+        fontSize: 12.5,
+        fontWeight: 600,
+        border: `1px solid ${on ? 'var(--color-accentink)' : 'var(--color-line2)'}`,
+        background: on ? 'var(--color-accentsoft)' : 'transparent',
+        color: on ? 'var(--color-accentink)' : 'var(--color-ink2)',
+        transition: 'background-color .16s, color .16s, border-color .16s',
       }}
     >
-      {dark ? <IconSun size={size >= 34 ? 18 : 16} /> : <IconMoon size={size >= 34 ? 18 : 16} />}
+      {dot ? (
+        <span
+          aria-hidden="true"
+          style={{
+            width: 11,
+            height: 11,
+            borderRadius: 999,
+            background: dot,
+            border: '1px solid var(--color-line2)',
+            display: 'inline-block',
+          }}
+        />
+      ) : null}
+      {label}
     </button>
+  )
+}
+
+/**
+ * ============================================================
+ * 🆕 2026-10-10 F6：**主题选择器**（亮/暗 × 蓝/紫 = 4 套）
+ *
+ * 用户拍板：「主题做成**选择器**」+「原来的主题也要保留」。
+ *
+ * **选的是哪一种（以及为什么）**：一个"**入口钮 + 一张两行的小面板**"。
+ *   · 入口钮 = **原来那颗圆钮，位置、尺寸（30 / 34）、图标语义一个字没动** ——
+ *     `[data-theme-toggle]` 这个钩子也留着（`shots.mjs` F5-1 的焦点环断言就在它上面）。
+ *   · 点开是**两行**：「明暗」亮/暗 · 「强调色」蓝/紫。
+ *   为什么不是另外两种：
+ *     · **一颗钮循环 4 态** ✗ —— 4 个状态轮着转，"现在是哪一套"要靠记，而且这仓库的
+ *       口径一直是"图标显示**当前**档"（`more ? 收起 : 展开`）；循环把当前档变成一个序列位置。
+ *     · **两个独立小钮** ✗ —— 想换"亮紫"要点两次、中途还会经过一个用户没要的中间态
+ *       （亮蓝→暗蓝→…），而且"哪个钮管哪一轴"没有任何视觉线索。
+ *     · **两行面板** ✓ —— 它把"两个轴"**直接摆出来**：用户看得见"亮/暗"与"强调色"是**两件事**，
+ *       于是"跟随系统只作用于亮/暗"这条口径在界面上是自洽的（没有"跟随系统"的强调色档位）。
+ *       一次点击 = 一次选择，中间不经过别的组合。
+ *   ⚠️ 代价：换亮/暗从 1 次点成了 2 次（先开面板）。这是"选择器"这个要求本身的代价；
+ *      入口钮的**位置与尺寸**没动，所以肌肉记忆仍然是"平台标题右侧那颗"。
+ *
+ * **两处摆放**（用户点名"两处都要照顾"）——与原来完全一致，只换了"点开之后"：
+ *   · **桌面**：左栏最上面那一行（树形图标 + 「树高教师平台」+ TEACHER CONSOLE）的**右端**；
+ *   · **移动端**：顶部那条**玻璃顶栏**、平台名右侧、班级标签**左边**（左栏在窄屏没有，
+ *     理由见 F4 那一段：平台级设置只有这条顶栏是全局位置）。
+ *   面板是**贴着钮往下弹**的（`right: 0`），所以在移动端它**向左**展开、不会顶出屏幕；
+ *   两个摆放的祖先链上都没有会裁掉它的 `overflow`（左栏那块是 `.floating-rail`、
+ *   移动端是 `.glass`，两个都只 `position: relative` + 玻璃，没有 overflow）。
+ *
+ * ⚠️ 四套都要好看：面板只吃令牌（`surface` / `line2` / `ink2` / `ink3` /
+ *    `accentsoft` / `accentink` / `shadow`），所以亮紫/暗紫下它自己就跟着变
+ *    （暗紫下那四个值都算过对比度，见 `index.css` 的紫块）。
+ * ⚠️ 触控目标：入口钮 30 / 34 **不许更小**（原来就大于顶栏那个 23 高的班级标签）；
+ *    面板里每个选项 **30 高**（与桌面那颗同级），不比平台里任何一个"每次会话用一次"的控件小。
+ * ============================================================
+ */
+function ThemeToggle({
+  theme,
+  accent,
+  onToggleTheme,
+  onPickAccent,
+  size = THEME_BTN_DESKTOP,
+}: {
+  theme: 'light' | 'dark'
+  accent: Accent
+  onToggleTheme: () => void
+  onPickAccent: (a: Accent) => void
+  size?: number
+}) {
+  const dark = theme === 'dark'
+  const [open, setOpen] = useState(false)
+  const wrap = useRef<HTMLSpanElement | null>(null)
+
+  /**
+   * 点面板外面 / 按 Esc → 关掉。
+   * ⚠️ 用 `pointerdown` 而不是 `click`：`click` 要等"按下+抬起都在同一个元素上"，
+   *    在"按住拖出去"的那条路径上关不掉；`pointerdown` 是"手指/鼠标一碰别处就关"。
+   * ⚠️ 入口钮在 `wrap` **里面** → 点钮不会先被这条关掉（不然"点一下开、点两下关"会变成两下都开）。
+   */
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: PointerEvent) => {
+      if (wrap.current && !wrap.current.contains(e.target as Node)) setOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('pointerdown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('pointerdown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  const label = `主题：${dark ? '暗色' : '亮色'} · 强调色：${accent === 'purple' ? '紫' : '蓝'}`
+  /* 「亮/暗」那一行与入口钮走**同一条**切换路径（`toggle()`）—— 不另开一个 setTheme 入口：
+     两条轴各自只有一个写入口，是本仓库的一贯口径。 */
+  const pickTheme = (t: 'light' | 'dark') => {
+    if (t !== theme) onToggleTheme()
+  }
+
+  return (
+    <span ref={wrap} className="relative shrink-0" style={{ display: 'inline-flex' }}>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        data-theme-toggle={theme}
+        data-accent-toggle={accent}
+        aria-label={label}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        title={label}
+        className="grid shrink-0 place-items-center"
+        style={{
+          width: size,
+          height: size,
+          borderRadius: 999,
+          border: '1px solid var(--color-line2)',
+          /* 圆钮是"浮在标题行上的一颗"：底色比它所在的底**高一档**（暗色下就是"更亮"那一档） */
+          background: 'var(--color-surface2)',
+          color: dark ? 'var(--color-accentink)' : 'var(--color-ink2)',
+          cursor: 'pointer',
+          transition: 'color .18s cubic-bezier(.22,.8,.24,1), background-color .18s',
+        }}
+      >
+        {dark ? <IconSun size={size >= 34 ? 18 : 16} /> : <IconMoon size={size >= 34 ? 18 : 16} />}
+      </button>
+
+      {open ? (
+        <div
+          data-theme-panel=""
+          role="group"
+          aria-label="主题与强调色"
+          style={{
+            position: 'absolute',
+            /* 贴着钮往下弹、右端与钮对齐（移动端于是**向左**展开，不会顶出屏幕） */
+            top: size + 8,
+            right: 0,
+            zIndex: 80,
+            width: 196,
+            padding: 10,
+            borderRadius: 10,
+            border: '1px solid var(--color-line2)',
+            background: 'var(--color-surface)',
+            boxShadow: '0 10px 28px -8px rgb(var(--color-shadow) / .28)',
+          }}
+        >
+          <div style={{ fontSize: 11, color: 'var(--color-ink3)', letterSpacing: '.06em' }}>明暗</div>
+          <div className="mt-1.5 flex gap-1.5">
+            <ThemeSeg
+              on={!dark}
+              onClick={() => pickTheme('light')}
+              hook={{ 'data-theme-option': 'light' }}
+              label="亮色"
+            />
+            <ThemeSeg
+              on={dark}
+              onClick={() => pickTheme('dark')}
+              hook={{ 'data-theme-option': 'dark' }}
+              label="暗色"
+            />
+          </div>
+          <div
+            style={{ fontSize: 11, color: 'var(--color-ink3)', letterSpacing: '.06em', marginTop: 10 }}
+          >
+            强调色
+          </div>
+          <div className="mt-1.5 flex gap-1.5">
+            <ThemeSeg
+              on={accent === 'blue'}
+              onClick={() => onPickAccent('blue')}
+              hook={{ 'data-accent-option': 'blue' }}
+              label="蓝"
+              dot={ACCENT_SWATCH[theme].blue}
+            />
+            <ThemeSeg
+              on={accent === 'purple'}
+              onClick={() => onPickAccent('purple')}
+              hook={{ 'data-accent-option': 'purple' }}
+              label="紫"
+              dot={ACCENT_SWATCH[theme].purple}
+            />
+          </div>
+        </div>
+      ) : null}
+    </span>
   )
 }
 
@@ -1562,12 +1772,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const navigate = useNavigate()
   const current = classes.find((c) => c.id === currentClassId)
   /*
-   * 🆕 亮 / 暗（2026-10-09 F4）。
-   * ⚠️ `pathname` 是它的 `key`：路由一变就重算一次 —— 这一条专门兜住
-   *    「从教师端进 `/classroom`」时把 `data-theme` 摘掉（教室端恒亮，见 `lib/theme.ts`）。
-   *    ⛔ 别改成 `useTheme()` 不带参：那样进教室端那一下属性会留到下一次重载。
+   * 🆕 亮 / 暗（2026-10-09 F4）+ 强调色（2026-10-10 F6）**两条正交给两根轴**。
+   * ⚠️ `pathname` 是它的 `key`：路由一变就重算一次 → 两条轴每次都跟着重算并重新落属性
+   *    （教室端恒亮 + 默认蓝靠的不是这一句，而是"/classroom 不套 AppShell"；见 `lib/theme.ts` 口径③）。
+   *    ⛔ 别改成 `useTheme()` 不带参：那样在应用壳内换路由时，属性要等下一次重载才对上。
    */
-  const { theme, toggle: toggleTheme } = useTheme(pathname)
+  const {
+    theme,
+    toggle: toggleTheme,
+    accent,
+    setAccent: pickAccent,
+  } = useTheme(pathname)
 
   /*
    * 右栏「名单体检」要的那一份数据（2026-10-08 修「0 人的班被画成绿勾」）。
@@ -1869,9 +2084,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 TEACHER CONSOLE
               </span>
             </span>
-            {/* 🆕 亮 / 暗切换 —— **平台标题的右侧**（用户指定的位置，见 `ThemeToggle` 的说明） */}
+            {/* 🆕 亮 / 暗 + 强调色 —— **平台标题的右侧**（用户指定的位置，见 `ThemeToggle` 的说明） */}
             <span className="flex-1" />
-            <ThemeToggle theme={theme} onToggle={toggleTheme} />
+            <ThemeToggle
+              theme={theme}
+              accent={accent}
+              onToggleTheme={toggleTheme}
+              onPickAccent={pickAccent}
+            />
           </div>
 
           <div className="rail-block">
@@ -2003,10 +2223,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <span style={{ fontSize: 14.5, fontWeight: 650 }}>树高教师平台</span>
           </span>
           <span className="flex-1" />
-          {/* 🆕 亮 / 暗切换 —— 移动端摆在这里（左栏在窄屏没有，理由见 `ThemeToggle` 的说明）。
+          {/* 🆕 亮 / 暗 + 强调色 —— 移动端摆在这里（左栏在窄屏没有，理由见 `ThemeToggle` 的说明）。
               ⚠️ 它排在班级标签**左边**：标签是"这一页在看哪个班"（内容级），
                  主题是"平台怎么显示"（平台级）—— 平台级靠标题更近。 */}
-          <ThemeToggle theme={theme} onToggle={toggleTheme} size={THEME_BTN_MOBILE} />
+          <ThemeToggle
+            theme={theme}
+            accent={accent}
+            onToggleTheme={toggleTheme}
+            onPickAccent={pickAccent}
+            size={THEME_BTN_MOBILE}
+          />
           {current ? (
             <button
               type="button"
