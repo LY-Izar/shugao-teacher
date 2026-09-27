@@ -295,8 +295,22 @@ export function dirtyGroups(r: ContradictionReport): ContradictionGroup[] {
 }
 
 /* ============================================================
-   C1 · `schema.sql` §10–§19 漂移总表
+   C1 · `schema.sql` **逐段**漂移总表（🆕 2026-10-08：段清单改为自动生成）
    ------------------------------------------------------------
+   🔴 **为什么改**（用户 2026-10-08 原话）：
+      「数据表，我们都更新到多少了，怎么这里只能探到这些」——
+      线上库早跑到 §37 了，而这张表只列 §10–§19 ✗。
+      根因：那份"逐段跑没跑"的清单是**手写死的一段**（旧 `sectionDefs()`），
+      `schema.sql` 后来加的 §20–§37 它根本不知道存在 —— 和"§18.1 脚本计数表过期"
+      是同一个毛病：**清单跟不上 schema**。
+
+   ✅ **现在的口径**：段号 / 标题 / 行号锚点 / "这一段建了什么" / **探针**全部由
+      `app/scripts/admin-checks.mjs --gen-stages` 从 `supabase/schema.sql` 解析后生成，
+      生成的数组就是下面那个 `SCHEMA_STAGES`（带 `@gen:schema-stages` 标记）。
+      门禁每次都会**重解析一遍 `schema.sql` 并与它逐字节比对** —— 有人改了 schema.sql
+      却忘了重新生成，`admin-checks` 当场红 ✅（反向对照见第七节）。
+      ⚠️ **不许手动改 `SCHEMA_STAGES`**（改了门禁就红，等于白改）。
+
    面板方案 §二 C1 的"探测手法"原文：**每条都用现成那套判据，别新写一套** ——
      · 表存在性：`select('id').limit(1)` → 看错误码（`42P01` / `PGRST205` / `schema cache`）
      · 列存在性：`select('<列>').limit(1)` → 看 `42703` / `does not exist`
@@ -323,12 +337,23 @@ export type DriftCell = {
   evidence: string
 }
 
+/**
+ * 这一段的**种类** —— 🔴 这两者**必须分开**（用户 2026-10-08：「这正是现在看不懂的原因」）：
+ *   · `'sql'`      —— 有可执行 SQL：能探、会红、会灰；
+ *   · `'registry'` —— **登记节**（0 行可执行 SQL，例如 §14 与 §18）：
+ *        **没有东西可跑、也没有东西可探**，所以它既不该红、也不该算"探不到"。
+ *        旧面板把 §18 混在 §19 那种"已跑"里列出来，读的人自然看不懂。
+ */
+export type DriftKind = 'sql' | 'registry'
+
 export type DriftSection = {
   /** 段号，如 `§15` */
   stage: string
-  /** 这一段建了什么（一句话） */
+  /** 这一段在 `schema.sql` 里的原标题（自动生成） */
+  title: string
+  /** 这一段建了什么（自动生成：表 / 列 / 无参函数） */
   built: string
-  /** 不跑会怎样 —— **静默症状**，照 C1 那张表逐字写 */
+  /** 不跑会怎样 —— **静默症状**（危险段是人工留档，其余是通用句） */
   impact: string
   /** 怎么修 */
   fix: string
@@ -336,6 +361,14 @@ export type DriftSection = {
   cells: DriftCell[]
   /** 整份 `schema.sql` 里对应的小节（给"复制段号"用） */
   anchor: string
+  /** 有可执行 SQL / 登记节 */
+  kind: DriftKind
+  /**
+   * **面板探不到**的原因（只有 `kind === 'sql'` 且没有探针时才有）。
+   * ⚠️ 它与"探测没结论"（`state === 'indeterminate'` 但有 cells）是**两件事**：
+   *    这一档是"这个问题不该问面板"，所以它**不参与**卡片的红黄绿。
+   */
+  noProbe?: string
 }
 
 const OK = '读到了（无错误）'
@@ -435,12 +468,23 @@ async function probeColumn(table: string, column: string): Promise<DriftCell> {
 /**
  * RPC 函数在不在。
  *
- * ⚠️ **只调"裸版"（无参 / 只吃业务参数），绝不调 `_for` 变体**：
- *    §18 的 `_for` 变体是 `revoke ... from public, anon, authenticated` 的
- *    （它们的用途是"在 SQL 编辑器里显式指定人核对"），拿 anon 会话去调会得到
- *    `permission denied` —— 那既不能证明它在、也不能证明它不在。
- *    裸版则在 §13 那句 `grant execute` 之后是可调的，且**对未登录调用恒为 false**，
+ * ⚠️ **只调"裸版"（无参），绝不调带参数的判据函数、也绝不调 `_for` 变体**：
+ *    · §18 的 `_for` 变体是 `revoke ... from public, anon, authenticated` 的
+ *      （它们的用途是"在 SQL 编辑器里显式指定人核对"），拿 anon 会话去调会得到
+ *      `permission denied` —— 那既不能证明它在、也不能证明它不在。
+ *    · 🔴 **带参数的函数一律不探**：探它得**伪造实参**，而 `schema.sql` 里带参数的函数
+ *      有 `grade_delete(...)` / `migrate_nos_to_serial()` / `promote_grades(...)` /
+ *      `purge_old_subject_data(...)` 这些**会写库**的 —— 面板是只读的，
+ *      **绝不做有副作用的探测**（这条纪律比"多探一段"重要得多）。
+ *    无参裸版则在 §13 那句 `grant execute` 之后是可调的，且**对未登录调用恒为 false**，
  *    所以"调到并返回 false"本身就是"函数存在且判据正确"的证据。
+ *
+ * 🆕 **`42501 permission denied` 算"在"**（2026-10-08 补，随清单扩展到全段而来）：
+ *    PostgREST 先在自己的 schema cache 里找这个函数 —— 找不到才是 `PGRST202`
+ *    （真的不在）；找到了、但当前角色没有 execute 权限才会回 `42501`。
+ *    所以 `42501` 反过来**证明函数在**。少了这一支，`is_school_admin()` /
+ *    `visible_class_ids()` 这些"给策略用、没 grant 给 anon"的函数会被记成灰，
+ *    整张卡就永远绿不了（那是把"确实在"说成"不知道"，同样是失真）。
  */
 async function probeRpc(fn: string, args: Record<string, unknown> = {}): Promise<DriftCell> {
   const sb = getSupabase()
@@ -455,124 +499,198 @@ async function probeRpc(fn: string, args: Record<string, unknown> = {}): Promise
     if (code === 'PGRST202' || /could not find the function|does not exist|schema cache/i.test(msg)) {
       return { what, state: 'missing', evidence: `${code || '?'} ${msg}`.trim() }
     }
+    /*
+     * 🆕 `42501 permission denied for function x` ⇒ **函数在**（见上面那段注释）：
+     *    能被 PostgREST 找到、只是这个角色没 execute 权限 —— 那是"在"的证据，不是"不在"。
+     */
+    if (code === '42501' || /permission denied for function/i.test(msg)) {
+      return {
+        what,
+        state: 'present',
+        evidence: `${code || '?'} ${msg}（**函数在**：能被 PostgREST 找到，只是当前角色没有 execute 权限）`.trim(),
+      }
+    }
     return { what, state: 'indeterminate', evidence: `${code || '?'} ${msg}`.trim() }
   } catch (e) {
     return { what, state: 'indeterminate', evidence: String(e) }
   }
 }
 
+/* ============================================================
+   段清单 · 🔴 **自动生成**（`app/scripts/admin-checks.mjs --gen-stages`）
+   ------------------------------------------------------------
+   下面这个数组是从 `supabase/schema.sql` 解析出来的**全部段**：
+     · `n` / `title` / `from` / `to` —— 段号、标题、**行号区间**（行号也跟着走，
+        所以不会再出现"锚点行号过期"）；
+     · `sql` —— 这一段**去掉 `--` 注释与空行之后还剩几行**（`0` = **登记节**）；
+     · `targets` —— 这一段建出来的、**anon 会话探得到**的东西（表 / 列 / 无参函数）。
+   ⚠️ **不许手动改这一段**：手改了就与 `schema.sql` 对不上，`admin-checks` 第七节当场红。
+       要更新清单：改完 `schema.sql` 之后跑 `node scripts/admin-checks.mjs --gen-stages`
+   ============================================================ */
+
+export type StageTarget =
+  | { kind: 'table'; name: string }
+  | { kind: 'col'; table: string; column: string }
+  | { kind: 'fn'; name: string }
+
+export type SchemaStage = {
+  n: number
+  title: string
+  /** `schema.sql` 里的 1-based 起止行（含首尾） */
+  from: number
+  to: number
+  /** 可执行 SQL 的行数（去掉 `--` 注释与空行）—— `0` = **登记节** */
+  sql: number
+  targets: StageTarget[]
+}
+
+/* @gen:schema-stages BEGIN */
+export const SCHEMA_STAGES: readonly SchemaStage[] = [
+  { n: 1, title: '教师', from: 15, to: 135, sql: 54, targets: [{ kind: 'table', name: 'teachers' }, { kind: 'table', name: 'teacher_profiles' }, { kind: 'col', table: 'teachers', column: 'notice_seen_at' }] },
+  { n: 2, title: '班级与学生', from: 137, to: 190, sql: 27, targets: [{ kind: 'table', name: 'classes' }, { kind: 'table', name: 'students' }, { kind: 'table', name: 'student_profiles' }] },
+  { n: 3, title: '作业档案', from: 192, to: 240, sql: 35, targets: [{ kind: 'table', name: 'assignments' }, { kind: 'col', table: 'assignments', column: 'question_meta' }, { kind: 'col', table: 'assignments', column: 'stats_mode' }, { kind: 'col', table: 'assignments', column: 'grades' }, { kind: 'col', table: 'assignments', column: 'focus_nos' }, { kind: 'col', table: 'assignments', column: 'correction_nos' }, { kind: 'col', table: 'assignments', column: 'corrected_nos' }] },
+  { n: 4, title: '教师课表（每周重复）', from: 242, to: 263, sql: 16, targets: [{ kind: 'table', name: 'schedule_items' }, { kind: 'col', table: 'schedule_items', column: 'scope' }] },
+  { n: 5, title: '教室端与呼叫', from: 265, to: 292, sql: 22, targets: [{ kind: 'table', name: 'classrooms' }, { kind: 'table', name: 'calls' }] },
+  { n: 6, title: '显式授权', from: 294, to: 317, sql: 7, targets: [] },
+  { n: 7, title: '行级安全（RLS）—— 每张表都要开，漏一张就等于全校数据裸奔', from: 319, to: 380, sql: 42, targets: [] },
+  { n: 8, title: '实时推送', from: 382, to: 399, sql: 12, targets: [] },
+  { n: 9, title: '教师端 → 教室端 的文件互传', from: 401, to: 463, sql: 34, targets: [{ kind: 'table', name: 'shared_files' }] },
+  { n: 10, title: '权限与账号体系 · 阶段 1（建表 / 回填 / RLS 函数）', from: 465, to: 1106, sql: 275, targets: [{ kind: 'table', name: 'schools' }, { kind: 'table', name: 'grades' }, { kind: 'table', name: 'teacher_roles' }, { kind: 'table', name: 'class_subjects' }, { kind: 'table', name: 'classroom_accounts' }, { kind: 'col', table: 'classes', column: 'school_id' }, { kind: 'col', table: 'classes', column: 'grade_id' }, { kind: 'col', table: 'teacher_roles', column: 'subject_code' }, { kind: 'fn', name: 'visible_class_ids' }, { kind: 'fn', name: 'is_classroom_account' }] },
+  { n: 11, title: '阶段 2：新策略与旧策略**并存**（只加，不删）', from: 1108, to: 1177, sql: 30, targets: [] },
+  { n: 12, title: '多学科 · 阶段 1（学科字典 / subject_code 加列 / 回填）', from: 1179, to: 1341, sql: 68, targets: [{ kind: 'table', name: 'subjects' }, { kind: 'col', table: 'assignments', column: 'subject_code' }, { kind: 'col', table: 'teachers', column: 'primary_subject_code' }] },
+  { n: 13, title: '多学科 · 阶段 3：建号带学科 + 身份判据 + 学科可见性分级', from: 1343, to: 1947, sql: 350, targets: [{ kind: 'fn', name: 'is_super_admin' }, { kind: 'fn', name: 'can_manage_teachers' }, { kind: 'fn', name: 'can_create_teacher_accounts' }, { kind: 'fn', name: 'can_assign_roles' }, { kind: 'fn', name: 'can_assign_super_role' }, { kind: 'fn', name: 'subject_lead_class_ids' }, { kind: 'fn', name: 'subject_lead_subject_codes' }] },
+  { n: 14, title: '自检：确认每张表都开了 RLS', from: 1949, to: 1954, sql: 0, targets: [] },
+  { n: 15, title: '考试（2026-09-27 新增）', from: 1956, to: 2295, sql: 142, targets: [{ kind: 'table', name: 'exams' }, { kind: 'table', name: 'exam_scores' }] },
+  { n: 16, title: '收口 · 阶段 5：逐表写策略矩阵 + can_grade 落地 + 删旧策略', from: 2297, to: 2904, sql: 271, targets: [{ kind: 'fn', name: 'is_school_admin' }] },
+  { n: 17, title: '收口 · 教室端的**三条**裂缝（2026-09-25 拍板「收紧」A/B；2026-09-27 收紧 C）', from: 2906, to: 3102, sql: 37, targets: [] },
+  { n: 18, title: '判据函数的 `_for` 变体（2026-09-27 补）：为什么每个判据都要两件套', from: 3104, to: 3206, sql: 0, targets: [] },
+  { n: 19, title: '共享文件的**班级归属**（2026-09-28）：教师端 → 教室端 的文件互传，**读**这一侧修通', from: 3208, to: 3469, sql: 64, targets: [{ kind: 'col', table: 'shared_files', column: 'class_ids' }] },
+  { n: 20, title: '序列号键迁移（P1，2026-09-25）', from: 3471, to: 4139, sql: 475, targets: [{ kind: 'table', name: 'student_serial_counters' }, { kind: 'col', table: 'students', column: 'serial' }, { kind: 'col', table: 'students', column: 'legacy_student_no' }, { kind: 'fn', name: 'assign_student_serials' }, { kind: 'fn', name: 'migrate_nos_to_serial' }, { kind: 'fn', name: 'serial_migration_report' }, { kind: 'fn', name: 'revert_nos_to_legacy' }] },
+  { n: 21, title: '通知（2026-09-28 新增）—— 「学校对老师说话」', from: 4141, to: 5180, sql: 550, targets: [{ kind: 'table', name: 'notices' }, { kind: 'table', name: 'notice_targets' }, { kind: 'table', name: 'teacher_departments' }, { kind: 'col', table: 'notice_targets', column: 'target_department' }, { kind: 'fn', name: 'notice_sendable_roles' }, { kind: 'fn', name: 'notice_departments' }, { kind: 'fn', name: 'my_notice_scopes' }] },
+  { n: 22, title: '全站公告（2026-09-28 公告轮）—— 「**平台**对老师说话」', from: 5182, to: 5365, sql: 56, targets: [{ kind: 'table', name: 'announcements' }, { kind: 'fn', name: 'can_publish_announcement' }] },
+  { n: 23, title: '平台设置：**维护模式**（2026-09-29 管理台第二期）—— 「平台对自己说话」', from: 5367, to: 5473, sql: 28, targets: [{ kind: 'table', name: 'admin_audit' }, { kind: 'table', name: 'site_state' }] },
+  { n: 24, title: '前端错误日志（2026-09-29 管理台第二期 · `frontend_errors`）', from: 5475, to: 5656, sql: 81, targets: [{ kind: 'table', name: 'frontend_errors' }] },
+  { n: 25, title: '用户反馈（2026-09-29 管理台第二期 · `feedback`）', from: 5658, to: 5787, sql: 45, targets: [{ kind: 'table', name: 'feedback' }, { kind: 'fn', name: 'can_contact_admin' }] },
+  { n: 26, title: '运维只读报告：**数据库用量**（2026-09-29 管理台第二期）', from: 5789, to: 5909, sql: 44, targets: [{ kind: 'fn', name: 'db_usage_report' }] },
+  { n: 27, title: '开学准备（P6，2026-09-30）', from: 5911, to: 6761, sql: 564, targets: [{ kind: 'table', name: 'student_subjects' }, { kind: 'table', name: 'class_members' }, { kind: 'col', table: 'grades', column: 'cohort' }, { kind: 'col', table: 'grades', column: 'stage' }, { kind: 'col', table: 'grades', column: 'enrolled_at' }, { kind: 'col', table: 'classes', column: 'kind' }, { kind: 'col', table: 'classes', column: 'class_type' }, { kind: 'col', table: 'classes', column: 'stream_key' }] },
+  { n: 28, title: '学年 / 学期 / 届（P3）+ 存量回填（P2），2026-09-30', from: 6763, to: 7203, sql: 288, targets: [{ kind: 'table', name: 'academic_years' }, { kind: 'table', name: 'terms' }, { kind: 'col', table: 'assignments', column: 'term_id' }, { kind: 'col', table: 'exams', column: 'grade_id' }, { kind: 'fn', name: 'beijing_today' }, { kind: 'fn', name: 'current_term_id' }, { kind: 'fn', name: 'can_manage_terms' }, { kind: 'fn', name: 'p3_backfill_terms_and_cohorts' }] },
+  { n: 29, title: '提档 + 毕业删除（P4，2026-10-01）', from: 7205, to: 8119, sql: 700, targets: [{ kind: 'table', name: 'grade_promotions' }, { kind: 'table', name: 'grade_removals' }, { kind: 'fn', name: 'current_academic_year' }, { kind: 'fn', name: 'can_promote_grades' }, { kind: 'fn', name: 'promotion_overview' }] },
+  { n: 31, title: '统一模型改造（P5，2026-10-03）🔴 **风险最高的一期**', from: 8121, to: 8291, sql: 50, targets: [] },
+  { n: 32, title: '走班班（P7，2026-10-04）—— 生成 + 分配老师 + `can_stream` 废弃', from: 8293, to: 8733, sql: 296, targets: [] },
+  { n: 33, title: '教室端的两块新能力（P9，2026-10-05）', from: 8735, to: 8943, sql: 74, targets: [] },
+  { n: 34, title: '收尾（P10，2026-10-05）', from: 8945, to: 9460, sql: 334, targets: [{ kind: 'table', name: 'student_subject_changes' }] },
+  { n: 35, title: '学生档案的可见性与修改权（2026-10-06）', from: 9462, to: 9543, sql: 30, targets: [] },
+  { n: 36, title: '🆕 教师档案的可见性与修改权（2026-10-06）', from: 9545, to: 9619, sql: 15, targets: [] },
+  { n: 37, title: '🔑 走班班的编辑 / 删除（走班班也是 `classes` 的一行）', from: 9621, to: 9735, sql: 53, targets: [] },
+]
+/* @gen:schema-stages END */
+
+/** 面板对每一段**最多探几格**（首屏请求数 ≈ 有探针的段数 × 这个数，只跑一次） */
+export const PROBES_PER_STAGE = 2
+
 /**
- * 各段定义。
+ * 危险段的「不跑会怎样 / 怎么修」—— **人工留档**，只补必须人说的那几段。
  *
- * ⚠️ **只列面板方案 §二 C1 那张表里的 §10–§19**，没有自己发明段号：
- *    段号、建了什么、静默症状、修法**全部照抄那张表**（逐字，含它点名的行号锚点）。
- *    §1–§9 是地基，那张表自己写了"不存在『没跑』的情形"，所以不列。
+ * ⚠️ 为什么这里可以手写、段清单却不行：**它不是"清单"**，是留档知识 ——
+ *    `schema.sql` 里根本没有"不跑会怎样"这种话，**推不出来**。
+ *    推得出来的东西（段号 / 标题 / 行号 / 建了什么 / 探什么）**一律自动生成**。
+ *    没写留档的段走 `defaultImpact()` 的通用句 —— 不编、不猜。
  */
+const IMPACT_NOTES: Record<number, { impact: string; fix?: string }> = {
+  10: {
+    impact:
+      '身份读不到 → `loadMyRoles()` 自带兜底返回 `[]` → 界面上**不多任何入口、不报错**；' +
+      '`grade_id` 列不存在 → 年级主任管不着自己建的班',
+  },
+  11: { impact: '读策略缺失 → 某些人少看见行，**不报错**', fix: '去跑第 11 段（它只加策略，重跑幂等）' },
+  12: {
+    impact:
+      '列不存在 → 写路径**摘掉那一列**；`subject_code` 全空 → 判据退化成按显示名反查，**认不出就不匹配**',
+    fix: '去跑第 12 段；跑完回填一次（§12.6 有模板）',
+  },
+  13: {
+    impact: '权限函数不存在 → Function 返回 **503「去跑第 13 段」**（§13.6：**不是 403**，故意区分）',
+    fix: '去跑第 13 段（跑完等十几秒让 PostgREST 刷缓存）',
+  },
+  14: { impact: '跑不跑都不改变行为；它是"每张表都开了 RLS"的判据来源（本段 0 行可执行 SQL）' },
+  15: { impact: '表不存在 → `ensureExamTables()` 返回 `missing` → **考试功能整个静默变空**' },
+  16: {
+    impact: '只删旧策略不补新策略 → 建作业/批改/加学生**被 RLS 拒**，界面只显示"保存失败"= 刷新即丢',
+    fix: '去跑第 16 段（这一段是**全仓唯一不可逆**的，跑之前先存一份 §16.6 的基线）',
+  },
+  17: { impact: '不跑 → 教室端账号仍能写业务表（安全裂缝）' },
+  18: { impact: '没有 `_for` 变体 = **这条判据不可能被验证**（I33）；本段 0 行可执行 SQL' },
+  19: { impact: '不跑 → **教室端拉到的文件列表恒为空，且不报错**' },
+  26: { impact: '不跑 → 管理台「数据库用量」那一格永远是灰的（`db_usage_report()` 不存在）' },
+}
+
 type SectionDef = {
   stage: string
+  title: string
   built: string
   impact: string
   fix: string
   anchor: string
+  kind: DriftKind
   probes: Array<{ what: string; run: () => Promise<DriftCell> }>
+  noProbe?: string
 }
 
+/** 这一段建了什么 —— **从 `targets` 拼**，不编 */
+function builtText(s: SchemaStage): string {
+  const tables: string[] = []
+  const cols: string[] = []
+  const fns: string[] = []
+  for (const t of s.targets) {
+    if (t.kind === 'table') tables.push(`\`${t.name}\``)
+    else if (t.kind === 'col') cols.push(`\`${t.table}.${t.column}\``)
+    else fns.push(`\`${t.name}()\``)
+  }
+  const parts: string[] = []
+  if (tables.length) parts.push(`建表 ${tables.join(' / ')}`)
+  if (cols.length) parts.push(`加列 ${cols.join(' / ')}`)
+  if (fns.length) parts.push(`无参判据函数 ${fns.join(' / ')}`)
+  const head = parts.length ? parts.join(' · ') : '这一段没有建表 / 加列 / 新建无参函数'
+  return `${head}（本段共 ${s.sql} 行可执行 SQL）`
+}
+
+/** 没有人工留档时的通用句 —— 只说实话，不编具体后果 */
+function defaultImpact(s: SchemaStage): string {
+  return `这一段没跑 → 它建的东西不在，依赖它的功能会**静默少东西**（多半不报错）：${builtText(s)}`
+}
+
+/** 一个探针目标 → 一次只读探测（判据仍是上面那三套：表 `42P01` / 列 `42703` / 函数 `PGRST202`） */
+function targetProbe(t: StageTarget): { what: string; run: () => Promise<DriftCell> } {
+  if (t.kind === 'table') return { what: `\`${t.name}\``, run: () => probeTable(t.name) }
+  if (t.kind === 'col')
+    return { what: `\`${t.table}.${t.column}\``, run: () => probeColumn(t.table, t.column) }
+  return { what: `\`${t.name}()\``, run: () => probeRpc(t.name) }
+}
+
+/** "面板探不到"的通用原因（只有策略 / 只有带参数的函数那几段） */
+const NO_PROBE_TEXT =
+  '这一段只加**策略**或**带参数的函数** —— 两者 anon 会话都没有可探的现成对象：' +
+  '策略读不到 `pg_policies`，而带参数的函数要**伪造实参**（其中 `grade_delete` / ' +
+  '`migrate_nos_to_serial` 那几个**会写库**），面板是只读的，绝不做有副作用的探测。' +
+  '**这既不是"没跑"，也不是绿。**'
+
 function sectionDefs(): SectionDef[] {
-  const T = (table: string) => ({ what: `\`${table}\``, run: () => probeTable(table) })
-  const C = (table: string, column: string) => ({
-    what: `\`${table}.${column}\``,
-    run: () => probeColumn(table, column),
+  return SCHEMA_STAGES.map((s) => {
+    const kind: DriftKind = s.sql === 0 ? 'registry' : 'sql'
+    const probes = kind === 'registry' ? [] : s.targets.slice(0, PROBES_PER_STAGE).map(targetProbe)
+    const note = IMPACT_NOTES[s.n]
+    return {
+      stage: `§${s.n}`,
+      title: s.title,
+      built: builtText(s),
+      impact: note?.impact ?? defaultImpact(s),
+      fix: note?.fix ?? `去 Supabase → SQL Editor 跑 supabase/schema.sql 第 ${s.n} 段`,
+      anchor: `schema.sql §${s.n}（:${s.from}–${s.to}）`,
+      kind,
+      probes,
+      noProbe: kind === 'sql' && probes.length === 0 ? NO_PROBE_TEXT : undefined,
+    }
   })
-  const R = (fn: string, args: Record<string, unknown> = {}) => ({
-    what: `\`${fn}()\``,
-    run: () => probeRpc(fn, args),
-  })
-  return [
-    {
-      stage: '§10',
-      built: '加 5 张表（schools / grades / teacher_roles / class_subjects / classroom_accounts）+ classes.school_id/.grade_id + 回填 + visible_class_ids_for / is_classroom_account + 5 条读策略',
-      impact: '身份读不到 → `loadMyRoles()` 自带兜底返回 `[]` → 界面上**不多任何入口、不报错**；`grade_id` 列不存在 → 年级主任管不着自己建的班',
-      fix: '去 Supabase → SQL Editor 跑 supabase/schema.sql 第 10 段',
-      anchor: 'schema.sql §10（`:355–761`）',
-      probes: [T('teacher_roles'), T('class_subjects'), C('classes', 'grade_id')],
-    },
-    {
-      stage: '§11',
-      built: '6 条 `*_visible` 读策略 + 教室端两处有限写（**只加，不删**）',
-      impact: '读策略缺失 → 某些人少看见行，**不报错**',
-      fix: '去跑第 11 段（它只加策略，重跑幂等）',
-      anchor: 'schema.sql §11（`:762–832`）',
-      probes: [T('schedule_items'), T('calls')],
-    },
-    {
-      stage: '§12',
-      built: '`subjects` 字典（15 行）+ 三列 `subject_code` + 回填',
-      impact: '列不存在 → 写路径**摘掉那一列**；`subject_code` 全空 → 判据退化成按显示名反查，**认不出就不匹配**',
-      fix: '去跑第 12 段；跑完回填一次（§12.6 有模板）',
-      anchor: 'schema.sql §12（`:833–995`）',
-      probes: [T('subjects'), C('assignments', 'subject_code'), C('teachers', 'primary_subject_code')],
-    },
-    {
-      stage: '§13',
-      built: '重定义 `handle_new_user`（带异常守卫）+ `is_super_admin` / `can_manage_teachers` + 学科可见性两件套 + **重写** `assignments_visible`',
-      impact: '权限函数不存在 → Function 返回 **503「去跑第 13 段」**（§13.6：**不是 403**，故意区分）',
-      fix: '去跑第 13 段（跑完等十几秒让 PostgREST 刷缓存）',
-      anchor: 'schema.sql §13（`:996–1344`）',
-      probes: [R('is_super_admin'), R('can_manage_teachers')],
-    },
-    {
-      stage: '§14',
-      built: '**只有一行被注释的 RLS 自检 SQL**（**0 个对象**）',
-      impact: '跑不跑不改变行为；但它是"每张表都开了 RLS"的判据来源',
-      fix: '去跑第 14 段（一行 SQL，零对象，跑不跑都不改变行为）',
-      anchor: 'schema.sql §14（`:1345–1351`）',
-      probes: [T('classrooms'), T('shared_files')],
-    },
-    {
-      stage: '§15',
-      built: '加 `exams` / `exam_scores` + `can_edit_exam_for` / `can_edit_exam` + 4 条策略',
-      impact: '表不存在 → `ensureExamTables()` 返回 `missing` → **考试功能整个静默变空**',
-      fix: '去跑第 15 段',
-      anchor: 'schema.sql §15（`:1352–1667`）',
-      probes: [T('exams'), T('exam_scores'), R('can_edit_exam', { p_class_ids: [], p_subject_code: '', p_subject: '' })],
-    },
-    {
-      stage: '§16',
-      built: '6 组判据两件套 + 重写 `can_grade` + 重写 4 条读策略 + **18 条写策略** + 🔴 **删 6 条旧 `for all`**',
-      impact: '只删旧策略不补新策略 → 建作业/批改/加学生**被 RLS 拒**，界面只显示"保存失败"= 刷新即丢',
-      fix: '去跑第 16 段（这一段是**全仓唯一不可逆**的，跑之前先存一份 §16.6 的基线）',
-      anchor: 'schema.sql §16（`:1668–2266`）',
-      probes: [
-        R('can_grade', { p_class_id: '00000000-0000-0000-0000-000000000000', p_subject: '' }),
-        R('is_school_admin'),
-        R('visible_class_ids'),
-      ],
-    },
-    {
-      stage: '§17',
-      built: '三条裂缝的 restrictive 收紧：`teachers_not_classroom_*` / `schedule_classroom_scope_only` / `shared_files_not_classroom_*`',
-      impact: '不跑 → 教室端账号仍能写业务表（安全裂缝）',
-      fix: '去跑第 17 段',
-      anchor: 'schema.sql §17（`:2267–2464`）',
-      probes: [],
-    },
-    {
-      stage: '§18',
-      built: '**登记节，0 行可执行 SQL** —— 只登记 13 个 `_for` 变体',
-      impact: '没有 `_for` 变体 = **这条判据不可能被验证**（I33）',
-      fix: '去跑第 18 段',
-      anchor: 'schema.sql §18（`:2465–2568`）',
-      probes: [],
-    },
-    {
-      stage: '§19',
-      built: '`shared_files.class_ids` + GIN 索引 + 搬迁 UPDATE + 读策略 + 归属守卫 + 🔴 **重写桶的读策略**',
-      impact: '不跑 → **教室端拉到的文件列表恒为空，且不报错**',
-      fix: '去跑第 19 段',
-      anchor: 'schema.sql §19（`:2569–2831`）',
-      probes: [C('shared_files', 'class_ids'), C('shared_files', 'class_id')],
-    },
-  ]
 }
 
 /**
@@ -609,9 +727,16 @@ export const NO_PROBE_REASON: Record<string, string> = {
  * 🟢 **不需要服务端 Function** —— 面板方案 §二 C1 与 §四 4.1 把这条标成 🟡
  * （"需要 Function + service_role 查 `pg_policies` / `pg_tables` / `pg_proc`"），
  * 但方案自己给的"探测手法"那一栏写的正是 **anon 也能用的那三套**
- * （表看 `42P01`/`PGRST205`、列看 `42703`、函数看 `_for` 变体）。
- * 所以第一期**照方案的手法做、不新增接口**，代价是 §17/§18 只能标"无法判断" ——
- * 而"无法判断"恰恰是方案 §3.4 第 4 条要求的独立状态。
+ * （表看 `42P01`/`PGRST205`、列看 `42703`、函数看 `PGRST202`）。
+ *
+ * 🔴 **逐段探走的是"客户端逐个探"这条路**（2026-10-08 拍板，留档在
+ *    `功能设计与不变量.md`），**没有**加 `schema_status()` 那样的 RPC。理由：
+ *      · 加 RPC 要改 `supabase/schema.sql` → **用户得再跑一遍整份 schema**
+ *        （唯一不可逆的 §16 也在里面），而这件事的收益只是"少几次请求"；
+ *      · 客户端这几探是**只读存在性探测**（表 / 列 / 无参函数），一次十来毫秒；
+ *      · 段一多，请求确实变多 → 用 `PROBES_PER_STAGE` 封顶（每段最多 2 格）。
+ *    ⚠️ 代价说清楚：全跑一次约等于「有探针的段数 × 2」次只读请求，**只在打开这一页时跑一次**
+ *       （重新探测要手动点）。
  */
 export async function probeSchemaDrift(): Promise<{ at: number; sections: DriftSection[] }> {
   const defs = sectionDefs()
@@ -620,11 +745,19 @@ export async function probeSchemaDrift(): Promise<{ at: number; sections: DriftS
       const cells = await Promise.all(d.probes.map((p) => p.run()))
       return {
         stage: d.stage,
+        title: d.title,
         built: d.built,
         impact: d.impact,
         fix: d.fix,
         anchor: d.anchor,
-        state: combineCells(cells),
+        kind: d.kind,
+        noProbe: d.noProbe,
+        /*
+         * 🔴 **登记节**（`sql === 0`）：没有可执行 SQL ⇒ 没有"跑没跑"这回事。
+         *    它的 `state` 是 `present`（"没什么可跑的"），但**渲染时不许画绿点** ——
+         *    屏上它走单独那一档（见 `Admin.tsx` 的 `kind === 'registry'` 分支）。
+         */
+        state: d.kind === 'registry' ? 'present' : combineCells(cells),
         cells,
       }
     }),
@@ -632,7 +765,7 @@ export async function probeSchemaDrift(): Promise<{ at: number; sections: DriftS
   return { at: Date.now(), sections }
 }
 
-/** C1 卡上那一句话（红 / 灰 / 绿各自说什么） */
+/** C1 卡上那一句话 + 五档分类（**登记节 / 探不到 / 没结论 三者必须分得开**） */
 export function driftSummary(sections: readonly DriftSection[]): {
   state: DriftState
   text: string
@@ -641,68 +774,131 @@ export function driftSummary(sections: readonly DriftSection[]): {
   /** 探测本身没结论的段（灰） */
   unknown: DriftSection[]
   /**
-   * **本面板按设计就探不到的段**（§17 / §18）。
+   * **本面板按设计就探不到的段** —— 只加策略 / 只加带参数的函数那几段。
    *
    * ⚠️ 它们**不参与**这张卡的红黄绿 —— 否则这张卡**永远不可能是绿的**。
-   *    理由不是"通融"，而是：这两段的产物（restrictive 策略 / `_for` 变体）
-   *    **连"没跑"都没法从面板上看出**（anon 读不到 `pg_policies`，`_for` 又全被 revoke），
-   *    所以它们既不是绿也不是灰 —— 它们是"**这个问题不该问面板**"，
-   *    要确认请跑 `supabase/自检.sql` 第 3 / 4 段。方案 §3.4 第 4 条要的是
-   *    "无法判断**不能归到绿**"，而这里连"判断"这个动作都不存在。
+   *    理由不是"通融"：它们的产物（`create policy` / 带参数的函数）
+   *    **连"没跑"都没法从面板上看出**（anon 读不到 `pg_policies`；带参数的函数要伪造实参，
+   *    而那些函数里有会写库的），所以它们既不是绿也不是灰 ——
+   *    它们是"**这个问题不该问面板**"。方案 §3.4 第 4 条要的是"无法判断**不能归到绿**"，
+   *    而这里连"判断"这个动作都不存在。
    */
   unprobeable: DriftSection[]
+  /**
+   * 🆕 **登记节**（`schema.sql` 里 0 行可执行 SQL 的段，例如 §14 / §18）。
+   *
+   * 🔴 它与 `unprobeable` 是**两件事**（这正是旧面板看不懂的原因）：
+   *    · 登记节 = **没有东西可跑**（不需要探，也不是"探不到"）；
+   *    · 探不到 = **有东西可跑，但面板探不到**（可能真没跑）。
+   */
+  registry: DriftSection[]
   /** 灰 / 探不到那些段，各自的原因（屏上要逐条写出来，不能只说"无法判断"） */
   reasons: string[]
+  /**
+   * 🔴 **总结论**：线上库**探得到的最高一段**（`null` = 一段都没探到）。
+   *
+   * 这是用户真正要的那个数（「线上库已跑到 §NN」）——所以它是一等公民，
+   * 而不是让人自己去十来个点里挑最大的那个。
+   */
+  latest: number | null
+  /** `schema.sql` 里**有几段可执行**（`sql > 0`）—— 「共 §NN 段可执行」 */
+  executableCount: number
 } {
+  const registry = sections.filter((s) => s.kind === 'registry')
   const missing = sections.filter((s) => s.state === 'missing')
-  const unprobeable = sections.filter((s) => s.cells.length === 0)
+  const unprobeable = sections.filter((s) => s.kind === 'sql' && s.cells.length === 0)
   const unknown = sections.filter((s) => s.state === 'indeterminate' && s.cells.length > 0)
-  const probed = sections.filter((s) => s.cells.length > 0)
+  const probed = sections.filter((s) => s.kind === 'sql' && s.cells.length > 0)
+  const presentProbed = probed.filter((s) => s.state === 'present')
+  const latest = presentProbed.length
+    ? Math.max(...presentProbed.map((s) => Number(s.stage.replace('§', ''))))
+    : null
+  const executableCount = sections.filter((s) => s.kind === 'sql').length
   const reasons = [...unknown, ...unprobeable].map(
-    (s) => `${s.stage}：${NO_PROBE_REASON[s.stage] ?? '这一段的产物 anon 会话探不到。'}`,
+    (s) => `${s.stage}：${NO_PROBE_REASON[s.stage] ?? s.noProbe ?? '这一段的产物 anon 会话探不到。'}`,
   )
+  const base = { missing, unknown, unprobeable, registry, reasons, latest, executableCount }
 
   if (missing.length) {
     const s = missing[0]
-    return {
-      state: 'missing',
-      text: `${s.stage} 未跑 → ${s.impact.split('；')[0]}`,
-      missing,
-      unknown,
-      unprobeable,
-      reasons,
-    }
+    return { state: 'missing', text: `${s.stage} 未跑 → ${s.impact.split('；')[0]}`, ...base }
   }
   if (unknown.length) {
     return {
       state: 'indeterminate',
       text: `${unknown.map((s) => s.stage).join(' / ')} 探测没结论（**不是绿**）`,
-      missing,
-      unknown,
-      unprobeable,
-      reasons,
+      ...base,
     }
   }
   if (!probed.length) {
-    return {
-      state: 'indeterminate',
-      text: '一段都探不到（没有云端连接？）—— 不是绿',
-      missing,
-      unknown,
-      unprobeable,
-      reasons,
-    }
+    return { state: 'indeterminate', text: '一段都探不到（没有云端连接？）—— 不是绿', ...base }
   }
+  /*
+   * 🟢 绿：**总结论**先说出口 —— 「线上库已跑到 §NN · 共 NN 段可执行」。
+   * ⚠️ `latest` 是"**探得到且已跑**"的最高一段；探不到的段一律不进这个数，
+   *    也不许被算成"没跑"（那是本项目最贵的那条教训）。
+   */
+  const registryText = registry.length ? `（另有 ${registry.length} 段是登记节，0 行 SQL）` : ''
   return {
     state: 'present',
     text:
-      `线上库与 schema.sql 同步（${probed.map((s) => s.stage).join(' ')} 全跑过）` +
-      (unprobeable.length ? ` · ${unprobeable.map((s) => s.stage).join(' / ')} 探不到（不是绿）` : ''),
-    missing,
-    unknown,
-    unprobeable,
-    reasons,
+      `线上库已跑到 §${latest} · 共 ${executableCount} 段可执行${registryText}` +
+      (unprobeable.length ? ` · ${unprobeable.length} 段面板探不到（不是没跑）` : ''),
+    ...base,
   }
+}
+
+/* ============================================================
+   C2 · 前端探测汇总 —— 🆕 补上**第四个探测**（`lib/files.ts` 的 `ensureFileClassCols`）
+   ------------------------------------------------------------
+   旧面板底部写着：「第四个探测（`lib/files.ts` 的 `ensureFileClassCols`）**没有对外的
+   只读 getter**，所以不在上面这张汇总里」✗ —— 于是那一行**永远缺着**。
+   现在 `lib/files.ts` 补了 `getFileClassColsStatus()` / `getFileClassColsProbeAt()`
+   （**只读、不改任何缓存语义**，照 `remote.getExamTablesProbeStatus()` 的写法），
+   这一格就能被探了 ✅。
+
+   ⚠️ 为什么要在**这里**合并、而不是去改 `data/remote.ts` 的 `probeReport()`：
+      那四个探测的缓存/判据都在 `remote.ts` 里，而这一轮的文件边界不含它 ——
+      合并这一下是纯函数，放在纯逻辑文件里正好，也**不新增第二套判据**。
+   ============================================================ */
+
+/** 与 `data/remote.ts` 的 `ProbeReportItem` **同形**（故意不 import 那个大模块，免得多一条依赖边） */
+export type ClientProbeItem = {
+  key: string
+  label: string
+  target: string
+  state: 'present' | 'missing' | 'indeterminate'
+  at: number | null
+  note?: string
+}
+export type ClientProbeReport = { collectedAt: number; items: ClientProbeItem[] }
+
+/** `lib/files.ts` 那个探测的对外三态（`pending` = 本次会话还没探过） */
+export type FileProbeStatus = 'pending' | 'present' | 'missing' | 'indeterminate'
+
+/**
+ * 把「文件归属列」这一格并进 C2 汇总（**追加在最后**，顺序稳定）。
+ *
+ * `pending`（这一页还没探过那个列）→ 记 `indeterminate` 并**说清为什么**：
+ * 它是"还没问"，不是"不在"，更不是绿（三态纪律）。
+ */
+export function withFileProbe(
+  report: ClientProbeReport,
+  status: FileProbeStatus,
+  at: number | null,
+): ClientProbeReport {
+  const item: ClientProbeItem = {
+    key: 'fileClassCols',
+    label: '文件归属列',
+    target: 'shared_files.class_ids',
+    state: status === 'pending' ? 'indeterminate' : status,
+    at,
+    note:
+      status === 'pending'
+        ? '本次会话**还没探过**它（打开「文件互传」那一页才会探）—— 这不是"列不在"。'
+        : '§19 没跑时列不在：写路径**摘掉这一列**改走老列 `class_id`（单个班）。',
+  }
+  return { collectedAt: report.collectedAt, items: [...report.items, item] }
 }
 
 /* ============================================================
@@ -875,7 +1071,16 @@ export function judgeBackup(f: BackupFacts): BackupJudgement {
     return { tone: 'bad', text: `最新一份备份只有 ${humanBytes(f.sizeBytes)}（可疑）`, notes }
   }
   if (f.degradedToArtifact) {
-    return { tone: 'warn', text: '备份在跑，但降级成了 Artifact（30 天后就没了）', notes }
+    return {
+      tone: 'warn',
+      text: '备份在跑 · **已知 · 已接受**：降级成 Artifact，**30 天后自动删除**（要留档得手动下载）',
+      notes: [
+        '🔴 **代价**：Artifact 只保留 30 天 —— **过期即删，不会通知**。要留档就现在**手动下载**：' +
+          'GitHub → Actions → backup → 那条运行 → 页面最下面的 Artifacts。',
+        '🔴 **为什么它不是"待办"**：开通 R2 要绑**国际银行卡**，当前账号做不到 → 永久状态。',
+        ...notes,
+      ],
+    }
   }
   if (sizeOk === null) {
     return {
@@ -943,11 +1148,16 @@ export function judgeR2(f: SecretFacts): { tone: Tone; text: string; notes: stri
   if (none) {
     return {
       tone: 'warn',
-      text: 'R2 四个都没配 → 备份走 **Artifact 降级**（`::warning` + `exit 0`，**工作流照旧绿灯**）',
+      text: 'R2 四个都没配 —— **已知 · 已接受**：备份走 Artifact 降级，**30 天后自动删除**',
       notes: [
-        '这不是"备份没跑"，而是"备份只留 30 天就消失"。',
+        '🔴 **代价写在这里，别当它不存在**：Artifact 只保留 30 天，**过期即删、不会通知**。' +
+          '要留档就**手动下载**：GitHub → Actions → backup → 那条运行 → 页面最下面的 Artifacts。',
+        '这不是"备份没跑"（备份**在跑**，工作流也照旧绿灯：`backup.yml` 只 `::warning` 然后 ' +
+          '`exit 0`）—— 区别只在"留多久"。',
         '⚠️ 这正是面板非要有 G2 那条字节数的理由：**只看成功/失败抓不住这个状态。**',
-        '修法二选一：① 补上四个 secret；② 接受 Artifact 方案，但要知道它的保留期。',
+        '🔴 **为什么它不是"待办"**：开通 R2 要绑**国际银行卡**（Cloudflare 的付款要求），' +
+          '当前账号做不到 → 这是**永久状态**，不是"有个动作等着你去做"。' +
+          '真正要处理的是**半配置**：`R2_ENDPOINT` / `R2_BUCKET` 配了而两个 key 没配 —— 那条照旧红。',
       ],
     }
   }

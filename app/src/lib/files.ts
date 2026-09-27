@@ -144,17 +144,60 @@ export type FileClassCols = { classIds: boolean }
 
 let fileClassColsProbe: Promise<FileClassCols> | null = null
 
+/**
+ * 🆕 2026-10-08 · **只读**的探测结论（管理台自检面板 C2 的第四格要它）。
+ *
+ * 🔴 为什么非要有它：`ensureFileClassCols()` 对外只回 `{ classIds }`，而
+ *    "探测本身没结论（网络抖动 / 权限错误）"**被兜底成了 `true`**（那是给**写路径**用的：
+ *    宁可多带一列也不要一次抖动就把归属永久写停）。于是屏上"列在"与"我没问出来"
+ *    长得一模一样 —— 而项目的硬纪律是**"没结论"必须是独立的第四种状态，绝不能画绿**
+ *    （`AGENTS.md` §三.4）。
+ *
+ * ⚠️ 这两个 getter **一个字节都不改变探测的时机、次数与返回值** ——
+ *    只是把 `probeFileClassCols()` 里本来就知道的结论另记一份，
+ *    与 `data/remote.ts` 的 `getExamTablesProbeStatus()` 是同一套写法。
+ *    ⚠️ 探过之前是 `'pending'`（还没问），**不是** `'indeterminate'`。
+ */
+export type FileClassColsStatus = 'pending' | 'present' | 'missing' | 'indeterminate'
+
+let fileClassColsStatus: FileClassColsStatus = 'pending'
+let fileClassColsProbeAt: number | null = null
+
+export function getFileClassColsStatus(): FileClassColsStatus {
+  return fileClassColsStatus
+}
+export function getFileClassColsProbeAt(): number | null {
+  return fileClassColsProbeAt
+}
+
 async function probeFileClassCols(): Promise<FileClassCols> {
   const c = getSupabase()
-  if (!c) return { classIds: false }
+  const mark = (s: FileClassColsStatus) => {
+    fileClassColsStatus = s
+    fileClassColsProbeAt = Date.now()
+  }
+  if (!c) {
+    /* 本地模式：没有云端可问 —— "无法判断"，不是"列不在" */
+    mark('indeterminate')
+    return { classIds: false }
+  }
   try {
     const { error } = await c.from('shared_files').select('class_ids').limit(1)
-    if (!error) return { classIds: true }
+    if (!error) {
+      mark('present')
+      return { classIds: true }
+    }
     const msg = String(error.message ?? '')
     const code = String((error as { code?: string }).code ?? '')
-    // 网络抖动 / 权限问题一律当作**有**（否则一次抖动就把归属永久写停了）
-    return { classIds: !(code === '42703' || /does not exist/i.test(msg)) }
+    // 🔴 返回值照旧：网络抖动 / 权限问题一律当作**有**（否则一次抖动就把归属永久写停了）
+    if (code === '42703' || /does not exist/i.test(msg)) {
+      mark('missing')
+      return { classIds: false }
+    }
+    mark('indeterminate')
+    return { classIds: true }
   } catch {
+    mark('indeterminate')
     return { classIds: true }
   }
 }

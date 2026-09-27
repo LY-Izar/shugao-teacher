@@ -27,7 +27,7 @@
  */
 
 import { createServer } from 'node:http'
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { dirname, resolve as resolvePath } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { registerTsResolve } from './lib/ts-resolve.mjs'
@@ -86,6 +86,136 @@ function section(t) {
    ============================================================ */
 
 const C = await import(mod('src/lib/adminChart.ts'))
+
+/* ============================================================
+   🆕 2026-10-08 · **`schema.sql` 逐段清单的解析器**（面板 C1 的清单来源）
+   ------------------------------------------------------------
+   为什么要有它：旧面板那张"逐段跑没跑"的清单是**手写死的一段**，
+   `schema.sql` 后来加的 §20–§37 它**不知道存在** —— 用户的症状是
+   「线上库都跑到 §37 了，这里只列 §10–§19」。**清单必须跟着 schema.sql 走。**
+
+   这一段是**唯一的解析实现**（面板自己不可能做到：`supabase/` 在 Vite 根之外，
+   实测 `@fs` 取它回 **403**，所以运行时 `?raw` 导入这条路走不通）：
+     · 门禁（第七节）每次重解析一遍 `supabase/schema.sql`，与 `adminChart.ts` 里那个
+       `SCHEMA_STAGES` **逐字段比对** —— 改了 schema 忘了重新生成，当场红；
+     · `node scripts/admin-checks.mjs --gen-stages` 用它把清单**写回** `adminChart.ts`
+       （只替换 `@gen:schema-stages` 标记之间那一段，其余一个字不动）。
+
+   解析规则（都能被 `schema.sql` 的写法直接核对）：
+     · 段头 = **横幅行（`-- ====`）的下一行**，形如 `--  12. 标题` 或 `-- §37 标题`；
+       要求紧跟在横幅后面，是为了避开正文里那种"`--  1. id 多了一条…`"的编号列表；
+     · `sql` = 去掉 `--` 注释与空行之后**还剩几行**（`0` ⇒ **登记节**）；
+     · `targets` = 这一段**建出来**的、anon 会话探得到的东西：表 / 加列 / **无参**函数。
+       ⚠️ 带参数的函数**一律不进清单** —— 探它要伪造实参，而 `grade_delete` /
+       `migrate_nos_to_serial` 那些**会写库**，面板是只读的；
+       `_for` 变体与 `returns trigger` 的触发器函数也不进（它们本来就不可 RPC 调用）。
+   ============================================================ */
+
+const SCHEMA_FILE = resolvePath(APP, '..', 'supabase', 'schema.sql')
+const ADMIN_CHART_FILE = resolvePath(APP, 'src/lib/adminChart.ts')
+
+function parseSchemaStages(text) {
+  const lines = text.split(/\r?\n/)
+  const isBanner = (s) => /^--\s*=+\s*$/.test(s)
+  const RE_DOT = /^--\s+(\d+)\.\s+(\S.*)$/
+  const RE_SEC = /^--\s*\u00a7\s*(\d+)\s+(\S.*)$/
+  const heads = []
+  for (let i = 0; i + 1 < lines.length; i++) {
+    if (!isBanner(lines[i])) continue
+    const m = RE_DOT.exec(lines[i + 1]) ?? RE_SEC.exec(lines[i + 1])
+    if (!m) continue
+    heads.push({ n: Number(m[1]), title: m[2].trim(), line: i + 2 })
+  }
+  return heads.map((h, k) => {
+    const to = k + 1 < heads.length ? heads[k + 1].line - 2 : lines.length
+    const body = lines.slice(h.line, to - 1)
+    /*
+     * 🔴 **先去掉 `--` 注释再做任何事**（`sql` 计数与探针提取都用剥过注释的文本）：
+     *    `schema.sql` 里有大段**注释掉的**模板 SQL，例如 §32.6 的
+     *    `--  -- alter table subjects add column if not exists can_stream …`（恢复模板）。
+     *    不剥注释就会把它当成"这一段加的列"，于是线上明明跑过 §32（那一列**已经删了**）
+     *    却被报成"§32 未跑" —— **一次假红**，正是本项目最贵的那类失真。
+     */
+    const stripped = body.map((l) => l.replace(/--.*$/, ''))
+    const sql = stripped.filter((l) => l.trim()).length
+    /* DDL 可能跨行（§19 的 `alter table shared_files\n add column …`）→ 摊平成一行再匹配 */
+    const flat = stripped.join('\n').replace(/\s+/g, ' ')
+    const targets = []
+    const push = (t) => {
+      if (!targets.some((x) => x.kind === t.kind && (x.name ?? x.column) === (t.name ?? t.column))) {
+        targets.push(t)
+      }
+    }
+    for (const m of flat.matchAll(/create table if not exists ([a-z_][a-z_0-9]*)/gi)) {
+      push({ kind: 'table', name: m[1].toLowerCase() })
+    }
+    for (const m of flat.matchAll(
+      /alter table ([a-z_][a-z_0-9]*) add column if not exists ([a-z_][a-z_0-9]*)/gi,
+    )) {
+      push({ kind: 'col', table: m[1].toLowerCase(), column: m[2].toLowerCase() })
+    }
+    for (const m of flat.matchAll(/create or replace function (?:public\.)?([a-z_][a-z_0-9]*)\(\)/gi)) {
+      const name = m[1].toLowerCase()
+      if (/_for$/.test(name)) continue
+      if (/returns trigger/i.test(flat.slice(m.index, m.index + 240))) continue
+      push({ kind: 'fn', name })
+    }
+    return { n: h.n, title: h.title, from: h.line, to, sql, targets }
+  })
+}
+
+/** 清单是否与 `schema.sql` 逐字段一致（门禁用的就是它） */
+function sameStages(a, b) {
+  return JSON.stringify(a) === JSON.stringify(b)
+}
+
+/** 把清单渲染成 `adminChart.ts` 里那段被标记包住的源码 */
+function renderStagesBlock(stages) {
+  /** 库里那些标题里有单引号的话要转义（现在没有，留着以免下次生成出一份坏源码） */
+  const q = (s) => `'${String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`
+  const body = stages
+    .map((s) => {
+      const targets = s.targets
+        .map((t) =>
+          t.kind === 'table'
+            ? `{ kind: 'table', name: '${t.name}' }`
+            : t.kind === 'col'
+              ? `{ kind: 'col', table: '${t.table}', column: '${t.column}' }`
+              : `{ kind: 'fn', name: '${t.name}' }`,
+        )
+        .join(', ')
+      return (
+        `  { n: ${s.n}, title: ${q(s.title)}, from: ${s.from}, to: ${s.to}, ` +
+        `sql: ${s.sql}, targets: [${targets}] },`
+      )
+    })
+    .join('\n')
+  return `export const SCHEMA_STAGES: readonly SchemaStage[] = [\n${body}\n]`
+}
+
+const GEN_BEGIN = '/* @gen:schema-stages BEGIN */'
+const GEN_END = '/* @gen:schema-stages END */'
+
+/** 用解析出来的清单**就地替换**标记之间那一段（其余一个字不动） */
+function writeStagesBlock(stages) {
+  const src = readFileSync(ADMIN_CHART_FILE, 'utf8')
+  const i = src.indexOf(GEN_BEGIN)
+  const j = src.indexOf(GEN_END)
+  if (i < 0 || j < 0 || j < i) throw new Error('adminChart.ts 里找不到 @gen:schema-stages 标记')
+  const next = src.slice(0, i + GEN_BEGIN.length) + '\n' + renderStagesBlock(stages) + '\n' + src.slice(j)
+  writeFileSync(ADMIN_CHART_FILE, next, 'utf8')
+}
+
+if (process.argv.includes('--gen-stages')) {
+  const stages = parseSchemaStages(readFileSync(SCHEMA_FILE, 'utf8'))
+  writeStagesBlock(stages)
+  console.log(
+    `已从 supabase/schema.sql 重新生成段清单：${stages.length} 段（` +
+      `可执行 ${stages.filter((s) => s.sql > 0).length} 段 · 登记节 ` +
+      `${stages.filter((s) => s.sql === 0).map((s) => `§${s.n}`).join(' ')}）`,
+  )
+  process.exit(0)
+}
 
 /* ============================================================
    E7 的夹具
@@ -1192,39 +1322,110 @@ await withLock(async () => {
      第七节 · C1 schema 漂移总表：段号与"无法判断"的口径
      ============================================================ */
 
-  section('第七节 · C1 漂移总表：段号齐全，且"无法判断"与"未跑"分得开')
+  section('第七节 · C1 漂移总表：段清单跟着 schema.sql 走，且"登记节 / 没结论 / 未跑"分得开')
 
+  /* ============================================================
+     第七节·补〇 · 🆕 2026-10-08：**清单必须跟着 `schema.sql` 走**
+     ------------------------------------------------------------
+     用户原话：「数据表，我们都更新到多少了，怎么这里只能探到这些」——
+     线上库早跑到 §37 了，而面板只列 §10–§19。
+     根因：那份清单是**手写死的一段**，`schema.sql` 后来加的段它不知道存在。
+
+     断言（每条都带反向对照）：
+       ⓐ 面板用的 `SCHEMA_STAGES` 与**当场重新解析** `supabase/schema.sql` 的结果逐字段一致；
+       ⓑ §35 / §36 / §37 在清单里（旧的手写清单没有它们）；
+       ⓒ **反向对照**：把清单换回"手写 10~19 那一段"→ 判据必须**不认**（否则这条断言是摆设）；
+       ⓓ 登记节（0 行可执行 SQL）单独一类，**不混进**"已跑/没跑/探不到"。
+     ============================================================ */
   {
-    eq('§10–§19 一共 10 段', (await C.probeSchemaDrift()).sections.length, 10)
+    const schemaText = readFileSync(SCHEMA_FILE, 'utf8')
+    const parsed = parseSchemaStages(schemaText)
+    ok(
+      '补〇ⓐ 面板里的段清单与**当场解析 `supabase/schema.sql`** 的结果逐字段一致' +
+        '（改了 schema 忘了重新生成 → 这里红）',
+      sameStages(parsed, C.SCHEMA_STAGES),
+      `解析出 ${parsed.length} 段 / 面板里 ${C.SCHEMA_STAGES.length} 段；` +
+        `不一致就跑 node scripts/admin-checks.mjs --gen-stages`,
+    )
+    const nums = C.SCHEMA_STAGES.map((s) => s.n)
+    ok(
+      '补〇ⓑ 🆕 §35 / §36 / §37 在清单里（旧的手写清单只到 §19）',
+      nums.includes(35) && nums.includes(36) && nums.includes(37),
+      nums.join(','),
+    )
+    ok(
+      '补〇ⓑ 清单覆盖全部段（36 段，末段是 §37）',
+      nums.length === 36 && Math.max(...nums) === 37,
+      `${nums.length} 段 / 最大 §${Math.max(...nums)}`,
+    )
+    ok(
+      '补〇ⓑ 行号锚点也跟着新（§37 的行号与文件里那一段对得上）',
+      (() => {
+        const s = C.SCHEMA_STAGES.find((x) => x.n === 37)
+        return /§37/.test(schemaText.split(/\r?\n/)[s.from - 1])
+      })(),
+      JSON.stringify(C.SCHEMA_STAGES.find((x) => x.n === 37)),
+    )
+    /* 反向对照：旧的手写清单（§10–§19）必须**被判据认出来"不是清单"** */
+    const oldHandwritten = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+    const asOldList = parsed.filter((s) => oldHandwritten.includes(s.n))
+    ok(
+      '补〇ⓒ 反向对照：把清单改回**手写 §10–§19** → 判据必须不认（`sameStages` 会红）',
+      asOldList.length === 10 && !sameStages(asOldList, C.SCHEMA_STAGES),
+      `手写那一版 ${asOldList.length} 段；面板里 ${C.SCHEMA_STAGES.length} 段`,
+    )
+    ok(
+      '补〇ⓒ 而且手写那一版**确实漏了 §35/§36/§37**（这就是当初的病灶）',
+      ![35, 36, 37].some((n) => asOldList.some((s) => s.n === n)),
+      asOldList.map((s) => s.n).join(','),
+    )
+
+    /* ⓓ 登记节：从 `schema.sql` 里真的算出来是 0 行可执行 SQL 的那两段 */
+    const registryNums = parsed.filter((s) => s.sql === 0).map((s) => s.n)
+    eq('补〇ⓓ 登记节 = 0 行可执行 SQL 的段（§14 / §18）', registryNums.join(','), '14,18')
+    const probe = await C.probeSchemaDrift()
+    const byStage = new Map(probe.sections.map((s) => [s.stage, s]))
+    eq('补〇ⓓ §14 走的是"登记节"这一档', byStage.get('§14').kind, 'registry')
+    eq('补〇ⓓ §18 同理', byStage.get('§18').kind, 'registry')
+    eq('补〇ⓓ 登记节不带探针（没东西可探）', byStage.get('§18').cells.length, 0)
+    const sumR = C.driftSummary(probe.sections)
+    eq('补〇ⓓ 总结论里**登记节单独一类**（不混进已跑/没跑）', sumR.registry.map((s) => s.stage).join(','), '§14,§18')
+    ok(
+      '补〇ⓓ 而且登记节**既不在未跑里、也不在探不到里**',
+      !sumR.missing.some((s) => s.kind === 'registry') &&
+        !sumR.unprobeable.some((s) => s.kind === 'registry'),
+      `missing=${sumR.missing.length} unprobeable=${sumR.unprobeable.length}`,
+    )
+    /* 反向对照：把一段"有 SQL 但没有探针"的段当成登记节 → 必须不成立 */
+    ok(
+      '补〇ⓓ 反向对照：`sql > 0` 但没有探针的段**不许**被算成登记节（那是"探不到"，不是"没有 SQL"）',
+      (() => {
+        const s35 = byStage.get('§35')
+        return s35.kind === 'sql' && s35.cells.length === 0 && s35.noProbe
+      })(),
+      JSON.stringify([byStage.get('§35').kind, byStage.get('§35').cells.length]),
+    )
   }
 
-  /* ① 库"全跑过" → §10–§16、§19 全绿；§17/§18 是灰（anon 探不到，见下） */
+  /* ① 库"全跑过" → 有探针的段全绿；登记节单独一档；只加策略的那几段是"探不到" */
   {
     missingTables.clear()
     missingCols.clear()
     const r = await C.probeSchemaDrift()
-    const by = new Map(r.sections.map((s) => [s.stage, s]))
     eq(
-      '段号就是 §10–§19（没有自己发明段号）',
+      '① 段号就是 `schema.sql` 里的全部段（没有自己发明段号）',
       r.sections.map((s) => s.stage).join(','),
-      '§10,§11,§12,§13,§14,§15,§16,§17,§18,§19',
+      C.SCHEMA_STAGES.map((s) => `§${s.n}`).join(','),
     )
     ok(
-      '① 表/列/函数都在 → §10 §11 §12 §13 §14 §15 §16 §19 全是"已跑"',
-      ['§10', '§11', '§12', '§13', '§14', '§15', '§16', '§19'].every(
-        (st) => by.get(st)?.state === 'present',
-      ),
-      JSON.stringify(r.sections.map((s) => [s.stage, s.state])),
+      '① 有探针的段全都在 → 状态一律"已跑"',
+      r.sections.filter((s) => s.kind === 'sql' && s.cells.length).every((s) => s.state === 'present'),
+      JSON.stringify(r.sections.filter((s) => s.state !== 'present').map((s) => [s.stage, s.state])),
     )
-    eq(
-      '① **§17 是"无法判断"而不是"未跑"**（restrictive 策略 anon 读不到 pg_policies）',
-      by.get('§17').state,
-      'indeterminate',
-    )
-    eq('① §18 同理（`_for` 变体全部 revoke 掉了）', by.get('§18').state, 'indeterminate')
     ok(
-      '① 每一段都带"不跑的后果"（方案 §六 验收口径：每一行都带一句）',
-      r.sections.every((s) => s.impact.length > 8 && s.fix.length > 4 && s.built.length > 8),
+      '① **探不到的段不许是"未跑"**（只加策略 / 带参数的函数 → 面板探不到，不是没跑）',
+      r.sections.filter((s) => s.cells.length === 0).every((s) => s.state !== 'missing'),
+      JSON.stringify(r.sections.filter((s) => s.cells.length === 0).map((s) => [s.stage, s.state])),
     )
     ok(
       '① §17 / §18 有**专门的理由**（探不到就得说清为什么，不能只给一个灰点）',
@@ -1241,19 +1442,44 @@ await withLock(async () => {
       C.NO_PROBE_REASON['§18'].includes('revoke') && C.NO_PROBE_REASON['§18'].includes('_for'),
       C.NO_PROBE_REASON['§18'],
     )
+    ok(
+      '① 每一段都带"不跑的后果"与"怎么修"（方案 §六 验收口径：每一行都带一句）',
+      r.sections.every((s) => s.impact.length > 8 && s.fix.length > 4 && s.built.length > 8),
+    )
+    ok(
+      '① 探不到的段各自带**原因**（`noProbe` 或专门理由，不许只有一句灰）',
+      r.sections
+        .filter((s) => s.kind === 'sql' && s.cells.length === 0)
+        .every((s) => Boolean(s.noProbe || C.NO_PROBE_REASON[s.stage])),
+    )
     const sum0 = C.driftSummary(r.sections)
     eq('① 卡上那句话是绿的（能探的都跑过）', sum0.state, 'present')
     ok(
-      '① 但**必须同时写出**那两段探不到（§17 / §18 不能被悄悄算成绿）',
-      sum0.text.includes('§17') && sum0.text.includes('§18') && sum0.text.includes('不是绿'),
+      '① 🔴 **总结论是用户真正要的那个数**：「线上库已跑到 §NN」',
+      /线上库已跑到\s*§\d+/.test(sum0.text),
       sum0.text,
     )
-    eq('① 探不到的正好是 §17 / §18 两段', sum0.unprobeable.map((s) => s.stage).join(','), '§17,§18')
+    eq(
+      '① 总结论里的那段号 = **探得到且已跑**的最高一段（不许把探不到的段算进去）',
+      sum0.latest,
+      Math.max(
+        ...r.sections
+          .filter((s) => s.kind === 'sql' && s.cells.length)
+          .map((s) => Number(s.stage.replace('§', ''))),
+      ),
+    )
+    ok(
+      '① 并且带上「共 NN 段可执行」（= 全部段 − 登记节）',
+      sum0.executableCount === C.SCHEMA_STAGES.filter((s) => s.sql > 0).length &&
+        sum0.text.includes(`共 ${sum0.executableCount} 段可执行`),
+      `${sum0.executableCount} / ${sum0.text}`,
+    )
+    eq('① 探不到的段（只加策略/带参数的函数）单独一类', sum0.unprobeable.length > 0, true)
     eq('① 而"探测没结论"这一类是空的（两者不能混为一谈）', sum0.unknown.length, 0)
     ok(
-      '① 两段各自带原因',
-      sum0.reasons.length === 2 && sum0.reasons.every((x) => x.includes('：')),
-      JSON.stringify(sum0.reasons),
+      '① 探不到的那些段各自带原因（屏上要逐条写出来）',
+      sum0.reasons.length === sum0.unprobeable.length && sum0.reasons.every((x) => x.includes('：')),
+      JSON.stringify(sum0.reasons.slice(0, 2)),
     )
   }
 
@@ -1301,9 +1527,9 @@ await withLock(async () => {
       JSON.stringify(r.sections.map((s) => [s.stage, s.state])),
     )
     ok(
-      '③ 全是"无法判断"（灰）',
-      r.sections.every((s) => s.state === 'indeterminate'),
-      JSON.stringify(r.sections.map((s) => [s.stage, s.state])),
+      '③ 全是"无法判断"（灰）—— 登记节除外（它本来就没有东西可跑）',
+      r.sections.filter((s) => s.kind === 'sql').every((s) => s.state === 'indeterminate'),
+      JSON.stringify(r.sections.filter((s) => s.state !== 'indeterminate').map((s) => [s.stage, s.state])),
     )
   }
 
@@ -1328,19 +1554,31 @@ await withLock(async () => {
     const missingOne = C.driftSummary([
       {
         stage: '§15',
+        title: 't',
         built: 'b',
         impact: '考试功能整个静默变空；还有别的',
         fix: 'f',
         state: 'missing',
         cells: [],
         anchor: '',
+        kind: 'sql',
       },
     ])
     eq('有未跑时卡是红的', missingOne.state, 'missing')
     ok('而且那句话说的是**症状**不是段号', missingOne.text.includes('考试功能整个静默变空'), missingOne.text)
 
     const unknownOne = C.driftSummary([
-      { stage: '§18', built: 'b', impact: 'i', fix: 'f', state: 'indeterminate', cells: [], anchor: '' },
+      {
+        stage: '§18',
+        title: 't',
+        built: 'b',
+        impact: 'i',
+        fix: 'f',
+        state: 'indeterminate',
+        cells: [],
+        anchor: '',
+        kind: 'sql',
+      },
     ])
     eq('无法判断时卡是灰的', unknownOne.state, 'indeterminate')
     ok('而且明确写"不是绿"', unknownOne.text.includes('不是绿'), unknownOne.text)
@@ -1395,19 +1633,46 @@ await withLock(async () => {
     /*
      * 结构性钉子（比行为断言更狠）：**表存在性探测不许假设任何一列存在**。
      * 行为那条要靠"假库恰好建模了那张表"才抓得住；这一条把写法本身钉死 ——
-     * 只要有人把 `select('id')` 写回去，两条一起红。
+     * 只要有人把 `select('id')` 写回去，下面两条一起红。
      */
-    const tableProbes = seen.filter((s) =>
-      /^\/rest\/v1\/(schools|grades|teacher_roles|class_subjects|classroom_accounts|schedule_items|calls|classrooms|shared_files|exams|exam_scores|subjects)$/.test(
-        s.path,
+    /*
+     * 🆕 2026-10-08：判据改成**跟着清单走**（不再写死"正好 9 张表"）——
+     * 段一多，探的表也就多了，写死一个数字只会变成下一条"过期的计数表"。
+     * 两条：
+     *   ① 清单里每一个**表**探针，发出去的那次请求必须是 `select=*`；
+     *   ② 只有清单里**列**探针才允许出现 `select=<列>`（别人再把 `select('id')` 写回来 → 红）。
+     */
+    const tableTargets = C.SCHEMA_STAGES.flatMap((s) =>
+      s.targets
+        .slice(0, C.PROBES_PER_STAGE)
+        .filter((t) => t.kind === 'table')
+        .map((t) => t.name),
+    )
+    const colTargets = new Set(
+      C.SCHEMA_STAGES.flatMap((s) =>
+        s.targets
+          .slice(0, C.PROBES_PER_STAGE)
+          .filter((t) => t.kind === 'col')
+          .map((t) => `${t.table}.${t.column}`),
       ),
     )
-    const probedPaths = [...new Set(tableProbes.map((s) => s.path))]
+    const allRest = seen.filter((s) => s.path.startsWith('/rest/v1/'))
+    const missingStar = [...new Set(tableTargets)].filter(
+      (t) => !allRest.some((s) => s.path === `/rest/v1/${t}` && s.search.includes('select=*')),
+    )
     ok(
-      '补② 表存在性探测发出去的是 `select=*`（**不许拿某一列当整张表的探针**）',
-      probedPaths.length === 9 &&
-        probedPaths.every((p) => tableProbes.some((s) => s.path === p && s.search.includes('select=*'))),
-      JSON.stringify([...new Set(tableProbes.map((s) => `${s.path}${s.search}`))].slice(0, 10)),
+      '补② 清单里**每一个表探针**发出去的都是 `select=*`（**不许拿某一列当整张表的探针**）',
+      missingStar.length === 0,
+      `这些表没用 select=*：${missingStar.slice(0, 6).join(',')}`,
+    )
+    const straySelects = allRest
+      .filter((s) => s.search.includes('select=') && !s.search.includes('select=*'))
+      .map((s) => `${s.path.split('/')[3]}.${new URLSearchParams(s.search).get('select') ?? ''}`)
+      .filter((x) => !colTargets.has(x))
+    ok(
+      '补② 只有清单里的**列探针**才允许 `select=<列>`（`select(\'id\')` 那种写法回不来）',
+      straySelects.length === 0,
+      JSON.stringify([...new Set(straySelects)].slice(0, 6)),
     )
 
     /* 反向对照 A：表**真的不在**时，必须仍然红 —— 证明上面那两条不是"恒绿" */
@@ -1440,6 +1705,139 @@ await withLock(async () => {
       JSON.stringify(byB.get('§12').cells),
     )
     flakyTables.clear()
+  }
+
+  /* ============================================================
+     第七节·补三 · 🆕 2026-10-08 用户点名的两件
+     ------------------------------------------------------------
+     ① 「把这个黄点消了，反正也配不了」：
+        ② 的 R2 / ③ 的 Artifact 备份**不是待办**（R2 要绑国际银行卡，做不到），
+        所以黄档的词从「需要处理」改成「要留意」，那两卡角标写「降级中（已知）」+ 代价。
+        🔴 断言：**面板上不再出现"需要处理"**。
+        反向对照：把那个词塞回去 → 判据必须红（所以这里用一个能红的判别函数）。
+     ② 「第四个探测（`lib/files.ts` 的 `ensureFileClassCols`）没有对外的只读 getter」
+        → 补了 `getFileClassColsStatus()` / `getFileClassColsProbeAt()`，
+        并且 C2 汇总里**真的多出那一格**。
+     ③ 「这个可以删除了」：概览上那张"已经移到「公告」那一格"的指路卡**整项删掉**
+        （它是"已完成的迁移说明"，不是状态 → 永远灰）。
+     ============================================================ */
+
+  section('第七节·补三 🆕 黄档改口径（不再说"需要处理"）· 第四个探测补 getter · 删掉迁移说明卡')
+
+  {
+    const adminSrc = readFileSync(resolvePath(APP, 'src/pages/Admin.tsx'), 'utf8')
+    /*
+     * 注释里写"从前叫需要处理"是**故意的**（留档），所以判据要**先去掉整行注释**：
+     * 那一档的词只可能出现在 JSX 字符串 / 三元里，绝不会出现在行首带 `*` 的注释里。
+     */
+    const stripLineComments = (s) =>
+      s
+        .split('\n')
+        .filter((l) => !/^\s*(\*|\/\/|\/\*)/.test(l))
+        .join('\n')
+    const banned = '需要处理'
+    const hasBanned = (s) => stripLineComments(s).includes(banned)
+    /*
+     * 反向对照：**判别函数本身要能红** —— 拿旧写法当输入，必须判出 true。
+     * 少了这一条，"不出现"就可能是"这个函数永远回 false"的摆设。
+     */
+    ok(
+      '补三① 反向对照：判别函数对**旧写法**（`warn: { …, text: \'需要处理\' }`）必须报 true',
+      hasBanned(`const TONE_STYLE = { warn: { text: '${banned}' } }`) === true,
+      '判别函数本身不会红 = 断言是摆设',
+    )
+    ok(
+      `补三① 面板源码里**不再出现"${banned}"**（黄档改口径：那是"已知降级"，不是待办）`,
+      hasBanned(adminSrc) === false,
+      JSON.stringify(stripLineComments(adminSrc).match(new RegExp(`.{0,20}${banned}.{0,20}`))?.[0] ?? ''),
+    )
+    ok(
+      '补三① 黄档的新说法是「要留意」，而且文案里写明它含"已知降级"',
+      adminSrc.includes("text: '要留意'") && adminSrc.includes('含已知降级'),
+    )
+    ok(
+      '补三① ② 与 ③ 两张卡都用了「降级中（已知）」那个角标（`chipText`）',
+      (adminSrc.match(/chipText=\{[^}]*'降级中（已知）'/g) ?? []).length === 2,
+      `出现 ${(adminSrc.match(/chipText=/g) ?? []).length} 处 chipText`,
+    )
+    ok(
+      '补三① 「已知降级」的**代价**写在判据里：Artifact 30 天后自动删除 + 要留档就手动下载',
+      C.judgeBackup({
+        configured: true,
+        conclusion: 'success',
+        lastSuccessAgoMs: 60_000,
+        lastRunAgoMs: 60_000,
+        sizeBytes: 300 * 1024,
+        degradedToArtifact: true,
+        r2Keys: null,
+      }).text.includes('手动下载'),
+    )
+    const r2None = C.judgeR2({ configured: true, keys: {} })
+    ok(
+      '补三① R2 四个都没配那一档：写清"已知 · 已接受"与代价（30 天），**不再给一个做不到的"修法"**',
+      r2None.text.includes('已知') &&
+        r2None.text.includes('30 天') &&
+        r2None.notes.some((n) => n.includes('国际银行卡')),
+      JSON.stringify(r2None),
+    )
+    ok(
+      '补三① 而**半配置**（ENDPOINT/BUCKET 配了、两个 key 没配）照旧红 —— 口径没被顺手放宽',
+      C.judgeR2({
+        configured: true,
+        keys: { R2_ENDPOINT: true, R2_BUCKET: true },
+      }).tone === 'bad',
+    )
+
+    /* ---- ② 第四个探测：补了只读 getter，而且 C2 汇总里真的多出那一格 ---- */
+    const F = await import(mod('src/lib/files.ts'))
+    ok(
+      '补三② `lib/files.ts` 补了**只读 getter**（`getFileClassColsStatus` / `getFileClassColsProbeAt`）',
+      typeof F.getFileClassColsStatus === 'function' && typeof F.getFileClassColsProbeAt === 'function',
+    )
+    eq('补三② 还没探过时是 `pending`（不是"列不在"，更不是绿）', F.getFileClassColsStatus(), 'pending')
+    const base = { collectedAt: 1, items: [] }
+    const withPending = C.withFileProbe(base, F.getFileClassColsStatus(), F.getFileClassColsProbeAt())
+    eq('补三② C2 汇总因此多出**一格的**（以前那一行永远缺着）', withPending.items.length, 1)
+    eq('补三② 那一格 key 固定', withPending.items[0].key, 'fileClassCols')
+    eq(
+      '补三② `pending` → 记"无法判断"（灰），**绝不是绿**',
+      withPending.items[0].state,
+      'indeterminate',
+    )
+    ok(
+      '补三② 而且说清"还没问"与"不在"是两件事',
+      withPending.items[0].note.includes('还没探过'),
+      withPending.items[0].note,
+    )
+    eq(
+      '补三② 拿到结论时**照原样透出**（present / missing 都不改写）',
+      ['present', 'missing', 'indeterminate']
+        .map((s) => C.withFileProbe(base, s, 5).items[0].state)
+        .join(','),
+      'present,missing,indeterminate',
+    )
+    ok(
+      '补三② 反向对照：面板不再下"所以不在上面这张汇总里"那个结论，' +
+        '而且**真的去读那两个 getter**（不是只在注释里提一句）',
+      !adminSrc.includes('所以不在上面这张汇总里') &&
+        adminSrc.includes('getFileClassColsStatus') &&
+        adminSrc.includes('getFileClassColsProbeAt') &&
+        adminSrc.includes('withFileProbe('),
+    )
+
+    /* ---- ③ 迁移说明卡整项删掉（不是藏起来） ---- */
+    ok(
+      '补三③ 概览上那张"⑥ 全站公告 —— 已经移到「公告」那一格"的指路卡**整项删掉**了',
+      !adminSrc.includes('已经移到「公告」那一格'),
+    )
+    ok(
+      '补三③ 而且它那两句 §七 禁语（"本页只留一句指路" / "同一件事不给两个入口"）不在了',
+      !adminSrc.includes('本页只留一句指路'),
+    )
+    ok(
+      '补三③ 「公告 ≠ 通知」那句话**没有丢**：公告分区那张卡上还写着（所以只是删，不搬）',
+      adminSrc.includes('与「通知」不是一件事'),
+    )
   }
 
   /* ============================================================

@@ -5,7 +5,8 @@ import { getSupabase, isRemote, connectionMode, SUPABASE_URL } from '../lib/supa
 import { APP_VERSION, APP_VERSION_LABEL, BUILD_HASH } from '../lib/version'
 import { deviceRole, deviceRoleAt, authDaysLeft } from '../lib/session'
 import { isSuperAdmin } from '../lib/roles'
-import { getExamTablesProbeStatus, probeReport, type ProbeReport } from '../data/remote'
+import { getExamTablesProbeStatus, probeReport } from '../data/remote'
+import { getFileClassColsProbeAt, getFileClassColsStatus } from '../lib/files'
 import { displayNoOfArchiveKey, studentOfArchiveKey } from '../lib/keys'
 import type { Klass } from '../data/types'
 import {
@@ -31,8 +32,10 @@ import {
   EGRESS_QUOTA_BYTES,
   NO_PROBE_REASON,
   R2_KEYS,
+  withFileProbe,
   type AdminTab,
   type BackupFacts,
+  type ClientProbeReport,
   type DbFacts,
   type DriftSection,
   type EgressFacts,
@@ -181,9 +184,20 @@ type ServerState =
 
 /* ---------------- 小件 ---------------- */
 
+/**
+ * 四档颜色 → 屏上那个词。
+ *
+ * 🔴 **2026-10-08 用户拍板：黄档的词从「需要处理」改成「要留意」**。
+ *    原话：「**把这个黄点消了，反正也配不了**」——
+ *    「需要处理」暗示"**有个动作等着你**"，而这一档里最典型的两个
+ *    （② 的 R2 四个 secret、③ 的 Artifact 备份）**是永久且做不到的**：
+ *    R2 要绑国际银行卡，当前账号做不到 → **那是已接受的降级，不是待办**。
+ *    → 黄档改叫「要留意」；**"已知 · 已接受 + 代价"写在卡自己的标题句里**（见下两处 `chipText`）。
+ *    ⚠️ 这条口径是断言钉着的（`admin-checks` 第七节·补三 + `shots`：屏上**不许出现**"需要处理"）。
+ */
 const TONE_STYLE: Record<Tone, { dot: string; chip: string; text: string }> = {
   ok: { dot: 'var(--color-ok)', chip: 'tag tag-ok', text: '正常' },
-  warn: { dot: 'var(--color-warn)', chip: 'tag tag-warn', text: '需要处理' },
+  warn: { dot: 'var(--color-warn)', chip: 'tag tag-warn', text: '要留意' },
   bad: { dot: 'var(--color-bad)', chip: 'tag tag-bad', text: '异常' },
   unknown: { dot: 'var(--color-idle)', chip: 'tag tag-idle', text: '无法判断' },
 }
@@ -216,6 +230,7 @@ function Card({
   title,
   headline,
   note,
+  chipText,
   children,
   openLabel = '看明细',
   defaultOpen = false,
@@ -224,6 +239,15 @@ function Card({
   title: string
   headline: string
   note?: string
+  /**
+   * 🆕 覆盖角标上那个词（默认取 `TONE_STYLE[tone].text`）。
+   *
+   * 只有"**已知 · 已接受**"那种黄卡用它：② 的 R2 与 ③ 的 Artifact 备份
+   * **不是"有个待办"**，是永久状态（用户 2026-10-08：「把这个黄点消了，反正也配不了」）——
+   * 所以角标写「降级中（已知）」，**代价写在 headline 里**。
+   * ⚠️ 颜色仍由 `tone` 决定（不新增第五档，`index.css` 里那套 `[data-tone]` 一个字不动）。
+   */
+  chipText?: string
   children?: React.ReactNode
   openLabel?: string
   /**
@@ -249,7 +273,7 @@ function Card({
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <span style={{ fontSize: 14.5, fontWeight: 650 }}>{title}</span>
-            <span className={TONE_STYLE[tone].chip}>{TONE_STYLE[tone].text}</span>
+            <span className={TONE_STYLE[tone].chip}>{chipText ?? TONE_STYLE[tone].text}</span>
           </div>
           <div className="mt-1" style={{ fontSize: 13, lineHeight: 1.7 }}>
             {headline}
@@ -661,8 +685,16 @@ export default function Admin() {
     }
   }, [sessionChecked, hasSession])
 
-  /* 3. C2 前端探测汇总（读现成状态，**不改任何写入路径**） */
-  const probes: ProbeReport = useMemo(() => probeReport(), [])
+  /*
+   * 3. C2 前端探测汇总（读现成状态，**不改任何写入路径**）。
+   * 🆕 2026-10-08：把**第四个探测**（`lib/files.ts` 的 `ensureFileClassCols`）也并进来 ——
+   *    它以前缺一个只读 getter，所以那一行永远缺着（面板自己底部写着这件事）。
+   *    合并是纯函数（`withFileProbe`），**不新增第二套判据**，也不碰 `data/remote.ts`。
+   */
+  const probes: ClientProbeReport = useMemo(
+    () => withFileProbe(probeReport(), getFileClassColsStatus(), getFileClassColsProbeAt()),
+    [],
+  )
   const examProbe = getExamTablesProbeStatus()
   /* 4. E7 矛盾扫描（🟢 纯前端、零额外请求） */
   const classNames = useMemo(() => new Map(classes.map((c) => [c.id, c.name])), [classes])
@@ -1014,9 +1046,9 @@ export default function Admin() {
             <div className="min-w-0 flex-1">
               <div style={{ fontSize: 16, fontWeight: 680 }} data-admin-headline>
                 {toneAll === 'bad'
-                  ? `平台有问题 · ${badCount} 项需要处理`
+                  ? `平台有问题 · ${badCount} 项异常`
                   : toneAll === 'warn'
-                    ? `平台基本正常 · ${warnCount} 项需要处理`
+                    ? `平台基本正常 · ${warnCount} 项要留意`
                     : toneAll === 'unknown'
                       ? `平台状态无法完全判断 · ${unknownCount} 项拿不到数据`
                       : '平台正常 · 没有发现异常'}
@@ -1208,7 +1240,12 @@ export default function Admin() {
             },
             {
               key: 'health',
-              label: '需要处理',
+              /*
+               * 🔴 2026-10-08：这一格原来叫「需要处理」——用户点名「把这个黄点消了，反正也配不了」。
+               *    黄档里最典型的两项（R2 / Artifact 备份）是**永久且做不到的已知降级**，
+               *    不是"等着你去处理"的待办 → 词改成「要留意」（口径见 `TONE_STYLE` 上面那段）。
+               */
+              label: '要留意',
               value: String(badCount + warnCount),
               sub: badCount ? `其中 ${badCount} 项异常` : '体检没结论的不算进来',
               tone: badCount ? 'bad' : warnCount ? 'warn' : toneAll === 'unknown' ? 'unknown' : 'ok',
@@ -1262,8 +1299,11 @@ export default function Admin() {
           }}
         >
           <b>这一页怎么读</b>：上面每块磁贴点一下就到对应的分区；左边那一列是分区导航。
-          <br />· **绿 = 正常 · 黄 = 需要处理 · 红 = 异常 · <span style={{ color: 'var(--color-ink3)' }}>灰 = 无法判断</span>**
+          <br />· **绿 = 正常 · 黄 = 要留意（含已知降级）· 红 = 异常 · <span style={{ color: 'var(--color-ink3)' }}>灰 = 无法判断</span>**
           —— 灰**绝不是**绿：拿不到数据就是不画绿（本项目最贵的一条教训）。
+          <br />· 黄里有几项是**已经接受的降级**（角标写着「降级中（已知）」）——
+          它们的**代价**写在卡里（例：Artifact 备份 30 天后自动删除，要留档得手动下载）。
+          那**不是待办**：R2 要绑国际银行卡，做不到就是做不到。
           <br />· 明细一律在分区里，**这一屏只放"要不要现在去看一眼"**。
         </div>
       </div>
@@ -1368,9 +1408,13 @@ export default function Admin() {
           </HintOnly>
         </Card>
 
-        {/* ② 配置完整性（B1 / B3） */}
+        {/* ② 配置完整性（B1 / B3）
+            🔴 `chipText`：黄的那一档是 **R2 四个都没配** —— 那是**已知 · 已接受**的降级，
+               不是待办（用户 2026-10-08：「把这个黄点消了，反正也配不了」）。
+               真要处理的是**半配置**（ENDPOINT/BUCKET 配了、key 没配），那一档照旧是红。 */}
         <Card
           tone={toneConfig}
+          chipText={toneConfig === 'warn' ? '降级中（已知）' : undefined}
           title="② 配置完整性"
           headline={
             serviceKey.tone === 'bad'
@@ -1440,9 +1484,12 @@ export default function Admin() {
           </HintOnly>
         </Card>
 
-        {/* ③ 备份与外部依赖（G2 · 第一期最该先做的一条） */}
+        {/* ③ 备份与外部依赖（G2 · 第一期最该先做的一条）
+            🔴 `chipText`：Artifact 降级那一档是**已知 · 已接受**（R2 要绑国际银行卡，做不到）。
+               ⚠️ 角标下方那行「最近一次运行」**照旧保留** —— 那是功能性的，与口径无关。 */}
         <Card
           tone={toneBackup}
+          chipText={toneBackup === 'warn' ? '降级中（已知）' : undefined}
           title="③ 备份（G2）"
           headline={backup.text}
           note={
@@ -1579,35 +1626,90 @@ export default function Admin() {
           tone={toneSchema}
           title="④ 数据库结构漂移（C1）"
           headline={driftInfo ? driftInfo.text : '正在探测…'}
-          note={drift ? `探测于 ${agoText(drift.at, now)}（刷新即重探）` : undefined}
-          openLabel="看 §10–§19 总表"
+          note={
+            drift
+              ? `探测于 ${agoText(drift.at, now)}（刷新即重探）` +
+                (driftInfo
+                  ? ` · 共 ${driftInfo.executableCount} 段可执行（登记节 ${driftInfo.registry.length} 段 · 面板探不到 ${driftInfo.unprobeable.length} 段）`
+                  : '')
+              : undefined
+          }
+          openLabel="看逐段总表"
         >
+          {/*
+            🔴 **总结论**（用户真正要的那个数：「我们都更新到多少了」）。
+            ⚠️ 本地模式 / 断网时**给不出**这个数 —— 那就明写"给不出来"，
+               **绝不许**拿 `schema.sql` 的最后一段冒充"线上库跑到了那里"（那是假绿）。
+            它挂 `data-admin-c1-conclusion` 是为了让回归脚本按**结构**找它（不按文案）。
+          */}
+          <div
+            data-admin-c1-conclusion
+            className="px-3.5 py-2"
+            style={{
+              fontSize: 12.5,
+              fontWeight: 620,
+              lineHeight: 1.8,
+              color: driftInfo?.latest ? 'var(--color-ink)' : 'var(--color-ink3)',
+            }}
+          >
+            {driftInfo
+              ? driftInfo.latest !== null
+                ? `线上的库已跑到 §${driftInfo.latest} · 共 ${driftInfo.executableCount} 段可执行`
+                : `给不出总结论 —— 一段都没探到（本地模式 / 断网？）；登记节 ${driftInfo.registry.length} 段不计入`
+              : '正在探测…'}
+          </div>
           <div
             className="px-3.5 py-2"
             style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.75 }}
           >
+            🔴 **段清单是从 <code>supabase/schema.sql</code> 自动生成的**（跑{' '}
+            <code>node scripts/admin-checks.mjs --gen-stages</code> 更新）——
+            段号、标题、行号、探针都跟着文件走，**不会再出现"手写死一段、只列到 §19"**。
+            <br />
             判据全部走**调用者自己的会话**（表看 <code>42P01</code>/<code>PGRST205</code>、列看{' '}
-            <code>42703</code>、函数看裸版 RPC），**没有为了"看得全"而绕开 RLS**。灰点 ={' '}
-            **无法判断**（探测本身没结论或探不到），**绝不是绿**。
+            <code>42703</code>、函数看裸版 RPC），**没有为了"看得全"而绕开 RLS**。
+            <br />⚠️ **三档要分清**（这正是以前看不懂的原因）：
+            <b>登记节</b> = 0 行可执行 SQL（没东西可跑，也没东西可探）；
+            <b>面板探不到</b> = 有东西可跑、但 anon 会话探不到（**不是"没跑"**）；
+            <b>无法判断</b>（灰）= 探了、没结论 —— **灰绝不是绿**。
           </div>
           {(drift?.sections ?? []).map((s) => (
             <div key={s.stage} style={{ borderTop: '1px solid var(--color-line)' }}>
               <div className="flex items-start gap-2.5 px-3.5 py-2">
                 <span style={{ paddingTop: 5 }}>
-                  <Dot tone={driftTone(s.state)} />
+                  {/*
+                   * 🔴 **登记节不画点**（用户 2026-10-08：「"登记节"要单独标出来，别和"没跑"混在一起」）：
+                   *    它既不是"已跑"也不是"无法判断"，所以既不给绿点也不给灰点 ——
+                   *    改用一枚中性角标。三态那三档才有点（灰 ≠ 红，仍然由 `driftTone` 一处决定）。
+                   */}
+                  {s.kind === 'registry' ? (
+                    <span className="tag tag-idle" style={{ fontSize: 10.5 }}>
+                      登记
+                    </span>
+                  ) : (
+                    <Dot tone={driftTone(s.state)} />
+                  )}
                 </span>
                 <div className="min-w-0 flex-1">
                   <div style={{ fontSize: 13, fontWeight: 620 }}>
                     {s.stage}{' '}
                     <span style={{ fontWeight: 400, color: 'var(--color-ink3)' }}>
-                      {s.cells.length === 0
-                        ? '不适用（面板探不到）'
-                        : s.state === 'present'
-                          ? '已跑'
-                          : s.state === 'missing'
-                            ? '未跑'
-                            : '无法判断'}
+                      {s.kind === 'registry'
+                        ? '登记节（0 行可执行 SQL · 不需要探）'
+                        : s.cells.length === 0
+                          ? '面板探不到（不是没跑）'
+                          : s.state === 'present'
+                            ? '已跑'
+                            : s.state === 'missing'
+                              ? '未跑'
+                              : '无法判断'}
                     </span>
+                    {s.title ? (
+                      <span style={{ fontWeight: 400, color: 'var(--color-ink4)', fontSize: 12 }}>
+                        {' '}
+                        · {s.title}
+                      </span>
+                    ) : null}
                   </div>
                   <div style={{ fontSize: 12, color: 'var(--color-ink2)', lineHeight: 1.7 }}>
                     {s.built}
@@ -1625,7 +1727,13 @@ export default function Admin() {
                       {s.cells.length
                         ? '探测本身没有结论（网络 / 权限错误）—— '
                         : '这一段的产物 anon 会话根本探不到 —— '}
-                      {NO_PROBE_REASON[s.stage] ?? ''}
+                      {NO_PROBE_REASON[s.stage] ?? s.noProbe ?? ''}
+                    </div>
+                  ) : null}
+                  {s.kind === 'registry' ? (
+                    <div style={{ fontSize: 12, color: 'var(--color-ink3)', lineHeight: 1.7 }}>
+                      {NO_PROBE_REASON[s.stage] ??
+                        '这一段**没有可执行 SQL**（整段都是说明 / 登记）—— 没有东西可跑，也就没有"跑没跑"。'}
                     </div>
                   ) : null}
                   <div
@@ -1645,7 +1753,9 @@ export default function Admin() {
                               }`,
                           )
                           .join(' · ')
-                      : '（这一段的产物不是表也不是函数，anon 会话探不到）'}
+                      : s.kind === 'registry'
+                        ? '（0 行可执行 SQL —— 这一节没有可探的对象）'
+                        : '（这一段只加策略 / 带参数的函数，anon 会话没有可探的对象）'}
                     <br />
                     出处：{s.anchor}
                   </div>
@@ -1667,7 +1777,7 @@ export default function Admin() {
             </span>
           </div>
 
-          <SubHead>C2 · 前端四个探测的汇总（它自己以为哪些列/表在）</SubHead>
+          <SubHead>C2 · 前端探测的汇总（它自己以为哪些列/表在）</SubHead>
           {probes.items.map((p) => (
             <Line
               key={p.key}
@@ -1681,16 +1791,27 @@ export default function Admin() {
                           ? 'var(--color-ok)'
                           : p.state === 'missing'
                             ? 'var(--color-bad)'
-                            : 'var(--color-warn)',
+                            : /*
+                               * 🔴 「认不出」这一档是**灰**，不是黄、更不是红：
+                               *    三态里"没结论"绝不能染成红（`AGENTS.md` §三.4 的硬不变量）。
+                               *    它以前借用了 `--color-warn`，"没结论"看着像"要留意"—— 改回灰。
+                               */
+                              'var(--color-idle)',
                       fontWeight: 600,
                     }}
                   >
-                    {p.state === 'present' ? '在' : p.state === 'missing' ? '不在' : '认不出'}
+                    {p.state === 'present' ? '在' : p.state === 'missing' ? '不在' : '认不出（灰·没结论）'}
                   </span>{' '}
                   <code style={{ fontSize: 11.5 }}>{p.target}</code>{' '}
                   <span style={{ color: 'var(--color-ink4)', fontSize: 11.5 }}>
                     {p.at ? agoText(p.at, now) : '本次会话还没探过'}
                   </span>
+                  {p.note ? (
+                    <span style={{ color: 'var(--color-ink4)', fontSize: 11 }}>
+                      {' '}
+                      · {p.note}
+                    </span>
+                  ) : null}
                 </span>
               }
             />
@@ -1702,9 +1823,11 @@ export default function Admin() {
             考试表那一个的**真实探针状态**是 <code>{examProbe}</code>
             （`indeterminate` = 探测本身没结论，而项目纪律是"一律当作有" —— 所以那个结果
             **不可信**，面板上必须显式标出来）。
-            <br />⚠️ 第四个探测（`lib/files.ts` 的 `ensureFileClassCols`）**没有对外的只读
-            getter**，所以不在上面这张汇总里；它的现状看 §19 那一行的{' '}
-            <code>shared_files.class_ids</code>。
+            <br />🆕 **「文件归属列」这一格以前不在汇总里** —— 因为它当时**没有对外的只读
+            getter**（`ensureFileClassCols()` 只回 <code>{'{ classIds }'}</code>，而"探测没结论"
+            被兜底成了 <code>true</code>，屏上"列在"与"没问出来"长得一模一样）。
+            现在 <code>lib/files.ts</code> 补了 <code>getFileClassColsStatus()</code> /
+            <code>getFileClassColsProbeAt()</code>（只读、不改任何缓存语义），所以它进来了。
           </div>
         </Card>
 
@@ -1834,14 +1957,6 @@ export default function Admin() {
             </>
           )}
         </Card>
-
-        {/* ⑥ 全站公告 —— 🆕 第二期起它有了**自己的分区**（左边「公告」） */}
-        <Card
-          tone="unknown"
-          title="⑥ 全站公告 —— 已经移到「公告」那一格"
-          headline="本页只留一句指路：同一件事不给两个入口（本仓库「同一件事两个入口」出过四次）"
-          note="公告 ≠ 通知：公告是**平台对全站**说的话，没有收件范围；学校对老师的事走「通知」"
-        />
 
         {/* 入口与边界说明 */}
         <Card

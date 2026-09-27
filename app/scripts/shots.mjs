@@ -6857,9 +6857,26 @@ await withLock(async () => {
           '本地模式 = 最危险的静默降级，必须压过其他一切',
         )
         check(
-          b.includes('平台') && (b.includes('项需要处理') || b.includes('拿不到数据') || b.includes('没有发现异常')),
-          `${SAD}：L0 是一句人话（"基本正常 · N 项需要处理"这种），不是一串数字`,
+          b.includes('平台') && (b.includes('项要留意') || b.includes('拿不到数据') || b.includes('没有发现异常')),
+          `${SAD}：L0 是一句人话（"基本正常 · N 项要留意"这种），不是一串数字`,
           short(b.split('\n').find((x) => x.includes('平台')) ?? '', 100),
+        )
+        /*
+         * 🔴 2026-10-08 用户点名：「把这个黄点消了，反正也配不了」。
+         *    黄档原来那三个字暗示"有个待办等着你"，而 ② 的 R2 / ③ 的 Artifact 备份
+         *    **是永久且做不到的已知降级**（R2 要绑国际银行卡）→ 口径改成
+         *    「要留意」+ 卡上写「降级中（已知）· 代价」。
+         *    这条断言钉的就是**屏上**不许再出现那三个字（期望值变了，理由如上）。
+         */
+        check(
+          !b.includes('需要处理'),
+          `${SAD}：🔴 面板上**不再出现"需要处理"**（黄档改口径：那是"已知降级"，不是待办）`,
+          short(b.match(/.{0,16}需要处理.{0,16}/)?.[0] ?? '（屏上没有这三个字）', 80),
+        )
+        check(
+          b.includes('要留意'),
+          `${SAD}：黄档的说法已经换成"要留意"（含已知降级）`,
+          short(b.match(/.{0,10}要留意.{0,20}/)?.[0] ?? '', 80),
         )
 
         /* --- A3：本地模式那条红警告必须**首屏可见** --- */
@@ -6919,17 +6936,49 @@ await withLock(async () => {
           g2.includes('服务端回话') ? '在' : short(g2, 220),
         )
 
-        /* --- C1：§10–§19 十段，且 §17/§18 明确"不适用" --- */
+        /* --- C1：**段清单跟着 schema.sql 走**（§35/§36/§37 也必须在），
+         *    而且"登记节"与"面板探不到"要分得开 ---
+         *  ⚠️ 2026-10-08 用户原话：「数据表，我们都更新到多少了，怎么这里只能探到这些」——
+         *     旧面板只列 §10–§19（清单是手写死的一段）。期望值因此整段改了。 */
         await adPage.locator('[data-admin-toggle="④ 数据库结构漂移（C1）"]').click()
         await adPage.waitForTimeout(250)
         const c1 = (await pageInfo(adPage)).body
-        for (const st of ['§10', '§15', '§17', '§18', '§19']) {
+        for (const st of ['§10', '§15', '§17', '§18', '§19', '§35', '§36', '§37']) {
           check(c1.includes(st), `${SAD}：C1 总表列出了 ${st}`, c1.includes(st) ? '在' : '没找到')
         }
         check(
-          c1.includes('不适用') && c1.includes('探不到'),
-          `${SAD}：§17 / §18 明写"不适用（面板探不到）"，**没有假装它是绿的**`,
-          short(c1.match(/.{0,20}不适用.{0,40}/)?.[0] ?? '', 140),
+          (await adPage.locator('[data-admin-c1-conclusion]').count()) === 1,
+          `${SAD}：C1 有**总结论**那一行（\`data-admin-c1-conclusion\`）`,
+          `节点数 ${await adPage.locator('[data-admin-c1-conclusion]').count()}`,
+        )
+        const conclusion = await adPage.evaluate(
+          () => document.querySelector('[data-admin-c1-conclusion]')?.textContent ?? '',
+        )
+        check(
+          /*
+           * ⚠️ 浏览器脚本跑的是**本地演示模式**（没有云端连接）→ 探不到任何一段，
+           *    所以那时它必须说"**给不出总结论**"，而**不许**拿 schema.sql 的最后一段冒充。
+           *    连真库时（`admin-checks` 的假库）那句才是「线上库已跑到 §NN」——
+           *    两种形状都钉住，谁也不许把"没探到"说成一个段号。
+           */
+          /线上库已跑到\s*§\d+/.test(conclusion) || conclusion.includes('给不出总结论'),
+          `${SAD}：总结论要么是「线上库已跑到 §NN」、要么明写"给不出总结论"（**不许拿 schema 末段冒充**）`,
+          short(conclusion, 90),
+        )
+        check(
+          /\d+\s*段可执行/.test(c1),
+          `${SAD}：并且带上「共 N 段可执行」`,
+          short(c1.match(/共[^\n]{0,40}/)?.[0] ?? '', 90),
+        )
+        check(
+          c1.includes('登记节') && c1.includes('不需要探'),
+          `${SAD}：**登记节单独标出来**（0 行可执行 SQL · 不需要探），没有和"没跑/已跑"混在一起`,
+          short(c1.match(/.{0,10}登记节.{0,30}/)?.[0] ?? '', 90),
+        )
+        check(
+          c1.includes('探不到') && c1.includes('不是没跑'),
+          `${SAD}：探不到的那几段明写"面板探不到（不是没跑）"，**没有假装它是绿的、也没说它没跑**`,
+          short(c1.match(/.{0,16}探不到.{0,30}/)?.[0] ?? '', 110),
         )
         check(
           c1.includes('pg_policies') || c1.includes('revoke'),
@@ -7407,7 +7456,10 @@ await withLock(async () => {
         await annPage.waitForTimeout(600)
         /*
          * 🆕 2026-09-29 管理台第二期：面板改成了**左侧分区导航 + 一排数字磁贴**，
-         *    公告搬进了自己那一格（概览上只留一句指路）。
+         *    公告搬进了自己那一格。
+         *    ⚠️ 2026-10-08：概览上那张"已经移到「公告」那一格"的指路卡**已整项删除**
+         *    （用户点名：「这个可以删除了」）—— 它是**一项已完成的迁移说明**，不是状态，
+         *    所以永远显示"无法判断"；它的正文两句又正好犯 §七（解释实现 + 设计辩护）。
          *    ⚠️ 窄屏（414）下左栏折叠成**顶部横向分段**，所以这里点的是
          *    `data-admin-seg-key` —— 与桌面那套 `data-admin-nav-key` 是同一份分区表。
          */
