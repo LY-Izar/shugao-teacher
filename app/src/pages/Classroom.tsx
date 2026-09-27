@@ -1406,65 +1406,6 @@ export default function Classroom() {
               */}
               <DailyQuote />
 
-              {collect ? (
-                <Panel className="overflow-hidden">
-                  <div className="panel-head">
-                    <h2>本次作业</h2>
-                    <span className="flex-1" />
-                    <span style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
-                      {assignment ? friendlyDate(assignment.assignDate) : ''}
-                    </span>
-                  </div>
-                  <div className="p-4 grid grid-cols-3 gap-3 text-center">
-                    {[
-                      { k: '应交', v: collect.total },
-                      { k: '已交', v: collect.submitted, c: 'var(--color-ok)' },
-                      {
-                        k: '未交',
-                        v: collect.missing,
-                        c: collect.missing ? 'var(--color-bad)' : undefined,
-                      },
-                    ].map((x) => (
-                      <div key={x.k}>
-                        <div className="num" style={{ fontSize: 26, fontWeight: 700, color: x.c }}>
-                          {x.v}
-                        </div>
-                        <div style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>{x.k}</div>
-                      </div>
-                    ))}
-                  </div>
-                </Panel>
-              ) : null}
-
-              {/* 🆕 P9：本班考试（**只读**）—— Q17 说走班班的屏"只看作业和考试"，
-                  这是"考试"那一半。它是**纯读**：`exams` 上教室端零写策略（§15.3）。 */}
-              {classExams.length ? (
-                <Panel className="overflow-hidden">
-                  <div className="panel-head">
-                    <h2>本班考试</h2>
-                    <span className="flex-1" />
-                    <span style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
-                      共 {classExams.length} 场
-                    </span>
-                  </div>
-                  <div className="p-3">
-                    {classExams.map((e) => (
-                      <div key={e.id} className="flex items-center gap-2 py-1.5">
-                        <span className="num shrink-0" style={{ width: 48, fontSize: 12.5, color: 'var(--color-ink2)' }}>
-                          {e.examDate.slice(5).replace('-', '/')}
-                        </span>
-                        <span className="min-w-0 flex-1 truncate" style={{ fontSize: 13.5, fontWeight: 550 }}>
-                          {e.subject || e.title}
-                        </span>
-                        <Tag tone={e.status === 'graded' ? 'ok' : 'idle'}>
-                          {e.status === 'graded' ? '已定稿' : '批阅中'}
-                        </Tag>
-                      </div>
-                    ))}
-                  </div>
-                </Panel>
-              ) : null}
-
               {/* 今天的课 —— 时间在最前面，一眼看清现在上什么、下一节什么 */}
               <Panel bodyClass="p-4">
                 <input
@@ -1713,6 +1654,65 @@ export default function Classroom() {
                   </div>
                 ) : null}
               </Panel>
+
+              {collect ? (
+                <Panel className="overflow-hidden">
+                  <div className="panel-head">
+                    <h2>本次作业</h2>
+                    <span className="flex-1" />
+                    <span style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
+                      {assignment ? friendlyDate(assignment.assignDate) : ''}
+                    </span>
+                  </div>
+                  <div className="p-4 grid grid-cols-3 gap-3 text-center">
+                    {[
+                      { k: '应交', v: collect.total },
+                      { k: '已交', v: collect.submitted, c: 'var(--color-ok)' },
+                      {
+                        k: '未交',
+                        v: collect.missing,
+                        c: collect.missing ? 'var(--color-bad)' : undefined,
+                      },
+                    ].map((x) => (
+                      <div key={x.k}>
+                        <div className="num" style={{ fontSize: 26, fontWeight: 700, color: x.c }}>
+                          {x.v}
+                        </div>
+                        <div style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>{x.k}</div>
+                      </div>
+                    ))}
+                  </div>
+                </Panel>
+              ) : null}
+
+              {/* 🆕 P9：本班考试（**只读**）—— Q17 说走班班的屏"只看作业和考试"，
+                  这是"考试"那一半。它是**纯读**：`exams` 上教室端零写策略（§15.3）。 */}
+              {classExams.length ? (
+                <Panel className="overflow-hidden">
+                  <div className="panel-head">
+                    <h2>本班考试</h2>
+                    <span className="flex-1" />
+                    <span style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
+                      共 {classExams.length} 场
+                    </span>
+                  </div>
+                  <div className="p-3">
+                    {classExams.map((e) => (
+                      <div key={e.id} className="flex items-center gap-2 py-1.5">
+                        <span className="num shrink-0" style={{ width: 48, fontSize: 12.5, color: 'var(--color-ink2)' }}>
+                          {e.examDate.slice(5).replace('-', '/')}
+                        </span>
+                        <span className="min-w-0 flex-1 truncate" style={{ fontSize: 13.5, fontWeight: 550 }}>
+                          {e.subject || e.title}
+                        </span>
+                        <Tag tone={e.status === 'graded' ? 'ok' : 'idle'}>
+                          {e.status === 'graded' ? '已定稿' : '批阅中'}
+                        </Tag>
+                      </div>
+                    ))}
+                  </div>
+                </Panel>
+              ) : null}
 
               {/* 呼叫播报：走班班的屏**不接呼叫**（Q17），整块不摆 */}
               {streamMode ? null : (
