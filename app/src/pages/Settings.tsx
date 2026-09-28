@@ -290,10 +290,13 @@ export default function Settings() {
                 color: 'var(--color-accenttext)',
               }}
             >
-              {/* 🔴 校徽，不是平台的旧品牌标 —— 24px 用**纯徽**（`落地清单.md` §9.1：
-                  全徽 24px 外圈线只有 0.50px、"刚够半个像素"、圆是半实半虚 → 认不出是枚校徽）。
-                  位图见 `public/emblem/emblem-pure-24.png`。 */}
-              <Emblem n={24} pure data-settings-emblem />
+              {/* 🔴 校徽，不是平台的旧品牌标 —— 24px 也用**全徽**（2026-10-11 用户
+                  「把所有这种（纯徽标）全部换成（全徽标）」）。
+                  ⚠️ 实测 `落地清单.md` §9.1：全徽 24px 外圈线只有 **0.50px**、"刚够半个像素"、
+                  圆半实半虚 —— 观感如实写进《功能设计与不变量.md》，是用户知情后的选择，
+                  **别再有人把它当 bug 改回去**（那一档已经整条删掉，没有第二种图了）。
+                  位图见 `public/emblem/emblem-24.png`（2x = `emblem-48.png`）。 */}
+              <Emblem n={24} data-settings-emblem />
             </span>
             <div className="min-w-0 flex-1">
               <div style={{ fontSize: 17, fontWeight: 660 }}>{teacher?.name ?? '未登录'}</div>

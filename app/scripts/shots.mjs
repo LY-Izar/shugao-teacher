@@ -52,7 +52,7 @@
  * ⚠️ 这个脚本跑的是**本地演示模式**（dev 下没有 Supabase 变量），
  *    所以它**永远覆盖不到云端路径 / 权限** —— 那是 `rls-checks.mjs` 的活，别在这里补。
  */
-import { mkdirSync, writeFileSync, readdirSync, existsSync, readFileSync } from 'node:fs'
+import { mkdirSync, writeFileSync, readdirSync, existsSync, readFileSync, rmSync } from 'node:fs'
 import { execSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -10385,15 +10385,29 @@ await withLock(async () => {
         .toString('utf8')
         .split('\0')
         .filter(Boolean)
+      /* 🔴 2026-10-11 修：**"不在工作区"和"真读不到"必须分开**。
+       * 踩到的现场：`emblem-pure-24.png` 在工作区被删了、**但还在 git 索引里** →
+       * `git ls-files` 照样列它 → `readFileSync` 报 ENOENT → 被算进"读失败 1" → 这条判据红。
+       * 🔴 **正确口径**：`git ls-files` 的结果先过一遍 `fs.existsSync()`
+       *    · **不在工作区**（已删 / 已 rename，git 还没记）→ **跳过**，并**把数量报出来**
+       *      （⚠️ 不许静默跳过 —— `AGENTS.md` 三·5；也**不许**把它当成"扫过了、0 处"）
+       *    · **真读不到**（权限 / 编码坏 / 是目录）→ **仍然算失败，仍然报错**，这正是这条断言的原意
+       */
       const texts22 = []
       let bin22 = 0
-      let fail22 = 0
+      const missing22 = []
+      const fail22 = []
       for (const rel of tracked22) {
+        const abs = join(ROOT22, rel)
+        if (!existsSync(abs)) {
+          missing22.push(rel)
+          continue
+        }
         let buf
         try {
-          buf = readFileSync(join(ROOT22, rel))
-        } catch {
-          fail22++
+          buf = readFileSync(abs)
+        } catch (e) {
+          fail22.push(`${rel}（${e instanceof Error ? e.message : String(e)}）`)
           continue
         }
         if (buf.includes(0)) {
@@ -10403,10 +10417,104 @@ await withLock(async () => {
         texts22.push({ path: rel, text: buf.toString('utf8') })
       }
       check(
-        fail22 === 0 && texts22.length > 150,
-        'S22 ①：下面那条扫的是**真的**仓库文件树（不是"读不到就当成 0 处"）',
-        `git ls-files ${tracked22.length} 个 → 文本 ${texts22.length} / 二进制 ${bin22} / 读失败 ${fail22}`,
+        fail22.length === 0 && texts22.length > 150,
+        'S22 ①：下面那条扫的是**真的**仓库文件树（不是"读不到就当成 0 处"）—— 「不在工作区」（git 还没记的删除）**跳过并计数**，「真读不到」**仍然要报**',
+        `git ls-files ${tracked22.length} 个 → 文本 ${texts22.length} / 二进制 ${bin22} / 不在工作区（已跳过）${missing22.length} / 读失败 ${fail22.length}`,
+        fail22.length ? `读失败的是：${fail22.slice(0, 5).join('、')}` : '',
       )
+      /* 跳过的那几个要**看得见**（不然"跳过了 200 个"和"跳过了 0 个"在读数里长得一样） */
+      check(
+        !missing22.includes('app/src/main.tsx') && !missing22.includes('app/scripts/shots.mjs'),
+        'S22 ①：跳过的那几个**不含**仓库的核心文件（证明 `existsSync` 那一关没把整棵工作区误判成"不在"）',
+        missing22.length ? `跳过的 ${missing22.length} 个：${missing22.slice(0, 8).join('、')}` : '跳过 0 个',
+      )
+      /* 🧪 反向对照 A：**真读不到** → 上面那条必须红。
+       * ⚠️ 造这个夹具比看起来难（第一版写错了两次，**实测都没红**，记下来免得再踩）：
+       *   ① 用「已跟踪、但路径上是目录」—— **"不存在"压过一切**：
+       *      `existsSync('_diag-dir/keep.txt')`（keep.txt 已删）**照样是 false** → 落进"不在工作区"那一档；
+       *   ② 用联结（junction）—— `readFileSync` 确实抛 `EISDIR` ✓，但 **git 不跟踪联结**，
+       *      `git add -N` 既不报错也不登记任何东西 → 索引里 0 条，判据永远红。
+       * ✅ 最终做法：`mkdir` 一个真目录 + `git update-index --add --cacheinfo` **手动往索引里塞一条
+       *   普通文件记录**（空 blob 的 sha1）→ 索引里那条路径在磁盘上是个**目录**
+       *   → `existsSync` 为真、`readFileSync` 必抛 `EISDIR`。这正是"真读不到"。
+       * `finally` 里 `git rm --cached` + `rmSync` 无条件清干净。
+       */
+      const DD22 = '_diag-real-dir'
+      try {
+        mkdirSync(join(ROOT22, DD22), { recursive: true })
+        const sha22 = execSync('git hash-object -t blob --stdin', {
+          cwd: ROOT22,
+          input: '',
+          stdio: ['pipe', 'pipe', 'ignore'],
+        })
+          .toString()
+          .trim()
+        execSync(`git update-index --add --cacheinfo 100644,${sha22},${DD22}`, {
+          cwd: ROOT22,
+          stdio: 'ignore',
+        })
+        const tracked2 = execSync('git -c core.quotePath=false ls-files -z', { cwd: ROOT22 })
+          .toString('utf8')
+          .split('\0')
+          .filter(Boolean)
+        const miss2 = []
+        const fail2 = []
+        for (const rel of tracked2) {
+          const abs = join(ROOT22, rel)
+          if (!existsSync(abs)) {
+            miss2.push(rel)
+            continue
+          }
+          try {
+            readFileSync(abs)
+          } catch (e2) {
+            fail2.push(`${rel}（${e2 instanceof Error ? e2.code ?? e2.message : String(e2)}）`)
+          }
+        }
+        const inFail2 = fail2.some((x) => x.startsWith(DD22))
+        const inMiss2 = miss2.includes(DD22)
+        check(
+          inFail2 && !inMiss2,
+          '🧪 S22 ① 反向对照 A：造一个**真读不到**的（索引里是文件、磁盘上是个目录 → `existsSync` 真、`readFileSync` 抛 `EISDIR`）→ 落进**"读失败"**那一档 —— 上面那条因此会红，证明"真读不到"没被一起放掉',
+          `读失败 ${fail2.length} 个${inFail2 ? `（含 ${DD22}）` : ''} · 不在工作区 ${miss2.length} 个${inMiss2 ? `（含 ${DD22} ← 放错了档）` : ''}`,
+          fail2.length ? `读失败清单：${fail2.slice(0, 5).join('、')}` : '（fail2 是空的）',
+        )
+      } finally {
+        try {
+          execSync(`git rm --cached -q --ignore-unmatch -- ${DD22}`, { cwd: ROOT22, stdio: 'ignore' })
+        } catch {
+          /* 忽略 */
+        }
+        rmSync(join(ROOT22, DD22), { recursive: true, force: true })
+      }
+      /* 🧪 反向对照 B：**已跟踪、但工作区里没有** → 必须被**跳过**（不是读失败）。
+       * 造法：建一个临时文件、`git add -N` 登记、**再把它删掉** ——
+       * 这就是 `emblem-pure-24.png` 现在的状态（在索引里、不在工作区），
+       * 也是本轮这条判据最初红掉的原因。
+       */
+      const TP22 = '_diag-tracked-missing.txt'
+      try {
+        writeFileSync(join(ROOT22, TP22), 'x')
+        execSync(`git add -N -- ${TP22}`, { cwd: ROOT22, stdio: 'ignore' })
+        rmSync(join(ROOT22, TP22), { force: true })
+        const tracked3 = execSync('git -c core.quotePath=false ls-files -z', { cwd: ROOT22 })
+          .toString('utf8')
+          .split('\0')
+          .filter(Boolean)
+        const miss3 = tracked3.filter((r) => !existsSync(join(ROOT22, r)))
+        check(
+          miss3.includes(TP22),
+          '🧪 S22 ① 反向对照 B：造一个"已跟踪、但工作区里没有"（= `emblem-pure-24.png` 那种状态）→ 它落进**"不在工作区（已跳过）"**，**不进"读失败"**（两种状态真的分开了，而且这一档不是静默的：数量会打进读数）',
+          `不在工作区 ${miss3.length} 个${miss3.includes(TP22) ? `，含 ${TP22}` : ''}`,
+        )
+      } finally {
+        try {
+          execSync(`git rm --cached -q --ignore-unmatch -- ${TP22}`, { cwd: ROOT22, stdio: 'ignore' })
+        } catch {
+          /* 忽略 */
+        }
+        rmSync(join(ROOT22, TP22), { force: true })
+      }
       const scanOld22 = (list) => list.filter((f) => f.text.includes(OLD22)).map((f) => f.path)
       const oldHits22 = scanOld22(texts22)
       check(
@@ -10592,6 +10700,87 @@ await withLock(async () => {
         (html22.match(/<link rel="(icon|apple-touch-icon)"[^>]*>/g) ?? []).join(' '),
       )
 
+      /* ---------- ④-b 🔴 2026-10-11「全徽」轮：**图标那几档也不再是纯徽** ----------
+       * 为什么期望值变了：用户看了「我的身份」那张卡 + **Windows 任务栏的图标**（那是
+       * `favicon.ico` 的 16 / 32 两帧）后说「把所有这种**纯徽标**全部换成**全徽标**」。
+       * 改之前：`icon-16.png` / `icon-32.png` / `.ico` 的 16+32 两帧 / `favicon.svg` 内嵌的是
+       * **纯徽**（`落地清单.md` §11.1 的结论：16px 全徽外圈线只有 0.33px、校名 2.0px 高，
+       * "像加载中"）。现在是**全徽**，所以下面这几条判据**整个反过来了**。
+       * ⚠️ 下面拿"仓库里那张图"与"`徽标方案\assets\全徽-N.png`"逐像素比 —— 8 张 PNG 里
+       * 16 / 32 那两张**只差在"用哪一档素材"**，逐像素比是唯一能把它钉死的判据（比文件大小稳）。
+       */
+      const ASSETS22 = 'C:\\Users\\Administrator\\Desktop\\徽标方案\\assets'
+      const rawPx22 = (p) => {
+        const b = readFileSync(p)
+        return { w: b.readUInt32BE(16), h: b.readUInt32BE(20), idat: b.subarray(41, b.length - 12) }
+      }
+      const cmp22 = (repoRel, assetName) => {
+        const repo = rawPx22(join(PUB22, repoRel))
+        const src = rawPx22(join(ASSETS22, assetName))
+        return (
+          repo.w === src.w &&
+          repo.h === src.h &&
+          repo.idat.length === src.idat.length &&
+          repo.idat.equals(src.idat)
+        )
+      }
+      const pairs22 = [
+        ['icons/icon-16.png', '全徽-16.png'],
+        ['icons/icon-32.png', '全徽-32.png'],
+        ['icons/icon-48.png', '全徽-48.png'],
+        ['icons/icon-128.png', '全徽-128.png'],
+      ]
+      const badPair22 = pairs22.filter(([r, a]) => !cmp22(r, a))
+      check(
+        badPair22.length === 0,
+        'S22 ④-b：站点图标 16 / 32 / 48 / 128 四档**逐像素都是从「全徽-N.png」那条流水线出来的**（16 与 32 原来是纯徽；⚠️ 16px 全徽实测外圈线只有 0.33px）',
+        badPair22.length
+          ? badPair22.map(([r, a]) => `${r} ≠ ${a}`).join('、')
+          : pairs22.map(([r]) => r).join('、') + ' 四档都对得上',
+      )
+      /* 反向对照：拿**纯徽**那几张素材去比 → 必须当场判假（证明这个比对真的分得出两档） */
+      const purePairs22 = [
+        ['icons/icon-16.png', '纯徽-16.png'],
+        ['icons/icon-32.png', '纯徽-32.png'],
+      ].filter(([r, a]) => existsSync(join(ASSETS22, a)) && cmp22(r, a))
+      check(
+        purePairs22.length === 0,
+        '🧪 S22 ④-b 反向对照：拿 `assets\\纯徽-16.png` / `纯徽-32.png` 去比那两张 → 一条都对不上（比对真分得出"全徽 / 纯徽"两档，不是恒真）',
+        purePairs22.length ? `竟然对上了：${purePairs22.map(([r]) => r).join('、')}` : '纯徽那两张一条都对不上',
+      )
+      /* `favicon.ico`：三帧都是**全徽**（原来 16 / 32 两帧是纯徽）。
+         判据 = 逐帧与 assets 的全徽素材逐像素比 —— 只数帧数是钉不住的。 */
+      const ico22 = readFileSync(join(PUB22, 'favicon.ico'))
+      const nIco22 = ico22.readUInt16LE(4)
+      const icoFrames22 = []
+      for (let i = 0; i < nIco22; i++) {
+        const e = ico22.subarray(6 + 16 * i, 6 + 16 * (i + 1))
+        const w = e[0] === 0 ? 256 : e[0]
+        const off = e.readUInt32LE(12)
+        const len = e.readUInt32LE(8)
+        icoFrames22.push({ w, idat: ico22.subarray(off + 41, off + len - 12) })
+      }
+      const badIco22 = icoFrames22.filter((f) => {
+        const src = rawPx22(join(ASSETS22, `全徽-${f.w}.png`))
+        return f.idat.length !== src.idat.length || !f.idat.equals(src.idat)
+      })
+      check(
+        icoFrames22.length === 3 &&
+          icoFrames22.map((f) => f.w).join('/') === '16/32/48' &&
+          badIco22.length === 0,
+        'S22 ④-b：`favicon.ico` 三帧 16/32/48 **每一帧都是全徽**、逐像素与 `assets\\全徽-N.png` 对得上（Windows 任务栏用的正是这个文件）',
+        badIco22.length
+          ? `对不上的帧：${badIco22.map((f) => f.w).join('、')}`
+          : icoFrames22.map((f) => `${f.w}px`).join(' · '),
+      )
+      const svgFull22 = readFileSync(join(ASSETS22, '全徽-128.png')).toString('base64')
+      const svgTxt22 = readFileSync(join(PUB22, 'favicon.svg'), 'utf8')
+      check(
+        svgTxt22.includes(svgFull22),
+        'S22 ④-b：`favicon.svg` 内嵌的是 **128px 全徽**（原来内嵌的是裁掉校名环那一档）—— 判据是"base64 与 `assets\\全徽-128.png` 逐字节相同"，不是"文件里有没有某个词"',
+        `内嵌全徽-128 的 base64 = ${svgTxt22.includes(svgFull22) ? '一致' : '不一致'}`,
+      )
+
       /* ---------- ⑤ 校徽：四套主题下都在 / 暗色提亮 / 亮色不提亮 / 无盘 / 无框线 ----------
        * 探针量的是 `[data-emblem]`（`Emblem.tsx` 那一层）**页面自己算出来的**值，
        * 不是把期望值抄进断言。四套并排本身就是一组对照：亮色那两条必须是 `none`。
@@ -10679,10 +10868,12 @@ await withLock(async () => {
               : '这一页一个 `[data-emblem]` 都没有',
           )
           const ns22 = pr.list.map((e) => e.n).sort((a, b) => a - b)
-          /* ⚠️ 这一节探的是 `/` 与 `/login` 两个路由 —— 「我的身份」卡那颗 24px 纯徽在
+          /* ⚠️ 这一节探的是 `/` 与 `/login` 两个路由 —— 「我的身份」卡那颗 24px 校徽在
              `/settings` 上，**不在这一节**（它在 S24 里逐条钉）。2026-10-11 第一次改这里时
              把 24 加进 `/` 的期望值，实测红——原因是"改错了期望值"，不是"漏了徽"。
-             左栏 40 · 移动顶栏 32 · 登录卡 48 三档一个字没动。 */
+             左栏 40 · 移动顶栏 32 · 登录卡 48 三档一个字没动。
+             ⚠️ 2026-10-11「全徽」轮：那三档**本来就是全徽**，所以这一节**一个字都没改** ——
+             改的只有 S24（24px 从纯徽换成全徽）与 `public/icons/**` + `favicon.*` 那几张静态图。 */
           const wantNs22 = path22 === '/' ? [32, 40] : [48]
           check(
             JSON.stringify(ns22) === JSON.stringify(wantNs22),
@@ -11459,11 +11650,32 @@ await withLock(async () => {
      * （`icons.tsx` 的 `Logo`：蓝色圆角方块 + 坐标轴折线），**不是校徽**。
      * 这一轮换成校徽，并顺手把已经没人用的 `Logo` 组件删掉。
      *
-     * ⚠️ 24px 用**纯徽**（`emblem-pure-24.png`）：`徽标方案\落地清单.md` §9.1 实测
-     *    全徽 24px 的外圈线只有 **0.50px**（"刚够半个像素"）、圆半实半虚 → 认不出是枚校徽。
+     * 🔴 2026-10-11（同日）「全徽」轮 —— 这一节**整条判据都变了**，逐条注明为什么：
+     *    · 24px 原来是**纯徽**（`emblem-pure-24.png`），依据是 `徽标方案\落地清单.md` §9.1：
+     *      全徽 24px 的外圈线只有 **0.50px**（"刚够半个像素"）、圆半实半虚 → 认不出是枚校徽。
+     *    · 用户看了截图（「我的身份」那张卡 + Windows 任务栏图标）后说
+     *      「把所有这种**纯徽标**全部换成**全徽标**」→ **知情仍要求全徽**，照做。
+     *    · 因此：① `src` 从 `emblem-pure-24.png` → `emblem-24.png`；
+     *            ② **`srcset` 从"不写"变成"必须写"** —— 纯徽只生成了 1x 一张，
+     *               写 2x 会让 2x 屏去取一张**不存在**的 `emblem-pure-48.png`；
+     *               全徽**有 2x 档**（`emblem-48.png`），不写它 2x 屏就只能把 24px 那张放大一倍。
+     *            ③ 新增一条"全仓 0 处纯徽"的静态钉子 + 一条"24px 这一档现在真的指到 2x"的判据。
+     *    · ⚠️ 全徽 24px 实测确实"圆半实半虚"（0.50px）—— 这是**用户知情后的选择**，
+     *      不是回归，**别把它当 bug 改回纯徽**（`pure` prop 与 `emblem-pure-*.png` 已整条删掉）。
      */
-    await step('S24：我的身份 · 24px 校徽（纯徽）', async () => {
-      const c = await browser.newContext({ viewport: { width: 1440, height: 940 }, locale: 'zh-CN' })
+    await step('S24：我的身份 · 24px 校徽（全徽）', async () => {
+      /* 🔴 **这一节必须跑在 DPR 2 的 context 上**（2026-10-11 修）：
+       * `srcset` 的 1x / 2x 是**浏览器按设备像素比挑**的 —— DPR 1 的 context 里它**永远挑 1x**，
+       * 于是"有没有取到 2x 档"这条判据**在 DPR 1 下根本量不到**（实测踩过：读数里
+       * `currentSrc=emblem-24.png · 天然 24px / 屏上需要 24px` = DPR 1，判据红，而**代码是对的**）。
+       * ⚠️ 不许把判据放宽成"1x 也算" ✗ —— 那就成了摆设（`AGENTS.md` 三·2）。
+       * 文件开头那个 `ctx`（`deviceScaleFactor: 2`）是**移动端截图**用的，跟这一节无关。
+       */
+      const c = await browser.newContext({
+        viewport: { width: 1440, height: 940 },
+        locale: 'zh-CN',
+        deviceScaleFactor: 2,
+      })
       await c.clock.install({ time: new Date('2026-09-19T10:00:00') })
       await c.addInitScript((st) => {
         window.localStorage.setItem('shugao.teacher.v1', JSON.stringify(st))
@@ -11480,15 +11692,37 @@ await withLock(async () => {
           const marked = all.filter((e) => e.hasAttribute('data-settings-emblem'))
           const host = marked[0] ?? null
           const img = host ? host.querySelector('img') : null
+          const css = img ? getComputedStyle(img) : null
           return {
             n: all.length,
             before: marked.length === 0 ? all.length : all.indexOf(host),
             markedSrc: img ? img.getAttribute('src') : null,
-            markedPure: host ? host.hasAttribute('data-emblem-pure') : null,
             natural: img ? img.naturalWidth : 0,
             complete: img ? img.complete : false,
             hostW: host ? Math.round(parseFloat(getComputedStyle(host).width) * 100) / 100 : null,
             srcset: img ? img.getAttribute('srcset') : null,
+            /* 🔴 那一档**真实渲染出来的**是 1x 还是 2x —— 判据不读 `srcset` 那个字符串，
+               读 `currentSrc` + `<img>` 的布局宽度 × devicePixelRatio：
+               `emblem-24.png` 的天然宽是 24、`emblem-48.png` 是 48，谁也冒充不了谁。 */
+            currentSrc: img ? img.currentSrc : null,
+            naturalOnScreen: img ? (css ? parseFloat(css.width) * window.devicePixelRatio : 0) : 0,
+            /* 🔴 **`naturalWidth` 是"兜底 `src` 那张"的天然宽，不是浏览器挑中的那张**
+               （实测：`currentSrc = emblem-48.png` 而 `naturalWidth` 仍然是 24）——
+               所以"挑中的那张够不够清晰"只能读 `currentSrc` 那一条路。 */
+            naturalOfCurrentSrc: img
+              ? (() => {
+                  const m = /emblem-(\d+)\.png/.exec(img.currentSrc || '')
+                  return m ? Number(m[1]) : 0
+                })()
+              : 0,
+            /* 🔴 判据得先能看见"这一节跑在什么 DPR 上" —— 否则它红的时候分不清
+               是"代码没写 srcset"还是"环境是 DPR 1"（本轮就是这么红的）。 */
+            dpr: window.devicePixelRatio,
+            /* 纯徽的痕迹：`<span data-emblem-pure>` 与 `/emblem/emblem-pure-*.png` 两种写法 */
+            pureHosts: document.querySelectorAll('[data-emblem-pure]').length,
+            pureImgs: [...document.querySelectorAll('img')].filter((i) =>
+              /emblem-pure/.test(i.getAttribute('src') ?? ''),
+            ).length,
             /* 旧品牌标的几何指纹：坐标轴那条 `M3.8 3.6v16.8h16.8`（`icons.tsx` 的 `Logo`） */
             legacyLogo: document.querySelectorAll('svg path[d="M3.8 3.6v16.8h16.8"]').length,
           }
@@ -11496,37 +11730,87 @@ await withLock(async () => {
 
       const r24 = await read24(p)
       check(
-        r24.n >= 1 && r24.markedSrc === '/emblem/emblem-pure-24.png' && r24.markedPure === true,
-        'S24：「我的身份」那颗 24px 现在是**校徽**（而且是 24px 那一档的**纯徽** —— 全徽 24px 外圈线只有 0.50px，认不出是枚校徽）',
-        `[data-settings-emblem] src=${r24.markedSrc} · 纯徽=${r24.markedPure}`,
+        r24.n >= 1 && r24.markedSrc === '/emblem/emblem-24.png',
+        'S24：「我的身份」那颗 24px 现在是**全徽**（`emblem-24.png`）—— 用户「把所有这种纯徽标全部换成全徽标」；⚠️ 实测外圈线 0.50px、"圆半实半虚"，是知情后的选择',
+        `[data-settings-emblem] src=${r24.markedSrc}`,
       )
       check(
-        r24.complete && r24.natural === 24 && Math.abs((r24.hostW ?? 0) - 24 / 0.87) < 0.6 && r24.srcset === null,
-        'S24：徽的**真图元**在（天然 24px）、盒子 = 徽 / 0.87（盒子那 13% 就是"徽到文字"的间距）、纯徽没有 2x 档（不写 `srcset`，否则 2x 屏会去取一张不存在的图）',
+        r24.complete &&
+          r24.natural === 24 &&
+          Math.abs((r24.hostW ?? 0) - 24 / 0.87) < 0.6 &&
+          r24.srcset === '/emblem/emblem-24.png 1x, /emblem/emblem-48.png 2x',
+        'S24：徽的**真图元**在（天然 24px）、盒子 = 徽 / 0.87（盒子那 13% 就是"徽到文字"的间距）—— 而 `srcset` 判据**整个反过来了**：纯徽时代是"必须不写"（写了 2x 会去取一张不存在的 `emblem-pure-48.png`），全徽**有 2x 档**，现在是"必须写"',
         `天然 ${r24.natural}px · 盒 ${r24.hostW}px · srcset = ${r24.srcset === null ? '（未写）' : r24.srcset}`,
+      )
+      check(
+        r24.dpr === 2 && r24.naturalOfCurrentSrc >= r24.naturalOnScreen,
+        '🔴 S24：24px 那一档在 **DPR 2 的屏上真的取到了全徽的 2x 档**（浏览器挑中的那张的天然宽 ≥ 盒宽 × DPR）—— 判据读的是 `currentSrc` 挑中的那一张，不是 `srcset` 那个字符串，也不是 `naturalWidth`（后者永远是兜底 `src` 那张的 24）',
+        `DPR=${r24.dpr} · currentSrc=${r24.currentSrc} · 挑中那张天然 ${r24.naturalOfCurrentSrc}px / 屏上需要 ${Math.round(r24.naturalOnScreen)}px`,
       )
       check(
         r24.before >= 0 && r24.n === 3 && r24.legacyLogo === 0,
         '🔴 S24：那一颗是"我的身份"卡上那颗（带 `data-settings-emblem` 标记；同一页还有左栏 40 / 移动顶栏 32 两颗），而且**旧品牌标一个都没有了**（`<Logo>` 的坐标轴折线 0 处）',
         `页面上 ${r24.n} 个校徽、那颗在第 ${r24.before + 1} 位 · 旧 Logo 折线 ${r24.legacyLogo} 处`,
       )
-      /* 🧪 反向对照 A：把校徽换成旧 Logo 的 SVG（= 换回去）→ "是校徽"那条必须判假 */
+      check(
+        r24.pureHosts === 0 && r24.pureImgs === 0,
+        '🔴 S24：这一页（`/settings`，三个徽位）里 `data-emblem-pure` 与 `emblem-pure-*` 两种纯徽写法**都是 0 处**',
+        `data-emblem-pure=${r24.pureHosts} 处 · emblem-pure 图=${r24.pureImgs} 张`,
+      )
+      /* ---------- 🔴 新增：全仓「再也没有一处纯徽」的静态钉子 ----------
+       * 为什么要有它：`pure` prop / `emblem-pure-*` 文件 / 纯徽素材名 —— 三样都清了，
+       * 但只要有人再把其中任一样写回来，"全部全徽"这条用户指令就破了，而上面那几条
+       * 页面内断言**看不见**（只有 24px 那一处会被看见，别的位图看不见）。
+       */
+      /* ⚠️ 正则**不扫「纯徽」这两个汉字**：改完之后它仍然会出现在"为什么不用它"的说明性注释里，
+         扫它会变成一条**为了绿而扫**、且永远说不清的判据。要钉的是**代码里那三样真的东西**：
+         `pure` prop、`data-emblem-pure` 属性、`emblem-pure-*` 那个位图路径 / 文件名。 */
+      const PURE_CODE24 = /emblem-pure|\bpure\b|data-emblem-pure|emblemPure/
+      const SRC24 = join(HERE, '..', 'src')
+      const EMBLEM24 = join(HERE, '..', 'public', 'emblem')
+      const walk24 = (dir) =>
+        readdirSync(dir, { withFileTypes: true }).flatMap((d) =>
+          d.isDirectory() ? walk24(join(dir, d.name)) : [join(dir, d.name)],
+        )
+      const hitPure24 = walk24(SRC24).filter(
+        (f) => /\.(tsx?|css)$/.test(f) && PURE_CODE24.test(readFileSync(f, 'utf8')),
+      )
+      check(
+        hitPure24.length === 0,
+        'S24：`src/**` 的**代码里**再也没有一处纯徽（`pure` prop / `data-emblem-pure` / `emblem-pure-*` 三种写法，全仓 0 处）',
+        hitPure24.length
+          ? hitPure24.map((f) => f.slice(SRC24.length + 1)).join('、')
+          : 'src 下 0 处',
+      )
+      const pureFiles24 = readdirSync(EMBLEM24).filter((f) => /pure|纯徽/.test(f))
+      check(
+        !existsSync(join(EMBLEM24, 'emblem-pure-24.png')) && pureFiles24.length === 0,
+        'S24：`public/emblem/` 里**纯徽那几张位图已经删干净了**（`emblem-pure-24.png` 不存在）',
+        pureFiles24.length ? `还剩 ${pureFiles24.join('、')}` : 'emblem 目录下 0 个纯徽文件',
+      )
+      /* 🧪 反向对照 A：把那一张手动改回**纯徽**那张（`src` + `srcset` 两个一起改，
+       * 照 ⑤ 那条反向对照的教训 —— 只改 `src` 的话浏览器会从 `srcset` 挑回真图，
+       * 对照就成了"怎么都不会红"的假对照）→ "是全徽"与"2x 档"两条**必须**当场判假。
+       */
       const negA24 = await p.evaluate(() => {
         const host = document.querySelector('[data-settings-emblem]')
-        if (!host) return { ok: false, why: '找不到那一颗' }
-        host.innerHTML =
-          '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor">' +
-          '<path d="M3.8 3.6v16.8h16.8"></path></svg>'
-        host.removeAttribute('data-emblem-pure')
+        const img = host ? host.querySelector('img') : null
+        if (!host || !img) return { ok: false, why: '找不到那一颗' }
+        img.removeAttribute('srcset')
+        img.src = '/emblem/emblem-pure-24.png'
         return { ok: true }
       })
-      const negR24 = negA24.ok ? await read24(p) : { markedSrc: null, markedPure: null }
+      await p.waitForTimeout(400)
+      const negR24 = negA24.ok ? await read24(p) : { markedSrc: null, natural: 0, currentSrc: null }
       check(
-        negA24.ok && negR24.markedSrc !== '/emblem/emblem-pure-24.png',
-        '🧪 S24 反向对照 A：把那颗换回**旧品牌标的 SVG** → 同一个探针**当场判假**（`src` 不再是纯徽那张）',
-        `换回去之后 src=${negR24.markedSrc} · 纯徽=${negR24.markedPure}`,
+        negA24.ok &&
+          negR24.markedSrc !== '/emblem/emblem-24.png' &&
+          negR24.natural === 0 &&
+          negR24.currentSrc !== '/emblem/emblem-48.png',
+        '🧪 S24 反向对照 A：把那颗在内存里指回**纯徽**那张（而且那张文件已经不存在）→ 同一个探针**当场判假**（`src` 不是全徽、2x 也没了）',
+        `改回去之后 src=${negR24.markedSrc} · 天然 ${negR24.natural}px · currentSrc=${negR24.currentSrc}`,
       )
-      /* 🧪 反向对照 B：把 `data-settings-emblem` 摘掉 → "它在第一位"那条必须判假 */
+      /* 🧪 反向对照 B：把 `data-settings-emblem` 摘掉 → "它就是那一颗"那条必须判假 */
       const negR24b = await p.evaluate(() => {
         const marked = document.querySelector('[data-settings-emblem]')
         if (marked) marked.removeAttribute('data-settings-emblem')
@@ -11538,6 +11822,38 @@ await withLock(async () => {
         '🧪 S24 反向对照 B：把 `data-settings-emblem` 摘掉 → "它就是那一颗"那条**当场判假**（证明这个探针真的在找标记，不是恒真）',
         `摘掉之后带标记的：${negR24b.marked} 个`,
       )
+      /* 🧪 反向对照 C（🔴 本轮新增，专治"satisfied by construction"）：**同一个探针**在
+       * **DPR 1 的 context** 里量同一页 —— 浏览器这时只会挑 1x，于是"取到了 2x 档"
+       * 那条判据**必须当场判假**。
+       * 它证明的是"那条判据**真的在量 DPR**"，而不是"在 2x 环境里怎么都真"。
+       */
+      {
+        const c1 = await browser.newContext({
+          viewport: { width: 1440, height: 940 },
+          locale: 'zh-CN',
+          deviceScaleFactor: 1,
+        })
+        await c1.addInitScript((st) => {
+          window.localStorage.setItem('shugao.teacher.v1', JSON.stringify(st))
+          window.localStorage.setItem('shugao.deviceRole', 'teacher')
+        }, TEACHER_STATE)
+        const p1 = await c1.newPage()
+        await p1.goto(`${BASE}/settings`, { waitUntil: 'networkidle' })
+        await p1.waitForTimeout(400)
+        const r1 = await read24(p1)
+        check(
+          /* ⚠️ 门槛要写成 `naturalOfCurrentSrc < naturalOnScreen * 2` 而不是
+             `< naturalOnScreen` —— DPR 1 下这两个数**恰好相等**（都是 24），
+             写 `<` 就成了一条**永远红**的对照（实测踩过）。主判据要的是
+             "够不够 2x"，所以这里的否定就是"**不到 2x**"。 */
+          r1.dpr === 1 &&
+            r1.naturalOfCurrentSrc === 24 &&
+            r1.naturalOfCurrentSrc < r1.naturalOnScreen * 2,
+          '🧪 S24 反向对照 C：同一个页面放进 **DPR 1** 的 context → 浏览器只挑 1x（天然 24 < 屏上需要的 2 倍），主判据那条**当场不成立**（证明它真的在量 DPR，不是恒真）',
+          `DPR=${r1.dpr} · currentSrc=${r1.currentSrc} · 挑中那张天然 ${r1.naturalOfCurrentSrc}px / 屏上需要 ${Math.round(r1.naturalOnScreen)}px（2 倍 = ${Math.round(r1.naturalOnScreen * 2)}px）`,
+        )
+        await c1.close()
+      }
       await c.close()
     })
 
