@@ -354,6 +354,10 @@ const EXPECTED_FILES = [
   '122-darkpurple-workbench.png',
   '123-darkpurple-admin.png',
   '124-theme-picker.png',
+  // 🆕 2026-10-11（见 S26 那一节）：**「我的身份」卡里多了一段「改密码」**。
+  //  125 = 那张卡打开、三格填成"太短"之后的样子 —— 屏上**明写着错误原因**（不是静默不提交）。
+  //  ⚠️ 图号接着 124 编；`EXPECTED_FILES` 是**集合相等**，所以这一张不登记就会红。
+  '125-settings-change-password.png',
 ]
 
 /* ---------------- 断言与日志 ---------------- */
@@ -11854,6 +11858,188 @@ await withLock(async () => {
         )
         await c1.close()
       }
+      await c.close()
+    })
+
+    /*
+     * ================= S26：**自己改密码**（2026-10-11） =================
+     *
+     * 🔴 用户原话：「**加一个吧，都放在我的页面的那个身份卡里面，自己改了账户名字后行政管理那边要能看见**」
+     *
+     * 为什么要这一节（不是"多加一组静态断言"）：这一段的失败**必须显式上屏**
+     * （AGENTS.md §三.5），而"上了没上"只有在真浏览器里量得到 ——
+     * `nav-checks` 那一边只能证明源码里摆了那两块屏。
+     *
+     * ⚠️ 这一节跑的是**本地演示模式**（`isRemote === false`）：
+     *    · 那段界面**照常摆**（身份卡是"我的账号"那一块，与有没有后端无关）；
+     *    · 所以**三档前置校验**在这台机器上量得到（它们不看后端，看的是三个格）；
+     *    · 而"真的调用了改密码接口"那一步只能到"显示"这一层（本地没有账号）——
+     *      **这一点如实写在断言里，不假装测过**（真联网那一条在 `nav-checks` D13-B 静态钉死）。
+     */
+    await step('S26：我的身份 · 自己改密码（失败显式上屏）', async () => {
+      const c = await browser.newContext({
+        viewport: { width: 1440, height: 940 },
+        locale: 'zh-CN',
+        deviceScaleFactor: 2,
+      })
+      await c.clock.install({ time: new Date('2026-09-19T10:00:00') })
+      await c.addInitScript((st) => {
+        window.localStorage.setItem('shugao.teacher.v1', JSON.stringify(st))
+        window.localStorage.setItem('shugao.deviceRole', 'teacher')
+      }, TEACHER_STATE)
+      const p = await c.newPage()
+      p.on('pageerror', (e) => errors.push(`PAGEERROR(S26) :: ${e.message}`))
+      await p.goto(`${BASE}/settings`, { waitUntil: 'networkidle' })
+      await p.waitForTimeout(400)
+
+      /* 身份卡那一行右边那颗「编辑」→ 打开 `title="我的身份"` 那张 Sheet */
+      await p.getByRole('button', { name: '编辑' }).first().click()
+      await p.waitForTimeout(350)
+
+      /** 那张 Sheet 里，与"改密码"有关的一切（**都在同一个浮层里量**） */
+      const readPwd = (page) =>
+        page.evaluate(() => {
+          const sheets = [...document.querySelectorAll('.sheet, [role="dialog"]')]
+          const sheet = sheets.find((s) => (s.textContent ?? '').includes('我的身份')) ?? null
+          const blk = sheet ? sheet.querySelector('[data-change-password]') : null
+          const labels = [...(sheet ? sheet.querySelectorAll('span.label') : [])].map((e) =>
+            (e.textContent ?? '').trim(),
+          )
+          const inputs = blk ? [...blk.querySelectorAll('input')] : []
+          return {
+            hasSheet: Boolean(sheet),
+            hasBlock: Boolean(blk),
+            labelAt: labels.indexOf('改密码'),
+            labelCount: labels.length,
+            nameAt: labels.indexOf('姓名'),
+            subjAt: labels.indexOf('主学科'),
+            order: blk && sheet ? [...sheet.querySelectorAll('span.label, [data-change-password]')].indexOf(blk) : -1,
+            passwordInputs: inputs.filter((i) => i.getAttribute('type') === 'password').length,
+            typed: inputs.map((i) => i.getAttribute('type')),
+            autoComplete: blk
+              ? [...blk.querySelectorAll('input')].map((i) => i.getAttribute('autocomplete'))
+              : [],
+            err: blk ? (blk.querySelector('[data-pwd-err]')?.textContent ?? '').trim() : '',
+            ok: blk ? (blk.querySelector('[data-pwd-ok]')?.textContent ?? '').trim() : '',
+            errRole: blk ? (blk.querySelector('[data-pwd-err]')?.getAttribute('role') ?? '') : '',
+            buttons: blk ? [...blk.querySelectorAll('button')].map((b) => (b.textContent ?? '').trim()) : [],
+          }
+        })
+
+      const before = await readPwd(p)
+      check(
+        before.hasSheet,
+        '🔴 S26 ① 身份卡那颗「编辑」打开的**就是**「我的身份」那张卡（不是别的浮层）',
+        `card=${before.hasSheet} · 卡内段落标签 ${before.labelCount} 个`,
+      )
+      check(
+        before.hasBlock && before.labelAt >= 0,
+        '🔴 S26 ② 卡里**有**一段「改密码」（用户点名：都放在身份卡里面）',
+        `[data-change-password]=${before.hasBlock} · 标签序位 ${before.labelAt}`,
+      )
+      /* ⚠️ `shots.mjs` 只有 `check(cond, label, observed)` 这一个断言器（没有 `eq`）——
+         这几条原来是 `eq(...)`（那是 `nav-checks.mjs` 里的），会 `ReferenceError` 把
+         整节**在第一条断言之前**打断（2026-10-11 实测：脚本停在第 S26 步、125 那张图没产出）。
+         所以这里一律写成 `check(...)` + `JSON.stringify` 比字面量，标签与口径一个字不改。 */
+      const sameCard = [before.nameAt >= 0, before.subjAt >= 0, before.labelAt >= 0]
+      check(
+        sameCard.every(Boolean),
+        '🔴 S26 ③ 它**与「姓名」「主学科」并列在同一张卡里**（姓名 / 主学科 / 改密码 三个标签都在）',
+        JSON.stringify(sameCard),
+      )
+      check(
+        before.labelAt > before.nameAt && before.labelAt > before.subjAt,
+        'S26 ④ 它**排在姓名与主学科之后**（先"我是谁"，再"改我的密码"—— 顺序是有意的）',
+        `姓名 @${before.nameAt} · 主学科 @${before.subjAt} · 改密码 @${before.labelAt}`,
+      )
+      check(
+        before.passwordInputs === 3,
+        '🔴 S26 ⑤ 三个格**都是密码格**（新密码不会明着写在屏上）',
+        `${before.passwordInputs} 个密码格`,
+      )
+      check(
+        JSON.stringify(before.autoComplete) === JSON.stringify(['current-password', 'new-password', 'new-password']),
+        'S26 ⑥ 三个格分别是：现在的密码 / 新密码 / 新密码再输一遍（autocomplete 也各自对）',
+        JSON.stringify(before.autoComplete),
+      )
+      check(
+        JSON.stringify(before.buttons) === JSON.stringify(['改密码']),
+        'S26 ⑦ 那段里只有**一颗按钮**（就是把密码改掉那颗；保存是下面整卡的按钮，不混在一起）',
+        JSON.stringify(before.buttons),
+      )
+      check(
+        JSON.stringify([before.err, before.ok]) === JSON.stringify(['', '']),
+        'S26 ⑧ 还没输任何东西时**屏上不报错、也不报成功**（不许无中生有）',
+        JSON.stringify([before.err, before.ok]),
+      )
+
+      const P = {
+        old: p.getByPlaceholder('现在用的那一个'),
+        next: p.getByPlaceholder('至少 8 位'),
+        again: p.getByPlaceholder('两次要一样'),
+      }
+
+      /* ---- 第一档：太短（而且**不许静默提交**） ---- */
+      await P.old.fill('now-pwd-ok')
+      await P.next.fill('short7c')
+      await P.again.fill('short7c')
+      await p.waitForTimeout(150)
+      await p.getByRole('button', { name: '改密码' }).first().click()
+      await p.waitForTimeout(300)
+      const short = await readPwd(p)
+      check(
+        /至少 8 位/.test(short.err) && /7/.test(short.err),
+        '🔴 S26 ⑨ 新密码 7 位 → **屏上明写**"至少 8 位（现在 7 位）"，不静默、不假装成功',
+        `err=${JSON.stringify(short.err)}`,
+      )
+      check(short.ok === '', 'S26 ⑨b 失败时**不是**"已经改好了"的样子（成功那块一个字都不出现）', JSON.stringify(short.ok))
+      check(short.errRole === 'alert', 'S26 ⑨c 那一句是 `role="alert"`（读屏软件也会念出来）', JSON.stringify(short.errRole))
+      await shot(p, 'S26：我的身份 · 自己改密码（失败显式上屏）', '125-settings-change-password', {
+        full: false,
+        wait: 320,
+      })
+
+      /* ---- 第二档：两次不一致（文案必须与"太短"**不是同一句**） ---- */
+      await P.next.fill('newpass-9a')
+      await P.again.fill('newpass-9b')
+      await p.getByRole('button', { name: '改密码' }).first().click()
+      await p.waitForTimeout(300)
+      const miss = await readPwd(p)
+      check(
+        /不一致/.test(miss.err),
+        '🔴 S26 ⑩ 两次不一致 → 屏上换成"两次输入的新密码不一致"（**不是**沿用上一档那句话）',
+        `err=${JSON.stringify(miss.err)}`,
+      )
+      check(
+        miss.err !== short.err && miss.err.includes('不一致') && short.err.includes('至少 8 位'),
+        '🔴 S26 ⑪ 两档的**文案确实不同**（"太短 / 不一致"各自的错各自说 —— §三.5 不许一句话概括）',
+        `太短=${JSON.stringify(short.err)} · 不一致=${JSON.stringify(miss.err)}`,
+      )
+
+      /* ---- 第三档：旧密码不对（本地模式没有账号 → 走的是"要连服务器"那一句） ---- */
+      await P.again.fill('newpass-9a')
+      await p.getByRole('button', { name: '改密码' }).first().click()
+      await p.waitForTimeout(300)
+      const third = await readPwd(p)
+      check(
+        third.err !== '' && third.err !== miss.err,
+        '🔴 S26 ⑫ 前两档过了之后**还有第三句**（本地演示模式：说清"这一项要连上服务器才能用"）—— 不许沉默地什么都不做',
+        `err=${JSON.stringify(third.err)}`,
+      )
+
+      /* 🧪 反向对照：把这一段从 DOM 里摘掉 → ② 与 S26-A 那条探针**当场判假** */
+      const negS26 = await p.evaluate(() => {
+        const blk = document.querySelector('[data-change-password]')
+        if (blk && blk.parentNode) blk.parentNode.removeChild(blk)
+        const sheets = [...document.querySelectorAll('.sheet, [role="dialog"]')]
+        const sheet = sheets.find((s) => (s.textContent ?? '').includes('我的身份')) ?? null
+        return { still: Boolean(sheet && sheet.querySelector('[data-change-password]')) }
+      })
+      check(
+        negS26.still === false,
+        '🧪 S26 反向对照：把 `[data-change-password]` 从 DOM 里摘掉 → ② 那条判据**当场判假**（证明它真的在页面上找这一段，不是恒真）',
+        `摘掉之后还在 = ${negS26.still}`,
+      )
       await c.close()
     })
 

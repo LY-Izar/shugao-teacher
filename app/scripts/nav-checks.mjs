@@ -3374,6 +3374,346 @@ section('第十四节 · D12：念出来的号 = 班内学号（`serial` 只当�
   )
 }
 
+/* ============================================================
+   第十五节 · D13：**自己改密码**只作用自己 + 失败必须显式报错
+   ------------------------------------------------------------
+   🔴 用户 2026-10-11 原话：
+      「**加一个吧，都放在我的页面的那个身份卡里面**」
+
+   为什么这件事**必须**存在：平台把**最高管理员锁死为一个**（`teacher_roles_one_super`），
+   他自己忘了密码**没人能给他重置** —— 只能自己改。所以入口在
+   `Settings.tsx` 那张 `title="我的身份"` 的 Sheet 里（用户点名：和姓名 / 主学科并列）。
+
+   为什么这一节有四组断言（都不是摆设）：
+     · A —— 三档失败各自的文案。§三.5：不可写的路径要**显式报错**，
+            而"太短 / 两次不一致 / 旧密码没填"是三种不同的错，**不许一句话概括**；
+     · B —— 全仓**没有**"拿别人的 id 去改密码"的路（更新只作用当前会话自己）；
+     · C —— 旧密码那道坎**真的在**（`signInWithPassword` **先于** `updateUser`），
+            而且它挂在验证之后 —— 少了它，"手机被人拿去"就能把原主人永久锁在外面；
+     · D —— 失败**上屏**（`role="alert"` + 真按钮），不是只写在注释里。
+
+   每条都带反向对照（喂"修之前的写法"必须判红）；对照本身也证过能红。
+   ============================================================ */
+section('第十五节 · D13：自己改密码（只作用自己 · 失败显式上屏）')
+
+{
+  const SET = 'src/pages/Settings.tsx'
+  const settingsSrc = readApp(SET)
+
+  /* ---- A：三档失败各自的文案（**从源码里抠出那个真函数**来跑，不是复刻一份） ---- */
+  const mFn = settingsSrc.match(/function pwdIssue\([\s\S]*?\n\}/)
+  check(
+    Boolean(mFn),
+    'D13-A 锚点自证：`Settings.tsx` 里有 `function pwdIssue()`（抠不到就说明它改名了，这一节得跟着改）',
+    mFn ? short(mFn[0], 90) : '没找到',
+  )
+  let pwdIssue = () => {
+    throw new Error('没抠到 pwdIssue')
+  }
+  let fnErr = ''
+  try {
+    /*
+     * ⚠️ 两个必须处理的坑（都踩过一次）：
+     *   ① `export ` 在 `new Function()` 的函数体里是语法错误；
+     *   ② `new Function()` 只吃 **JS**，而源码是 TS —— 类型注解要逐处剥掉。
+     *      只处理"函数签名 + 返回值类型"这一小块，体**一个字都不动**。
+     */
+    const fnSrc = (mFn?.[0] ?? '')
+      .replace(/^export\s+/, '')
+      .replace(/^function\s+\w+\s*\(([^)]*)\)\s*:\s*[^{]+/, (s, params) =>
+        `function pwdIssue(${params.replace(/:\s*[^,)]+/g, '')})`,
+      )
+    pwdIssue = new Function(`${fnSrc}; return pwdIssue`)()
+  } catch (e) {
+    fnErr = e instanceof Error ? e.message : String(e)
+  }
+  check(
+    typeof pwdIssue === 'function' && pwdIssue('old-pwd-8', 'newpass-9', 'newpass-9') === null,
+    'D13-A 锚点自证②：抠出来的**就是**那个函数（合格输入回 null —— 证明没抠成半截）',
+    fnErr ? `求值失败：${fnErr}` : `typeof = ${typeof pwdIssue}`,
+  )
+
+  const iOld = pwdIssue('', 'x'.repeat(10), 'x'.repeat(10))
+  check(
+    typeof iOld === 'string' && iOld.includes('现在的密码'),
+    '🔴 D13-A ① 旧密码没填 → 报一句"请输入现在的密码"（**不是**静默提交）',
+    `pwdIssue('', 10 位, 10 位) → ${JSON.stringify(iOld)}`,
+  )
+  const iShort = pwdIssue('old-pwd-8', 'short7c', 'short7c')
+  check(
+    typeof iShort === 'string' && iShort.includes('至少 8 位'),
+    '🔴 D13-A ② 新密码太短（7 位）→ 报"至少 8 位"并说出**现在几位**',
+    `7 位 → ${JSON.stringify(iShort)}`,
+  )
+  const iMiss = pwdIssue('old-pwd-8', 'newpass-9a', 'newpass-9b')
+  check(
+    typeof iMiss === 'string' && iMiss.includes('不一致'),
+    '🔴 D13-A ③ 两次不一致 → 报"两次输入的新密码不一致"（**文案与"太短"必须不同**）',
+    `→ ${JSON.stringify(iMiss)}`,
+  )
+  check(
+    typeof iShort === 'string' && typeof iMiss === 'string' && iShort !== iMiss,
+    '🔴 D13-A ④ 两档的文案**不是同一句**（"一句话概括所有失败"= 把原因吃掉）',
+    `太短 = ${JSON.stringify(iShort)} vs 不一致 = ${JSON.stringify(iMiss)}`,
+  )
+  const iSame = pwdIssue('same-pwd-8', 'same-pwd-8', 'same-pwd-8')
+  check(
+    typeof iSame === 'string' && iSame.includes('不能和现在的密码一样'),
+    'D13-A ⑤ 新密码和旧密码一样 → 也拦下（还有第 4 档文案）',
+    `→ ${JSON.stringify(iSame)}`,
+  )
+  eq('D13-A ⑥ 三格都合格 → `null`（**放行**；三档里任何一档恒真，上面几条就是摆设）', pwdIssue('old-pwd-8', 'newpass-9', 'newpass-9'), null)
+
+  /* ---- 反向对照（A）：喂"修之前的写法"（不校验）必须判红 ---- */
+  const lazyIssue = () => null
+  const lazyOk = lazyIssue('', 'x', 'y') === null
+  check(
+    lazyOk &&
+      !(pwdIssue('', 'x', 'y') === null) &&
+      !(pwdIssue('old-pwd-8', 'short7c', 'short7c') === null),
+    '🧪 D13-A 反向对照：把校验改成"永远放行" → ① ② 当场判红（三档失败**真的**被拦下来了）',
+    `不校验版('', 'x', 'y') = ${lazyOk ? 'null（= 恒过的摆设）' : '有拦'} · 真函数('', 'x', 'y') = ${JSON.stringify(pwdIssue('', 'x', 'y'))}`,
+  )
+  eq(
+    '🧪 D13-A 反向对照②：把新密码填到 **8 位**就不再报"太短"（边界真的在 8，不是随手写的数）',
+    pwdIssue('old-pwd-8', '12345678', '12345678'),
+    null,
+  )
+
+  /* ---- A'：8 位这个下限与**建号那一支同一个数**（一个平台一个口径） ---- */
+  const fnSrc = readApp('functions/api/teacher-account.ts')
+  check(
+    /password\.length\s*<\s*8/.test(fnSrc) && /初始密码至少 8 位/.test(fnSrc),
+    'D13-A ⑦ 下限 8 与建号那支**同一个数**（`functions/api/teacher-account.ts` 的「初始密码至少 8 位」）',
+    `服务端那一句在 = ${/password\.length\s*<\s*8/.test(fnSrc)}`,
+  )
+  /* 🧪 反向对照：把服务端那个数改成 6 → 上面那条必须红（证明它真的在比对那个字面量） */
+  const fnPoison = fnSrc.replace('password.length < 8', 'password.length < 6')
+  check(
+    !(/password\.length\s*<\s*8/.test(fnPoison) && /初始密码至少 8 位/.test(fnPoison)),
+    '🧪 D13-A ⑧ 反向对照：把服务端改成 6 位 → ⑦ 当场红（两个数一旦分家就会被抓住）',
+    `改后两个条件同时成立 = ${/password\.length\s*<\s*8/.test(fnPoison) && /初始密码至少 8 位/.test(fnPoison)}`,
+  )
+
+  /* ---- B：入口就在「我的身份」那张卡里 + **只作用自己**（静态） ---- */
+  const sheetAt = settingsSrc.indexOf('title="我的身份"')
+  check(
+    sheetAt > 0,
+    'D13-B 锚点自证：找得到那张 `title="我的身份"` 的 Sheet（找不到就说明它改名了，这一节得跟着改）',
+    `偏移 ${sheetAt}`,
+  )
+  const sheetEnd = settingsSrc.indexOf('</Sheet>', sheetAt)
+  const sheetBody = sheetAt > 0 && sheetEnd > sheetAt ? settingsSrc.slice(sheetAt, sheetEnd) : ''
+  check(
+    /data-change-password[^>]*>/.test(sheetBody) && /<span className="label">改密码<\/span>/.test(sheetBody),
+    '🔴 D13-B ① 「改密码」那一块**就在「我的身份」那张卡里**（用户点名：放在身份卡里，与姓名 / 主学科并列）',
+    `卡内出现「改密码」标题 = ${/<span className="label">改密码<\/span>/.test(sheetBody)} · 卡内长度 ${sheetBody.length}`,
+  )
+  eq('D13-B ② 那张卡里三个密码格**都真的摆了**（现在的密码 / 新密码 / 再输一遍新密码）', (sheetBody.match(/type="password"/g) ?? []).length, 3)
+  check(
+    /onClick=\{\(\) => void doChangePassword\(\)\}/.test(sheetBody),
+    'D13-B ③ 那一块点下去走的是 `doChangePassword()`（不是把密码丢进 `updateTeacher` 的载荷里）',
+    `找到调用点 = ${/doChangePassword\(\)/.test(sheetBody)}`,
+  )
+  /* 注释里也写着 `updateUser`（那是**留档**，不是代码）——所以这一组全部在**剔掉注释之后**量 */
+  const SET_CODE = settingsSrc
+    .replace(/(^|[^:'"`\w])\/\/[^\n]*/gm, '$1')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+  const upd = [...SET_CODE.matchAll(/\.auth\.updateUser\(/g)]
+  eq('🔴 D13-B ④ `updateUser(` 在 `Settings.tsx` 的真代码里**恰好 1 处**（多一处就要来这儿说清）', upd.length, 1)
+  check(
+    /\.auth\.updateUser\(\{\s*password\s*:/.test(SET_CODE),
+    '🔴 D13-B ⑤ 那一处**只带 `password` 一个键**（没有 `email` / 没有别人的 `userId`）—— 改的是"我的密码"',
+    `带 password 的调用 = ${/\.auth\.updateUser\(\{\s*password\s*:/.test(SET_CODE)}`,
+  )
+  check(
+    /sb\??\.auth\.getUser\(\)/.test(SET_CODE),
+    '🔴 D13-B ⑥ 账号身份来自 `sb.auth.getUser()`（**当前会话**），不是从参数 / 路由 / store 里拿一个 id',
+    `getUser 在 = ${/sb\??\.auth\.getUser\(\)/.test(SET_CODE)}`,
+  )
+  check(
+    !/updateUserById|admin\.updateUser|admin\.createUser|service_role|SERVICE_ROLE/i.test(settingsSrc),
+    '🔴 D13-B ⑦ `Settings.tsx` 里**没有**任何"替别人改密码"的手段（`updateUserById` / `admin.*` / `service_role`）',
+    `命中 = ${(settingsSrc.match(/updateUserById|admin\.updateUser|admin\.createUser|service_role|SERVICE_ROLE/gi) ?? []).join('、') || '0 处'}`,
+  )
+
+  /* 🔴 B'：**全仓**扫一遍 —— 有且只有 Settings.tsx 那一处（别人的 id 改密码是绝对禁线） */
+  const SRC_ROOT = join(APP, 'src')
+  const walk = (d, exts = /\.tsx?$/) => {
+    const out = []
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      if (e.name === 'node_modules' || e.name === 'dist') continue
+      const p = join(d, e.name)
+      if (e.isDirectory()) out.push(...walk(p, exts))
+      else if (exts.test(e.name) && !/\.d\.ts$/.test(e.name)) out.push(p)
+    }
+    return out
+  }
+  const srcFiles = walk(SRC_ROOT)
+  check(srcFiles.length >= 40, `D13-B ⑧ 扫到 ${srcFiles.length} 个 .ts/.tsx（自证不是"什么都没扫到"）`, `根：${SRC_ROOT}`)
+  const updHits = srcFiles
+    .map((f) => ({ rel: f.slice(APP.length + 1).replace(/\\/g, '/'), txt: readFileSync(f, 'utf8') }))
+    .filter((x) => x.txt.includes('updateUser'))
+  eqSet('🔴 D13-B ⑨ 全仓**碰 `updateUser` 的文件只有 Settings.tsx 一个**（别人那儿一处都不许有）', updHits.map((x) => x.rel), [SET])
+  const updTotal = updHits.reduce((n, x) => n + (x.txt.match(/\.auth\.updateUser\(/g) ?? []).length, 0)
+  eq('🔴 D13-B ⑩ 全仓 `.auth.updateUser(` 合计**恰好 1 处**（= 它只改自己的会话）', updTotal, 1)
+  check(
+    !srcFiles.some((f) => /updateUserById|admin\.updateUserById/.test(readFileSync(f, 'utf8'))),
+    '🔴 D13-B ⑪ 全仓**一处都没有** `updateUserById`（那是"拿别人的 id 去改密码"，本项目永远不许有）',
+    `命中文件 = ${srcFiles.filter((f) => /updateUserById/.test(readFileSync(f, 'utf8'))).map((f) => f.slice(APP.length + 1)).join('、') || '0 个'}`,
+  )
+  /* 🧪 反向对照：把别人那一支的签名（`updateUserById`）塞进去 → ⑪ 必须红 */
+  const srcPoison = settingsSrc + "\nsb.auth.admin.updateUserById(otherId, { password: 'x' })\n"
+  check(
+    /updateUserById/.test(srcPoison) && !/updateUserById/.test(settingsSrc),
+    '🧪 D13-B 反向对照：往源码里塞一句 `updateUserById(otherId, …)` → ⑪ 当场红（"只作用自己"那条**真的在读源码**）',
+    `塞进去之后命中 = ${/updateUserById/.test(srcPoison)} · 原源码命中 = ${/updateUserById/.test(settingsSrc)}`,
+  )
+
+  /* ---- C：旧密码那道坎**真的在**，而且**先验后改** ---- */
+  check(
+    /sb\.auth\.signInWithPassword\(\{\s*email\s*,\s*password:\s*pwOld\s*\}\)/.test(SET_CODE),
+    '🔴 D13-C ① 旧密码那一道坎真的在（`signInWithPassword` 复验**当前账号 + 输入的旧密码**）',
+    `找到 = ${/sb\.auth\.signInWithPassword\(\{\s*email\s*,\s*password:\s*pwOld\s*\}\)/.test(SET_CODE)}`,
+  )
+  const iSignIn = SET_CODE.indexOf('signInWithPassword')
+  const iUpdate = SET_CODE.indexOf('.auth.updateUser(')
+  check(
+    iSignIn > 0 && iUpdate > iSignIn,
+    '🔴 D13-C ② 顺序是**先验旧密码、再改**（反过来 = 谁拿到手机都能把原主人永久锁在外面）',
+    `signInWithPassword @ ${iSignIn} · updateUser @ ${iUpdate}（要 update 在后）`,
+  )
+  check(
+    (SET_CODE.match(/setPwErr\(/g) ?? []).length >= 4,
+    '🔴 D13-C ③ 失败**有好几档各自上屏**（§三.5 显式报错，不许静默）—— `setPwErr()` 的落点至少 4 处',
+    `${(SET_CODE.match(/setPwErr\(/g) ?? []).length} 处`,
+  )
+  /* 🧪 反向对照：把两句**对调** → ② 必须红（证明它真的在比偏移，不是恒真） */
+  const swapped = (() => {
+    const a = 'sb.auth.signInWithPassword({ email, password: pwOld })'
+    const b = 'sb.auth.updateUser({ password: pwNew })'
+    return SET_CODE.split(a).join('\u0000').split(b).join(a).split('\u0000').join(b)
+  })()
+  check(
+    swapped.indexOf('signInWithPassword') > swapped.indexOf('.auth.updateUser('),
+    '🧪 D13-C 反向对照：把两句**对调**（先改再验）→ ② 当场红（"先验后改"不是一句空话）',
+    `对调后 signInWithPassword @ ${swapped.indexOf('signInWithPassword')} · updateUser @ ${swapped.indexOf('.auth.updateUser(')}`,
+  )
+
+  /* ---- D：失败/成功**真上屏**（标记 + role=alert），不是躺在注释里 ---- */
+  check(
+    /data-pwd-err/.test(settingsSrc) && /role="alert"/.test(settingsSrc),
+    '🔴 D13-D ① 失败那块屏上有标记、并且是 `role="alert"`（不是只写在注释里 —— 注释不算"上屏"）',
+    `data-pwd-err=${/data-pwd-err/.test(settingsSrc)} · role="alert"=${/role="alert"/.test(settingsSrc)}`,
+  )
+  check(
+    /\{pwErr \? \(/.test(settingsSrc) && /data-pwd-ok/.test(settingsSrc) && /setPwOk\('密码已改/.test(SET_CODE),
+    'D13-D ② 成功也说话（"密码已改" + 那台设备不用重新登录），而且错/对两块**是两个条件各自的**',
+    `pwErr 三元=${/\{pwErr \? \(/.test(settingsSrc)} · data-pwd-ok=${/data-pwd-ok/.test(settingsSrc)}`,
+  )
+  /* 🧪 反向对照：把那两个标记摘掉 → ① 必须假 */
+  const stripped = settingsSrc.split('data-pwd-err').join('x-pwd-err').split('role="alert"').join('role="note"')
+  check(
+    !/data-pwd-err/.test(stripped) && !/role="alert"/.test(stripped),
+    '🧪 D13-D 反向对照：把标记摘掉 → ① 当场判假（这个探针真的在找那两个标记）',
+    `摘掉之后 data-pwd-err=${/data-pwd-err/.test(stripped)} · role="alert"=${/role="alert"/.test(stripped)}`,
+  )
+
+  /* ---- E：全仓不许出现**真密码字面量**（断言/注释也不行；这里只放"形状明显是密码"的串） ---- */
+  const PW_LITERALS = [
+    /ShuGao@?\d{4}/i,
+    /(password|passwd|pwd)\s*[:=]\s*['"][^'"\s]{6,}['"]/i,
+    /['"][A-Za-z0-9!@#$%^&*_-]{6,}['"]\s*\/\/\s*密码/,
+  ]
+  const pwDirs = [
+    { dir: join(APP, 'src'), exts: /\.tsx?$/ },
+    { dir: join(APP, 'scripts'), exts: /\.(mjs|ts)$/ },
+    { dir: join(APP, 'functions'), exts: /\.ts$/ },
+    { dir: join(REPO, 'supabase'), exts: /\.sql$/ },
+  ]
+  const pwHits = []
+  let pwScanned = 0
+  for (const { dir, exts } of pwDirs) {
+    if (!existsSync(dir)) continue
+    for (const f of walk(dir, exts)) {
+      pwScanned++
+      const txt = readFileSync(f, 'utf8')
+      for (const re of PW_LITERALS) {
+        const m = txt.match(re)
+        if (m) pwHits.push(`${f.slice(REPO.length + 1).replace(/\\/g, '/')} → ${short(m[0], 60)}`)
+      }
+    }
+  }
+  check(pwScanned >= 100, `D13-E 自证：真的扫了 ${pwScanned} 个文本文件（src / scripts / functions / supabase/schema.sql）`, `扫到 ${pwScanned} 个`)
+  eq('🔴 D13-E ① 仓库里**没有任何"看起来就是真密码"的字面量**（代码 / 注释 / 断言都不许有）', pwHits.length, 0)
+  /*
+   * 🧪 反向对照：喂一条**真形状**的密码进来 → 同一组正则必须命中
+   *（证明 ① 不是"什么都扫不到"）。
+   * ⚠️ 样例与它前面的那个词**都写成 `\uXXXX` 转义**，到运行时才解回明文：
+   *    · 源码里因此**不存在**明文凭据的字节序列（"仓库里不许有密码"连假样例也守）；
+   *    · 而且**这一行的原文**也不会撞上 ① 的那条正则 —— 否则就成了
+   *      "用自己的样例把自己判红"（真踩过一次）。
+   *    所以 ① 的绿是干净的：既不靠排除这个文件，也不用为了绿去改绿。
+   */
+  const ESC_PW = '\\u0068\\u0075\\u006e\\u0074\\u0065\\u0072\\u0032\\u0073\\u0065\\u0063\\u0072\\u0065\\u0074'
+  const ESC_KEY = '\\u0070\\u0061\\u0073\\u0073\\u0077\\u006f\\u0072\\u0064'
+  const unesc = (s) => String(JSON.parse(`"${s}"`))
+  const pwPoison = `const ${unesc(ESC_KEY)} = '${unesc(ESC_PW)}'`
+  check(
+    PW_LITERALS.some((re) => re.test(pwPoison)),
+    '🧪 D13-E 反向对照：喂 `const password = \'…\'`（真形状）进去 → 同一组正则**当场命中**',
+    `命中 = ${PW_LITERALS.map((re) => re.test(pwPoison)).join('/')}`,
+  )
+  check(
+    ESC_PW === [...unesc(ESC_PW)].map((c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`).join('') &&
+      !/hunter/.test(ESC_PW),
+    'D13-E 反向对照自证：样例在**源码里**是 `\\uXXXX` 转义（明文只存在于运行时内存）—— 所以 ① 的绿不是被自己的样例撞出来的，也没有"排除自己这个文件"',
+    `源码形态 = ${JSON.stringify(ESC_PW)}`,
+  )
+
+  /* ---- F：改名字那**两条写路径**对同一个字段必须有同一个口径（2026-10-11 本轮补） ----
+   *
+   * 背景（用户原话的后半句：「自己改了账户名字后行政管理那边要能看见」）：
+   * 「我的」页改的是 `teachers.name`，行政管理（`TeacherAccounts.tsx`）读的也是它 ——
+   * 但那是**两条不同的写路径**：
+   *   · 老师自己那一页：`store.updateTeacher` → `remote.saveTeacher`（**自己的 JWT + RLS**）；
+   *   · 行政管理那一页：`/api/teacher-account` 的 `rename` 动作（**service_role**）。
+   * 两条都落同一张表、同一列 → **行政管理刷新即见**（这一页只在挂载时拉一次，没有客户端缓存）。
+   * 数据库那一层由 `rls-checks` 第七节（真 Postgres）与第八·之二节各自钉住；
+   * 这里只钉**前端这一层**唯一会分家的地方：**姓名那一格的字数上限**。
+   *   🔴 分家的代价：老师能给自己存一个 60 个字的名字，而行政管理那一页的同一个字段不许 ——
+   *      同一个人、同一个字段、两套规矩（AGENTS.md §四：「一个字段只能有一种语义」）。
+   */
+  const fSrc = readApp('src/pages/TeacherAccounts.tsx')
+  const mServer = fnSrc.match(/const NAME_MAX\s*=\s*(\d+)/)
+  const mClient = settingsSrc.match(/const SELF_NAME_MAX\s*=\s*(\d+)/)
+  check(
+    Boolean(mServer) && Boolean(mClient) && mServer[1] === mClient[1],
+    '🔴 D13-F ① 姓名上限**一个数**：`teacher-account.ts` 的 `NAME_MAX` 与 `Settings.tsx` 的 `SELF_NAME_MAX` 相等（老师自己改名 / 行政管理改名 不许两套规矩）',
+    `服务端 NAME_MAX=${mServer ? mServer[1] : '（没抠到）'} · 我的页 SELF_NAME_MAX=${mClient ? mClient[1] : '（没抠到）'}`,
+  )
+  check(
+    /maxLength=\{NAME_MAX\}/.test(fSrc) && /maxLength=\{SELF_NAME_MAX\}/.test(SET_CODE),
+    '🔴 D13-F ② 两条路都把那个数**真的挂到了输入框上**（常量相等但没人用 = 摆设；`maxLength` 才是挡住超长那一格的东西）',
+    `行政管理挂上了 = ${/maxLength=\{NAME_MAX\}/.test(fSrc)} · 我的页挂上了 = ${/maxLength=\{SELF_NAME_MAX\}/.test(SET_CODE)}`,
+  )
+  /* 🧪 反向对照：把服务端那个数改成 60 → ① 当场红（证明它真的在比那两个数，不是恒真） */
+  const mServer60 = fnSrc.replace(/const NAME_MAX\s*=\s*24/, 'const NAME_MAX = 60')
+  const server60 = mServer60.match(/const NAME_MAX\s*=\s*(\d+)/)
+  check(
+    Boolean(server60) && server60[1] !== (mClient ? mClient[1] : null),
+    '🧪 D13-F 反向对照：把服务端改成 60 → ① 当场红（两个数一旦分家就会被抓住）',
+    `改后 服务端=${server60 ? server60[1] : '（没抠到）'} vs 我的页=${mClient ? mClient[1] : '（没抠到）'}`,
+  )
+  /* 🧪 反向对照②：把 `maxLength` 那一处摘掉 → ② 当场假（"挂上了没有"真的在读 JSX） */
+  const SET_NO_MAX = SET_CODE.replace(/maxLength=\{SELF_NAME_MAX\}/, '')
+  check(
+    !/maxLength=\{SELF_NAME_MAX\}/.test(SET_NO_MAX) && /maxLength=\{SELF_NAME_MAX\}/.test(SET_CODE),
+    '🧪 D13-F 反向对照②：把 `maxLength={SELF_NAME_MAX}` 摘掉 → ② 当场假（那一条真的在读 JSX，不是恒真）',
+    `摘掉之后还在 = ${/maxLength=\{SELF_NAME_MAX\}/.test(SET_NO_MAX)}`,
+  )
+}
+
 /* ---------------- 结果 ---------------- */
 console.log(`\n================ 结果 ================`)
 console.log(`  断言：通过 ${passed} 条，失败 ${failures.length} 条`)
@@ -3382,6 +3722,6 @@ if (failures.length) {
   console.log('\n  ⛔ 有断言没过（上面每一条都写了实测值）')
   process.exitCode = 1
 } else {
-  console.log('  全部通过 ✅（纯函数 A1–A10 / 静态 D1–D7 · D9 · D10 · D11 · D12 / 编码 + 不可见字符 D8）')
+  console.log('  全部通过 ✅（纯函数 A1–A10 / 静态 D1–D7 · D9 · D10 · D11 · D12 · D13 / 编码 + 不可见字符 D8）')
 }
 }, { script: 'nav-checks.mjs' })

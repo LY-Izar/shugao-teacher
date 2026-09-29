@@ -78,6 +78,39 @@ const BACKUP_MARK_LABEL: Record<StatusMarkStatus, string> = {
   cancelled: '已取消',
 }
 
+/**
+ * 「改密码」那三个格的前置校验：三个空串 → **一句人话**，或 null（可以往下走）。
+ *
+ * 为什么必须逐条分开：AGENTS.md §三.5 —— 不可写的路径要**显式报错**。
+ * "太短 / 两次不一致 / 旧密码没填"是三种不同的错，**一句话概括会把原因吃掉**。
+ * 拎成模块级纯函数，`nav-checks` 才能对每一档都喂一次（并做反向对照）。
+ *
+ * 🔴 下限 8 位与建号那支**同一个数**（`functions/api/teacher-account.ts`：
+ *    「初始密码至少 8 位」）—— 同一个平台里"什么算合格的密码"只能有一个口径。
+ * 🔴 它**只校验形状，不校验旧密码对不对** —— 那件事只有服务器说得清
+ *    （见下面 `doChangePassword` 里的 `signInWithPassword`）。
+ */
+/**
+ * 「姓名」那一格的字数上限 = 24 —— 🔴 与**另两条改名的路同一个数**：
+ *   · `functions/api/teacher-account.ts` 的 `NAME_MAX = 24`（建号 / 行政管理改名共用，
+ *     超了回一句「姓名最多 24 个字（现在 n 个）」）；
+ *   · `TeacherAccounts.tsx` 那个输入框的 `maxLength={NAME_MAX}`。
+ *
+ * 为什么这里必须有：一个字段只能有一种语义。老师在自己这一页能把名字填成 60 个字、
+ * `teachers.name` 也真存进去，而行政管理那一页的同一个字段**不许**填那么长 ——
+ * 同一个人同一个字段两套规矩，列表还会被那种行撑烂。
+ * ⚠️ 只挡输入上限，**不加新校验**：空名仍然由那颗「保存」按钮的 `disabled` 管。
+ */
+const SELF_NAME_MAX = 24
+
+function pwdIssue(oldPwd: string, next: string, again: string): string | null {
+  if (!oldPwd) return '请输入现在的密码'
+  if (next.length < 8) return `新密码至少 8 位（现在 ${next.length} 位）`
+  if (next !== again) return '两次输入的新密码不一致'
+  if (next === oldPwd) return '新密码不能和现在的密码一样'
+  return null
+}
+
 export default function Settings() {
   const teacher = useStore((s) => s.teacher)
   const classes = useStore((s) => s.classes)
@@ -181,6 +214,75 @@ export default function Settings() {
     setFSubject(teacher?.subject ?? '')
     setFPrimary(teacherPrimarySubjectCode(teacher))
     setEditing(true)
+  }
+
+  /* 改自己的密码（放在「我的身份」那张卡里，与姓名 / 主学科并列） */
+  const [pwOld, setPwOld] = useState('')
+  const [pwNew, setPwNew] = useState('')
+  const [pwNew2, setPwNew2] = useState('')
+  const [pwBusy, setPwBusy] = useState(false)
+  const [pwErr, setPwErr] = useState('')
+  const [pwOk, setPwOk] = useState('')
+  const closeEdit = () => {
+    setEditing(false)
+    setPwOld('')
+    setPwNew('')
+    setPwNew2('')
+    setPwErr('')
+    setPwOk('')
+  }
+
+  /**
+   * 改密码。
+   *
+   * 🔴 改的**只有自己**这一个会话（`sb.auth.updateUser`）——
+   *    **没有任何地方能拿别人的 id 来改密码**；"给别人重置密码"仍旧只走
+   *    教师账号那一页（由服务端那一支处理）。这里不碰 RLS、也不碰别人。
+   *
+   * 为什么要先 `signInWithPassword` 验一次旧密码：这个平台把**最高管理员锁死为一个**
+   * （`teacher_roles_one_super`），而 `updateUser` **不校验旧密码** ——
+   * 手机被人拿去、或会话留在别人机器上，就能直接把密码换掉、**原主人永久进不来**
+   * （没人能给他重置）。所以这里多设一道坎：**改密码必须知道现在的密码**。
+   * 代价：会把当前会话重新签一次（下面"改回教师端"那一支已经是同一套做法）。
+   */
+  const doChangePassword = async () => {
+    if (pwBusy) return
+    setPwErr('')
+    setPwOk('')
+    const bad = pwdIssue(pwOld, pwNew, pwNew2)
+    if (bad) {
+      setPwErr(bad)
+      return
+    }
+    if (!isRemote) {
+      setPwErr('本地演示环境没有账号密码，这一项要连上服务器才能用。')
+      return
+    }
+    const sb = getSupabase()
+    const email = (await sb?.auth.getUser())?.data.user?.email
+    if (!sb || !email) {
+      setPwErr('读不到当前账号，请重新登录后再改。')
+      return
+    }
+    setPwBusy(true)
+    const check = await sb.auth.signInWithPassword({ email, password: pwOld })
+    if (check.error) {
+      setPwBusy(false)
+      setPwErr('现在的密码不对，没有改动。')
+      return
+    }
+    const { error } = await sb.auth.updateUser({ password: pwNew })
+    setPwBusy(false)
+    if (error) {
+      /* 失败**必须说出来**（网络断了 / 服务器拒了）—— 不许看起来像改成功了 */
+      setPwErr(`没改成：${error.message}`)
+      return
+    }
+    setPwOld('')
+    setPwNew('')
+    setPwNew2('')
+    /* 当前这台设备不用重新登录（改的是这个会话自己的密码） */
+    setPwOk('密码已改。这台设备不用重新登录，别的设备下次要用新密码。')
   }
 
   /*
@@ -916,10 +1018,10 @@ export default function Settings() {
         </div>
       </Page>
 
-      {/* 编辑教师身份 */}
+      {/* 编辑教师身份 —— 包括**改自己的密码**（用户 2026-10-11：都放在这一张卡里） */}
       <Sheet
         open={editing}
-        onClose={() => setEditing(false)}
+        onClose={closeEdit}
         title="我的身份"
         footer={
           <Button
@@ -934,7 +1036,7 @@ export default function Settings() {
                 subject: fSubject.trim() || subjectName(fPrimary),
                 primarySubjectCode: fPrimary,
               })
-              setEditing(false)
+              closeEdit()
               push({ text: '已保存', tone: 'ok' })
             }}
           >
@@ -948,6 +1050,7 @@ export default function Settings() {
             className="input"
             value={fName}
             onChange={(e) => setFName(e.target.value)}
+            maxLength={SELF_NAME_MAX}
             placeholder="例如 王老师"
           />
         </label>
@@ -993,6 +1096,94 @@ export default function Settings() {
             只在顶部和设置页显示。留空就跟主学科一致；写「物理竞赛」这类也行。
           </p>
         </label>
+
+        {/*
+          改自己的密码。
+          🔴 用户 2026-10-11：「加一个吧，都放在我的页面的那个身份卡里面」——
+             所以它在**这张「我的身份」卡里**，与姓名 / 主学科并列（不是另开一张卡）。
+          🔴 为什么必须有：平台把**最高管理员锁死为一个**（`teacher_roles_one_super`），
+             他自己忘了密码没人能给他重置 —— 只能自己改。
+          ⚠️ 这里改的**只有当前这个会话自己**（`sb.auth.updateUser`），
+             全仓没有"拿别人的 id 改密码"的路；给别人重置在教师账号那一页。
+          ⚠️ 文案只说"这里是什么、我能做什么"（§七），不解释实现。
+        */}
+        <div
+          className="mt-5 border-t border-line pt-4"
+          data-change-password
+        >
+          <span className="label">改密码</span>
+          <label className="mt-2 block">
+            <span className="label">现在的密码</span>
+            <input
+              className="input"
+              type="password"
+              value={pwOld}
+              onChange={(e) => setPwOld(e.target.value)}
+              placeholder="现在用的那一个"
+              autoComplete="current-password"
+            />
+          </label>
+          <label className="mt-3 block">
+            <span className="label">新密码</span>
+            <input
+              className="input"
+              type="password"
+              value={pwNew}
+              onChange={(e) => setPwNew(e.target.value)}
+              placeholder="至少 8 位"
+              autoComplete="new-password"
+            />
+          </label>
+          <label className="mt-3 block">
+            <span className="label">再输一遍新密码</span>
+            <input
+              className="input"
+              type="password"
+              value={pwNew2}
+              onChange={(e) => setPwNew2(e.target.value)}
+              placeholder="两次要一样"
+              autoComplete="new-password"
+            />
+          </label>
+          {/*
+            🔴 失败与成功都**显式上屏**（§三.5）：太短 / 两次不一致 / 旧密码不对 /
+               网络或权限失败，各自说各自的；成功后也说清"这台设备不用重新登录"。
+          */}
+          {pwErr ? (
+            <p
+              data-pwd-err
+              role="alert"
+              style={{ fontSize: 12, color: 'var(--color-danger, #c0392b)', marginTop: 8, lineHeight: 1.7 }}
+            >
+              {pwErr}
+            </p>
+          ) : null}
+          {pwOk ? (
+            <p
+              data-pwd-ok
+              style={{ fontSize: 12, color: 'var(--color-ink2)', marginTop: 8, lineHeight: 1.7 }}
+            >
+              {pwOk}
+            </p>
+          ) : null}
+          <div className="mt-3">
+            <Button
+              block
+              data-change-password-btn
+              /*
+               * 🔴 **只有"正在改"时才禁用** —— 空格子也让它点得下去。
+               *    为什么（`nav-checks` D13-A 那条的 UI 对应）：按钮一禁用，
+               *    那颗按钮就**什么都不说**了 —— "还没填旧密码"这一档就永远上不了屏，
+               *    而这正是本项目最贵的那条教训（§三.5：不许静默）。
+               *    点下去 → 由 `pwdIssue()` 逐条说清是哪一格的问题。
+               */
+              disabled={pwBusy}
+              onClick={() => void doChangePassword()}
+            >
+              {pwBusy ? '正在改…' : '改密码'}
+            </Button>
+          </div>
+        </div>
       </Sheet>
 
       {/* 改回教师端：先验身份，再改标记 */}
