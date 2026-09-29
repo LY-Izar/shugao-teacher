@@ -407,6 +407,15 @@ export type EntryKey =
      这是那 34 行之外的新事实，矩阵里体现为 `27/9/0` vs `26/10/0`。 */
   | '/notices'
   | '/notices/new'
+  /*
+   * 🆕 2026-10-12「课程管理」`/manage/course`（**课程管理第 3 轮**）。
+   * 🔴 它必须排在 `/manage` 那条通配之前（下面的匹配是"前缀 + / 或结尾"，
+   *    不排在这里的话 `/manage/course` 会被 `/manage` 那条吃掉）。
+   * 判据与 `/manage` 同一条（`seesAdministration()`）：课程管理正是「行政管理」那一页的第四张卡，
+   * 两者是**同一个判据**、同一个组件 —— 与数据库的 `can_manage_schedule_for()`
+   * （超管 / 教务处全校 · 年级主任本年级）同形。
+   */
+  | '/manage/course'
   /* 🆕 2026-10-01 行政管理（`/manage`）：**一个页面，三张入口卡** ——
      年级管理 / 档案管理 / 教师管理。它的判据是那三张卡各自的判据的**并集**
      （见下面 `seesAdministration()` 的长注释）—— 不新造一套。 */
@@ -588,6 +597,17 @@ export const ENTRIES: Record<EntryKey, EntryRule> = {
    *    不是「我的」里的一行设置项。
    */
   '/manage': { label: '行政管理', visibleFor: seesAdministration },
+  /*
+   * 🆕 2026-10-12 **课程管理**（`/manage/course`）：行政管理那一页的**第四张卡**展开出来的
+   * 那一段自己的地址（第 3 轮落成独立页面；上一轮它是就地展开、没有地址）。
+   *
+   * 🔴 判据 = **`hasManagingRole`（超管 / 教务处 / 年级主任）** —— 与数据库的
+   *    `can_manage_schedule_for()` 同形。⚠️ **比 `/manage` 那条窄一档**：
+   *    `seesAdministration` 还含**办公室主任**（他能管教师账号），
+   *    而"改课表"他不在那一档里（§38.0 的口径）—— 所以这里**不能沿用 `/manage` 的 key**，
+   *    否则矩阵里那一行会算成 V（实测撞到过：D9 的 `/manage/course × office_head`）。
+   */
+  '/manage/course': { label: '课程管理', visibleFor: hasManagingRole },
   /*
    * ★ 将来：**super / admin / 年级主任**（`hasManagingRole`）。
    *

@@ -34,6 +34,7 @@ import GradeSetup from './pages/GradeSetup'
 import ImportPaste from './pages/ImportPaste'
 import ImportPhoto from './pages/ImportPhoto'
 import Login from './pages/Login'
+import ManageCourse from './pages/ManageCourse'
 import NotFound from './pages/NotFound'
 import NoticeNew from './pages/NoticeNew'
 import Notices from './pages/Notices'
@@ -744,6 +745,28 @@ export default function App() {
           element={
             <Guard>
               <Administration />
+            </Guard>
+          }
+        />
+        {/*
+          🆕 2026-10-12「课程管理」`/manage/course`（第 3 轮：**独立页面**）。
+
+          🔴 上一轮它是**就地展开**在 `/manage` 那张卡下面 —— 因为新地址要**同时**登记四处
+            （`App.tsx` · `PAGES` · `按身份显示导航方案.md` §2.2 · `管理架构与角色权限方案.md` §4.2），
+            而那时候的施工单只允许动"页面 + 类型 + 数据读写"。这一轮四处一起落。
+
+          ⚠️ **`/manage` 那张卡保留**（点卡仍然就地展开）：那是"到这一页的一条入口"，
+            多一条入口不是多一套判据 —— 两边渲染的是**同一个组件**（`CourseAdmin`）。
+
+          ⚠️ 刻意**不套额外守卫**（与 `/manage` / `/grades` / `/accounts` 同款）：
+            手打 URL 进得来，然后页面自己只回答"摆不摆那一段"（`hasManagingRole`），
+            而写入口的闸门在数据库（`can_manage_schedule()` + §38.1.1 的触发器）。
+        */}
+        <Route
+          path="/manage/course"
+          element={
+            <Guard>
+              <ManageCourse />
             </Guard>
           }
         />

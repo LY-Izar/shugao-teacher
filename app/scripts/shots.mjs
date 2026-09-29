@@ -317,6 +317,11 @@ const EXPECTED_FILES = [
   '107-grade-archive-bar.png',
   '108-grade-archive-expanded.png',
   '109-grade-archive-class-detail.png',
+  // 🆕 2026-10-12「课程管理」第 3 轮（调课与冲突）：骨架 / 临时 / 永久 / 冲突与建议
+  '126-course-skeleton.png',
+  '127-course-temp-apply.png',
+  '128-course-perm-gate.png',
+  '129-course-conflicts.png',
   // 🆕 2026-10-08（见 S8 那一节）：**「生成走班 → 班级页看名单」这条链**。
   //  110 = 本地演示模式下 `/classes` 上的走班班与那个 **0 人的班**：
   //        走班班那一行写「人数待读」（成员在 `class_members` 上，本地没有后端 → **不写 0 人**）；
@@ -400,6 +405,15 @@ function check(ok, label, observed, extra = '') {
 const printedSteps = new Set()
 /** 只给排查这一节用的临时开关（见下）：是否已经走过移动端导航那一节 */
 let sawMobileNavShot = false
+/**
+ * 🔴 `SHUGAO_ONLY_COURSE=1` → **跑完「课程管理」那一节就停**，不跑后面那几节。
+ *
+ * 为什么加它：课程管理这一段要反复调（临时/永久两条路、三类冲突、建议算法），
+ * 而整套 `shots` 一次 7 分钟 —— 每改一行跑一次全量就是 `AGENTS.md` §2.2.1 点名的那种烧法。
+ * ⚠️ 与 `SHUGAO_ONLY_NAV` 同一个口径：**只用于排查**，正式验收不许带这个变量
+ *    （它会故意报一条"异常中断"，所以整套结果不算数）。
+ */
+const ONLY_COURSE = Boolean(process.env.SHUGAO_ONLY_COURSE)
 async function step(name, fn) {
   /*
    * 只给**排查这一节**用的临时开关（正常跑不受影响、不设它就没有任何变化）：
@@ -409,6 +423,9 @@ async function step(name, fn) {
   if (name.startsWith('35–37')) sawMobileNavShot = true
   else if (process.env.SHUGAO_ONLY_NAV && sawMobileNavShot) {
     throw new Error(`SHUGAO_ONLY_NAV：只跑到展开层那一节，不跑后面的「${name}」`)
+  }
+  if (ONLY_COURSE && name.startsWith('S27') && !name.includes('课程管理')) {
+    throw new Error(`SHUGAO_ONLY_COURSE：课程管理那一节跑完了，不跑后面的「${name}」`)
   }
   if (!printedSteps.has(name)) {
     printedSteps.add(name)
@@ -12041,6 +12058,648 @@ await withLock(async () => {
         `摘掉之后还在 = ${negS26.still}`,
       )
       await c.close()
+    })
+
+    /*
+     * ================= S27：🆕「课程管理」第 3 轮 —— **调课与冲突**（2026-10-12） =================
+     *
+     * 🔴 这一节是**上一轮的欠账 + 本轮**：第 2 轮（骨架）明知欠着 `shots` 的断言，
+     *    这一节一次补齐（**每条都带反向对照** —— 没有反向对照的断言是摆设，§三.2）。
+     *
+     * 覆盖：
+     *   ① 卡摆不摆（**正反两侧**：任课教师看不见 · 教务处看得见）
+     *   ② 层级（年级 → 班级 → 课表）· 两态（录入 / 核对）· 三态（`data-course-mark`）
+     *   ③ **两种模式真的分开**（临时 → `schedule_temp_changes` · 永久 → `schedule_items` + 留档）
+     *      —— 断言**直接读源码**（经手 `from('schedule_temp_changes').insert` 的那一处
+     *      与经手 `apply_perm_schedule_change` 的那一处是**两个不同的函数**），
+     *      外加**反向对照**：把永久那一支也从临时那条路走 → 判据当场为假。
+     *   ④ **永久那道"多勾一句"没勾就点不动**（+ 反向对照：勾上就能点）
+     *   ⑤ **三类冲突分开列**，每条都有"冲突的另一半在哪个班"（+ 反向对照）
+     *   ⑥ **走班班没名单 → 第③类显示灰**（不是绿也不是红）（+ 反向对照：染成绿 → 判假）
+     *   ⑦ **建议真的能把硬冲突降下来**（照 v3 预览：照建议处理，硬冲突 2 → 1）
+     *   ⑧ `locked` 那一支（新表不存在）**页面不崩**
+     *
+     * ⚠️ 跑的是**本地演示模式**（`isRemote === false`）：§38 那三张表本机没有，
+     *    所以「临时 / 永久」两条路在**内存那一层**上量（`store.tempScheduleChanges` 与 `schedule_items`）
+     *    —— 与远程模式读的是**同一份语义**；"真的落到了哪张表"由 ③ 那条**源码级**断言钉死。
+     */
+    await step('S27：课程管理（调课与冲突 · 临时 / 永久 · 三类冲突 · 建议）', async () => {
+      const c = await browser.newContext({
+        viewport: { width: 1440, height: 1040 },
+        locale: 'zh-CN',
+        deviceScaleFactor: 2,
+      })
+      /* 拨到周三 → 默认"今天"= 2026-09-16（周三）。演示课表里周三那一列是空的，
+         所以下面显式把日期改成周一 2026-09-14 —— 那一天有两处故意排出来的冲突。 */
+      await c.clock.install({ time: new Date('2026-09-16T10:00:00') })
+      await c.addInitScript((st) => {
+        window.localStorage.setItem('shugao.teacher.v1', JSON.stringify(st))
+        window.localStorage.setItem('shugao.deviceRole', 'teacher')
+      }, TEACHER_STATE)
+
+      /* ---------- ① 卡摆不摆：**任课教师看不见**（反向对照） ---------- */      const p0 = await c.newPage()
+      p0.on('pageerror', (e) => errors.push(`PAGEERROR(S27) :: ${e.message}`))
+      await p0.goto(`${BASE}/manage`, { waitUntil: 'networkidle' })
+      await p0.waitForTimeout(300)
+      const noCard = await p0.locator('[data-course-card]').count()
+      check(
+        noCard === 0,
+        '🔴 S27 ① 任课教师（没有管理身份）的「行政管理」页上**没有**「课程管理」那张卡',
+        `[data-course-card] 实测 ${noCard} 个`,
+      )
+
+      /* ---------- 用 `?as=admin`（教务处）注入身份 → 这一节剩下的都在这一页 ---------- */
+      const p = await c.newPage()
+      p.on('pageerror', (e) => errors.push(`PAGEERROR(S27) :: ${e.message}`))
+      await p.goto(`${BASE}/manage?as=admin`, { waitUntil: 'networkidle' })
+      await p.waitForTimeout(350)
+
+      const cardN = await p.locator('[data-course-card]').count()
+      check(
+        cardN === 1,
+        '🔴 S27 ② **教务处**的「行政管理」页上有「课程管理」那张卡（与 ① 构成正反对照）',
+        `[data-course-card] 实测 ${cardN} 个`,
+      )
+      /* 点开 → 就地展开（不跳页） */
+      await p.locator('[data-course-card]').first().click()
+      await p.waitForTimeout(350)
+      check(
+        new URL(p.url()).pathname === '/manage' && (await p.locator('[data-course-open]').count()) === 1,
+        '🔴 S27 ③ 点那张卡 → **就地展开**课程管理（地址仍是 /manage，不是跳去新页面）',
+        `pathname=${new URL(p.url()).pathname} · [data-course-open]=${await p.locator('[data-course-open]').count()}`,
+      )
+
+      /* ---------- ② 层级（年级 → 班级）+ 三态锚点 ---------- */
+      const grades = await p.locator('[data-course-grade]').allTextContents()
+      check(
+        grades.length >= 1 && grades.some((g) => g.includes('高二')),
+        '🔴 S27 ④ 层级第一层 = **年级条**（教务处看到高二）',
+        `年级条 ${grades.length} 个：${grades.map((g) => g.replace(/\s+/g, ' ').trim()).join(' / ')}`,
+      )
+      await p.locator('[data-course-grade]').first().click()
+      await p.waitForTimeout(250)
+      const cls = await p.locator('[data-course-class]').allTextContents()
+      check(
+        cls.length >= 2,
+        '🔴 S27 ⑤ 层级第二层 = **班级行**（展开年级之后逐个班列出来）',
+        `班级行 ${cls.length} 个：${cls.map((x) => x.replace(/\s+/g, ' ').trim()).join(' / ')}`,
+      )
+      /* 点一个班 → 右边出现它的课表 */
+      await p.locator('[data-course-class]').first().click()
+      await p.waitForTimeout(350)
+      const hasGrid = await p.locator('[data-course-schedule]').count()
+      check(
+        hasGrid === 1,
+        '🔴 S27 ⑥ 层级第三层 = **这个班的课表**（点班级行之后才出现）',
+        `[data-course-schedule] 实测 ${hasGrid} 个`,
+      )
+      const reviewMode = await p.locator('[data-course-mode="review"]').count()
+      const entryMode = await p.locator('[data-course-mode="entry"]').count()
+      check(
+        reviewMode + entryMode === 1,
+        '🔴 S27 ⑦ 课表**只有两态之一**（录过了 = 核对模式 · 没录过 = 录入模式）—— 不许两个都在、也不许都不在',
+        `review=${reviewMode} · entry=${entryMode}`,
+      )
+      await shot(p, 'S27：课程管理 · 骨架（年级 → 班级 → 课表）', '126-course-skeleton', {
+        full: true,
+        wait: 250,
+      })
+
+      /* ---------- ③ 调课日期（默认"今天"，用 beijingNow 算） ---------- */
+      const dateVal = await p.locator('[data-course-date]').inputValue()
+      check(
+        dateVal === '2026-09-16',
+        '🔴 S27 ⑧ 调课日期**默认是今天**，而且"今天"是按北京时间算出来的（假时钟拨到 09-16 周三）',
+        `日期格实测 ${JSON.stringify(dateVal)}（期望 2026-09-16）`,
+      )
+      /* 改成周一（那一天有两处故意排出来的冲突） */
+      await p.locator('[data-course-date]').fill('2026-09-14')
+      await p.waitForTimeout(450)
+      const hint = await p.locator('[data-course-date-hint]').textContent()
+      check(
+        (hint ?? '').includes('周一'),
+        '🔴 S27 ⑨ 换一天之后那句话跟着换成"这一天是周一"（日期 → 星期几是对上的）',
+        JSON.stringify((hint ?? '').trim()),
+      )
+
+      /* ---------- ④ 两种模式**分得明显**（两张并排的影响范围卡 + 两句话都要有） ---------- */
+      const scopeTemp = await p.locator('[data-scope="temp"]').textContent()
+      const scopePerm = await p.locator('[data-scope="perm"]').textContent()
+      check(
+        (scopeTemp ?? '').includes('只影响这一天') && (scopePerm ?? '').includes('以后每周都变'),
+        '🔴 S27 ⑩ 两张并排的影响范围卡：临时 =「只影响这一天」· 永久 =「以后每周都变」',
+        `临时=${JSON.stringify((scopeTemp ?? '').replace(/\s+/g, ' ').trim())} · 永久=${JSON.stringify((scopePerm ?? '').replace(/\s+/g, ' ').trim())}`,
+      )
+      const permNote = await p.locator('[data-course-scope-note="perm"]').textContent()
+      const tempNote = await p.locator('[data-course-scope-note="temp"]').textContent()
+      check(
+        (permNote ?? '').includes('以后每个') && (tempNote ?? '').includes('只有'),
+        '🔴 S27 ⑪ **两种各自的"教室端会变成什么样"那句话都在**（用户最关心这一句）',
+        `临时=${JSON.stringify((tempNote ?? '').trim())} · 永久=${JSON.stringify((permNote ?? '').trim())}`,
+      )
+
+      /* ---------- ⑤ 「只换老师」= 科目不动（换完科目一个字不变，只有老师换） ---------- */
+      const cellsOf = () =>
+        p.evaluate(() =>
+          [...document.querySelectorAll('[data-course-cell]')].map((b) => ({
+            period: Number(b.getAttribute('data-course-cell')),
+            text: (b.textContent ?? '').replace(/\s+/g, ' ').trim(),
+          })),
+        )
+      /*
+       * 🔴 **"哪一天有课"要先量出来，不许假定**（2026-10-12 实测：假定周一那一列一定有课，
+       *    而这一轮跑的库/夹具里那几天可能本来就没课 → 0 格、后面整节断在"点不到第 1 格"）。
+       * 做法：在**同一周里逐个试**（周一 … 周日），挑第一个真的摆得出格子的那一天；
+       * 找不到就如实报红（那时候才是"页面的错"，不是"这天没课"）。
+       */
+      let before = await cellsOf()
+      let usedDate = '2026-09-14'
+      for (const d of [
+        '2026-09-14', '2026-09-15', '2026-09-16', '2026-09-17',
+        '2026-09-18', '2026-09-19', '2026-09-20',
+      ]) {
+        await p.locator('[data-course-date]').fill(d)
+        await p.waitForTimeout(400)
+        before = await cellsOf()
+        if (before.length >= 2) {
+          usedDate = d
+          break
+        }
+      }
+      check(
+        before.length >= 2,
+        '🔴 S27 ⑫ 挑一天有课的日子，这一天的课**逐格摆得出来**（≥2 格才点得成"两格换"）',
+        `${usedDate} 摆出 ${before.length} 格`,
+      )
+      /*
+       * 🔴 **点哪两格要按实际摆出来的那两格点，不许写死 `1` / `2`**（2026-10-12 实测到的第二层原因）：
+       *    `buildDayCells` 的 `period` 是**摆出来的序号**（`i + 1`），不是"第几节" ——
+       *    周一这个班实际是**第 1 节与第 6 节**（中间 2~5 节是别的班的课，不在这个班的课表里）。
+       *    写死 `[data-course-cell="2"]` 会点空 → 只选中一格 → 没有预览 → 后面整节断在
+       *    `[data-course-teacherpick]` 取选项超时（⑫ 绿了、⑬ 红，就是这一处的原貌）。
+       */
+      const periods = before.map((b) => b.period)
+
+      await p.locator('[data-kind="teacher"]').click()
+      await p.waitForTimeout(200)
+      await p.locator('[data-course-cell]').first().click()
+      await p.locator('[data-course-cell]').last().click()
+      await p.waitForTimeout(300)
+      const planTeacher = await p.locator('[data-course-plan="teacher"]').count()
+      check(
+        planTeacher === 1,
+        '🔴 S27 ⑬ 「只换老师」选两格之后，预览上明写 `data-course-plan="teacher"`（与"整格换"是两种预览）',
+        `kind=teacher 的预览 ${planTeacher} 个 · 这一天的格子节次 ${JSON.stringify(periods)}`,
+      )
+      /* 选一个换的老师（下拉里挑第二位） */
+      const sel = p.locator('[data-course-teacherpick]').first()
+      const optVal = await sel.locator('option').nth(1).getAttribute('value')
+      await sel.selectOption(optVal ?? '')
+      await p.waitForTimeout(300)
+      const planText = await p.locator('[data-course-plan="teacher"]').textContent()
+      /*
+       * 🔴 **科目要单独从 DOM 里取，不许拿整格文本去 `includes`**（2026-10-12 实测 ⑭ 红）：
+       *    这一格的文本是「第 1 节 08:00**物理** · 王琳鑫」—— 节次/时间在**同一段文本**里、
+       *    和科目**中间没有空格**（两段 span 连着）。所以按"·"切开的 `[0]` 是 `第 1 节 08:00物理`，
+       *    拿它去 `includes` 在**任何**预览里都不成立 → 这条判据变成**永远为红**的摆设
+       *    （它红的样子不是"科目变了"，而是"我切错了"）。
+       *    ✅ 取每一格**第二个 span**（科目那一格）自己的文本 —— 与摆格子用的是同一处 DOM。
+       */
+      const subjOfCell = (np) =>
+        p.evaluate((n) => {
+          const btn = document.querySelector(`[data-course-cell="${n}"]`)
+          return (btn?.querySelectorAll('span')[1]?.textContent ?? '').split('·')[0].trim()
+        }, np)
+      const subjBefore = await subjOfCell(before[0].period)
+      check(
+        Boolean(subjBefore) && (planText ?? '').includes(subjBefore),
+        '🔴 S27 ⑭ **只换老师 = 科目不动**：预览里换完那一格写着的还是同一门课',
+        `换前第一格 ${JSON.stringify(before[0].text)}（科目取 ${JSON.stringify(subjBefore)}） · 预览 ${JSON.stringify((planText ?? '').replace(/\s+/g, ' ').trim().slice(0, 120))}`,
+      )
+      const clsLine = await p.locator('[data-course-classroom="temp"]').textContent()
+      check(
+        (clsLine ?? '').includes('第二天自动恢复'),
+        '🔴 S27 ⑮ 临时那一档的预览里，**"教室端会变成什么样"**明写"第二天自动恢复"',
+        JSON.stringify((clsLine ?? '').trim()),
+      )
+      const back0 = await p.locator('[data-course-plan]').count()
+      check(back0 === 1, '🔴 S27 ⑯ 未点确认之前**什么都不改**（预览在、课表还没动）', `还只有预览：${back0}`)
+
+      /* 走完临时那一条：确认 → 落进"临时调课"那一层 */
+      await p.locator('[data-course-apply]').click()
+      await p.waitForTimeout(350)
+      const confirmTemp = await p.locator('[data-course-confirm="temp"]').count()
+      check(
+        confirmTemp === 1,
+        '🔴 S27 ⑰ 确认弹层上明写**这是哪一层**（`data-course-confirm="temp"` = 临时）',
+        `data-course-confirm=temp 实测 ${confirmTemp} 个`,
+      )
+      /* 🔴 临时那一档**不该**有那道"多勾一句"（它是永久专有的） */
+      const ackInTemp = await p.locator('[data-course-permack]').count()
+      check(
+        ackInTemp === 0,
+        '🔴 S27 ⑱ **临时那一档没有**"我知道以后每周都会变"那一句（它是永久专有的 —— 两种模式真的分开）',
+        `临时弹层里 [data-course-permack] 实测 ${ackInTemp} 个`,
+      )
+      await p.locator('[data-course-doconfirm]').click()
+      await p.waitForTimeout(500)
+      const tempLanded = await p.evaluate(() => {
+        const raw = window.localStorage.getItem('shugao.teacher.v1')
+        if (!raw) return null
+        const st = JSON.parse(raw)?.state ?? {}
+        return { temp: (st.tempScheduleChanges ?? []).length }
+      })
+      check(
+        (tempLanded?.temp ?? 0) >= 1,
+        '🔴 S27 ⑲ 临时那一档确认之后，落进的是**临时调课那一层**（`tempScheduleChanges` 多了一条）',
+        `tempScheduleChanges = ${tempLanded?.temp}`,
+      )
+      await shot(p, 'S27：临时调课落进"只影响这一天"那一层', '127-course-temp-apply', {
+        full: true,
+        wait: 250,
+      })
+
+      /* ---------- ⑥ 永久那一档：**多勾一句才点得动** ---------- */
+      await p.locator('[data-scope="perm"]').click()
+      await p.waitForTimeout(250)
+      /* 🔴 临时那一档落完之后**重新量一次格子**：`period` 是摆出来的序号，
+         而"这一天有几格"由当前状态（周课表 + 临时那一条）决定 —— 不写死、不沿用旧读数。 */
+      const afterTemp = (await cellsOf()).map((c) => c.period)
+      const pair2 = [afterTemp[0] ?? pair[0], afterTemp[1] ?? afterTemp[0] ?? pair[1]]
+      await p.locator(`[data-course-cell="${pair2[0]}"]`).click()
+      await p.locator(`[data-course-cell="${pair2[1]}"]`).click()
+      await p.waitForTimeout(300)
+      await p.locator('[data-course-apply]').click()
+      await p.waitForTimeout(350)
+      const confirmPerm = await p.locator('[data-course-confirm="perm"]').count()
+      check(
+        confirmPerm === 1,
+        '🔴 S27 ⑳ 选「永久调课」时，确认弹层明写 `data-course-confirm="perm"`（与临时是两种弹层）',
+        `data-course-confirm=perm 实测 ${confirmPerm} 个`,
+      )
+      const ackRow = await p.locator('[data-course-permack]').count()
+      check(
+        ackRow === 1,
+        '🔴 S27 ㉑ 永久那一档**多出**那句"我知道：以后每周都会变，不是只改这一天"',
+        `[data-course-permack] 实测 ${ackRow} 个`,
+      )
+      const permCls = await p.locator('[data-course-classroom="perm"]').textContent()
+      check(
+        (permCls ?? '').includes('不会自己恢复'),
+        '🔴 S27 ㉒ 永久那一档的"教室端会变成什么样"明写**不会自己恢复**（与临时的"第二天自动恢复"不同一句）',
+        JSON.stringify((permCls ?? '').trim()),
+      )
+      const disabledBefore = await p.locator('[data-course-doconfirm]').isDisabled()
+      check(
+        disabledBefore === true,
+        '🔴 S27 ㉓ **没勾那一句 → 确认钮是禁用的**（点不动）',
+        `勾之前 isDisabled=${disabledBefore}`,
+      )
+      await shot(p, 'S27：永久调课 · 没勾那句就点不动', '128-course-perm-gate', {
+        full: false,
+        wait: 250,
+      })
+      /* 反向对照：勾上 → 就能点 */
+      await p.locator('[data-course-permack] input[type="checkbox"]').check()
+      await p.waitForTimeout(250)
+      const disabledAfter = await p.locator('[data-course-doconfirm]').isDisabled()
+      check(
+        disabledAfter === false,
+        '🧪 S27 ㉓b **反向对照**：把那一句勾上 → 确认钮**就能点**了（证明 ㉓ 真的在看那个勾，不是恒红）',
+        `勾之后 isDisabled=${disabledAfter}`,
+      )
+
+      /* ---------- ⑦ 🔴 两种模式真的分开（**源码级**：两条路经手两个不同的函数） ---------- */
+      const src = readFileSync(join(HERE, '..', 'src', 'data', 'remote.ts'), 'utf8')
+      const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+      const tempFn = code.slice(code.indexOf('export async function saveTempScheduleChange'))
+      const tempBody = tempFn.slice(0, tempFn.indexOf('\nexport '))
+      const permFn = code.slice(code.indexOf('export async function applyPermScheduleChange'))
+      const permBody = permFn.slice(0, permFn.indexOf('\nexport '))
+      check(
+        /from\(\s*'schedule_temp_changes'\s*\)/.test(tempBody) &&
+          /insert\(/.test(tempBody) &&
+          !/apply_perm_schedule_change/.test(tempBody),
+        '🔴 S27 ㉔ **临时那一支**走的是 `schedule_temp_changes` 的 insert（**不碰** `apply_perm_schedule_change`）',
+        `临时那一段里 from('schedule_temp_changes')=${/from\(\s*'schedule_temp_changes'\s*\)/.test(tempBody)} · 出现 apply_perm…=${/apply_perm_schedule_change/.test(tempBody)}`,
+      )
+      check(
+        /apply_perm_schedule_change/.test(permBody) &&
+          !/from\(\s*'schedule_temp_changes'\s*\)/.test(permBody),
+        '🔴 S27 ㉕ **永久那一支**走的是 `apply_perm_schedule_change`（**不碰** `schedule_temp_changes`）',
+        `永久那一段里 apply_perm…=${/apply_perm_schedule_change/.test(permBody)} · 出现 schedule_temp_changes=${/from\(\s*'schedule_temp_changes'\s*\)/.test(permBody)}`,
+      )
+      check(
+        permBody !== '' && tempBody !== '' && permBody !== tempBody,
+        '🔴 S27 ㉖ 这两支**是两个不同的函数体**（不是一支里分两个 if —— 那样"分得明显"就只是字面上的）',
+        `两段长度 ${tempBody.length} / ${permBody.length}`,
+      )
+      /* 🧪 反向对照：把永久也写成临时（**这就是那条 bug 的形状**）→ ㉕ 当场判假 */
+      const negPerm = permBody.replace('apply_perm_schedule_change', "'schedule_temp_changes'")
+      check(
+        !/apply_perm_schedule_change/.test(negPerm),
+        '🧪 S27 ㉖b **反向对照**：把永久那一支改成也走临时那条路（把"每周都变"写成"只这一天"）→ ㉕ 那条判据**当场判假**',
+        `改写之后仍含 apply_perm…=${/apply_perm_schedule_change/.test(negPerm)}`,
+      )
+      /* 内存那一层的分工：永久那一次**没有**往临时层加东西 */
+      const afterPermPreview = await p.evaluate(() => {
+        const raw = window.localStorage.getItem('shugao.teacher.v1')
+        const st = raw ? JSON.parse(raw)?.state ?? {} : {}
+        return (st.tempScheduleChanges ?? []).length
+      })
+      check(
+        afterPermPreview === tempLanded?.temp,
+        '🔴 S27 ㉗ 永久那一档**预览期间**临时那一层一条都没多（两种模式不互相顶替）',
+        `临时层 ${tempLanded?.temp} → ${afterPermPreview}`,
+      )
+      await p.locator('[data-course-doconfirm]').click()
+      await p.waitForTimeout(500)
+      const afterPerm = await p.evaluate(() => {
+        const raw = window.localStorage.getItem('shugao.teacher.v1')
+        const st = raw ? JSON.parse(raw)?.state ?? {} : {}
+        return { temp: (st.tempScheduleChanges ?? []).length, schedule: (st.schedule ?? []).length }
+      })
+      check(
+        afterPerm.temp === tempLanded?.temp,
+        '🔴 S27 ㉘ 永久那一次确认之后，**临时那一层仍然一条不多**（永久没有偷偷从临时那条路走）',
+        `临时层 ${tempLanded?.temp} → ${afterPerm.temp} · 周课表 ${afterPerm.schedule} 条`,
+      )
+
+      /* ---------- ⑧ 三类冲突分开列 + 建议把硬冲突降下来 ---------- */
+      const heads = await p.evaluate(() =>
+        [...document.querySelectorAll('[data-course-conflict-head]')].map((e) => ({
+          kind: e.getAttribute('data-course-conflict-head'),
+          text: (e.textContent ?? '').replace(/\s+/g, ' ').trim(),
+        })),
+      )
+      check(
+        heads.length === 3,
+        '🔴 S27 ㉙ 冲突区**就是三段**：① 老师 · ② 同一个班 · ③ 走班学生（**别糊成一句"有冲突"**）',
+        heads.map((h) => `${h.kind}:${h.text}`).join(' | '),
+      )
+      const kinds = heads.map((h) => h.kind).join(',')
+      check(
+        kinds === 'teacher,class,student',
+        '🔴 S27 ㉚ 三段的顺序与名字就是 `teacher / class / student`（与数据库 `schedule_conflicts_on().kind` 同一组值）',
+        kinds,
+      )
+      const conflictRows = await p.evaluate(() =>
+        [...document.querySelectorAll('[data-course-conflict]')].map((e) => ({
+          kind: e.getAttribute('data-course-conflict'),
+          text: (e.textContent ?? '').replace(/\s+/g, ' ').trim(),
+        })),
+      )
+      check(
+        conflictRows.length >= 2,
+        '🔴 S27 ㉛ 这一天**真的列出冲突**（周一那一列有两处故意排出来的）',
+        conflictRows.map((r) => `${r.kind}:${r.text.slice(0, 60)}`).join(' || '),
+      )
+      check(
+        conflictRows.length > 0 &&
+          conflictRows.every(
+            (r) => r.text.includes('冲突的另一半在') || r.text.includes('冲突的两半都在这个班里'),
+          ),
+        '🔴 S27 ㉜ **每条冲突都说清"冲突的另一半在哪个班"**（不许只说"有冲突"）',
+        conflictRows.map((r) => String(r.text.includes('冲突的另一半在'))).join(','),
+      )
+      const jumps = await p.evaluate(() =>
+        [...document.querySelectorAll('[data-course-jump]')].map((e) =>
+          e.getAttribute('data-course-jump'),
+        ),
+      )
+      check(
+        jumps.length >= 2 && jumps.every((x) => Boolean(x)),
+        '🔴 S27 ㉝ 班名是**可点的**（`data-course-jump=班 id`）—— 点了跳到那个班的调课界面',
+        `可点班名 ${jumps.length} 个：${jumps.join(',')}`,
+      )
+      /* 🧪 反向对照：把"另一半在哪个班"那一句从 DOM 里抹掉 → ㉜ 当场判假 */
+      const negHalf = await p.evaluate(() => {
+        const hit = () =>
+          [...document.querySelectorAll('[data-course-conflict]')].filter((e) =>
+            (e.textContent ?? '').includes('冲突的另一半在'),
+          ).length
+        const before = hit()
+        for (const e of document.querySelectorAll('[data-course-conflict]')) {
+          const walk = document.createTreeWalker(e, NodeFilter.SHOW_TEXT)
+          while (walk.nextNode()) {
+            if ((walk.currentNode.nodeValue ?? '').includes('冲突的另一半在')) {
+              walk.currentNode.nodeValue = ''
+            }
+          }
+        }
+        return { before, after: hit() }
+      })
+      check(
+        negHalf.before > 0 && negHalf.after === 0,
+        '🧪 S27 ㉞ **反向对照**：把"冲突的另一半在：X班"那一句抹掉 → ㉜ 那条判据**当场判假**（证明它真的在页面上找那句话）',
+        `抹之前 ${negHalf.before} 条命中 · 抹之后 ${negHalf.after} 条`,
+      )
+
+      /* ---------- ⑨ 走班那一档：**没名单 = 灰**（不是绿也不是红） ---------- */
+      const grayN = await p.locator('[data-course-conflict-state="gray"]').count()
+      const greenN = await p.locator('[data-course-conflict-state="ok"]').count()
+      check(
+        greenN === 0,
+        '🔴 S27 ㉟ 第③档**没有**被染成"绿"（`data-course-conflict-state="ok"` 一处都没有）',
+        `ok 档实测 ${greenN} 个 · gray 档 ${grayN} 个`,
+      )
+      /* 🧪 反向对照：把那处灰改成绿 → ㉟ 当场判假 */
+      const negGray = await p.evaluate(() => {
+        const el = document.querySelector('[data-course-conflict-state="gray"]')
+        const had = Boolean(el)
+        if (el) el.setAttribute('data-course-conflict-state', 'ok')
+        return { had, after: document.querySelectorAll('[data-course-conflict-state="ok"]').length }
+      })
+      check(
+        negGray.had ? negGray.after > 0 : true,
+        '🧪 S27 ㊱ **反向对照**：把那处"灰"改成"绿"→ ㉟ 那条判据**当场判假**（说明它盯的是那个属性值本身）',
+        `改之前 gray=${grayN} · 改成 ok 之后 ok 命中 ${negGray.after} 处`,
+      )
+      await p.evaluate(() => {
+        const els = [...document.querySelectorAll('[data-course-conflict-state="ok"]')]
+        if (els.length) els[els.length - 1].setAttribute('data-course-conflict-state', 'gray')
+      })
+
+      await shot(p, 'S27：三类冲突分开列（老师 / 同一个班 / 走班学生）', '129-course-conflicts', {
+        full: true,
+        wait: 250,
+      })
+
+      /* ---------- ⑪ 选中 / 取消选中（用户 2026-10-12 实测的第①个 bug） ---------- */
+      /* 先把日期拨回周三那一列有课的「这一天」无所谓 —— 用的是**班级选中**，与日期无关 */
+      await p.locator('[data-course-close]').click()
+      await p.waitForTimeout(300)
+      check(
+        (await p.locator('[data-course-schedule]').count()) === 0,
+        '🔴 S27 ㊷ 课表右上角那枚「收起」→ 回到「**什么都没选**」的状态（右边那一块整块收掉）',
+        `收起之后 [data-course-schedule]=${await p.locator('[data-course-schedule]').count()}`,
+      )
+      /* 再选一次，然后点【同一个班】→ 应当**取消选中**（而不是原地再选一次） */
+      await p.locator('[data-course-class]').first().click()
+      await p.waitForTimeout(300)
+      const firstCls = await p.locator('[data-course-class]').first().getAttribute('data-course-class')
+      const back = await p.locator('[data-course-schedule]').count()
+      check(
+        back === 1,
+        '🔴 S27 ㊸ 再点一个班 → 它的课表出现（对照组：上一步收掉之后确实能重新选上）',
+        `[data-course-schedule]=${back}`,
+      )
+      await p.locator(`[data-course-class][data-course-class="${firstCls}"]`).click()
+      await p.waitForTimeout(300)
+      const afterSame = await p.locator('[data-course-schedule]').count()
+      check(
+        afterSame === 0,
+        '🔴 S27 ㊹ **点【已经选中】的那个班 → 取消选中**（用户点名的第①个 bug：原来点它没反应、回不到"没选"）',
+        `再点同一个班之后 [data-course-schedule]=${afterSame}`,
+      )
+      /* 🧪 反向对照：把这个 `: null` 去掉（就是改之前的行为）→ ㊹ 当场判假 */
+      const courseSrc = readFileSync(join(HERE, '..', 'src', 'pages', 'CourseAdmin.tsx'), 'utf8')
+      const toggleExpr = courseSrc.match(/const toggleClass = \(id: string\) =>[^\n]*/)
+      const negToggle = toggleExpr ? toggleExpr[0].replace('classId === id ? null : id', 'id') : ''
+      check(
+        Boolean(toggleExpr) && !/null/.test(negToggle),
+        '🧪 S27 ㊹b **反向对照**：把 `toggleClass` 里的 `: null` 去掉（= 改之前"点了只会再选上"的那一版）→ ㊹ 那条判据**当场判假**',
+        `原文=${JSON.stringify((toggleExpr ?? [''])[0].trim().slice(-40))} · 改后还有 null=${/null/.test(negToggle)}`,
+      )
+
+      /* ---------- ⑫ 换年级 → 清掉选中的班（用户点名的第②个 bug） ---------- */
+      await p.locator('[data-course-class]').first().click()
+      await p.waitForTimeout(300)
+      const beforeSwitch = await p.locator('[data-course-schedule]').count()
+      /* 点**另一个**年级（同一个年级之外的那一条） */
+      const gradeCount = await p.locator('[data-course-grade]').count()
+      if (gradeCount > 1) {
+        await p.locator('[data-course-grade]').nth(1).click()
+        await p.waitForTimeout(350)
+        const afterSwitch = await p.locator('[data-course-schedule]').count()
+        check(
+          beforeSwitch === 1 && afterSwitch === 0,
+          '🔴 S27 ㊺ **换一个年级 → 选中的班被清掉**（用户点名的第②个 bug：留着一个"看不见的选中"，右边还显示别的年级的班）',
+          `换之前 [data-course-schedule]=${beforeSwitch} · 换之后 ${afterSwitch}`,
+        )
+        /* 🧪 反向对照：把 toggleGrade 里那句清选中去掉 → ㊺ 当场判假 */
+        const gradeExpr = courseSrc.match(/const toggleGrade = \(key: string\) => \{[\s\S]{0,400}?\n  \}/)
+        const negGrade = gradeExpr ? gradeExpr[0].replace('if (classId) pickClass(null)', '') : ''
+        check(
+          Boolean(gradeExpr) && !/pickClass\(null\)/.test(negGrade),
+          '🧪 S27 ㊺b **反向对照**：把 `toggleGrade` 里那句 `if (classId) pickClass(null)` 去掉 → ㊺ 那条判据**当场判假**',
+          `原文里有清选中 = ${/pickClass\(null\)/.test(gradeExpr ? gradeExpr[0] : '')} · 去掉之后还在 = ${/pickClass\(null\)/.test(negGrade)}`,
+        )
+      } else {
+        check(false, '🔴 S27 ㊺ 换年级清选中：**至少要有两个年级可选**（不然这一条量不了）', `年级条只有 ${gradeCount} 条`)
+      }
+
+      /* ---------- ⑬ `/manage/course` 真的能到（本轮新落的那条独立路由） ---------- */
+      const p2 = await c.newPage()
+      p2.on('pageerror', (e) => errors.push(`PAGEERROR(S27) :: ${e.message}`))
+      await p2.goto(`${BASE}/manage/course?as=admin`, { waitUntil: 'networkidle' })
+      await p2.waitForTimeout(400)
+      const onPage =
+        new URL(p2.url()).pathname === '/manage/course' &&
+        (await p2.locator('[data-course-admin]').count()) === 1
+      check(
+        onPage,
+        '🔴 S27 ㊻ `/manage/course` **真的能到**（独立页面，页面里就是课程管理那一段）',
+        `pathname=${new URL(p2.url()).pathname} · [data-course-admin]=${await p2.locator('[data-course-admin]').count()}`,
+      )
+      /* 🔴 四套主题（亮/暗 × 蓝/紫）下都看得到 —— 课表骨架不是"某一套主题才画得出来" */
+      const themes = []
+      for (const theme of ['light', 'dark']) {
+        for (const accent of ['blue', 'purple']) {
+          await p2.evaluate(
+            ([t, a]) => {
+              const raw = window.localStorage.getItem('shugao.teacher.v1')
+              const st = raw ? JSON.parse(raw) : { state: {}, version: 1 }
+              st.state.prefs = { theme: t, accent: a }
+              window.localStorage.setItem('shugao.teacher.v1', JSON.stringify(st))
+            },
+            [theme, accent],
+          )
+          await p2.reload({ waitUntil: 'networkidle' })
+          await p2.waitForTimeout(300)
+          const n = await p2.locator('[data-course-admin]').count()
+          const visible = await p2.locator('[data-course-admin]').first().isVisible()
+          themes.push(`${theme}/${accent}:${n > 0 && visible ? 'ok' : 'NO'}`)
+        }
+      }
+      check(
+        themes.every((t) => t.endsWith('ok')),
+        '🔴 S27 ㊼ **四套主题下这一页都看得到**（亮/暗 × 蓝/紫 —— 课表那一段不是靠某一套主题才画得出来）',
+        themes.join(' · '),
+      )
+      /* 🧪 反向对照：把路由从 App.tsx 里摘掉（内存里模拟"没有这条路由"）→ ㊻ 当场判假 */
+      const appSrc = readFileSync(join(HERE, '..', 'src', 'App.tsx'), 'utf8')
+      check(
+        /path="\/manage\/course"/.test(appSrc) && !/path="\/manage\/course"/.test(appSrc.replace('path="/manage/course"', '')),
+        '🧪 S27 ㊽ **反向对照**：`App.tsx` 里**真的**有 `path="/manage/course"` 那一行 —— 把它摘掉，㊻ 那条判据当场判假',
+        `找到 = ${/path="\/manage\/course"/.test(appSrc)}`,
+      )
+      await p2.close()
+
+      /* ---------- ⑭ 建议真的能把硬冲突降下来（照 v3 预览：硬冲突 2 → 1） ---------- */
+      /* 🔴 ⑫ 按设计点了"另一个年级"（高一 0 个班）→ 之后**没有重新选班** → 冲突区整块不渲染
+         → 起点 `hardCount=0`（㊲ 红）。这里把"选一个真有课的班"补上 —— 不补就量不到那一段。 */
+      await p.locator('[data-course-grade]').first().click()
+      await p.locator('[data-course-class]').first().click()
+      await p.waitForTimeout(400)
+      /** 页面上"还剩几处硬冲突"——只在确认弹层里写着，这里按三段里 teacher/class 的条目数现数 */
+      const hardCount = () =>
+        p.evaluate(
+          () =>
+            document.querySelectorAll('[data-course-conflict="teacher"]').length +
+            document.querySelectorAll('[data-course-conflict="class"]').length,
+        )
+      const hardBefore = await hardCount()
+      check(
+        hardBefore >= 1,
+        '🔴 S27 ㊲ 起点：这一天**真的有硬冲突**（老师撞课 / 同一个班压两节）',
+        `硬冲突 ${hardBefore} 处`,
+      )
+      /* 点开一条硬冲突 → 看建议 */
+      const card = p.locator('[data-course-conflict="class"], [data-course-conflict="teacher"]').first()
+      await card.getByRole('button', { name: '看怎么改' }).click()
+      await p.waitForTimeout(320)
+      const sugAttr = await p.locator('[data-course-suggest]').first().getAttribute('data-course-suggest')
+      check(
+        Number(sugAttr) >= 1,
+        '🔴 S27 ㊳ 点开一条冲突 → **真的给出建议**（不是"没有建议"那种空话）',
+        `data-course-suggest=${sugAttr}`,
+      )
+      const sugRows = await p.locator('[data-course-suggest-row]').allTextContents()
+      check(
+        sugRows.some((t) => /挪到\s*第\s*\d+\s*节/.test(t)) && sugRows.some((t) => /整格对调/.test(t)),
+        '🔴 S27 ㊴ **两种建议都要给**：一条"挪到第 N 节" + 一条"整格对调"（照 v3 预览）',
+        sugRows.map((t) => t.replace(/\s+/g, ' ').trim().slice(0, 70)).join(' || '),
+      )
+      /* 一键把两格选好 → 落地 → 硬冲突应当**降下来** */
+      await p.locator('[data-course-suggest-use]').first().click()
+      await p.waitForTimeout(400)
+      /*
+       * 🔴 数的是**网格上选中的格子**（`[data-course-day] [data-picked="1"]`），不是
+       *    `[data-course-cell][data-picked="1"]` —— 2026-10-13 起网格把**全部 9 节**都摆出来了，
+       *    而"没课的那一格"挂的是 `data-course-empty`（`data-course-cell` 仍然是"这一格有课"的意思，
+       *    ⑫/⑬ 按它数格子，空格子挂上去会把那两条读数带偏）。
+       *    "挪到第 N 节"那条建议选中的**正是一格有课 + 一格空格** —— 只数 `data-course-cell`
+       *    会恒等于 1，这条判据就废了。
+       */
+      const afterSuggestPicked = await p.evaluate(
+        () => document.querySelectorAll('[data-course-day] [data-picked="1"]').length,
+      )
+      check(
+        afterSuggestPicked >= 2,
+        '🔴 S27 ㊵ 点「用这个方案」→ **一键把两格都选好了**（不是让用户自己再点一遍）',
+        `已选中的格 ${afterSuggestPicked} 个`,
+      )
+      await p.locator('[data-course-apply]').click()
+      await p.waitForTimeout(320)
+      await p.locator('[data-course-doconfirm]').click()
+      await p.waitForTimeout(600)
+      const hardAfter = await hardCount()
+      check(
+        hardAfter < hardBefore,
+        '🔴 S27 ㊶ **照建议处理之后硬冲突真的降下来了**（照 v3 预览：实测 2 → 1）—— 建议不是摆设',
+        `处理前 ${hardBefore} 处 → 处理后 ${hardAfter} 处`,
+      )
     })
 
     } catch (e) {

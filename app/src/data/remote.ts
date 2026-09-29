@@ -2266,6 +2266,225 @@ export async function canManageSchedule(classId: string): Promise<CanManageSched
   }
 }
 
+/* ============================================================
+   🆕 2026-10-12 · 「课程管理」第 3 轮：**调课与冲突**（`schema.sql` §38）的读写口
+   ------------------------------------------------------------
+   🔴 **权威判定全在数据库**（§38.6 / 38.6.1）：
+      · `schedule_day_cells(p_date)` —— 这一天实际上什么课（临时调课**压在**周课表上）；
+      · `schedule_conflicts_on(p_date)` —— 三类冲突的**唯一一份**算法。
+      前端**一个判据都不写**，只把服务端回的那几张表翻成人看的样子
+      （"前端算 = 可绕过，且两套口径必然分叉" —— §38 的原文）。
+   🔴 **两条路落在两张不同的表上**（本轮最重要的一条）：
+      · 临时 → `insert schedule_temp_changes`（只影响那一天，过了自动不生效）；
+      · 永久 → RPC `apply_perm_schedule_change()`（改 `schedule_items` 那一行 + 同事务留档）。
+      ⚠️ 永久**不许**走 `insert schedule_temp_changes` —— 那是把"每周都变"写成"只这一天"。
+   ⚠️ 读失败一律回 `'unknown'`（"不知道"），**不许回空数组** ——
+      空数组在界面上是"这一天排得开"，与"没读到"完全是两回事（同 `loadClassMembers` 的纪律）。
+   ============================================================ */
+
+/** 这一天某一格实际是什么（`schedule_day_cells` 一行） */
+export type ScheduleDayCell = {
+  classId: string
+  start: string
+  end: string
+  subject: string
+  teacherId: string | null
+  /** 这一格是被**临时调课**盖过的（教室端那块屏今天显示的就是这个） */
+  changed: boolean
+}
+
+export type ScheduleDayRead =
+  | { status: 'present'; date: string; cells: ScheduleDayCell[] }
+  | { status: 'local' }
+  | { status: 'missing' }
+  | { status: 'unknown' }
+
+export type ScheduleDayConflict = {
+  kind: 'teacher' | 'class' | 'student'
+  start: string
+  classId: string | null
+  otherClassId: string | null
+  teacherId: string | null
+  studentId: string | null
+  detail: string
+}
+
+export type ScheduleConflictRead =
+  | { status: 'present'; date: string; conflicts: ScheduleDayConflict[] }
+  | { status: 'local' }
+  | { status: 'missing' }
+  | { status: 'unknown' }
+
+/** 认 RPC 不在（§38 还没跑）：`42883` = undefined_function · `PGRST202` = PostgREST 找不到 */
+function isMissingRpc(error: { message?: string; code?: string } | null | undefined): boolean {
+  const code = String(error?.code ?? '')
+  const msg = String(error?.message ?? '')
+  return code === '42883' || code === 'PGRST202' || /could not find the function/i.test(msg)
+}
+
+/** 这一天实际上什么课（**只有数据库这一份口径** —— 临时调课已经压好了） */
+export async function loadScheduleDay(date: string): Promise<ScheduleDayRead> {
+  const sb = getSupabase()
+  if (!isRemote || !sb) return { status: 'local' }
+  const tables = await ensureScheduleAdminTables()
+  if (tables === 'missing') return { status: 'missing' }
+  try {
+    const { data, error } = await sb.rpc(
+      'schedule_day_cells' as never,
+      { p_date: date } as never,
+    )
+    if (error) return isMissingRpc(error) ? { status: 'missing' } : { status: 'unknown' }
+    const rows = (data ?? []) as Array<Record<string, unknown>>
+    return {
+      status: 'present',
+      date,
+      cells: rows.map((r) => ({
+        classId: String(r.class_id ?? ''),
+        start: hhmm(String(r.start_time ?? '')),
+        end: hhmm(String(r.end_time ?? '')),
+        subject: String(r.subject ?? ''),
+        teacherId: r.teacher_id ? String(r.teacher_id) : null,
+        changed: r.changed === true,
+      })),
+    }
+  } catch {
+    return { status: 'unknown' }
+  }
+}
+
+/** 三类冲突（`kind` 就是三类的名字，**别把它们糊成一句"有冲突"**） */
+export async function loadScheduleConflicts(date: string): Promise<ScheduleConflictRead> {
+  const sb = getSupabase()
+  if (!isRemote || !sb) return { status: 'local' }
+  const tables = await ensureScheduleAdminTables()
+  if (tables === 'missing') return { status: 'missing' }
+  try {
+    const { data, error } = await sb.rpc(
+      'schedule_conflicts_on' as never,
+      { p_date: date } as never,
+    )
+    if (error) return isMissingRpc(error) ? { status: 'missing' } : { status: 'unknown' }
+    const rows = (data ?? []) as Array<Record<string, unknown>>
+    return {
+      status: 'present',
+      date,
+      conflicts: rows.map((r) => ({
+        kind: String(r.kind) as ScheduleDayConflict['kind'],
+        start: hhmm(String(r.start_time ?? '')),
+        classId: r.class_id ? String(r.class_id) : null,
+        otherClassId: r.other_class_id ? String(r.other_class_id) : null,
+        teacherId: r.teacher_id ? String(r.teacher_id) : null,
+        studentId: r.student_id ? String(r.student_id) : null,
+        detail: String(r.detail ?? ''),
+      })),
+    }
+  } catch {
+    return { status: 'unknown' }
+  }
+}
+
+/** 一节课被调动的经过（临时那张表的行形状） */
+export type TempChangeInput = {
+  onDate: string
+  classId: string
+  start: string
+  end: string
+  fromSubject: string
+  fromTeacherId: string | null
+  toSubject: string
+  toTeacherId: string
+  kind: 'teacher' | 'whole'
+}
+
+/**
+ * **临时调课**：往 `schedule_temp_changes` 写一条（**只影响这一天**）。
+ * ⚠️ `weekday` / `actor_*` / `created_at` 一律由 §38.1.1 的触发器在库里算 ——
+ *    这里**不传**，传了也不信（"发件人由服务端从调用者 JWT 取"同一条纪律）。
+ */
+export async function saveTempScheduleChange(
+  row: TempChangeInput,
+): Promise<{ ok: boolean; message: string }> {
+  const sb = getSupabase()
+  if (!sb) return { ok: true, message: '' }
+  try {
+    const { error } = await sb.from('schedule_temp_changes').insert({
+      on_date: row.onDate,
+      class_id: row.classId,
+      start_time: row.start,
+      end_time: row.end,
+      from_subject: row.fromSubject,
+      from_teacher_id: row.fromTeacherId,
+      to_subject: row.toSubject,
+      to_teacher_id: row.toTeacherId,
+      kind: row.kind,
+    } as never)
+    if (error) return { ok: false, message: String(error.message ?? '没写进临时调课表') }
+    return { ok: true, message: '' }
+  } catch (e) {
+    return { ok: false, message: e instanceof Error ? e.message : '没写进临时调课表' }
+  }
+}
+
+export type PermChangeInput = {
+  classId: string
+  weekday: number
+  start: string
+  end: string
+  fromSubject: string
+  fromTeacherId: string | null
+  toSubject: string
+  toTeacherId: string
+  kind: 'teacher' | 'whole'
+  scheduleItemId: string | null
+}
+
+/**
+ * **永久调课**：`apply_perm_schedule_change()` —— 改 `schedule_items` 那一行**并且**留档。
+ * 🔴 为什么必须走这一个函数：前端"update 一次 + insert 一次"会有"改了但没留档"的那一瞬
+ *    （§38.7 的原话）。这里只递参数、翻人话，**判据在库里**。
+ */
+export async function applyPermScheduleChange(
+  row: PermChangeInput,
+): Promise<{ ok: boolean; message: string }> {
+  const sb = getSupabase()
+  if (!sb) return { ok: true, message: '' }
+  try {
+    const { error } = await sb.rpc(
+      'apply_perm_schedule_change' as never,
+      {
+        p_class_id: row.classId,
+        p_weekday: row.weekday,
+        p_start_time: row.start,
+        p_end_time: row.end,
+        p_from_subject: row.fromSubject,
+        p_from_teacher_id: row.fromTeacherId,
+        p_to_subject: row.toSubject,
+        p_to_teacher_id: row.toTeacherId,
+        p_kind: row.kind,
+        p_schedule_item_id: row.scheduleItemId,
+      } as never,
+    )
+    if (error) return { ok: false, message: String(error.message ?? '周课表没改成') }
+    return { ok: true, message: '' }
+  } catch (e) {
+    return { ok: false, message: e instanceof Error ? e.message : '周课表没改成' }
+  }
+}
+
+/** 「清理过期」—— 删之前先在库里留档（§38.8，判据是既有的 `is_school_admin()`） */
+export async function purgeExpiredScheduleChanges(): Promise<{ ok: boolean; message: string; n: number }> {
+  const sb = getSupabase()
+  if (!sb) return { ok: true, message: '', n: 0 }
+  try {
+    const { data, error } = await sb.rpc('purge_expired_schedule_changes' as never, {} as never)
+    if (error) return { ok: false, message: String(error.message ?? '没清理'), n: 0 }
+    const n = Number((data as { purged?: number } | null)?.purged ?? 0)
+    return { ok: true, message: '', n }
+  } catch (e) {
+    return { ok: false, message: e instanceof Error ? e.message : '没清理', n: 0 }
+  }
+}
+
 export const saveClassroom = (c: ClassroomClient, teacherId: string) =>
   upsert('classrooms', classroomToRow(c, teacherId))
 

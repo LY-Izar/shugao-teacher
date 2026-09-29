@@ -667,6 +667,44 @@ export type ScheduleItem = {
    *  · 'class' 班级课表：这个班整天所有科目（数学、语文…），贴在教室给学生看
    */
   scope?: 'mine' | 'class'
+  /**
+   * 这一节谁上（数据库 `schedule_items.teacher_id`，**NOT NULL**）。
+   * ⚠️ 只有**班级课表**（`scope='class'`）才有意义：教师个人排课表里"我"就是那位老师。
+   * 一行没有它 = 这格不由某位老师上（班会那种）。
+   */
+  teacherId?: string | null
 }
 
 export const WEEKDAY_TEXT = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
+
+/* ---------------- 临时调课（`schema.sql` §38.1） ---------------- */
+
+/**
+ * **只影响那一天**的一笔调课 —— 与「永久调课」（改 `schedule_items` 那一行）**不是一件事**。
+ *
+ * 🔴 为什么单独立一个形状：两种调课的落点**是两张不同的表**
+ *    （`schedule_temp_changes` vs `schedule_items` + `schedule_perm_changes` 留档），
+ *    而"过了那天自动恢复"这个性质**只属于临时**这一种。
+ * ⚠️ 权威判定在数据库（`schedule_day_cells(p_date)` / `schedule_conflicts_on(p_date)`）；
+ *    这个前端形状只用来在**本地演示模式**下把界面画出来。
+ */
+export type TempScheduleChange = {
+  id: string
+  /** 哪一天（北京时区口径的 `YYYY-MM-DD`） */
+  date: string
+  /** 那一天是星期几（1 = 周一 … 7 = 周日） */
+  weekday: number
+  classId: string
+  /** HH:MM */
+  start: string
+  /** HH:MM */
+  end: string
+  fromSubject: string
+  fromTeacherId: string | null
+  toSubject: string
+  toTeacherId: string
+  /** `'teacher'` = 只换老师（科目不动）· `'whole'` = 整格换（科目 + 老师一起换） */
+  kind: 'teacher' | 'whole'
+  /** 什么时候记下的（本地演示模式用；库里由触发器写 `now()`） */
+  at: number
+}

@@ -43,6 +43,7 @@ import type {
   StudentStatus,
   Teacher,
   TeacherRole,
+  TempScheduleChange,
 } from './types'
 
 /**
@@ -152,6 +153,15 @@ type State = {
   calls: CallRecord[]
   /* ---- 课表 ---- */
   schedule: ScheduleItem[]
+  /**
+   * 🆕 2026-10-12「课程管理」：**临时调课**那一条路（`schema.sql` §38.1）。
+   *
+   * 🔴 它与 `schedule`（周课表）**不是一个东西**：这里一条 = 某班 · **某一天** · 某一节的一次改动；
+   *    "过了那天自动恢复"就落在"按 `date` 读"这一句上（库里 `schedule_day_cells(p_date)` 同一口径）。
+   * ⚠️ 远程模式下拉一次那个 RPC 就够（不该把日期层灌进 state）；本地演示模式没有数据库可问，
+   *    所以写在这里让界面画得出来。两条路读到的**是同一份语义**，不是两套判据。
+   */
+  tempScheduleChanges: TempScheduleChange[]
   /**
    * 🆕 档案（2026-10 备份缺口）：**学生档案 / 教师档案**，导出备份时带上它们。
    *
@@ -403,6 +413,11 @@ type State = {
   addScheduleMany: (items: Omit<ScheduleItem, 'id'>[]) => number
   updateSchedule: (id: string, patch: Partial<ScheduleItem>) => void
   removeSchedule: (id: string) => void
+  /**
+   * 🆕 2026-10-12「课程管理」：记一笔**只影响那一天**的调课（`schema.sql` §38.1）。
+   * 🔴 永久调课**不许**走这里（那条路是 `updateSchedule` → `schedule_items` 那一行）。
+   */
+  addTempScheduleChange: (c: Omit<TempScheduleChange, 'id' | 'weekday' | 'at'>) => string
 
   /* ---- 考试 ---- */
   /**
@@ -632,6 +647,8 @@ function freshDemo() {
     classrooms: makeClassrooms(classes),
     calls: [] as CallRecord[],
     schedule: makeDemoSchedule(classes),
+    /* 本地演示模式没有 §38 那两张表可写 —— 临时调课先落在内存里（刷新即回初始） */
+    tempScheduleChanges: [] as TempScheduleChange[],
     exams: examDemo.exams,
     examScores: examDemo.scores,
     isDemo: true,
@@ -713,6 +730,7 @@ function initialState() {  if (!isRemote) return freshDemo()
     classrooms: [] as ClassroomClient[],
     calls: [] as CallRecord[],
     schedule: [] as ScheduleItem[],
+    tempScheduleChanges: [] as TempScheduleChange[],
     exams: [] as Exam[],
     examScores: [] as ExamScore[],
     terms: [] as Term[],
@@ -812,6 +830,8 @@ export const useStore = create<State>()(
           classes: snap.classes,
           assignments: snap.assignments,
           schedule: snap.schedule,
+          /* 临时调课从库里读（页面那一层调 `schedule_day_cells`），快照里没有它 */
+          tempScheduleChanges: [] as TempScheduleChange[],
           classrooms: snap.classrooms,
           calls: snap.calls,
           exams: examBundle.exams,
@@ -1014,6 +1034,8 @@ export const useStore = create<State>()(
           classrooms: [],
           calls: [],
           schedule: [],
+          // 临时调课也跟着会话走：换账号后不能还留着上一个人改的那一天
+          tempScheduleChanges: [] as TempScheduleChange[],
           // 考试数据跟着会话走：换账号后不能还留着上一个人的成绩
           exams: [],
           examScores: [],
@@ -1778,6 +1800,32 @@ export const useStore = create<State>()(
       },
 
       /*
+       * 🆕 2026-10-12「课程管理」第 3 轮 · **临时调课**（`schema.sql` §38.1）那一条路。
+       *
+       * 🔴 它与 `updateSchedule`（永久那条路）**走的是两张不同的表**：
+       *    · 这里 → `schedule_temp_changes`：一条 = 某班 · **某一天** · 某一节 · 一次改动。
+       *      它**不动** `schedule_items`（"过了那天自动恢复"就是靠这个）。
+       *    · `updateSchedule` → `schedule_items` 那一行本身（以后每周都变）。
+       *    两条路**不许互相顶替**（把永久写成临时 = 下周悄悄变回去；把临时写成永久 = 改坏了周课表）。
+       *
+       * ⚠️ 内存里那一条只活到**刷新为止**（本地演示模式没有数据库）——
+       *    `date` 是必填的：界面上"这一天"只看当天命中的那几条。
+       * ⚠️ `actor` / `createdAt` / `weekday` 由 §38.1.1 的触发器在库里算，这里只留个本地形状。
+       */
+      addTempScheduleChange: (c) => {
+        const row: TempScheduleChange = {
+          ...c,
+          id: uid(),
+          weekday: new Date(`${c.date}T00:00:00Z`).getUTCDay() === 0
+            ? 7
+            : new Date(`${c.date}T00:00:00Z`).getUTCDay(),
+          at: Date.now(),
+        }
+        set((s) => ({ tempScheduleChanges: [...s.tempScheduleChanges, row] }))
+        return row.id
+      },
+
+      /*
        * 从备份恢复：**逐条过写入路径的归一化，不裸 set**。
        *
        * 为什么不能直接把 `b.assignments` 塞进 state：`restoreBackup` 也是一条**写入路径**，
@@ -1804,6 +1852,8 @@ export const useStore = create<State>()(
             questionCount: clampQuestionCount(a.questionCount),
           })),
           schedule: b.schedule,
+          /* ⚠️ 备份里没有临时调课那一层（v1–v3 老备份都没有）：恢复之后它按"没有改过"算 */
+          tempScheduleChanges: [] as TempScheduleChange[],
           calls: b.calls,
           classrooms: b.classrooms,
           /*
@@ -1843,6 +1893,7 @@ export const useStore = create<State>()(
           classrooms: [],
           calls: [],
           schedule: [],
+          tempScheduleChanges: [],
           exams: [],
           examScores: [],
           /* 🆕 两份档案也一起清（别把上一个人的 PII 留在内存里 —— 全仓只此一处清空本机 state） */
@@ -1887,6 +1938,8 @@ export const useStore = create<State>()(
           classrooms: s.classrooms,
           calls: s.calls,
           schedule: s.schedule,
+          /* 本地演示模式：临时调课那一天改的是什么，刷新之后还要看得到（库里那一份不在本机） */
+          tempScheduleChanges: s.tempScheduleChanges,
           exams: s.exams,
           examScores: s.examScores,
           isDemo: s.isDemo,

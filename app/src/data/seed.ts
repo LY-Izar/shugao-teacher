@@ -272,6 +272,87 @@ export function makeDemoSchedule(classes: Klass[]): ScheduleItem[] {
   ]
 }
 
+/* ---------------- 「课程管理」那一节的班级课表（演示） ----------------
+ *
+ * 🔴 **为什么必须单独造一份**（2026-10-12 实测：S27 的 ㉛㉜㉝㉞㊲ 五条红都是"这一天一处冲突都没有"）：
+ *    `makeDemoSchedule` 是**教师个人排课表**（`scope` 空着 = `'mine'`，就是"这位物理老师什么时候上哪个班"）——
+ *    它的语义决定了**天然构造不出冲突**：
+ *      · ① 同一个老师、同一时段**两个班** —— 个人课表里那位老师同一时段只在一个班；
+ *      · ② 同一个班、同一时段**两节课** —— 个人课表里这个班的每一节都排在不同时段。
+ *    而「课程管理」这一页要的是**班级课表**（`scope='class'` + `classId` + `teacherId`）。
+ *
+ * ✅ 所以这一份**只给课程管理那一页**（`isRemote === false` 时由 `CourseAdmin` 读）：
+ *    · **不动 `/schedule` 那一批**（`makeDemoSchedule` 一个字没改）——
+ *      它就是"教师个人排课表"，别把它的行硬标成 `scope='class'`（那是在改语义，不是补数据）；
+ *    · 也**不塞进 store**：教室端读的正是 `scope='class'`，塞进 store 会让教室大屏多出一份课表。
+ *    · 于是它**只影响这一节**，不需要在 S27 结束前清理。
+ *
+ * ⚠️ 行的形状照数据库：`schedule_items.teacher_id` 是 **NOT NULL** ——
+ *    这里每一行都写死 `teacherId`（只有"班会"这种不由某位老师上的格子留空）。
+ * ⚠️ 周一（`weekday = 1`）那几行是**故意排出来的冲突**，别顺手"理"平：
+ *    · 高二(3)班 08:00 物理 与 高二(7)班 08:00 物理 —— **同一个老师同一时段两个班**（① 类）；
+ *    · 高二(3)班 08:00 物理 与 高二(3)班 08:00 数学 —— **同一个班同一时段两节课**（② 类）；
+ *    · 两班 14:30 都有语文（同一位老师）—— 再来一处 ① 类（不然"三条冲突"只剩两条）。
+ */
+export function makeCourseAdminDemoSchedule(classes: Klass[]): ScheduleItem[] {
+  const a = classes[0]
+  const b = classes[1]
+  if (!a || !b) return []
+
+  const SLOT: Array<[string, string]> = [
+    ['08:00', '08:45'],
+    ['08:55', '09:40'],
+    ['10:10', '10:55'],
+    ['11:05', '11:50'],
+    ['14:30', '15:15'],
+    ['15:25', '16:10'],
+  ]
+  let n = 0
+  const row = (
+    weekday: number,
+    slot: number,
+    klass: Klass,
+    subject: string,
+    teacherId?: string,
+  ): ScheduleItem => ({
+    id: `cad-${++n}`,
+    weekday,
+    start: SLOT[slot - 1][0],
+    end: SLOT[slot - 1][1],
+    /* 标题照全平台那一套：**班名写在标题里**（`lib/scheduleParse.ts` 的 `matchClassName` 认的就是它） */
+    title: `${klass.name} ${subject}`,
+    classId: klass.id,
+    kind: 'class',
+    notify: true,
+    scope: 'class',
+    teacherId: teacherId ?? null,
+  })
+
+  return [
+    /* ---- 周一：故意排出来的冲突（见上面那段说明） ---- */
+    row(1, 1, a, '物理', 'demo-t-wang'),
+    row(1, 1, a, '数学', 'demo-t-xie'),
+    row(1, 3, a, '物理', 'demo-t-wang'),
+    row(1, 5, a, '语文', 'demo-t-zhu'),
+    /* 同一位老师的第二节：给"整格对调"那条建议留一个对手 */
+    row(1, 6, a, '物理', 'demo-t-wang'),
+    row(1, 1, b, '物理', 'demo-t-wang'),
+    row(1, 3, b, '化学', 'demo-t-chen'),
+    row(1, 5, b, '语文', 'demo-t-zhu'),
+    row(1, 6, b, '数学', 'demo-t-luo'),
+    /* ---- 其余几天：排满一周（"录过了"那一态看的是整周，别的日子不能空着） ---- */
+    row(2, 2, a, '物理', 'demo-t-wang'),
+    row(2, 2, b, '数学', 'demo-t-xie'),
+    row(3, 3, a, '物理', 'demo-t-wang'),
+    row(3, 3, b, '化学', 'demo-t-chen'),
+    row(4, 2, a, '数学', 'demo-t-xie'),
+    row(4, 2, b, '物理', 'demo-t-wang'),
+    row(5, 1, a, '物理', 'demo-t-wang'),
+    row(5, 4, a, '班会'),
+    row(5, 1, b, '语文', 'demo-t-zhu'),
+  ]
+}
+
 /* ---------------- S4：教室端一体机 ---------------- */
 
 export function makeClassrooms(classes: Klass[]): ClassroomClient[] {
