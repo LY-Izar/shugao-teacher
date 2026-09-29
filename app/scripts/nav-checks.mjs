@@ -23,6 +23,9 @@
  *     生产构建里测试钩子不许出现；
  *     🆕 **D10：表存在性探针不许假设任何列存在**（`select('*')`）+
  *     「表不在」与「列不在」判据分流（这一类 bug 已经咬了两次：`subjects` / `notice_targets`）。
+ *     🆕 **D12（2026-10-12）：念出来的号 / 摆上屏的号 = 班内学号** ——
+ *     「呼叫后教室端播报的应该是学生的班级内学号，而不是年级序列号」（用户原话）；
+ *     谁在拼"念出来的话"、谁自己抄了一遍 `s.serial || s.studentNo`，两样都钉住。
  *   · 编码（D8）：全仓文本文件的无 BOM / 严格 UTF-8 / 中文没被 mojibake，
  *     外加**不可见字符 / 全角标点混进代码** ——
  *     这个项目**反复栽在编码上**（BOM 出过构建失败、上一轮又出双重编码乱码），
@@ -3105,6 +3108,272 @@ section("第十三节 · D10：表存在性探针不许假设列存在（select(
   )
 }
 
+/* ============================================================
+   第十四节 · D12：**念出来的号 / 摆上屏的号 = 班内学号**（档案键只当键）
+   ------------------------------------------------------------
+   🔴 用户原话（2026-10-12）：
+      「**呼叫后教室端播报的应该是学生的班级内学号，而不是年级序列号**」
+
+   平台有**两套号**（`lib/keys.ts` 文件头 / I40）：
+     · `students.serial`    = 全校唯一序列号（7 位 `YYYY`+`NNN`）——
+                              **是那 10 个字段的键**，生成后永久不可改；
+     · `students.studentNo` = **班内学号** —— 老师与学生认的就是它。
+   判据只有一句：**给人看 / 念给人听的号，一律是班内学号；当键用的地方一个字都不许动。**
+
+   为什么要有这一节：拼"念出来的话"的地方有三处，其中**改错登记页**
+   （`AssignmentCorrect.tsx`）一直把**档案键**直接交给 `composeCallText()` →
+   教室端念出「请 **2025007** 号…」（= 序列号），学生不知道那是在叫谁。
+   纯逻辑断言在 A 组、静态钉子在 D 组，每条都带**反向对照**（喂修之前的写法必须判红）。
+
+   ⚠️ 豁免只两处（`eqSet` 钉住，多一处就要来这儿说清）：
+     · `src/lib/keys.ts`   —— **唯一入口**：翻译本来就长在这里；
+     · `src/lib/stream.ts` —— `labelOf()` 是 **`pending` / `noRecord` 的排序键**（不上屏）；
+        ⚠️ 它上面那句注释写的是"序列号优先，因为它全校唯一"，与本仓库的主导口径
+        （`keys.ts:70`「界面上永远显示班内学号」）**不一致** —— 本轮**超出文件边界没动它**，
+        留在这里让它可见；要么下轮统一，要么把那句注释改对。
+   ============================================================ */
+section('第十四节 · D12：念出来的号 = 班内学号（`serial` 只当键）')
+
+{
+  const K = await import('../src/lib/keys.ts')
+  const CALLS = await import('../src/lib/calls.ts')
+
+  /** 夹具：两个学生，键（序列号）与给人看的号（班内学号）**故意长得完全不一样** */
+  const ROSTER = [
+    { serial: '2025007', studentNo: '12', name: '甲' },
+    { serial: '2025008', studentNo: '3', name: '乙' },
+  ]
+  const KEYS_ = ['2025007', '2025008']
+  const ROOM = '物理老师办公室'
+
+  eq(
+    '🔴 D12-A ① 一批**键** → 一批**给人看的号**（= 班内学号）',
+    JSON.stringify(K.displayNosOfArchiveKeys(ROSTER, KEYS_)),
+    JSON.stringify(['12', '3']),
+  )
+  eq(
+    'D12-A ② **老键**（迁移前的班内学号）照样翻得出（兼容期两条路）',
+    JSON.stringify(K.displayNosOfArchiveKeys(ROSTER, ['12', '3'])),
+    JSON.stringify(['12', '3']),
+  )
+  eq(
+    'D12-A ③ 翻不出来的键**原样留着**（不许变空串 —— 空 = 把一个学生从名单里静默抹掉，§三.5）',
+    JSON.stringify(K.displayNosOfArchiveKeys(ROSTER, ['9999999'])),
+    JSON.stringify(['9999999']),
+  )
+
+  /* ---- B：真函数串起来 —— 教室端**念出来的那句话** ---- */
+  const said = CALLS.composeCallText(K.displayNosOfArchiveKeys(ROSTER, KEYS_), ROOM, '物理', '')
+  eq('🔴 D12-B ① 教室端念的是**班内学号**', said, '请 12 号、3 号，到物理老师办公室。')
+  check(
+    !/2025\d{3}/.test(said),
+    '🔴 D12-B ② 那句话里**一个 7 位序列号都没有**（序列号是内部键，念给学生听毫无意义）',
+    said,
+  )
+  /* 反向对照：把**修之前的写法**（键直传）喂进来 → 序列号就出来了（证明上面两条不是恒真） */
+  const saidBeforeFix = CALLS.composeCallText(KEYS_, ROOM, '物理', '')
+  check(
+    /2025007/.test(saidBeforeFix),
+    '🧪 D12-B 反向对照：**把键原样交给 `composeCallText()`**（= 修之前那一行）→ 念出来的是 7 位序列号（所以 ① 会红）',
+    `改回旧写法 = ${saidBeforeFix}`,
+  )
+
+  /* ---- C：**键**这条路一个字都没动（反向对照：把键也换成班内学号 → 必须红） ---- */
+  eq('🔴 D12-C ① `archiveKeyOf()` 给的还是**序列号**（写库/存档用的键没被动过）', K.archiveKeyOf(ROSTER[0]), '2025007')
+  eq(
+    '🔴 D12-C ② 键候选顺序仍是 [序列号, 班内学号]（读的两条路：**序列号优先**）',
+    JSON.stringify(K.archiveKeyCandidates(ROSTER[0])),
+    JSON.stringify(['2025007', '12']),
+  )
+  eq(
+    'D12-C ③ 没有序列号时键退回班内学号（老库上的行为一个字节都不变）',
+    K.archiveKeyOf({ serial: '', studentNo: '7' }),
+    '7',
+  )
+  eq(
+    'D12-C ④ `archiveValue()` 认序列号那一格（键还是键）',
+    JSON.stringify(K.archiveValue({ 2025007: ['3'] }, ROSTER[0])),
+    JSON.stringify(['3']),
+  )
+  /* 反向对照：把键也换成班内学号（这正是"绕过 P1 迁移"的形状）——
+     同一个断言体必须判**假**；否则上面那四条只是摆设 */
+  const keyOfPoison = (s) => s.studentNo
+  check(
+    keyOfPoison(ROSTER[0]) !== '2025007' && K.archiveKeyCandidates(ROSTER[0])[0] === '2025007',
+    '🧪 D12-C 反向对照：把键也换成班内学号 → D12-C ① **当场红**（而 ② 的"序列号优先"正是挡住这一步的那一条）',
+    `改后 archiveKeyOf(甲) = ${keyOfPoison(ROSTER[0])}（期望 ≠ 2025007）`,
+  )
+
+  /* ---- D：全仓"自己写 `x.serial || x.studentNo` 去显示"= 0 处（纪律 → 能跑的断言） ---- */
+  const D12_EXEMPT = new Set([
+    'src/lib/keys.ts', // 唯一入口：翻译本来就长在这里
+    'src/lib/stream.ts', // labelOf()：**排序键**，不上屏（见本节头部的说明）
+  ])
+  const D12_SHAPES = [
+    /\.serial\s*\|\|\s*[\w$]+\.studentNo/, // `s.serial || s.studentNo`
+    /\.serial\s\?[^\n]{0,140}?\.studentNo\s\?/, // 「序列号优先」的三元
+  ]
+  /* ⚠️ 只扫**真代码行**：整行是注释的不算（`keys.ts` / `Admin.tsx` 的文件头就在写这条纪律本身，
+     里面**故意**有那个坏形状的字面量）。判据只认"这一行上真有那个表达式"。 */
+  const isCommentOnly = (line) => {
+    const t = line.trim()
+    return t.startsWith('*') || t.startsWith('//') || t.startsWith('/*')
+  }
+  const d12Files = []
+  const walkD12 = (dir) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      if (e.name === 'node_modules' || e.name === 'dist' || e.name.startsWith('.')) continue
+      const full = join(dir, e.name)
+      if (e.isDirectory()) walkD12(full)
+      else if (/\.tsx?$/.test(e.name)) d12Files.push(full)
+    }
+  }
+  walkD12(join(APP, 'src'))
+  const d12Hits = []
+  for (const f of d12Files) {
+    const rel = f.slice(APP.length + 1).replace(/\\/g, '/')
+    readFileSync(f, 'utf8')
+      .split('\n')
+      .forEach((line, i) => {
+        if (isCommentOnly(line)) return
+        for (const re of D12_SHAPES) if (re.test(line)) d12Hits.push({ file: rel, line: i + 1, text: short(line, 110) })
+      })
+  }
+  const d12Bad = d12Hits.filter((h) => !D12_EXEMPT.has(h.file))
+  check(
+    d12Files.length >= 40,
+    `D12-D 自证：扫到 ${d12Files.length} 个 .ts/.tsx（少于 40 说明锚点坏了，不是"全绿"）`,
+    `${d12Files.length} 个`,
+  )
+  check(
+    d12Bad.length === 0,
+    '🔴 D12-D ① 全仓没有一处"自己写 `x.serial || x.studentNo` 去显示/念号"（翻译只许走 `lib/keys.ts`）',
+    d12Bad.length ? d12Bad.map((h) => `${h.file}:${h.line} ${h.text}`).join('；') : `0 处红（命中 ${d12Hits.length} 处，全在豁免清单里）`,
+  )
+  eqSet(
+    'D12-D ② 自证：豁免清单 = 唯一入口 + 一处**排序键**（多一处就要来这儿说清它为什么该在）',
+    d12Hits.filter((h) => D12_EXEMPT.has(h.file)).map((h) => h.file),
+    ['src/lib/keys.ts', 'src/lib/stream.ts'],
+  )
+  /* 反向对照：把旧写法（两种形状）喂给同一个判据 → 必须都被抓到 */
+  const D12_POISON = [
+    'const no = a.serial || b.studentNo',
+    '  {p.serial ? ` （${p.serial}）` : p.studentNo ? ` （${p.studentNo}）` : ""}',
+    '  <td>{s.serial ? s.serial : s.studentNo ? s.studentNo : ""}</td>',
+  ]
+  const poisonHit = D12_POISON.filter((l) => D12_SHAPES.some((re) => re.test(l)))
+  eq(
+    '🧪 D12-D 反向对照①：把旧写法（`||` 与"序列号优先"的三元）喂给同一判据 → **三种全被抓**',
+    poisonHit.length,
+    D12_POISON.length,
+  )
+  /* 反向对照②：**真文件**改回序列号优先 → 上面 ① 当场红（拿真内容做替换，不靠手写的字面量） */
+  const BT = String.fromCharCode(96)
+  const gsSrc = readApp('src/pages/GradeSetup.tsx')
+  const gsFixed = gsSrc.split('\n').filter((l) => l.includes('（${p.studentNo}）'))
+  eq(
+    '🔴 D12-D ③ `GradeSetup.tsx` 那两处（待处理 / 选科还没录）的括号号 = **班内学号优先**（序列号只当兜底）',
+    gsFixed.length,
+    2,
+  )
+  const gsPoison = gsSrc.replace(
+    new RegExp('p\\.studentNo \\? ' + BT + ' （\\$\\{p\\.studentNo\\}）' + BT + ' : p\\.serial', 'g'),
+    'p.serial ? ' + BT + ' （${p.serial}）' + BT + ' : p.studentNo',
+  )
+  check(
+    gsPoison !== gsSrc && D12_SHAPES.some((re) => gsPoison.split('\n').some((l) => re.test(l))),
+    '🧪 D12-D 反向对照②：把那两处**改回「序列号优先」** → D12-D ①/③ 当场红',
+    gsPoison === gsSrc ? '没替换成功（锚点变了？那这条对照就是摆设，必须修）' : '替换成功，且被判据抓到',
+  )
+
+  /* ---- E：拼"念出来的话"的地方只有三处，而且每一处的号都是给人看的 ---- */
+  /** 从一段源码里抠出每一处 `composeCallText(` 的**第一个实参**（括号/引号配平到第一个顶层逗号） */
+  function callTextFirstArgs(src) {
+    const out = []
+    const re = /(?<![\w.$])composeCallText\s*\(/g
+    let m
+    while ((m = re.exec(src))) {
+      if (/function\s+$/.test(src.slice(Math.max(0, m.index - 24), m.index))) continue // 定义处
+      let i = m.index + m[0].length
+      let depth = 0
+      let arg = ''
+      for (; i < src.length; i++) {
+        const ch = src[i]
+        if (ch === "'" || ch === '"' || ch === BT) {
+          const quote = ch
+          arg += ch
+          for (i++; i < src.length && src[i] !== quote; i++) arg += src[i]
+          arg += src[i] ?? ''
+          continue
+        }
+        if (ch === '(' || ch === '[' || ch === '{') depth++
+        else if (ch === ')' || ch === ']' || ch === '}') {
+          if (depth === 0) break
+          depth--
+        } else if (ch === ',' && depth === 0) break
+        arg += ch
+      }
+      out.push({ line: src.slice(0, m.index).split('\n').length, arg: arg.trim() })
+      re.lastIndex = i
+    }
+    return out
+  }
+  /** "给人看的号"的两种合法写法：走唯一入口，或页面手里本来就是 `Student`（`.studentNo`） */
+  const DISPLAY_ARG_OK = [
+    /displayNos?OfArchiveKeys?\s*\(/,
+    /\.map\(\s*\(\s*[\w$]+\s*\)\s*=>\s*[\w$]+\.studentNo\s*\)/,
+  ]
+  const callSites = []
+  for (const f of d12Files) {
+    const rel = f.slice(APP.length + 1).replace(/\\/g, '/')
+    const lines = readFileSync(f, 'utf8').split('\n')
+    for (const s of callTextFirstArgs(lines.join('\n'))) {
+      /* 整行是注释的不算（`keys.ts` 的文件头就在讲这条纪律本身，里面**故意**
+         写了一个 `composeCallText(…)` 的字面量当反例） */
+      if (isCommentOnly(lines[s.line - 1] ?? '')) continue
+      callSites.push({ file: rel, ...s })
+    }
+  }
+  const callBad = callSites.filter((s) => !DISPLAY_ARG_OK.some((re) => re.test(s.arg)))
+  eq('D12-E 自证：拼"念出来的话"的地方 = 3 处（多一处就要来这儿说清）', callSites.length, 3)
+  eqSet(
+    'D12-E 自证：这三处分别是哪个文件',
+    callSites.map((s) => s.file),
+    ['src/pages/AssignmentCall.tsx', 'src/pages/AssignmentCorrect.tsx', 'src/pages/ClassDetail.tsx'],
+  )
+  check(
+    callBad.length === 0,
+    '🔴 D12-E ① 每一处"念出来的话"的第一个实参都是**给人看的号**（不是档案键）',
+    callBad.length
+      ? callBad.map((s) => `${s.file}:${s.line} → ${short(s.arg, 80)}`).join('；')
+      : callSites.map((s) => `第 ${s.line} 行 → ${short(s.arg, 60)}`).join('；'),
+  )
+  /* 反向对照：把改错页改回"键直传" → 当场红；两种合法写法**不**判红（防一刀切） */
+  const poisonSite = callTextFirstArgs("composeCallText(callSel, room, assignment.subject, '')")
+  check(
+    poisonSite.length === 1 && !DISPLAY_ARG_OK.some((re) => re.test(poisonSite[0].arg)),
+    '🧪 D12-E 反向对照①：把改错页改回 `composeCallText(callSel, …)`（**键直传，就是那个 bug**）→ 当场红',
+    `抠出的第一个实参 = ${poisonSite[0]?.arg ?? '(没抠到)'}`,
+  )
+  const okSites = [
+    "composeCallText(displayNosOfArchiveKeys(students, callSel), room, assignment.subject, '')",
+    "composeCallText(selected.map((k) => displayNoOfArchiveKey(students, k)), room, subject, custom)",
+    "composeCallText(picked.map((s) => s.studentNo), klass.name, '', callText.trim())",
+  ]
+  const okParsed = okSites.map((s) => callTextFirstArgs(s)[0]?.arg ?? '')
+  check(
+    okParsed.length === 3 && okParsed.every((a) => DISPLAY_ARG_OK.some((re) => re.test(a))),
+    '🧪 D12-E 反向对照②：三种**合法**写法（批量入口 / 单个入口 / 页面手里本来就是 Student）都**不**判红（防一刀切）',
+    okParsed.map((a) => short(a, 60)).join(' · '),
+  )
+  const poisonSelf = callTextFirstArgs("composeCallText(s.serial || s.studentNo, room, '', '')")[0]?.arg ?? ''
+  check(
+    !DISPLAY_ARG_OK.some((re) => re.test(poisonSelf)) && D12_SHAPES.some((re) => re.test(poisonSelf)),
+    '🧪 D12-E 反向对照③：`s.serial || s.studentNo` 这种"自己翻译"喂进来 → 被 D 与 E 两条一起抓',
+    `第一个实参 = ${poisonSelf}`,
+  )
+}
+
 /* ---------------- 结果 ---------------- */
 console.log(`\n================ 结果 ================`)
 console.log(`  断言：通过 ${passed} 条，失败 ${failures.length} 条`)
@@ -3113,6 +3382,6 @@ if (failures.length) {
   console.log('\n  ⛔ 有断言没过（上面每一条都写了实测值）')
   process.exitCode = 1
 } else {
-  console.log('  全部通过 ✅（纯函数 A1–A10 / 静态 D1–D7 · D9 · D10 · D11 / 编码 + 不可见字符 D8）')
+  console.log('  全部通过 ✅（纯函数 A1–A10 / 静态 D1–D7 · D9 · D10 · D11 · D12 / 编码 + 不可见字符 D8）')
 }
 }, { script: 'nav-checks.mjs' })

@@ -7,7 +7,7 @@ import { useStore, useToast } from '../data/store'
 import type { Student } from '../data/types'
 import { friendlyDate } from '../lib/date'
 import { CALL_LIMIT, composeCallText } from '../lib/calls'
-import { archiveKeyOf } from '../lib/keys'
+import { archiveKeyOf, displayNosOfArchiveKeys } from '../lib/keys'
 
 /**
  * 改错登记。
@@ -128,8 +128,20 @@ export default function AssignmentCorrect() {
       sendCall({
         assignmentId: id,
         classId: assignment.classId,
+        /* `studentNos` 落库的是**档案键**（迁移后 = 序列号），这一行是对的、不要动 */
         studentNos: callSel,
-        text: composeCallText(callSel, room, assignment.subject, ''),
+        /*
+         * 🔴 而**念出来的话**要的是**班内学号**。
+         *    以前这里直接把 `callSel`（= 键）交给 `composeCallText` ——
+         *    于是教室端念「请 **2025007** 号…」，学生不知道那是在叫谁。
+         *    翻译只走一处入口（`lib/keys.ts` 的 `displayNosOfArchiveKeys`）。
+         */
+        text: composeCallText(
+          displayNosOfArchiveKeys(students, callSel),
+          room,
+          assignment.subject,
+          '',
+        ),
         room,
       })
       push({

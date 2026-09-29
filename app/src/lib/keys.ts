@@ -74,3 +74,30 @@ export function displayNoOfArchiveKey<T extends Pick<Student, 'serial' | 'studen
 ): string {
   return studentOfArchiveKey(students, key)?.studentNo ?? key
 }
+
+/**
+ * **一批**键 → **一批**给人看的号（`displayNoOfArchiveKey` 的批量版）。
+ *
+ * 🔴 为什么要有它：**念出来的那句话**（`lib/calls.ts` 的 `composeCallText`）要的是一串
+ *    "给人看的号"，而调用方手里往往是一批**档案键**（`callSel` / `selected` / `studentNos`）。
+ *    2026-10-12 实测的 bug：改错登记页（`AssignmentCorrect.tsx`）把键直接交给
+ *    `composeCallText(...)` → 教室端念出「请 **2025007** 号…」（7 位序列号），
+ *    学生根本不知道那是在叫谁。**凡是"给一批键、要一批号"的地方一律走这里**，
+ *    别在页面里 `keys.map(k => …)` 各写一套（`keys.ts` 是本仓库唯一的翻译入口）。
+ *
+ * ⚠️ **翻不出来的键原样留着**（= 与 `displayNoOfArchiveKey` 同一条回落口径）：
+ *    · 回落成**空串** = 把一个学生从那句话/那张名单里**静默抹掉**（AGENTS §三.5：
+ *      不许"不报错但就是不对"）；
+ *    · 回落成「该学生」这种词更糟 —— `composeCallText` 拼的是「X 号」，
+ *      会念成「请 该学生 号」；
+ *    · 留着原键时，屏上会出现一个 7 位数字 —— **那正是"该来报修"的信号**，
+ *      而且它能在名单的「序列号」那一列（`ClassDetail.tsx`）里查到是谁。
+ *    ⚠️ 但"翻不出来"在播报这条路上**本来就不该发生**：键是从同一份名单上选出来的。
+ *    真发生了 = 名单与档案不同步，回落值的作用是**让错误可见**，不是让文案好看。
+ */
+export function displayNosOfArchiveKeys<T extends Pick<Student, 'serial' | 'studentNo'>>(
+  students: readonly T[] | undefined | null,
+  keys: readonly string[],
+): string[] {
+  return keys.map((k) => displayNoOfArchiveKey(students, k))
+}

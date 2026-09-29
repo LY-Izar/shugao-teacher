@@ -1906,7 +1906,15 @@ function StreamPanel({
               <div key={p.studentId} style={{ fontSize: 12, lineHeight: 1.7 }}>
                 <span style={{ color: 'var(--color-ink2)' }}>
                   {p.className} · {p.name}
-                  {p.serial ? ` （${p.serial}）` : p.studentNo ? ` （${p.studentNo}）` : ''}
+                  {/*
+                    给人看的号一律是**班内学号**（`lib/keys.ts` 的口径：老师看到的东西不变）。
+                    以前这里是"序列号优先" —— 可序列号是 7 位的**内部键**，
+                    除了「班级档案 · 序列号」那一列之外，教导处的界面上找不到它的对照物，
+                    摆在这里等于给一个认不出的号。班名就在同一行，班内学号不会歧义。
+                    ⚠️ 序列号留着当**兜底**：万一这一行还没编号（`studentNo` 为空），
+                       宁可显示序列号，也不要空着（空 = 静默少了一个人）。
+                  */}
+                  {p.studentNo ? ` （${p.studentNo}）` : p.serial ? ` （${p.serial}）` : ''}
                 </span>
                 <span style={{ color: 'var(--color-ink3)' }}> —— {p.note}</span>
               </div>
@@ -1935,7 +1943,8 @@ function StreamPanel({
             {plan.noRecord.slice(0, 20).map((p) => (
               <div key={p.studentId} style={{ fontSize: 12, lineHeight: 1.7, color: 'var(--color-ink3)' }}>
                 {p.className} · {p.name}
-                {p.serial ? ` （${p.serial}）` : p.studentNo ? ` （${p.studentNo}）` : ''}
+                {/* 同上面「待处理」那一档：给人看的是**班内学号**，序列号只当兜底 */}
+                {p.studentNo ? ` （${p.studentNo}）` : p.serial ? ` （${p.serial}）` : ''}
               </div>
             ))}
             {plan.noRecord.length > 20 ? (
