@@ -1,6 +1,8 @@
+import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Page } from '../components/AppShell'
 import {
+  IconCalendar,
   IconChevronRight,
   IconSliders,
   IconTarget,
@@ -9,8 +11,9 @@ import {
 } from '../components/icons'
 import { PageHead, Panel } from '../components/ui'
 import { useStore } from '../data/store'
-import { entryVisible, type EntryKey } from '../lib/roles'
-import type { ComponentType } from 'react'
+import { entryVisible, hasManagingRole, type EntryKey } from '../lib/roles'
+import CourseAdmin from './CourseAdmin'
+import type { ButtonHTMLAttributes, ComponentType, ReactNode } from 'react'
 
 /**
  * 「行政管理」`/manage`（2026-10-01）。
@@ -36,6 +39,12 @@ import type { ComponentType } from 'react'
  * ⚠️ 它**不是**"本地演示模式下就不摆"—— 三张卡照旧按入口表摆（本地模式也看得见这一页）。
  *    要服务端的那一张（教师管理）跳过去之后，**那一页自己**会说明"现在打不开"
  *    （`TeacherAccounts.tsx` 那条服务端 403 的路），所以这里不重复拦一道。
+ *
+ * 🆕 2026-10-12「课程管理」—— **第四张卡**（第 2 轮：骨架，见 `CourseAdmin.tsx` 的文件头）：
+ *    · 它与上面三张**不同款**：上面三张是"跳去早就存在的那一页"，这一张是**就地展开**一段；
+ *    · 摆不摆问 `hasManagingRole()`（既有判据函数，与 `can_manage_schedule_for()` 同形）；
+ *    · ⚠️ 它**还没有自己的入口 key**（那要同时登记 `App.tsx` / `PAGES` / 两份矩阵文档），
+ *      所以**不进 `ENTRIES`**、也**不带** `data-manage-card`（理由写在下面那张卡的注释里）。
  */
 
 /** 一张入口卡：跳去哪一页 + 图标 + 标题 + 一行副标题 */
@@ -83,48 +92,79 @@ export default function Administration() {
   const myRoles = useStore((s) => s.myRoles)
   /* 三张卡逐个问那张唯一的入口表（不读任何数据行 —— M1/M2/M3） */
   const cards = CARDS.filter((c) => entryVisible(c.key, myRoles))
+  /*
+   * 🆕 2026-10-12「课程管理」—— **第四张卡**（第 2 轮：骨架）。
+   *
+   * 🔴 摆不摆问的是 `lib/roles.ts` 里**既有**的那个判据 `hasManagingRole()`
+   *    （最高管理员 / 教务处 / 年级主任）—— 它恰好与数据库的
+   *    `can_manage_schedule_for()` 那一档同形（§38.0：超管 / 教务处全校 · 年级主任本年级）。
+   *    ⚠️ 这里**没有**在页面里就地写角色数组，也没有新造判据；
+   *       而"能不能改**这个班**的课表"仍然由服务端回的布尔说了算（`CourseAdmin.tsx`）。
+   *    ⚠️ 它**暂时不进** `lib/roles.ts` 的 `ENTRIES`：那是"入口 ↔ 路由"的登记表，
+   *       而新地址要**同时**登记四处（`App.tsx` · `PAGES` · §2.2 矩阵 · §4.2 矩阵），
+   *       不在这一轮的文件边界里。所以这一段**就地展开**、不走新路由 ——
+   *       下一轮落新地址时，这张卡换成 `key + entryVisible()` 即可。
+   */
+  const mayCourse = hasManagingRole(myRoles)
+  const [courseOpen, setCourseOpen] = useState(false)
 
   return (
     <>
+      {/* ⚠️ 副标题**这一轮不动**（仍是「年级 · 档案 · 教师」）：它与「我的」页那一行的
+          副标题是同一句话（`shots.mjs` 按它找那一行），要改就两处一起改 ——
+          等下一轮"课程管理"有自己的地址时再一起落。 */}
       <PageHead title="行政管理" sub="年级 · 档案 · 教师" onBack={() => navigate('/settings')} />
       <Page>
         <Panel className="overflow-hidden">
-          {cards.map((c) => {
-            const Icon = c.icon
-            return (
-              <button
-                key={c.key}
-                type="button"
-                className="row"
-                /* 稳定选择器（`shots.mjs` 按它点卡，不按可见文案找 —— 文案改一个字不该弄红断言） */
-                data-manage-card={c.key}
-                style={{ padding: 14 }}
-                onClick={() => navigate(c.key)}
-              >
+          {cards.map((c) => (
+            <CardShell
+              key={c.key}
+              icon={c.icon}
+              label={c.label}
+              desc={c.desc}
+              /* 稳定选择器（`shots.mjs` 按它点卡，不按可见文案找 —— 文案改一个字不该弄红断言） */
+              data-manage-card={c.key}
+              onClick={() => navigate(c.key)}
+            />
+          ))}
+          {/*
+           * 🆕 第四张卡：**课程管理**（点一下**就地展开**下面那一段，不跳页）。
+           *
+           * ⚠️ 它带的是 `data-course-card` 而**不是** `data-manage-card`：那个属性在这张表里
+           *    的意思是"**点一下跳去某一页**的入口卡"（`shots.mjs` 按它逐张点过去核路由），
+           *    而这一张不跳页。两种卡分开标，`shots.mjs` 里那条"三张卡 = /grades,/grades/promote,/accounts"
+           *    也就不用改（**不为了让门禁变绿而改断言**）。
+           */}
+          {mayCourse ? (
+            <CardShell
+              icon={IconCalendar}
+              label="课程管理"
+              desc="课表：按年级看班 · 录入与核对"
+              data-course-card="1"
+              aria-expanded={courseOpen}
+              onClick={() => setCourseOpen((v) => !v)}
+              /* ⚠️ 图标里没有 ChevronDown —— 用箭头**旋转 90°**当"展开/收起"（照 `Grades.tsx:257`） */
+              right={
                 <span
-                  className="grid place-items-center shrink-0"
                   style={{
-                    width: 36,
-                    height: 36,
-                    border: '1px solid var(--color-line2)',
-                    borderRadius: 4,
-                    background: 'var(--color-surface2)',
-                    color: 'var(--color-accenttext)',
+                    display: 'grid',
+                    placeItems: 'center',
+                    color: 'var(--color-ink3)',
+                    transition: 'transform .18s ease',
+                    transform: courseOpen ? 'rotate(90deg)' : 'none',
                   }}
                 >
-                  <Icon size={18} />
+                  <IconChevronRight size={16} />
                 </span>
-                <span className="min-w-0 flex-1">
-                  <span style={{ fontSize: 14.5, fontWeight: 620 }}>{c.label}</span>
-                  <span className="mt-0.5 block" style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
-                    {c.desc}
-                  </span>
-                </span>
-                <IconChevronRight size={16} />
-              </button>
-            )
-          })}
+              }
+            />
+          ) : null}
         </Panel>
+        {mayCourse && courseOpen ? (
+          <div className="mt-2" data-course-open="1">
+            <CourseAdmin />
+          </div>
+        ) : null}
         {/*
           🔴 **这一段什么时候轮到它**：三张卡**都对这个人不摆**时 ——
           正常点不进来（`ENTRIES['/manage']` 就是那三条判据的并集），
@@ -132,7 +172,7 @@ export default function Administration() {
           ⚠️ 那就**必须说人话**（`app/AGENTS.md` §三.5：不可写的路径要显式报错，不许静默）：
           这里没有路由守卫（这一页只是入口合集），所以这一句就是那道"看得见的说明"。
         */}
-        {cards.length === 0 ? (
+        {cards.length === 0 && !mayCourse ? (
           <Panel bodyClass="p-4">
             <div style={{ fontSize: 13, color: 'var(--color-ink3)', lineHeight: 1.7 }}>
               你的账号看不到这一页的内容。
@@ -144,5 +184,54 @@ export default function Administration() {
         ) : null}
       </Page>
     </>
+  )
+}
+
+/**
+ * 一张管理卡的样子 —— **四张卡共用同一处**（图标盒 / 标题 / 副标题 / 右侧那个箭头）。
+ *
+ * 🔴 为什么抽出来而不是各写一遍：那处内联样式里有**前景色令牌** `--color-accenttext`，
+ *    而 `shots.mjs` 的 **F6-H** 是按**源码里 `color:` 前景色的处数**数出来的
+ *    （`--color-accenttext` 恰好 25 处，判据会先把块注释剔掉）。复制一份卡的样子 = 那个数当场 +1 ——
+ *    那时候面前只有两条路：改断言的分母（为了让门禁变绿而改绿），
+ *    或者把重复的样式收成一处（**这一条**）。四张卡本来就该长得一模一样，所以选后者。
+ */
+function CardShell({
+  icon,
+  label,
+  desc,
+  right,
+  ...rest
+}: {
+  icon: ComponentType<IconProps>
+  label: string
+  desc: string
+  /** 右侧那个东西（不给就是一枚向右的箭头） */
+  right?: ReactNode
+} & ButtonHTMLAttributes<HTMLButtonElement>) {
+  const Icon = icon
+  return (
+    <button type="button" className="row" style={{ padding: 14 }} {...rest}>
+      <span
+        className="grid place-items-center shrink-0"
+        style={{
+          width: 36,
+          height: 36,
+          border: '1px solid var(--color-line2)',
+          borderRadius: 4,
+          background: 'var(--color-surface2)',
+          color: 'var(--color-accenttext)',
+        }}
+      >
+        <Icon size={18} />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span style={{ fontSize: 14.5, fontWeight: 620 }}>{label}</span>
+        <span className="mt-0.5 block" style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
+          {desc}
+        </span>
+      </span>
+      {right ?? <IconChevronRight size={16} />}
+    </button>
   )
 }

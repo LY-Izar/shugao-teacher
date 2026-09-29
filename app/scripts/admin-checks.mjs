@@ -105,7 +105,15 @@ const C = await import(mod('src/lib/adminChart.ts'))
      · 段头 = **横幅行（`-- ====`）的下一行**，形如 `--  12. 标题` 或 `-- §37 标题`；
        要求紧跟在横幅后面，是为了避开正文里那种"`--  1. id 多了一条…`"的编号列表；
      · `sql` = 去掉 `--` 注释与空行之后**还剩几行**（`0` ⇒ **登记节**）；
-     · `targets` = 这一段**建出来**的、anon 会话探得到的东西：表 / 加列 / **无参**函数。
+     · `targets` = 这一段**建出来**的东西，按"能不能探"分两类：
+       ⓐ 表 / 加列 / **无参**函数 —— anon 会话**直接探得到**（探针在 `adminChart.ts`）；
+       ⓑ 🆕 **策略**（`create policy <名> on <表>`）—— **唯一**来源是 `pg_catalog.pg_policies`，
+          探针也写好了（`probePolicy()`），但**库肯不肯答要看平台**：PostgREST 默认只暴露
+          `public`，`pg_catalog` 不在它的 schema cache 里 → 答不了时这几段**如实留在
+          "面板探不到"**（不是"没跑"，也不是绿），而**不许**拿"它落在那张表上、表在"
+          冒充它跑过（那是假绿 —— §11 就是这么骗过人的）。
+       🔴 **策略排在最后压进 `targets`**：`PROBES_PER_STAGE` 只取前 2 个，不能让策略把
+          "表 / 无参函数"这些**真能探的**挤出探针位。
        ⚠️ 带参数的函数**一律不进清单** —— 探它要伪造实参，而 `grade_delete` /
        `migrate_nos_to_serial` 那些**会写库**，面板是只读的；
        `_for` 变体与 `returns trigger` 的触发器函数也不进（它们本来就不可 RPC 调用）。
@@ -160,6 +168,20 @@ function parseSchemaStages(text) {
       if (/returns trigger/i.test(flat.slice(m.index, m.index + 240))) continue
       push({ kind: 'fn', name })
     }
+    /*
+     * 🆕 策略（`create policy <名> on <表>`）—— **最后**才压进 `targets`（见上面那段纪律）。
+     * ⚠️ 只认 `create policy`：`drop policy if exists <名> on <表>;` 是它的伴生语句，
+     *    正则要是松一点就会把"这一段删掉的策略"也当成"这一段建的"。
+     * ⚠️ `targets` 的去重键是 `name ?? column` —— 策略重名（不同表上同名）会互相吃掉，
+     *    所以 `push` 里去重时要把 `table` 也算上（下面单独写一份，不动共用的那个 `push`）。
+     */
+    for (const m of flat.matchAll(/create policy ([a-z_][a-z_0-9]*) on (?:public\.)?([a-z_][a-z_0-9]*)/gi)) {
+      const name = m[1].toLowerCase()
+      const table = m[2].toLowerCase()
+      if (!targets.some((x) => x.kind === 'policy' && x.name === name && x.table === table)) {
+        targets.push({ kind: 'policy', table, name })
+      }
+    }
     return { n: h.n, title: h.title, from: h.line, to, sql, targets }
   })
 }
@@ -181,7 +203,9 @@ function renderStagesBlock(stages) {
             ? `{ kind: 'table', name: '${t.name}' }`
             : t.kind === 'col'
               ? `{ kind: 'col', table: '${t.table}', column: '${t.column}' }`
-              : `{ kind: 'fn', name: '${t.name}' }`,
+              : t.kind === 'policy'
+                ? `{ kind: 'policy', table: '${t.table}', name: '${t.name}' }`
+                : `{ kind: 'fn', name: '${t.name}' }`,
         )
         .join(', ')
       return (
@@ -344,6 +368,34 @@ await withLock(async () => {
    */
   const flakyTables = new Set()
 
+  /* ============================================================
+     🆕 2026-10-11 · 策略探针（`pg_policies`）的假库模型
+     ------------------------------------------------------------
+     🔴 **默认必须按真实平台的形状答**：PostgREST 只暴露 `public`，
+        `pg_catalog.pg_policies` **不在它的 schema cache 里** → `404 + PGRST205`。
+        假库要是默认回 `200 []`，策略探针就会把"**问不到**"读成"**读到了 0 行**"，
+        再往下 §35 / §36 就会被判成"策略不在" = **假红**（本项目最贵的那类失真）。
+        —— 假库比真库宽松 = 假绿，比真库严格 = 假红，两个方向都不许。
+
+     `pgPoliciesExposed = true` 是**造出来的世界**（"库里真有一个能读 `pg_policies` 的口子"），
+     只在第七节·补〇二的反向对照里开：它能证明**策略探针本身不是摆设** ——
+     在"能答"的库里，它真的判得出"在"和"不在"（而不是永远返回一句"探不到"）。
+     ============================================================ */
+  let pgPoliciesExposed = false
+  /** 假库里的策略清单：默认 = 从 `schema.sql` 解析出来的那些（与真库同形，不另编一份） */
+  let pgPolicies = []
+  /** 把这些策略从假库里拿掉 —— 造"这一段没跑"（用在反向对照里） */
+  const missingPolicies = new Set()
+  /*
+   * ⚠️ 假库里的策略清单**从 `schema.sql` 现解析** —— 不另抄一份（抄一份就是下一条"过期的计数表"）。
+   *    所以假库里"有的策略"与真库（跑完整份 schema.sql 之后）**必然同形**。
+   */
+  pgPolicies = parseSchemaStages(readFileSync(SCHEMA_FILE, 'utf8')).flatMap((s) =>
+    s.targets
+      .filter((t) => t.kind === 'policy')
+      .map((t) => ({ schemaname: 'public', tablename: t.table, policyname: t.name })),
+  )
+
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', `http://127.0.0.1:${PORT}`)
     seen.push({ path: url.pathname, auth: req.headers.authorization ?? '', search: url.search })
@@ -400,6 +452,19 @@ await withLock(async () => {
     if (url.pathname.startsWith('/rest/v1/')) {
       const rest = url.pathname.replace('/rest/v1/', '')
       const table = rest.split('/')[0]
+      /* 🆕 策略探针：`pg_policies`（见上面那段"假库模型"的纪律） */
+      if (table === 'pg_policies') {
+        if (!pgPoliciesExposed) {
+          return send(404, {
+            code: 'PGRST205',
+            message: `Could not find the table 'public.pg_policies' in the schema cache`,
+          })
+        }
+        return send(
+          200,
+          pgPolicies.filter((p) => !missingPolicies.has(`${p.tablename}.${p.policyname}`)),
+        )
+      }
       if (missingTables.has(table)) {
         return send(404, {
           code: 'PGRST205',
@@ -1349,14 +1414,16 @@ await withLock(async () => {
     )
     const nums = C.SCHEMA_STAGES.map((s) => s.n)
     ok(
-      '补〇ⓑ 🆕 §35 / §36 / §37 在清单里（旧的手写清单只到 §19）',
-      nums.includes(35) && nums.includes(36) && nums.includes(37),
+      '补〇ⓑ 🆕 §35 / §36 / §37 / §38 在清单里（旧的手写清单只到 §19）',
+      [35, 36, 37, 38].every((n) => nums.includes(n)),
       nums.join(','),
     )
     ok(
-      '补〇ⓑ 清单覆盖全部段（36 段，末段是 §37）',
-      nums.length === 36 && Math.max(...nums) === 37,
-      `${nums.length} 段 / 最大 §${Math.max(...nums)}`,
+      '补〇ⓑ 清单覆盖到 `schema.sql` 的**最后一个段头**（不是写死的数字 —— 加段就自动跟上）',
+      nums.length === parsed.length &&
+        Math.max(...nums) === parsed[parsed.length - 1].n &&
+        Math.max(...nums) === 38,
+      `${nums.length} 段 / 最大 §${Math.max(...nums)}（schema.sql 末段 §${parsed[parsed.length - 1].n}）`,
     )
     ok(
       '补〇ⓑ 行号锚点也跟着新（§37 的行号与文件里那一段对得上）',
@@ -1405,6 +1472,163 @@ await withLock(async () => {
       })(),
       JSON.stringify([byStage.get('§35').kind, byStage.get('§35').cells.length]),
     )
+  }
+
+  /* ============================================================
+     第七节·补〇二 · 🆕 2026-10-11：「**只加策略**」的段也探得到
+     ------------------------------------------------------------
+     用户 2026-10-11 点名：「记得补探针，就是管理台那个」。
+     病灶：清单已经自动生成了，但**探针只认"表 / 加列 / 无参函数"** ——
+     `create policy` 既不建表也不建函数，于是 §35 / §36（**只加策略**）
+     和 §37（只加一个**带参数**的函数）永远躺在"面板探不到"那一档，
+     总结论「线上库已跑到 §NN」**偏低**（库到 §37，面板说 §34）。
+
+     补的东西：
+       · 生成器多认一类产物 `{ kind: 'policy', table, name }`（解析 `create policy`）；
+       · 面板多一个策略探针 `probePolicy()` —— **只问 `pg_policies`**，三种答法分开：
+           读到行 → 在 / 不在（进红黄绿）；
+           库不暴露它（PostgREST 只暴露 `public`）→ **本面板探不到**（如实留在那一档）；
+           网络 / 认不出的错 → 没结论（灰）。
+
+     断言（每条都带反向对照）：
+       ⓔ §38 在清单里、而且**探得到**（它建了三张表 → 不再落进"探不到"）；
+       ⓕ §35 / §36 被认出是"只加策略"（旧清单里它们是**空产物**）；
+       ⓖ 反向对照 A：假库**按真实平台的形状**答（不暴露 `pg_policies`）→
+          §35 / §36 必须**如实留在"探不到"**：不在未跑里、不在没结论里、卡不许变红；
+       ⓗ 反向对照 B：造一个"库里有 `pg_policies` 口子"的世界 →
+          策略探针必须**真的能判**：全在 → §35 已跑；**抽掉一条** → §35 必须红。
+     ============================================================ */
+  {
+    const byN = new Map(C.SCHEMA_STAGES.map((s) => [s.n, s]))
+    const s35 = byN.get(35)
+    const s36 = byN.get(36)
+    const s37 = byN.get(37)
+    const s38 = byN.get(38)
+    const onlyPolicies = (s) => s.targets.length > 0 && s.targets.every((t) => t.kind === 'policy')
+
+    ok('补〇二ⓔ §38 在清单里（刚加的那一段）', Boolean(s38), JSON.stringify(s38?.n))
+    ok(
+      '补〇二ⓔ §38 **建了可探的东西**（表）—— 所以它不会落进"面板探不到"',
+      s38.targets.some((t) => t.kind === 'table'),
+      JSON.stringify(s38.targets.slice(0, 4)),
+    )
+    ok(
+      '补〇二ⓕ §35 / §36 是"**只加策略**"的段（`create policy` 一条条解析出来的）',
+      onlyPolicies(s35) && onlyPolicies(s36),
+      `§35=${JSON.stringify(s35.targets.map((t) => t.kind))} §36=${JSON.stringify(s36.targets.map((t) => t.kind))}`,
+    )
+    ok(
+      '补〇二ⓕ §35 那四条策略都点得出名字（屏上要看得见"这一段加了什么"）',
+      s35.targets
+        .filter((t) => t.kind === 'policy')
+        .map((t) => t.name)
+        .join(',') ===
+        'student_profiles_visible,student_profiles_insert,student_profiles_update,student_profiles_delete',
+      JSON.stringify(s35.targets.map((t) => t.name)),
+    )
+    ok(
+      '补〇二ⓕ §37 **不是**"只加策略"（它的产物是一个**带参数**的函数，本面板不探）—— 两者不许混为一谈',
+      s37.targets.length === 0 && !onlyPolicies(s37),
+      JSON.stringify(s37.targets),
+    )
+
+    /* ---- ⓖ 反向对照 A：假库按**真实平台**的形状答（不暴露 `pg_policies`） ---- */
+    missingTables.clear()
+    missingCols.clear()
+    flakyTables.clear()
+    missingPolicies.clear()
+    pgPoliciesExposed = false
+    {
+      const r = await C.probeSchemaDrift()
+      const by = new Map(r.sections.map((s) => [s.stage, s]))
+      const sum = C.driftSummary(r.sections)
+      ok(
+        '补〇二ⓖ 库不暴露 `pg_policies` 时：§35 / §36 **一格都不进**（如实留在"探不到"那一档）',
+        by.get('§35').cells.length === 0 && by.get('§36').cells.length === 0,
+        JSON.stringify([by.get('§35').cells.length, by.get('§36').cells.length]),
+      )
+      ok(
+        '补〇二ⓖ 而且它们**不许**出现在"未跑"或"没结论"里（问不到 ≠ 没跑 ≠ 不知道）',
+        !sum.missing.some((s) => s.stage === '§35' || s.stage === '§36') &&
+          !sum.unknown.some((s) => s.stage === '§35' || s.stage === '§36') &&
+          sum.unprobeable.some((s) => s.stage === '§35') &&
+          sum.unprobeable.some((s) => s.stage === '§36'),
+        `missing=${sum.missing.map((s) => s.stage)} unknown=${sum.unknown.map((s) => s.stage)}`,
+      )
+      ok(
+        '补〇二ⓖ 卡**不许**因为"策略问不到"变红（探不到不参与红黄绿）',
+        sum.state !== 'missing',
+        sum.state,
+      )
+      ok(
+        '补〇二ⓖ §38 探得到 → 总结论不再偏低（**这次补探针要的就是这个数**）',
+        sum.latest === 38 && /线上库已跑到\s*§38/.test(sum.text),
+        sum.text,
+      )
+      ok(
+        '补〇二ⓖ "探不到"的理由**点名 `pg_policies` + 策略名字**（不是一句"探不到"就完了）',
+        (by.get('§35').noProbe ?? '').includes('pg_policies') &&
+          (by.get('§35').noProbe ?? '').includes('student_profiles_visible'),
+        (by.get('§35').noProbe ?? '').slice(0, 130),
+      )
+      ok(
+        '补〇二ⓖ 而 §37 走的是**另一句**理由（带参数的函数，不是"只加策略"）',
+        !(by.get('§37').noProbe ?? '').includes('只加策略'),
+        (by.get('§37').noProbe ?? '').slice(0, 90),
+      )
+      /* 反向对照（"问不到"被错当成"没跑" → 必须红）：证明上面那条"不许红"是真断言 */
+      const asMissing = C.driftSummary(
+        r.sections.map((s) => (s.stage === '§35' ? { ...s, state: 'missing' } : s)),
+      )
+      eq(
+        '补〇二ⓖ 反向对照：若把"问不到"错当成"未跑" → 卡**立刻变红**（所以上面那条不是恒真）',
+        asMissing.state,
+        'missing',
+      )
+    }
+
+    /* ---- ⓗ 反向对照 B：造一个"库里能读 `pg_policies`"的世界 ---- */
+    pgPoliciesExposed = true
+    {
+      const r = await C.probeSchemaDrift()
+      const by = new Map(r.sections.map((s) => [s.stage, s]))
+      const sum = C.driftSummary(r.sections)
+      eq('补〇二ⓗ 库里能读 `pg_policies` 时：策略都在 → §35 判"已跑"', by.get('§35').state, 'present')
+      eq('补〇二ⓗ §36 同理', by.get('§36').state, 'present')
+      ok(
+        '补〇二ⓗ 而且它真的**从"探不到"里出来了**（不再落进 unprobeable）',
+        !sum.unprobeable.some((s) => s.stage === '§35') &&
+          !sum.unprobeable.some((s) => s.stage === '§36'),
+        JSON.stringify(sum.unprobeable.map((s) => s.stage)),
+      )
+      ok(
+        '补〇二ⓗ 每一格都带**原始证据**（"在 pg_policies 里"）—— 不是只给一个绿点',
+        by.get('§35').cells.every((c) => c.state === 'present' && c.evidence.includes('pg_policies')),
+        JSON.stringify(by.get('§35').cells),
+      )
+      /* 🔴 反向对照：**抽掉一条策略** → §35 必须红（否则这探针就是摆设） */
+      missingPolicies.add('student_profiles.student_profiles_visible')
+      const r2 = await C.probeSchemaDrift()
+      const by2 = new Map(r2.sections.map((s) => [s.stage, s]))
+      const sum2 = C.driftSummary(r2.sections)
+      eq(
+        '补〇二ⓗ 反向对照：**抽掉 §35 那一条策略** → §35 必须"未跑"（策略探针不是摆设）',
+        by2.get('§35').state,
+        'missing',
+      )
+      eq('补〇二ⓗ 而且卡跟着变红', sum2.state, 'missing')
+      ok(
+        '补〇二ⓗ 证据里点名是**哪一条**策略不在（不是一句"策略不在"）',
+        by2
+          .get('§35')
+          .cells.some(
+            (c) => c.state === 'missing' && c.evidence.includes('student_profiles_visible'),
+          ),
+        JSON.stringify(by2.get('§35').cells),
+      )
+      missingPolicies.clear()
+      pgPoliciesExposed = false
+    }
   }
 
   /* ① 库"全跑过" → 有探针的段全绿；登记节单独一档；只加策略的那几段是"探不到" */
@@ -1583,6 +1807,33 @@ await withLock(async () => {
     eq('无法判断时卡是灰的', unknownOne.state, 'indeterminate')
     ok('而且明确写"不是绿"', unknownOne.text.includes('不是绿'), unknownOne.text)
     ok('并给出原因', unknownOne.reasons[0]?.includes('§18'), JSON.stringify(unknownOne.reasons))
+
+    /*
+     * 🔴 **反向对照（硬不变量 I45）**："没结论"必须是灰，**绝不能红**。
+     *    上面那条只证明"灰就是灰"；这一条证明**它没有把红藏在灰里** ——
+     *    把同一段人为改成 `missing`，卡必须**当场变红**。
+     *    少了它，`unknownOne.state === 'indeterminate'` 可能只是因为
+     *    "判据根本没在看 severity"（那就是永远为灰的摆设）。
+     */
+    const redOne = C.driftSummary([
+      {
+        stage: '§18',
+        title: 't',
+        built: 'b',
+        impact: 'i',
+        fix: 'f',
+        state: 'missing',
+        cells: [],
+        anchor: '',
+        kind: 'sql',
+      },
+    ])
+    eq('反向对照：把"没结论"那一段**染成未跑** → 卡必须变红', redOne.state, 'missing')
+    ok(
+      '而且灰与红**确实是两种颜色**（`driftTone` 一处决定）',
+      C.driftTone(unknownOne.state) === 'unknown' && C.driftTone(redOne.state) === 'bad',
+      `${C.driftTone(unknownOne.state)} / ${C.driftTone(redOne.state)}`,
+    )
   }
 
   /* ============================================================

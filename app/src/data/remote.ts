@@ -2130,6 +2130,142 @@ export const saveSchedules = (list: ScheduleItem[], teacherId: string) =>
   list.length ? upsert('schedule_items', list.map((s) => scheduleToRow(s, teacherId))) : Promise.resolve()
 export const deleteSchedule = (id: string) => remove('schedule_items', id)
 
+/* ============================================================
+   🆕 2026-10-12 · 「课程管理」（`schema.sql` §38）—— 前端这一层只做两件事
+   ------------------------------------------------------------
+   ① `ensureScheduleAdminTables()`：**§38 那两张新表在不在线上库里**。
+      🔴 用户**还没跑** §38，所以这一页必须先探一下再画 ——
+         探不到时**优雅降级**（照 `ensureExamTables()` / `ensureNoticeTables()` 那一套：
+         判据只认「表不在」，网络抖动一律当作"在"；`select('*')`，不假设任何一列存在）。
+
+   ② `canManageSchedule(classId)`：问数据库"我能不能改**这个班**的课表"。
+      🔴 走**裸版** RPC `can_manage_schedule(p_class_id)`（判据函数自己取 `auth.uid()`）——
+         **不许**端 `can_manage_schedule_for`：那个 `_for` 变体在 §38.0 里
+         `revoke all … from authenticated`，端上去线上必 42501
+         （与 `nav-checks` D11-A ④ 是同一条纪律）。
+      前端**一个判据都不写**：只把服务端那一位布尔翻成"摆不摆入口"
+      （`canRevoke` / `canPin` 那套先例）。
+
+   ⚠️ 本地演示模式回 `'local'`：本地这一套本来就没有权限层（写进内存 store，谁点都生效），
+      所以照常摆入口。这与"读不到（断网 / §38 没跑）→ **不摆**"是两件不同的事，
+      别把后者折进前者（`nav-checks` D11 那条先例：服务端没给结论时入口先不摆）。
+   ============================================================ */
+
+export type ScheduleAdminTables = 'present' | 'missing' | 'unknown' | 'local'
+
+/** 两张新表的名字 —— 只在这一处列，探针与注释共用同一份 */
+const SCHEDULE_ADMIN_TABLES = ['schedule_temp_changes', 'schedule_perm_changes'] as const
+
+let scheduleAdminProbe: Promise<ScheduleAdminTables> | null = null
+
+async function probeScheduleAdminTables(): Promise<ScheduleAdminTables> {
+  const sb = getSupabase()
+  if (!sb) return 'local'
+  const has = async (table: string): Promise<boolean | null> => {
+    try {
+      /* 🔴 `select('*')`，不是 `select('id')` —— 表存在性只跟"这张表在不在"有关，
+         探针不许假设任何一列存在（`nav-checks` D10-A 会静态抓这一条） */
+      const { error } = await sb.from(table).select('*').limit(1)
+      if (!error) return true
+      if (isMissingTable(error)) return false
+      return null // 认不出来（`42703`「列不在」也走这一支）→ "不知道"，绝不判成"表不在"
+    } catch {
+      return null
+    }
+  }
+  const found = await Promise.all(SCHEDULE_ADMIN_TABLES.map((t) => has(t)))
+  if (found.some((f) => f === false)) return 'missing'
+  if (found.some((f) => f === null)) {
+    /* 探测本身没结论：**不缓存**，让下一次重探（可能只是断网） */
+    scheduleAdminProbe = null
+    return 'unknown'
+  }
+  return 'present'
+}
+
+/** 探一次（同一页面内只探一次）—— 课程管理页按它决定"调课那部分摆不摆" */
+export function ensureScheduleAdminTables(): Promise<ScheduleAdminTables> {
+  if (!scheduleAdminProbe) scheduleAdminProbe = probeScheduleAdminTables()
+  return scheduleAdminProbe
+}
+
+/**
+ * 「我能不能改这个班的课表」—— 三种结论 + 一句人话（页面只照它摆入口）。
+ *
+ * `verdict` 的四档各有各的处置，**不许互相顶替**：
+ *   · `allowed` —— 数据库说可以（超管 / 教务处全校 · 年级主任本年级）；
+ *   · `denied`  —— 数据库说不行（科任老师 / 班主任 / 别年级的年级主任）；
+ *   · `missing` —— §38 还没跑（函数不存在）→ **不摆**，并说清"还没开通"；
+ *   · `unknown` —— 这一次没读出来（断网 / 认不出的错）→ **不摆**，并说清"没读到"。
+ *   · `local`   —— 本地演示模式（没有数据库可问）→ 摆。
+ */
+export type CanManageScheduleVerdict = 'allowed' | 'denied' | 'missing' | 'unknown' | 'local'
+
+export type CanManageScheduleState = {
+  /** 摆不摆那几个写入口（**只决定摆不摆**：真正的闸门是数据库 RLS 与 §38.1.1 的触发器） */
+  canManage: boolean
+  verdict: CanManageScheduleVerdict
+  /** 摆不了时给页面的一句话（空 = 不用说话） */
+  notice: string
+}
+
+export async function canManageSchedule(classId: string): Promise<CanManageScheduleState> {
+  const sb = getSupabase()
+  if (!isRemote || !sb) return { canManage: true, verdict: 'local', notice: '' }
+
+  const tables = await ensureScheduleAdminTables()
+  if (tables === 'missing') {
+    return {
+      canManage: false,
+      verdict: 'missing',
+      notice: '改课表的能力还没开通，这里现在只能看。',
+    }
+  }
+  if (tables === 'unknown') {
+    return {
+      canManage: false,
+      verdict: 'unknown',
+      notice: '这一次没读出你能不能改这个班的课表，入口先不摆。',
+    }
+  }
+
+  try {
+    const { data, error } = await sb.rpc(
+      'can_manage_schedule' as never,
+      { p_class_id: classId } as never,
+    )
+    if (error) {
+      const msg = String(error.message ?? '')
+      const code = String((error as { code?: string }).code ?? '')
+      /* 42883 = `undefined_function` · PGRST202 = PostgREST 找不到这个 RPC（§38 还没跑） */
+      if (code === '42883' || code === 'PGRST202' || /could not find the function/i.test(msg)) {
+        return { canManage: false, verdict: 'missing', notice: '改课表的能力还没开通，这里现在只能看。' }
+      }
+      return {
+        canManage: false,
+        verdict: 'unknown',
+        notice: '这一次没读出你能不能改这个班的课表，入口先不摆。',
+      }
+    }
+    if (data === true) return { canManage: true, verdict: 'allowed', notice: '' }
+    if (data === false) {
+      return { canManage: false, verdict: 'denied', notice: '这个班的课表你只能看。' }
+    }
+    /* 回了话却没有结论 —— **不许静默当成"没权限"**（那会冤枉一位教务处） */
+    return {
+      canManage: false,
+      verdict: 'unknown',
+      notice: '这一次没读出你能不能改这个班的课表，入口先不摆。',
+    }
+  } catch {
+    return {
+      canManage: false,
+      verdict: 'unknown',
+      notice: '这一次没读出你能不能改这个班的课表，入口先不摆。',
+    }
+  }
+}
+
 export const saveClassroom = (c: ClassroomClient, teacherId: string) =>
   upsert('classrooms', classroomToRow(c, teacherId))
 

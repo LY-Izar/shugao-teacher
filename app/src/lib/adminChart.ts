@@ -312,9 +312,13 @@ export function dirtyGroups(r: ContradictionReport): ContradictionGroup[] {
       ⚠️ **不许手动改 `SCHEMA_STAGES`**（改了门禁就红，等于白改）。
 
    面板方案 §二 C1 的"探测手法"原文：**每条都用现成那套判据，别新写一套** ——
-     · 表存在性：`select('id').limit(1)` → 看错误码（`42P01` / `PGRST205` / `schema cache`）
+     · 表存在性：`select('*').limit(1)` → 看错误码（`42P01` / `PGRST205` / `schema cache`）
      · 列存在性：`select('<列>').limit(1)` → 看 `42703` / `does not exist`
-     · 策略 / 函数存在性：anon key **查不到 `pg_policies`** → 标"无法判断"
+     · 🆕 策略存在性（2026-10-11）：**问 `pg_policies`** → 逐条判在/不在；
+       库不暴露它（PostgREST 只暴露 `public`）→ 这一段**如实留在"面板探不到"**。
+       ⚠️ 这一条**推翻了**方案那句"策略 anon key 查不到 → 标无法判断"里的一半：
+          "查不到"是对的，但**查不到不等于不能问** —— 问了、答案是"库不暴露"，
+          那就是一条**准确的**结论（"本面板问不到策略"），比一句笼统的"无法判断"有用。
 
    🔴 **一处刻意的偏离**（2026-09-28 收尾轮，留档在 `功能设计与不变量.md` §20.7）：
       表存在性探针**不用 `select('id')`，改用 `select('*')`**。
@@ -369,6 +373,109 @@ export type DriftSection = {
    *    这一档是"这个问题不该问面板"，所以它**不参与**卡片的红黄绿。
    */
   noProbe?: string
+}
+
+/* ============================================================
+   🆕 2026-10-11 · 「策略在不在」的探针 —— 问 `pg_policies`
+   ------------------------------------------------------------
+   病灶（用户 2026-10-11 点名）：清单改成一节一节从 `schema.sql` 自动生成之后，
+   **探针仍然只认"表 / 加列 / 无参函数"** —— 于是"**只加 policy**"的段
+   （§35 / §36 / §37）`targets` 是空的 → 永远躺在"面板探不到"那一档，
+   而总结论「线上库已跑到 §NN」**偏低**（库到 §37，面板说 §34）。
+
+   🔴 **唯一的信息来源就是数据库**：一条策略有没有生效，只写在
+      `pg_catalog.pg_policies` 里 —— 表在不在看 `42P01`、函数在不在看 `PGRST202`，
+      策略**没有第三个客户端可观测的形状**（"读这张表回 0 行"既可能是"策略挡住了"、
+      也可能是"表里本来就没行"，拿它当判据就是假绿）。
+      → 所以这里**只问 `pg_policies`**，不问别的。
+
+   🔴 **三种答法必须分开**（这一段的全部意义就在这三分）：
+      · 读到行 → 逐条判"在 / 不在"（进红黄绿，`present` / `missing`）；
+      · 库**不暴露**它（PostgREST 默认只暴露 `public`，`pg_catalog` 不在它的
+        schema cache 里 → `PGRST205`）→ `'no-oracle'`：**本面板探不到**
+        （如实留在那一档：不是"没跑"，也不是绿）；
+      · 网络 / 认不出的错 → `'error'`：**没结论**（灰，绝不是红）。
+      ⚠️ 红线：`'no-oracle'` **绝不许**被当成 `missing`（那是把"问不到"说成"没跑"），
+         也**绝不许**被当成 `present`（那是拿"表在"冒充"策略在"）。
+
+   ⚠️ `select('*')` —— **不假设 `pg_policies` 有任何一列**（§20.7 的纪律）。
+      列名只在**读到行之后**才拿来取值；读到行却认不出那两列 → 也算"没结论"，并报出来。
+   ⚠️ **一次探测只发一次请求**（记忆化）：全表拉一次，比"每条策略问一次"省得多。
+      `probeSchemaDrift()` 每次调用会把它清空，所以"重新探测"拿到的是新数据。
+   ============================================================ */
+
+type PoliciesOracle =
+  | { kind: 'rows'; rows: ReadonlyArray<Record<string, unknown>> }
+  | { kind: 'no-oracle'; evidence: string }
+  | { kind: 'error'; evidence: string }
+
+let policiesPromise: Promise<PoliciesOracle> | null = null
+
+/** 问一次 `pg_policies`（只读；整个面板共用这一个 promise） */
+function readPolicies(): Promise<PoliciesOracle> {
+  if (policiesPromise) return policiesPromise
+  policiesPromise = (async (): Promise<PoliciesOracle> => {
+    const sb = getSupabase()
+    if (!sb) return { kind: 'error', evidence: '本地模式：没有云端连接' }
+    try {
+      const { data, error } = await sb.from('pg_policies' as never).select('*')
+      if (error) {
+        const code = String((error as { code?: string }).code ?? '')
+        const msg = String(error.message ?? '')
+        if (MISSING_TABLE_RE.test(code) || MISSING_TABLE_RE.test(msg)) {
+          return {
+            kind: 'no-oracle',
+            evidence:
+              `${code || '?'} ${msg}`.trim() +
+              '（PostgREST 只暴露 `public`，`pg_catalog.pg_policies` 不在它的 schema cache 里 → ' +
+              '**本面板问不到策略**；这不是"策略没跑"）',
+          }
+        }
+        return { kind: 'error', evidence: `${code || '?'} ${msg}`.trim() }
+      }
+      const rows = Array.isArray(data) ? (data as ReadonlyArray<Record<string, unknown>>) : []
+      return { kind: 'rows', rows }
+    } catch (e) {
+      return { kind: 'error', evidence: String(e) }
+    }
+  })()
+  return policiesPromise
+}
+
+/**
+ * 一条策略在不在。
+ *
+ * 返回值 `null` = **本面板探不到**（库不暴露 `pg_policies`）——
+ * ⚠️ 它与"探测没结论"（返回一个 `indeterminate` 的格）是**两件事**：
+ * 前者不进"格"，于是这一段落回"面板探不到"那一档（不参与卡的红黄绿）；
+ * 后者进"格"，于是这一段是**灰**（有结论尝试过、只是没拿到）。
+ */
+async function probePolicy(table: string, name: string): Promise<DriftCell | null> {
+  const what = `策略 \`${name}\`（\`${table}\` 上）`
+  const o = await readPolicies()
+  if (o.kind === 'no-oracle') return null
+  if (o.kind === 'error') return { what, state: 'indeterminate', evidence: o.evidence }
+  const rows = o.rows
+  /* 一行都没读到：要么整库真的一条策略都没有，要么形状对不上 —— **不下"不在"的结论** */
+  if (!rows.length) {
+    return {
+      what,
+      state: 'indeterminate',
+      evidence: '`pg_policies` 读到了 0 行 —— 不据此说"这条策略不在"（宁可说不知道）',
+    }
+  }
+  const named = rows.filter((r) => typeof r?.policyname === 'string')
+  if (!named.length) {
+    return {
+      what,
+      state: 'indeterminate',
+      evidence: '读到了 `pg_policies`，但行里认不出 `policyname` / `tablename` 两列（形状不认识）',
+    }
+  }
+  const hit = named.some((r) => r.policyname === name && r.tablename === table)
+  return hit
+    ? { what, state: 'present', evidence: '在 `pg_policies` 里（这一条策略确实建出来了）' }
+    : { what, state: 'missing', evidence: `\`pg_policies\` 里没有 \`${table}\` 上的 \`${name}\`` }
 }
 
 const OK = '读到了（无错误）'
@@ -532,6 +639,15 @@ export type StageTarget =
   | { kind: 'table'; name: string }
   | { kind: 'col'; table: string; column: string }
   | { kind: 'fn'; name: string }
+  /**
+   * 🆕 **策略**（`create policy <name> on <table>`）—— 第三类产物，2026-10-11 补。
+   *
+   * 🔴 为什么它必须单独一类：`create policy` **建不出表、也建不出函数**，
+   *    所以在旧清单里，§35 / §36 / §37 这种"只加策略"的段的 `targets` 是**空的** →
+   *    它们躺在"面板探不到"那一档，而总结论（`latest`）**偏低**
+   *    （库到 §37，面板说 §34）。
+   */
+  | { kind: 'policy'; table: string; name: string }
 
 export type SchemaStage = {
   n: number
@@ -552,36 +668,37 @@ export const SCHEMA_STAGES: readonly SchemaStage[] = [
   { n: 4, title: '教师课表（每周重复）', from: 242, to: 263, sql: 16, targets: [{ kind: 'table', name: 'schedule_items' }, { kind: 'col', table: 'schedule_items', column: 'scope' }] },
   { n: 5, title: '教室端与呼叫', from: 265, to: 292, sql: 22, targets: [{ kind: 'table', name: 'classrooms' }, { kind: 'table', name: 'calls' }] },
   { n: 6, title: '显式授权', from: 294, to: 317, sql: 7, targets: [] },
-  { n: 7, title: '行级安全（RLS）—— 每张表都要开，漏一张就等于全校数据裸奔', from: 319, to: 380, sql: 42, targets: [] },
+  { n: 7, title: '行级安全（RLS）—— 每张表都要开，漏一张就等于全校数据裸奔', from: 319, to: 380, sql: 42, targets: [{ kind: 'policy', table: 'teachers', name: 'teachers_self' }, { kind: 'policy', table: 'classes', name: 'classes_own' }, { kind: 'policy', table: 'students', name: 'students_own' }, { kind: 'policy', table: 'assignments', name: 'assignments_own' }, { kind: 'policy', table: 'schedule_items', name: 'schedule_own' }, { kind: 'policy', table: 'classrooms', name: 'classrooms_own' }, { kind: 'policy', table: 'calls', name: 'calls_own' }] },
   { n: 8, title: '实时推送', from: 382, to: 399, sql: 12, targets: [] },
-  { n: 9, title: '教师端 → 教室端 的文件互传', from: 401, to: 463, sql: 34, targets: [{ kind: 'table', name: 'shared_files' }] },
-  { n: 10, title: '权限与账号体系 · 阶段 1（建表 / 回填 / RLS 函数）', from: 465, to: 1106, sql: 275, targets: [{ kind: 'table', name: 'schools' }, { kind: 'table', name: 'grades' }, { kind: 'table', name: 'teacher_roles' }, { kind: 'table', name: 'class_subjects' }, { kind: 'table', name: 'classroom_accounts' }, { kind: 'col', table: 'classes', column: 'school_id' }, { kind: 'col', table: 'classes', column: 'grade_id' }, { kind: 'col', table: 'teacher_roles', column: 'subject_code' }, { kind: 'fn', name: 'visible_class_ids' }, { kind: 'fn', name: 'is_classroom_account' }] },
-  { n: 11, title: '阶段 2：新策略与旧策略**并存**（只加，不删）', from: 1108, to: 1177, sql: 30, targets: [] },
-  { n: 12, title: '多学科 · 阶段 1（学科字典 / subject_code 加列 / 回填）', from: 1179, to: 1341, sql: 68, targets: [{ kind: 'table', name: 'subjects' }, { kind: 'col', table: 'assignments', column: 'subject_code' }, { kind: 'col', table: 'teachers', column: 'primary_subject_code' }] },
-  { n: 13, title: '多学科 · 阶段 3：建号带学科 + 身份判据 + 学科可见性分级', from: 1343, to: 1947, sql: 350, targets: [{ kind: 'fn', name: 'is_super_admin' }, { kind: 'fn', name: 'can_manage_teachers' }, { kind: 'fn', name: 'can_create_teacher_accounts' }, { kind: 'fn', name: 'can_assign_roles' }, { kind: 'fn', name: 'can_assign_super_role' }, { kind: 'fn', name: 'subject_lead_class_ids' }, { kind: 'fn', name: 'subject_lead_subject_codes' }] },
+  { n: 9, title: '教师端 → 教室端 的文件互传', from: 401, to: 463, sql: 34, targets: [{ kind: 'table', name: 'shared_files' }, { kind: 'policy', table: 'shared_files', name: 'shared_files_own' }, { kind: 'policy', table: 'storage', name: 'classroom_files_read' }, { kind: 'policy', table: 'storage', name: 'classroom_files_insert' }, { kind: 'policy', table: 'storage', name: 'classroom_files_delete' }] },
+  { n: 10, title: '权限与账号体系 · 阶段 1（建表 / 回填 / RLS 函数）', from: 465, to: 1106, sql: 275, targets: [{ kind: 'table', name: 'schools' }, { kind: 'table', name: 'grades' }, { kind: 'table', name: 'teacher_roles' }, { kind: 'table', name: 'class_subjects' }, { kind: 'table', name: 'classroom_accounts' }, { kind: 'col', table: 'classes', column: 'school_id' }, { kind: 'col', table: 'classes', column: 'grade_id' }, { kind: 'col', table: 'teacher_roles', column: 'subject_code' }, { kind: 'fn', name: 'visible_class_ids' }, { kind: 'fn', name: 'is_classroom_account' }, { kind: 'policy', table: 'schools', name: 'schools_read' }, { kind: 'policy', table: 'grades', name: 'grades_read' }, { kind: 'policy', table: 'teacher_roles', name: 'teacher_roles_read' }, { kind: 'policy', table: 'class_subjects', name: 'class_subjects_read' }, { kind: 'policy', table: 'classroom_accounts', name: 'classroom_accounts_read' }] },
+  { n: 11, title: '阶段 2：新策略与旧策略**并存**（只加，不删）', from: 1108, to: 1177, sql: 30, targets: [{ kind: 'policy', table: 'classes', name: 'classes_visible' }, { kind: 'policy', table: 'students', name: 'students_visible' }, { kind: 'policy', table: 'assignments', name: 'assignments_visible' }, { kind: 'policy', table: 'calls', name: 'calls_visible' }, { kind: 'policy', table: 'schedule_items', name: 'schedule_class_visible' }, { kind: 'policy', table: 'classrooms', name: 'classrooms_visible' }, { kind: 'policy', table: 'classrooms', name: 'classrooms_heartbeat' }, { kind: 'policy', table: 'schedule_items', name: 'schedule_classroom_write' }] },
+  { n: 12, title: '多学科 · 阶段 1（学科字典 / subject_code 加列 / 回填）', from: 1179, to: 1341, sql: 68, targets: [{ kind: 'table', name: 'subjects' }, { kind: 'col', table: 'assignments', column: 'subject_code' }, { kind: 'col', table: 'teachers', column: 'primary_subject_code' }, { kind: 'policy', table: 'subjects', name: 'subjects_read' }] },
+  { n: 13, title: '多学科 · 阶段 3：建号带学科 + 身份判据 + 学科可见性分级', from: 1343, to: 1947, sql: 350, targets: [{ kind: 'fn', name: 'is_super_admin' }, { kind: 'fn', name: 'can_manage_teachers' }, { kind: 'fn', name: 'can_create_teacher_accounts' }, { kind: 'fn', name: 'can_assign_roles' }, { kind: 'fn', name: 'can_assign_super_role' }, { kind: 'fn', name: 'subject_lead_class_ids' }, { kind: 'fn', name: 'subject_lead_subject_codes' }, { kind: 'policy', table: 'assignments', name: 'assignments_visible' }] },
   { n: 14, title: '自检：确认每张表都开了 RLS', from: 1949, to: 1954, sql: 0, targets: [] },
-  { n: 15, title: '考试（2026-09-27 新增）', from: 1956, to: 2295, sql: 142, targets: [{ kind: 'table', name: 'exams' }, { kind: 'table', name: 'exam_scores' }] },
-  { n: 16, title: '收口 · 阶段 5：逐表写策略矩阵 + can_grade 落地 + 删旧策略', from: 2297, to: 2904, sql: 271, targets: [{ kind: 'fn', name: 'is_school_admin' }] },
-  { n: 17, title: '收口 · 教室端的**三条**裂缝（2026-09-25 拍板「收紧」A/B；2026-09-27 收紧 C）', from: 2906, to: 3102, sql: 37, targets: [] },
+  { n: 15, title: '考试（2026-09-27 新增）', from: 1956, to: 2295, sql: 142, targets: [{ kind: 'table', name: 'exams' }, { kind: 'table', name: 'exam_scores' }, { kind: 'policy', table: 'exams', name: 'exams_visible' }, { kind: 'policy', table: 'exams', name: 'exams_write' }, { kind: 'policy', table: 'exam_scores', name: 'exam_scores_visible' }, { kind: 'policy', table: 'exam_scores', name: 'exam_scores_write' }] },
+  { n: 16, title: '收口 · 阶段 5：逐表写策略矩阵 + can_grade 落地 + 删旧策略', from: 2297, to: 2904, sql: 271, targets: [{ kind: 'fn', name: 'is_school_admin' }, { kind: 'policy', table: 'classes', name: 'classes_visible' }, { kind: 'policy', table: 'students', name: 'students_visible' }, { kind: 'policy', table: 'calls', name: 'calls_visible' }, { kind: 'policy', table: 'classrooms', name: 'classrooms_visible' }, { kind: 'policy', table: 'classes', name: 'classes_insert' }, { kind: 'policy', table: 'classes', name: 'classes_update' }, { kind: 'policy', table: 'classes', name: 'classes_delete' }, { kind: 'policy', table: 'students', name: 'students_insert' }, { kind: 'policy', table: 'students', name: 'students_update' }, { kind: 'policy', table: 'students', name: 'students_delete' }, { kind: 'policy', table: 'assignments', name: 'assignments_insert' }, { kind: 'policy', table: 'assignments', name: 'assignments_update' }, { kind: 'policy', table: 'assignments', name: 'assignments_delete' }, { kind: 'policy', table: 'calls', name: 'calls_insert' }, { kind: 'policy', table: 'calls', name: 'calls_update' }, { kind: 'policy', table: 'calls', name: 'calls_delete' }, { kind: 'policy', table: 'schedule_items', name: 'schedule_mine_read' }, { kind: 'policy', table: 'schedule_items', name: 'schedule_mine_write' }, { kind: 'policy', table: 'schedule_items', name: 'schedule_class_write' }, { kind: 'policy', table: 'classrooms', name: 'classrooms_insert' }, { kind: 'policy', table: 'classrooms', name: 'classrooms_update' }, { kind: 'policy', table: 'classrooms', name: 'classrooms_delete' }] },
+  { n: 17, title: '收口 · 教室端的**三条**裂缝（2026-09-25 拍板「收紧」A/B；2026-09-27 收紧 C）', from: 2906, to: 3102, sql: 37, targets: [{ kind: 'policy', table: 'teachers', name: 'teachers_not_classroom' }, { kind: 'policy', table: 'teachers', name: 'teachers_not_classroom_insert' }, { kind: 'policy', table: 'teachers', name: 'teachers_not_classroom_update' }, { kind: 'policy', table: 'teachers', name: 'teachers_not_classroom_delete' }, { kind: 'policy', table: 'schedule_items', name: 'schedule_classroom_scope_only' }, { kind: 'policy', table: 'shared_files', name: 'shared_files_not_classroom_insert' }, { kind: 'policy', table: 'shared_files', name: 'shared_files_not_classroom_update' }, { kind: 'policy', table: 'shared_files', name: 'shared_files_not_classroom_delete' }] },
   { n: 18, title: '判据函数的 `_for` 变体（2026-09-27 补）：为什么每个判据都要两件套', from: 3104, to: 3206, sql: 0, targets: [] },
-  { n: 19, title: '共享文件的**班级归属**（2026-09-28）：教师端 → 教室端 的文件互传，**读**这一侧修通', from: 3208, to: 3469, sql: 64, targets: [{ kind: 'col', table: 'shared_files', column: 'class_ids' }] },
+  { n: 19, title: '共享文件的**班级归属**（2026-09-28）：教师端 → 教室端 的文件互传，**读**这一侧修通', from: 3208, to: 3469, sql: 64, targets: [{ kind: 'col', table: 'shared_files', column: 'class_ids' }, { kind: 'policy', table: 'shared_files', name: 'shared_files_class_read' }, { kind: 'policy', table: 'shared_files', name: 'shared_files_class_scope_insert' }, { kind: 'policy', table: 'shared_files', name: 'shared_files_class_scope_update' }, { kind: 'policy', table: 'storage', name: 'classroom_files_read' }] },
   { n: 20, title: '序列号键迁移（P1，2026-09-25）', from: 3471, to: 4139, sql: 475, targets: [{ kind: 'table', name: 'student_serial_counters' }, { kind: 'col', table: 'students', column: 'serial' }, { kind: 'col', table: 'students', column: 'legacy_student_no' }, { kind: 'fn', name: 'assign_student_serials' }, { kind: 'fn', name: 'migrate_nos_to_serial' }, { kind: 'fn', name: 'serial_migration_report' }, { kind: 'fn', name: 'revert_nos_to_legacy' }] },
-  { n: 21, title: '通知（2026-09-28 新增）—— 「学校对老师说话」', from: 4141, to: 5180, sql: 550, targets: [{ kind: 'table', name: 'notices' }, { kind: 'table', name: 'notice_targets' }, { kind: 'table', name: 'teacher_departments' }, { kind: 'col', table: 'notice_targets', column: 'target_department' }, { kind: 'fn', name: 'notice_sendable_roles' }, { kind: 'fn', name: 'notice_departments' }, { kind: 'fn', name: 'my_notice_scopes' }] },
-  { n: 22, title: '全站公告（2026-09-28 公告轮）—— 「**平台**对老师说话」', from: 5182, to: 5365, sql: 56, targets: [{ kind: 'table', name: 'announcements' }, { kind: 'fn', name: 'can_publish_announcement' }] },
+  { n: 21, title: '通知（2026-09-28 新增）—— 「学校对老师说话」', from: 4141, to: 5180, sql: 550, targets: [{ kind: 'table', name: 'notices' }, { kind: 'table', name: 'notice_targets' }, { kind: 'table', name: 'teacher_departments' }, { kind: 'col', table: 'notice_targets', column: 'target_department' }, { kind: 'fn', name: 'notice_sendable_roles' }, { kind: 'fn', name: 'notice_departments' }, { kind: 'fn', name: 'my_notice_scopes' }, { kind: 'policy', table: 'teacher_departments', name: 'teacher_departments_read' }, { kind: 'policy', table: 'notices', name: 'notices_visible' }, { kind: 'policy', table: 'notice_targets', name: 'notice_targets_visible' }] },
+  { n: 22, title: '全站公告（2026-09-28 公告轮）—— 「**平台**对老师说话」', from: 5182, to: 5365, sql: 56, targets: [{ kind: 'table', name: 'announcements' }, { kind: 'fn', name: 'can_publish_announcement' }, { kind: 'policy', table: 'announcements', name: 'announcements_visible' }] },
   { n: 23, title: '平台设置：**维护模式**（2026-09-29 管理台第二期）—— 「平台对自己说话」', from: 5367, to: 5473, sql: 28, targets: [{ kind: 'table', name: 'admin_audit' }, { kind: 'table', name: 'site_state' }] },
   { n: 24, title: '前端错误日志（2026-09-29 管理台第二期 · `frontend_errors`）', from: 5475, to: 5656, sql: 81, targets: [{ kind: 'table', name: 'frontend_errors' }] },
   { n: 25, title: '用户反馈（2026-09-29 管理台第二期 · `feedback`）', from: 5658, to: 5787, sql: 45, targets: [{ kind: 'table', name: 'feedback' }, { kind: 'fn', name: 'can_contact_admin' }] },
   { n: 26, title: '运维只读报告：**数据库用量**（2026-09-29 管理台第二期）', from: 5789, to: 5909, sql: 44, targets: [{ kind: 'fn', name: 'db_usage_report' }] },
-  { n: 27, title: '开学准备（P6，2026-09-30）', from: 5911, to: 6761, sql: 564, targets: [{ kind: 'table', name: 'student_subjects' }, { kind: 'table', name: 'class_members' }, { kind: 'col', table: 'grades', column: 'cohort' }, { kind: 'col', table: 'grades', column: 'stage' }, { kind: 'col', table: 'grades', column: 'enrolled_at' }, { kind: 'col', table: 'classes', column: 'kind' }, { kind: 'col', table: 'classes', column: 'class_type' }, { kind: 'col', table: 'classes', column: 'stream_key' }] },
-  { n: 28, title: '学年 / 学期 / 届（P3）+ 存量回填（P2），2026-09-30', from: 6763, to: 7203, sql: 288, targets: [{ kind: 'table', name: 'academic_years' }, { kind: 'table', name: 'terms' }, { kind: 'col', table: 'assignments', column: 'term_id' }, { kind: 'col', table: 'exams', column: 'grade_id' }, { kind: 'fn', name: 'beijing_today' }, { kind: 'fn', name: 'current_term_id' }, { kind: 'fn', name: 'can_manage_terms' }, { kind: 'fn', name: 'p3_backfill_terms_and_cohorts' }] },
+  { n: 27, title: '开学准备（P6，2026-09-30）', from: 5911, to: 6761, sql: 564, targets: [{ kind: 'table', name: 'student_subjects' }, { kind: 'table', name: 'class_members' }, { kind: 'col', table: 'grades', column: 'cohort' }, { kind: 'col', table: 'grades', column: 'stage' }, { kind: 'col', table: 'grades', column: 'enrolled_at' }, { kind: 'col', table: 'classes', column: 'kind' }, { kind: 'col', table: 'classes', column: 'class_type' }, { kind: 'col', table: 'classes', column: 'stream_key' }, { kind: 'policy', table: 'student_subjects', name: 'student_subjects_read' }, { kind: 'policy', table: 'student_subjects', name: 'student_subjects_write' }, { kind: 'policy', table: 'class_members', name: 'class_members_read' }] },
+  { n: 28, title: '学年 / 学期 / 届（P3）+ 存量回填（P2），2026-09-30', from: 6763, to: 7203, sql: 288, targets: [{ kind: 'table', name: 'academic_years' }, { kind: 'table', name: 'terms' }, { kind: 'col', table: 'assignments', column: 'term_id' }, { kind: 'col', table: 'exams', column: 'grade_id' }, { kind: 'fn', name: 'beijing_today' }, { kind: 'fn', name: 'current_term_id' }, { kind: 'fn', name: 'can_manage_terms' }, { kind: 'fn', name: 'p3_backfill_terms_and_cohorts' }, { kind: 'policy', table: 'academic_years', name: 'academic_years_read' }, { kind: 'policy', table: 'terms', name: 'terms_read' }] },
   { n: 29, title: '提档 + 毕业删除（P4，2026-10-01）', from: 7205, to: 8119, sql: 700, targets: [{ kind: 'table', name: 'grade_promotions' }, { kind: 'table', name: 'grade_removals' }, { kind: 'fn', name: 'current_academic_year' }, { kind: 'fn', name: 'can_promote_grades' }, { kind: 'fn', name: 'promotion_overview' }] },
-  { n: 31, title: '统一模型改造（P5，2026-10-03）🔴 **风险最高的一期**', from: 8121, to: 8291, sql: 50, targets: [] },
+  { n: 31, title: '统一模型改造（P5，2026-10-03）🔴 **风险最高的一期**', from: 8121, to: 8291, sql: 50, targets: [{ kind: 'policy', table: 'assignments', name: 'assignments_insert' }, { kind: 'policy', table: 'assignments', name: 'assignments_update' }] },
   { n: 32, title: '走班班（P7，2026-10-04）—— 生成 + 分配老师 + `can_stream` 废弃', from: 8293, to: 8733, sql: 296, targets: [] },
-  { n: 33, title: '教室端的两块新能力（P9，2026-10-05）', from: 8735, to: 8943, sql: 74, targets: [] },
-  { n: 34, title: '收尾（P10，2026-10-05）', from: 8945, to: 9460, sql: 334, targets: [{ kind: 'table', name: 'student_subject_changes' }] },
-  { n: 35, title: '学生档案的可见性与修改权（2026-10-06）', from: 9462, to: 9543, sql: 30, targets: [] },
-  { n: 36, title: '🆕 教师档案的可见性与修改权（2026-10-06）', from: 9545, to: 9619, sql: 15, targets: [] },
+  { n: 33, title: '教室端的两块新能力（P9，2026-10-05）', from: 8735, to: 8943, sql: 74, targets: [{ kind: 'policy', table: 'calls', name: 'calls_insert' }, { kind: 'policy', table: 'calls', name: 'calls_update' }, { kind: 'policy', table: 'calls', name: 'calls_delete' }, { kind: 'policy', table: 'schedule_items', name: 'schedule_classroom_admin_only_insert' }, { kind: 'policy', table: 'schedule_items', name: 'schedule_classroom_admin_only_update' }, { kind: 'policy', table: 'schedule_items', name: 'schedule_classroom_admin_only_delete' }, { kind: 'policy', table: 'calls', name: 'calls_classroom_admin_only' }] },
+  { n: 34, title: '收尾（P10，2026-10-05）', from: 8945, to: 9460, sql: 334, targets: [{ kind: 'table', name: 'student_subject_changes' }, { kind: 'policy', table: 'student_subject_changes', name: 'student_subject_changes_read' }] },
+  { n: 35, title: '学生档案的可见性与修改权（2026-10-06）', from: 9462, to: 9543, sql: 30, targets: [{ kind: 'policy', table: 'student_profiles', name: 'student_profiles_visible' }, { kind: 'policy', table: 'student_profiles', name: 'student_profiles_insert' }, { kind: 'policy', table: 'student_profiles', name: 'student_profiles_update' }, { kind: 'policy', table: 'student_profiles', name: 'student_profiles_delete' }] },
+  { n: 36, title: '🆕 教师档案的可见性与修改权（2026-10-06）', from: 9545, to: 9619, sql: 15, targets: [{ kind: 'policy', table: 'teacher_profiles', name: 'teacher_profiles_visible' }, { kind: 'policy', table: 'teacher_profiles', name: 'teacher_profiles_insert' }, { kind: 'policy', table: 'teacher_profiles', name: 'teacher_profiles_update' }] },
   { n: 37, title: '🔑 走班班的编辑 / 删除（走班班也是 `classes` 的一行）', from: 9621, to: 9735, sql: 53, targets: [] },
+  { n: 38, title: '🆕 课程管理（第 1 轮：**数据层**）—— 调课的两条路 + 冲突判据 + 过期清理', from: 9737, to: 10460, sql: 488, targets: [{ kind: 'table', name: 'schedule_temp_changes' }, { kind: 'table', name: 'schedule_temp_archive' }, { kind: 'table', name: 'schedule_perm_changes' }, { kind: 'fn', name: 'purge_expired_schedule_changes' }, { kind: 'policy', table: 'schedule_temp_changes', name: 'schedule_temp_changes_read' }, { kind: 'policy', table: 'schedule_temp_changes', name: 'schedule_temp_changes_insert' }, { kind: 'policy', table: 'schedule_temp_changes', name: 'schedule_temp_changes_update' }, { kind: 'policy', table: 'schedule_temp_archive', name: 'schedule_temp_archive_read' }, { kind: 'policy', table: 'schedule_perm_changes', name: 'schedule_perm_changes_read' }] },
 ]
 /* @gen:schema-stages END */
 
@@ -632,25 +749,42 @@ type SectionDef = {
   fix: string
   anchor: string
   kind: DriftKind
-  probes: Array<{ what: string; run: () => Promise<DriftCell> }>
+  /**
+   * ⚠️ `run()` 回 `null` = **本面板探不到**（只有策略探针会这样，见 `probePolicy()`）——
+   *    这一格**不进 `cells`**，于是这一段如实落回"面板探不到"那一档。
+   */
+  probes: Array<{ what: string; run: () => Promise<DriftCell | null> }>
   noProbe?: string
 }
 
-/** 这一段建了什么 —— **从 `targets` 拼**，不编 */
+/**
+ * 这一段建了什么 —— **从 `targets` 拼**，不编。
+ *
+ * ⚠️ 策略**只报条数与名字**（屏上要看得见这一段到底加了哪几条），
+ *    最长列 3 条 —— 一段加十几条策略是常事，全列出来会把卡片撑爆。
+ */
 function builtText(s: SchemaStage): string {
   const tables: string[] = []
   const cols: string[] = []
   const fns: string[] = []
+  const policies: string[] = []
   for (const t of s.targets) {
     if (t.kind === 'table') tables.push(`\`${t.name}\``)
     else if (t.kind === 'col') cols.push(`\`${t.table}.${t.column}\``)
+    else if (t.kind === 'policy') policies.push(`\`${t.name}\``)
     else fns.push(`\`${t.name}()\``)
   }
   const parts: string[] = []
   if (tables.length) parts.push(`建表 ${tables.join(' / ')}`)
   if (cols.length) parts.push(`加列 ${cols.join(' / ')}`)
   if (fns.length) parts.push(`无参判据函数 ${fns.join(' / ')}`)
-  const head = parts.length ? parts.join(' · ') : '这一段没有建表 / 加列 / 新建无参函数'
+  if (policies.length) {
+    const head = policies.slice(0, 3).join(' / ')
+    parts.push(
+      `加策略 ${policies.length} 条（${head}${policies.length > 3 ? ` 等 ${policies.length} 条` : ''}）`,
+    )
+  }
+  const head = parts.length ? parts.join(' · ') : '这一段没有建表 / 加列 / 策略 / 新建无参函数'
   return `${head}（本段共 ${s.sql} 行可执行 SQL）`
 }
 
@@ -659,19 +793,54 @@ function defaultImpact(s: SchemaStage): string {
   return `这一段没跑 → 它建的东西不在，依赖它的功能会**静默少东西**（多半不报错）：${builtText(s)}`
 }
 
-/** 一个探针目标 → 一次只读探测（判据仍是上面那三套：表 `42P01` / 列 `42703` / 函数 `PGRST202`） */
-function targetProbe(t: StageTarget): { what: string; run: () => Promise<DriftCell> } {
+/** 这一段是不是「只加策略」 —— 有策略、且**没有别的产物** */
+function policiesOnly(s: SchemaStage): boolean {
+  return s.targets.length > 0 && s.targets.every((t) => t.kind === 'policy')
+}
+
+/** 一段里那几条策略的名字（屏上要看得见，不能只说"只加策略"） */
+function policyListText(s: SchemaStage): string {
+  return s.targets
+    .filter((t) => t.kind === 'policy')
+    .map((t) => `\`${t.name}\`（\`${t.table}\` 上）`)
+    .join(' / ')
+}
+
+/**
+ * 「只加策略」的段为什么探不到 —— **要点名 `pg_policies`**，不许只说一句"探不到"。
+ *
+ * 🔴 这句话与 `NO_PROBE_REASON['§17']` 是同一件事的两种说法（§17 是策略 + 函数）。
+ */
+function policyNoProbeText(s: SchemaStage): string {
+  return (
+    `这一段**只加策略**：${policyListText(s)}。` +
+    '策略唯一写在 `pg_catalog.pg_policies` 里，而 **PostgREST 默认只暴露 `public`** —— ' +
+    'anon / authenticated 会话读不到它，所以**本面板问不到策略**。' +
+    '🔴 **这既不是"没跑"，也不是绿**：要确认请跑 `supabase/自检.sql` 的策略清单那一段。'
+  )
+}
+
+/** 一个探针目标 → 一次只读探测（判据仍是那三套：表 `42P01` / 列 `42703` / 函数 `PGRST202`；策略 `pg_policies`） */
+function targetProbe(t: StageTarget): { what: string; run: () => Promise<DriftCell | null> } {
   if (t.kind === 'table') return { what: `\`${t.name}\``, run: () => probeTable(t.name) }
   if (t.kind === 'col')
     return { what: `\`${t.table}.${t.column}\``, run: () => probeColumn(t.table, t.column) }
+  if (t.kind === 'policy')
+    return { what: `策略 \`${t.name}\``, run: () => probePolicy(t.table, t.name) }
   return { what: `\`${t.name}()\``, run: () => probeRpc(t.name) }
 }
 
-/** "面板探不到"的通用原因（只有策略 / 只有带参数的函数那几段） */
+/**
+ * "面板探不到"的通用原因（**带参数的函数**那几段，以及一切确实没有可探产物的段）。
+ *
+ * ⚠️ 2026-10-11 起，"只加策略"的段**不再走这一句** —— 它有专门的
+ *    `policyNoProbeText()`（点名 `pg_policies` + 那几条策略的名字）。
+ *    这一句留给"产物全是带参数的函数"那种段。
+ */
 const NO_PROBE_TEXT =
-  '这一段只加**策略**或**带参数的函数** —— 两者 anon 会话都没有可探的现成对象：' +
-  '策略读不到 `pg_policies`，而带参数的函数要**伪造实参**（其中 `grade_delete` / ' +
-  '`migrate_nos_to_serial` 那几个**会写库**），面板是只读的，绝不做有副作用的探测。' +
+  '这一段只加**带参数的函数**（或没有可探产物）—— ' +
+  '带参数的函数要**伪造实参**才问得到，其中 `grade_delete` / ' +
+  '`migrate_nos_to_serial` 那几个**会写库**，面板是只读的，绝不做有副作用的探测。' +
   '**这既不是"没跑"，也不是绿。**'
 
 function sectionDefs(): SectionDef[] {
@@ -679,6 +848,16 @@ function sectionDefs(): SectionDef[] {
     const kind: DriftKind = s.sql === 0 ? 'registry' : 'sql'
     const probes = kind === 'registry' ? [] : s.targets.slice(0, PROBES_PER_STAGE).map(targetProbe)
     const note = IMPACT_NOTES[s.n]
+    /*
+     * 🔴 `noProbe` 的两支：
+     *   · 这一段**一条探针都没有** → 通用理由；
+     *   · 这一段**只有策略** → 专用理由（点名 `pg_policies`）。
+     *     ⚠️ 「只有策略」的段**即使挂了策略探针也要先备好这句** —— 因为策略探针
+     *     在"库不暴露 `pg_policies`"时会**退掉**（返回 `null` → 不进格），
+     *     那一段就又变成"一格都没有"，屏上得有话可说（而且必须是**准确**的那句）。
+     */
+    const policyOnly = policiesOnly(s)
+    const noProbeText = policyOnly ? policyNoProbeText(s) : NO_PROBE_TEXT
     return {
       stage: `§${s.n}`,
       title: s.title,
@@ -688,7 +867,7 @@ function sectionDefs(): SectionDef[] {
       anchor: `schema.sql §${s.n}（:${s.from}–${s.to}）`,
       kind,
       probes,
-      noProbe: kind === 'sql' && probes.length === 0 ? NO_PROBE_TEXT : undefined,
+      noProbe: kind === 'sql' && (probes.length === 0 || policyOnly) ? noProbeText : undefined,
     }
   })
 }
@@ -712,9 +891,10 @@ export function combineCells(cells: readonly DriftCell[]): DriftState {
 /** `§17` / `§18` 为什么探不到 —— 这句话要显示在屏上，不能只留一个灰点 */
 export const NO_PROBE_REASON: Record<string, string> = {
   '§17':
-    '这一段的产物是 **restrictive 策略**，不是表也不是函数。anon key 读不到 `pg_policies`；' +
-    '硬要探只能靠"故意写一次看它报不报错"，那是**有副作用的探测** —— 面板不做。' +
-    '要确认请跑 `supabase/自检.sql` 第 4 段（③ 矩阵审计）。',
+    '这一段的产物是 **restrictive 策略**，不是表也不是函数。策略只写在 `pg_policies` 里，' +
+    '而 **PostgREST 默认只暴露 `public`** → 本面板问不到（`adminChart` 的策略探针会**如实**' +
+    '报成"探不到"，既不红也不绿）。硬要探只能靠"故意写一次看它报不报错"，' +
+    '那是**有副作用的探测** —— 面板不做。要确认请跑 `supabase/自检.sql` 第 4 段（③ 矩阵审计）。',
   '§18':
     '这一段是**登记节**（0 行可执行 SQL），产出的是 13 个 `_for` 变体，' +
     '而它们**全部 `revoke` 掉了 anon / authenticated** —— 拿面板的会话去调只会得到 ' +
@@ -739,10 +919,22 @@ export const NO_PROBE_REASON: Record<string, string> = {
  *       （重新探测要手动点）。
  */
 export async function probeSchemaDrift(): Promise<{ at: number; sections: DriftSection[] }> {
+  /*
+   * 🔴 每次重探都把 `pg_policies` 那一次询问清空 —— 否则"重新探测"会拿上一次的旧答案
+   *    （面板上那个「重新探测」按钮存在的唯一理由就是"上次的答案不算数了"）。
+   */
+  policiesPromise = null
   const defs = sectionDefs()
   const sections = await Promise.all(
     defs.map(async (d): Promise<DriftSection> => {
-      const cells = await Promise.all(d.probes.map((p) => p.run()))
+      const raw = await Promise.all(d.probes.map((p) => p.run()))
+      /*
+       * 🔴 `null` = **本面板探不到**（库不暴露 `pg_policies`，见 `probePolicy()`）——
+       *    它不是一格"无法判断"：它**不进 `cells`**，于是这一段落回
+       *    "面板探不到（不是没跑）"那一档，**不参与**卡片的红黄绿。
+       *    把 `null` 当成灰格，整张卡会永远灰；当成"不在"，那是假红。
+       */
+      const cells = raw.filter((c): c is DriftCell => c !== null)
       return {
         stage: d.stage,
         title: d.title,
