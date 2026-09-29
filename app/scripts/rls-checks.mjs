@@ -4452,7 +4452,7 @@ await withLock(async () => {
        */
       const forNames = forCount.rows.map((r) => r.proname)
       ok(
-        '`_for` 变体一共 33 个（13 + 管理架构轮 8 个 + 公告轮 1 个 `can_publish_announcement_for`' +
+        '`_for` 变体一共 34 个（13 + 管理架构轮 8 个 + 公告轮 1 个 `can_publish_announcement_for`' +
           ' + 管理台第二期 1 个 `can_contact_admin_for`' +
           ' + 🆕P4 2 个 `can_promote_grades_for` / `can_delete_grade_for`' +
           ' + 🆕集成修复 4 个 `can_manage_grade_setup_for` / `can_edit_student_subject_for` /' +
@@ -4460,9 +4460,10 @@ await withLock(async () => {
           ' + 🆕P5 1 个 `assignments_write_ok_for`' +
           ' + 🆕P9 1 个 `can_call_for`（事务性呼叫的判据）' +
           ' + 🆕P10 1 个 `old_subject_data_counts_for`（旧科目数据的清单）' +
-          ' + 🆕2026-10-08 超管唯一 1 个 `can_assign_super_role_for`（发 super 只有超管能发））' +
+          ' + 🆕2026-10-08 超管唯一 1 个 `can_assign_super_role_for`（发 super 只有超管能发）' +
+          ' + 🆕课程管理 1 个 `can_manage_schedule_for`（能不能改这个班的课表））' +
           ' —— id 变体也算判据的两件套，新增判据别只写裸版',
-        forNames.length === 33,
+        forNames.length === 34,
         `实际 ${forNames.length} 个：${forNames.join('、')}`,
       )
       const hasBare = await db.query(`select has_function_privilege('authenticated', 'public.can_edit_exam(uuid[], text, text)', 'EXECUTE') as v`)
@@ -7531,8 +7532,9 @@ await withLock(async () => {
         RESTRICT_EXPECT.map((k) => `${k}(a)`).sort(),
       )
       ok(
-        '🔴 ① 另外六条是 `on delete set null`（数据库自己置空，**不拦人**）—— 别把它们也算进"要手工清"里',
-        setNull(toTeachers).length === 6,
+        '🔴 ① 另外 **17** 条是 `on delete set null`（数据库自己置空，**不拦人**）—— 别把它们也算进"要手工清"里' +
+          '（🆕课程管理那三张表加进来 11 条：改课的人 / 原来那位老师 / 撤回人 / 清理人 …）',
+        setNull(toTeachers).length === 17,
         `${setNull(toTeachers).length} 条 set null · ${setNull(toTeachers).join(' / ')}`,
       )
       ok(
@@ -8308,6 +8310,562 @@ await withLock(async () => {
           `复制后数到 ${countExit(duplicated)} 处（原文 ${countExit(settingsSrc)} 处）`,
         )
       }
+    }
+
+    /* ============================================================
+       二十五、🆕 课程管理（第 1 轮：**数据层**）
+       ------------------------------------------------------------
+       用户口径（2026-10-11，已经确认过）：
+         · **调课 = 老师临时有事换课，只影响那一天**；**永久调课 = 改每周固定的课表**，两种都要；
+         · 允许「**只换老师**」（科目不动）也允许「**整格换**」（科目 + 老师一起换）；
+         · 冲突**三类全查**：① 同一老师同天同时段两节 ② 同一个班同天同时段两节 ③ 走班学生；
+         · 过期**按日期过滤**（不依赖清理跑没跑）；清理**删之前**先留一条档。
+       本节钉（每条都带反向对照）：
+         ① 判据分档：教务处/超管**全校** · 年级主任**本年级** · 别的年级主任/班主任/任课老师/教室端**一律不行**；
+         ② 临时调课：写进去读得到 · 那一格真的换了 · **别的日期不受影响**（"只影响那一天"）；
+         ③ 冲突三类**真的报得出来**（含走班学生），而且是**按那一天**算的；
+         ④ 永久调课：**改了 `schedule_items` 且留了档**（同一笔事务）· 撤回能照留档改回去；
+         ⑤ 过期清理：删之前留档 + 「操作记录」一行 + 判据只认教务处/超管；
+         ⑥ 教室端仍**只读本班**，而且**一个字都写不了**（那条红线没有被放宽）。
+       🔴 反向对照**全在内存里**做（改函数体副本 / 改内存 SQL 文本），仓库文件一个字节都不动：
+         · `zz_bad_schedule_day_cells` = 把"按日期过滤"拿掉 → ② 那条断言必须变红；
+         · `zz_bad_apply_perm`        = 把"留档"拿掉     → ④ 那条断言必须变红。
+       ============================================================ */
+    section('二十五、🆕 课程管理（数据层）：临时调课 · 永久调课留档 · 三类冲突 · 过期留档')
+    {
+      const S11 = {
+        band: mk('cb', 1),
+        i1: mk('5f', 1), i2: mk('5f', 2), i3: mk('5f', 3),
+        i4: mk('5f', 4), i5: mk('5f', 5), i6: mk('5f', 6),
+        c1: mk('5e', 1), c2: mk('5e', 2), c3: mk('5e', 3), c4: mk('5e', 4),
+      }
+      const one = async (sql, params = []) => (await db.query(sql, params)).rows[0]
+      const rowsOf = async (sql, params = []) => (await db.query(sql, params)).rows
+      const rowsAs = (uid, sql, params = []) => asUser(db, uid, async () => (await db.query(sql, params)).rows)
+      const nAs = (uid, sql, params = []) => countAs(db, uid, sql, params)
+      /**
+       * 以某个身份**真的落库**（与 `attempt` 的区别：它**不回滚**）——
+       * 夹具、以及"这一笔要留下来给后面看的"用它。
+       */
+      const execAs = async (uid, sql, params = []) => {
+        await db.exec('begin')
+        try {
+          await db.query(`select set_config('request.jwt.claims', $1, true)`, [claimsOf(uid)])
+          await db.exec('set local role authenticated')
+          const r = await db.query(sql, params)
+          await db.exec('commit')
+          return r
+        } catch (e) {
+          await db.exec('rollback')
+          throw e
+        }
+      }
+      /** 日期全部**从库里算**（"哪一天"的口径是北京时区 —— 不靠脑算星期几，也不靠 `new Date()`） */
+      const today = (await one(`select public.beijing_today()::text as d`)).d
+      const D  = (await one(`select (public.beijing_today() + 30)::text as d`)).d
+      const D2 = (await one(`select (public.beijing_today() + 37)::text as d`)).d
+      const D0 = (await one(`select (public.beijing_today() + 23)::text as d`)).d
+      const PAST = (await one(`select (public.beijing_today() - 5)::text as d`)).d
+      const WD = Number((await one(`select extract(isodow from date '${D}')::int as w`)).w)
+
+      /* ---- 夹具（属主写：`classes` / `class_members` / `schedule_items` 对 authenticated 本来就没写权限）----
+         · 一个**高二的走班班** + 它的一名成员（那个成员本来在 c1）—— ③ 走班学生冲突靠它
+         · 六行班级课表，都在"那一天（D）"那个星期几上：
+             14:00 c1（④ 临时调课的对象）· 14:00 c2（① 老师撞课的另一半）
+             15:00 c1 **两行**（② 同一个班同一时段两节）· 15:00 走班班（③）
+             16:00 c1（⑧ 永久调课的对象） */
+      await db.exec(`
+      insert into classes (id, teacher_id, name, grade, year, school_id, grade_id, kind, class_type, stream_key) values
+        ('${S11.band}', '${U.head}', '走班班-课程管理夹具', '高二', '2025',
+         (select id from schools order by created_at limit 1), (select id from grades where name = '高二'),
+         'stream', '', 'sched25')
+      on conflict (id) do nothing;
+      insert into class_members (class_id, student_id) values ('${S11.band}', '${S10.stu}')
+      on conflict do nothing;
+      insert into schedule_items (id, teacher_id, weekday, start_time, end_time, title, class_id, scope) values
+        ('${S11.i1}', '${U.head}', ${WD}, '14:00', '14:40', '高二(1)班 语文',    '${C.c1}', 'class'),
+        ('${S11.i2}', '${U.phy}',  ${WD}, '14:00', '14:40', '高二(4)班 物理',    '${C.c2}', 'class'),
+        ('${S11.i3}', '${U.head}', ${WD}, '15:00', '15:40', '高二(1)班 语文',    '${C.c1}', 'class'),
+        ('${S11.i4}', '${U.head}', ${WD}, '15:00', '15:40', '高二(1)班 劳动实践', '${C.c1}', 'class'),
+        ('${S11.i5}', '${U.chn}',  ${WD}, '15:00', '15:40', '走班班-课程管理夹具', '${S11.band}', 'class'),
+        ('${S11.i6}', '${U.head}', ${WD}, '16:00', '16:40', '高二(1)班 语文',    '${C.c1}', 'class')
+      on conflict (id) do nothing;
+      `)
+
+      /* 临时调课夹具：**由教务处写**（走的是真 RLS + 真触发器那条路） */
+      const tempIns = (id, cls, st, en, fromSub, fromT, toSub, toT, kind, date = D) => ({
+        sql: `insert into schedule_temp_changes (id, on_date, class_id, start_time, end_time,
+                from_subject, from_teacher_id, to_subject, to_teacher_id, kind)
+              values ($1, $2::date, $3::uuid, $4::time, $5::time, $6, $7::uuid, $8, $9::uuid, $10)`,
+        values: [id, date, cls, st, en, fromSub, fromT, toSub, toT, kind],
+      })
+      let seeded = ''
+      try {
+        for (const q of [
+          tempIns(S11.c1, C.c1, '14:00', '14:40', '高二(1)班 语文', U.head, '高二(1)班 语文', U.grade, 'teacher'),
+          tempIns(S11.c2, C.c2, '14:00', '14:40', '高二(4)班 物理', U.phy, '高二(4)班 物理', U.grade, 'teacher'),
+          tempIns(S11.c4, C.c1, '16:00', '16:40', '高二(1)班 语文', U.head, '数学', U.grade, 'whole'),
+          tempIns(S11.c3, C.c1, '17:00', '17:40', '高二(1)班 语文', U.head, '高二(1)班 语文', U.grade, 'teacher', PAST),
+        ]) {
+          await execAs(U.admin, q.sql, q.values)
+        }
+      } catch (e) {
+        seeded = shortErr(e)
+      }
+      ok('⓪ 夹具：4 条临时调课真的由**教务处**写进去了（真 RLS + 真触发器那条路）', seeded === '', seeded)
+
+      eq(
+        '⓪ 前置：夹具那个班真的是**走班班**（③ 靠它）',
+        await one(`select kind, stream_key from classes where id = $1`, [S11.band]),
+        { kind: 'stream', stream_key: 'sched25' },
+      )
+      eq(
+        '⓪ 前置：那个走班班里恰有 1 名成员（就是 c1 的那个学生）',
+        Number((await one(`select count(*)::int as n from class_members where class_id = $1`, [S11.band])).n),
+        1,
+      )
+      eq(
+        '🔴 ⓪ `weekday` 是**触发器在库里算**的：等于那一天真实的星期几（不是前端传的那个数）',
+        Number((await one(`select weekday from schedule_temp_changes where id = $1`, [S11.c1])).weekday),
+        WD,
+      )
+
+      /* ---- ① 判据分档（`can_manage_schedule_for` = 权威）---- */
+      const judge = async (uid, cls) =>
+        Boolean((await one(`select public.can_manage_schedule_for($1::uuid, $2::uuid) as v`, [uid, cls])).v)
+      const bareAs = (uid, cls) =>
+        asUser(db, uid, async () => Boolean((await db.query(`select public.can_manage_schedule($1::uuid) as v`, [cls])).rows[0].v))
+
+      eq('① 最高管理员：全校（c1 改得动）', await judge(U.super, C.c1), true)
+      eq('① 教务处：全校（c1 + 高三的 c3 都改得动）', [await judge(U.admin, C.c1), await judge(U.admin, C.c3)], [true, true])
+      eq('① 年级主任：**本年级**改得动（高二 c1）', await judge(U.grade, C.c1), true)
+      eq('🔴 ① 反向对照：年级主任 **别的年级**（高三 c3）改不动', await judge(U.grade, C.c3), false)
+      eq('🔴 ① 反向对照：**别的年级主任**（高三那位）也改不动 c1', await judge(S10.otherHead, C.c1), false)
+      eq('🔴 ① 反向对照：**这个班的班主任**不在这一档（用户点名的是教务处 + 超管 + 年级主任）', await judge(U.head, C.c1), false)
+      eq('🔴 ① 反向对照：任课老师（教 c1 物理）改不动', await judge(U.phy, C.c1), false)
+      eq('🔴 ① 反向对照：教室端改不动', await judge(U.room, C.c1), false)
+      eq('🔴 ① 反向对照：**把自己当超管** —— 任课老师拿超管的 uid 去问 → 被拒（`_for` 变体 revoke 了）',
+        (await attempt(db, U.phy, `select public.can_manage_schedule_for($1::uuid, $2::uuid) as v`, [U.super, C.c1])).outcome,
+        'denied')
+      eq(
+        '① 裸版 `can_manage_schedule()` 按 `auth.uid()` 走（年级主任：本年级 true / 别的年级 false）',
+        [await bareAs(U.grade, C.c1), await bareAs(U.grade, C.c3)],
+        [true, false],
+      )
+      {
+        const priv = await one(`select has_function_privilege('authenticated', 'public.can_manage_schedule(uuid)', 'EXECUTE') as bare,
+                                       has_function_privilege('authenticated', 'public.can_manage_schedule_for(uuid, uuid)', 'EXECUTE') as forv`)
+        eq('🔴 ① 两件套：裸版给 authenticated，`_for` 版 revoke（接受任意 uid = 以任意人身份问权限）',
+          [priv.bare, priv.forv], [true, false])
+      }
+
+      /* ---- ② 临时调课：写进去读得到 · 那一格真的换了 · 只影响那一天 ---- */
+      const cell = (uid, date, cls, st) =>
+        rowsAs(uid, `select subject, teacher_id::text as t, changed
+                       from public.schedule_day_cells($1::date)
+                      where class_id = $2::uuid and start_time = $3::time`, [date, cls, st])
+
+      eq('② 教务处读得到这 4 条临时调课（读得宽）', await nAs(U.admin, `select count(*)::int as n from schedule_temp_changes`), 4)
+      eq(
+        '🔴 ② 调课那一天：那一格换成新老师，而且「只换老师」→ **科目一个字没动**',
+        (await cell(U.admin, D, C.c1, '14:00')).map((r) => [r.subject, r.t, r.changed]),
+        [['高二(1)班 语文', U.grade, true]],
+      )
+      eq(
+        '🔴 ② 下一周同一天：那一格回到原来的老师（临时调课**只影响那一天**）',
+        (await cell(U.admin, D2, C.c1, '14:00')).map((r) => [r.subject, r.t, r.changed]),
+        [['高二(1)班 语文', U.head, false]],
+      )
+      eq(
+        '🔴 ② 上一周同一天：同上（前后都不受影响）',
+        (await cell(U.admin, D0, C.c1, '14:00')).map((r) => [r.subject, r.t, r.changed]),
+        [['高二(1)班 语文', U.head, false]],
+      )
+      eq(
+        '🔴 ② 5 天前那一条：**那一天**读得到（不然"过期不生效"那条断言无从谈起）',
+        (await cell(U.admin, PAST, C.c1, '17:00')).map((r) => r.t),
+        [U.grade],
+      )
+      eq(
+        '🔴 ② 而**今天**的读数里没有它 —— 过期不生效（不依赖清理任务跑没跑）',
+        await cell(U.admin, today, C.c1, '17:00'),
+        [],
+      )
+
+      /* ---- ③ 反向对照：把"按日期过滤"拿掉 → ② 那条断言必须变红 ---- */
+      {
+        const src = (await one(`select prosrc from pg_proc where proname = 'schedule_day_cells'`)).prosrc
+        const noDate = src.replace('sc.on_date = p_date', 'true')
+        ok(
+          '🔴 ③ 反向对照：把 `sc.on_date = p_date` 那半句拿掉这一步**真的改到了**（改不到就说明锚点漂了）',
+          noDate !== src,
+        )
+        await db.exec(`create or replace function public.zz_bad_schedule_day_cells(p_date date)
+          returns table (class_id uuid, start_time time, end_time time, subject text, teacher_id uuid, changed boolean)
+          language sql stable security definer set search_path = public
+          as $zzbad$ ${noDate} $zzbad$`)
+        const next = await rowsAs(U.admin, `select teacher_id::text as t
+                       from public.zz_bad_schedule_day_cells($1::date)
+                      where class_id = $2::uuid and start_time = $3::time`, [D2, C.c1, '14:00'])
+        eq(
+          '🔴 ③ 反向对照：坏版本把**下一周同一天**也换了（= ② 那条"只影响那一天"当场红）',
+          next.map((r) => r.t),
+          [U.grade],
+        )
+        await db.exec(`drop function if exists public.zz_bad_schedule_day_cells(date)`)
+      }
+
+      /* ---- ④ 冲突三类（全查）---- */
+      const conflicts = (uid, date) =>
+        rowsAs(uid, `select kind, to_char(start_time, 'HH24:MI') as st, class_id::text as c,
+                            other_class_id::text as oc, teacher_id::text as t, student_id::text as s
+                       from public.schedule_conflicts_on($1::date)`, [date])
+      {
+        const cf = await conflicts(U.admin, D)
+        eq(
+          '🔴 ④ 三类冲突**都报得出来**（kind 的集合）',
+          [...new Set(cf.map((r) => r.kind))].sort(),
+          ['class', 'student', 'teacher'],
+        )
+        ok(
+          '🔴 ④ ① 同一老师、同一时段**两个班**（14:00 · 换上去的那位老师，两个班就是 c1 与 c2）',
+          cf.some((r) => r.kind === 'teacher' && r.st === '14:00' && r.t === U.grade &&
+            [r.c, r.oc].sort().join() === [C.c1, C.c2].sort().join()),
+          JSON.stringify(cf.filter((r) => r.kind === 'teacher')),
+        )
+        ok(
+          '🔴 ④ ② 同一个班、同一时段**两节课**（c1 的 15:00 那两行）',
+          cf.some((r) => r.kind === 'class' && r.st === '15:00' && r.c === C.c1),
+          JSON.stringify(cf.filter((r) => r.kind === 'class')),
+        )
+        ok(
+          '🔴 ④ ③ **走班学生**、同一时段在别的班也有课（那个学生 15:00 同时在 c1 与走班班）',
+          cf.some((r) => r.kind === 'student' && r.st === '15:00' && r.s === S10.stu),
+          JSON.stringify(cf.filter((r) => r.kind === 'student')),
+        )
+        eq(
+          '🔴 ④ 反向对照：下一周同一天，① 没了 —— 它是**临时调课**造出来的，不是底表本来就撞',
+          (await conflicts(U.admin, D2)).filter((r) => r.t === U.grade),
+          [],
+        )
+        eq(
+          '🔴 ④ 反向对照：**别的年级主任**（高三）看不到高二这一天排了什么（`visible_class_ids()` 收口）',
+          (await conflicts(S10.otherHead, D)).filter((r) => r.c === C.c1),
+          [],
+        )
+      }
+
+      /* ---- ⑤ 写窄：只有那三档写得动（真 RLS）---- */
+      const tempPayload = (cls, id, extra = {}) => ({
+        id, on_date: D, class_id: cls, start_time: '11:00', end_time: '11:40',
+        from_subject: '语文', from_teacher_id: U.head, to_subject: '语文', to_teacher_id: U.grade,
+        kind: 'teacher', ...extra,
+      })
+      allowed('⑤ 教务处：全校写得动（c1）',
+        await write(db, U.admin, insertSql('schedule_temp_changes', tempPayload(C.c1, mk('5e', 91)))))
+      allowed('⑤ 年级主任：本年级写得动（c1）',
+        await write(db, U.grade, insertSql('schedule_temp_changes', tempPayload(C.c1, mk('5e', 92)))))
+      denied('🔴 ⑤ 反向对照：年级主任写**别的年级**（高三 c3）→ 被拒',
+        await write(db, U.grade, insertSql('schedule_temp_changes', tempPayload(C.c3, mk('5e', 93)))))
+      denied('🔴 ⑤ 反向对照：**班主任**改自己班的课表 → 被拒',
+        await write(db, U.head, insertSql('schedule_temp_changes', tempPayload(C.c1, mk('5e', 94)))))
+      denied('🔴 ⑤ 反向对照：任课老师 → 被拒',
+        await write(db, U.phy, insertSql('schedule_temp_changes', tempPayload(C.c1, mk('5e', 95)))))
+      denied('🔴 ⑤ 反向对照：**教室端** → 被拒（一个字都写不了）',
+        await write(db, U.room, insertSql('schedule_temp_changes', tempPayload(C.c1, mk('5e', 96)))))
+      {
+        const spoofId = mk('5e', 97)
+        const seen = await asUser(db, U.admin, async () => {
+          await db.query(
+            `insert into schedule_temp_changes (id, on_date, class_id, start_time, end_time,
+               from_subject, from_teacher_id, to_subject, to_teacher_id, kind, actor_id, actor_name)
+             values ($1, $2::date, $3::uuid, '11:00'::time, '11:40'::time, '语文', $4::uuid, '语文', $5::uuid,
+                     'teacher', $6::uuid, '冒充者')`,
+            [spoofId, D, C.c1, U.head, U.grade, U.phy],
+          )
+          return (await db.query(`select actor_id::text as a, actor_name from schedule_temp_changes where id = $1`, [spoofId])).rows[0]
+        })
+        eq(
+          '🔴 ⑤ 「谁改的 / 什么时候改的」由**库里从 JWT 取** —— 前端塞 `actor_id=别人` 不算数，名字是快照',
+          [seen.a, seen.actor_name],
+          [U.admin, '教务处'],
+        )
+      }
+
+      /* ---- ⑥ 两种形状同一张表都装得下 · 形状由库守 ---- */
+      const shapeOf = (id) =>
+        one(`select kind, from_subject, to_subject, from_teacher_id::text as f, to_teacher_id::text as t
+               from schedule_temp_changes where id = $1`, [id])
+      eq(
+        '🔴 ⑥ 形状一：**只换老师**（科目一个字没动，老师换了）',
+        await shapeOf(S11.c1),
+        { kind: 'teacher', from_subject: '高二(1)班 语文', to_subject: '高二(1)班 语文', f: U.head, t: U.grade },
+      )
+      eq(
+        '🔴 ⑥ 形状二：**整格换**（科目 + 老师一起换）',
+        await shapeOf(S11.c4),
+        { kind: 'whole', from_subject: '高二(1)班 语文', to_subject: '数学', f: U.head, t: U.grade },
+      )
+      eq(
+        '🔴 ⑥ 整格换**真的把科目也换了**：那一天 16:00 读出来是数学',
+        (await cell(U.admin, D, C.c1, '16:00')).map((r) => [r.subject, r.t]),
+        [['数学', U.grade]],
+      )
+      {
+        const bad = await write(db, U.admin,
+          insertSql('schedule_temp_changes', tempPayload(C.c1, mk('5e', 98), { start_time: '12:00', to_subject: '数学' })))
+        denied('🔴 ⑥ 反向对照：`kind = \'teacher\'` 却把科目换成数学 → 库直接拒', bad)
+        ok(
+          '🔴 ⑥ 而且拒的就是那条 check（「只换老师 = 科目不动」只写一次，所有写入路径都过它）',
+          bad.constraint === 'schedule_temp_changes_teacher_keeps_subject',
+          `${bad.sqlState} / ${bad.constraint}`,
+        )
+      }
+      {
+        const again = await write(db, U.admin,
+          insertSql('schedule_temp_changes', tempPayload(C.c1, mk('5e', 99), { start_time: '14:00', end_time: '14:40' })))
+        denied('🔴 ⑥ 反向对照：同一天同一格再插一条**生效**的 → 库直接拒（两条 active = 数据自相矛盾）', again)
+        ok(
+          '🔴 ⑥ 拒的是那条**部分唯一索引**（23505），不是别的理由',
+          again.sqlState === '23505',
+          `${again.sqlState} / ${again.constraint}`,
+        )
+      }
+      {
+        const r = await attempt(db, U.admin,
+          `update schedule_temp_changes set to_subject = '英语' where id = $1 returning id`, [S11.c1])
+        denied('🔴 ⑥ 写下去的调课**不许改**（改 `to_subject` → 拒）', r)
+        ok(
+          '🔴 ⑥ 而且报的是**人话**（不是 42501 那种"权限"）—— 说明它真走到了触发器那一句',
+          /写下去就不许改/.test(String(r.detail ?? '')),
+          String(r.detail ?? '').slice(0, 90),
+        )
+      }
+      {
+        const rv = await asUser(db, U.admin, async () => {
+          await db.query(`update schedule_temp_changes set status = 'revoked' where id = $1`, [S11.c2])
+          return (await db.query(`select status, revoked_by::text as by, revoked_by_name
+                                    from schedule_temp_changes where id = $1`, [S11.c2])).rows[0]
+        })
+        eq(
+          '🔴 ⑥ 而**撤回**走得通，`revoked_by` / 名字快照也是库里记的',
+          [rv.status, rv.by, rv.revoked_by_name],
+          ['revoked', U.admin, '教务处'],
+        )
+      }
+
+      /* ---- ⑦ 永久调课：**改了 `schedule_items`** 且 **留了档**（同一笔事务）---- */
+      const permArgs = (args) => [`$1::uuid, $2::int, $3::time, $4::time, $5, $6::uuid, $7, $8::uuid, $9, $10::uuid`, args]
+      const permOk = async (uid, args) => {
+        const [ph, vals] = permArgs(args)
+        const r = await execAs(uid, `select public.apply_perm_schedule_change(${ph}) as r`, vals)
+        return r.rows[0].r
+      }
+      const permMsg = async (uid, args) => {
+        try {
+          await permOk(uid, args)
+          return 'ok'
+        } catch (e) {
+          return shortErr(e)
+        }
+      }
+      const itemOf = (id) => one(`select title, teacher_id::text as t, scope, weekday from schedule_items where id = $1`, [id])
+
+      {
+        const res = await permOk(U.admin, [C.c1, WD, '16:00', '16:40', '语文', U.head, '数学', U.grade, 'whole', S11.i6])
+        eq('🔴 ⑦ 永久调课：返回 ok', Boolean(res && res.ok), true)
+        eq(
+          '🔴 ⑦ **改的就是 `schedule_items` 那一行**（科目与老师都变了）',
+          [(await itemOf(S11.i6)).title, (await itemOf(S11.i6)).t],
+          ['数学', U.grade],
+        )
+        eq(
+          '🔴 ⑦ `schedule_items` 的**既有语义一个字没动**（`scope` 还是 class · `weekday` 还是那一天）',
+          [(await itemOf(S11.i6)).scope, (await itemOf(S11.i6)).weekday],
+          ['class', WD],
+        )
+        eq(
+          '🔴 ⑦ 而且**留了档**：谁在什么时候把哪一节从什么改成了什么（同一笔事务）',
+          await one(`select class_id::text as c, weekday, to_char(start_time, 'HH24:MI') as st,
+                            from_subject, from_teacher_id::text as f, to_subject, to_teacher_id::text as t,
+                            kind, status, actor_name
+                       from schedule_perm_changes where id = $1`, [res.archiveId]),
+          { c: C.c1, weekday: WD, st: '16:00', from_subject: '语文', f: U.head,
+            to_subject: '数学', t: U.grade, kind: 'whole', status: 'active', actor_name: '教务处' },
+        )
+      }
+      {
+        const msg = await permMsg(U.head, [C.c1, WD, '15:00', '15:40', '语文', U.head, '英语', U.chn, 'whole', S11.i3])
+        ok('🔴 ⑦ 反向对照：**班主任**调不动（判据在库里，前端绕不过）', /权限/.test(msg), msg)
+        const msg2 = await permMsg(U.grade, [C.c3, WD, '15:00', '15:40', '语文', U.head, '英语', U.chn, 'whole', S11.i3])
+        ok('🔴 ⑦ 反向对照：年级主任调**别的年级**（高三 c3）也动不了', /权限|没有课/.test(msg2), msg2)
+      }
+      {
+        /* 撤回：照留档改回去（年级主任也调得动本年级 —— 顺带验那一档）*/
+        const res = await permOk(U.grade, [C.c1, WD, '16:00', '16:40', '语文', U.head, '数学', U.grade, 'whole', S11.i6])
+        eq('🔴 ⑦ 年级主任本年级调得动（那一档真的通）', Boolean(res && res.ok), true)
+        const undone = await execAs(U.grade, `select public.undo_perm_schedule_change($1::uuid) as r`, [res.archiveId])
+          .then((r) => r.rows[0].r)
+        eq('🔴 ⑦ 撤回：返回 ok', Boolean(undone && undone.ok), true)
+        eq(
+          '🔴 ⑦ 撤回照留档**改回 `schedule_items`**（科目 + 老师都回去）',
+          [(await itemOf(S11.i6)).title, (await itemOf(S11.i6)).t],
+          ['语文', U.head],
+        )
+        eq(
+          '🔴 ⑦ 而且留档标成"撤回"（**不删行** —— 撤回也是历史）',
+          await one(`select status, revoked_by_name from schedule_perm_changes where id = $1`, [res.archiveId]),
+          { status: 'revoked', revoked_by_name: '高二年级主任' },
+        )
+      }
+      {
+        /* ---- ⑦ 的反向对照：把"留档"那两段从函数体里拿掉 → "改了不留档"必须当场红 ---- */
+        const src = (await one(`select prosrc from pg_proc where proname = 'apply_perm_schedule_change'`)).prosrc
+        const noArch = src
+          .replace(/insert into schedule_perm_changes \([\s\S]*?returning id into v_archive;/, 'v_archive := gen_random_uuid();')
+          .replace(/if not exists \(select 1 from schedule_perm_changes c where c\.id = v_archive\) then[\s\S]*?end if;/, '')
+        ok(
+          '🔴 ⑦ 反向对照：把"留档"与"留档断言"那两段**真的拿掉了**（拿不掉就说明锚点漂了）',
+          noArch !== src && !/insert into schedule_perm_changes/.test(noArch),
+        )
+        await db.exec(`create or replace function public.zz_bad_apply_perm(
+          p_class_id uuid, p_weekday int, p_start_time time, p_end_time time,
+          p_from_subject text, p_from_teacher_id uuid, p_to_subject text, p_to_teacher_id uuid,
+          p_kind text, p_schedule_item_id uuid default null) returns jsonb
+          language plpgsql security definer set search_path = public
+          as $zzbad$ ${noArch} $zzbad$`)
+        await execAs(U.admin, `select public.zz_bad_apply_perm($1::uuid, $2::int, $3::time, $4::time, $5, $6::uuid, $7, $8::uuid, $9, $10::uuid) as r`,
+          [C.c1, WD, '16:00', '16:40', '语文', U.head, '英语', U.chn, 'whole', S11.i6])
+        eq(
+          '🔴 ⑦ 反向对照：坏版本**改了 `schedule_items`**（= 只做了前半截）',
+          [(await itemOf(S11.i6)).title, (await itemOf(S11.i6)).t],
+          ['英语', U.chn],
+        )
+        eq(
+          '🔴 ⑦ 反向对照：而留档**一条都没多** —— "改了不留档"就是这个样子，所以上面那条断言真的在测它',
+          Number((await one(`select count(*)::int as n from schedule_perm_changes
+                              where schedule_item_id = $1 and to_subject = '英语'`, [S11.i6])).n),
+          0,
+        )
+        await db.exec(`drop function if exists public.zz_bad_apply_perm(uuid, int, time, time, text, uuid, text, uuid, text, uuid)`)
+        /* 收尾：把那一格改回去（避免影响后面的断言）*/
+        await db.exec(`update schedule_items set title = '语文', teacher_id = '${U.head}' where id = '${S11.i6}'`)
+      }
+
+      /* ---- ⑧ 过期清理：**删之前先留档** ---- */
+      {
+        const res = await execAs(U.admin, `select public.purge_expired_schedule_changes() as r`).then((r) => r.rows[0].r)
+        eq(
+          '🔴 ⑧ 清理：只清**过期**那一条（未来那几条一条都没动）',
+          [res.purged, Number((await one(`select count(*)::int as n from schedule_temp_changes`)).n)],
+          [1, 3],
+        )
+        eq(
+          '🔴 ⑧ 删之前留了档 —— "那天那节课换过谁"删了也查得到',
+          await one(`select on_date::text as d, from_teacher_id::text as f, to_teacher_id::text as t,
+                            class_name, purged_by::text as by, purged_by_name
+                       from schedule_temp_archive where change_id = $1`, [S11.c3]),
+          { d: PAST, f: U.head, t: U.grade, class_name: '高二(1)班', by: U.admin, purged_by_name: '教务处' },
+        )
+        eq(
+          '🔴 ⑧ 表里那一条真的没了（删了才叫清理）',
+          Number((await one(`select count(*)::int as n from schedule_temp_changes where id = $1`, [S11.c3])).n),
+          0,
+        )
+        eq(
+          '🔴 ⑧ 动作级那一笔也在平台的「操作记录」里（超管在 /admin 看得到）',
+          await one(`select action, target, affected, actor_name from admin_audit
+                      where action = 'schedule.purge' order by at desc limit 1`),
+          { action: 'schedule.purge', target: today, affected: 1, actor_name: '教务处' },
+        )
+      }
+      for (const [who, uid] of [['年级主任', U.grade], ['任课老师', U.phy], ['教室端', U.room]]) {
+        const msg = await (async () => {
+          try {
+            await execAs(uid, `select public.purge_expired_schedule_changes()`)
+            return 'ok'
+          } catch (e) {
+            return shortErr(e)
+          }
+        })()
+        ok(
+          `🔴 ⑧ 反向对照：**${who}** 清不了（判据用的是平台既有的 \`is_school_admin()\`，没新造）`,
+          /只有教务处或最高管理员/.test(msg),
+          msg,
+        )
+      }
+
+      /* ---- ⑨ 教室端：**只读本班**，而且那条边界没有被放宽 ---- */
+      eq('🔴 ⑨ 教室端读**全校**的调课 = 只剩本班那两条', await nAs(U.room, `select count(*)::int as n from schedule_temp_changes`), 2)
+      eq('🔴 ⑨ 本班那两条读得到（它那块屏要照它显示）',
+        await nAs(U.room, `select count(*)::int as n from schedule_temp_changes where class_id = $1::uuid`, [C.c1]), 2)
+      eq('🔴 ⑨ 反向对照：**别班**（c2）的一条都读不到',
+        await nAs(U.room, `select count(*)::int as n from schedule_temp_changes where class_id = $1::uuid`, [C.c2]), 0)
+      eq('🔴 ⑨ `schedule_day_cells()` 也只给它本班（读别班 = 0 行）',
+        await nAs(U.room, `select count(*)::int as n from public.schedule_day_cells($1::date) where class_id <> $2::uuid`, [D, C.c1]), 0)
+      eq('🔴 ⑨ 反向对照：**别的老师**（新来的 · 高一(1)班）一条都读不到',
+        await nAs(U.fresh, `select count(*)::int as n from schedule_temp_changes`), 0)
+      eq('🔴 ⑨ 反向对照：教室端读**留档**（周课表变更 / 清理留档）= 0 行（那不是它的事）',
+        [await nAs(U.room, `select count(*)::int as n from schedule_perm_changes`),
+         await nAs(U.room, `select count(*)::int as n from schedule_temp_archive`)],
+        [0, 0])
+      eq('🔴 ⑨ 年级主任：**本年级**的留档读得到 · **别年级**的读不到',
+        [await nAs(U.grade, `select count(*)::int as n from schedule_perm_changes where class_id = $1::uuid`, [C.c1]),
+         await nAs(U.grade, `select count(*)::int as n from schedule_perm_changes where class_id = $1::uuid`, [C.c3])],
+        [2, 0])
+
+      /* ---- ⑩ 结构审计（策略清单 / RLS / 表权限 / 两条库级约束）---- */
+      eq(
+        '🔴 ⑩ 策略清单：临时表三条（读/增/改）+ 两张留档各一条只读 —— **没有 for all、没有 delete**',
+        (await rowsOf(`select tablename, policyname, cmd from pg_policies
+                        where schemaname = 'public'
+                          and (tablename like 'schedule\\_temp%' or tablename = 'schedule_perm_changes')
+                        order by 1, 3`)).map((r) => `${r.tablename}:${r.policyname}:${r.cmd}`),
+        ['schedule_perm_changes:schedule_perm_changes_read:SELECT',
+         'schedule_temp_archive:schedule_temp_archive_read:SELECT',
+         'schedule_temp_changes:schedule_temp_changes_insert:INSERT',
+         'schedule_temp_changes:schedule_temp_changes_read:SELECT',
+         'schedule_temp_changes:schedule_temp_changes_update:UPDATE'],
+      )
+      eq(
+        '🔴 ⑩ 三张新表的 RLS 都开着（§14「没有一张表漏开 RLS」那条自检照旧）',
+        (await rowsOf(`select rowsecurity from pg_tables
+                        where schemaname = 'public'
+                          and (tablename like 'schedule\\_temp%' or tablename = 'schedule_perm_changes')
+                        order by tablename`)).map((r) => r.rowsecurity),
+        [true, true, true],
+      )
+      eq(
+        '🔴 ⑩ 客户端**连 delete 的表权限都没有**（"前端去删"是显式报错，不是删 0 行装作成功）',
+        [Boolean((await one(`select has_table_privilege('authenticated', 'schedule_temp_changes', 'DELETE') as v`)).v),
+         Boolean((await one(`select has_table_privilege('authenticated', 'schedule_temp_archive', 'INSERT') as v`)).v)],
+        [false, false],
+      )
+      eq(
+        '🔴 ⑩ 匿名（anon）对这几张表一个权限都没有',
+        Number((await one(`select count(*)::int as n from information_schema.role_table_grants
+                            where grantee = 'anon' and table_schema = 'public'
+                              and (table_name like 'schedule\\_temp%' or table_name = 'schedule_perm_changes')`)).n),
+        0,
+      )
+      ok(
+        '🔴 ⑩ 「同一格只能有一条生效的」那条**部分唯一索引**在（`where status = \'active\'`）',
+        /status = 'active'/.test((await one(`select indexdef from pg_indexes where indexname = 'schedule_temp_changes_slot_active'`)).indexdef),
+      )
+      ok(
+        '🔴 ⑩ 「只换老师 = 科目不动」那条 check 在（一个不变量只写一次，所有写入路径都过它）',
+        /kind <> 'teacher'[\s\S]*to_subject = from_subject/.test(
+          (await one(`select pg_get_constraintdef(oid) as d from pg_constraint
+                       where conname = 'schedule_temp_changes_teacher_keeps_subject'`)).d),
+      )
+      eq(
+        '🔴 ⑩ `schedule_items` 上的策略清单**一个字都没动**（永久调课走的是同一个"改那一行"，没加新策略）',
+        (await rowsOf(`select policyname from pg_policies
+                        where schemaname = 'public' and tablename = 'schedule_items' order by 1`)).map((r) => r.policyname),
+        ['schedule_class_visible', 'schedule_class_write', 'schedule_classroom_admin_only_delete',
+         'schedule_classroom_admin_only_insert', 'schedule_classroom_admin_only_update',
+         'schedule_classroom_scope_only', 'schedule_classroom_write', 'schedule_mine_read', 'schedule_mine_write'],
+      )
     }
 
     await B.db.close()

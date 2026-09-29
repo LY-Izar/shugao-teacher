@@ -9732,3 +9732,728 @@ revoke all on function public.write_stream_members(uuid, uuid[]) from public, an
 --  -- select class_id from class_members where student_id = '<学生 id>';
 -- ============================================================
 
+
+-- ============================================================
+-- §38 🆕 课程管理（第 1 轮：**数据层**）—— 调课的两条路 + 冲突判据 + 过期清理
+-- ============================================================
+--  用户口径（2026-10-11，已跟用户确认过）：
+--    · **调课 = 老师临时有事换课，只影响那一天**；「按日期调课」是同一件事（只是先选未来某天）；
+--    · **永久调课 = 改每周固定的课表** —— 两种都要，而且要**分得明显**；
+--    · 允许「**只换老师**」（科目不动）也允许「**整格换**」（科目 + 老师一起换）；
+--    · 调完确认后：① 教室端那块屏按新的显示 ② 被调到的老师收到系统通知（署名教务处）；
+--    · 冲突查三类（全查）：① 同一老师同天同时段两节 ② 同一个班同天同时段两节 ③ 走班学生。
+--
+--  🔴 **两条路落在两张不同的表上**（这是本轮最重要的一个判断）：
+--    · **临时** → `schedule_temp_changes`：一条 = 某班 · 某一天 · 某一节 · 一次改动。
+--      它**不动 `schedule_items`**：那一天读课表时把它**压在上面**（后写的盖前面的）。
+--      过期 = 按日期读不到 → **不依赖"删干净"**（清理没跑也不会照着旧记录上课）。
+--    · **永久** → 改的就是 `schedule_items` 那一行（`scope` / `teacher_id` / `weekday`
+--      的既有语义**一个字不动**），另在 `schedule_perm_changes` 留档
+--      （谁在什么时候把哪一节从什么改成了什么）；撤回就照它改回去。
+--
+--  🔴 **留档为什么不用平台的 `操作记录`（`admin_audit`）**：
+--    那张表是**超管运维**的（`revoke all … from authenticated`，一条策略都没有、连 SELECT 都不给），
+--    而「周课表变更留档 / 清理留档」是**教务处自己要看的**（撤回、查"那天那节课换过谁"）。
+--    把教务处要看的东西写进只有超管能读的表 = 这个功能直接做不了。
+--    所以：**逐条留档各有一张自己的表**（读宽 = 判据那一档），
+--    而「谁执行了这次清理、清了几条」这种**动作级**的账仍旧写进 `admin_audit`（两本账，各记各的）。
+--
+--  🔴 **冲突拦在哪一层**（用户点名要一个判断）：
+--    · **数据库 = 权威**：三类冲突的算法**只有一份**，就在 `schedule_conflicts_on()`（38.6.1）；
+--      ⚠️ 名字里**故意不带 `_for`**：`_for` 在本仓库是"接受任意 uid 的判据变体"那条纪律的代号
+--         （第十三节 ⑨ 有一条机器审计：所有 `*_for` 都必须对 authenticated/anon revoke），
+--         而这个函数不是判据，别让它撞上那条审计。
+--      前端只负责把它查出来摆给人看，**不许自己再算一套**（前端算 = 可绕过，且两套口径必然分叉）。
+--    · **数据库硬拦的只有"数据本身不成立"那两类**：同一格重复生效（部分唯一索引）、形状不对
+--      （「只换老师」却换了科目 / 目标老师为空 / 那一天与星期几对不上 —— 后者由触发器算出来）。
+--    · **老师撞课 / 班级撞课 / 走班学生撞课"不硬拦"** —— 那是**教务处的决定权**：
+--      已确认过的那份设计里，确认弹层原话是「改完还剩 N 处老师撞课或班级撞课没处理」，
+--      也就是**允许带着冲突确认**（否则"照建议处理"那条动线没有存在的必要）。
+--      硬拦会把用户已经点头的动线堵死 —— 所以三类冲突在库里是**权威提示**，不是拒绝。
+--
+--  ⚠️ 本轮**只做数据层**：页面一个字都没碰（下一轮）。下面这些表/函数**目前还没有前端调用方**。
+--  ⚠️ 顺序纪律：判据函数（38.0）**必须定义在所有用它的东西之前** ——
+--     `create policy` 与 SQL 函数体会**当场解析名字**（这一条踩过两次）。
+-- ============================================================
+
+-- -------- 38.0 🔴 判据函数：**能不能改这个班的课表**（**定义在引用它的东西之前**）--------
+--  ⚠️ 顺序是硬要求：下面的触发器（38.1.1）与函数体**当场解析这个名字**，
+--     所以这一节必须排在 38.1 之前（平台在这上面踩过两次）。
+--  照平台现有的"范围形状"写（与 `can_manage_class_for` 同一支写法），**但少一档**：
+--    · 最高管理员 / 教务处 → **全校**（与 `is_school_admin_for` 同义的那一支）
+--    · 年级主任 → **只限本年级**（`scope_type='grade' and scope_id = 这个班的 grade_id`）
+--    · 🔴 **班主任不在这一档**（这是本轮的一个判断，写下来免得后来的人"顺手补上"）：
+--      `can_manage_class` 里有班主任那一支，因为"加删自己班的学生 / 改班级课表"是他分内的事；
+--      而用户对「课程管理」这一档点名的原话是**教务处（+ 最高管理员 + 年级主任）** ——
+--      班主任能不能动**课表**，用户没有点头，而课表一动就是连锁（老师 / 班 / 走班学生）。
+--    · 🔴 **任课老师 / 教室端一律不在**（教室端那条红线的理由与 §17 那三条收窄逐字相同）。
+create or replace function public.can_manage_schedule_for(p_uid uuid, p_class_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select
+    exists (select 1 from teacher_roles r
+             where r.teacher_id = p_uid and r.role in ('super', 'admin'))
+    or exists (select 1 from teacher_roles r
+                where r.teacher_id = p_uid and r.role = 'grade_head'
+                  and r.scope_type = 'grade'
+                  and r.scope_id = (select c.grade_id from classes c where c.id = p_class_id));
+$$;
+
+-- 与 `visible_class_ids_for` / `can_manage_teachers_for` 同一条纪律：
+--   `_for` 变体接受**任意 uid**（= 以任意人身份问权限），只留给属主在 SQL 编辑器里核对用
+revoke all on function public.can_manage_schedule_for(uuid, uuid) from public, anon, authenticated;
+
+create or replace function public.can_manage_schedule(p_class_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$ select public.can_manage_schedule_for(auth.uid(), p_class_id) $$;
+
+grant execute on function public.can_manage_schedule(uuid) to authenticated;
+
+-- -------- 38.1 临时调课表（`schedule_temp_changes`）--------
+--  一条 = **哪一天 · 哪个班 · 哪一节** 的一次改动。字段与语义（一个字段只有一种语义）：
+--    · `on_date`   —— **哪一天**（北京时区口径；"过期不生效"就是拿它跟 `beijing_today()` 比）
+--    · `weekday`   —— `on_date` 是星期几。**由触发器在库里算**（不信前端传的那一列），
+--                     它让"这一条压在周课表哪一格上"只靠 (班, 星期几, 时段) 就对得上
+--    · `class_id` / `start_time` / `end_time` —— **哪一节**（班级课表的口径 = `schedule_items`
+--                     里 `scope='class'` 那一族：班 + 星期几 + 时段。平台里**没有"第几节"这个号**）
+--    · `schedule_item_id` —— 原来那一行 `schedule_items` 的 id（**留档线索**；
+--                     `on delete set null`：那一行被删了也不影响这一条记录）
+--    · `from_subject` / `from_teacher_id` —— **原来是什么**（快照。原来那一格是空的 → 空串 / 空）
+--    · `to_subject` / `to_teacher_id`     —— **换成什么**
+--                     🔴 `to_teacher_id` **not null**：与 `schedule_items.teacher_id` 同一个口径 ——
+--                        **课表上每一节都必须有老师**，"换成谁"不许空着
+--    · `kind`      —— **两种形状同一张表装**：
+--                     `'teacher'` = **只换老师**（科目不动 → `to_subject = from_subject`，有 check 钉着）
+--                     `'whole'`   = **整格换**（科目 + 老师一起换）
+--    · `status`    —— `'active'`（生效）/ `'revoked'`（撤回：不生效，但**留着可查**）
+--                     ⚠️ **"过期"不是一种 status**：到期不生效是**读的时候按 `on_date` 算**出来的
+--                        （`on_date < beijing_today()`），所以清理没跑也照样对
+--    · `actor_id` / `actor_name` —— **谁改的**（触发器从调用者 JWT 取，前端传什么都不信；
+--                     `actor_name` 是**名字快照**，照 `admin_audit` 那条纪律）
+--    · `created_at` —— **什么时候改的**（触发器写 `now()`，不信前端）
+create table if not exists schedule_temp_changes (
+  id               uuid primary key default gen_random_uuid(),
+  on_date          date not null,
+  weekday          int  not null check (weekday between 1 and 7),
+  class_id         uuid not null references classes (id) on delete cascade,
+  start_time       time not null,
+  end_time         time not null,
+  schedule_item_id uuid references schedule_items (id) on delete set null,
+  from_subject     text not null default '',
+  from_teacher_id  uuid references teachers (id) on delete set null,
+  to_subject       text not null default '',
+  to_teacher_id    uuid not null references teachers (id) on delete cascade,
+  kind             text not null check (kind in ('teacher', 'whole')),
+  status           text not null default 'active' check (status in ('active', 'revoked')),
+  actor_id         uuid references teachers (id) on delete set null,
+  actor_name       text not null default '',
+  created_at       timestamptz not null default now(),
+  revoked_at       timestamptz,
+  revoked_by       uuid references teachers (id) on delete set null,
+  revoked_by_name  text not null default '',
+  -- 🔴 「只换老师」= 科目不动。这一条**必须由库守**：前端写错、或将来多一条写路径，
+  --    都拦在同一个地方（"同一不变量要在所有写入路径上守"）
+  constraint schedule_temp_changes_teacher_keeps_subject
+    check (kind <> 'teacher' or to_subject = from_subject)
+);
+-- 「这一天这一节」是读课表 / 查冲突的热路径（按天读、按班读）
+create index if not exists schedule_temp_changes_day_idx
+  on schedule_temp_changes (on_date, class_id, start_time);
+-- 「这位老师这一天有没有被调课」（通知与冲突都按它查）
+create index if not exists schedule_temp_changes_teacher_idx
+  on schedule_temp_changes (to_teacher_id, on_date);
+
+-- 🔴 **同一格只能有一条生效的临时调课**（= 数据库硬拦的那一类）。
+--    两条 `active` 落在同一个 (日期, 班, 时段) = **数据自相矛盾**（到底按哪条上课？）——
+--    这里没有"教务处的决定权"可言，所以做成**部分唯一索引**，让它在库里就插不进去。
+--    ⚠️ `where status = 'active'`：撤回过的行不占位，所以"撤回再写一条"仍然走得通。
+create unique index if not exists schedule_temp_changes_slot_active
+  on schedule_temp_changes (on_date, class_id, start_time) where status = 'active';
+
+-- -------- 38.1.1 写入口的把关（触发器）--------
+--  ① 谁改的 / 什么时候改的 / 那一天是星期几 —— **库里说了算**，前端传什么都不信
+--     （照 `calls.teacher_id` 那条纪律："发件人由服务端从调用者 JWT 取"）；
+--  ② 判据再挡一道（RLS 已经挡了一道）：万一将来哪条策略写错，库里也不会躺着一条谁都不该写的调课；
+--  ③ **写下去的行不许改**：`from_* / to_* / 日期 / 时段 / 班级` 一律不可变 ——
+--     要改就"撤回（`status='revoked'`）再写一条"。没有这一条，留档会说谎
+--     （"原来是什么"能被事后改写），"那天那节课换过谁"就再也答不出来了。
+create or replace function public.schedule_temp_changes_guard()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_name text;
+begin
+  if tg_op = 'INSERT' then
+    new.weekday         := extract(isodow from new.on_date)::int;
+    new.actor_id        := auth.uid();
+    new.actor_name      := coalesce((select t.name from teachers t where t.id = auth.uid()), '');
+    new.created_at      := now();
+    new.status          := 'active';
+    new.revoked_at      := null;
+    new.revoked_by      := null;
+    new.revoked_by_name := '';
+    /* ⚠️ 只有**带身份的调用者**（authenticated）才判：没有 uid = 属主 / 服务端那条路
+       （`service_role` 的 JWT 没有 sub）—— 那条路本来就绕过 RLS，是平台既有的口径（§21.2 同一句） */
+    if auth.uid() is not null and not public.can_manage_schedule(new.class_id) then
+      raise exception '你没有改这个班课表的权限';
+    end if;
+    /* 留档线索：能对上就往 `schedule_item_id` 写一份（对不上也不拦 —— 那一格本来可能是空的） */
+    if new.schedule_item_id is null then
+      select si.id into new.schedule_item_id
+        from schedule_items si
+       where si.class_id = new.class_id and si.weekday = new.weekday
+         and si.start_time = new.start_time and si.scope = 'class'
+       order by si.id
+       limit 1;
+    end if;
+    return new;
+  end if;
+
+  /* UPDATE：一条写下去的调课**只允许撤回** */
+  if (new.on_date, new.weekday, new.class_id, new.start_time, new.end_time,
+      new.schedule_item_id, new.from_subject, new.from_teacher_id,
+      new.to_subject, new.to_teacher_id, new.kind, new.actor_id, new.actor_name, new.created_at)
+     is distinct from
+     (old.on_date, old.weekday, old.class_id, old.start_time, old.end_time,
+      old.schedule_item_id, old.from_subject, old.from_teacher_id,
+      old.to_subject, old.to_teacher_id, old.kind, old.actor_id, old.actor_name, old.created_at) then
+    raise exception '临时调课写下去就不许改 —— 要改就先撤回（status = revoked）再写一条';
+  end if;
+  if old.status = 'revoked' and new.status = 'active' then
+    raise exception '撤回过的调课不许再改回生效 —— 重新写一条';
+  end if;
+  if new.status = 'revoked' and old.status = 'active' then
+    select coalesce(t.name, '') into v_name from teachers t where t.id = auth.uid();
+    new.revoked_at      := now();
+    new.revoked_by      := auth.uid();
+    new.revoked_by_name := v_name;
+  end if;
+  return new;
+end $$;
+
+drop trigger if exists schedule_temp_changes_guard_trg on schedule_temp_changes;
+create trigger schedule_temp_changes_guard_trg
+  before insert or update on schedule_temp_changes
+  for each row execute function public.schedule_temp_changes_guard();
+
+-- -------- 38.2 清理留档（`schedule_temp_archive`）--------
+--  「清理过期」把过期的临时调课**删掉之前**先抄一份在这里 ——
+--  删了以后还能回答"那天那节课换过谁"（用户明确要求过）。
+--  · 原样抄一份（形状与 `schedule_temp_changes` 逐列对应，`change_id` 记住它是谁）
+--  · 多三列：`purged_at` / `purged_by` / `purged_by_name`（谁清的、什么时候清的）
+--  · `class_name` 是**班名快照**：班删了之后这一行还要读得懂（所以 `class_id` 是 set null）
+--  🔴 **只读**：一条写策略都没有（写只走 38.8 那个 `security definer` 函数）——
+--     "留档"被谁改一笔就废了。
+create table if not exists schedule_temp_archive (
+  id               bigint generated always as identity primary key,
+  change_id        uuid not null,
+  class_name       text not null default '',
+  on_date          date not null,
+  weekday          int  not null,
+  class_id         uuid references classes (id) on delete set null,
+  start_time       time not null,
+  end_time         time not null,
+  schedule_item_id uuid,
+  from_subject     text not null default '',
+  from_teacher_id  uuid references teachers (id) on delete set null,
+  to_subject       text not null default '',
+  to_teacher_id    uuid references teachers (id) on delete set null,
+  kind             text not null,
+  status           text not null,
+  actor_id         uuid references teachers (id) on delete set null,
+  actor_name       text not null default '',
+  created_at       timestamptz not null,
+  revoked_at       timestamptz,
+  revoked_by       uuid references teachers (id) on delete set null,
+  revoked_by_name  text not null default '',
+  purged_at        timestamptz not null default now(),
+  purged_by        uuid references teachers (id) on delete set null,
+  purged_by_name   text not null default ''
+);
+create index if not exists schedule_temp_archive_day_idx on schedule_temp_archive (on_date desc);
+-- 同一条调课**只留一次档**（清理重跑也不会抄两份）
+create unique index if not exists schedule_temp_archive_change_idx on schedule_temp_archive (change_id);
+
+-- -------- 38.3 周课表变更留档（`schedule_perm_changes`）--------
+--  「永久调课」改的是 `schedule_items` 那一行，**留档就是这张表**（一条 = 一次改动）。
+--  与临时那张表的差别只有一个：**没有 `on_date`**（它不属于某一天，属于"每周的固定课表"）。
+--  · `status='active'` = 这一笔现在还生效着（`schedule_items` 那一行就是它写上去的）；
+--    `'revoked'` = 撤回过了（`schedule_items` 已经照 `from_*` 改回去了）
+--  · 同一格可以调很多次（**后写的盖前面的**）：所以**没有**唯一索引 ——
+--    "这一格现在是什么"永远看 `schedule_items` 本身，留档只回答"谁把它从什么改成了什么"
+create table if not exists schedule_perm_changes (
+  id               uuid primary key default gen_random_uuid(),
+  class_id         uuid not null references classes (id) on delete cascade,
+  weekday          int  not null check (weekday between 1 and 7),
+  start_time       time not null,
+  end_time         time not null,
+  schedule_item_id uuid references schedule_items (id) on delete set null,
+  from_subject     text not null default '',
+  from_teacher_id  uuid references teachers (id) on delete set null,
+  to_subject       text not null default '',
+  to_teacher_id    uuid not null references teachers (id) on delete cascade,
+  kind             text not null check (kind in ('teacher', 'whole')),
+  status           text not null default 'active' check (status in ('active', 'revoked')),
+  actor_id         uuid references teachers (id) on delete set null,
+  actor_name       text not null default '',
+  created_at       timestamptz not null default now(),
+  revoked_at       timestamptz,
+  revoked_by       uuid references teachers (id) on delete set null,
+  revoked_by_name  text not null default '',
+  -- 与临时那张表同一条：**「只换老师」= 科目不动**
+  constraint schedule_perm_changes_teacher_keeps_subject
+    check (kind <> 'teacher' or to_subject = from_subject)
+);
+create index if not exists schedule_perm_changes_slot_idx
+  on schedule_perm_changes (class_id, weekday, start_time, created_at desc);
+
+-- -------- 38.6 这一天实际上什么课（临时调课**压在**周课表上面）--------
+--  🔴 **"过期不生效"就落在这一句 `sc.on_date = p_date` 上**：
+--     今天读 `schedule_day_cells(beijing_today())`，过去那些行**根本不参与** ——
+--     所以"清理任务挂了 / 没人点清理"也不会让教室端照着一条旧记录上课（用户明确要求过）。
+--  · 只算 `scope='class'` 的行（班级课表；`scope='mine'` 是老师自己的排课，不属于"这个班"）
+--  · 临时调课**后写的盖前面的**（`distinct on` + `order by created_at desc, id desc`）
+--  · 只列**我看得见的班**（`visible_class_ids()`：教务处/超管全校 · 年级主任本年级 ·
+--    科任/班主任本班 · 教室端本班）
+--  ⚠️ 底表同一格有**两行**时（那种"多出一节"的状态）**不在这里去重** ——
+--     去重就等于把「② 同一个班同一时段两节课」这条冲突藏掉（冲突函数要靠它）
+create or replace function public.schedule_day_cells(p_date date)
+returns table (
+  class_id uuid, start_time time, end_time time, subject text, teacher_id uuid, changed boolean
+)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  with wd as (select extract(isodow from p_date)::int as w),
+  base as (
+    select si.class_id, si.start_time, si.end_time,
+           si.title as subject, si.teacher_id, false as changed
+      from schedule_items si, wd
+     where si.scope = 'class' and si.class_id is not null
+       and si.weekday = wd.w
+       and si.class_id in (select visible_class_ids())
+  ),
+  ov as (
+    select distinct on (sc.class_id, sc.start_time)
+           sc.class_id, sc.start_time, sc.end_time,
+           sc.to_subject as subject, sc.to_teacher_id as teacher_id, true as changed
+      from schedule_temp_changes sc
+     where sc.on_date = p_date
+       and sc.status = 'active'
+       and sc.class_id in (select visible_class_ids())
+     order by sc.class_id, sc.start_time, sc.created_at desc, sc.id desc
+  )
+  select coalesce(b.class_id, o.class_id)   as class_id,
+         coalesce(b.start_time, o.start_time) as start_time,
+         coalesce(b.end_time, o.end_time)   as end_time,
+         coalesce(o.subject, b.subject)     as subject,
+         coalesce(o.teacher_id, b.teacher_id) as teacher_id,
+         (o.class_id is not null)           as changed
+    from base b
+    full join ov o on o.class_id = b.class_id and o.start_time = b.start_time;
+$$;
+
+grant execute on function public.schedule_day_cells(date) to authenticated;
+
+-- -------- 38.6.1 冲突（**三类，全查**）--------
+--  ① 同一老师、同一时段**两个班**（`count(distinct class_id) > 1`）
+--  ② 同一个班、同一时段**两节课**（同一格两行 —— 那种"多出一节"的状态）
+--  ③ **走班学生**、同一时段在别的班也有课
+--     （一个学生这一天这一节的课 = 他行政班的课 ∪ 他所在走班班的课；两个不同的班同时段 = 撞）
+--  🔴 这是**唯一一份**冲突算法（前端不许再写一套）：`kind` 就是三类的名字。
+--  ⚠️ 只算我看得见的班（同 `schedule_day_cells`）—— 教务处看到的是全校、年级主任是本年级。
+--  ⚠️ 休学 / 离校的学生（`status <> 'active'`）不算 ③。
+create or replace function public.schedule_conflicts_on(p_date date)
+returns table (
+  kind           text,
+  start_time     time,
+  class_id       uuid,
+  other_class_id uuid,
+  teacher_id     uuid,
+  student_id     uuid,
+  detail         text
+)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  with cells as (select * from schedule_day_cells(p_date)),
+  t as (
+    select 'teacher'::text as kind, c.start_time,
+           (array_agg(c.class_id order by c.class_id))[1] as class_id,
+           (array_agg(c.class_id order by c.class_id desc))[1] as other_class_id,
+           c.teacher_id, null::uuid as student_id,
+           '这位老师同一时段在 ' || count(distinct c.class_id) || ' 个班有课' as detail
+      from cells c
+     where c.teacher_id is not null
+     group by c.teacher_id, c.start_time
+    having count(distinct c.class_id) > 1
+  ),
+  k as (
+    select 'class'::text, c.start_time, c.class_id, c.class_id,
+           null::uuid, null::uuid,
+           '这个班同一时段有 ' || count(*) || ' 节课'
+      from cells c
+     group by c.class_id, c.start_time
+    having count(*) > 1
+  ),
+  mine as (
+    select s.id as student_id, c.class_id, c.start_time
+      from students s join cells c on c.class_id = s.class_id
+     where s.status = 'active'
+    union
+    select cm.student_id, c.class_id, c.start_time
+      from class_members cm join cells c on c.class_id = cm.class_id
+  ),
+  stud as (
+    select 'student'::text, m.start_time,
+           (array_agg(m.class_id order by m.class_id))[1],
+           (array_agg(m.class_id order by m.class_id desc))[1],
+           null::uuid, m.student_id,
+           '这个学生同一时段在 ' || count(distinct m.class_id) || ' 个班有课'
+      from mine m
+     group by m.student_id, m.start_time
+    having count(distinct m.class_id) > 1
+  )
+  select * from t union all select * from k union all select * from stud;
+$$;
+
+grant execute on function public.schedule_conflicts_on(date) to authenticated;
+
+-- -------- 38.7 永久调课：**改 `schedule_items` 那一行 + 同事务留档** --------
+--  🔴 为什么必须是一个函数、而不是"前端 update 一次 + insert 一次"：
+--     那样就有"改了但没留档"的那一瞬（网断在第 2 步、或者将来谁只写了一半）——
+--     而"谁在什么时候把哪一节从什么改成了什么"是用户点名要的东西。
+--     放进一个函数 = **同一笔事务**：要么两件都成，要么两件都不成。
+--  🔴 不改 `schedule_items` 的既有语义：`scope` / `weekday` / `teacher_id` 的含义一个字不动，
+--     这里只写 `title`（科目）与 `teacher_id`（老师）两列 —— 正是"整格换 / 只换老师"要改的那两列。
+--  ⚠️ 找不到那一行（这个班这一节现在没课）**显式报错**，不悄悄新插一行（§三.5）。
+--  ⚠️ 返回里带上 `notifyTeacherIds`（这一笔里"课被动过"的老师）：
+--     **通知本身这一轮没接** —— `notices` 只有服务端那一条写路径（§21.2：多一条写策略就多一个
+--     前端能绕过的口子），而本轮不许碰 `functions/**`。下一轮服务端照这个名单走 `/api/notice`。
+drop function if exists public.apply_perm_schedule_change(uuid, int, time, time, text, uuid, text, uuid, text, uuid);
+create or replace function public.apply_perm_schedule_change(
+  p_class_id         uuid,
+  p_weekday          int,
+  p_start_time       time,
+  p_end_time         time,
+  p_from_subject     text,
+  p_from_teacher_id  uuid,
+  p_to_subject       text,
+  p_to_teacher_id    uuid,
+  p_kind             text,
+  p_schedule_item_id uuid default null
+) returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_actor   uuid := auth.uid();
+  v_name    text;
+  v_item    uuid;
+  v_archive uuid;
+  v_notify  uuid[];
+begin
+  if p_kind not in ('teacher', 'whole') then
+    raise exception '调课种类只认 teacher（只换老师）与 whole（整格换）';
+  end if;
+  if p_kind = 'teacher' and p_to_subject is distinct from p_from_subject then
+    raise exception '「只换老师」不许改科目（科目不动）';
+  end if;
+  if p_to_teacher_id is null then
+    raise exception '要换成哪位老师 —— 课表上每一节都得有老师';
+  end if;
+  if p_weekday is null or p_weekday not between 1 and 7 then
+    raise exception '星期几只能是 1–7';
+  end if;
+  if not public.can_manage_schedule(p_class_id) then
+    raise exception '你没有改这个班课表的权限';
+  end if;
+
+  select coalesce(t.name, '') into v_name from teachers t where t.id = v_actor;
+
+  /* 要改的那一行：给了 id 就用它（并且要真是这个班 / 这个星期几 / 这个时段的课） */
+  if p_schedule_item_id is not null then
+    select si.id into v_item from schedule_items si
+     where si.id = p_schedule_item_id and si.class_id = p_class_id
+       and si.weekday = p_weekday and si.start_time = p_start_time and si.scope = 'class';
+    if v_item is null then
+      raise exception '要改的那一节对不上（班 / 星期几 / 时段）';
+    end if;
+  else
+    select si.id into v_item from schedule_items si
+     where si.class_id = p_class_id and si.weekday = p_weekday
+       and si.start_time = p_start_time and si.scope = 'class'
+     order by si.id
+     limit 1;
+  end if;
+  if v_item is null then
+    raise exception '这个班这一节现在没有课 —— 先把课录进周课表再调';
+  end if;
+
+  /* ① 改的就是 `schedule_items` 那一行 */
+  update schedule_items
+     set title = p_to_subject, teacher_id = p_to_teacher_id
+   where id = v_item;
+
+  /* ② 留档（同一笔事务）*/
+  insert into schedule_perm_changes (
+    class_id, weekday, start_time, end_time, schedule_item_id,
+    from_subject, from_teacher_id, to_subject, to_teacher_id, kind, actor_id, actor_name
+  ) values (
+    p_class_id, p_weekday, p_start_time, p_end_time, v_item,
+    p_from_subject, p_from_teacher_id, p_to_subject, p_to_teacher_id, p_kind, v_actor, v_name
+  ) returning id into v_archive;
+
+  /* ③ 断言：写完了必须**真的**是新的（§三.5：失败了要有人知道，不许静默） */
+  if not exists (
+    select 1 from schedule_items si
+     where si.id = v_item and si.title = p_to_subject and si.teacher_id = p_to_teacher_id
+  ) then
+    raise exception '周课表没有按预期改到（这一笔已回滚）';
+  end if;
+  if not exists (select 1 from schedule_perm_changes c where c.id = v_archive) then
+    raise exception '变更留档没有落库（这一笔已回滚）';
+  end if;
+
+  select array_agg(distinct x) into v_notify
+    from unnest(array[p_from_teacher_id, p_to_teacher_id]) x
+   where x is not null;
+
+  return jsonb_build_object(
+    'ok', true, 'itemId', v_item, 'archiveId', v_archive,
+    'classId', p_class_id, 'weekday', p_weekday, 'startTime', p_start_time,
+    'toSubject', p_to_subject, 'toTeacherId', p_to_teacher_id,
+    'notifyTeacherIds', coalesce(to_jsonb(v_notify), '[]'::jsonb)
+  );
+end $$;
+
+grant execute on function public.apply_perm_schedule_change(uuid, int, time, time, text, uuid, text, uuid, text, uuid) to authenticated;
+revoke all on function public.apply_perm_schedule_change(uuid, int, time, time, text, uuid, text, uuid, text, uuid) from public, anon;
+
+-- -------- 38.7.1 撤回一笔永久调课（照留档改回去 + 把留档标成撤回）--------
+--  ⚠️ 只在"那一格如今还是当初改成的那样"时才动它：后来又被调过一次 → **不平白改回去**（显式报错）。
+drop function if exists public.undo_perm_schedule_change(uuid);
+create or replace function public.undo_perm_schedule_change(p_id uuid)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_arch schedule_perm_changes;
+  v_item uuid;
+  v_name text;
+begin
+  select * into v_arch from schedule_perm_changes where id = p_id;
+  if v_arch.id is null then
+    raise exception '这条变更留档不存在';
+  end if;
+  if v_arch.status <> 'active' then
+    raise exception '这条变更已经撤回过了';
+  end if;
+  if not public.can_manage_schedule(v_arch.class_id) then
+    raise exception '你没有改这个班课表的权限';
+  end if;
+  if v_arch.from_teacher_id is null then
+    raise exception '留档里没有"原来那位老师"，改不回去';
+  end if;
+
+  select si.id into v_item from schedule_items si
+   where si.class_id = v_arch.class_id and si.weekday = v_arch.weekday
+     and si.start_time = v_arch.start_time and si.title = v_arch.to_subject
+     and si.teacher_id = v_arch.to_teacher_id and si.scope = 'class'
+   order by si.id
+   limit 1;
+  if v_item is null then
+    raise exception '这一格已经不是当初改成的那样了（后来又被调过）—— 不平白改回去';
+  end if;
+
+  update schedule_items
+     set title = v_arch.from_subject, teacher_id = v_arch.from_teacher_id
+   where id = v_item;
+
+  select coalesce(t.name, '') into v_name from teachers t where t.id = auth.uid();
+  update schedule_perm_changes
+     set status = 'revoked', revoked_at = now(), revoked_by = auth.uid(), revoked_by_name = v_name
+   where id = p_id;
+
+  if not exists (
+    select 1 from schedule_items si
+     where si.id = v_item and si.title = v_arch.from_subject
+       and si.teacher_id = v_arch.from_teacher_id
+  ) then
+    raise exception '没有按预期回到原来的周课表（这一笔已回滚）';
+  end if;
+  if not exists (select 1 from schedule_perm_changes c where c.id = p_id and c.status = 'revoked') then
+    raise exception '留档没有标成撤回（这一笔已回滚）';
+  end if;
+
+  return jsonb_build_object('ok', true, 'itemId', v_item, 'archiveId', p_id,
+                            'fromSubject', v_arch.from_subject, 'fromTeacherId', v_arch.from_teacher_id);
+end $$;
+
+grant execute on function public.undo_perm_schedule_change(uuid) to authenticated;
+revoke all on function public.undo_perm_schedule_change(uuid) from public, anon;
+
+-- -------- 38.8 「清理过期」——**删之前先留档**（教务处手动；将来也可以挂定时任务）--------
+--  判据用的是**平台既有那一个** `is_school_admin()`（最高管理员 / 教务处），一个新判据都不造。
+--  顺序是硬要求：① 操作记录 ② 留档 ③ 才删。留档少抄一条 → **一条都不删**（整笔回滚）。
+--  ⚠️ 只清**临时**那一份：永久调课不属于某一天，**不会过期**。
+--  ⚠️ 就算这一步永远不跑，功能也是对的（读的时候按日期过滤，见 38.6）。
+drop function if exists public.purge_expired_schedule_changes();
+create or replace function public.purge_expired_schedule_changes()
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_today date := public.beijing_today();
+  v_n     int  := 0;
+  v_arch  int  := 0;
+  v_name  text;
+begin
+  if not public.is_school_admin() then
+    raise exception '只有教务处或最高管理员能清理过期的临时调课';
+  end if;
+
+  select count(*) into v_n from schedule_temp_changes where on_date < v_today;
+
+  if v_n > 0 then
+    select coalesce(t.name, '') into v_name from teachers t where t.id = auth.uid();
+
+    /* ① 先记一条"谁在什么时候清了这一批"（超管在 /admin 的「操作记录」里看得到） */
+    insert into admin_audit (actor_id, actor_name, action, target, detail, affected)
+    values (auth.uid(), v_name, 'schedule.purge', v_today::text,
+            '清理 ' || v_n || ' 条过期临时调课；逐条留档在 schedule_temp_archive', v_n);
+
+    /* ② 逐条留档（"那天那节课换过谁" —— 删了就靠它回答） */
+    insert into schedule_temp_archive (
+      change_id, class_name, on_date, weekday, class_id, start_time, end_time, schedule_item_id,
+      from_subject, from_teacher_id, to_subject, to_teacher_id, kind, status,
+      actor_id, actor_name, created_at, revoked_at, revoked_by, revoked_by_name,
+      purged_by, purged_by_name
+    )
+    select sc.id,
+           coalesce((select c.name from classes c where c.id = sc.class_id), ''),
+           sc.on_date, sc.weekday, sc.class_id, sc.start_time, sc.end_time, sc.schedule_item_id,
+           sc.from_subject, sc.from_teacher_id, sc.to_subject, sc.to_teacher_id, sc.kind, sc.status,
+           sc.actor_id, sc.actor_name, sc.created_at, sc.revoked_at, sc.revoked_by, sc.revoked_by_name,
+           auth.uid(), v_name
+      from schedule_temp_changes sc
+     where sc.on_date < v_today;
+    get diagnostics v_arch = row_count;
+
+    if v_arch <> v_n then
+      raise exception '留档抄了 % 条、过期的有 % 条 —— 对不上，一条都不删', v_arch, v_n;
+    end if;
+
+    /* ③ 再删 */
+    delete from schedule_temp_changes where on_date < v_today;
+    get diagnostics v_arch = row_count;
+    if v_arch <> v_n then
+      raise exception '删了 % 条、过期的有 % 条 —— 对不上', v_arch, v_n;
+    end if;
+  end if;
+
+  return jsonb_build_object('ok', true, 'purged', v_n, 'today', v_today);
+end $$;
+
+grant execute on function public.purge_expired_schedule_changes() to authenticated;
+revoke all on function public.purge_expired_schedule_changes() from public, anon;
+
+-- -------- 38.9 RLS：**读得宽、写得窄** --------
+alter table schedule_temp_changes enable row level security;
+alter table schedule_temp_archive enable row level security;
+alter table schedule_perm_changes enable row level security;
+
+--  · 临时调课表：读 + 改（撤回）给客户端；
+--    🔴 **delete 一条策略都没有** —— 过期行只能由 38.8 那个函数删（它删之前先留档）。
+--    ⚠️ 而且**连 delete 的表权限都不给**：那样"前端去删"是**显式报错**（42501），
+--       而不是"删了 0 行、看起来成功了"（§三.5 那条纪律）。
+grant select, insert, update on schedule_temp_changes to authenticated;
+revoke all on schedule_temp_changes from anon;
+
+--  · 两张留档表：**只读**（写只走 38.7 / 38.8 那两个安全定义函数）
+grant select on schedule_temp_archive to authenticated;
+revoke all on schedule_temp_archive from anon;
+grant select on schedule_perm_changes to authenticated;
+revoke all on schedule_perm_changes from anon;
+
+-- 读（临时调课）：**看得见这个班的人**（教务处/超管全校 · 年级主任本年级 · 科任/班主任本班 ·
+--   🔴 **教室端本班** —— 教室端那块屏要照它显示）+ **这一节被动过的老师本人**
+--   （被换上去的老师哪怕本来不教这个班，也要读得到自己那一行）
+drop policy if exists schedule_temp_changes_read on schedule_temp_changes;
+create policy schedule_temp_changes_read on schedule_temp_changes for select to authenticated
+  using (
+    class_id in (select visible_class_ids())
+    or to_teacher_id   = auth.uid()
+    or from_teacher_id = auth.uid()
+  );
+
+-- 写（临时调课）：**只有那三档**（教务处 / 最高管理员 / 本年级年级主任）——
+--   判据只有一份：`can_manage_schedule()` 自己取 `auth.uid()`，前端塞不进别人的身份
+drop policy if exists schedule_temp_changes_insert on schedule_temp_changes;
+create policy schedule_temp_changes_insert on schedule_temp_changes for insert to authenticated
+  with check (can_manage_schedule(class_id));
+
+drop policy if exists schedule_temp_changes_update on schedule_temp_changes;
+create policy schedule_temp_changes_update on schedule_temp_changes for update to authenticated
+  using (can_manage_schedule(class_id))
+  with check (can_manage_schedule(class_id));
+
+-- 读（两张留档）：**同一把尺子**（能不能管这个班的课表）——
+--   教务处/超管全校 · 年级主任本年级。⚠️ **教室端读不到**（它不是这一档），
+--   而清理要看的正是"那天哪节课换过谁"，跟教室端无关
+drop policy if exists schedule_temp_archive_read on schedule_temp_archive;
+create policy schedule_temp_archive_read on schedule_temp_archive for select to authenticated
+  using (can_manage_schedule(class_id));
+
+drop policy if exists schedule_perm_changes_read on schedule_perm_changes;
+create policy schedule_perm_changes_read on schedule_perm_changes for select to authenticated
+  using (can_manage_schedule(class_id));
+
+-- -------- 38.10 核对（把下面整段粘进 SQL 编辑器；以**有权限的人**的 JWT 跑）--------
+--  ① 三张表与列都在（期望列名与 38.1 / 38.2 / 38.3 逐字对上）：
+--  -- select table_name, column_name from information_schema.columns
+--  --  where table_schema='public' and table_name in
+--  --        ('schedule_temp_changes','schedule_temp_archive','schedule_perm_changes')
+--  --  order by table_name, ordinal_position;
+--  ② 策略清单（期望 5 条：临时表 SELECT/INSERT/UPDATE 各一 + 两张留档各一条 SELECT）：
+--  -- select tablename, policyname, cmd from pg_policies
+--  --  where schemaname='public' and tablename like 'schedule\_%' order by 1,3;
+--  ③ 那三档 **改得动**、别人 **改不动**（把 uid 换成真实值；`can_manage_schedule` 看 `auth.uid()`）：
+--  -- select public.can_manage_schedule_for('<教务处 uid>', '<班 id>') as 教务处,
+--  --        public.can_manage_schedule_for('<本年级年级主任 uid>', '<班 id>') as 本年级主任,
+--  --        public.can_manage_schedule_for('<别年级年级主任 uid>', '<班 id>') as 别年级主任,
+--  --        public.can_manage_schedule_for('<该班班主任 uid>', '<班 id>') as 班主任,   -- 期望 false
+--  --        public.can_manage_schedule_for('<任课老师 uid>', '<班 id>') as 任课老师;   -- 期望 false
+--  ④ 这一天实际什么课（临时调课压在周课表上；**过期那条不参与**）：
+--  -- select * from public.schedule_day_cells(current_date);        -- 传**北京时区**的那一天
+--  -- select * from public.schedule_conflicts_on(current_date);   -- 三类冲突
+--  ⑤ 临时调课写下去就不许改（期望报"写下去就不许改"）：
+--  -- update schedule_temp_changes set to_subject = '别的' where id = '<一条 id>';
+--  ⑥ 同一天同一格插第二条**生效**的（期望报唯一索引冲突）：
+--  -- insert into schedule_temp_changes (on_date, weekday, class_id, start_time, end_time,
+--  --        to_subject, to_teacher_id, kind) values ('<同一天>', 1, '<同班>', '08:50', '09:30',
+--  --        '语文', '<老师 id>', 'teacher');
+--  ⑦ 清理（期望 ok = true 且 purged = 过期条数；跑完 `schedule_temp_archive` 里查得到那几条）：
+--  -- select public.purge_expired_schedule_changes();
+-- ============================================================
+
