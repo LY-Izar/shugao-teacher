@@ -460,14 +460,94 @@ export default function Classroom() {
   const isMakeup = dayKind(ymdOf(now)) === 'makeup'
   const useWeekday = isMakeup && weekOverride !== null ? weekOverride : weekdayOf(now)
 
+  const todayIso = ymdOf(now)
+
+  /*
+   * 🆕 2026-10-13「课程管理」第 4 轮 · **教室端认"今天有临时调整"**（`schema.sql` §38.6）。
+   *
+   * 🔴 数据源是**数据库那一份** `schedule_day_cells(p_date)`：它把"读时按日期过滤"做在里面了
+   *    （临时调课只在 `on_date = 这一天` 时压上来）—— 所以**过了那天自动恢复**不需要教室端
+   *    做任何事：换一天再读就是原来的周课表，`schedule_items` 一个字都没被写过。
+   * 🔴 **这一层只覆盖本班**：下面 `c.classId === klass.id` 那一句就是「教室端只看本班」那条
+   *    硬边界（`scope='class'` 的口径**一个字没放宽**）。
+   * ⚠️ 本地演示模式没有数据库（`loadScheduleDay` 回 `local`）→ 用内存里那一层
+   *    `tempScheduleChanges` 顶上，两边**同一份语义**（与 `CourseAdmin.tsx` 同款做法）。
+   * ⚠️ 读不到（`missing` / `unknown`）**保持原课表**、不做任何标记：
+   *    "不知道有没有调整"不等于"没有调整"，也**不许**让这块屏空掉（§三.4 的三态纪律）。
+   */
+  const localTempChanges = useStore((s) => s.tempScheduleChanges)
+  const [dbTempCells, setDbTempCells] = useState<Record<string, string>>({})
+  /* 标题的写法要班名（照平台约定「班名 科目」）—— 单独取一份，免得把整个 `klass` 挂进依赖 */
+  const klassName = klass?.name ?? ''
+
+  useEffect(() => {
+    if (!isRemote || !klass?.id) return
+    let alive = true
+    const load = () => {
+      void remote.loadScheduleDay(todayIso).then((r) => {
+        if (!alive || r.status !== 'present') return
+        const m: Record<string, string> = {}
+        /* ⚠️ 同一条纪律：`r.cells` 是**服务端回来的东西**，这里也不假设它一定是数组 */
+        for (const c of r.cells ?? []) {
+          /* 🔴 只要**本班**那几格（教室端那条边界），且只要被临时调过的那几格 */
+          if (c.changed && c.classId === klass.id) m[c.start] = c.subject
+        }
+        setDbTempCells(m)
+      })
+    }
+    load()
+    /* 教务处那边改完，这块屏最多一分钟自己跟上（不要求有人来点刷新） */
+    const t = window.setInterval(load, 60_000)
+    return () => {
+      alive = false
+      window.clearInterval(t)
+    }
+  }, [klass?.id, todayIso])
+
+  /** 这一天、这个班被临时调过的格：键 = **开始时间**（临时调课锚在"这一天这一节"上） */
+  const tempOfDay = useMemo(() => {
+    if (isRemote) return dbTempCells
+    const m: Record<string, string> = {}
+    /*
+     * 🔴 `?? []` 是**入口这一侧的兜底**，不是判据：`store.ts` 那 6 处赋
+     *    `tempScheduleChanges` 的地方给的都是数组（见那一处核查记录），类型上也是 `TempScheduleChange[]`。
+     *    但"教室里那块屏"是**出不得错的**那一块（它一崩，整页连左栏一起白）——
+     *    多一个 `?? []` 的代价是零，而漏掉它的代价是一整屏。
+     */
+    for (const c of localTempChanges ?? []) {
+      if (c.date === todayIso && c.classId === klass?.id) m[c.start] = c.toSubject
+    }
+    return m
+  }, [dbTempCells, localTempChanges, todayIso, klass?.id])
+
   const dayItems = useMemo(() => {
     const raw = schedule.filter(
       (s) => s.scope === 'class' && s.classId === klass?.id && s.weekday === useWeekday,
     )
+    /*
+     * 🔴 今天有临时调整 → 那一格显示**调整后**的课。
+     *    标题按平台约定拼「班名 科目」—— 与 `CourseAdmin` 写进周课表的那一种写法同一口径
+     *    （教室端「正在上课」卡就是靠 `splitTitle` 从这一串里拆出科目与老师）。
+     */
+    const merged = raw.map((it) => {
+      const subject = tempOfDay[it.start]
+      if (subject === undefined) return it
+      return { ...it, title: `${klassName} ${subject}`.trim() }
+    })
     // 朝会只在真正的周一早上，所以顺延看的是「今天是不是周一」，
     // 而不是「借用了哪一天的课表」—— 调休借周一的课不代表今天要顺延。
-    return maybeShift(raw, weekdayOf(now))
-  }, [schedule, klass?.id, useWeekday, now])
+    return maybeShift(merged, weekdayOf(now))
+  }, [schedule, klass?.id, klassName, useWeekday, now, tempOfDay])
+
+  /** 今天哪几节是**被临时调过的**（屏上给一个小标记；`id` 在顺延之后不变） */
+  const adjustedIds = useMemo(() => {
+    const ids = new Set<string>()
+    for (const it of schedule) {
+      if (it.scope !== 'class' || it.classId !== klass?.id || it.weekday !== useWeekday) continue
+      if (tempOfDay[it.start] !== undefined) ids.add(it.id)
+    }
+    return ids
+  }, [schedule, klass?.id, useWeekday, tempOfDay])
 
   // 传入 useWeekday：调休日教师手选的那天，不能被设备真实星期再筛一次
   const day = useMemo(() => dayState(dayItems.items, now, useWeekday), [dayItems.items, now, useWeekday])
@@ -483,7 +563,6 @@ export default function Classroom() {
    * 课要照上（还可能按教师手选的星期上）—— 只有 `isRestDay` 才拦。
    * 下课铃那边早就有这道判断了（见下面 tick 里的 isRestDay），这里是补上显示。
    */
-  const todayIso = ymdOf(now)
   const restDay = isRestDay(todayIso)
   const restName = restDay ? (holidayOn(todayIso)?.name ?? '') : ''
   const nowMin = now.getHours() * 60 + now.getMinutes()
@@ -1642,6 +1721,8 @@ export default function Classroom() {
                           ) : next && day.minutesToNext !== null ? (
                             <Tag tone="accent">下一节 {awayText(day.minutesToNext)}</Tag>
                           ) : null}
+                          {/* 🆕 今天这一节**被临时调过**（教务处换的课）—— 屏上要看得出来 */}
+                          {adjustedIds.has(it.id) ? <Tag tone="warn">已调整</Tag> : null}
                         </div>
                       )
                     })}

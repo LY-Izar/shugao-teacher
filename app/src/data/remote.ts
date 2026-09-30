@@ -2392,7 +2392,16 @@ export type TempChangeInput = {
   fromSubject: string
   fromTeacherId: string | null
   toSubject: string
-  toTeacherId: string
+  /**
+   * 换成哪位老师。
+   * 🔴 `null` = **这一格腾空**（`to_subject` 是空串）：这节课挪到别处了 / 取消了。
+   *    ⚠️ 原来这一栏是 `string`，腾空时前端递的是**空串** —— 而空串不是一个 uuid，
+   *       PostgREST / Postgres 会直接拒（`invalid input syntax for type uuid: ""`），
+   *       于是"腾空那一笔写不进去"，而界面上看着像写成了（本来那一格还挂着旧课）。
+   *       所以：**腾空就递 `null`**（库那一列在 §38.1 已改成允许为空，条件由 check 钉着）。
+   *    ⚠️ 有课的那一格**必须有老师**：`null` + 非空 `to_subject` 会被库里那道 check 拒。
+   */
+  toTeacherId: string | null
   kind: 'teacher' | 'whole'
 }
 
@@ -2400,28 +2409,35 @@ export type TempChangeInput = {
  * **临时调课**：往 `schedule_temp_changes` 写一条（**只影响这一天**）。
  * ⚠️ `weekday` / `actor_*` / `created_at` 一律由 §38.1.1 的触发器在库里算 ——
  *    这里**不传**，传了也不信（"发件人由服务端从调用者 JWT 取"同一条纪律）。
+ * 🆕 第 4 轮起**把写进去那一行的 id 带回来**：调完之后要照它发那条通知
+ *    （`notifyScheduleChange()` 用 `changeId` 去服务端取"被调到的老师"，
+ *     所以收件人名单**不从前端走**）。
  */
 export async function saveTempScheduleChange(
   row: TempChangeInput,
-): Promise<{ ok: boolean; message: string }> {
+): Promise<{ ok: boolean; message: string; id: string }> {
   const sb = getSupabase()
-  if (!sb) return { ok: true, message: '' }
+  if (!sb) return { ok: true, message: '', id: '' }
   try {
-    const { error } = await sb.from('schedule_temp_changes').insert({
-      on_date: row.onDate,
-      class_id: row.classId,
-      start_time: row.start,
-      end_time: row.end,
-      from_subject: row.fromSubject,
-      from_teacher_id: row.fromTeacherId,
-      to_subject: row.toSubject,
-      to_teacher_id: row.toTeacherId,
-      kind: row.kind,
-    } as never)
-    if (error) return { ok: false, message: String(error.message ?? '没写进临时调课表') }
-    return { ok: true, message: '' }
+    const { data, error } = await sb
+      .from('schedule_temp_changes')
+      .insert({
+        on_date: row.onDate,
+        class_id: row.classId,
+        start_time: row.start,
+        end_time: row.end,
+        from_subject: row.fromSubject,
+        from_teacher_id: row.fromTeacherId,
+        to_subject: row.toSubject,
+        to_teacher_id: row.toTeacherId,
+        kind: row.kind,
+      } as never)
+      .select('id')
+    if (error) return { ok: false, message: String(error.message ?? '没写进临时调课表'), id: '' }
+    const id = String((data as Array<{ id?: string }> | null)?.[0]?.id ?? '')
+    return { ok: true, message: '', id }
   } catch (e) {
-    return { ok: false, message: e instanceof Error ? e.message : '没写进临时调课表' }
+    return { ok: false, message: e instanceof Error ? e.message : '没写进临时调课表', id: '' }
   }
 }
 
@@ -2445,11 +2461,11 @@ export type PermChangeInput = {
  */
 export async function applyPermScheduleChange(
   row: PermChangeInput,
-): Promise<{ ok: boolean; message: string }> {
+): Promise<{ ok: boolean; message: string; archiveId: string }> {
   const sb = getSupabase()
-  if (!sb) return { ok: true, message: '' }
+  if (!sb) return { ok: true, message: '', archiveId: '' }
   try {
-    const { error } = await sb.rpc(
+    const { data, error } = await sb.rpc(
       'apply_perm_schedule_change' as never,
       {
         p_class_id: row.classId,
@@ -2464,11 +2480,33 @@ export async function applyPermScheduleChange(
         p_schedule_item_id: row.scheduleItemId,
       } as never,
     )
-    if (error) return { ok: false, message: String(error.message ?? '周课表没改成') }
-    return { ok: true, message: '' }
+    if (error) return { ok: false, message: String(error.message ?? '周课表没改成'), archiveId: '' }
+    /* 🆕 第 4 轮起把留档 id 带回来：服务端照它取"被调到的老师"再发通知
+       （返回值里的 `notifyTeacherIds` 与那行留档的 from/to 是同一组人 —— 一个口径两处取） */
+    const archiveId = String((data as { archiveId?: string } | null)?.archiveId ?? '')
+    return { ok: true, message: '', archiveId }
   } catch (e) {
-    return { ok: false, message: e instanceof Error ? e.message : '周课表没改成' }
+    return { ok: false, message: e instanceof Error ? e.message : '周课表没改成', archiveId: '' }
   }
+}
+
+/**
+ * 🆕 2026-10-13（第 4 轮）**调完之后发那条通知**（署名教务处，收件人 = 被调到的老师）。
+ *
+ * 🔴 走服务端 `/api/schedule-notice`：`notices` 只有服务端一条写路径（§21.2），
+ *    前端一条写策略都没有。这里只递"哪一笔"（表 + id）——
+ *    **收件人名单、正文、署名都在服务端算**（前端说我发给谁不算数）。
+ * 🔴 本地演示模式**一个请求都不发**（`postApi` 里那一句），回的是一句人话；
+ *    调用方据此决定"要不要在提示里提通知"。
+ */
+export async function notifyScheduleChange(
+  changeKind: 'temp' | 'perm',
+  changeId: string,
+): Promise<{ ok: boolean; message: string }> {
+  if (!changeId) return { ok: false, message: '这一笔没有回执 id，通知没发出去' }
+  const r = await postApi('/api/schedule-notice', { changeKind, changeId })
+  if (r.ok) return { ok: true, message: '' }
+  return { ok: false, message: apiMessage(r, '通知没发出去') }
 }
 
 /** 「清理过期」—— 删之前先在库里留档（§38.8，判据是既有的 `is_school_admin()`） */

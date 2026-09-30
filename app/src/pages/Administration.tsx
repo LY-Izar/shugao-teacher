@@ -1,4 +1,3 @@
-import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Page } from '../components/AppShell'
 import {
@@ -12,20 +11,20 @@ import {
 import { PageHead, Panel } from '../components/ui'
 import { useStore } from '../data/store'
 import { entryVisible, hasManagingRole, type EntryKey } from '../lib/roles'
-import CourseAdmin from './CourseAdmin'
 import type { ButtonHTMLAttributes, ComponentType, ReactNode } from 'react'
 
 /**
  * 「行政管理」`/manage`（2026-10-01）。
  *
- * 🔴 **它是一个入口合集，不是第四个判据**：三张卡各自跳去**早就存在**的那一页，
- *    而**那三页各自的判据一个字都没动**（照旧在它们自己那里）：
+ * 🔴 **它是一个入口合集，不是第四个判据**：每张卡各自跳去**早就存在**的那一页，
+ *    而**那几页各自的判据一个字都没动**（照旧在它们自己那里）：
  *
  *      | 卡片     | 跳去              | 那一页的入口判据（写在 `lib/roles.ts`） |
  *      |---|---|---|
  *      | 年级管理 | `/grades`         | `hasManagingRole \|\| seesTeachingData` |
  *      | 档案管理 | `/grades/promote` | `canManageTeachers`                     |
  *      | 教师管理 | `/accounts`       | `canManageTeachers`                     |
+ *      | 课程管理 | `/manage/course`  | `hasManagingRole`                       |
  *
  *    ⚠️ 这一页**自己不查权限**（没有守卫、没有一句 `if (角色)`）——
  *       卡摆不摆由 `entryVisible()`（唯一那张入口表）逐个卡回答；
@@ -40,11 +39,15 @@ import type { ButtonHTMLAttributes, ComponentType, ReactNode } from 'react'
  *    要服务端的那一张（教师管理）跳过去之后，**那一页自己**会说明"现在打不开"
  *    （`TeacherAccounts.tsx` 那条服务端 403 的路），所以这里不重复拦一道。
  *
- * 🆕 2026-10-12「课程管理」—— **第四张卡**（第 2 轮：骨架，见 `CourseAdmin.tsx` 的文件头）：
- *    · 它与上面三张**不同款**：上面三张是"跳去早就存在的那一页"，这一张是**就地展开**一段；
+ * 🆕 2026-10-12「课程管理」—— **第四张卡**（第 3 轮落地址，第 4 轮改成跳页）：
+ *    · 🔴 它与上面三张**同款**：点一下**跳到那一页**（`/manage/course`），不再就地展开。
+ *      理由：平台有「同一件事两个入口」这条纪律 —— 卡是入口，页面是页面；
+ *      上一轮那套"就地展开"（连同它的 `courseOpen` 状态与面板）**已经整块删掉**，
+ *      不是留着代码只把卡改成链接。
  *    · 摆不摆问 `hasManagingRole()`（既有判据函数，与 `can_manage_schedule_for()` 同形）；
- *    · ⚠️ 它**还没有自己的入口 key**（那要同时登记 `App.tsx` / `PAGES` / 两份矩阵文档），
- *      所以**不进 `ENTRIES`**、也**不带** `data-manage-card`（理由写在下面那张卡的注释里）。
+ *    · ⚠️ 它**仍然带 `data-course-card`**（不是 `data-manage-card`）：那个属性在这一页上的
+ *      意思是"`/manage` 上**跳页**的卡片"（`shots.mjs` 的 B4 按它逐张点过去核路由、
+ *      并按张数断言"这一页摆着三张卡"）。这一张的**落点**由 S27 那一节单独钉。
  */
 
 /** 一张入口卡：跳去哪一页 + 图标 + 标题 + 一行副标题 */
@@ -93,26 +96,24 @@ export default function Administration() {
   /* 三张卡逐个问那张唯一的入口表（不读任何数据行 —— M1/M2/M3） */
   const cards = CARDS.filter((c) => entryVisible(c.key, myRoles))
   /*
-   * 🆕 2026-10-12「课程管理」—— **第四张卡**（第 2 轮：骨架）。
+   * 🆕 2026-10-12「课程管理」—— **第四张卡**。
    *
    * 🔴 摆不摆问的是 `lib/roles.ts` 里**既有**的那个判据 `hasManagingRole()`
    *    （最高管理员 / 教务处 / 年级主任）—— 它恰好与数据库的
    *    `can_manage_schedule_for()` 那一档同形（§38.0：超管 / 教务处全校 · 年级主任本年级）。
    *    ⚠️ 这里**没有**在页面里就地写角色数组，也没有新造判据；
    *       而"能不能改**这个班**的课表"仍然由服务端回的布尔说了算（`CourseAdmin.tsx`）。
-   *    ⚠️ 它**暂时不进** `lib/roles.ts` 的 `ENTRIES`：那是"入口 ↔ 路由"的登记表，
-   *       而新地址要**同时**登记四处（`App.tsx` · `PAGES` · §2.2 矩阵 · §4.2 矩阵），
-   *       不在这一轮的文件边界里。所以这一段**就地展开**、不走新路由 ——
-   *       下一轮落新地址时，这张卡换成 `key + entryVisible()` 即可。
+   *    ⚠️ 它**不进** `lib/roles.ts` 的 `ENTRIES`：那张表是"入口 ↔ 左栏那一行"的登记表
+   *       （`/manage/course` 自己的 `visibleFor` 已经登记在 `ENTRIES` 里、由 `App.tsx` 那一页用），
+   *       而这一页只是**入口合集**，它自己的卡摆不摆由上面那句回答。
    */
   const mayCourse = hasManagingRole(myRoles)
-  const [courseOpen, setCourseOpen] = useState(false)
 
   return (
     <>
-      {/* ⚠️ 副标题**这一轮不动**（仍是「年级 · 档案 · 教师」）：它与「我的」页那一行的
-          副标题是同一句话（`shots.mjs` 按它找那一行），要改就两处一起改 ——
-          等下一轮"课程管理"有自己的地址时再一起落。 */}
+      {/* ⚠️ 副标题**照旧不动**（仍是「年级 · 档案 · 教师」）：它与「我的」页那一行的
+          副标题是同一句话（`shots.mjs` 按它找那一行）——
+          而这一页本来就是"入口合集"，它列的是**卡**，不是"这一页能做什么"的全集。 */}
       <PageHead title="行政管理" sub="年级 · 档案 · 教师" onBack={() => navigate('/settings')} />
       <Page>
         <Panel className="overflow-hidden">
@@ -128,31 +129,23 @@ export default function Administration() {
             />
           ))}
           {/*
-           * 🆕 第四张卡：**课程管理**（点一下**就地展开**下面那一段，不跳页）。
+           * 🆕 第四张卡：**课程管理**（点一下**跳到 `/manage/course`**）。
            *
-           * ⚠️ 它带的是 `data-course-card` 而**不是** `data-manage-card`：那个属性在这张表里
-           *    的意思是"**点一下跳去某一页**的入口卡"（`shots.mjs` 按它逐张点过去核路由），
-           *    而这一张不跳页。两种卡分开标，`shots.mjs` 里那条"三张卡 = /grades,/grades/promote,/accounts"
-           *    也就不用改（**不为了让门禁变绿而改断言**）。
+           * ⚠️ 它带的是 `data-course-card` 而**不是** `data-manage-card`：后者在 B4 那一节里
+           *    与"这一页摆着三张卡"那条断言绑在一起（`/grades` · `/grades/promote` · `/accounts`），
+           *    而这一张的落点由 S27 那一节**单独**钉（点它 → 地址变成 `/manage/course`）。
+           *    ⚠️ 两种卡都**跳页**了，差别只剩"谁来断言它的落点"。
            */}
           {mayCourse ? (
             <CardShell
               icon={IconCalendar}
               label="课程管理"
-              desc="课表：按年级看班 · 录入与核对"
+              desc="课表：按年级看班 · 调课 · 冲突"
               data-course-card="1"
-              aria-expanded={courseOpen}
-              onClick={() => setCourseOpen((v) => !v)}
-              /* ⚠️ 图标里没有 ChevronDown —— 用箭头**旋转 90°**当"展开/收起"（照 `Grades.tsx:257`） */
+              onClick={() => navigate('/manage/course')}
               right={
                 <span
-                  style={{
-                    display: 'grid',
-                    placeItems: 'center',
-                    color: 'var(--color-ink3)',
-                    transition: 'transform .18s ease',
-                    transform: courseOpen ? 'rotate(90deg)' : 'none',
-                  }}
+                  style={{ display: 'grid', placeItems: 'center', color: 'var(--color-ink3)' }}
                 >
                   <IconChevronRight size={16} />
                 </span>
@@ -160,11 +153,6 @@ export default function Administration() {
             />
           ) : null}
         </Panel>
-        {mayCourse && courseOpen ? (
-          <div className="mt-2" data-course-open="1">
-            <CourseAdmin />
-          </div>
-        ) : null}
         {/*
           🔴 **这一段什么时候轮到它**：三张卡**都对这个人不摆**时 ——
           正常点不进来（`ENTRIES['/manage']` 就是那三条判据的并集），

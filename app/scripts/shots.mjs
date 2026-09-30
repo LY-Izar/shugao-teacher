@@ -12120,12 +12120,12 @@ await withLock(async () => {
         '🔴 S27 ② **教务处**的「行政管理」页上有「课程管理」那张卡（与 ① 构成正反对照）',
         `[data-course-card] 实测 ${cardN} 个`,
       )
-      /* 点开 → 就地展开（不跳页） */
+      /* 点开 → 跳到它自己的页面（2026-09-30 改：**不再就地展开**） */
       await p.locator('[data-course-card]').first().click()
       await p.waitForTimeout(350)
       check(
-        new URL(p.url()).pathname === '/manage' && (await p.locator('[data-course-open]').count()) === 1,
-        '🔴 S27 ③ 点那张卡 → **就地展开**课程管理（地址仍是 /manage，不是跳去新页面）',
+        new URL(p.url()).pathname === '/manage/course' && (await p.locator('[data-course-open]').count()) === 0,
+        '🔴 S27 ③ 点那张卡 → **跳到自己的页面 `/manage/course`**（不再是就地展开；`[data-course-open]` 已整块删掉）',
         `pathname=${new URL(p.url()).pathname} · [data-course-open]=${await p.locator('[data-course-open]').count()}`,
       )
 
