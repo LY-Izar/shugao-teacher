@@ -1821,7 +1821,32 @@ export const useStore = create<State>()(
             : new Date(`${c.date}T00:00:00Z`).getUTCDay(),
           at: Date.now(),
         }
-        set((s) => ({ tempScheduleChanges: [...s.tempScheduleChanges, row] }))
+        set((s) => ({
+          /*
+           * 🔴 **后一次顶掉前一次** —— 与数据库**同一条不变量**。
+           *
+           * `schedule_temp_changes` 上有一条**部分唯一索引**
+           * `(on_date, class_id, start_time) where status = 'active'`（`schema.sql:9878`）：
+           * 同一天、同一个班、同一个开始时间**只能有一条生效的**；
+           * 库里那条 guard 也把正解写死了 ——「要改就撤回再写一条」（`schema.sql:9886`）。
+           *
+           * 本地这一层原来只 `append`，于是"先把这节只换老师、后来再把它腾空"会留下
+           * **两条同 start** 的记录，而 `buildDayCells` 取的是
+           * `days.find((t) => t.start === s.start)`（**第一条**）→
+           * **后一次改动被前一条盖住**：屏上还是老样子，一个字都不报（§三.5 那一族）。
+           *
+           * 2026-09-30 实测：这正是 `shots` S27 ㊶ 一直红的原因 ——
+           * 那一节在跑建议之前先用过一次「只换老师」（也在 08:00 留了一条），
+           * 于是后面"把 08:00 腾空"那一笔永远不生效，硬冲突 3 → 3。
+           * ⚠️ **单跑那一笔是好的**（诊断驱动里 3 → 1）—— 只有"同一节改第二次"才露出来。
+           */
+          tempScheduleChanges: [
+            ...s.tempScheduleChanges.filter(
+              (r) => !(r.date === row.date && r.classId === row.classId && r.start === row.start),
+            ),
+            row,
+          ],
+        }))
         return row.id
       },
 
