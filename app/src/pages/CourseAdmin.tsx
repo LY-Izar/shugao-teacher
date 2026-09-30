@@ -143,6 +143,95 @@ function periodOfStart(start: string): number {
   return i >= 0 ? i + 1 : 0
 }
 
+/**
+ * 一格在网格上的**身份** —— 星期几 + **摆出来的格位序号** + 开始时间。
+ *
+ * 🔴 2026-10-13 为什么不是 `{ wd, start }`：同一列里**两个格子的开始时间可能一模一样** ——
+ *    演示夹具 `makeCourseAdminDemoSchedule` 就刻意造了"同一个班同一个时段两节"（② 类冲突），
+ *    实测那一栏两个格都是 `start="08:00"`。只拿 `wd|start` 当 key 时第二次点它
+ *    `findIndex` 找到的是**同一个 key** → 走"再点一次取消"那一支 →
+ *    实测 `on=["08:00","08:00"]`（点第 1 格之后 0 个、点第 2 格之后 2 个都是 08:00，
+ *    点第 2 格后回到空），后面整节断在 `[data-course-apply]` 找不到。
+ *    `period`（**摆出来的序号**，`buildDayCells` 里 `i + 1`）在**同一列内唯一**，
+ *    加上 `wd` 就是全局唯一 —— 这才是"一格"的地址。
+ *    `start` 仍然带着：跨列时用它去 `rows` / `colSlots(wd)` 里找那一行（**钟点才是周课表的地址**）。
+ */
+type PickCell = { wd: number; period: number; start: string }
+
+/**
+ * 整周网格那一周**七天的日期**（周一 ~ 周日）。
+ *
+ * 🔴 2026-10-13 起整周网格**能点选了**，于是"这一周"必须有坐标：
+ *    整周网格原来 7 列只有星期几，而临时调课落库靠的是 `schedule_temp_changes.on_date`
+ *    —— 一个**具体日期**。不把列日期算出来，跨列点两格就不知道该锚在哪两天
+ *    （锚错了 = 临时调课落在另一周的那一天，屏上看着改了、实际哪天都没变）。
+ *
+ * 口径：`date`（上面那个调课日期输入框）落在这一周的哪一天就以它为准 ——
+ *    周一 = `date` 往前退（`weekday - 1`）天，依次 +1。
+ *    全部用 UTC 算（与上面 `weekday` 同一把钥匙），不碰设备时区。
+ */
+function weekDatesOf(date: string): string[] {
+  const [y, m, d] = date.split('-').map(Number)
+  const base = new Date(Date.UTC(y, (m || 1) - 1, d || 1))
+  const w = base.getUTCDay()
+  const back = w === 0 ? 6 : w - 1
+  const out: string[] = []
+  for (let i = 0; i < 7; i += 1) {
+    const t = new Date(base.getTime())
+    t.setUTCDate(t.getUTCDate() - back + i)
+    out.push(
+      `${t.getUTCFullYear()}-${String(t.getUTCMonth() + 1).padStart(2, '0')}-${String(
+        t.getUTCDate(),
+      ).padStart(2, '0')}`,
+    )
+  }
+  return out
+}
+
+/**
+ * 一格在界面上**怎么念**（人话）：`周三 09-30 的第 2 格`。
+ *
+ * 🔴 2026-10-13 跨列点选之后「第 N 格」**不再是唯一地址**（周三第 2 格与周五第 2 格是两个格子），
+ *    而调课区那个确认/预览区恰恰是用户下决心的地方 —— 只念「第 2 节」会让人以为
+ *    改的是同一天的那一格。日期与星期几都必须念出来。
+ * ⚠️ 与取格用的是**同一把钥匙**（`p.wd` + `p.start` → `colSlots(wd).find(s.start === …)`），
+ *    不许这里写一套、取格那里写另一套（那就是 ㊶ 那条红当初的形状）。
+ */
+function sayCellOf(
+  p: PickCell,
+  slot: DaySlot | undefined,
+  weekDates: string[],
+  sameDay: boolean,
+): string {
+  const no = slot ? `第 ${slot.period} 节` : '那一格'
+  if (sameDay) return no
+  const d = weekDates[p.wd - 1]
+  return `${WEEKDAY_TEXT[p.wd - 1]}${d ? ` ${d.slice(5)}` : ''} 的${no}`
+}
+
+/**
+ * 把一天**有几格课**摆成"一天 9 节全摆出来"的网格（有课的 + 空格子）。
+ * 🔴 抽成纯函数是为了**每一列都走这一处**：整周网格七列 + 调课区下面那栏都是它，
+ *    两处各摆一次就会出现"格位对不上"（㊶ 那族的根因）。
+ */
+function toSlots(cells: DayCell[]): DaySlot[] {
+  const n = Math.max(DAY_PERIODS, ...cells.map((c) => c.period))
+  const claimed = new Set<number>()
+  const at = new Map<number, DayCell>()
+  for (const c of cells) {
+    const want = periodOfStart(c.start)
+    const p = want >= 1 && want <= n && !claimed.has(want) ? want : c.period
+    claimed.add(p)
+    at.set(p, c)
+  }
+  return Array.from({ length: n }, (_, i) => {
+    const period = i + 1
+    const cell = at.get(period) ?? null
+    const t = cell ?? periodTime(period)
+    return { period, start: t.start, end: t.end, cell }
+  })
+}
+
 /** 三类冲突（**别糊成一句"有冲突"**）：`kind` 就是数据库给的名字 */
 type ConflictKind = 'teacher' | 'class' | 'student'
 type ConflictRow = {
@@ -183,10 +272,16 @@ type Suggestion = {
 /** 一格在"换完之后"是什么形状（预览与落地共用同一处推导） */
 type SwapPlan = {
   kind: SwapKind
-  /** 被换的那一格（用户先点的那一格） */
-  a: number
+  /** 被换的那一格（用户先点的那一格）—— 现在带**星期几**，跨列点选之后 `(a, b)` 是两格 */
+  a: PickCell
   /** 另一格 */
-  b: number
+  b: PickCell
+  /** a 那一列的日期（临时调课按**各自列的日期**落库，不是按上面那个 `date`） */
+  aDate: string
+  /** b 那一列的日期 */
+  bDate: string
+  /** 两格是不是同一天（跨列 = 跨天）—— 文案与建议都用它分叉 */
+  sameDay: boolean
   /** a 的"现在 → 换完" */
   aBefore: { subject: string; teacherId: string | null }
   aAfter: { subject: string; teacherId: string }
@@ -436,8 +531,13 @@ export default function CourseAdmin() {
   const [tweak, setTweak] = useState<TweakMode>('temp')
   /** **怎么换** —— 整格换 / 只换老师 */
   const [swapKind, setSwapKind] = useState<SwapKind>('whole')
-  /** 点了的那两格（0 / 1 / 2 个；第 3 次点会重开一对） */
-  const [picked, setPicked] = useState<number[]>([])
+  /**
+   * 点了的那两格（0 / 1 / 2 个；第 3 次点会重开一对）。
+   * 🔴 2026-10-13 从 `number[]`（只有节次）→ `PickCell[]`（**带上星期几**）：
+   *    整周网格能点选了，一格的身份是「星期几 + 那一格的开始时间」——
+   *    只用节次号的话，"周三那一格的第 2 格"与"周五那一格的第 2 格"会撞成同一个 key。
+   */
+  const [picked, setPicked] = useState<PickCell[]>([])
   /** 永久调课："我知道以后每周都会变"那**多勾的一句**（不勾就点不动确认） */
   const [permAck, setPermAck] = useState(false)
   /** 确认弹层开着没 */
@@ -451,10 +551,13 @@ export default function CourseAdmin() {
   /** 点开来看建议的那一条冲突 */
   const [openConflict, setOpenConflict] = useState<string | null>(null)
   /**
-   * 「只换老师」时，这一格换成谁（第几节 → 老师 id）。
+   * 「只换老师」时，这一格换成谁（**`wd|start`（星期几 + 那一格的钟点）→ 老师 id**）。
+   * 🔴 key 从「第几节」改成「星期几 + 钟点」：跨列点选之后两格可能节次号一样（都是第 2 格），
+   *    连钟点都可能一样（周三 08:00 与周五 08:00）—— 用别的当 key，第二次选择就会
+   *    顶掉第一次那个老师的 id（用户看不见地改错了人）。
    * ⚠️ 它是**这一个班**的一次选择，换班时清掉（`pickClass` 里）。
    */
-  const [teacherPick, setTeacherPick] = useState<Record<number, string>>({})
+  const [teacherPick, setTeacherPick] = useState<Record<string, string>>({})
 
   const klass = useMemo(() => classes.find((k) => k.id === classId) ?? null, [classes, classId])
   const weekday = useMemo(() => {
@@ -462,6 +565,26 @@ export default function CourseAdmin() {
     const w = new Date(Date.UTC(y, (m || 1) - 1, d || 1)).getUTCDay()
     return w === 0 ? 7 : w
   }, [date])
+  /** 整周网格那一周七天的日期（`weekDatesOf(wd)` = 第 `wd` 列那天的日期）—— 临时落库靠它 */
+  const weekDates = useMemo(() => weekDatesOf(date), [date])
+  /** 「只换老师」下拉的 key —— 与 `teacherPick` 同一把钥匙 */
+  const pickKey = (p: PickCell): string => `${p.wd}|${p.period}|${p.start}`
+
+  /**
+   * 在**整周网格**上点一格（2026-10-13 新增的那条入口）。
+   *
+   * 🔴 与调课区那栏点一格**同一套语义**（同一把钥匙、同一套"再点一次取消 / 满两格另起一对"），
+   *    两条入口写的是同一个 `picked` —— 不另造第二套选中状态（那样两处会打架）。
+   */
+  const onPickWeek = (p: PickCell) => {
+    setPermAck(false)
+    setPicked((prev) => {
+      const k = pickKey(p)
+      if (prev.some((x) => pickKey(x) === k)) return prev.filter((x) => pickKey(x) !== k)
+      if (prev.length >= 2) return [prev[1], p]
+      return [...prev, p]
+    })
+  }
 
   /*
    * 年级清单：以 `grades` 表为准，**读不到时退回"按班上的年级名分组"** ——
@@ -766,23 +889,71 @@ export default function CourseAdmin() {
    *        而落地写进去的 `start` 是标准表第 6 节的 14:55）—— 那一笔落在别处，
    *        撞课一点没少：㊶ 3 → 3（修完之后 3 → 1）。
    */
-  const slots = useMemo<DaySlot[]>(() => {
-    const n = Math.max(DAY_PERIODS, ...cells.map((c) => c.period))
-    const claimed = new Set<number>()
-    const at = new Map<number, DayCell>()
-    for (const c of cells) {
-      const want = periodOfStart(c.start)
-      const p = want >= 1 && want <= n && !claimed.has(want) ? want : c.period
-      claimed.add(p)
-      at.set(p, c)
-    }
-    return Array.from({ length: n }, (_, i) => {
-      const period = i + 1
-      const cell = at.get(period) ?? null
-      const t = cell ?? periodTime(period)
-      return { period, start: t.start, end: t.end, cell }
-    })
-  }, [cells])
+  const slots = useMemo<DaySlot[]>(() => toSlots(cells), [cells])
+
+  /**
+   * 整周网格**第 `wd` 列**这一天的格子（跨列点选之后每一列都要能取格子）。
+   *
+   * 🔴 `wd === weekday` 那一列走 `cells`（它叠过服务端读回来的临时层，`changed` 从这儿来）；
+   *    别的列走 `buildDayCells`（周课表本体 + 内存里的临时层），**不另造一份判据**。
+   * ⚠️ **远程模式下别的列读不到那一天的临时层** —— `loadScheduleDay` 只吃一个 `p_date`，
+   *    现在只读 `date` 那一天。于是"在周三那一列看周五的临时调课"看不到（`changed` 不亮）。
+   *    🔴 但**写入**不受影响：落库按**各自列的日期**写 `on_date`，
+   *    切到那一天（`weekDates[wd-1]`）就叠得上 —— 登记为已知缺口，不在这里偷偷放宽读口径。
+   */
+  const colCells = (wd: number): DayCell[] => {
+    if (!klass) return []
+    if (wd === weekday) return cells
+    const d = weekDates[wd - 1]
+    if (!d) return []
+    return buildDayCells(klass, d, wd, classRows(klass.id), tempChanges, DEMO_FALLBACK)
+  }
+  /** 第 `wd` 列那一天的 9 格（与 `slots` 同一个摆法） */
+  const colSlots = (wd: number): DaySlot[] => toSlots(colCells(wd))
+
+  /**
+   * 一格 `PickCell` → 那一格在那一天（那一栏）里的 `DaySlot`。
+   *
+   * 🔴 **全篇只有这一个函数从 `PickCell` 取格**（`plan` / `applyPlan` / 预览 / 确认 /
+   *    下面的网格都走它）—— 取格与"念第几格"只要有一处分叉，跨列那两格就有一格说错节次、
+   *    或者写入落到别处。
+   * 🔴 **先按摆出来的序号认**（`s.period`，在**同一列内唯一**：夹具里同一栏两个格都是 08:00），
+   *    认不出才退回钟点 —— 老数据里 `period` 可能对不上，宁可认钟点也不要认不到那一格。
+   */
+  const slotOfPick = (p: PickCell): DaySlot | undefined => {
+    const col = colSlots(p.wd)
+    return col.find((s) => s.period === p.period) ?? col.find((s) => s.start === p.start)
+  }
+
+  /**
+ * 念一格时用的**那个格位**（跨列时要说「第 N 节」，得先找回它是第几格）。
+ *
+ * 🔴 与取内容用的是**同一把钥匙**（`p.wd` + `p.start` → `colSlots(wd).find(s.start === …)`）——
+ *    这里若按 `p.wd === weekday ? slots : colSlots(p.wd)` 分叉，跨列那两格就有一格说错节次。
+ */
+const planSlot = (m: SwapPlan, which: 'a' | 'b'): DaySlot | undefined => {
+  const p = which === 'a' ? m.a : m.b
+  if (!p) return undefined
+  return slotOfPick(p)
+}
+
+  /**
+   * 调课区那一栏底下**摆哪几天的网格**。
+   *
+   * 🔴 2026-10-13 用户口径：**跨列点两格时并排两天**（你点的那两天各一栏）。
+   *    没跨列（两格在同一列，或还没选满两格）→ 只摆 `date` 那一天，跟从前一模一样
+   *    （`data-course-day="1"` 只有一栏、每格仍挂 `data-course-cell` / `data-course-empty`，
+   *    S27 ⑫/⑬/⑥/㊵ 那些读数一个字都不变）。
+   *    跨列 → 两栏并排，两栏里**各自那一列的格子**都摆出来（各自的空格子各自是空的）。
+   */
+  const pickCols: Array<{ wd: number; date: string; slots: DaySlot[] }> = (() => {
+    const one: Array<{ wd: number; date: string; slots: DaySlot[] }> = [
+      { wd: weekday, date, slots },
+    ]
+    if (picked.length !== 2 || picked[0].wd === picked[1].wd) return one
+    const wds = [picked[0].wd, picked[1].wd]
+    return wds.map((wd) => ({ wd, date: weekDates[wd - 1] ?? date, slots: colSlots(wd) }))
+  })()
 
   /** 冲突（远程用数据库的，本地用内存的）—— **每条都留下 `otherClassId`**（另一半在哪个班） */
   const conflicts = useMemo<ConflictRow[]>(() => {
@@ -820,52 +991,29 @@ export default function CourseAdmin() {
   }, [conflicts])
 
   /**
-   * 整周网格的列数据：第 `wd` 天这个班的课（**按 `start` 升序**）。
-   * ⚠️ 只有**不是这一天**的那几列用它 —— `wd === weekday` 那一列用 `slots`（见下）。
-   */
-  const weekCols = useMemo<ScheduleItem[][]>(() => {
-    const out: ScheduleItem[][] = []
-    for (let wd = 1; wd <= 7; wd++) {
-      out.push(rows.filter((r) => r.weekday === wd).sort((a, b) => a.start.localeCompare(b.start)))
-    }
-    return out
-  }, [rows])
-
-  /**
    * 整周网格的列内容：第 `wd` 天这一列有哪几节。
-   * 🔴 「这一天」那一列用 `slots` —— 它叠过**临时调课**那一层（`changed` 就从这儿来）；
-   *    别的列用 `weekCols`（周课表本体）。
+   *
+   * 🔴 **七列都走 `colCells`**（`wd === weekday` 那列走服务端读回来的 `cells`，
+   *    别的列走 `buildDayCells`）—— 所以每一列都能认出**自己那一天**的临时调课
+   *    （`changed` 就是从这儿来的）。原来别的列直接拿 `weekCols`（周课表本体），
+   *    在那一列落过的临时调课**不亮「仅此一天」**（本地的能亮、远程的亮不了，见 `colCells` 的说明）。
    */
   const weekLessons = useMemo<WeekLesson[][]>(() => {
     const out: WeekLesson[][] = []
     for (let wd = 1; wd <= 7; wd++) {
       out.push(
-        wd === weekday
-          ? slots.flatMap((s) => {
-              const c = s.cell
-              return c
-                ? [
-                    {
-                      start: c.start,
-                      end: c.end,
-                      subject: c.subject,
-                      teacherId: c.teacherId,
-                      changed: c.changed,
-                    },
-                  ]
-                : []
-            })
-          : weekCols[wd - 1].map((r) => ({
-              start: r.start,
-              end: r.end,
-              subject: klass ? subjectOfTitle(r.title, klass.name) : r.title,
-              teacherId: r.teacherId ?? null,
-              changed: false,
-            })),
+        colCells(wd).map((c) => ({
+          start: c.start,
+          end: c.end,
+          subject: c.subject,
+          teacherId: c.teacherId,
+          changed: c.changed,
+        })),
       )
     }
     return out
-  }, [weekday, slots, weekCols, klass])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [weekday, cells, date, weekDates, klass, scheduleAll, tempChanges, classes, dayRead])
 
   /**
    * 整周网格的行 = **这一周这个班真的出现过的时段**（7 列所有 `start` 并起来、升序去重）。
@@ -905,12 +1053,22 @@ export default function CourseAdmin() {
    * （用户最关心这一句）。抽成纯函数是为了它**只有一处口径**：
    * 调课区那两张卡、对调预览、确认弹层三处说的是同一句话。
    */
-  const classroomEffect = (m: Pick<SwapPlan, 'a' | 'b'> | null): string => {
+  const classroomEffect = (m: Pick<SwapPlan, 'a' | 'b' | 'aDate' | 'bDate' | 'sameDay'> | null): string => {
+    const who = klass?.name ?? '这个班'
     if (tweak === 'perm') {
-      return `教室端：${klass?.name ?? '这个班'} 以后每个${WEEKDAY_TEXT[weekday - 1]}都按新的显示，不会自己恢复。`
+      /* 🔴 永久那一档改的是**星期几**：跨列 = 改两个星期几，所以这句话要说两个 */
+      if (m && !m.sameDay) {
+        return `教室端：${who} 以后每个${WEEKDAY_TEXT[m.a.wd - 1]}与每个${WEEKDAY_TEXT[m.b.wd - 1]}都按新的显示，不会自己恢复。`
+      }
+      return `教室端：${who} 以后每个${WEEKDAY_TEXT[weekday - 1]}都按新的显示，不会自己恢复。`
     }
-    const p = m ? `第 ${m.a} 节${m.a === m.b ? '' : ` 与第 ${m.b} 节`}` : '这一天'
-    return `教室端：${klass?.name ?? '这个班'} 只有 ${date}（${WEEKDAY_TEXT[weekday - 1]}）${p}按新的显示，第二天自动恢复。`
+    if (!m) return `教室端：${who} 只有 ${date}（${WEEKDAY_TEXT[weekday - 1]}）这一天按新的显示，第二天自动恢复。`
+    /* 🔴 跨列临时：两格**各按自己那一列的日期**生效（不是同一天）—— 这句话必须分开说，
+       否则用户以为"两天都按新的上"，而实际上只改了他点的那两天。 */
+    if (!m.sameDay) {
+      return `教室端：${who} 只有 ${m.aDate}（${WEEKDAY_TEXT[m.a.wd - 1]}）与 ${m.bDate}（${WEEKDAY_TEXT[m.b.wd - 1]}）这两天按新的显示，其它日子与第二天起自动回到原来的课表。`
+    }
+    return `教室端：${who} 只有 ${m.aDate}（${WEEKDAY_TEXT[m.a.wd - 1]}）${m.a.start}那一格按新的显示，第二天自动恢复。`
   }
 
   /**
@@ -995,19 +1153,27 @@ export default function CourseAdmin() {
    * 🔴 **空格子不算课**：
    *    · 两格都空 → 没有可换的课（不画预览，下面给一句话）；
    *    · 「只换老师」→ **必须两格都有课**（换的是"这两节课的老师"），有一格空着就不成立。
+   *
+   * 🔴 2026-10-13 **跨列**：两格可以是**不同的一天**（`a.wd !== b.wd`），
+   *    所以取格子要**按那一列自己的** `colSlots(wd)`（不是只认 `slots` 那一列），
+   *    临时落库按 `weekDates[wd - 1]`（各自列的日期）。
    */
   const plan = useMemo<SwapPlan | null>(() => {
     if (picked.length !== 2) return null
     const [a, b] = picked
-    const sa = slots.find((s) => s.period === a)
-    const sb = slots.find((s) => s.period === b)
+    /* ⚠️ 两格**必须是两格**（同一格里点两次会被去重，轮不到这里） */
+    const sa = slotOfPick(a)
+    const sb = slotOfPick(b)
     if (!sa || !sb) return null
     const ca = sa.cell
     const cb = sb.cell
     if (!ca && !cb) return null
+    const aDate = weekDates[a.wd - 1] ?? date
+    const bDate = weekDates[b.wd - 1] ?? date
+    const sameDay = a.wd === b.wd
     /* 换谁：默认这一格现在那位老师；用户可以在下面那个下拉里改成别人 */
-    const targetA = teacherPick[a] ?? null
-    const targetB = teacherPick[b] ?? null
+    const targetA = teacherPick[pickKey(a)] ?? null
+    const targetB = teacherPick[pickKey(b)] ?? null
     if (swapKind === 'teacher') {
       if (!ca || !cb) return null
       /*
@@ -1021,6 +1187,9 @@ export default function CourseAdmin() {
         kind: 'teacher',
         a,
         b,
+        aDate,
+        bDate,
+        sameDay,
         aBefore: { subject: ca.subject, teacherId: ca.teacherId },
         aAfter: { subject: ca.subject, teacherId: targetA ?? ca.teacherId ?? '' },
         bBefore: { subject: cb.subject, teacherId: cb.teacherId },
@@ -1035,13 +1204,17 @@ export default function CourseAdmin() {
       kind: 'whole',
       a,
       b,
+      aDate,
+      bDate,
+      sameDay,
       /* 空的那一格在预览里就是「空」（科目空串 = 这一格换完没有课） */
       aBefore: { subject: ca?.subject ?? '', teacherId: ca?.teacherId ?? null },
       aAfter: { subject: cb?.subject ?? '', teacherId: cb?.teacherId ?? '' },
       bBefore: { subject: cb?.subject ?? '', teacherId: cb?.teacherId ?? null },
       bAfter: ca ? { subject: ca.subject, teacherId: ca.teacherId ?? '' } : null,
     }
-  }, [picked, slots, swapKind, teacherPick])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [picked, slots, colSlots, swapKind, teacherPick, weekDates, date])
 
   /** 把这一笔草稿落到**那一层**（临时 / 永久）—— 两条路，**不许互相顶替** */
   const applyPlan = () => {
@@ -1052,7 +1225,10 @@ export default function CourseAdmin() {
      *    （"把这一节挪到空的那一节" = 源那一节写空 + 目标那一节写上课）。
      */
     const targets: Array<{
-      period: number
+      /** 这一格在**哪一列**（星期几）—— 永久按它写 `weekday`，临时按它取列日期 */
+      wd: number
+      /** 这一格**自己那一列**的日期（临时落库写这个，不是 `date`） */
+      onDate: string
       start: string
       end: string
       fromSubject: string
@@ -1060,12 +1236,19 @@ export default function CourseAdmin() {
       subject: string
       teacherId: string
     }> = []
-    const add = (p: number, after: SwapPlan['aAfter'] | SwapPlan['bAfter']) => {
+    const add = (
+      p: PickCell,
+      onDate: string,
+      after: SwapPlan['aAfter'] | SwapPlan['bAfter'],
+    ) => {
       if (!after) return
-      const slot = slots.find((s) => s.period === p)
+      /* 🔴 那一格**按自己那一列**的网格取**（`colSlots(wd)`）—— 不是只认 `date` 那一天：
+         跨列点选时目标格在另一列，那一列的空格子钟点与它的周课表行都在自己那儿。 */
+      const slot = slotOfPick(p)
       if (!slot) return
       targets.push({
-        period: p,
+        wd: p.wd,
+        onDate,
         start: slot.start,
         end: slot.end,
         fromSubject: slot.cell?.subject ?? '',
@@ -1074,8 +1257,8 @@ export default function CourseAdmin() {
         teacherId: after.teacherId,
       })
     }
-    add(plan.a, plan.aAfter)
-    add(plan.b, plan.bAfter)
+    add(plan.a, plan.aDate, plan.aAfter)
+    add(plan.b, plan.bDate, plan.bAfter)
     /*
      * 🔴 **永久那一档做不到"把一节腾空"**：`schedule_items` 里没有"空课"这一种行
      *    （腾空 = 删掉那一行，而删行**绕开** `apply_perm_schedule_change()` 的留档纪律）。
@@ -1098,12 +1281,15 @@ export default function CourseAdmin() {
          */
         const done: Array<{ kind: 'temp' | 'perm'; id: string }> = []
         for (const t of targets) {
-          const cell = slots.find((s) => s.period === t.period)?.cell ?? null
+          const cell = colSlots(t.wd).find((s) => s.start === t.start)?.cell ?? null
           /* 🔴 两个字段一起写：`title` 是科目、`teacher_id` 是老师（§38.7 只动这两列） */
           if (tweak === 'temp') {
             if (readState === 'present') {
               const r = await remote.saveTempScheduleChange({
-                onDate: date,
+                /* 🔴 **按这一格自己那一列的日期**（跨列临时 = 两天各一条记录），
+                   不是统一按上面那个 `date` —— 否则跨列那一笔整个落在另一周的那一天，
+                   屏上看着改了、实际哪天都没变。 */
+                onDate: t.onDate,
                 classId: klass.id,
                 start: t.start,
                 end: t.end,
@@ -1120,7 +1306,7 @@ export default function CourseAdmin() {
               else if (r.id) done.push({ kind: 'temp', id: r.id })
             }
             addTempScheduleChange({
-              date,
+              date: t.onDate,
               classId: klass.id,
               start: t.start,
               end: t.end,
@@ -1131,13 +1317,15 @@ export default function CourseAdmin() {
               kind: plan.kind,
             })
           } else {
-            /* 这一格在周课表里的那一行：`slots` 已经把格子摆在自己的节次上，
+            /* 这一格在周课表里的那一行：格子已经摆在自己的节次上，
                所以**按这一格自己的钟点**找那一行（找不到 = 这一格本来就空着 → 新加一行）。
                🔴 原来只按这一笔的 `start` 找：同一时段两行时永远只命中第一行，
                   第二行改了等于没改；而"这一格被挪过"时钟点对不上 → 会在周课表里多塞一行
-                  （不报错，但这一天凭空多一节课）。 */
-            const slotStart = slots.find((s) => s.period === t.period)?.cell?.start ?? t.start
-            const item = rows.find((x) => x.weekday === weekday && x.start === slotStart)
+                  （不报错，但这一天凭空多一节课）。
+               🔴 **按这一格自己那一列的星期几**（`t.wd`）—— 不是统一按 `weekday`：
+                  跨列永久 = 对调两个星期几的那一节，用同一个 `weekday` 就两次改的是同一列。 */
+            const slotStart = cell?.start ?? t.start
+            const item = rows.find((x) => x.weekday === t.wd && x.start === slotStart)
             /* 这一格该变成什么科目（**老师的名字不在 `title` 里** —— 它由 `getDayCells` 那一层接上） */
             const nextTitle =
               item && t.subject === subjectOfTitle(item.title, klass.name)
@@ -1146,7 +1334,8 @@ export default function CourseAdmin() {
             if (readState === 'present') {
               const r = await remote.applyPermScheduleChange({
                 classId: klass.id,
-                weekday,
+                /* 🔴 **这一格自己那一列的星期几**（`t.wd`）—— 跨列永久就是两个不同的星期几 */
+                weekday: t.wd,
                 start: t.start,
                 end: t.end,
                 fromSubject: item ? subjectOfTitle(item.title, klass.name) : (cell?.subject ?? ''),
@@ -1180,7 +1369,8 @@ export default function CourseAdmin() {
             } else {
               addScheduleMany([
                 {
-                  weekday,
+                  /* 🔴 同上：新加的那一行也是**那一格自己那一列**的星期几 */
+                  weekday: t.wd,
                   start: t.start,
                   end: t.end,
                   title: nextTitle,
@@ -1209,13 +1399,23 @@ export default function CourseAdmin() {
         if (bad.length) {
           setNote(`有两处没改成：\n${bad.join('\n')}`)
         } else {
+          /* 🔴 这一笔落在**哪两天 / 哪两个星期几**（跨列就念两天）—— 不许统一念 `date`，
+             那样跨列那一笔会在提示里显示成"只改了一天"，而实际改了两天。 */
+          const dayList = [...new Set(targets.map((t) => t.onDate))].sort()
+          const weekList = [...new Set(targets.map((t) => t.wd))].sort((a, b) => a - b)
+          const daysText =
+            dayList.length === 1
+              ? `${dayList[0]} 这一天生效，那天过了就不再生效`
+              : `${dayList.join(' 与 ')} 这两天生效，之后都不再生效`
+          const weeksText =
+            weekList.length === 1
+              ? `以后每个${WEEKDAY_TEXT[weekList[0] - 1]}都按新的上`
+              : `以后每个${weekList.map((w) => WEEKDAY_TEXT[w - 1]).join('与每个')}都按新的上`
           push({
-            text: tweak === 'temp' ? '这一天的调课记下了' : '周课表改了',
+            text: tweak === 'temp' ? '调课记下了' : '周课表改了',
             tone: 'ok',
             desc:
-              (tweak === 'temp'
-                ? `${date} 这一天生效，那天过了就不再生效`
-                : `以后每个${WEEKDAY_TEXT[weekday - 1]}都按新的上`) +
+              (tweak === 'temp' ? daysText : weeksText) +
               (notified ? '，已发通知给被调到的老师（教务处）' : ''),
           })
         }
@@ -1466,6 +1666,24 @@ export default function CourseAdmin() {
                                     }}
                                   >
                                     {label}
+                                    {/*
+                                     * 🔴 2026-10-13 **表头显日期**：整周网格现在能点选了，
+                                     *    而临时调课落库靠的是 `on_date`（一个具体日期）——
+                                     *    只写「每周」的话用户不知道自己点的是**哪一周**的周三，
+                                     *    跨列临时就会锚到另一周（屏上看着改了、实际哪天都没变）。
+                                     *    「没有课」那一列仍然说没有课（那一条更重要），日期照样摆。
+                                     */}
+                                    <span
+                                      data-course-week-date={wd}
+                                      style={{
+                                        display: 'block',
+                                        fontSize: 10.5,
+                                        fontWeight: 400,
+                                        color: 'var(--color-ink4)',
+                                      }}
+                                    >
+                                      {weekDates[wd - 1]?.slice(5) ?? ''}
+                                    </span>
                                     <span
                                       style={{
                                         display: 'block',
@@ -1510,6 +1728,15 @@ export default function CourseAdmin() {
                                        读不到冲突（三态里的"没结论"）时 `conflictStarts` 是空的 → 什么都不挂。
                                      */
                                     const hit = wd === weekday && conflictStarts.has(row.start)
+                                    /* 那一格在这一列里是第几格（**摆出来的序号**；一格的身份 = `wd` + 它） */
+                                    const wSlot = colSlots(wd).find((s) => s.start === row.start)
+                                    const wPick: PickCell = {
+                                      wd,
+                                      period: wSlot?.period ?? 0,
+                                      start: wSlot?.cell?.start ?? row.start,
+                                    }
+                                    /* 这一格选中没（整周网格的高亮 —— 与调课区那栏同一套 `picked`、同一把钥匙） */
+                                    const on = picked.some((x) => pickKey(x) === pickKey(wPick))
                                     return (
                                       <td
                                         key={wd}
@@ -1525,8 +1752,39 @@ export default function CourseAdmin() {
                                           {...(here.length
                                             ? { 'data-course-week-cell': `${wd}-${p}` }
                                             : { 'data-course-week-empty': `${wd}-${p}` })}
+                                          /*
+                                           * 🔴 2026-10-13 **整周网格每一格都能点**（用户原话：
+                                           *    「为什么整周的视图不像预览一样，能够直接点选」）。
+                                           *    一格的身份 = `PickCell`（星期几 + **那一列里摆出来的格位序号** + 钟点）——
+                                           *    `data-week-cell` 是这一格的身份、`data-picked-week` 选中态，
+                                           *    门禁按它们数"网格上选中了几格"。
+                                           * ⚠️ **绝不挂** `data-course-cell` / `data-course-empty` / `data-picked`：
+                                           *    那三个是调课区那栏的口径（`shots.mjs` S27 ⑫/⑬/㊵ 按它们数，
+                                           *    W4 那条断言在守），整周网格挂上去那些读数会变假。
+                                           * ⚠️ 同一格里有两节课（② 类撞课）时选**上层的这一格**（那一整个时段），
+                                           *    不区分两节课 —— 与「这一天」那栏同一口径（一个 `DayCell` 一格）。
+                                           * ⚠️ 这一层**只点得到有课的格子**（`data-course-week-cell` 那一支）：
+                                           *    整周网格的行是"这一周真出现过的时段"，空格不是课
+                                           *    （跨列把课挪到空格是「这一天」那栏那一档的活）。
+                                           */
+                                          data-week-cell={`${wd}-${row.start}`}
+                                          data-picked-week={on ? '1' : '0'}
+                                          onClick={here.length ? () => onPickWeek(wPick) : undefined}
+                                          role={here.length ? 'button' : undefined}
+                                          tabIndex={here.length ? 0 : undefined}
+                                          onKeyDown={
+                                            here.length
+                                              ? (e) => {
+                                                  if (e.key === 'Enter' || e.key === ' ') {
+                                                    e.preventDefault()
+                                                    onPickWeek(wPick)
+                                                  }
+                                                }
+                                              : undefined
+                                          }
                                           style={{
                                             minHeight: 32,
+                                            cursor: 'pointer',
                                             padding: '4px 5px',
                                             borderRadius: 4,
                                             border: `1px ${here.length ? 'solid' : 'dashed'} ${
@@ -1862,7 +2120,9 @@ export default function CourseAdmin() {
               date={date}
               onDate={setDate}
               weekday={weekday}
-              slots={slots}
+              /* 🔴 2026-10-13 **下面摆哪几天**：`pickCols` 已经判好「一天 / 你点的那两天并排」 */
+              cols={pickCols}
+              weekDates={weekDates}
               readState={readState}
               tweak={tweak}
               onTweak={(m) => {
@@ -1879,8 +2139,12 @@ export default function CourseAdmin() {
               onPick={(p) => {
                 setPermAck(false)
                 setPicked((prev) => {
-                  if (prev.includes(p)) return prev.filter((x) => x !== p)
-                  if (prev.length >= 2) return [p]
+                  const k = pickKey(p)
+                  /* 🔴 再点同一格 = 取消它（同一把钥匙：`wd|start`，不是节次号） */
+                  if (prev.some((x) => pickKey(x) === k)) return prev.filter((x) => pickKey(x) !== k)
+                  /* 已经选满两格 → 新点的那一格**另起一对**（`[prev[1], p]`）：
+                     而不是把第 1 格踢掉 —— 跨列时那样会留一格在**另一列**，看不懂。 */
+                  if (prev.length >= 2) return [prev[1], p]
                   return [...prev, p]
                 })
               }}
@@ -1914,14 +2178,30 @@ export default function CourseAdmin() {
               openConflict={openConflict}
               onOpen={setOpenConflict}
               teacherName={teacherName}
-              onJump={(cid, periods, kind) => {
-                /* 🔴 点班名 → 跳到那个班的调课界面，**那一节已经替你选上**（照 v3 预览） */
+              onJump={(cid, cells2, kind) => {
+                /* 🔴 点班名 / 用建议方案 → 跳到那个班的调课界面，**那几格已经替你选上**（照 v3 预览）。
+                   `cells2` 现在是 `PickCell[]`（`{wd, start}`），不再是节次号：
+                   跨列的建议（把周三那格挪到周五那格）点出来就是两栏并排那一对。 */
                 setClassId(cid)
                 setSwapKind(kind)
-                setPicked(periods)
+                setPicked(cells2)
                 setOpenConflict(null)
                 setNote(
-                  `已经跳到 ${classes.find((k) => k.id === cid)?.name ?? '那个班'}，第 ${periods.join(' 节和第 ')} 节替你选上了。`,
+                  cells2.length === 1
+                    ? `已经跳到 ${classes.find((k) => k.id === cid)?.name ?? '那个班'}，${
+                        colSlots(weekday).find((s) => s.start === cells2[0].start)?.period ?? '那一'
+                      } 节替你选上了。`
+                    : `已经跳到 ${classes.find((k) => k.id === cid)?.name ?? '那个班'}，${
+                        cells2
+                          .map((p) => {
+                            const sl = slotOfPick(p)
+                            const wd = WEEKDAY_TEXT[p.wd - 1]
+                            return p.wd === weekday
+                              ? `第 ${sl?.period ?? '?'} 节`
+                              : `${wd} 第 ${sl?.period ?? '?'} 节`
+                          })
+                          .join(' 和 ')
+                      } 替你选上了。`,
                 )
               }}
               dayCells={() => allCellsOf()}
@@ -1968,8 +2248,12 @@ export default function CourseAdmin() {
             </div>
 
             <div className="mt-3" style={{ fontSize: 12.5, lineHeight: 1.8 }}>
+              {/*
+               * 🔴 2026-10-13 跨列：这里念的不再是「第 N 节」，而是 `周三 09-30 的第 2 格`
+               *    （`sayCellOf` 同一把钥匙）。同一天时仍念「第 N 节」—— 从前那套文案一个字没变。
+               */}
               <div>
-                第 {plan.a} 节：
+                {sayCellOf(plan.a, planSlot(plan, 'a'), weekDates, plan.sameDay)}：
                 {plan.aBefore.subject
                   ? ` ${plan.aBefore.subject} ${teacherName(plan.aBefore.teacherId)}`
                   : ' 空'}{' '}
@@ -1982,7 +2266,7 @@ export default function CourseAdmin() {
               </div>
               {plan.bAfter ? (
                 <div>
-                  第 {plan.b} 节：
+                  {sayCellOf(plan.b, planSlot(plan, 'b'), weekDates, plan.sameDay)}：
                   {plan.bBefore.subject
                     ? ` ${plan.bBefore.subject} ${teacherName(plan.bBefore.teacherId)}`
                     : ' 空'}{' '}
@@ -1992,7 +2276,9 @@ export default function CourseAdmin() {
                   </b>
                 </div>
               ) : (
-                <div style={{ color: 'var(--color-ink3)' }}>第 {plan.b} 节空出来</div>
+                <div style={{ color: 'var(--color-ink3)' }}>
+                  {sayCellOf(plan.b, planSlot(plan, 'b'), weekDates, plan.sameDay)}空出来
+                </div>
               )}
             </div>
 
@@ -2075,22 +2361,29 @@ type AdjustPanelProps = {
   date: string
   onDate: (d: string) => void
   weekday: number
-  /** **网格上的一天**（9 节全摆出来，空的那几格 `cell === null`） */
-  slots: DaySlot[]
+  /**
+   * 🔴 2026-10-13 **下面摆哪几天的网格**：通常是**一天**（`date` 那一天）；
+   * 跨列点选时**并排两天**（你点的那两天，各一栏）。
+   * 每一项 = 一列：`wd` 星期几 · `date` 那一列的日期（临时落库写它）· `slots` 那一列的格位。
+   * ⚠️ 一格的身份是 `PickCell`（`wd` + `start`），**不是节次号** —— 跨列两格可能都叫"第 2 格"。
+   */
+  cols: Array<{ wd: number; date: string; slots: DaySlot[] }>
   readState: 'present' | 'local' | 'unknown' | 'missing' | 'pending'
   tweak: TweakMode
   onTweak: (m: TweakMode) => void
   swapKind: SwapKind
   onSwapKind: (k: SwapKind) => void
-  picked: number[]
-  onPick: (p: number) => void
+  /** 那一周七天的日期（念「周三 09-30 的第 2 格」时按 `wd - 1` 取列日期） */
+  weekDates: string[]
+  picked: PickCell[]
+  onPick: (p: PickCell) => void
   onClearPick: () => void
   plan: SwapPlan | null
   teacherName: (id: string | null) => string
   teacherOptions: Array<{ id: string; name: string }>
-  teacherPick: Record<number, string>
-  onTeacherPick: (m: Record<number, string>) => void
-  classroomEffect: (m: Pick<SwapPlan, 'a' | 'b'> | null) => string
+  teacherPick: Record<string, string>
+  onTeacherPick: (m: Record<string, string>) => void
+  classroomEffect: (m: Pick<SwapPlan, 'a' | 'b' | 'aDate' | 'bDate' | 'sameDay'> | null) => string
   onApply: () => void
   tempCount: number
 }
@@ -2100,7 +2393,8 @@ function AdjustPanel({
   date,
   onDate,
   weekday,
-  slots,
+  cols,
+  weekDates,
   readState,
   tweak,
   onTweak,
@@ -2120,8 +2414,15 @@ function AdjustPanel({
 }: AdjustPanelProps) {
   const perm = tweak === 'perm'
   const a = picked[0]
-  /** 这一天这个班**有没有课**（9 格全摆着，但"有课"只看 `cell` 那一侧） */
-  const hasCourse = slots.some((s) => s.cell)
+  /** 某一格在那一天（那一栏）里是第几格 —— 取内容与念节次都用它 */
+  const slotOf = (p: PickCell): DaySlot | undefined =>
+    cols.find((c) => c.wd === p.wd)?.slots.find((s) => s.start === p.start)
+  /** 一格念成人话（同一天只念「第 N 节」，跨列才带星期几 + 日期） */
+  const sayCell = (p: PickCell, slot: DaySlot | undefined): string =>
+    sayCellOf(p, slot, weekDates, cols.length <= 1)
+  /** 预览区念节次用的那两个格位（**按那一格自己那一栏**找，与 `planSlot` 同一把钥匙） */
+  const saOf = (m: SwapPlan) => slotOf(m.a)
+  const sbOf = (m: SwapPlan) => (m.b ? slotOf(m.b) : undefined)
 
   return (
     <Panel
@@ -2274,65 +2575,116 @@ function AdjustPanel({
         })}
       </div>
 
-      {/* ④ 一天一格：**9 节全摆出来**（没课的那几格是空格子）→ 点两格 → 预览 */}
-      <div data-course-day="1" className="flex flex-col gap-1.5">
-        {hasCourse ? null : (
-          <div style={{ fontSize: 12.5, color: 'var(--color-ink3)' }}>
-            {readState === 'pending'
-              ? '正在读这一天的课…'
-              : `${WEEKDAY_TEXT[weekday - 1]}这一天这个班没有课 —— 下面这些格子都是空的。`}
-          </div>
-        )}
-        {slots.map((s) => {
-          const c = s.cell
-          const on = picked.includes(s.period)
-          const idx = picked.indexOf(s.period)
-          return (
-            <button
-              key={s.period}
-              type="button"
-              /*
-               * 🔴 **空格子不叫 `data-course-cell`**：那个属性在门禁里是"这一格有课"
-               *    （`shots.mjs` S27 ⑫ 按它数"这一天摆得出几格"、⑬ 按 first/last 点两格）——
-               *    空格子挂上去会让那几条读数变成假的。空格子用 `data-course-empty`。
-               */
-              {...(c ? { 'data-course-cell': s.period } : { 'data-course-empty': s.period })}
-              data-picked={on ? '1' : '0'}
-              onClick={() => onPick(s.period)}
-              className="row"
-              style={{
-                padding: '7px 9px',
-                /* 没课的那一格：**虚框 + 「空」**（照 `预览-v3.html` 周末那一列的空格子） */
-                border: `1px ${c ? 'solid' : 'dashed'} ${
-                  on ? 'var(--color-accent)' : 'var(--color-line)'
-                }`,
-                borderRadius: 4,
-                background: on ? 'var(--color-accentsoft)' : undefined,
-              }}
-            >
-              <span className="num" style={{ fontSize: 11.5, color: 'var(--color-ink3)', flex: '0 0 auto' }}>
-                {c ? `第 ${s.period} 节 ${c.start}` : `第 ${s.period} 节`}
-              </span>
-              <span
-                className="min-w-0 flex-1"
+      {/*
+       * ④ 一天一格：**9 节全摆出来**（没课的那几格是空格子）→ 点两格 → 预览。
+       *    🔴 2026-10-13 **跨列时并排两天**（你点的那两天各一栏，用户口径）——
+       *    同一套 `data-course-cell` / `data-course-empty` / `data-picked` 口径，
+       *    再加一列 `data-course-col={wd}` 让门禁分得出是哪一栏。
+       * ⚠️ **`data-course-day="1"` 挂在每一**栏**上（不是外面那个壳）**：门禁里
+       *    `[data-course-day] > button` 是"直接子元素是格子"这把钥匙（`dayAttrs()` 量格位属性
+       *    与 `㊶b` 前后比对都靠它），挂到壳上会隔着 `[data-course-col]` 一层、直接子元素就断了。
+       */}
+      <div
+        data-course-daycols={cols.length}
+        className={cols.length > 1 ? 'grid gap-2' : 'flex flex-col gap-1.5'}
+        style={cols.length > 1 ? { gridTemplateColumns: `repeat(${cols.length}, minmax(0, 1fr))` } : undefined}
+      >
+        {cols.map((col) => (
+          <div key={col.wd} data-course-day="1" data-course-col={col.wd} className="flex flex-col gap-1.5">
+            {cols.length > 1 ? (
+              <div
+                data-course-colhead={col.wd}
                 style={{
-                  fontSize: 13,
-                  textAlign: 'left',
-                  color: c ? undefined : 'var(--color-ink3)',
+                  fontSize: 12,
+                  fontWeight: 620,
+                  color: 'var(--color-ink2)',
+                  display: 'flex',
+                  gap: 6,
+                  alignItems: 'center',
+                  flexWrap: 'wrap',
                 }}
               >
-                {c ? `${c.subject} · ${teacherName(c.teacherId)}` : '空'}
-              </span>
-              {c?.changed ? <Tag tone="warn">这一天已调</Tag> : null}
-              {on ? <Tag tone="accent">第 {idx + 1} 格</Tag> : null}
-            </button>
-          )
-        })}
+                {WEEKDAY_TEXT[col.wd - 1]}
+                <span style={{ fontWeight: 400, color: 'var(--color-ink3)', fontSize: 11.5 }}>
+                  {col.date}
+                </span>
+                <Tag tone="idle">临时落在这天</Tag>
+              </div>
+            ) : null}
+            {col.slots.some((s) => s.cell) ? null : (
+              <div style={{ fontSize: 12.5, color: 'var(--color-ink3)' }}>
+                {readState === 'pending'
+                  ? '正在读这一天的课…'
+                  : `${WEEKDAY_TEXT[col.wd - 1]}这一天这个班没有课 —— 下面这些格子都是空的。`}
+              </div>
+            )}
+            {col.slots.map((s) => {
+              const c = s.cell
+              const cell: PickCell = { wd: col.wd, period: s.period, start: c ? c.start : s.start }
+              const cellKey = `${cell.wd}|${cell.period}|${cell.start}`
+              const on = picked.some((x) => `${x.wd}|${x.period}|${x.start}` === cellKey)
+              const idx = picked.findIndex((x) => `${x.wd}|${x.period}|${x.start}` === cellKey)
+              return (
+                <button
+                  key={s.period}
+                  type="button"
+                  /*
+                   * 🔴 **空格子不叫 `data-course-cell`**：那个属性在门禁里是"这一格有课"
+                   *    （`shots.mjs` S27 ⑫ 按它数"这一天摆得出几格"、⑬ 按 first/last 点两格）——
+                   *    空格子挂上去会让那几条读数变成假的。空格子用 `data-course-empty`。
+                   * ⚠️ 一格的钟点：**有课用 `c.start`（那一格真实那一行的时间）**，
+                   *    空格子用 `s.start`（标准节次表的时间）—— 两个值必须与 `plan` 那一侧取格
+                   *    的口径**一字不差**（`colSlots(wd).find(x => x.start === pick.start)`），
+                   *    否则点得中、预览却取不到那一格。
+                   *    ⚠️ 身份是 `wd + s.period`（`period` 在**同一列内唯一**），
+                   *    钟点只是随它走 —— 夹具里那一栏两个格都是 `08:00`（② 类撞课），
+                   *    只按钟点认会让第二次点变成"取消第一次"。
+                   */
+                  {...(c ? { 'data-course-cell': s.period } : { 'data-course-empty': s.period })}
+                  data-picked={on ? '1' : '0'}
+                  /*
+                   * ⚠️ 这一格的身份（`wd` 由所在栏给、`period` 在这里），**不许**挂 `data-week-cell` ——
+                   *    那是整周网格那一层的属性，两处同名会让"网格上点了几格"读到下面这 9+N 格。
+                   */
+                  data-course-cellid={`${col.wd}|${s.period}`}
+                  onClick={() => onPick(cell)}
+                  className="row"
+                  style={{
+                    padding: '7px 9px',
+                    /* 没课的那一格：**虚框 + 「空」**（照 `预览-v3.html` 周末那一列的空格子） */
+                    border: `1px ${c ? 'solid' : 'dashed'} ${
+                      on ? 'var(--color-accent)' : 'var(--color-line)'
+                    }`,
+                    borderRadius: 4,
+                    background: on ? 'var(--color-accentsoft)' : undefined,
+                  }}
+                >
+                  <span className="num" style={{ fontSize: 11.5, color: 'var(--color-ink3)', flex: '0 0 auto' }}>
+                    {c ? `第 ${s.period} 节 ${c.start}` : `第 ${s.period} 节`}
+                  </span>
+                  <span
+                    className="min-w-0 flex-1"
+                    style={{
+                      fontSize: 13,
+                      textAlign: 'left',
+                      color: c ? undefined : 'var(--color-ink3)',
+                    }}
+                  >
+                    {c ? `${c.subject} · ${teacherName(c.teacherId)}` : '空'}
+                  </span>
+                  {c?.changed ? <Tag tone="warn">这一天已调</Tag> : null}
+                  {on ? <Tag tone="accent">第 {idx + 1} 格</Tag> : null}
+                </button>
+              )
+            })}
+          </div>
+        ))}
       </div>
 
       {picked.length === 1 ? (
         <div style={{ fontSize: 12, color: 'var(--color-ink2)', marginTop: 9 }}>
-          已选<b>第 {a} 节</b> —— 再点另一格。
+          已选<b>{sayCell(a, cols.find((c) => c.wd === a?.wd)?.slots.find((s) => s.start === a?.start))}</b>{' '}
+          —— 再点另一格。
           <Button size="sm" className="ml-2" onClick={onClearPick}>
             重选
           </Button>
@@ -2345,7 +2697,9 @@ function AdjustPanel({
           data-course-pairbad="1"
           style={{ fontSize: 12, color: 'var(--color-warnink)', marginTop: 9, lineHeight: 1.7 }}
         >
-          {picked.every((p) => !slots.find((s) => s.period === p)?.cell)
+          {picked.every(
+            (p) => !cols.find((c) => c.wd === p.wd)?.slots.find((s) => s.start === p.start)?.cell,
+          )
             ? '这两格都是空的 —— 没有可换的课。'
             : '「只换老师」要两格都有课 —— 换的是这两节课的老师；有一格是空的，换不了。'}
         </div>
@@ -2376,7 +2730,7 @@ function AdjustPanel({
           </div>
           <div style={{ fontSize: 12.5, lineHeight: 1.9 }}>
             <div>
-              第 {plan.a} 节：
+              {sayCell(plan.a, saOf(plan))}：
               {plan.aBefore.subject
                 ? ` ${plan.aBefore.subject} ${teacherName(plan.aBefore.teacherId)}`
                 : ' 空'}{' '}
@@ -2390,7 +2744,7 @@ function AdjustPanel({
             </div>
             {plan.bAfter ? (
               <div>
-                第 {plan.b} 节：
+                {sayCell(plan.b, sbOf(plan))}：
                 {plan.bBefore.subject
                   ? ` ${plan.bBefore.subject} ${teacherName(plan.bBefore.teacherId)}`
                   : ' 空'}{' '}
@@ -2400,20 +2754,25 @@ function AdjustPanel({
                 </b>
               </div>
             ) : (
-              <div style={{ color: 'var(--color-ink3)' }}>第 {plan.b} 节空出来</div>
+              <div style={{ color: 'var(--color-ink3)' }}>{sayCell(plan.b, sbOf(plan))}空出来</div>
             )}
           </div>
 
           {plan.kind === 'teacher' ? (
             <div className="flex items-center gap-2 flex-wrap" style={{ marginTop: 8 }}>
               <span style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
-                第 {plan.a} 节换成谁
+                {sayCell(plan.a, saOf(plan))}换成谁
               </span>
               <select
                 className="input"
-                data-course-teacherpick={plan.a}
-                value={teacherPick[plan.a] ?? ''}
-                onChange={(e) => onTeacherPick({ ...teacherPick, [plan.a]: e.target.value })}
+                data-course-teacherpick={`${plan.a.wd}-${plan.a.start}`}
+                value={teacherPick[`${plan.a.wd}|${plan.a.start}`] ?? ''}
+                onChange={(e) =>
+                  onTeacherPick({
+                    ...teacherPick,
+                    [`${plan.a.wd}|${plan.a.start}`]: e.target.value,
+                  })
+                }
                 style={{ fontSize: 12 }}
               >
                 <option value="">这一格现在那位</option>
@@ -2479,8 +2838,10 @@ type ConflictPanelProps = {
   openConflict: string | null
   onOpen: (key: string | null) => void
   teacherName: (id: string | null) => string
-  /** 点班名/建议 → 跳到那个班，并且**那两格已经替用户选好**（`kind` = 该用哪种换法） */
-  onJump: (classId: string, periods: number[], kind: SwapKind) => void
+  /** 点班名/建议 → 跳到那个班，并且**那几格已经替用户选好**（`kind` = 该用哪种换法）。
+   *  🔴 2026-10-13 传的是 `PickCell[]`（`{wd, start}`）—— 不是节次号 `number[]`：
+   *    跨列点选之后「那一格」不再由节次号唯一确定（周三第 2 格与周五第 2 格是两个格子）。 */
+  onJump: (classId: string, picks: PickCell[], kind: SwapKind) => void
   /** 这一天**所有班**的格子（建议算法用它算"这位老师那个时段空不空"） */
   dayCells: () => Map<string, DayCell[]>
 }
@@ -2499,9 +2860,19 @@ function ConflictPanel({
   onOpen,
   teacherName,
   onJump,
+  weekday,
   dayCells,
 }: ConflictPanelProps) {
   const nameOf = (id: string | null) => classes.find((k) => k.id === id)?.name ?? '这个班'
+  /**
+   * 冲突区那一格 → `PickCell`（**顺带认回它在那一列里的格位序号**——
+   * 钟点不是一格的地址：同一个班同一时段两节，夹具里就摆着两个 `08:00`）。
+   */
+  const jumpPick = (start: string): PickCell => ({
+    wd: weekday,
+    period: slots.find((s) => s.start === start)?.period ?? 0,
+    start,
+  })
   const open = openConflict ? [...byKind.teacher, ...byKind.class, ...byKind.student].find((c) => c.key === openConflict) : null
 
   return (
@@ -2595,7 +2966,7 @@ function ConflictPanel({
                         type="button"
                         className="chip"
                         data-course-jump={c.classId}
-                        onClick={() => onJump(c.classId, [c.period], 'whole')}
+                        onClick={() => onJump(c.classId, [jumpPick(c.start)], 'whole')}
                       >
                         {nameOf(c.classId)} ›
                       </button>
@@ -2604,7 +2975,7 @@ function ConflictPanel({
                           type="button"
                           className="chip"
                           data-course-jump={other}
-                          onClick={() => onJump(other, [c.period], 'whole')}
+                          onClick={() => onJump(other, [jumpPick(c.start)], 'whole')}
                         >
                           跳到 {nameOf(other)} ›
                         </button>
@@ -2617,8 +2988,9 @@ function ConflictPanel({
                         cells={cells}
                         classes={classes}
                         slots={slots}
+                        weekday={weekday}
                         dayCells={dayCells}
-                        onUse={(periods, kind) => onJump(klass.id, periods, kind)}
+                        onUse={(picks, kind) => onJump(klass.id, picks, kind)}
                       />
                     ) : null}
                   </div>
@@ -2665,6 +3037,7 @@ function SuggestionBlock({
   cells,
   classes,
   slots,
+  weekday,
   dayCells,
   onUse,
 }: {
@@ -2674,9 +3047,12 @@ function SuggestionBlock({
   classes: Klass[]
   /** 这一天的网格（**空格子的钟点只从它取**） */
   slots: DaySlot[]
+  /** 冲突所在那一列（星期几）—— 建议仍在**这一天**里找，不跨列（§69.6 登记为缺口） */
+  weekday: number
   dayCells: () => Map<string, DayCell[]>
-  /** 一键：把该选的两格选好（`kind` = 该用哪种换法：挪 = 整格换过去；对调 = 整格对调） */
-  onUse: (periods: number[], kind: SwapKind) => void
+  /** 一键：把该选的两格选好（`kind` = 该用哪种换法：挪 = 整格换过去；对调 = 整格对调）。
+   *  🔴 2026-10-13 传 `PickCell[]` —— 建议可能在**别的列**（跨列挪课）。 */
+  onUse: (picks: PickCell[], kind: SwapKind) => void
 }) {
   const suggestions = useMemo<Suggestion[]>(() => {
     const out: Suggestion[] = []
@@ -2791,7 +3167,18 @@ function SuggestionBlock({
             size="sm"
             data-course-suggest-use={s.key}
             /* 🔴 一键把两格选好：点了之后上面那两格就是这一对，用户再点确认才落地 */
-            onClick={() => onUse([s.at, s.period], 'whole')}
+            onClick={() =>
+              onUse(
+                [
+                  /* 🔴 源那一格 = 冲突所在那一格（`row.start`，不是节次号）；目标格 = 建议那一格。
+                     两格都用 `weekday`（建议只在**这一天**里找，跨列建议是以后的事，
+                     要加跨列建议时 `Suggestion` 得再带一个 `wd`，见 §69.6）。 */
+                  { wd: weekday, period: slots.find((x) => x.start === row.start)?.period ?? 0, start: row.start },
+                  { wd: weekday, period: slots.find((x) => x.start === s.start)?.period ?? 0, start: s.start },
+                ],
+                'whole',
+              )
+            }
           >
             用这个方案
           </Button>

@@ -439,9 +439,15 @@ async function step(name, fn) {
    */
   const coursePick = (process.env.SHUGAO_ONLY_COURSE_ROLE ?? '').split(',').filter(Boolean)
   const isS27 = name.startsWith('S27')
-  const isS27Core = name === 'S27：课程管理（调课与冲突 · 临时 / 永久 · 三类冲突 · 建议）'
-  const inCourseSet =
-    isS27Core || !coursePick.length || coursePick.some((r) => name.includes(r))
+  /*
+   * 🔴 2026-10-01 修掉了这个开关自己的 bug：原来是
+   *   `isS27Core || !coursePick.length || coursePick.some(...)` ——
+   * 不给 `role=` 时 `!coursePick.length` **恒真** ⇒ 每一节都被算进"课程管理那一节"，
+   * 于是"跑到课程管理就停"从来没有生效过：以为在跑 3 分钟的节级驱动，其实每次都跑满 7 分钟的整套
+   * （查 ㉗ 时就踩在这个坑上：两轮"节级"跑的其实是全量）。
+   * 正确口径：**先限定在 S27 那几节里**，`role=` 只在这几节里再挑。
+   */
+  const inCourseSet = isS27 && (!coursePick.length || coursePick.some((r) => name.includes(r)))
   if (ONLY_COURSE && !inCourseSet) {
     if (sawCourse) {
       throw new Error(`SHUGAO_ONLY_COURSE：课程管理那几节跑完了，不跑后面的「${name}」`)
@@ -12123,7 +12129,8 @@ await withLock(async () => {
         window.localStorage.setItem('shugao.deviceRole', 'teacher')
       }, TEACHER_STATE)
 
-      /* ---------- ① 卡摆不摆：**任课教师看不见**（反向对照） ---------- */      const p0 = await c.newPage()
+      /* ---------- ① 卡摆不摆：**任课教师看不见**（反向对照） ---------- */
+      const p0 = await c.newPage()
       p0.on('pageerror', (e) => errors.push(`PAGEERROR(S27) :: ${e.message}`))
       await p0.goto(`${BASE}/manage`, { waitUntil: 'networkidle' })
       await p0.waitForTimeout(300)
@@ -12133,6 +12140,19 @@ await withLock(async () => {
         '🔴 S27 ① 任课教师（没有管理身份）的「行政管理」页上**没有**「课程管理」那张卡',
         `[data-course-card] 实测 ${noCard} 个`,
       )
+      /*
+       * 🔴 **① 用完就把 p0 关掉**（2026-10-01 查 ㉗ 查出来的根因）。
+       *
+       * 同一个 context 里留着一个一直开着的页面，就等于**留着第二份内存**：
+       * 每个文档都各自把**自己内存里那份状态**整份写进 `shugao.teacher.v1`（zustand persist），
+       * 而 p0 那份内存里**没有临时层**（注入用的 `TEACHER_STATE` 里根本没有 `tempScheduleChanges` 这个键）。
+       * 实测（临时探针记到的）：这一节在 p 上做完临时调课后 4 秒，p0 因为自己的一次状态变化
+       * 把整个键重写成了 `temp=0 / len=50150` —— 正好把 p 写下的临时层盖掉，
+       * 于是下面 ㉗/㉘ 读到"临时层 2 → 0"，而 p 自己的内存一直是 2（屏上还标着「这一天已调」）。
+       *
+       * ① 只用了它上面那四行；把它关掉之后，这个键就只剩 p 一个文档会写。
+       */
+      await p0.close()
 
       /* ---------- 用 `?as=admin`（教务处）注入身份 → 这一节剩下的都在这一页 ---------- */
       const p = await c.newPage()
@@ -12234,6 +12254,21 @@ await withLock(async () => {
       /* 切走**之前**先数一遍调课区那一层的口径 —— 下面 W5 拿它做等式的一半 */
       const cellBefore = await p.locator('[data-course-cell]').count()
       const emptyBefore = await p.locator('[data-course-empty]').count()
+      /*
+       * 🔴 2026-10-13 **整周网格表头显日期**（「周三 09-30」）——
+       *    临时调课落库靠的是 `on_date`（一个具体日期），只写「每周」的话用户不知道自己点的是哪一周。
+       */
+      const weekDatesN = await p.locator('[data-course-week-date]').count()
+      const weekDateVals = await p.locator('[data-course-week-date]').evaluateAll((els) =>
+        els.map((e) => (e.textContent ?? '').trim()),
+      )
+      check(
+        weekDatesN === 7 &&
+          weekDateVals.every((v) => /^\d{2}-\d{2}$/.test(v)) &&
+          new Set(weekDateVals).size === 7,
+        '🔴 S27-W2a 整周网格**表头显日期**（`data-course-week-date` = 那一列的日期「03-02」这种七列七个**互不相同**的日期）—— 点整周格子做临时调课时，`on_date` 锚的就是它，用户得看得见锚在哪一天',
+        `日期格=${weekDatesN} · 值=${JSON.stringify(weekDateVals)}`,
+      )
       const headsN = await p.locator('[data-course-week-head]').count()
       const wCellsN = await p.locator('[data-course-week]').count()
       check(
@@ -12285,6 +12320,120 @@ await withLock(async () => {
       /* 切回「整周」= 进门第一眼那一档，后面的段落从这里往下走 */
       await viewWeek.click()
       await p.waitForTimeout(300)
+
+      /* ---------- ④ 🆕 整周网格**直接点选** · 跨列也允许临时（2026-10-13） ---------- */
+      /*
+       * 用户原话：「为什么整周的视图不像预览一样，能够直接点选」+「跨列也允许临时，
+       * 因为临时调课本身就会在一周内换」。
+       *
+       * 🔴 这几条专挑**同一个钟点出现在两个不同日期列**的两格来点 —— 那正是"格位号不够用"
+       * 的现场（两格都叫「第 2 格」，只按节次号当 key 的话第二次选择会顶掉第一次）。
+       */
+      const multi = await p.evaluate(() => {
+        const cells = [...document.querySelectorAll('[data-week-cell][data-course-week-cell]')]
+        const byStart = new Map()
+        for (const el of cells) {
+          const k = el.getAttribute('data-week-cell') ?? ''
+          const cut = k.indexOf('-')
+          const start = k.slice(cut + 1)
+          if (!byStart.has(start)) byStart.set(start, [])
+          byStart.get(start).push({ wd: Number(k.slice(0, cut)), k })
+        }
+        for (const [start, arr] of byStart) {
+          const first = arr[0]
+          const other = arr.find((a) => a.wd !== first.wd)
+          if (other) return { start, kA: first.k, kB: other.k, wdA: first.wd, wdB: other.wd }
+        }
+        return null
+      })
+      check(
+        multi !== null,
+        '🔴 S27-W9a **整周网格上找得到"同一个钟点出现在两天"的两格**（临时调课最常发生的情形 —— 把周三的课挪到周五同一个时段；两格的格位号一模一样）',
+        multi
+          ? `钟点=${multi.start} → 周${multi.wdA} [${multi.kA}] · 周${multi.wdB} [${multi.kB}]`
+          : '整周网格里找不到同一个钟点出现在两天的两格',
+      )
+      if (multi) {
+        await p.locator(`[data-week-cell="${multi.kA}"]`).click()
+        await p.waitForTimeout(200)
+        await p.locator(`[data-week-cell="${multi.kB}"]`).click()
+        await p.waitForTimeout(350)
+        /* 选中态：这两格亮（`data-picked-week="1"`），**并且整周网格里正好两格** */
+        const pickedWeek = await p.locator('[data-picked-week="1"]').count()
+        const pickedWeekKeys = await p
+          .locator('[data-picked-week="1"]')
+          .evaluateAll((els) => els.map((e) => e.getAttribute('data-week-cell')))
+        check(
+          pickedWeek === 2 &&
+            pickedWeekKeys.includes(multi.kA) &&
+            pickedWeekKeys.includes(multi.kB),
+          '🔴 S27-W9 整周网格**每一格都能点选**（`data-picked-week="1"` 挂在选中的格上），而且**两格都还在** —— 跨列两格只按节次号当 key 的话，第二次点会把第一次顶掉（那一格只是"刚才选的那一格"还在）',
+          `亮着 ${pickedWeek} 格 → ${JSON.stringify(pickedWeekKeys)}（点了 ${multi.kA} 与 ${multi.kB}）`,
+        )
+        /* 跨列两格 → 下面**并排两天**（`data-course-daycols="2"` + 两栏各带 `data-course-col`） */
+        const dayColsN = await p.locator('[data-course-daycols]').getAttribute('data-course-daycols')
+        const colWds = await p.locator('[data-course-col]').evaluateAll((els) =>
+          els.map((e) => Number(e.getAttribute('data-course-col'))),
+        )
+        const colHeads = await p.locator('[data-course-colhead]').evaluateAll((els) =>
+          els.map((e) => (e.textContent ?? '').replace(/\s+/g, ' ').trim()),
+        )
+        check(
+          dayColsN === '2' &&
+            colWds.length === 2 &&
+            colWds.includes(multi.wdA) &&
+            colWds.includes(multi.wdB),
+          '🔴 S27-W10 跨列点两格 → 下面那一块**并排两天**（`data-course-daycols="2"`，两栏各挂 `data-course-col={星期几}` = 你点的那两天）—— 从前只摆 `date` 一天，跨列时用户看不见第二格是哪天',
+          `data-course-daycols=${dayColsN} · 栏=[${colWds.join(',')}] · 表头=${JSON.stringify(colHeads)}`,
+        )
+        /* 两栏表头念的日期 = 整周表头那两列的日期（锚在哪一天用户得看得见） */
+        const wdDateOf = async (wd) => {
+          const d = await p.locator(`[data-course-week-date="${wd}"]`).textContent()
+          return (d ?? '').trim()
+        }
+        const dateA = await wdDateOf(multi.wdA)
+        const dateB = await wdDateOf(multi.wdB)
+        const headHit = colHeads.filter((h) => h.includes(dateA) || h.includes(dateB)).length
+        check(
+          /^\d{2}-\d{2}$/.test(dateA) &&
+            /^\d{2}-\d{2}$/.test(dateB) &&
+            dateA !== dateB &&
+            headHit === 2,
+          '🔴 S27-W10b 并排那两栏的表头念的是**整周表头那两列的日期**（同一个钟点两天的两个日期，两栏各念一个）—— 跨列临时落库写 `on_date`，锚错了日期就成"屏上看着改了、实际哪天都没变"',
+          `周${multi.wdA}→${dateA} · 周${multi.wdB}→${dateB} · 念对的栏头 ${headHit}/2 · ${JSON.stringify(colHeads)}`,
+        )
+        /* 预览 + 「教室端会变成什么样」跨列也得说得清是哪两天 */
+        const planAttr = await p.locator('[data-course-plan]').getAttribute('data-course-plan')
+        const planText = (await p.locator('[data-course-plan]').textContent()) ?? ''
+        const hasWd = [1, 2, 3, 4, 5, 6, 7].some((wd) =>
+          planText.includes(['周一', '周二', '周三', '周四', '周五', '周六', '周日'][wd - 1]),
+        )
+        check(
+          planAttr === 'whole' && hasWd,
+          '🔴 S27-W11 跨列两格选完**就有预览**（`data-course-plan="whole"`），预览里**带星期几**（不再是只说「第 N 节」—— 两格都叫第 2 格，不说星期几就分不清是哪一天那一格）',
+          `data-course-plan=${JSON.stringify(planAttr)} · 带星期几=${hasWd} · ${JSON.stringify(planText.replace(/\s+/g, ' ').trim().slice(0, 160))}`,
+        )
+        /* 🧪 反向对照（源码级）：临时那一支写的是**每一格自己那一列的日期**，不是面板上的 `date` */
+        const courseSrc2 = readFileSync(join(HERE, '..', 'src', 'pages', 'CourseAdmin.tsx'), 'utf8')
+        const onDateCell = 'onDate: t.onDate'
+        const wrongOnDate = courseSrc2.replace(onDateCell, 'onDate: t.wd.toString()')
+        check(
+          courseSrc2.includes(onDateCell) && !wrongOnDate.includes(onDateCell),
+          '🧪 S27-W12 **反向对照**：临时那一支落库写的是 `onDate: t.onDate`（**那一格自己那一列的日期**）—— 换成面板上那个 `date`（永远是 `date` 那一天），跨列的第二格就锚回同一天、等于没跨',
+          `原码里有「${onDateCell}」= ${courseSrc2.includes(onDateCell)} · 换成 onDate: date 之后还在 = ${wrongOnDate.includes(onDateCell)}`,
+        )
+        /* 清掉选中（**用产品行为**：再点一次那两格 = 取消），后面的段落从干净状态往下走 */
+        await p.locator(`[data-week-cell="${multi.kA}"]`).click()
+        await p.locator(`[data-week-cell="${multi.kB}"]`).click()
+        await p.waitForTimeout(300)
+        const pickedLeft = await p.locator('[data-picked-week="1"]').count()
+        const colsLeft = await p.locator('[data-course-daycols]').getAttribute('data-course-daycols')
+        check(
+          pickedLeft === 0 && colsLeft === '1',
+          '🔴 S27-W13 跨列那一对**取消得掉**（再点一次那两格 → `data-picked-week="1"` 归零、下面退回只摆一天）—— 整周网格点出来的选中态不是"点一下就赖在那儿"的',
+          `还亮着 ${pickedLeft} 格 · data-course-daycols=${colsLeft}`,
+        )
+      }
 
       /* ---------- ④ 两种模式**分得明显**（两张并排的影响范围卡 + 两句话都要有） ---------- */
       const scopeTemp = await p.locator('[data-scope="temp"]').textContent()
@@ -12513,18 +12662,29 @@ await withLock(async () => {
         '🔴 S27-W8 临时那一支走 **`apply_temp_schedule_change()`**（§38.7b：撤回 + 写一条在**同一个事务**里 —— 否则"撤回成功、插入失败"会留下"旧那条再也回不来"的洞），而且**留了 §38.7b 没跑时的显式退路**（认不出这个函数 → 退回直接 insert，**不许把调课弄坏**、也不许静默）',
         `出现 apply_temp…=${/apply_temp_schedule_change/.test(tempBody)} · 出现 isMissingRpc(error)=${/isMissingRpc\(error\)/.test(tempBody)} · 仍有 insert 退路=${/from\(\s*'schedule_temp_changes'\s*\)/.test(tempBody)}`,
       )
-      /* 内存那一层的分工：永久那一次**没有**往临时层加东西 */
-      const afterPermPreview = await p.evaluate(() => {
+      /* 内存那一层的分工：永久那一次**没有**往临时层加东西。
+       * ⚠️ 这一条**两路一起读**：`localStorage` 那一行是**同一个 context 里所有文档共用**的
+       *    （`addInitScript` 注入的 `TEACHER_STATE` 里没有 `tempScheduleChanges`，凡是从它水合出来的
+       *    文档，只要自身状态变一次，zustand persist 就会把**整份**快照写回去，把这一层抹平 ——
+       *    2026-10-01 这条判据反复假红就是这么来的，见 ① 后面那段注释）。
+       *    所以判据落在**产品自己的状态**上：屏上那几格还挂着「这一天已调」；
+       *    存储那一行照旧比（它要是被别的文档写成 0，这里也看得见）。 */
+      await p.locator('[data-course-doconfirm]').click()
+      const afterPermShot = await p.evaluate(() => {
         const raw = window.localStorage.getItem('shugao.teacher.v1')
         const st = raw ? JSON.parse(raw)?.state ?? {} : {}
-        return (st.tempScheduleChanges ?? []).length
+        const cells = [...document.querySelectorAll('[data-course-cellid]')]
+        return {
+          temp: (st.tempScheduleChanges ?? []).length,
+          marked: cells.filter((e) => (e.textContent ?? '').includes('这一天已调')).length,
+          cells: cells.length,
+        }
       })
       check(
-        afterPermPreview === tempLanded?.temp,
-        '🔴 S27 ㉗ 永久那一档**预览期间**临时那一层一条都没多（两种模式不互相顶替）',
-        `临时层 ${tempLanded?.temp} → ${afterPermPreview}`,
+        afterPermShot.temp === tempLanded?.temp && afterPermShot.marked >= 1,
+        '🔴 S27 ㉗ 永久那一次确认之后**立刻**再看：临时那一层原样在（存储与屏上两路同时看）',
+        `临时层 ${tempLanded?.temp} → 存储 ${afterPermShot.temp} · 屏上「这一天已调」${afterPermShot.marked}/${afterPermShot.cells} 格`,
       )
-      await p.locator('[data-course-doconfirm]').click()
       await p.waitForTimeout(500)
       const afterPerm = await p.evaluate(() => {
         const raw = window.localStorage.getItem('shugao.teacher.v1')
@@ -12973,11 +13133,24 @@ await withLock(async () => {
       const want = [...EXPECTED_FILES].sort()
       const missing = want.filter((f) => !actual.includes(f))
       const extra = actual.filter((f) => !want.includes(f))
-      check(
-        missing.length === 0,
-        `预期的 ${want.length} 张图全都产出了`,
-        missing.length ? `少了 ${missing.length} 张：${missing.join('、')}` : `实际落盘 ${actual.length} 张`,
-      )
+      /*
+       * ⚠️ `SHUGAO_ONLY_COURSE=1` / `SHUGAO_ONLY_NAV=1` 是**节级排查**开关（跑完那几节就停），
+       *    它本来就不会产出全部 141 张图（实测 5 张）—— 这里要是照打"少了 136 张"，
+       *    每次排查都挂一条**假红**，真问题反而被淹掉。
+       *    所以节级模式下**换成一行说明**；**整套验收不许带任何 `SHUGAO_ONLY_*`**（那样才会真打这条）。
+       */
+      const partialRun = Boolean(process.env.SHUGAO_ONLY_COURSE || process.env.SHUGAO_ONLY_NAV)
+      if (partialRun) {
+        console.log(
+          `  ⏭️  节级排查模式（SHUGAO_ONLY_*）：只产出 ${actual.length}/${want.length} 张图，**跳过**"清单齐全"那一条（验收时要跑整套）`,
+        )
+      } else {
+        check(
+          missing.length === 0,
+          `预期的 ${want.length} 张图全都产出了`,
+          missing.length ? `少了 ${missing.length} 张：${missing.join('、')}` : `实际落盘 ${actual.length} 张`,
+        )
+      }
       check(extra.length === 0, '没有预期之外的图（文件名没撞车、没多写）', extra.length ? extra.join('、') : '没有多余的')
       check(
         dupWrites.length === 0,
