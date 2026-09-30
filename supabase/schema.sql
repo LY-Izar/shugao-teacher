@@ -9828,11 +9828,21 @@ grant execute on function public.can_manage_schedule(uuid) to authenticated;
 --                     `on delete set null`：那一行被删了也不影响这一条记录）
 --    · `from_subject` / `from_teacher_id` —— **原来是什么**（快照。原来那一格是空的 → 空串 / 空）
 --    · `to_subject` / `to_teacher_id`     —— **换成什么**
---                     🔴 `to_teacher_id` **not null**：与 `schedule_items.teacher_id` 同一个口径 ——
---                        **课表上每一节都必须有老师**，"换成谁"不许空着
+--                     🔴 **两个字段是同一件事的两半，一起读才成立**（2026-10-13 修）：
+--                        · 有课      → `to_subject` 是科目，`to_teacher_id` **必须有值**
+--                                      （"课表上每一节都必须有老师"，与 `schedule_items.teacher_id` 同一口径）；
+--                        · **腾空**  → `to_subject = ''` **且** `to_teacher_id is null`
+--                                      = "这节课挪到别处了 / 这节课取消了"。
+--                     ⚠️ **从前 `to_teacher_id` 是 not null**，于是"腾空"根本写不进来：
+--                        挪课只能"把目标那格写上课"，**源那格还挂着旧课** —— 老师撞课一点没少
+--                        （"照着建议处理完，硬冲突 3 → 3"就是这么来的）。
+--                        "这一格没有课"和"这一格有课但没定老师"是**两件事**，
+--                        所以这里用 `is null` 表达前者，**不许拿空串/占位 uuid 冒充**。
+--                        ⚠️ 空串不是一个 uuid —— PostgREST / Postgres 会直接回
+--                        `invalid input syntax for type uuid: ""`（那一笔写不进去）。
 --    · `kind`      —— **两种形状同一张表装**：
 --                     `'teacher'` = **只换老师**（科目不动 → `to_subject = from_subject`，有 check 钉着）
---                     `'whole'`   = **整格换**（科目 + 老师一起换）
+--                     `'whole'`   = **整格换**（科目 + 老师一起换；腾空也是这一种）
 --    · `status`    —— `'active'`（生效）/ `'revoked'`（撤回：不生效，但**留着可查**）
 --                     ⚠️ **"过期"不是一种 status**：到期不生效是**读的时候按 `on_date` 算**出来的
 --                        （`on_date < beijing_today()`），所以清理没跑也照样对
@@ -9850,7 +9860,9 @@ create table if not exists schedule_temp_changes (
   from_subject     text not null default '',
   from_teacher_id  uuid references teachers (id) on delete set null,
   to_subject       text not null default '',
-  to_teacher_id    uuid not null references teachers (id) on delete cascade,
+  /* ⚠️ **这一列现在是"可空"的**（2026-10-13 修）—— 建表那一版写的是 `not null`；
+     存量库由下面 **38.1.0** 那几句改掉（"腾空一格"必须能写成 `is null`，不然挪课挪不走旧课）。 */
+  to_teacher_id    uuid references teachers (id) on delete cascade,
   kind             text not null check (kind in ('teacher', 'whole')),
   status           text not null default 'active' check (status in ('active', 'revoked')),
   actor_id         uuid references teachers (id) on delete set null,
@@ -9877,6 +9889,66 @@ create index if not exists schedule_temp_changes_teacher_idx
 --    ⚠️ `where status = 'active'`：撤回过的行不占位，所以"撤回再写一条"仍然走得通。
 create unique index if not exists schedule_temp_changes_slot_active
   on schedule_temp_changes (on_date, class_id, start_time) where status = 'active';
+
+-- -------- 38.1.0 「腾空一格」要能写下来（2026-10-13 加，**幂等**）--------
+--  🔴 问题：原来 `to_teacher_id` 是 `not null` —— 于是"这一格腾空"写不进来。
+--     挪一节课只能"把目标那格写上课"，**源那格还挂着旧课** → 老师同时段还是两个班有课，
+--     硬冲突一点没少（实测：照建议处理完 3 → 3）。而"这节课挪到别处了 / 取消了"
+--     是**真实存在的状态**，必须有地方写。
+--
+--  ✅ 处置：① 去掉那一列的 not null；② 补一条 check，把"两个字段一起成立"钉死 ——
+--     `to_subject = ''` **当且仅当** `to_teacher_id is null`。
+--     · 有课 → 科目非空 **且** 老师有值（"课表上每一节都必须有老师"照旧成立）；
+--     · 腾空 → 科目空串 **且** 老师为空（没有课，也就没有"谁上"）。
+--     ⚠️ **不许拿空串 / 占位 uuid 冒充"没有"**：空串不是一个 uuid，
+--        PostgREST 会回 400（那一笔写不进去，而界面上看着像写成了）。
+--
+--  ⚠️ **与 `schedule_temp_changes_teacher_keeps_subject` 不冲突**：那一条只管 `kind='teacher'`
+--     （只换老师：科目不动）；"腾空"走的是 `kind='whole'`，两条件各管各的。
+--
+--  ① 去掉 not null：PostgreSQL 把列级 `not null` 存成一条名为 `<表>_<列>_not_null` 的约束，
+--     所以这一句**天生幂等**（第一次真的去掉，之后每次都是 no-op）——
+--     与 `assignments.class_id` 那一处同一套写法（§31.2）。
+alter table schedule_temp_changes drop constraint if exists schedule_temp_changes_to_teacher_id_not_null;
+
+--  ⚠️ **另外两张表也要一起放宽**（不是顺手，是"整份脚本必须幂等"这一条逼出来的）：
+--     · `schedule_temp_archive` 是**按临时表逐列抄一份**（清理过期时抄）—— 腾空那一行
+--       `to_teacher_id` 是 null，抄档却撞上 not null，清理就整条失败（留档丢了还不知道）；
+--     · `schedule_perm_changes` 与它逐列对应（永久那一支现在写不出腾空，
+--       但两张留档表的形状**不许有一处不一样** —— 同一件事的两种留档分叉过一次，就再也对不上了）。
+--     在**这个位置**做（第 38.1 段里、引用它们的东西之前）：存量库里那两张表是旧的
+--       （还带 not null），下面是 `create table if not exists`（对存量库是空操作）
+--       → 不在这里改，存量库与新建库就会长成两个样子。
+--  ⚠️ **另外两张留档表也要一起放宽 —— 但那两句不能放在这里**：
+--     它们在 `schema.sql` 里是**后面才建的**（§38.2 / §38.3），
+--     全新库跑到这一行时那两张表**还不存在** → `alter table` 直接报 **42P01**（undefined_table）。
+--     2026-09-30 实测：`rls-checks` 就是把整份 `schema.sql` 喂给假库跑的，它当场红了。
+--     → 这两句挪到 **§38.3 建表之后**（那里两张表都在），见下面的 **38.3.1**。
+--     ⚠️ 教训：`drop constraint if exists` 防的是"约束不存在"，防不了"**表**不存在"。
+
+--  ② 补 check（**幂等**：`pg_constraint` 里已有同名约束就跳过）——
+--     ⚠️ 存量库里如果已经有"科目空、老师非空"这种半拉子行，这一条会失败；
+--        那种行本来就是错的（界面上显示成一节没有老师的课）。真碰上了先自查：
+--        `select id, on_date, class_id, start_time, to_subject, to_teacher_id
+--           from schedule_temp_changes where to_subject = '' and to_teacher_id is not null;`
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+     where conname = 'schedule_temp_changes_vacated_slot'
+       and conrelid = 'schedule_temp_changes'::regclass
+  ) then
+    alter table schedule_temp_changes
+      add constraint schedule_temp_changes_vacated_slot
+      check ((to_subject = '') = (to_teacher_id is null));
+  end if;
+end $$;
+
+--  自检（**幂等**：整份跑两遍都不该报错；第二遍 `not_null` 仍是 false）：
+--  -- select a.attnotnull from pg_attribute a
+--  --  where a.attrelid = 'schedule_temp_changes'::regclass and a.attname = 'to_teacher_id';
+--  -- select conname from pg_constraint
+--  --  where conrelid = 'schedule_temp_changes'::regclass and conname like '%vacated%';
 
 -- -------- 38.1.1 写入口的把关（触发器）--------
 --  ① 谁改的 / 什么时候改的 / 那一天是星期几 —— **库里说了算**，前端传什么都不信
@@ -10002,7 +10074,12 @@ create table if not exists schedule_perm_changes (
   from_subject     text not null default '',
   from_teacher_id  uuid references teachers (id) on delete set null,
   to_subject       text not null default '',
-  to_teacher_id    uuid not null references teachers (id) on delete cascade,
+  /* ⚠️ 与 `schedule_temp_changes` 同一条：**去掉 `not null`**（38.3.1 有 `drop constraint`）——
+     "腾空"那一行的 `to_teacher_id` 是 null（永久那一支现在写不出腾空，但两张留档表的形状不许分叉）。
+     🔴 `on delete` 那一半**不动**（照旧 `cascade`）：改它 = 动"**真删教师**"的删除语义，
+     那是另一件事 —— 2026-09-30 实测：顺手改成 `set null` 会让 rls-checks ①
+     的"`set null` 外键 17 条"当场变 18 条。**不混在这一轮里。** */
+  to_teacher_id    uuid references teachers (id) on delete cascade,
   kind             text not null check (kind in ('teacher', 'whole')),
   status           text not null default 'active' check (status in ('active', 'revoked')),
   actor_id         uuid references teachers (id) on delete set null,
@@ -10017,6 +10094,18 @@ create table if not exists schedule_perm_changes (
 );
 create index if not exists schedule_perm_changes_slot_idx
   on schedule_perm_changes (class_id, weekday, start_time, created_at desc);
+
+-- -------- 38.3.1 两张留档表也去掉 `to_teacher_id` 的 not null（**38.1.0 的续**，幂等）--------
+--  🔴 **为什么落在这里、而不是 38.1.0**：这两张表是 §38.2 / §38.3 才建的 ——
+--     放到 38.1.0 去，**全新库**跑到那一行时表还不存在，`alter table` 直接报 42P01
+--     （存量库里这两张表早就在了，所以那两句对存量库是真的有用、对全新库是灾难）。
+--     ⚠️ `drop constraint if exists` 防的是"**约束**不存在"，防不了"**表**不存在"。
+--  ⚠️ **为什么要连留档表一起放宽**：`schedule_temp_archive` 是**按临时表逐列抄一份**
+--     （清理过期时抄）—— 腾空那一行 `to_teacher_id` 是 null，抄档却撞上 not null，
+--     清理就**整条失败**（留档丢了还不知道）；`schedule_perm_changes` 与它逐列对应，
+--     两张留档表的形状**不许分叉**。
+alter table schedule_temp_archive drop constraint if exists schedule_temp_archive_to_teacher_id_not_null;
+alter table schedule_perm_changes drop constraint if exists schedule_perm_changes_to_teacher_id_not_null;
 
 -- -------- 38.6 这一天实际上什么课（临时调课**压在**周课表上面）--------
 --  🔴 **"过期不生效"就落在这一句 `sc.on_date = p_date` 上**：
@@ -10059,8 +10148,15 @@ as $$
   select coalesce(b.class_id, o.class_id)   as class_id,
          coalesce(b.start_time, o.start_time) as start_time,
          coalesce(b.end_time, o.end_time)   as end_time,
-         coalesce(o.subject, b.subject)     as subject,
-         coalesce(o.teacher_id, b.teacher_id) as teacher_id,
+         /* 🔴 **临时层说了算**（2026-10-13 修）：一条 active 的临时调课**盖住**这一格 ——
+            包括"腾空"（`to_subject = ''` + `to_teacher_id is null`）。
+            ⚠️ 原来是 `coalesce(o.subject, b.subject)` / `coalesce(o.teacher_id, b.teacher_id)`
+               —— `coalesce` **认不出"没写"和"空"的区别**：腾空那一格的 `null` 会被判成
+               "这一条没写"，于是退回周课表那一行 → **教室里照样显示旧课**，
+               而页面上明明写的是"这一格空出来了"（不报错但就是不对）。
+               腾空读出来必须是**空课**：科目空串 + 老师 null —— 与写入侧同一处口径。 */
+         case when o.class_id is not null then o.subject else b.subject end as subject,
+         case when o.class_id is not null then o.teacher_id else b.teacher_id end as teacher_id,
          (o.class_id is not null)           as changed
     from base b
     full join ov o on o.class_id = b.class_id and o.start_time = b.start_time;
@@ -10245,6 +10341,78 @@ end $$;
 
 grant execute on function public.apply_perm_schedule_change(uuid, int, time, time, text, uuid, text, uuid, text, uuid) to authenticated;
 revoke all on function public.apply_perm_schedule_change(uuid, int, time, time, text, uuid, text, uuid, text, uuid) from public, anon;
+
+-- -------- 38.7b 临时调课：**撤回 + 写一条**（同一个事务）--------
+--  🔴 为什么要一个函数、而不是前端发两条请求：
+--     `schedule_temp_changes` 上有**部分唯一索引**
+--     `(on_date, class_id, start_time) where status = 'active'`（38.1）——
+--     同一天同一班同一节**只能有一条生效的**；要在同一节上改一次主意，
+--     只能"先把旧那条撤回，再写新的一条"（guard 的原话：见 38.1.1 上面那段注释）。
+--     ⚠️ 前端分两步做会有一个**丢数据的窗口**：撤回成功、紧接着插入失败时，
+--     旧那条**再也回不来**（guard 不许 `revoked → active`）。放进一个函数 = 一个事务，
+--     失败就整体回滚 —— 要么新的一条生效，要么一切照旧。
+--  ⚠️ `security definer`：所以**必须自己判权限**（RLS 在这里不生效）——
+--     与 38.7 那个函数同一套写法、同一句判据（`can_manage_schedule`）。
+--  🔴 **腾空**：`p_to_subject = ''` + `p_to_teacher_id = null`（38.1.0 那条 check 钉着）——
+--     递空串当 uuid 会被 Postgres 直接拒（`invalid input syntax for type uuid: ""`）。
+create or replace function public.apply_temp_schedule_change(
+  p_on_date         date,
+  p_class_id        uuid,
+  p_start_time      time,
+  p_end_time        time,
+  p_from_subject    text,
+  p_from_teacher_id uuid,
+  p_to_subject      text,
+  p_to_teacher_id   uuid default null,
+  p_kind            text default 'whole'
+) returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_revoked int := 0;
+  v_id      uuid;
+begin
+  if p_kind not in ('teacher', 'whole') then
+    raise exception '调课种类只认 teacher（只换老师）与 whole（整格换）';
+  end if;
+  if p_kind = 'teacher' and p_to_subject is distinct from p_from_subject then
+    raise exception '「只换老师」不许改科目（科目不动）';
+  end if;
+  /* 🔴 与 38.1.0 那条 check **同一句话**（这里先拦一次，报的是人话，不是约束名） */
+  if (coalesce(p_to_subject, '') = '') <> (p_to_teacher_id is null) then
+    raise exception '这一格要么写上课（科目 + 老师都有），要么腾空（科目空、老师也空）—— 两半要一起成立';
+  end if;
+  if p_on_date is null then
+    raise exception '临时调课必须落在某一天上';
+  end if;
+  if not public.can_manage_schedule(p_class_id) then
+    raise exception '你没有改这个班课表的权限';
+  end if;
+
+  /* ① 先把这一格上**原来那条生效的**撤回（没有就 0 行 —— 正常，不是错） */
+  update schedule_temp_changes
+     set status = 'revoked'
+   where on_date = p_on_date and class_id = p_class_id
+     and start_time = p_start_time and status = 'active';
+  get diagnostics v_revoked = row_count;
+
+  /* ② 再写新的一条（`weekday` / `actor_*` / `created_at` / `status` 由 38.1.1 的 guard 算） */
+  insert into schedule_temp_changes (
+    on_date, class_id, start_time, end_time,
+    from_subject, from_teacher_id, to_subject, to_teacher_id, kind
+  ) values (
+    p_on_date, p_class_id, p_start_time, p_end_time,
+    p_from_subject, p_from_teacher_id, p_to_subject, p_to_teacher_id, p_kind
+  )
+  returning id into v_id;
+
+  return jsonb_build_object('id', v_id, 'revoked', v_revoked);
+end $$;
+
+grant execute on function public.apply_temp_schedule_change(date, uuid, time, time, text, uuid, text, uuid, text) to authenticated;
+revoke all on function public.apply_temp_schedule_change(date, uuid, time, time, text, uuid, text, uuid, text) from public, anon;
 
 -- -------- 38.7.1 撤回一笔永久调课（照留档改回去 + 把留档标成撤回）--------
 --  ⚠️ 只在"那一格如今还是当初改成的那样"时才动它：后来又被调过一次 → **不平白改回去**（显式报错）。

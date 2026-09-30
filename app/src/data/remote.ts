@@ -2418,7 +2418,8 @@ export async function saveTempScheduleChange(
 ): Promise<{ ok: boolean; message: string; id: string }> {
   const sb = getSupabase()
   if (!sb) return { ok: true, message: '', id: '' }
-  try {
+  /** §38.7b 还没跑时退回的老路（**只 insert**）—— 那条路"同一节改第二次"会撞唯一索引 */
+  const legacyInsert = async (): Promise<{ ok: boolean; message: string; id: string }> => {
     const { data, error } = await sb
       .from('schedule_temp_changes')
       .insert({
@@ -2434,8 +2435,46 @@ export async function saveTempScheduleChange(
       } as never)
       .select('id')
     if (error) return { ok: false, message: String(error.message ?? '没写进临时调课表'), id: '' }
-    const id = String((data as Array<{ id?: string }> | null)?.[0]?.id ?? '')
-    return { ok: true, message: '', id }
+    return {
+      ok: true,
+      message: '',
+      id: String((data as Array<{ id?: string }> | null)?.[0]?.id ?? ''),
+    }
+  }
+  try {
+    /*
+     * 🔴 走 `apply_temp_schedule_change()`（§38.7b）—— **撤回 + 写一条在同一个事务里**。
+     *
+     * 为什么不在前端"先 update 撤回、再 insert"：`schedule_temp_changes` 上有**部分唯一索引**
+     * `(on_date, class_id, start_time) where status = 'active'`（§38.1）—— 同一天同一班同一节
+     * 只能有一条生效的；而库里那条 guard **只允许撤回、不许改回去**（`revoked → active` 会 raise）。
+     * 所以"撤回成功、紧接着插入失败"会留下一个**旧那条再也回不来**的洞。
+     * 放进库里那个函数 = 一个事务，失败整体回滚。
+     *
+     * ⚠️ **数据库还没跑 §38.7b 时不许把调课弄坏**：认不出这个函数就退回老路（**显式**，不静默）——
+     * 与 `ensureScheduleAdminTables()` 同一套口径：**SQL 没跑过时前端不许崩**。
+     */
+    const { data, error } = await sb.rpc(
+      'apply_temp_schedule_change' as never,
+      {
+        p_on_date: row.onDate,
+        p_class_id: row.classId,
+        p_start_time: row.start,
+        p_end_time: row.end,
+        p_from_subject: row.fromSubject,
+        p_from_teacher_id: row.fromTeacherId,
+        p_to_subject: row.toSubject,
+        p_to_teacher_id: row.toTeacherId,
+        p_kind: row.kind,
+      } as never,
+    )
+    if (!error) {
+      return { ok: true, message: '', id: String((data as { id?: string } | null)?.id ?? '') }
+    }
+    if (!isMissingRpc(error)) {
+      return { ok: false, message: String(error.message ?? '没写进临时调课表'), id: '' }
+    }
+    return await legacyInsert()
   } catch (e) {
     return { ok: false, message: e instanceof Error ? e.message : '没写进临时调课表', id: '' }
   }

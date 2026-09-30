@@ -702,7 +702,17 @@ export type TempScheduleChange = {
   fromSubject: string
   fromTeacherId: string | null
   toSubject: string
-  toTeacherId: string
+  /**
+   * 换成哪位老师。
+   * 🔴 `null` = **这一格腾空**（`to_subject` 是空串）：这节课挪到别处了 / 取消了。
+   *    ⚠️ 原来这一栏是 `string`，腾空时前端递的是**空串** —— 而空串不是一个 uuid，
+   *       Postgres 会直接拒（`invalid input syntax for type uuid: ""`），
+   *       于是"腾空那一笔写不进去"，界面上却看着像写成了（那一格还挂着旧课）。
+   *    ⚠️ 有课的那一格**必须有老师**：`null` + 非空 `to_subject` 会被库里那道
+   *       `schedule_temp_changes_vacated_slot` 拒（§38.1.0）。
+   *    ⚠️ 与 `remote.ts` 的 `TempChangeInput.toTeacherId` **同一口径**（一个字段一种语义）。
+   */
+  toTeacherId: string | null
   /** `'teacher'` = 只换老师（科目不动）· `'whole'` = 整格换（科目 + 老师一起换） */
   kind: 'teacher' | 'whole'
   /** 什么时候记下的（本地演示模式用；库里由触发器写 `now()`） */

@@ -12484,6 +12484,14 @@ await withLock(async () => {
         '🧪 S27 ㉖b **反向对照**：把永久那一支改成也走临时那条路（把"每周都变"写成"只这一天"）→ ㉕ 那条判据**当场判假**',
         `改写之后仍含 apply_perm…=${/apply_perm_schedule_change/.test(negPerm)}`,
       )
+      /* ---------- ⑦b 🆕 「腾空一格」+「同一节改第二次」：走库里那个函数（§38.7b） ---------- */
+      check(
+        /apply_temp_schedule_change/.test(tempBody) &&
+          /isMissingRpc\(error\)/.test(tempBody) &&
+          /from\(\s*'schedule_temp_changes'\s*\)/.test(tempBody),
+        '🔴 S27-W8 临时那一支走 **`apply_temp_schedule_change()`**（§38.7b：撤回 + 写一条在**同一个事务**里 —— 否则"撤回成功、插入失败"会留下"旧那条再也回不来"的洞），而且**留了 §38.7b 没跑时的显式退路**（认不出这个函数 → 退回直接 insert，**不许把调课弄坏**、也不许静默）',
+        `出现 apply_temp…=${/apply_temp_schedule_change/.test(tempBody)} · 出现 isMissingRpc(error)=${/isMissingRpc\(error\)/.test(tempBody)} · 仍有 insert 退路=${/from\(\s*'schedule_temp_changes'\s*\)/.test(tempBody)}`,
+      )
       /* 内存那一层的分工：永久那一次**没有**往临时层加东西 */
       const afterPermPreview = await p.evaluate(() => {
         const raw = window.localStorage.getItem('shugao.teacher.v1')

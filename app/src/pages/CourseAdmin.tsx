@@ -276,7 +276,7 @@ function buildDayCells(
   date: string,
   weekday: number,
   schedule: readonly ScheduleItem[],
-  temp: readonly { date: string; classId: string; period?: number; start: string; end: string; toSubject: string; toTeacherId: string; kind: string }[],
+  temp: readonly { date: string; classId: string; period?: number; start: string; end: string; toSubject: string; toTeacherId: string | null; kind: string }[],
   demoFallback = false,
 ): DayCell[] {
   const base = schedule
@@ -327,7 +327,8 @@ function buildDayCells(
       start: t.start,
       end: t.end,
       subject: t.toSubject,
-      teacherId: t.toTeacherId || null,
+      /* 🔴 腾空那一格 `toTeacherId` 就是 `null`（不许写成 `|| null` 再把有课那格也抹平） */
+      teacherId: t.toTeacherId,
       changed: true,
     })
   }
@@ -1042,7 +1043,10 @@ export default function CourseAdmin() {
                 fromSubject: t.fromSubject,
                 fromTeacherId: t.fromTeacherId,
                 toSubject: t.subject,
-                toTeacherId: t.teacherId,
+                /* 🔴 腾空那一格（`subject` 是空串）→ **递 `null`**，不许递空串 ——
+                   空串不是一个 uuid，Postgres 会直接拒（`invalid input syntax for type uuid: ""`），
+                   于是那一笔写不进去、而界面上看着像写成了（§38.1.0 那条 check 也是这个口径） */
+                toTeacherId: t.subject ? t.teacherId || null : null,
                 kind: plan.kind,
               })
               if (!r.ok) bad.push(r.message)
@@ -1055,7 +1059,7 @@ export default function CourseAdmin() {
               fromSubject: t.fromSubject,
               fromTeacherId: t.fromTeacherId,
               toSubject: t.subject,
-              toTeacherId: t.teacherId,
+              toTeacherId: t.subject ? t.teacherId || null : null,
               kind: plan.kind,
             })
           } else {
