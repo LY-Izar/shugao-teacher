@@ -12370,6 +12370,50 @@ await withLock(async () => {
           '🔴 S27-W9 整周网格**每一格都能点选**（`data-picked-week="1"` 挂在选中的格上），而且**两格都还在** —— 跨列两格只按节次号当 key 的话，第二次点会把第一次顶掉（那一格只是"刚才选的那一格"还在）',
           `亮着 ${pickedWeek} 格 → ${JSON.stringify(pickedWeekKeys)}（点了 ${multi.kA} 与 ${multi.kB}）`,
         )
+        /*
+         * 🔴 2026-10-01 用户实测：「点了以后没有选中的提示框，老师不知道自己选没选中，只加这一个地方」。
+         *    上面 W9 读的是**属性**（`data-picked-week`）——属性一直是对的，屏上却一点变化都没有，
+         *    所以这一条量**算出来的颜色**（`getComputedStyle`）：属性对、屏上没变化，正是要抓的那件事。
+         *    期望值**不写死**：直接拿下面「这一天」那栏**选中那一格**当基准（用户拍板的口径就是
+         *    "两处同一套皮肤"：强调色边框 + 淡强调底），这样四套主题换令牌也不会误报，
+         *    也不违反"页面里零十六进制"。
+         */
+        const weekSkin = await p.evaluate(
+          ([ka, kb]) => {
+            const g = (el, prop) => (el ? getComputedStyle(el)[prop] : null)
+            const wA = document.querySelector(`[data-week-cell="${ka}"]`)
+            const wB = document.querySelector(`[data-week-cell="${kb}"]`)
+            const idle = [...document.querySelectorAll('[data-week-cell]')].find(
+              (e) => e.getAttribute('data-picked-week') !== '1',
+            )
+            const dayPicked = document.querySelector('[data-picked="1"]')
+            return {
+              hasIdle: Boolean(idle),
+              hasDay: Boolean(dayPicked),
+              aBorder: g(wA, 'borderTopColor'),
+              aBg: g(wA, 'backgroundColor'),
+              bBorder: g(wB, 'borderTopColor'),
+              bBg: g(wB, 'backgroundColor'),
+              idleBorder: g(idle, 'borderTopColor'),
+              idleBg: g(idle, 'backgroundColor'),
+              dayBorder: g(dayPicked, 'borderTopColor'),
+              dayBg: g(dayPicked, 'backgroundColor'),
+            }
+          },
+          [multi.kA, multi.kB],
+        )
+        check(
+          weekSkin.hasIdle &&
+            weekSkin.hasDay &&
+            weekSkin.aBorder === weekSkin.bBorder &&
+            weekSkin.aBorder === weekSkin.dayBorder &&
+            weekSkin.aBg === weekSkin.bBg &&
+            weekSkin.aBg === weekSkin.dayBg &&
+            weekSkin.aBorder !== weekSkin.idleBorder &&
+            weekSkin.aBg !== weekSkin.idleBg,
+          '🔴 S27-W9b 整周网格的选中态**屏上看得见**（强调色边框 + 淡强调底），而且与下面「这一天」那栏**算出来的颜色一模一样**（用户 2026-10-01 实测：「点了以后没有选中的提示框，老师不知道自己选没选中」）',
+          `选中两格 边框=${weekSkin.aBorder} / ${weekSkin.bBorder} · 底=${weekSkin.aBg} / ${weekSkin.bBg} ‖ 没选的一格 边框=${weekSkin.idleBorder} · 底=${weekSkin.idleBg} ‖ 「这一天」那栏选中 边框=${weekSkin.dayBorder} · 底=${weekSkin.dayBg} · 找到未选格=${weekSkin.hasIdle} 找到下栏选中格=${weekSkin.hasDay}`,
+        )
         /* 跨列两格 → 下面**并排两天**（`data-course-daycols="2"` + 两栏各带 `data-course-col`） */
         const dayColsN = await p.locator('[data-course-daycols]').getAttribute('data-course-daycols')
         const colWds = await p.locator('[data-course-col]').evaluateAll((els) =>

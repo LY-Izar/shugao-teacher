@@ -1787,14 +1787,25 @@ const planSlot = (m: SwapPlan, which: 'a' | 'b'): DaySlot | undefined => {
                                             cursor: 'pointer',
                                             padding: '4px 5px',
                                             borderRadius: 4,
+                                            /*
+                                             * 🔴 2026-10-01 用户实测：「点了以后没有选中的提示框，
+                                             *    老师不知道自己选没选中」—— `data-picked-week` 只是给门禁
+                                             *    看的**属性**，屏上原来一点变化都没有。
+                                             *    选中态与下面「这一天」那栏**同一套皮肤**：强调色边框 +
+                                             *    淡强调底（同一个 `picked`、同一个 `on`，两处一个手感）。
+                                             */
                                             border: `1px ${here.length ? 'solid' : 'dashed'} ${
-                                              here.length
-                                                ? 'var(--color-line2)'
-                                                : 'var(--color-line)'
+                                              on
+                                                ? 'var(--color-accent)'
+                                                : here.length
+                                                  ? 'var(--color-line2)'
+                                                  : 'var(--color-line)'
                                             }`,
-                                            background: here.length
-                                              ? 'var(--color-surface2)'
-                                              : undefined,
+                                            background: on
+                                              ? 'var(--color-accentsoft)'
+                                              : here.length
+                                                ? 'var(--color-surface2)'
+                                                : undefined,
                                           }}
                                         >
                                           {here.length ? (
