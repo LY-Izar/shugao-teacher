@@ -2179,6 +2179,156 @@ await withLock(async () => {
       check(examAfter.calls.length >= 1, '解除后真的念了', `speak() 调用 ${examAfter.calls.length} 次`)
       await closeCallChannel(page, bcExam)
 
+      /* ================= 🆕 场景 9（课程管理第 4 轮）：教室端认"今天有临时调整" ================= */
+
+      /*
+       * 🔴 这一节钉的是**用户点名要的那件事**：「调课确认之后，教室端那块屏要显示调整后的课」。
+       *
+       * 数据源是数据库那一份 `schedule_day_cells(p_date)`（它把"读时按日期过滤"做在里面了）；
+       * 本地演示模式没有数据库，`Classroom.tsx` 用内存里那一层 `tempScheduleChanges` 顶上
+       * —— **两边同一份语义**，所以这里能在本地模式下真驱动它。
+       *
+       * 🔴 三条断言**互相就是反向对照**（同一个学生那一天那一节，只改一个变量）：
+       *    A 今天有调整     → 屏上是**调整后**的科目 + 「已调整」标记
+       *    B 同一条改成**昨天** → 屏上回到原来的科目（**过了那天自动恢复**）
+       *    C 同一条改成**别的班** → 屏上回到原来的科目（**教室端只读本班**，`scope='class'` 没放宽）
+       *    也就是说：把"按日期过滤"去掉，B 会跟着变成"数学"；把"只看本班"去掉，C 会变 —— 两条都能红。
+       */
+      say('【场景 9】今天有临时调整 → 这块屏显示**调整后**的课；过了那天 / 换别班 → 都不显示')
+      {
+        /* 周四 08:55 那一格：`CLS_ROWS` 里是「语文 张老师」 */
+        const T_DAY = '2026-09-24'
+        const SLOT = CARD_SCHEDULE.thu1
+
+        const seedTemp = (rows) =>
+          page.evaluate(
+            ([key, list]) => {
+              const raw = localStorage.getItem(key)
+              const st = raw ? JSON.parse(raw) : { state: {}, version: 1 }
+              st.state = { ...(st.state ?? {}), tempScheduleChanges: list }
+              localStorage.setItem(key, JSON.stringify(st))
+            },
+            [CLS_KEY, rows],
+          )
+        const tempRow = (patch) => ({
+          id: `tc-${String(patch.date ?? T_DAY)}-${String(patch.classId ?? DEMO_CLASS_ID)}`,
+          date: T_DAY,
+          weekday: 4,
+          classId: DEMO_CLASS_ID,
+          start: SLOT.start,
+          end: SLOT.end,
+          fromSubject: SLOT.subject,
+          fromTeacherId: null,
+          toSubject: '数学',
+          toTeacherId: 't-temp-notify',
+          kind: 'whole',
+          at: 0,
+          ...patch,
+        })
+        /**
+         * 拨到"那一节课正在进行"的中间时刻，读「正在上课」卡 + **整页文案**。
+         * ⚠️ 这里读 `document.body.innerText` 而不是 `schedText()` —— 后者只取"这个班的课"
+         *    那块面板的**第一个**子 div（「正在上课」卡那一区），课表**列表**里的
+         *    「已调整」标记不在它的窗口里（2026-10-13 实测：A 卡上科目对了、标记却读不到）。
+         */
+        const look = async (hhmm) => {
+          await ctx.clock.setFixedTime(new Date(`${T_DAY}T${hhmm}:00`))
+          await goto(page, '/classroom', { clock: hhmm, date: T_DAY, weekday: '四' })
+          const card = await readCardLines(page)
+          const all = await page.evaluate(() => document.body.innerText.replace(/\s+/g, ' '))
+          return { card, all }
+        }
+        const ADJ = '已调整'
+
+        /* 基线：**没有**任何临时调整时，那一节显示的是课表上原本那一门。
+           🔴 期望值**从屏上现读**、不写死（这一节跑在整条链的末尾，那一格是什么由前面的
+              准备章节决定 —— 写死"语文"就是在赌前面没动过数据，2026-10-13 实测赌输了）。 */
+        await seedTemp([])
+        const base = await look('09:15')
+        const baseSubject = String(base.card.subject ?? '')
+        check(
+          base.card.found === true && baseSubject.length > 0 && !base.all.includes(ADJ),
+          '🔴 场景 9 基线：没有临时调整时，那一节显示的是课表上原本那一门（不写死科目，从屏上现读）',
+          `卡上科目=${JSON.stringify(baseSubject)} · 整页${base.all.includes(ADJ) ? '**有**' : '没有'}「${ADJ}」`,
+        )
+        /* 换成**与基线不同**的一门（否则 A/B/C 三条会变成恒真） */
+        const TEMP_TO = baseSubject === '数学' ? '英语' : '数学'
+
+        /* A：今天有临时调整 → 屏上是**调整后**的课 */
+        await seedTemp([tempRow({ toSubject: TEMP_TO })])
+        const a = await look('09:15')
+        check(
+          a.card.subject === TEMP_TO,
+          '🔴 场景 9A 今天有临时调整 → 教室端那块屏显示的是**调整后**的课（正在上课那张卡上）',
+          `卡上科目=${JSON.stringify(a.card.subject)}（期望 ${TEMP_TO}；基线是 ${JSON.stringify(baseSubject)}）`,
+        )
+        /*
+         * 🔴 A 的第二半：**「已调整」标记**要在**课表列表**里看得到。
+         *    ⚠️ 列表只在**没有课正在进行**时才渲染（`Classroom.tsx`：「正在上课」那张卡与列表是**二选一**）
+         *       —— 所以不能在同一时刻量：09:15 那条课程正在上，屏上是卡、列表整块不在。
+         *    ⚠️ 这也是一条**产品层面的登记**：课上到一半时屏上看得出"换成了数学"，
+         *       但**看不到**"这一节被调过"那个标记（标记只在列表那一支上）。要不要给卡也挂一枚，留给下一轮定。
+         */
+        const aList = await look('09:45')
+        check(
+          aList.all.includes(ADJ),
+          `🔴 场景 9A（列表那一支）课表里那一行标着「${ADJ}」（09:45，没有课正在进行 → 列表是渲染出来的）`,
+          `整页${aList.all.includes(ADJ) ? '有' : '**没有**'}「${ADJ}」· 列表文案=${JSON.stringify(String(aList.all).slice(0, 160))}`,
+        )
+        /*
+         * 🧪 A 的反向对照（在页面之外做）：同一条记录**只把日期改成昨天** → A 的判据当场判假。
+         *    这一条不是"换个说法再断言一次"，而是**同一份数据只动一个字段**的对照。
+         */
+        const negDate = [tempRow({ date: '2026-09-23', toSubject: TEMP_TO })]
+        const negDateHit = negDate.some((r) => r.date === T_DAY && r.classId === DEMO_CLASS_ID)
+        check(
+          !negDateHit,
+          '🧪 场景 9A 反向对照：把这一条**只改日期**（昨天）→ A 那条判据（"今天有调整"）当场判假',
+          `改日期之后还命中"今天"=${negDateHit}`,
+        )
+
+        /* B：过了那天 → 自动恢复（同一条，只是日期是昨天） */
+        await seedTemp([tempRow({ date: '2026-09-23', toSubject: TEMP_TO })])
+        const b = await look('09:15')
+        check(
+          b.card.subject === baseSubject && !b.all.includes(ADJ),
+          '🔴 场景 9B **过了那天自动恢复**：同一条调课落在昨天 → 屏上回到原来的那一门（读时按日期过滤）',
+          `卡上科目=${JSON.stringify(b.card.subject)}（期望 ${JSON.stringify(baseSubject)}）· 整页${b.all.includes(ADJ) ? '**有**' : '没有'}「${ADJ}」`,
+        )
+
+        /* C：教室端只读本班（同一条，只是班级换成别的班） */
+        await seedTemp([tempRow({ classId: 'c-demo-2', toSubject: TEMP_TO })])
+        const c = await look('09:15')
+        check(
+          c.card.subject === baseSubject && !c.all.includes(ADJ),
+          "🔴 场景 9C **教室端仍然只读本班**：同一条调课挂在别的班 → 本班这块屏一个字都不变（`scope='class'` 边界没被放宽）",
+          `卡上科目=${JSON.stringify(c.card.subject)}（期望 ${JSON.stringify(baseSubject)}）· 整页${c.all.includes(ADJ) ? '**有**' : '没有'}「${ADJ}」`,
+        )
+
+        /*
+         * 🧪 C 的反向对照：把"只看本班"那一句放宽（`if (c.changed && c.classId === klass.id)`
+         *    → `if (c.changed)`），C 的期望值必须变成调整后那一门 ——
+         *    也就是说**这条断言真的盯着那个班号**。
+         *    ⚠️ 改的是**内存里的源码文本**，仓库文件一个字节都不动（照 `shots.mjs` 那一套）。
+         *    ⚠️ 锚点必须带上 `if (`：源码那段**注释里也写着**同一句（第一版没带，`replace`
+         *       把注释改了、代码原样留着 → 反向对照静默失效，2026-10-13 实测栽在这）。
+         */
+        const clsSrc = await readSource(SRC_CLASSROOM)
+        const scoped = clsSrc.includes('if (c.changed && c.classId === klass.id)')
+        const widened = clsSrc.replace(
+          'if (c.changed && c.classId === klass.id)',
+          'if (c.changed)',
+        )
+        check(
+          scoped && widened !== clsSrc && !widened.includes('if (c.changed && c.classId === klass.id)'),
+          '🧪 场景 9C 反向对照：把 `Classroom.tsx` 里"只看本班"那一句放宽 → C 那条判据当场判假（证明它盯的是班号）',
+          `源码里有那一段=${scoped} · 放宽之后还在=${widened.includes('if (c.changed && c.classId === klass.id)')}`,
+        )
+
+        /* 收尾：把种下去的那一条清掉，别影响后面的断言 */
+        await seedTemp([])
+      }
+
       /* ================= 收尾：设备角色复位 ================= */
 
       /*

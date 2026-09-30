@@ -8868,6 +8868,246 @@ await withLock(async () => {
       )
     }
 
+    /* ============================================================
+       二十五·之二 🆕 2026-10-13（课程管理第 4 轮）：**调课通知的服务端**
+       ------------------------------------------------------------
+       跑的是**真的 `functions/api/schedule-notice.ts`**（`onRequestPost`），
+       底下是**假 PostgREST**：判据（`can_manage_schedule`）的回话由桩给。
+
+       🔴 这一节要钉的三件事（用户点名的三条）：
+         ① **署名是教务处**（正文最后一行）—— 不许写"系统"、不许写"管理员"；
+         ② **只发给"被调到的老师"**（原来是哪位 ∪ 换成哪位，**不多发一个**）；
+         ③ **服务端不信前端**：判据照**调用者 JWT** 问库，**非教务处直接打这个接口 → 403**
+            （而且**一条通知都没写出去**）。
+       🔴 四条反向对照**在同一次运行里**跑（把源码在内存里改坏、写成临时模块再 import）——
+          不用另开一轮 `RLS_NEGATIVE=`，一处绿一处红当场对照。
+       ============================================================ */
+    section('二十五·之二 🆕 调课通知的服务端：署名教务处 · 只发给被调到的老师 · 非教务处打不动')
+    {
+      const SRC_SNOTICE = resolvePath(APP, 'functions/api/schedule-notice.ts')
+      const srcNotice = readFileSync(SRC_SNOTICE, 'utf8')
+      /* 临时模块在系统临时目录里，相对导入 `./_lib/supa` 会断 —— 换成真文件的绝对 URL */
+      const SUPA_URL = pathToFileURL(resolvePath(APP, 'functions/api/_lib/supa.ts')).href
+      const absSrc = srcNotice.replace("from './_lib/supa'", `from '${SUPA_URL}'`)
+
+      const S_API = 'tok-sched-notice'
+      const S_SVC = 'svc-sched-notice'
+      const S_ENV = {
+        SUPABASE_URL: 'https://sb.shugao.test',
+        SUPABASE_ANON_KEY: 'anon-sched-notice',
+        SUPABASE_SERVICE_ROLE_KEY: S_SVC,
+      }
+      const S_NAMES = { [U.admin]: '教务处', [U.head]: '王老师', [U.phy]: '李老师' }
+      const S_CHANGE = {
+        id: mk('5f', 1),
+        on_date: '2026-10-13',
+        weekday: 2,
+        class_id: C.c1,
+        start_time: '08:55:00',
+        end_time: '09:35:00',
+        from_subject: '语文',
+        from_teacher_id: U.head,
+        to_subject: '数学',
+        to_teacher_id: U.phy,
+        kind: 'whole',
+        status: 'active',
+        actor_id: U.admin,
+        actor_name: '教务处',
+      }
+      /* 桩的状态：这个 token 是谁 · 判据回什么 · 服务端往两张表写了什么 */
+      let sWho = U.admin
+      let sAllowed = true
+      let sWrote = []
+      const sJson = (v, status = 200) =>
+        new Response(JSON.stringify(v), { status, headers: { 'Content-Type': 'application/json' } })
+      const sRealFetch = globalThis.fetch
+      globalThis.fetch = async (input, init = {}) => {
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+        const method = String(init?.method ?? 'GET').toUpperCase()
+        const token = String(new Headers(init.headers ?? {}).get('authorization') ?? '').replace(
+          /^Bearer\s+/i,
+          '',
+        )
+        const body = init?.body ? JSON.parse(String(init.body)) : {}
+        if (/\/auth\/v1\/user$/.test(url)) {
+          return token === S_API ? sJson({ id: sWho }) : sJson({ message: 'invalid jwt' }, 401)
+        }
+        if (/\/rest\/v1\/rpc\/can_manage_schedule$/.test(url)) {
+          return new Response(sAllowed ? 'true' : 'false', { status: 200 })
+        }
+        if (/\/rest\/v1\/schedule_temp_changes/.test(url)) return sJson([S_CHANGE])
+        if (/\/rest\/v1\/teachers/.test(url)) {
+          return sJson(Object.keys(S_NAMES).map((id) => ({ id, name: S_NAMES[id] })))
+        }
+        if (/\/rest\/v1\/classes/.test(url)) return sJson([{ id: C.c1, name: '高二(1)班' }])
+        if (/\/rest\/v1\/schools/.test(url)) return sJson([{ id: 'sch-1' }])
+        if (/\/rest\/v1\/notices/.test(url)) {
+          if (method === 'POST') {
+            const id = mk('5f', 50 + sWrote.length)
+            sWrote.push({ table: 'notices', body })
+            return sJson([{ id }], 201)
+          }
+          return new Response(null, { status: 204 })
+        }
+        if (/\/rest\/v1\/notice_targets/.test(url)) {
+          for (const r of Array.isArray(body) ? body : [body]) sWrote.push({ table: 'targets', body: r })
+          return new Response(null, { status: 201 })
+        }
+        return sRealFetch(input, init)
+      }
+
+      /** 把一个（可能被改坏的）源码写进临时目录、import 回来 —— 仓库文件一个字节都不动 */
+      const loadNotice = async (code, tag) => {
+        const dir = mkdtempSync(join(tmpdir(), `shugao-snotice-${tag}-`))
+        const file = join(dir, 'schedule-notice.ts')
+        writeFileSync(file, code, 'utf8')
+        try {
+          return await import(pathToFileURL(file).href)
+        } finally {
+          rmSync(dir, { recursive: true, force: true })
+        }
+      }
+      const callNotice = async (mod, body) => {
+        const req = new Request('https://x.test/api/schedule-notice', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${S_API}` },
+          body: JSON.stringify(body),
+        })
+        const res = await mod.onRequestPost({ request: req, env: S_ENV })
+        return { status: res.status, body: await res.json().catch(() => ({})) }
+      }
+      const reset = (who = U.admin, allowed = true) => {
+        sWho = who
+        sAllowed = allowed
+        sWrote = []
+      }
+      const THE_CHANGE = { changeKind: 'temp', changeId: S_CHANGE.id }
+
+      try {
+        /* ---------- ① 教务处（本年级能管这个班）打这一笔 → 发一条通知给两位老师 ---------- */
+        const mod = await loadNotice(absSrc, 'ok')
+        reset(U.admin, true)
+        const r1 = await callNotice(mod, THE_CHANGE)
+        const wroteNotices = sWrote.filter((w) => w.table === 'notices')
+        const wroteTargets = sWrote.filter((w) => w.table === 'targets')
+        const targets = wroteTargets.map((w) => String(w.body.teacher_id)).sort()
+        const text = String(wroteNotices[0]?.body?.body ?? '')
+        eq(
+          '🔴 ① 教务处就这一笔调课发通知 → 200，而且**真的写了一条通知**',
+          [r1.status, wroteNotices.length],
+          [200, 1],
+        )
+        eq(
+          '🔴 ① **只发给"被调到的老师"**：原来是哪位（王老师）∪ 换成哪位（李老师）—— 一个不多、一个不少',
+          targets,
+          [U.head, U.phy].sort(),
+        )
+        ok(
+          '🔴 ① **署名是教务处**（正文最后一行「—— 教务处」）',
+          /——\s*教务处/.test(text),
+          `正文：${JSON.stringify(text.replace(/\s+/g, ' ').slice(0, 120))}`,
+        )
+        ok(
+          '🔴 ① 正文里**没有**"系统" / "管理员"这两个署名（用户点名不许写）',
+          !/系统/.test(text) && !/管理员/.test(text),
+          `正文里出现系统=${/系统/.test(text)} · 管理员=${/管理员/.test(text)}`,
+        )
+        eq(
+          '🔴 ① 发件人 = **调用者本人**（服务端从 JWT 取的那个 id，不是前端传的）· 范围 = 自定义名单',
+          [String(wroteNotices[0]?.body?.sender_id ?? ''), String(wroteNotices[0]?.body?.scope_kind ?? '')],
+          [U.admin, 'custom'],
+        )
+        eq(
+          '🔴 ① 通知正文里的人话对得上这一笔（那一节的科目换成了数学）',
+          /数学/.test(text) && /08:55/.test(text),
+          true,
+        )
+
+        /* ---------- ② 🔴 非教务处身份直接打这个接口 → **必须拒**，而且一条通知都不许写 ---------- */
+        reset(U.chn, false) // 科任老师：`can_manage_schedule` 回 false，而且这一笔也不是他做的
+        const r2 = await callNotice(mod, THE_CHANGE)
+        eq(
+          '🔴 ② **服务端不信前端**：科任老师（判据回 false）直接打这个接口 → 403',
+          r2.status,
+          403,
+        )
+        eq(
+          '🔴 ② 而且**一条通知都没写出去**（不是"写了又撤回"）',
+          sWrote.length,
+          0,
+        )
+        /*
+         * 🔴 ②b **把两道闸分开量**（不然 ② 可能是被另一道闸拦下的 —— 那就是"假断言"）：
+         *    调用者**就是这一笔的执行人**（actor 那一句放行），但**判据**回 false → 仍然 403。
+         *    场景是真的：改完之后身份被撤了 / 换了年级，再回头点"发通知"就不该发得出去。
+         */
+        reset(U.admin, false)
+        const r2b = await callNotice(mod, THE_CHANGE)
+        eq(
+          '🔴 ②b **判据那一句自己在拦**：我就是这一笔的执行人，但 `can_manage_schedule` 回 false → 403',
+          r2b.status,
+          403,
+        )
+
+        /* ---------- ③ 判据说"能管"、但这一笔不是我做的 → 拒 ---------- */
+        reset(U.phy, true) // 判据说"能管"，但这一笔的 actor 是教务处
+        const r3 = await callNotice(mod, THE_CHANGE)
+        eq('🔴 ③ 别人做的调课，我拿它的 id 也发不出去（这一笔的 `actor_id` 必须是调用者）', r3.status, 403)
+
+        /* ---------- ④ 反向对照（同一轮里把源码改坏，逐个变红） ---------- */
+        /* ④a 判据那一句去掉 → ②b 那条判据当场判假（403 变 200） */
+        const noGuard = absSrc.replace(
+          /if \(!allowed\) return json\(\{[\s\S]{0,90}?\}, 403\)/,
+          '/* 反向对照：把判据那一句去掉 */',
+        )
+        ok('🧪 ④a 反向对照的锚点在（`if (!allowed) … 403` 那一句找得到）', noGuard !== absSrc)
+        if (noGuard !== absSrc) {
+          const modA = await loadNotice(noGuard, 'noguard')
+          reset(U.admin, false)
+          const rA = await callNotice(modA, THE_CHANGE)
+          eq(
+            '🧪 ④a 反向对照：把"判据那一句"去掉 → **同一笔的执行人这次是 200**（证明 ②b 真的盯着那句判据）',
+            rA.status,
+            200,
+          )
+        }
+
+        /* ④b 收件人只留"换成的那位" → ① 那条"两位都发"当场判假（少一位） */
+        const onlyTo = absSrc.replace(
+          /const ids = \[\.\.\.new Set\(\[row\.from_teacher_id, row\.to_teacher_id\][^\n]*/,
+          'const ids = [String(row.to_teacher_id)]; /* 反向对照：漏掉原来那位 */',
+        )
+        ok('🧪 ④b 反向对照的锚点在（收件人那两句找得到）', onlyTo !== absSrc)
+        if (onlyTo !== absSrc) {
+          const modB = await loadNotice(onlyTo, 'onlyto')
+          reset(U.admin, true)
+          await callNotice(modB, THE_CHANGE)
+          eq(
+            '🧪 ④b 反向对照：收件人漏掉"原来那位" → 只写出 1 行收件人（证明 ① 真的在数那个集合）',
+            sWrote.filter((w) => w.table === 'targets').length,
+            1,
+          )
+        }
+
+        /* ④c 署名改成"系统" → ① 那条署名判据当场判假 */
+        const sysSign = absSrc.replace('—— 教务处', '—— 系统')
+        ok('🧪 ④c 反向对照的锚点在（正文里的署名找得到）', sysSign !== absSrc)
+        if (sysSign !== absSrc) {
+          const modC = await loadNotice(sysSign, 'syssign')
+          reset(U.admin, true)
+          await callNotice(modC, THE_CHANGE)
+          const t = String(sWrote.find((w) => w.table === 'notices')?.body?.body ?? '')
+          ok(
+            '🧪 ④c 反向对照：把署名写成"系统" → ① 的"署名是教务处"当场判假（并命中"不许写系统"）',
+            !/——\s*教务处/.test(t) && /系统/.test(t),
+            `改写后的正文：${JSON.stringify(t.replace(/\s+/g, ' ').slice(0, 90))}`,
+          )
+        }
+      } finally {
+        globalThis.fetch = sRealFetch
+      }
+    }
+
     await B.db.close()
     await A.db.close()
 

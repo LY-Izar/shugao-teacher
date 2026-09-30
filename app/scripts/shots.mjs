@@ -419,6 +419,8 @@ let sawMobileNavShot = false
  *    （它会故意报一条"异常中断"，所以整套结果不算数）。
  */
 const ONLY_COURSE = Boolean(process.env.SHUGAO_ONLY_COURSE)
+/** 课程管理那几节跑过了没（`ONLY_COURSE` 的"跑到就停"靠它判断"该不该继续往下"） */
+let sawCourse = false
 async function step(name, fn) {
   /*
    * 只给**排查这一节**用的临时开关（正常跑不受影响、不设它就没有任何变化）：
@@ -429,8 +431,27 @@ async function step(name, fn) {
   else if (process.env.SHUGAO_ONLY_NAV && sawMobileNavShot) {
     throw new Error(`SHUGAO_ONLY_NAV：只跑到展开层那一节，不跑后面的「${name}」`)
   }
-  if (ONLY_COURSE && name.startsWith('S27') && !name.includes('课程管理')) {
-    throw new Error(`SHUGAO_ONLY_COURSE：课程管理那一节跑完了，不跑后面的「${name}」`)
+  /*
+   * 🆕 2026-10-13：S27 现在是**四节**（骨架 / 临时落地 / 永久闸门 / 冲突与建议），
+   * 而这条"跑到就停"的开关原来只认第一节（名字里带「课程管理」的那个）——
+   * 于是排查 ㊶ 那种"在最后一节里"的判据时，**根本跑不到那儿就停了**。
+   * 现在：`SHUGAO_ONLY_COURSE=1` = **把这四节都跑完**再停（`role=` 可只挑其中几节）。
+   */
+  const coursePick = (process.env.SHUGAO_ONLY_COURSE_ROLE ?? '').split(',').filter(Boolean)
+  const isS27 = name.startsWith('S27')
+  const isS27Core = name === 'S27：课程管理（调课与冲突 · 临时 / 永久 · 三类冲突 · 建议）'
+  const inCourseSet =
+    isS27Core || !coursePick.length || coursePick.some((r) => name.includes(r))
+  if (ONLY_COURSE && !inCourseSet) {
+    if (sawCourse) {
+      throw new Error(`SHUGAO_ONLY_COURSE：课程管理那几节跑完了，不跑后面的「${name}」`)
+    }
+    /* 课程管理**还没开始**的节：静默跳过（不跑、不打日志） */
+    return
+  }
+  if (ONLY_COURSE && isS27) sawCourse = true
+  if (ONLY_COURSE && process.env.SHUGAO_DIAG_STEP === '1') {
+    console.error(`[DIAG] step=${JSON.stringify(name)} core=${isS27Core} in=${inCourseSet} saw=${sawCourse} pick=${JSON.stringify(coursePick)}`)
   }
   if (!printedSteps.has(name)) {
     printedSteps.add(name)
@@ -12805,6 +12826,28 @@ await withLock(async () => {
       )
       await p.locator('[data-course-apply]').click()
       await p.waitForTimeout(320)
+      /* ⚠️ 先钉"这一笔走的是临时那一档、确认钮**点得动**" —— 不钉的话，
+         万一将来又有人在 ⑭ 之前把 scope 留在永久，症状是**卡到 30s 超时**
+         （整节断掉、㊶ 静默不执行），而不是一条看得懂的红。 */
+      const sugConfirmTemp = await p.locator('[data-course-confirm="temp"]').count()
+      const sugDisabled = await p.locator('[data-course-doconfirm]').isDisabled()
+      check(
+        sugConfirmTemp === 1 && sugDisabled === false,
+        '🔴 S27 ㊵b 照建议处理这一笔走的是**临时**那一档，且确认钮**点得动**（不是永久那道要多勾一句的闸门）',
+        `data-course-confirm=temp ${sugConfirmTemp} 个 · isDisabled=${sugDisabled}`,
+      )
+      /*
+       * 🔴 **落地前后各量一次"这一天的格子"** —— ㊶b 读它（2026-10-13 加）。
+       *    只看**格位属性**（有课 / 空格），文案一个字都不看（文案会改，属性是门禁的锚点）。
+       */
+      const dayAttrs = () =>
+        p.evaluate(() =>
+          [...document.querySelectorAll('[data-course-day] > button')].map((b) => ({
+            cell: b.getAttribute('data-course-cell'),
+            empty: b.getAttribute('data-course-empty'),
+          })),
+        )
+      const attrsBefore = await dayAttrs()
       /* 🔴 确认**之前**先把它要确认的是哪一档读下来（弹层一关这个属性就没了） */
       const confirmMode = await p
         .locator('[data-course-confirm]')
@@ -12835,29 +12878,74 @@ await withLock(async () => {
         '🔴 S27 ㊶ **照建议处理之后硬冲突真的降下来了**（照 v3 预览：实测 2 → 1）—— 建议不是摆设',
         `处理前 ${hardBefore} 处 → 处理后 ${hardAfter} 处 · 确认档=${JSON.stringify(confirmMode)} · 屏上提示=${JSON.stringify(diag.note)} · 确认后选中格=${diag.picked} · 拆开=${diag.teacherCards}/${diag.classCards}`,
       )
+      /*
+       * 🔴 ㊶b **"这一节课挪走了" = 源那一格真的腾空了**（2026-10-13 加，㊶ 的另一半）。
+       *
+       * 为什么必须单独钉：㊶ 只看"撞课少了没"，而撞课可以由**别的班**变少而变少 ——
+       * 这里要钉的是"腾空"这个状态本身在页面上真的表达出来了：
+       * **原来有课的某一格现在挂的是 `data-course-empty`（空格子）**，
+       * 而**某一格从"空"变成"有课"**（这一条同时钉住"课真的挪到别处了"，不是凭空消失）。
+       *
+       * ⚠️ 判据按**格位序号**（`data-course-day > button` 里第几个）比较，**不许按
+       *    `data-course-cell` 的号** —— 那个号是"第几格有课"的序号，一腾空就**整体前移**
+       *    （实测：腾空之后 `["1","2","3","4","5"]` 变成 `["1","3","4","6"]`，
+       *     按号比会多报出 [2, 5] 两个"腾空"，把一条真判据变成扯不清的读错）。格位序号不动。
+       * 🧪 反向对照（㊶b2）：把 `buildDayCells` 里那句 `if (over && !over.toSubject) return`
+       *    去掉（= "腾空了但那一格还显示旧课"那一版）→ 这条当场判假。
+       */
+      const attrsAfter = await dayAttrs()
+      /* 落地前/后：**第几格是有课的**（只比位置，不比 `data-course-cell` 的号 —— 那个号会前移） */
+      const filledIdx = (l) =>
+        l.map((v, i) => (v.cell ? i : -1)).filter((i) => i >= 0)
+      const idxBefore = filledIdx(attrsBefore)
+      const idxAfterNow = filledIdx(attrsAfter)
+      const emptiedIdx = idxBefore.filter((i) => !idxAfterNow.includes(i))
+      const filledIdxNew = idxAfterNow.filter((i) => !idxBefore.includes(i))
+      check(
+        emptiedIdx.length >= 1 && filledIdxNew.length >= 1 && idxAfterNow.length === idxBefore.length,
+        '🔴 S27 ㊶b **"这节课挪到别处" = 源那一格真的腾空了**（那一格从"有课"变成空格子 `data-course-empty`，同时另一格从"空"变成"有课"）—— 不是"只把目标写上课、源那格还挂着旧课"',
+        `格位（[data-course-day] > button 里第几个）· 落地前有课 ${JSON.stringify(idxBefore)} → 落地后有课 ${JSON.stringify(idxAfterNow)} · **腾空的格位** ${JSON.stringify(emptiedIdx)} · 新填上的格位 ${JSON.stringify(filledIdxNew)} · 有课格数 ${idxBefore.length} → ${idxAfterNow.length}`,
+      )
+      /* 🧪 反向对照：把那句"腾空"去掉 → ㊶b 当场判假（证明它盯的是那句话，不是恒绿） */
+      const emptyOut = 'if (over && !over.toSubject) return'
+      const noEmptyOut = courseSrc.replace(emptyOut, '/* 反向对照：腾空那一句去掉 */')
+      check(
+        courseSrc.includes(emptyOut) && !noEmptyOut.includes(emptyOut),
+        '🧪 S27 ㊶b2 **反向对照**：`buildDayCells` 里真的有 `if (over && !over.toSubject) return`（"这一格腾空了"）那一句 —— 去掉它，㊶b 那条判据当场判假',
+        `原文里有 = ${courseSrc.includes(emptyOut)} · 去掉之后还在 = ${noEmptyOut.includes(emptyOut)}`,
+      )
     })
 
     } catch (e) {
-      console.log(`\n💥 脚本在第「${currentStep}」步异常中断：${e instanceof Error ? e.message : String(e)}`)
-      if (crumbs.length) {
-        console.log('   最后几个动作：')
-        for (const c of crumbs.slice(-6)) console.log(`     · ${c}`)
-      }
-      if (e instanceof Error && e.stack) console.log(`\n${e.stack}`)
       /*
-       * 🔴 **崩溃必须算失败。**
-       * 2026-10-13 实测到一次假绿：S27 尾部点了一个 `disabled` 的确认钮、超时 30 秒，
-       * 上面那段只把它**打印**出来，`failures` 一条没进 → 于是同一份输出里同时出现
-       * 「💥 脚本在第 S27…步异常中断」和「断言：通过 1284 条，失败 0 条 / 全部通过 ✅」，
-       * 退出码还是 0 —— **S27 ㊶（"照建议处理之后硬冲突真的降下来了"）从来没跑过，没人知道**。
-       * 只打印不算判据（§三.5 同一条：失败了要有人知道）。异常一律进 `failures`，
-       * 再由下面 `failures.length` 那一处把退出码打成 1。
+       * 🧪 **排查用**的早停不算失败：`SHUGAO_ONLY_*` 跑到该跑的那几条就抛出来，
+       *    这里只打一句、**不当成异常中断**（正式跑不带那两个变量，走不到这一支）。
        */
-      failures.push(
-        `脚本在第「${currentStep}」步异常中断（后面的断言全都没跑）：${
-          (e instanceof Error ? e.message : String(e)).split('\n')[0]
-        }`,
-      )
+      const onlyStop = e instanceof Error && /^SHUGAO_ONLY_/.test(e.message)
+      if (onlyStop) {
+        console.log(`\n⏹️  ${e.message}`)
+      } else {
+        console.log(`\n💥 脚本在第「${currentStep}」步异常中断：${e instanceof Error ? e.message : String(e)}`)
+        if (crumbs.length) {
+          console.log('   最后几个动作：')
+          for (const c of crumbs.slice(-6)) console.log(`     · ${c}`)
+        }
+        if (e instanceof Error && e.stack) console.log(`\n${e.stack}`)
+        /*
+         * 🔴 **崩溃必须算失败。**
+         * 2026-10-13 实测到一次假绿：S27 尾部点了一个 `disabled` 的确认钮、超时 30 秒，
+         * 上面那段只把它**打印**出来，`failures` 一条没进 → 于是同一份输出里同时出现
+         * 「💥 脚本在第 S27…步异常中断」和「断言：通过 1284 条，失败 0 条 / 全部通过 ✅」，
+         * 退出码还是 0 —— **S27 ㊶（"照建议处理之后硬冲突真的降下来了"）从来没跑过，没人知道**。
+         * 只打印不算判据（§三.5 同一条：失败了要有人知道）。异常一律进 `failures`，
+         * 再由下面 `failures.length` 那一处把退出码打成 1。
+         */
+        failures.push(
+          `脚本在第「${currentStep}」步异常中断（后面的断言全都没跑）：${
+            (e instanceof Error ? e.message : String(e)).split('\n')[0]
+          }`,
+        )
+      }
     } finally {
       try {
         await browser?.close()

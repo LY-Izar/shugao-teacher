@@ -119,10 +119,28 @@ type WeekLesson = {
 /** 一天几节 —— 就是标准节次表的长度（9）；空格子的钟点也从这张表取 */
 const DAY_PERIODS = PERIOD_SLOTS.length
 
-/** 第 N 节的标准钟点（空格子没有自己的钟点：周课表里根本没有这一行） */
+/** 第 N 节的标准钟点（**只在"空格子没有自己的钟点"时兜底**，见下面那条 🔴） */
 function periodTime(p: number): { start: string; end: string } {
   const s = PERIOD_SLOTS[p - 1] ?? PERIOD_SLOTS[PERIOD_SLOTS.length - 1]
   return { start: s[0], end: s[1] }
+}
+
+/**
+ * 网格上一格该按**哪一节**看 —— 由这一格的**开始时间**在标准节次表里反查。
+ *
+ * 🔴 为什么不能拿"第几格"和"第几节"当同一件事（2026-10-13 实测 ㊶ 红的根因）：
+ *    这一页的 `DayCell.period` 是**摆出来的序号**（`buildDayCells` 里 `i + 1`），
+ *    而"第 N 节"在平台里是**标准节次表的位置**（`PERIOD_SLOTS`）——
+ *    演示夹具的钟点（08:00–08:45 / 08:55 / 10:10 / …）与标准表（08:00–08:40 / 08:50 / 09:40 / …）
+ *    **不是同一套**：夹具里 10:10 那一格在标准表里是**第 3 节后面**，
+ *    于是"第几格"与"第几节"从第二格起就错开 —— 建议里写的"第 6 节"与
+ *    落地写进去的那一格的 `start` **不是同一格**，那一笔就落到了别处（撞课一点没少，读数 3 → 3）。
+ *    ⚠️ 真实模式（`schedule_day_cells`）给的 `start` 是库里的真钟点，更不可能等于标准表 ——
+ *       所以"按序号当节次"在远程只会更错。
+ */
+function periodOfStart(start: string): number {
+  const i = PERIOD_SLOTS.findIndex(([s]) => s === start)
+  return i >= 0 ? i + 1 : 0
 }
 
 /** 三类冲突（**别糊成一句"有冲突"**）：`kind` 就是数据库给的名字 */
@@ -149,6 +167,12 @@ type Suggestion = {
   at: number
   /** 挪/对调到第几节 */
   period: number
+  /**
+   * 那**一格自己**的钟点（`start` / `end`）。
+   * 🔴 它才是落地时要写的 `start` —— "第 N 节"只是给人看的号（见 `periodOfStart` 那段）。
+   */
+  start: string
+  end: string
   /** 「挪」时说清搬的是什么（对调不用） */
   title: string
   /** 「挪」时那一位老师（对调不用） */
@@ -288,8 +312,29 @@ function buildDayCells(
     .sort((a, b) => a.start.localeCompare(b.start))
   const days = temp.filter((t) => t.date === date && t.classId === klass.id)
   const out: DayCell[] = []
+  /*
+   * 🔴 **一条调课记录只管同班同时段的**第一行**（2026-10-13 修 ㊶b）。
+   *
+   * 库里同一天、同一个班、同一个开始时间**只能有一条生效的调课记录**
+   * （`schedule_temp_changes` 的部分唯一索引 `(on_date, class_id, start_time)
+   *   where status = 'active'`，`schema.sql:9878`；本地同一处口径在 `store.ts` 的
+   *   `addTempScheduleChange`）。所以"腾空 08:00"= **腾空这一格的课**，
+   *   不是"把这个班 08:00 的所有课都腾掉"。
+   *
+   * 原来 `days.find((t) => t.start === s.start)` 每行都重新找一遍 →
+   * 同一个 `start` 上的**每一行都命中同一条记录**：腾空一次腾掉两行，
+   * "改一次"也把两行都盖成同一门课（同一时段两节课，正是演示夹具刻意造的 ② 类冲突）。
+   * 那一笔落地后有课格数 5 → 4、目标格没填上（实测 `[0,1,2,3,4]` → `[0,2,3,5]`），
+   * 而界面只显示一格变了 —— 少一节课，不报错（§三.5 那一族）。
+   *
+   * ⚠️ 真实模式下这里恒是一行一格（库里那条唯一索引不允许两行），
+   *    `used` 只是把"一条记录 = 一格"这条语义写死。
+   */
+  const used = new Set<string>()
   base.forEach((s, i) => {
-    const over = days.find((t) => t.start === s.start)
+    const hit = days.find((t) => t.start === s.start)
+    const over = hit && !used.has(s.start) ? hit : undefined
+    if (over) used.add(s.start)
     /*
      * 🔴 这一节被**挪走了**（临时层把科目写成了空）→ **这一格就是空的**：
      *    不进格子清单 = 空格子（虚线框 + 「空」），于是也不会进冲突计算
@@ -711,12 +756,29 @@ export default function CourseAdmin() {
    * 调课网格：**一天 9 节全摆出来** —— 有课的那几格 + 没课的空格子。
    * 空格子的钟点取标准节次表（`PERIOD_SLOTS`）：周课表里没有这一行，问不到别的来源。
    * ⚠️ 它只是"怎么摆"，**不是第二份判据**：`cells` 仍然是"这一天的课"的唯一来源。
+   * 🔴 **有课的那几格按自己的 `start` 认格**（`periodOfStart`）：这样"第 N 格"在
+   *    `cells` / `slots` / 建议 / 落地写进去的 `start` **四处是同一个东西** ——
+   *    不然空格子会被摆到别处有课的那一格上（"挪到空位"就挪到了一个有课的时段，㊶ 红）。
+   *    ⚠️ 认不出格（钟点不在标准表里，比如库里排的是 08:45）→ **退回按序号摆**，
+   *       不许丢掉这一格（丢格 = 这一天少一节课，比"格位偏一点"严重得多）。
+   *      ⚠️ 反向对照：把 `slots` 换回"按序号摆"（`cell = cells.find(period === i + 1)`）那一版，
+   *        第 N 格与第 N 节就会错开（实测：界面说"挪到第 6 节"、那一格写着 14:00 空着，
+   *        而落地写进去的 `start` 是标准表第 6 节的 14:55）—— 那一笔落在别处，
+   *        撞课一点没少：㊶ 3 → 3（修完之后 3 → 1）。
    */
   const slots = useMemo<DaySlot[]>(() => {
     const n = Math.max(DAY_PERIODS, ...cells.map((c) => c.period))
+    const claimed = new Set<number>()
+    const at = new Map<number, DayCell>()
+    for (const c of cells) {
+      const want = periodOfStart(c.start)
+      const p = want >= 1 && want <= n && !claimed.has(want) ? want : c.period
+      claimed.add(p)
+      at.set(p, c)
+    }
     return Array.from({ length: n }, (_, i) => {
       const period = i + 1
-      const cell = cells.find((c) => c.period === period) ?? null
+      const cell = at.get(period) ?? null
       const t = cell ?? periodTime(period)
       return { period, start: t.start, end: t.end, cell }
     })
@@ -1030,6 +1092,11 @@ export default function CourseAdmin() {
     void (async () => {
       try {
         const bad: string[] = []
+        /*
+         * 🆕 第 4 轮：写成功的那几笔**各自带一个回执 id** —— 调完之后照它发通知
+         *（收件人 = 被调到的老师，由服务端照那一笔现取；署名教务处）。
+         */
+        const done: Array<{ kind: 'temp' | 'perm'; id: string }> = []
         for (const t of targets) {
           const cell = slots.find((s) => s.period === t.period)?.cell ?? null
           /* 🔴 两个字段一起写：`title` 是科目、`teacher_id` 是老师（§38.7 只动这两列） */
@@ -1050,6 +1117,7 @@ export default function CourseAdmin() {
                 kind: plan.kind,
               })
               if (!r.ok) bad.push(r.message)
+              else if (r.id) done.push({ kind: 'temp', id: r.id })
             }
             addTempScheduleChange({
               date,
@@ -1063,7 +1131,13 @@ export default function CourseAdmin() {
               kind: plan.kind,
             })
           } else {
-            const item = rows.find((x) => x.weekday === weekday && x.start === t.start)
+            /* 这一格在周课表里的那一行：`slots` 已经把格子摆在自己的节次上，
+               所以**按这一格自己的钟点**找那一行（找不到 = 这一格本来就空着 → 新加一行）。
+               🔴 原来只按这一笔的 `start` 找：同一时段两行时永远只命中第一行，
+                  第二行改了等于没改；而"这一格被挪过"时钟点对不上 → 会在周课表里多塞一行
+                  （不报错，但这一天凭空多一节课）。 */
+            const slotStart = slots.find((s) => s.period === t.period)?.cell?.start ?? t.start
+            const item = rows.find((x) => x.weekday === weekday && x.start === slotStart)
             /* 这一格该变成什么科目（**老师的名字不在 `title` 里** —— 它由 `getDayCells` 那一层接上） */
             const nextTitle =
               item && t.subject === subjectOfTitle(item.title, klass.name)
@@ -1083,6 +1157,7 @@ export default function CourseAdmin() {
                 scheduleItemId: item && /^[0-9a-f-]{36}$/i.test(item.id) ? item.id : null,
               })
               if (!r.ok) bad.push(r.message)
+              else if (r.archiveId) done.push({ kind: 'perm', id: r.archiveId })
             }
             /*
              * 本地演示 / 没读到这一天的格子时，就落在**周课表草稿**上：
@@ -1091,7 +1166,17 @@ export default function CourseAdmin() {
              *    同格多行是"同一个班同一时段两节课"那种异常态，不是这里要选的东西。
              */
             if (item) {
-              updateSchedule(item.id, { title: nextTitle, scope: 'class' })
+              /*
+               * 🔴 科目与老师**一起改**（`title` + `teacherId`）—— 与远程那一支同一处口径
+               *    （`§38.7` 只动这两列）。原来这里只改 `title`：那一行的 `teacherId`
+               *    还是原来那位（或没有）→ 格子上写的是新科目、配的却是旧老师的名字，
+               *    而"老师撞课"正是按 `teacherId` 算的 —— 改了课等于没改人。
+               */
+              updateSchedule(item.id, {
+                title: nextTitle,
+                scope: 'class',
+                teacherId: t.teacherId || null,
+              })
             } else {
               addScheduleMany([
                 {
@@ -1103,10 +1188,23 @@ export default function CourseAdmin() {
                   kind: 'class',
                   notify: true,
                   scope: 'class',
+                  teacherId: t.teacherId || null,
                 },
               ])
             }
           }
+        }
+        /*
+         * 🆕 第 4 轮 · **调完之后发那条系统通知**（署名教务处）。
+         * 🔴 走服务端（`notices` 只有服务端一条写路径，§21.2）；收件人是**被调到的老师**，
+         *    由服务端照上面那个回执 id 现取 —— **前端说发给谁不算数**。
+         * ⚠️ 通知发不出去**不影响"课已经调成了"**这件事（那是两笔），所以只如实说一句。
+         */
+        let notified = 0
+        for (const n of done) {
+          const r = await remote.notifyScheduleChange(n.kind, n.id)
+          if (r.ok) notified += 1
+          else bad.push(`通知没发出去：${r.message}`)
         }
         if (bad.length) {
           setNote(`有两处没改成：\n${bad.join('\n')}`)
@@ -1115,9 +1213,10 @@ export default function CourseAdmin() {
             text: tweak === 'temp' ? '这一天的调课记下了' : '周课表改了',
             tone: 'ok',
             desc:
-              tweak === 'temp'
+              (tweak === 'temp'
                 ? `${date} 这一天生效，那天过了就不再生效`
-                : `以后每个${WEEKDAY_TEXT[weekday - 1]}都按新的上`,
+                : `以后每个${WEEKDAY_TEXT[weekday - 1]}都按新的上`) +
+              (notified ? '，已发通知给被调到的老师（教务处）' : ''),
           })
         }
         setPicked([])
@@ -1811,6 +1910,7 @@ export default function CourseAdmin() {
               hardN={hardN}
               studentCheck={studentCheck}
               classes={classes}
+              slots={slots}
               openConflict={openConflict}
               onOpen={setOpenConflict}
               teacherName={teacherName}
@@ -2374,6 +2474,8 @@ type ConflictPanelProps = {
   hardN: number
   studentCheck: 'gray' | 'ok' | 'n/a'
   classes: Klass[]
+  /** 这一天的网格（`SuggestionBlock` 要按它取"那一格自己的钟点"） */
+  slots: DaySlot[]
   openConflict: string | null
   onOpen: (key: string | null) => void
   teacherName: (id: string | null) => string
@@ -2392,6 +2494,7 @@ function ConflictPanel({
   hardN,
   studentCheck,
   classes,
+  slots,
   openConflict,
   onOpen,
   teacherName,
@@ -2513,6 +2616,7 @@ function ConflictPanel({
                         klass={klass}
                         cells={cells}
                         classes={classes}
+                        slots={slots}
                         dayCells={dayCells}
                         onUse={(periods, kind) => onJump(klass.id, periods, kind)}
                       />
@@ -2560,6 +2664,7 @@ function SuggestionBlock({
   klass,
   cells,
   classes,
+  slots,
   dayCells,
   onUse,
 }: {
@@ -2567,6 +2672,8 @@ function SuggestionBlock({
   klass: Klass
   cells: DayCell[]
   classes: Klass[]
+  /** 这一天的网格（**空格子的钟点只从它取**） */
+  slots: DaySlot[]
   dayCells: () => Map<string, DayCell[]>
   /** 一键：把该选的两格选好（`kind` = 该用哪种换法：挪 = 整格换过去；对调 = 整格对调） */
   onUse: (periods: number[], kind: SwapKind) => void
@@ -2589,19 +2696,28 @@ function SuggestionBlock({
       return false
     }
 
-    /* ① 「挪」：同一天里**这个班空着**的时段 —— 就是网格上那几格**空格子**（第 1…9 节） */
+    /*
+     * ① 「挪」：同一天里**这个班空着**的时段 —— 就是网格上那几格**空格子**（第 1…9 节）。
+     *
+     * 🔴 这里**不再**用 `periodTime(p)` 去猜钟点（2026-10-13 修 ㊶）：
+     *    建议里写的"第 N 节"、和落地时写进临时层的那一格的 `start`，**必须是同一格** ——
+     *    `p` 是网格上的格位，`periodTime` 给的是**标准节次表**的钟点，两者在
+     *    "班上空着但时间表错开"的日子里会指向不同的格（实测：说"挪到第 6 节"，写的是 14:00，
+     *    而 14:00 那一格本来就有课 → 撞课没少、㊶ 红）。钟点**只从网格那一格取**（`slots`），
+     *    取不到（第 N 格还没摆出来）就不给这条建议 —— 宁可不建议，也不给一条落不了地的。
+     */
     for (let p = 1; p <= DAY_PERIODS; p++) {
       if (taken.has(p)) continue
-      /* 空格子的钟点取**标准节次表**（照 `预览-v3.html:1035` 的 `moveOptions`：p 就是第 p 节）；
-         ⚠️ 上限只能是 `DAY_PERIODS` —— 建议里写的"第 N 节"必须是网格上**真的摆着的那一格**，
-            否则一键选两格会选中一个不存在的格子（只选中一格 → 没有预览）。 */
-      const { start } = periodTime(p)
-      if (teacherBusyElsewhere(start)) continue
+      const slot = slots.find((s) => s.period === p)
+      if (!slot) continue
+      if (teacherBusyElsewhere(slot.start)) continue
       out.push({
         key: `move|${p}`,
         how: 'move',
         at: row.period,
         period: p,
+        start: slot.start,
+        end: slot.end,
         title: mine.subject,
         teacherId: tId,
         why: `那时这个班空着${tId ? '、这位老师也空' : ''}。`,
@@ -2613,11 +2729,15 @@ function SuggestionBlock({
     for (const c of cells) {
       if (c.period === row.period) continue
       if (tId && c.teacherId !== tId) continue
+      const slot = slots.find((s) => s.period === c.period)
+      if (!slot) continue
       out.push({
         key: `swap|${c.period}`,
         how: 'swap',
         at: row.period,
         period: c.period,
+        start: slot.start,
+        end: slot.end,
         title: mine.subject,
         teacherId: tId,
         why: `两节都是${tId ? '这位老师' : '这个班'}的课，整格对调完两边都不撞。`,
@@ -2626,7 +2746,7 @@ function SuggestionBlock({
     }
     return out.slice(0, 3)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [row, cells, classes, klass.id])
+  }, [row, cells, classes, klass.id, slots])
 
   if (!suggestions.length) {
     return (
