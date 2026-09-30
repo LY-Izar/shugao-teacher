@@ -322,6 +322,11 @@ const EXPECTED_FILES = [
   '127-course-temp-apply.png',
   '128-course-perm-gate.png',
   '129-course-conflicts.png',
+  // 🆕 2026-10-13「课程管理」第 5 轮（**整周视图**）：
+  //  130 = 点「整周」之后那张 **7 列（周一~周日）× N 行（这一周真的出现过的时段）** 的表 +
+  //        底部图例。默认仍然是「这一天」（核对流程的落点不许被挡住），所以这张必须**点一下**才有。
+  //  ⚠️ 加图必须登记：`EXPECTED_FILES` 是**集合相等**，不登记就会红（编号不参与比对）。
+  '130-course-week.png',
   // 🆕 2026-10-08（见 S8 那一节）：**「生成走班 → 班级页看名单」这条链**。
   //  110 = 本地演示模式下 `/classes` 上的走班班与那个 **0 人的班**：
   //        走班班那一行写「人数待读」（成员在 `class_members` 上，本地没有后端 → **不写 0 人**）；
@@ -12182,6 +12187,75 @@ await withLock(async () => {
         JSON.stringify((hint ?? '').trim()),
       )
 
+      /* ---------- ③b 🆕 2026-10-13 第 5 轮：**整周视图**（整周网格 / 视图切换 / 底部图例） ----------
+       * 为什么插在这里：这一段的日期已经被拨到 09-14（周一，演示数据里这一天有课），
+       * 所以下面"切换前后 `data-course-cell` 数量逐个相等"那条**数的是真数**，不是 0 == 0 的空等式。
+       * 🔴 这一段的最后必须**点回「这一天」** —— 后面 ④ 起还要靠 `data-course-mode="review"`
+       *    与「这一天」那一支的 DOM，不收回来就会把整节的后半段带红。
+       */
+      const viewDay = p.locator('[data-course-view="day"]')
+      const viewWeek = p.locator('[data-course-view="week"]')
+      const dayPressed = await viewDay.getAttribute('aria-pressed')
+      check(
+        dayPressed === 'true' && (await p.locator('[data-course-week-grid]').count()) === 0,
+        '🔴 S27-W1 课表默认看的是**「这一天」**（整周网格还没摆出来）—— 核对流程的落点不许被新视图挡住',
+        `[data-course-view="day"].aria-pressed=${JSON.stringify(dayPressed)} · [data-course-week-grid]=${await p.locator('[data-course-week-grid]').count()}`,
+      )
+      /* 切到整周**之前**先数一遍「这一天」的口径 —— 下面 W5 拿它做等式的一半 */
+      const cellBefore = await p.locator('[data-course-cell]').count()
+      const emptyBefore = await p.locator('[data-course-empty]').count()
+      await viewWeek.click()
+      await p.waitForTimeout(300)
+      const weekGridN = await p.locator('[data-course-week-grid]').count()
+      const headsN = await p.locator('[data-course-week-head]').count()
+      const wCellsN = await p.locator('[data-course-week]').count()
+      check(
+        weekGridN === 1 && headsN === 7 && wCellsN > 0 && wCellsN % 7 === 0,
+        '🔴 S27-W2 点「整周」→ 出**整周网格**：7 列（周一~周日）× N 行（这一周真的出现过的时段）—— 格子数必是 7 的整数倍（一行 7 格，一格不许多也不许少）',
+        `grid=${weekGridN} · 列表头=${headsN} · 格子=${wCellsN}（${wCellsN % 7 === 0 ? `${wCellsN / 7} 行` : '不是 7 的整数倍'}）`,
+      )
+      const wHasN = await p.locator('[data-course-week-cell]').count()
+      const wEmptyN = await p.locator('[data-course-week-empty]').count()
+      check(
+        wHasN > 0 && wHasN + wEmptyN === wCellsN,
+        '🔴 S27-W3 整周每一格**非此即彼**：「有课」挂 `data-course-week-cell`、空格挂 `data-course-week-empty` —— 两者之和必须**正好等于**格子总数（漏挂一格、或一格挂两个，都当场红）',
+        `有课=${wHasN} · 空=${wEmptyN} · 合计=${wHasN + wEmptyN} · 格子=${wCellsN}`,
+      )
+      const leakCell = await p.locator('[data-course-week-grid] [data-course-cell]').count()
+      const leakEmpty = await p.locator('[data-course-week-grid] [data-course-empty]').count()
+      check(
+        leakCell === 0 && leakEmpty === 0,
+        '🔴 S27-W4 **反向对照的正面**：整周网格里**一个 `data-course-cell` / `data-course-empty` 都没有** —— 那两个属性是「这一天摆得出几格」的口径，S27 ⑫/⑬ 靠 `.first()` / `.last()` 点它们；整周网格挂上去就会点到整周里去（把这一条反着改一次，W4 与 W5 必红）',
+        `整周里的 [data-course-cell]=${leakCell} · [data-course-empty]=${leakEmpty}`,
+      )
+      const cellAfter = await p.locator('[data-course-cell]').count()
+      const emptyAfter = await p.locator('[data-course-empty]').count()
+      check(
+        cellBefore === cellAfter && emptyBefore === emptyAfter,
+        '🔴 S27-W5 **切到整周之后，「这一天」的口径一格都没变**（切换前后的 `data-course-cell` / `data-course-empty` **逐个数相等**）—— 整周是**加**了一层视图，不是改了原来那一层',
+        `切换前 ${cellBefore}/${emptyBefore} → 切换后 ${cellAfter}/${emptyAfter}`,
+      )
+      const legendRaw = await p.locator('[data-course-legend]').textContent()
+      check(
+        (legendRaw ?? '').includes('临时调课') && (legendRaw ?? '').includes('周末没有课'),
+        '🔴 S27-W6 整周网格下面有**底部图例**：说清「有课 / 空 = 没课 / 临时调课（只这一天） / 撞课」，并且明说「周末没有课 —— 空格子就是没课，不是出错了」（**空格子不是出错**这件事必须写在屏上，不能靠用户猜）',
+        JSON.stringify((legendRaw ?? '').replace(/\s+/g, ' ').trim()),
+      )
+      await shot(p, 'S27：课程管理 · 整周视图（7 列 × 这一周出现过的时段 + 底部图例）', '130-course-week', {
+        full: true,
+        wait: 250,
+      })
+      await viewDay.click()
+      await p.waitForTimeout(300)
+      const backGridN = await p.locator('[data-course-week-grid]').count()
+      const backReviewN = await p.locator('[data-course-mode="review"]').count()
+      const backShowN = await p.locator('[data-course-show="all"]').count()
+      check(
+        backGridN === 0 && backReviewN === 1 && backShowN === 1,
+        '🔴 S27-W7 点回「这一天」→ 整周网格收起来、**核对那一块原样回来**（`data-course-mode="review"` 与「✓ 这 N 条教室里都会显示」都在）—— 两档之间来回切**不留残留**',
+        `week-grid=${backGridN} · review=${backReviewN} · show=${backShowN}`,
+      )
+
       /* ---------- ④ 两种模式**分得明显**（两张并排的影响范围卡 + 两句话都要有） ---------- */
       const scopeTemp = await p.locator('[data-scope="temp"]').textContent()
       const scopePerm = await p.locator('[data-scope="perm"]').textContent()
@@ -12642,6 +12716,28 @@ await withLock(async () => {
       await p.locator('[data-course-grade]').first().click()
       await p.locator('[data-course-class]').first().click()
       await p.waitForTimeout(400)
+      /*
+       * 🔴 **必须先把"这一笔改动管多久"拨回「临时调课」。**
+       *
+       * 上面 ⑳ 选过"永久"，而重选班级只清 `permAck`、**不清 `tweak`**
+       * （`CourseAdmin.tsx:1098`），所以这一刻模式还停在"永久"上。
+       *
+       * 而下面 ㊴ 那两条建议里，「把 物理 这节挪到 第 N 节」命中的是
+       * **一格有课 + 一格空位** —— 永久那一档**按设计就要拒**这一种：
+       * `schedule_items` 里没有"空课"那一行，整笔都不落，并显式说一句
+       * 「永久调课…做不到把一节腾空…把课挪到空位请用「临时调课」那一档」
+       * （`CourseAdmin.tsx:1000`）。
+       *
+       * 于是"点确认"要么点在一个 `disabled` 的钮上（超时 30 秒）、要么落不下去，
+       * 硬冲突自然 3 → 3。
+       *
+       * ⚠️ ㊶ 要量的是**建议是不是摆设**，不是永久那一档的闸门 ——
+       *    所以这里显式拨到临时那一档（`data-scope="temp"`，与 ⑩ 同一组按钮）。
+       * ⚠️ **"永久做不到腾空、并当场说清"是产品的正确行为，一个字没改**
+       *    （它的判据在 `CourseAdmin.tsx:1000`，不在这里）。
+       */
+      await p.locator('[data-scope="temp"]').click()
+      await p.waitForTimeout(250)
       /** 页面上"还剩几处硬冲突"——只在确认弹层里写着，这里按三段里 teacher/class 的条目数现数 */
       const hardCount = () =>
         p.evaluate(
@@ -12692,13 +12788,35 @@ await withLock(async () => {
       )
       await p.locator('[data-course-apply]').click()
       await p.waitForTimeout(320)
+      /* 🔴 确认**之前**先把它要确认的是哪一档读下来（弹层一关这个属性就没了） */
+      const confirmMode = await p
+        .locator('[data-course-confirm]')
+        .getAttribute('data-course-confirm')
+        .catch(() => null)
       await p.locator('[data-course-doconfirm]').click()
       await p.waitForTimeout(600)
       const hardAfter = await hardCount()
+      /*
+       * 🔴 把"这一刻屏上到底是什么"一起打进读数里 —— ㊶ 一直是红的，而"3 → 3"这一个数字
+       *    说不出是"根本没落"还是"落了但冲突没重算"。几样一起看才判得下去：
+       *    · `confirmMode` = 确认的是临时还是永久那一档（尾部残留模式是第一嫌疑）；
+       *    · `[data-course-note]` = 页面自己有没有说"没改成 / 为什么不改"（§三.5 不许静默）；
+       *    · 确认之后**选中的格**清掉没有（清了 = 那一下真的走到了处理函数末尾）。
+       */
+      const diag = await p.evaluate(() => ({
+        note: (document.querySelector('[data-course-note]')?.textContent ?? '(没有提示)')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 110),
+        picked: document.querySelectorAll('[data-course-day] [data-picked="1"]').length,
+        teacherCards: document.querySelectorAll('[data-course-conflict="teacher"]').length,
+        classCards: document.querySelectorAll('[data-course-conflict="class"]').length,
+        applyBar: document.querySelectorAll('[data-course-apply]').length,
+      }))
       check(
         hardAfter < hardBefore,
         '🔴 S27 ㊶ **照建议处理之后硬冲突真的降下来了**（照 v3 预览：实测 2 → 1）—— 建议不是摆设',
-        `处理前 ${hardBefore} 处 → 处理后 ${hardAfter} 处`,
+        `处理前 ${hardBefore} 处 → 处理后 ${hardAfter} 处 · 确认档=${JSON.stringify(confirmMode)} · 屏上提示=${JSON.stringify(diag.note)} · 确认后选中格=${diag.picked} · 拆开=${diag.teacherCards}/${diag.classCards}`,
       )
     })
 
@@ -12709,6 +12827,20 @@ await withLock(async () => {
         for (const c of crumbs.slice(-6)) console.log(`     · ${c}`)
       }
       if (e instanceof Error && e.stack) console.log(`\n${e.stack}`)
+      /*
+       * 🔴 **崩溃必须算失败。**
+       * 2026-10-13 实测到一次假绿：S27 尾部点了一个 `disabled` 的确认钮、超时 30 秒，
+       * 上面那段只把它**打印**出来，`failures` 一条没进 → 于是同一份输出里同时出现
+       * 「💥 脚本在第 S27…步异常中断」和「断言：通过 1284 条，失败 0 条 / 全部通过 ✅」，
+       * 退出码还是 0 —— **S27 ㊶（"照建议处理之后硬冲突真的降下来了"）从来没跑过，没人知道**。
+       * 只打印不算判据（§三.5 同一条：失败了要有人知道）。异常一律进 `failures`，
+       * 再由下面 `failures.length` 那一处把退出码打成 1。
+       */
+      failures.push(
+        `脚本在第「${currentStep}」步异常中断（后面的断言全都没跑）：${
+          (e instanceof Error ? e.message : String(e)).split('\n')[0]
+        }`,
+      )
     } finally {
       try {
         await browser?.close()

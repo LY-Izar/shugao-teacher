@@ -15,6 +15,7 @@ import {
   parseScheduleText,
   type ParsedScheduleItem,
 } from '../lib/scheduleParse'
+import { slotTextOf } from '../lib/stream'
 
 /**
  * 「课程管理」—— **行政管理页（`/manage`）里的第四张卡展开出来的那一段**。
@@ -99,6 +100,20 @@ type DaySlot = {
   start: string
   end: string
   cell: DayCell | null
+}
+
+/**
+ * 整周网格里的一节（**某一格 · 某一个时段的一件事**）。
+ * ⚠️ 与 `DayCell` 不是一回事：`DayCell` 是"这一天第几节"，这里的重点是**那个时段本身**
+ *    （整周网格的行由时段并出来，行号不表示第几节）。
+ */
+type WeekLesson = {
+  start: string
+  end: string
+  subject: string
+  teacherId: string | null
+  /** 这一节被**临时调课**盖过（只有"这一天"那一列可能为真） */
+  changed: boolean
 }
 
 /** 一天几节 —— 就是标准节次表的长度（9）；空格子的钟点也从这张表取 */
@@ -348,6 +363,11 @@ export default function CourseAdmin() {
   const [parsed, setParsed] = useState<ParsedScheduleItem[] | null>(null)
   /** 核对模式：「我核对过了」 */
   const [reviewed, setReviewed] = useState(false)
+  /**
+   * 班级课表看哪一档：`'day'` = 这一天（**默认** —— 核对流程走它）· `'week'` = 整周网格。
+   * ⚠️ 只影响这一块面板；下面的调课区不跟着变。
+   */
+  const [courseView, setCourseView] = useState<'day' | 'week'>('day')
   /** 一句话结果 / 拦下来的原因（**不许静默**） */
   const [note, setNote] = useState('')
   const [busy, setBusy] = useState(false)
@@ -725,6 +745,73 @@ export default function CourseAdmin() {
     for (const c of conflicts) out[c.kind].push(c)
     return out
   }, [conflicts])
+
+  /**
+   * 整周网格的列数据：第 `wd` 天这个班的课（**按 `start` 升序**）。
+   * ⚠️ 只有**不是这一天**的那几列用它 —— `wd === weekday` 那一列用 `slots`（见下）。
+   */
+  const weekCols = useMemo<ScheduleItem[][]>(() => {
+    const out: ScheduleItem[][] = []
+    for (let wd = 1; wd <= 7; wd++) {
+      out.push(rows.filter((r) => r.weekday === wd).sort((a, b) => a.start.localeCompare(b.start)))
+    }
+    return out
+  }, [rows])
+
+  /**
+   * 整周网格的列内容：第 `wd` 天这一列有哪几节。
+   * 🔴 「这一天」那一列用 `slots` —— 它叠过**临时调课**那一层（`changed` 就从这儿来）；
+   *    别的列用 `weekCols`（周课表本体）。
+   */
+  const weekLessons = useMemo<WeekLesson[][]>(() => {
+    const out: WeekLesson[][] = []
+    for (let wd = 1; wd <= 7; wd++) {
+      out.push(
+        wd === weekday
+          ? slots.flatMap((s) => {
+              const c = s.cell
+              return c
+                ? [
+                    {
+                      start: c.start,
+                      end: c.end,
+                      subject: c.subject,
+                      teacherId: c.teacherId,
+                      changed: c.changed,
+                    },
+                  ]
+                : []
+            })
+          : weekCols[wd - 1].map((r) => ({
+              start: r.start,
+              end: r.end,
+              subject: klass ? subjectOfTitle(r.title, klass.name) : r.title,
+              teacherId: r.teacherId ?? null,
+              changed: false,
+            })),
+      )
+    }
+    return out
+  }, [weekday, slots, weekCols, klass])
+
+  /**
+   * 整周网格的行 = **这一周这个班真的出现过的时段**（7 列所有 `start` 并起来、升序去重）。
+   * 🔴 行**不是**固定 9 节：周课表的钟点并不都在标准节次表上（演示那一批只有第 1 节碰得上），
+   *    按"第 N 节"硬摆会**写出错的钟点** —— 所以行标签一律由 `slotTextOf` 出
+   *    （它认得出标准节次时才补「（第 N 节）」）。
+   */
+  const weekRowStarts = useMemo<Array<{ start: string; end: string }>>(() => {
+    const ends = new Map<string, string>()
+    for (const list of weekLessons) {
+      for (const l of list) if (!ends.has(l.start)) ends.set(l.start, l.end)
+    }
+    return [...ends.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([start, end]) => ({ start, end }))
+  }, [weekLessons])
+
+  /** 这一天的撞课时刻（`conflicts` 本来只算这一天）；**读不到冲突时它是空的 → 一个角标都不挂** */
+  const conflictStarts = new Set(conflicts.map((c) => c.start))
 
   /**
    * 走班班**这一档查不查得了**（第③类）—— **三态硬不变量**：
@@ -1134,6 +1221,40 @@ export default function CourseAdmin() {
             head={`${klass.name} 的课表`}
             extra={
               <span className="flex items-center gap-2">
+                {/* 🔴 只在「这个班录过课表」时才摆这两档 —— 没课表时整周是一张全空的表，
+                    摆上去就是点了没反应（录入那一块仍然是唯一的入口）。 */}
+                {cap && cap.canManage && rows.length ? (
+                  <span className="flex items-center gap-1">
+                    {(
+                      [
+                        ['week', '整周'],
+                        ['day', '这一天'],
+                      ] as Array<['week' | 'day', string]>
+                    ).map(([v, label]) => {
+                      const on = courseView === v
+                      return (
+                        <button
+                          key={v}
+                          type="button"
+                          data-course-view={v}
+                          aria-pressed={on}
+                          onClick={() => setCourseView(v)}
+                          style={{
+                            padding: '3px 9px',
+                            borderRadius: 4,
+                            fontSize: 11.5,
+                            cursor: 'pointer',
+                            border: `1px solid ${on ? 'var(--color-accent)' : 'var(--color-line)'}`,
+                            background: on ? 'var(--color-accentsoft)' : 'var(--color-surface)',
+                            color: on ? 'var(--color-accentink)' : 'var(--color-ink2)',
+                          }}
+                        >
+                          {label}
+                        </button>
+                      )
+                    })}
+                  </span>
+                ) : null}
                 {rows.length ? (
                   <Tag tone="ok">已录 {rows.length} 节</Tag>
                 ) : (
@@ -1175,6 +1296,237 @@ export default function CourseAdmin() {
               rows.length ? (
                 /* ---------------- 核对模式：录过了 ---------------- */
                 <div data-course-mode="review">
+                  {/*
+                    🔴 这一层（`data-course-mode="review"`）**两档下都在** —— 它说的是"这个班录过课表"。
+                       「这一天」那一支与改动前**逐字相同**（`data-course-show="all"` 与 `data-course-review`
+                       都在它里面，那是门禁锚点）；换成「整周」只是把它换成下面这张周表。
+                  */}
+                  {courseView === 'week' ? (
+                    <>
+                      {/*
+                        整周网格：行 = **这一周真的出现过的时段**（不是固定 9 节，见 `weekRowStarts`）
+                        · 列 = 周一~周日。
+                        🔴 数据格挂 `data-course-week-cell` / `data-course-week-empty`，
+                           **绝不挂 `data-course-cell` / `data-course-empty`** —— 后两个是
+                           「这一天摆得出几格」的口径（见下面调课区那段注释），挂上去那几条读数会变假。
+                      */}
+                      <div style={{ overflowX: 'auto' }}>
+                        <table
+                          data-course-week-grid="1"
+                          style={{ width: '100%', minWidth: 620, borderCollapse: 'collapse' }}
+                        >
+                          <thead>
+                            <tr>
+                              <th
+                                style={{
+                                  width: 78,
+                                  textAlign: 'left',
+                                  padding: '4px 4px',
+                                  borderBottom: '1px solid var(--color-line2)',
+                                }}
+                              />
+                              {WEEKDAY_TEXT.map((label, i) => {
+                                const wd = i + 1
+                                /* 「没有课」= 这一列**一节都没有**（这一天那一列看叠过临时层的那一份） */
+                                const none = weekLessons[wd - 1].length === 0
+                                return (
+                                  <th
+                                    key={wd}
+                                    data-course-week-head={wd}
+                                    style={{
+                                      padding: '4px 4px',
+                                      borderBottom: '1px solid var(--color-line2)',
+                                      fontSize: 11.5,
+                                      color: none ? 'var(--color-ink4)' : 'var(--color-ink2)',
+                                    }}
+                                  >
+                                    {label}
+                                    <span
+                                      style={{
+                                        display: 'block',
+                                        fontSize: 10.5,
+                                        fontWeight: 400,
+                                        color: 'var(--color-ink4)',
+                                      }}
+                                    >
+                                      {none ? '没有课' : '每周'}
+                                    </span>
+                                  </th>
+                                )
+                              })}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {weekRowStarts.map((row, i) => {
+                              /* 属性值那个 `p` = **行的序号（1 起）**；行本身是"这一周真的上过的时段" */
+                              const p = i + 1
+                              return (
+                                <tr key={row.start}>
+                                  <td
+                                    style={{
+                                      padding: '4px 4px',
+                                      borderBottom: '1px solid var(--color-line)',
+                                      fontSize: 11,
+                                      color: 'var(--color-ink3)',
+                                      whiteSpace: 'nowrap',
+                                    }}
+                                  >
+                                    {slotTextOf(row.start, row.end)}
+                                  </td>
+                                  {WEEKDAY_TEXT.map((_, j) => {
+                                    const wd = j + 1
+                                    /* 这一格里**这一时段**的课 —— 同一时刻可能不止一节（② 类撞课），一节都不许丢 */
+                                    const here = weekLessons[wd - 1].filter(
+                                      (l) => l.start === row.start,
+                                    )
+                                    /*
+                                     * 🔴 撞课只有「这一天」那一列可能撞（别的列没有"这一天"这件事）；
+                                       口径用开始时间（与冲突区、与「这一天」那一格**同一把钥匙**）——
+                                       读不到冲突（三态里的"没结论"）时 `conflictStarts` 是空的 → 什么都不挂。
+                                     */
+                                    const hit = wd === weekday && conflictStarts.has(row.start)
+                                    return (
+                                      <td
+                                        key={wd}
+                                        data-course-week={`${wd}-${p}`}
+                                        style={{
+                                          padding: 3,
+                                          borderBottom: '1px solid var(--color-line)',
+                                          borderLeft: '1px solid var(--color-line)',
+                                          verticalAlign: 'top',
+                                        }}
+                                      >
+                                        <div
+                                          {...(here.length
+                                            ? { 'data-course-week-cell': `${wd}-${p}` }
+                                            : { 'data-course-week-empty': `${wd}-${p}` })}
+                                          style={{
+                                            minHeight: 32,
+                                            padding: '4px 5px',
+                                            borderRadius: 4,
+                                            border: `1px ${here.length ? 'solid' : 'dashed'} ${
+                                              here.length
+                                                ? 'var(--color-line2)'
+                                                : 'var(--color-line)'
+                                            }`,
+                                            background: here.length
+                                              ? 'var(--color-surface2)'
+                                              : undefined,
+                                          }}
+                                        >
+                                          {here.length ? (
+                                            here.map((l, k) => (
+                                              <div
+                                                key={`${l.start}-${k}`}
+                                                style={
+                                                  k
+                                                    ? {
+                                                        marginTop: 4,
+                                                        paddingTop: 4,
+                                                        borderTop: '1px solid var(--color-line)',
+                                                      }
+                                                    : undefined
+                                                }
+                                              >
+                                                <span
+                                                  style={{
+                                                    display: 'block',
+                                                    fontSize: 11.5,
+                                                    color: 'var(--color-ink2)',
+                                                  }}
+                                                >
+                                                  {l.subject}
+                                                </span>
+                                                <span
+                                                  style={{
+                                                    display: 'block',
+                                                    fontSize: 10.5,
+                                                    color: 'var(--color-ink3)',
+                                                  }}
+                                                >
+                                                  {teacherName(l.teacherId)}
+                                                </span>
+                                                {/* 「只这一天」与「撞课」是两件事：同时成立就两个都挂 */}
+                                                {l.changed ? <Tag tone="warn">仅此一天</Tag> : null}
+                                                {hit ? <Tag tone="bad">撞课</Tag> : null}
+                                              </div>
+                                            ))
+                                          ) : (
+                                            /* 没课的那一格：照预览 —— 不说话、不挂任何角标 */
+                                            <span
+                                              style={{ fontSize: 11, color: 'var(--color-ink3)' }}
+                                            >
+                                              空
+                                            </span>
+                                          )}
+                                        </div>
+                                      </td>
+                                    )
+                                  })}
+                                </tr>
+                              )
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                      <div
+                        data-course-legend="1"
+                        style={{
+                          display: 'flex',
+                          flexWrap: 'wrap',
+                          alignItems: 'center',
+                          gap: '4px 12px',
+                          marginTop: 9,
+                          fontSize: 11,
+                          color: 'var(--color-ink2)',
+                        }}
+                      >
+                        <span className="flex items-center gap-1">
+                          <i
+                            style={{
+                              flexShrink: 0,
+                              width: 10,
+                              height: 10,
+                              borderRadius: 2,
+                              background: 'var(--color-surface2)',
+                              border: '1px solid var(--color-line2)',
+                            }}
+                          />
+                          有课
+                        </span>
+                        <span className="flex items-center gap-1">
+                          <i
+                            style={{
+                              flexShrink: 0,
+                              width: 10,
+                              height: 10,
+                              borderRadius: 2,
+                              border: '1px dashed var(--color-line)',
+                            }}
+                          />
+                          空 = 没课
+                        </span>
+                        <span className="flex items-center gap-1">
+                          <i
+                            style={{
+                              flexShrink: 0,
+                              width: 10,
+                              height: 10,
+                              borderRadius: 2,
+                              background: 'var(--color-warnsoft)',
+                              border: '1px solid var(--color-warn)',
+                            }}
+                          />
+                          临时调课（只这一天）
+                        </span>
+                        <Tag tone="bad">撞课</Tag>
+                        <span style={{ color: 'var(--color-ink4)' }}>
+                          周末没有课 —— 空格子就是没课，不是出错了
+                        </span>
+                      </div>
+                    </>
+                  ) : (
+                    <>
                   <div
                     data-course-show="all"
                     style={{ fontSize: 12, color: 'var(--color-okink)', lineHeight: 1.7, marginBottom: 8 }}
@@ -1204,6 +1556,8 @@ export default function CourseAdmin() {
                       一条条对着看，看的是教室里现在显示的那一份。
                     </span>
                   </div>
+                    </>
+                  )}
                 </div>
               ) : (
                 /* ---------------- 录入模式：还没录过 ---------------- */
