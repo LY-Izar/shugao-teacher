@@ -12195,24 +12195,30 @@ await withLock(async () => {
        */
       const viewDay = p.locator('[data-course-view="day"]')
       const viewWeek = p.locator('[data-course-view="week"]')
-      const dayPressed = await viewDay.getAttribute('aria-pressed')
+      /*
+       * 🔴 **默认值 2026-09-30 从「这一天」改成「整周」** —— 用户实测反馈「怎么还是这个界面」：
+       *    点开一个班看到的是一列逐条列表（= 「这一天」那一档），而「整周」那颗按钮长在
+       *    这块面板的**标题行**上，滚动之后根本看不见 →
+       *    "整周视图已经做完了"这件事在屏上完全体现不出来（一个看不见的效果 = 白做）。
+       *    ⚠️ 期望值是**跟着产品口径变的，不是为了让门禁变绿**：
+       *      原来那条钉的是"默认是这一天"，现在钉的是"默认就是整周、进门第一眼就看得见"。
+       */
+      const weekPressed = await viewWeek.getAttribute('aria-pressed')
+      const gridOnOpen = await p.locator('[data-course-week-grid]').count()
       check(
-        dayPressed === 'true' && (await p.locator('[data-course-week-grid]').count()) === 0,
-        '🔴 S27-W1 课表默认看的是**「这一天」**（整周网格还没摆出来）—— 核对流程的落点不许被新视图挡住',
-        `[data-course-view="day"].aria-pressed=${JSON.stringify(dayPressed)} · [data-course-week-grid]=${await p.locator('[data-course-week-grid]').count()}`,
+        weekPressed === 'true' && gridOnOpen === 1,
+        '🔴 S27-W1 课表**点开一个班就是「整周」**（整周网格直接摆出来，不用先找到那颗按钮）',
+        `[data-course-view="week"].aria-pressed=${JSON.stringify(weekPressed)} · [data-course-week-grid]=${gridOnOpen}`,
       )
-      /* 切到整周**之前**先数一遍「这一天」的口径 —— 下面 W5 拿它做等式的一半 */
+      /* 切走**之前**先数一遍调课区那一层的口径 —— 下面 W5 拿它做等式的一半 */
       const cellBefore = await p.locator('[data-course-cell]').count()
       const emptyBefore = await p.locator('[data-course-empty]').count()
-      await viewWeek.click()
-      await p.waitForTimeout(300)
-      const weekGridN = await p.locator('[data-course-week-grid]').count()
       const headsN = await p.locator('[data-course-week-head]').count()
       const wCellsN = await p.locator('[data-course-week]').count()
       check(
-        weekGridN === 1 && headsN === 7 && wCellsN > 0 && wCellsN % 7 === 0,
-        '🔴 S27-W2 点「整周」→ 出**整周网格**：7 列（周一~周日）× N 行（这一周真的出现过的时段）—— 格子数必是 7 的整数倍（一行 7 格，一格不许多也不许少）',
-        `grid=${weekGridN} · 列表头=${headsN} · 格子=${wCellsN}（${wCellsN % 7 === 0 ? `${wCellsN / 7} 行` : '不是 7 的整数倍'}）`,
+        headsN === 7 && wCellsN > 0 && wCellsN % 7 === 0,
+        '🔴 S27-W2 整周网格：7 列（周一~周日）× N 行（这一周真的出现过的时段）—— 格子数必是 7 的整数倍（一行 7 格，一格不许多也不许少）',
+        `列表头=${headsN} · 格子=${wCellsN}（${wCellsN % 7 === 0 ? `${wCellsN / 7} 行` : '不是 7 的整数倍'}）`,
       )
       const wHasN = await p.locator('[data-course-week-cell]').count()
       const wEmptyN = await p.locator('[data-course-week-empty]').count()
@@ -12227,13 +12233,6 @@ await withLock(async () => {
         leakCell === 0 && leakEmpty === 0,
         '🔴 S27-W4 **反向对照的正面**：整周网格里**一个 `data-course-cell` / `data-course-empty` 都没有** —— 那两个属性是「这一天摆得出几格」的口径，S27 ⑫/⑬ 靠 `.first()` / `.last()` 点它们；整周网格挂上去就会点到整周里去（把这一条反着改一次，W4 与 W5 必红）',
         `整周里的 [data-course-cell]=${leakCell} · [data-course-empty]=${leakEmpty}`,
-      )
-      const cellAfter = await p.locator('[data-course-cell]').count()
-      const emptyAfter = await p.locator('[data-course-empty]').count()
-      check(
-        cellBefore === cellAfter && emptyBefore === emptyAfter,
-        '🔴 S27-W5 **切到整周之后，「这一天」的口径一格都没变**（切换前后的 `data-course-cell` / `data-course-empty` **逐个数相等**）—— 整周是**加**了一层视图，不是改了原来那一层',
-        `切换前 ${cellBefore}/${emptyBefore} → 切换后 ${cellAfter}/${emptyAfter}`,
       )
       const legendRaw = await p.locator('[data-course-legend]').textContent()
       check(
@@ -12252,9 +12251,19 @@ await withLock(async () => {
       const backShowN = await p.locator('[data-course-show="all"]').count()
       check(
         backGridN === 0 && backReviewN === 1 && backShowN === 1,
-        '🔴 S27-W7 点回「这一天」→ 整周网格收起来、**核对那一块原样回来**（`data-course-mode="review"` 与「✓ 这 N 条教室里都会显示」都在）—— 两档之间来回切**不留残留**',
+        '🔴 S27-W7 点「这一天」→ 整周网格收起来、**核对那一块原样出现**（`data-course-mode="review"` 与「✓ 这 N 条教室里都会显示」都在）—— 核对流程一条没少，只是不再挡在进门第一眼',
         `week-grid=${backGridN} · review=${backReviewN} · show=${backShowN}`,
       )
+      const cellAfter = await p.locator('[data-course-cell]').count()
+      const emptyAfter = await p.locator('[data-course-empty]').count()
+      check(
+        cellBefore === cellAfter && emptyBefore === emptyAfter,
+        '🔴 S27-W5 **切到「这一天」之后，调课区那一层一格都没变**（切换前后的 `data-course-cell` / `data-course-empty` **逐个数相等**）—— 整周是**加**了一层视图，不是改了原来那一层',
+        `切换前（整周）${cellBefore}/${emptyBefore} → 切换后（这一天）${cellAfter}/${emptyAfter}`,
+      )
+      /* 切回「整周」= 进门第一眼那一档，后面的段落从这里往下走 */
+      await viewWeek.click()
+      await p.waitForTimeout(300)
 
       /* ---------- ④ 两种模式**分得明显**（两张并排的影响范围卡 + 两句话都要有） ---------- */
       const scopeTemp = await p.locator('[data-scope="temp"]').textContent()

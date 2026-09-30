@@ -364,10 +364,20 @@ export default function CourseAdmin() {
   /** 核对模式：「我核对过了」 */
   const [reviewed, setReviewed] = useState(false)
   /**
-   * 班级课表看哪一档：`'day'` = 这一天（**默认** —— 核对流程走它）· `'week'` = 整周网格。
+   * 班级课表看哪一档：`'week'` = 整周网格（**默认**）· `'day'` = 这一天（核对流程走它）。
+   *
+   * 🔴 **默认值 2026-09-30 从 `'day'` 改成 `'week'`** —— 用户实测反馈：
+   *    「怎么还是这个界面」—— 点开一个班看到的是一列逐条列表（= 「这一天」那一档），
+   *    「整周」那颗按钮长在这块面板的**标题行**上，而他滚动之后**根本看不见那颗按钮**，
+   *    于是"整周视图已经做完了"这件事在屏上完全体现不出来（一个看不见的效果 = 白做）。
+   *    → 第一版把默认放成 `'day'` 是**照 `预览-v3` 的默认抄的**，
+   *      但那个默认在预览里没有代价（预览进去就是网格），在实装里有代价（多一屏列表 + 按钮在视野外）。
+   *
    * ⚠️ 只影响这一块面板；下面的调课区不跟着变。
+   * ⚠️ `data-course-mode="review"` 那一层**两档下都在** —— 换到「这一天」就是「✓ 这 N 条教室里都会显示」
+   *    +「我核对过了」那一块，核对流程一条没少，只是不再挡在进门第一眼。
    */
-  const [courseView, setCourseView] = useState<'day' | 'week'>('day')
+  const [courseView, setCourseView] = useState<'day' | 'week'>('week')
   /** 一句话结果 / 拦下来的原因（**不许静默**） */
   const [note, setNote] = useState('')
   const [busy, setBusy] = useState(false)
@@ -879,9 +889,21 @@ export default function CourseAdmin() {
     return m
   }
 
+  /**
+   * 认出来的老师姓名 —— **认不出返回 `null`**。
+   * 🔴 **绝不把 id 本身当名字返回**：2026-09-30 用户实测（「为什么周三的课下面有一堆乱码」）——
+   *    真实数据里周三那几行的 `teacher_id` 是 UUID，而这一页手上只有一份**演示用的**老师名册，
+   *    认不出 → 旧写法 `?? id` 把 `bedabab0-7cf1-4142-83d1-42ccbd23f493` 原样印到了屏上。
+   *    那是内部标识，不是给老师看的字（§七 文案纪律），而且看起来就是乱码。
+   *    ⚠️ 真实模式要显示姓名，得有一份可读的 `teachers` 名册（现在只有"读我自己那一行"，
+   *      `remote.ts:1551`）—— **登记为缺口**，本轮只做到"不把 id 打到屏上"。
+   */
+  const teacherOf = (id: string | null): string | null => (id ? (DEMO_TEACHER_NAMES.get(id) ?? null) : null)
+
+  /** 屏上那一句（认不出时说"没读到"，**不说 id**） */
   const teacherName = (id: string | null): string => {
     if (!id) return '没定老师'
-    return DEMO_TEACHER_NAMES.get(id) ?? id
+    return teacherOf(id) ?? '老师名字没读到'
   }
 
   /**
@@ -1437,15 +1459,25 @@ export default function CourseAdmin() {
                                                 >
                                                   {l.subject}
                                                 </span>
-                                                <span
-                                                  style={{
-                                                    display: 'block',
-                                                    fontSize: 10.5,
-                                                    color: 'var(--color-ink3)',
-                                                  }}
-                                                >
-                                                  {teacherName(l.teacherId)}
-                                                </span>
+                                                {/*
+                                                 * 🔴 这一行**只在真的认得出姓名时**才印（`teacherOf`）。
+                                                 *    两个原因，都是实测出来的：
+                                                 *    ① **id 一律不上屏**（认不出就什么都不印，别印 UUID）；
+                                                 *    ② 真实数据的 `teacher_id` 常常是空的，而**标题那一行里已经带着姓名**
+                                                 *       （`高二4班 英语 郭钰峰`）—— 这时再补一句「没定老师 / 名字没读到」，
+                                                 *       就是**同一格上自相矛盾**（用户 2026-09-30 截图里周一那几格正是这样）。
+                                                 */}
+                                                {teacherOf(l.teacherId) ? (
+                                                  <span
+                                                    style={{
+                                                      display: 'block',
+                                                      fontSize: 10.5,
+                                                      color: 'var(--color-ink3)',
+                                                    }}
+                                                  >
+                                                    {teacherOf(l.teacherId)}
+                                                  </span>
+                                                ) : null}
                                                 {/* 「只这一天」与「撞课」是两件事：同时成立就两个都挂 */}
                                                 {l.changed ? <Tag tone="warn">仅此一天</Tag> : null}
                                                 {hit ? <Tag tone="bad">撞课</Tag> : null}
