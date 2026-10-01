@@ -1,0 +1,28 @@
+{
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.functions.tsbuildinfo",
+    "target": "es2023",
+    "lib": ["ES2023"],
+    "types": ["@cloudflare/workers-types"],
+    "skipLibCheck": true,
+
+    /* Bundler mode（functions 里是 './_lib/supa' 这种无扩展名相对导入） */
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+
+    /* Linting（照 tsconfig.app.json 那一组，另加 strict —— functions 运行在 Worker 上，
+       Request/Response/ExecutionContext/caches 这些全局来自 @cloudflare/workers-types；
+       ⚠️ 这些文件零 Node API（全仓查过），所以 types 里不放 node —— 放了反而注入
+       undici 的 fetch/Request 与 workers-types 打架 */
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["functions"]
+}

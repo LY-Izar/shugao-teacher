@@ -239,7 +239,7 @@ async function inflateRaw(bytes: Uint8Array): Promise<string | null> {
   if (!DS) return null
   try {
     const ds = new DS('deflate-raw') as { readable: ReadableStream; writable: WritableStream }
-    const stream = new Blob([bytes as unknown as BlobPart]).stream().pipeThrough(
+    const stream = new Blob([bytes]).stream().pipeThrough(
       ds as unknown as ReadableWritablePair<Uint8Array, Uint8Array>,
     )
     const text = await new Response(stream).text()

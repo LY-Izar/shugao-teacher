@@ -539,6 +539,8 @@ export async function onRequestPost(context: {
       503,
     )
   }
+  /* 守卫之后键已确定存在；落成 const 是为了 `rollback` 闭包 —— TS 不把属性收窄带进闭包 */
+  const serviceKey: string = env.SUPABASE_SERVICE_ROLE_KEY
   if (!baseUrl(env) || !anonKey(env)) {
     return json(
       {
@@ -702,8 +704,8 @@ export async function onRequestPost(context: {
       await fetch(`${baseUrl(env)}/auth/v1/admin/users/${uid}`, {
         method: 'DELETE',
         headers: {
-          apikey: env.SUPABASE_SERVICE_ROLE_KEY,
-          Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+          apikey: serviceKey,
+          Authorization: `Bearer ${serviceKey}`,
         },
       })
       return json({ status: 'error', message: `${message}（已回滚，账号没留下）`, detail }, status)
