@@ -10625,3 +10625,74 @@ create policy schedule_perm_changes_read on schedule_perm_changes for select to 
 --  -- select public.purge_expired_schedule_changes();
 -- ============================================================
 
+-- ============================================================
+-- §39 函数执行权限收口（2026-10-01 安全加固 A8）
+-- ------------------------------------------------------------
+-- 背景：`create function` 的默认是 **EXECUTE to PUBLIC** —— 也就是说
+--   **只要没显式 revoke，anon（未登录的人）也能调它**。本项目的判据函数当年只写了
+--   `grant … to authenticated`、漏了 revoke；而 `promote_grades` / `grade_delete` /
+--   `write_student_subject` 这些**只该由 service_role 调的写入口**更是连 grant 都没有、
+--   纯靠 PUBLIC 默认值活着 ⇒ **anon 对它们的可达面比原先判断的更大**。
+--   判据读了 `auth.uid()` 恒 false 所以不要紧，**但写入口不是判据** ——
+--   那批必须在数据库层就够不着（PostgREST 对 anon 暴露 public schema）。
+--
+-- 做法（**规则式，不是一刀切**）：只把 `security definer` 且**不是触发器**的函数
+--   （当前 105 个）的 EXECUTE 从 `public, anon` 收回，逐条 `format` 生成。
+--   **非 definer 函数与触发器函数一律不碰**：前者是纯函数 / 序列号工具（它们的数据面
+--   已经由"表权限 + RLS"兜住），后者由系统调用、不查 EXECUTE。
+--
+-- 🔴 **不许写 `revoke execute on all functions …`**：那会把"没有显式 grant"的函数对
+--   `authenticated` / `service_role` **一起断供**，后果两条：
+--     ① 客户端 RPC 入口当场挂（`student_subject_check` 是其中一个，它靠 PUBLIC 默认值）；
+--     ② 服务端拿 service_role 调的 §29 写入口（`promote_grades` / `grade_backup*` /
+--        `grade_delete` / `write_student_subject` …）**门禁里测不到、直接在线上炸**。
+--   （2026-10-01 第一版就是这么写的，`grade-checks` K3 当场红 —— 下面这段规则是那次的代价。）
+--
+-- 🔴 三条必须跟着它、否则会咬人的事：
+--   ① **唯一给 anon 的例外**：`report_frontend_error()` 是**故意**给 anon 的
+--      （登录页 / 教室端 / `hydrate()` 失败这三个现场都没有会话，恰恰最该报上来）。
+--      它的限流与字段截断都在函数体里（§24.2），所以下面**再 grant 回来一次**。
+--      ⚠️ 顺序讲究：先 revoke、再单独 grant —— 反过来会被 revoke 掉。
+--   ② **裸版判据要给 `authenticated`**：`can_edit_student_subject(uuid)` 原来**只靠 PUBLIC 默认值**
+--      （全文件只有它这一个是要在 RLS 策略里用的，`schema.sql:6269-6270` / `:9012`）——
+--      一 revoke PUBLIC，那两条策略就会当场 `permission denied for function`。
+--      所以这里显式补一条 grant（**策略里被调用的函数必须有 EXECUTE**，这条是硬规矩）。
+--   ③ **service_role 要显式补回**：带**角色存在性守卫**全量 grant 一次 —— Supabase 上
+--      一定有 `service_role`；门禁的替身库（PGlite）里没有这个角色 ⇒ 自动跳过、不报错。
+--      给 service_role 全量不会撤销任何既有设计：历史那些 revoke 只针对
+--      `public` / `anon` / `authenticated` 三个角色。
+--
+-- ⚠️ `authenticated` 的其余 grant 一个都不动 —— 那 73 条**故意 revoke** 的
+--   （`*_for` 系列、三个写入口）依旧保持 revoked。
+-- ============================================================
+
+do $$
+declare
+  r record;
+begin
+  for r in
+    select p.oid::regprocedure as sig
+      from pg_proc p
+      join pg_namespace n on n.oid = p.pronamespace
+     where n.nspname = 'public'
+       and p.prosecdef
+       and p.prorettype <> 'trigger'::regtype
+  loop
+    execute format('revoke execute on function %s from public, anon', r.sig);
+  end loop;
+end $$;
+
+grant execute on function public.can_edit_student_subject(uuid) to authenticated;
+
+grant execute on function public.report_frontend_error(
+  text, text, text, text, text, text, text, text
+) to anon;
+
+do $$
+begin
+  if exists (select 1 from pg_roles where rolname = 'service_role') then
+    execute 'grant execute on all functions in schema public to service_role';
+  end if;
+end $$;
+
+

@@ -12,12 +12,14 @@
  * 请求先到 Cloudflare（自己的域名没被拦），由这里原样转发给 Supabase。
  * 好处是**对任何网络、任何设备都生效** —— 不用给手机、教室机器逐台配代理。
  *
- * 三个必须做对的地方（都是踩过的坑）：
+ * 四个必须做对的地方（都是踩过的坑）：
  *  ① 原样返回上游响应，**绝不要读它的 body** —— 一读就会解压，而
  *     `content-encoding` / `content-length` 还是上游那一份，浏览器解析会失败。
  *  ② 要保留 `Upgrade` 头，否则 Realtime 的 WebSocket 握不上手。
  *     握不上也不致命：App 里有轮询兜底，呼叫会晚几秒到，不是收不到。
  *  ③ 上游地址写死成常量 —— 这样它**不是开放代理**，别人拿不去当跳板。
+ *  ④ 🆕 **A7（2026-10-01 安全加固）**：路径按 `ALLOWED_PREFIXES` 收窄、
+ *     并把客户端可伪造的 IP 类头抹掉（`STRIP_HEADERS`）—— 理由见那两处常量。
  *
  * 部署：`<项目根>/functions/api/sb/[[path]].ts`，推 GitHub 后 Cloudflare 自动带上，
  * 和已有的 `api/ocr.ts`、`api/classroom-account.ts` 一样，不需要额外工具。
@@ -27,6 +29,51 @@ const UPSTREAM = 'https://gwdyiwopiymzqjnmkiou.supabase.co'
 
 /** 前缀要去掉：`/api/sb/rest/v1/classes` → 上游 `/rest/v1/classes` */
 const PREFIX = '/api/sb'
+
+/**
+ * 只放行 Supabase 的这五段（2026-10-01 安全加固 A7）—— 其余一律 404。
+ *
+ * 为什么要有名单：这条中转**对全世界开放**（谁都能打 `/api/sb/...`），
+ * 地址虽然写死成我们的项目、当不了跳板，但"什么都能转"意味着上游每一寸面
+ * 都暴露在这条路上。前端只用得到这五段，别的一个也不放。
+ * ⚠️ 加新功能如果打不开，先来这里看是不是少了一段（错误是 404 + 一句中文）。
+ */
+const ALLOWED_PREFIXES = ['/auth/v1/', '/rest/v1/', '/storage/v1/', '/realtime/v1/', '/functions/v1/']
+
+/**
+ * 转发前**删掉**这些头（A7 的后半条）。
+ *
+ * 为什么：客户端可以自己塞 `x-forwarded-for` / `cf-connecting-ip` 这类
+ * "告诉服务端我是谁"的头。上游 GoTrue 的限流**按来源 IP 计数** ——
+ * 攻击者每换一个假 IP 就等于换一只配额桶，登录爆破的限流当场失效。
+ * 这些头本来就该由边缘（Cloudflare）负责填，客户端那一份一律不留。
+ *
+ * ⚠️ 不删 `host`：它由目标 URL 决定，Workers 里本来也写不进去。
+ * ⚠️ 不删 `apikey` / `authorization` / `prefer` / `range` / `content-*` / `sec-websocket-*`：
+ *    那些是 supabase-js 正常要用、也是上游真正在看的头。
+ */
+const STRIP_HEADERS = [
+  'cf-connecting-ip',
+  'cf-connecting-ipv6',
+  'cf-ipcountry',
+  'cf-ray',
+  'cf-worker',
+  'x-real-ip',
+  'x-forwarded-for',
+  'x-forwarded-host',
+  'x-forwarded-proto',
+  'x-forwarded-port',
+  'forwarded',
+  'sb-forwarded-for',
+  'true-client-ip',
+  'x-client-ip',
+  'x-cluster-client-ip',
+]
+
+/** `/auth/v1` 与 `/auth/v1/` 都算数（supabase-js 两种都发） */
+function allowedPath(rest: string): boolean {
+  return ALLOWED_PREFIXES.some((p) => rest === p.slice(0, -1) || rest.startsWith(p))
+}
 
 type Ctx = {
   request: Request
@@ -39,15 +86,42 @@ export async function onRequest(context: Ctx): Promise<Response> {
 
   // 去掉前缀拼到上游。search 原样保留 —— supabase-js 全靠它传参（select/eq/order…）
   const rest = url.pathname.startsWith(PREFIX) ? url.pathname.slice(PREFIX.length) : url.pathname
+
+  // 不在名单里的路径直接谢客（见 ALLOWED_PREFIXES）。**不发上游**、也不泄露上游地址。
+  if (!allowedPath(rest)) {
+    return new Response(
+      JSON.stringify({
+        error: 'not_found',
+        error_description: '这个接口不在这条中转的名单里。',
+        message: '这个接口不在这条中转的名单里。',
+      }),
+      {
+        status: 404,
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Cache-Control': 'no-store',
+        },
+      },
+    )
+  }
+
   const target = `${UPSTREAM}${rest}${url.search}`
 
   /*
-   * `new Request(target, request)` 会把 method / headers / body 一起带过去，
+   * `new Request(target, …)` 会把 method / headers / body 一起带过去，
    * 包括 `Upgrade: websocket`。host 由目标 URL 决定，不用手动删。
+   * 🆕 A7：headers 里先抹掉客户端可伪造的 IP 类头（见 STRIP_HEADERS）。
    */
+  const headers = new Headers(request.headers)
+  for (const h of STRIP_HEADERS) headers.delete(h)
+
+  const init: RequestInit = { method: request.method, headers }
+  /* GET / HEAD 没有 body；其余（POST/PUT/PATCH/DELETE）原样带过去 */
+  if (request.method !== 'GET' && request.method !== 'HEAD') init.body = request.body
+
   let upstream: Response
   try {
-    upstream = await fetch(new Request(target, request))
+    upstream = await fetch(new Request(target, init))
   } catch (e) {
     /*
      * 上游连不上时，要返回**Supabase 那份错误结构**（error / error_description），

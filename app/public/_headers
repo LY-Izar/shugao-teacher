@@ -1,0 +1,24 @@
+# 安全响应头（2026-10-01 安全加固 A3）
+# ------------------------------------------------------------
+# ⚠️ 两条必须知道的事：
+#  ① 这个文件里的头**只作用于静态资源**（`index.html`、`/assets/*`、图标…）。
+#     **Functions 生成的响应不吃它** —— `/api/*` 那部分的头在
+#     `app/functions/api/_middleware.ts` 里加（两处都要，少一处就等于没做）。
+#  ② `script-src` 里那个 sha256 是 `app/index.html` 里那段**内联主题脚本**的哈希
+#     （首帧之前写 `data-theme` / `data-accent` 的那一段）。
+#     🔴 **改那段脚本就必须同步改这里** —— `nav-checks` 的 D14 盯着这个配对，
+#        不一致当场变红（不盯的话，改了脚本没人会发现主题首帧悄悄坏了）。
+#
+# HSTS 先只给 1 天：它一旦被浏览器收下就**很难回退**（缓存期内 http 一律不许用），
+# 稳定一段时间之后再升到 `max-age=31536000; includeSubDomains`。
+#
+# `style-src` 必须带 'unsafe-inline'：全站大量 React 内联 `style="…"`。
+# `img-src` 要留 `data:`（图标内联）与 `blob:`（本地文件预览）。
+
+/*
+  X-Frame-Options: DENY
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=(), document-domain=()
+  Strict-Transport-Security: max-age=86400
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'sha256-MF7BSXUjMzbc3VbMfaDh41fZLGA1bNeVPwuoQXbNVAo='; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; media-src 'self' blob: data:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
