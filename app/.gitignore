@@ -23,3 +23,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# 一次性探针脚本与临时产物（跑完就删，不许提交）
+.tmp-*/
+scripts/_tmp_*.mjs
