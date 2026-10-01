@@ -374,6 +374,33 @@
   --ease-spring: cubic-bezier(0.34, 1.3, 0.5, 1);
 }
 
+/* ---- 时长令牌：每个都等于一个现存字面量，搬家不改值 ----
+   ⚠️ 别顺手把值改「好看一点」—— 改值属于 P1，且必须另开一次提交。
+   ⚠️ P0 这些令牌**只写下来备用，一处都不许引用**：`--dur-page` 写 160ms 是占位（`.page-enter` 仍是 0.3s），
+      `--stagger-step` 写 30ms = 现状步长（换成 22ms 是 P1e）。 */
+@theme {
+  --dur-press: 90ms; /* .btn:active transform 0.1s            */
+  --dur-state: 140ms; /* .btn bg/border/color 0.16s            */
+  --dur-enter: 240ms; /* .sheet sheet-up 0.26s · .scrim 0.18s   */
+  --dur-exit: 180ms; /* 新增，退场（P1a 才用）                 */
+  --dur-swap: 260ms; /* 翻格 · 指示器                          */
+  --dur-mark: 320ms; /* 签名线专用，见 动效方案.md §4.1         */
+  --dur-grow: 200ms; /* 新增，展开收起                          */
+  --dur-page: 160ms; /* .page-enter page-in 0.3s → ⚠️ P0 不换值 */
+  --dur-theme: 220ms; /* 新增                                    */
+  --delay-intent: 80ms; /* 新增                                    */
+  --stagger-step: 30ms; /* ⚠️ = 现状步长，P1 才换成 22ms           */
+
+  /* ---- 缓动语义别名（取值一个字不改）---- */
+  --ease-enter: var(--ease-out);
+  --ease-exit: var(--ease-out);
+
+  /* ---- 阴影令牌：逐字照抄现有三处 box-shadow（P0 只搬家、不改引用）---- */
+  --lift-1: 0 1px 2px rgb(var(--color-shadow) / 0.07); /* = .seg 选中态内投影 */
+  --lift-2: 0 -12px 40px rgb(var(--color-shadow) / 0.14); /* = .sheet */
+  --lift-3: 0 28px 70px -22px rgb(var(--color-shadow) / 0.38); /* = .modal */
+}
+
 /* ============================================================
    基础
    ============================================================ */
@@ -565,10 +592,10 @@ body::before {
     white-space: nowrap;
     min-width: 0;
     transition:
-      background-color 0.16s cubic-bezier(0.22, 0.8, 0.24, 1),
-      border-color 0.16s cubic-bezier(0.22, 0.8, 0.24, 1),
-      transform 0.1s cubic-bezier(0.22, 0.8, 0.24, 1),
-      color 0.16s cubic-bezier(0.22, 0.8, 0.24, 1);
+      background-color 0.16s var(--ease-out),
+      border-color 0.16s var(--ease-out),
+      transform 0.1s var(--ease-out),
+      color 0.16s var(--ease-out);
   }
   .btn:hover {
     background: var(--color-surface2);
@@ -634,7 +661,7 @@ body::before {
     pointer-events: none;
   }
   .ripple:active::after {
-    animation: ripple 0.45s cubic-bezier(0.22, 0.8, 0.24, 1);
+    animation: ripple 0.45s var(--ease-out);
   }
 
   /* --- 输入 --- */
@@ -649,8 +676,8 @@ body::before {
     font-family: inherit;
     color: var(--color-ink);
     transition:
-      border-color 0.16s cubic-bezier(0.22, 0.8, 0.24, 1),
-      box-shadow 0.16s cubic-bezier(0.22, 0.8, 0.24, 1);
+      border-color 0.16s var(--ease-out),
+      box-shadow 0.16s var(--ease-out);
   }
   .input::placeholder {
     color: var(--color-ink4);
@@ -752,7 +779,7 @@ body::before {
     height: 100%;
     background: var(--color-accent);
     border-radius: 99px;
-    transition: width 0.5s cubic-bezier(0.22, 0.8, 0.24, 1);
+    transition: width 0.5s var(--ease-out);
   }
 
   /* --- 骨架屏 ---
@@ -781,7 +808,7 @@ body::before {
     padding: 12px 14px;
     border-bottom: 1px solid var(--color-line);
     background: var(--color-surface);
-    transition: background-color 0.14s cubic-bezier(0.22, 0.8, 0.24, 1);
+    transition: background-color 0.14s var(--ease-out);
     cursor: pointer;
     text-align: left;
     width: 100%;
@@ -816,7 +843,7 @@ body::before {
     background: rgb(var(--color-scrim) / 0.3);
     -webkit-backdrop-filter: blur(7px) saturate(140%);
     backdrop-filter: blur(7px) saturate(140%);
-    animation: fade 0.18s cubic-bezier(0.22, 0.8, 0.24, 1);
+    animation: fade 0.18s var(--ease-out);
   }
   .sheet {
     position: fixed;
@@ -830,7 +857,7 @@ body::before {
     border-radius: 10px 10px 0 0;
     border-top: 1px solid var(--color-line2);
     box-shadow: 0 -12px 40px rgb(var(--color-shadow) / 0.14);
-    animation: sheet-up 0.26s cubic-bezier(0.22, 0.8, 0.24, 1);
+    animation: sheet-up 0.26s var(--ease-out);
     max-height: 88vh;
     display: flex;
     flex-direction: column;
@@ -895,8 +922,8 @@ body::before {
     color: var(--color-ink3);
     cursor: pointer;
     transition:
-      background-color 0.16s cubic-bezier(0.22, 0.8, 0.24, 1),
-      color 0.16s cubic-bezier(0.22, 0.8, 0.24, 1);
+      background-color 0.16s var(--ease-out),
+      color 0.16s var(--ease-out);
   }
   .seg > button[data-on='true'] {
     background: var(--color-surface);
@@ -940,7 +967,7 @@ body::before {
     vertical-align: middle;
   }
   .tbl tbody tr {
-    transition: background-color 0.14s cubic-bezier(0.22, 0.8, 0.24, 1);
+    transition: background-color 0.14s var(--ease-out);
   }
   .tbl tbody tr:hover {
     background: var(--color-surface2);
@@ -1068,7 +1095,7 @@ body::before {
 }
 
 .tab-icon-on {
-  animation: tab-pop 0.46s cubic-bezier(0.34, 1.3, 0.5, 1);
+  animation: tab-pop 0.46s var(--ease-spring);
 }
 
 @keyframes pulse-dot {
@@ -1095,11 +1122,11 @@ body::before {
 }
 
 .anim-in {
-  animation: fade-up 0.32s cubic-bezier(0.22, 0.8, 0.24, 1) both;
+  animation: fade-up 0.32s var(--ease-out) both;
 }
 
 .stagger > * {
-  animation: fade-up 0.34s cubic-bezier(0.22, 0.8, 0.24, 1) both;
+  animation: fade-up 0.34s var(--ease-out) both;
 }
 .stagger > *:nth-child(1) {
   animation-delay: 0.01s;
@@ -1124,23 +1151,23 @@ body::before {
 }
 
 .anim-pop {
-  animation: pop 0.32s cubic-bezier(0.34, 1.3, 0.5, 1) both;
+  animation: pop 0.32s var(--ease-spring) both;
 }
 
 .anim-toast {
-  animation: toast-in 0.22s cubic-bezier(0.22, 0.8, 0.24, 1) both;
+  animation: toast-in 0.22s var(--ease-out) both;
 }
 
 /* 线条自绘：完成批改时的那一下 */
 .draw-check circle {
   stroke-dasharray: 170;
   stroke-dashoffset: 170;
-  animation: draw 0.62s cubic-bezier(0.22, 0.8, 0.24, 1) forwards;
+  animation: draw 0.62s var(--ease-out) forwards;
 }
 .draw-check path {
   stroke-dasharray: 42;
   stroke-dashoffset: 42;
-  animation: draw 0.46s cubic-bezier(0.22, 0.8, 0.24, 1) 0.46s forwards;
+  animation: draw 0.46s var(--ease-out) 0.46s forwards;
 }
 
 /* 线条自绘入场：用于品牌标与关键图形 */
@@ -1149,7 +1176,7 @@ body::before {
 .draw-all rect {
   stroke-dasharray: 170;
   stroke-dashoffset: 170;
-  animation: draw 0.85s cubic-bezier(0.22, 0.8, 0.24, 1) forwards;
+  animation: draw 0.85s var(--ease-out) forwards;
 }
 .draw-all > *:nth-child(2) {
   animation-delay: 0.16s;
@@ -1601,7 +1628,7 @@ body::before {
 }
 
 .page-enter {
-  animation: page-in 0.3s cubic-bezier(0.22, 0.8, 0.24, 1) both;
+  animation: page-in 0.3s var(--ease-out) both;
 }
 
 /* ---------- 移动端底部导航的玻璃 ----------
@@ -1712,7 +1739,7 @@ body::before {
   height: 2px;
   background: linear-gradient(90deg, transparent, #00b0c6, transparent);
   box-shadow: 0 0 12px 1px rgb(0 176 198 / 0.6);
-  animation: scan 2.1s cubic-bezier(0.22, 0.8, 0.24, 1) infinite;
+  animation: scan 2.1s var(--ease-out) infinite;
 }
 
 /* ============================================================
