@@ -3,6 +3,7 @@ import { useEffect, useLayoutEffect, useState } from 'react'
 import { AppShell, ToastHost } from './components/AppShell'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { MaintenanceGate } from './components/MaintenanceGate'
+import { Splash } from './components/Splash'
 import { installErrorReporting } from './lib/errors'
 import { useStore } from './data/store'
 import { useAuthBootstrap } from './hooks/useAuthBootstrap'
@@ -344,9 +345,32 @@ function useDevInjection() {
   }, [search])
 }
 
+/**
+ * 开屏要不要出现（`components/Splash.tsx`）。
+ *
+ * 后端模式（`isRemote`）默认**有**：那一屏等的就是"会话与数据就绪"。
+ * 本地演示模式没有后端可等，默认**没有** —— 否则每次本地打开都要白等一遍动画；
+ * 想看就用 `?boot=1`（`shots.mjs` 跑的是演示模式、也不会带这个参数，
+ * 所以那 141 张截图里不会出现开屏）。
+ */
+function bootSplash() {
+  if (isRemote) return true
+  try {
+    return new URLSearchParams(window.location.search).has('boot')
+  } catch {
+    return false
+  }
+}
+
 export default function App() {
   useAuthBootstrap()
   useDevInjection()
+  /*
+   * 开屏：它盖在**真页面上面**（不是替换页面）——
+   * `hydrated` 一到就补满进度条、渐隐，露出来的是底下已经渲染好的那一屏。
+   */
+  const hydrated = useStore((s) => s.hydrated)
+  const [bootDone, setBootDone] = useState(() => !bootSplash())
   /*
    * 🆕 2026-09-29 管理台第二期：装前端错误上报的三个入口里的两个
    *    （`window.onerror` + `unhandledrejection`；第三个是下面的 `<ErrorBoundary>`）。
@@ -773,6 +797,8 @@ export default function App() {
         <Route path="*" element={<NotFound />} />
       </Routes>
       </MaintenanceGate>
+      {/* 开屏放最后：它是全屏浮层（`z-index: 200`），盖住上面所有东西 */}
+      {!bootDone && <Splash ready={hydrated} onDone={() => setBootDone(true)} />}
     </BrowserRouter>
     </ErrorBoundary>
   )
