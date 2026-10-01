@@ -13110,9 +13110,14 @@ await withLock(async () => {
         '🔴 S27 ㊶b **"这节课挪到别处" = 源那一格真的腾空了**（那一格从"有课"变成空格子 `data-course-empty`，同时另一格从"空"变成"有课"）—— 不是"只把目标写上课、源那格还挂着旧课"',
         `格位（[data-course-day] > button 里第几个）· 落地前有课 ${JSON.stringify(idxBefore)} → 落地后有课 ${JSON.stringify(idxAfterNow)} · **腾空的格位** ${JSON.stringify(emptiedIdx)} · 新填上的格位 ${JSON.stringify(filledIdxNew)} · 有课格数 ${idxBefore.length} → ${idxAfterNow.length}`,
       )
-      /* 🧪 反向对照：把那句"腾空"去掉 → ㊶b 当场判假（证明它盯的是那句话，不是恒绿） */
+      /*
+       * 🧪 反向对照：把那句"腾空"去掉 → ㊶b 当场判假（证明它盯的是那句话，不是恒绿）。
+       * ⚠️ 必须用 `replaceAll`：这句话**在别处（注释里）也会被原样引用** —— 只换第一处的话，
+       *    注释里那一份留在结果里，"去掉之后还在"就永远是真，这条反向对照**自己失效**。
+       *    2026-10-01 实测栽过一次：`CourseAdmin.tsx` 新加的注释引了同一句，节级驱动当场照红。
+       */
       const emptyOut = 'if (over && !over.toSubject) return'
-      const noEmptyOut = courseSrc.replace(emptyOut, '/* 反向对照：腾空那一句去掉 */')
+      const noEmptyOut = courseSrc.replaceAll(emptyOut, '/* 反向对照：腾空那一句去掉 */')
       check(
         courseSrc.includes(emptyOut) && !noEmptyOut.includes(emptyOut),
         '🧪 S27 ㊶b2 **反向对照**：`buildDayCells` 里真的有 `if (over && !over.toSubject) return`（"这一格腾空了"）那一句 —— 去掉它，㊶b 那条判据当场判假',

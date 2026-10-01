@@ -13,6 +13,7 @@ import {
   PERIOD_SLOTS,
   matchClassName,
   parseScheduleText,
+  splitLessonTitle,
   type ParsedScheduleItem,
 } from '../lib/scheduleParse'
 import { slotTextOf } from '../lib/stream'
@@ -374,10 +375,17 @@ const DEMO_TEACHER_NAMES = new Map<string, string>(
   Object.values(DEMO_TEACHERS).flatMap((list) => list.map((t) => [t.id, t.name] as const)),
 )
 
-/** 从标题里认科目："高二(3)班 物理" → "物理" */
-function subjectOfTitle(title: string, klassName: string): string {
-  const t = title.replace(klassName, '').trim()
-  return t || title.trim()
+/**
+ * 从标题里认**科目**：「高二(3)班 物理」→「物理」· 真实数据「高二4班 英语 郭钰峰」→「英语」。
+ *
+ * 🔴 2026-10-01 修（`待办与已知缺口.md` §七 第 5 行）：原来是把 `classes.name` 原样
+ *    `replace` 掉 —— 库里的班名**常常没有括号**（「高二4班 英语 郭钰峰」），而 `classes.name`
+ *    是「高二(4)班」，匹配不上 ⇒ 这一栏把**整个标题**重复了一遍（用户看到的那一幕）。
+ *    现在按**形状**剥班名、再切掉老师名，与教室端同一处拆法
+ *    （`lib/scheduleParse.ts` 的 `splitLessonTitle`，§12.3 I13「判据只有一处」）。
+ */
+function subjectOfTitle(title: string): string {
+  return splitLessonTitle(title).subject
 }
 
 /**
@@ -437,13 +445,13 @@ function buildDayCells(
      */
     if (over && !over.toSubject) return
     /* 演示用的任课老师：同一科在同一个班上固定是第一位（这样"同一门课换人"才有得换） */
-    const roster = DEMO_TEACHERS[subjectOfTitle(s.title, klass.name)] ?? []
+    const roster = DEMO_TEACHERS[subjectOfTitle(s.title)] ?? []
     const fixed = roster.length ? roster[i % Math.min(roster.length, 2)] : null
     out.push({
       period: 0,
       start: s.start,
       end: s.end,
-      subject: over ? over.toSubject : subjectOfTitle(s.title, klass.name),
+      subject: over ? over.toSubject : subjectOfTitle(s.title),
       /*
        * 🔴 **行自己带了老师就用它**（`seed.ts:makeCourseAdminDemoSchedule` 那一批每个格子都带）——
        *    老师**不是**由"这是这一天的第几格"推出来的：按序号摊名册只是**没有老师时**的兜底。
@@ -1084,6 +1092,12 @@ const planSlot = (m: SwapPlan, which: 'a' | 'b'): DaySlot | undefined => {
       for (const k of classes) {
         const list = dayRead.cells
           .filter((c) => c.classId === k.id)
+          /*
+           * 🔴 腾空那一格（被临时调过、科目是空串）**不进格子清单** —— 与本地那一支
+           *    （`buildDayCells` 那句 `if (over && !over.toSubject) return`）同一口径。
+           *    不做这一步，真实模式下它会当成一格显示成"没有科目的课"。
+           */
+          .filter((c) => !(c.changed && !c.subject))
           .slice()
           .sort((a, b) => a.start.localeCompare(b.start))
         if (list.length) {
@@ -1093,7 +1107,13 @@ const planSlot = (m: SwapPlan, which: 'a' | 'b'): DaySlot | undefined => {
               period: i + 1,
               start: c.start,
               end: c.end,
-              subject: c.subject,
+              /*
+               * 🔴 数据库那一份的**没被调过**的格子给的是 `si.title` —— **整串标题**
+               *    （「高二4班 英语 郭钰峰」，`schema.sql:10132`），被调过的给的才是光科目。
+               *    原来这里原样收下，于是真实模式下整周网格每一格都重复一遍整个标题
+               *    （用户看到的那个"重复"；本地那一支走 `subjectOfTitle` 所以只在真实模式出现）。
+               */
+              subject: c.changed ? c.subject : subjectOfTitle(c.subject),
               teacherId: c.teacherId,
               changed: c.changed,
             })),
@@ -1111,15 +1131,37 @@ const planSlot = (m: SwapPlan, which: 'a' | 'b'): DaySlot | undefined => {
   }
 
   /**
+   * 一句话：`teacher_id → 姓名`，**从课表标题里认**（认不出不编）。
+   *
+   * 🔴 为什么不问 `teachers` 表：那条路只有"读我自己那一行"（策略 `teachers_self`，
+   *    `supabase/schema.sql:333`；`remote.ts:1551` 读的正是它）—— **别的老师那一行 RLS 挡住了**，
+   *    所以真实模式下这一页手上**没有**名册（旧注释把这里登记成缺口，2026-10-01 收掉）。
+   * 🔴 为什么从标题认：`schedule_items.title` 的平台约定本来就是「[班名] 科目 任课老师」
+   *    （库里真实数据写的是「高二4班 英语 郭钰峰」），姓名那一截就在里面，
+   *    而课表这一页本来就把 `schedule` 整份读回来了 —— 不必为此再动库、再要一次权限。
+   *    拆法与教室端「正在上课」卡**同一处**（`splitLessonTitle`）。
+   * ⚠️ 落在标题里没写老师名的课（如「高二4班 数学」）仍然认不出 → `teacherOf` 回 `null`
+   *    （屏上说"老师名字没读到"，**绝不印 id**）。
+   */
+  const teacherNamesByTitle = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const s of schedule) {
+      if (!s.teacherId || m.has(s.teacherId)) continue
+      const name = splitLessonTitle(s.title).teacher
+      if (name) m.set(s.teacherId, name)
+    }
+    return m
+  }, [schedule])
+
+  /**
    * 认出来的老师姓名 —— **认不出返回 `null`**。
    * 🔴 **绝不把 id 本身当名字返回**：2026-09-30 用户实测（「为什么周三的课下面有一堆乱码」）——
    *    真实数据里周三那几行的 `teacher_id` 是 UUID，而这一页手上只有一份**演示用的**老师名册，
    *    认不出 → 旧写法 `?? id` 把 `bedabab0-7cf1-4142-83d1-42ccbd23f493` 原样印到了屏上。
    *    那是内部标识，不是给老师看的字（§七 文案纪律），而且看起来就是乱码。
-   *    ⚠️ 真实模式要显示姓名，得有一份可读的 `teachers` 名册（现在只有"读我自己那一行"，
-   *      `remote.ts:1551`）—— **登记为缺口**，本轮只做到"不把 id 打到屏上"。
    */
-  const teacherOf = (id: string | null): string | null => (id ? (DEMO_TEACHER_NAMES.get(id) ?? null) : null)
+  const teacherOf = (id: string | null): string | null =>
+    id ? (DEMO_TEACHER_NAMES.get(id) ?? teacherNamesByTitle.get(id) ?? null) : null
 
   /** 屏上那一句（认不出时说"没读到"，**不说 id**） */
   const teacherName = (id: string | null): string => {
@@ -1328,7 +1370,7 @@ const planSlot = (m: SwapPlan, which: 'a' | 'b'): DaySlot | undefined => {
             const item = rows.find((x) => x.weekday === t.wd && x.start === slotStart)
             /* 这一格该变成什么科目（**老师的名字不在 `title` 里** —— 它由 `getDayCells` 那一层接上） */
             const nextTitle =
-              item && t.subject === subjectOfTitle(item.title, klass.name)
+              item && t.subject === subjectOfTitle(item.title)
                 ? item.title
                 : `${klass.name} ${t.subject}`
             if (readState === 'present') {
@@ -1338,7 +1380,7 @@ const planSlot = (m: SwapPlan, which: 'a' | 'b'): DaySlot | undefined => {
                 weekday: t.wd,
                 start: t.start,
                 end: t.end,
-                fromSubject: item ? subjectOfTitle(item.title, klass.name) : (cell?.subject ?? ''),
+                fromSubject: item ? subjectOfTitle(item.title) : (cell?.subject ?? ''),
                 fromTeacherId: cell?.teacherId ?? null,
                 toSubject: t.subject,
                 toTeacherId: t.teacherId,

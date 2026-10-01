@@ -63,7 +63,9 @@ const { beijingNow } = await import('../src/lib/holiday.ts')
  * 它就是 `matchClass()` 内部那一步，教室端有没有这节课全靠它给不给 `classId`。
  * 脚本里另写一遍 `title.includes(班名)` 就是两份实现，全角/半角括号上迟早分叉（§12.3 I13）。
  */
-const { matchClassName, parseScheduleText } = await import('../src/lib/scheduleParse.ts')
+const { PERIOD_SLOTS, matchClassName, parseScheduleText, splitLessonTitle } = await import(
+  '../src/lib/scheduleParse.ts'
+)
 
 /* ---------------- 配置 ---------------- */
 
@@ -143,6 +145,13 @@ const TITLE_SHAPES = [
   { raw: '班会', subject: '班会', teacher: '', why: '没有老师的课' },
   { raw: '自习', subject: '自习', teacher: '', why: '没有老师的课' },
   { raw: '选修课', subject: '选修课', teacher: '', why: '没有老师的课' },
+  /*
+   * 🔴 2026-10-01 加：**真实库里的形状**（`schedule_items.title` 实际长这样 —— 班名没有括号）。
+   *    `classes.name` 是「高二(4)班」，这一串是「高二4班」，两者对不上：
+   *    旧写法（拿 `classes.name` 原样 `replace`）在这一条上剥不掉班名 ⇒ 科目那一栏
+   *    把整个标题重复一遍（用户就是这么发现的）。这一条专门钉住那个形状。
+   */
+  { raw: '高二4班 语文 张老师', subject: '语文', teacher: '张老师', why: '🔴 真实库里的形状：班名**没有括号**' },
 ]
 
 /** 期望在屏幕上看到的（标题按 `splitTitle` 拆成两行） */
@@ -189,6 +198,14 @@ const SRC_CLASSROOM = new URL('../src/pages/Classroom.tsx', import.meta.url)
 const SRC_HOLIDAYS = new URL('../src/data/holidays.ts', import.meta.url)
 /** 静音时段表也从源码里读（见 tts.ts 的 QUIET_SLOTS）—— 不在脚本里再抄一份 */
 const SRC_TTS = new URL('../src/lib/tts.ts', import.meta.url)
+/**
+ * 课程管理页（整周网格那一页）。
+ * 🔴 2026-10-01 起它和教室端**共用同一份拆标题函数**（`splitLessonTitle`）——
+ *    两边各写一遍就会分叉：同一节课在教室里叫「英语」、在课表上叫整串标题（用户报过的那一幕）。
+ */
+const SRC_COURSE = new URL('../src/pages/CourseAdmin.tsx', import.meta.url)
+/** 拆标题那一份唯一的实现在这里 */
+const SRC_SCHEDULE_PARSE = new URL('../src/lib/scheduleParse.ts', import.meta.url)
 
 const runtime = { BUBBLE_MIN_MS: null, BUBBLE_MS_PER_CHAR: null }
 
@@ -689,6 +706,79 @@ async function postCall(page, handle, id, text) {
 
 async function closeCallChannel(page, handle) {
   await page.evaluate((bc) => bc.close(), handle)
+}
+
+/* ---------------- 静态核对：课表标题怎么拆成「科目 + 老师」 ---------------- */
+
+/*
+ * 🔴 这一块钉的是 2026-10-01 用户报的那个洞：**真实数据的标题里班名没有括号**
+ *    （库里是「高二4班 英语 郭钰峰」，而 `classes.name` 是「高二(4)班」），
+ *    旧写法拿 `classes.name` 去 `replace` ⇒ 匹配不上 ⇒ 科目那一栏把**整个标题**重复了一遍。
+ *
+ * ⚠️ 这一条**没法靠演示数据验**：演示标题恰好写成「高二(3)班 物理」，跟 `classes.name`
+ *    一模一样，旧写法在演示数据上是"对的" —— 所以这里直接喂真实那种形状。
+ *    跑的是 `src/lib/scheduleParse.ts` 里**那一份真实现**（教室端「正在上课」卡
+ *    与课程管理页共用它，§12.3 I13「判据只有一处」）。
+ */
+say('【静态核对】课表标题的拆法：`splitLessonTitle`（教室端与课程管理共用同一份）')
+{
+  const rows = [
+    // [标题, 期望科目, 期望老师, 说明]
+    ['高二4班 英语 郭钰峰', '英语', '郭钰峰', '🔴 真实库里的形状：**班名没有括号** + 科目 + 老师'],
+    ['高二(3)班 物理 王琳鑫', '物理', '王琳鑫', '半角括号（演示种子那种）'],
+    ['高二（3）班 语文 张老师', '语文', '张老师', '全角括号'],
+    ['高二4班 数学', '数学', '', '标题里没写老师名 → 老师那一截空着（屏上说"没读到"，**不许印 id**）'],
+    ['班会', '班会', '', '没有班名、也没有老师（本来就这一串）'],
+    ['高二4班 通用技术 谢丽君', '通用技术', '谢丽君', '科目不止两个字'],
+    ['高三12班 化学 谢伦菊', '化学', '谢伦菊', '两位数班号'],
+  ]
+  for (const [title, subject, teacher, why] of rows) {
+    const got = splitLessonTitle(title)
+    check(
+      got.subject === subject && got.teacher === teacher,
+      `🔴 拆标题「${title}」→ 科目「${subject}」/ 老师「${teacher}」`,
+      `科目=${JSON.stringify(got.subject)} · 老师=${JSON.stringify(got.teacher)}`,
+      why,
+    )
+  }
+
+  /*
+   * 🧪 反向对照：**旧写法**（拿 `classes.name` 原样 `replace`）在真实那种标题上当场露馅 ——
+   *    证明上面那几条不是恒真：同一件事，旧写法在这条标题上判错。
+   */
+  const realTitle = '高二4班 英语 郭钰峰'
+  const oldWay = realTitle.replace('高二(4)班', '').trim() || realTitle.trim()
+  check(
+    oldWay === realTitle && splitLessonTitle(realTitle).subject === '英语',
+    '🧪 反向对照：旧写法（拿 `classes.name`「高二(4)班」原样 replace）在真实标题上**剥不掉班名** → 整串标题原样当科目',
+    `旧写法=${JSON.stringify(oldWay)} · 新写法科目=${JSON.stringify(splitLessonTitle(realTitle).subject)}（用户看到的"重复整个标题"就是左边这个）`,
+  )
+
+  /*
+   * 🔴 拆法**只许有一处实现**：教室端与课程管理页都只许用那份共享的，
+   *    两页里再出现本地一份 `LEADING_CLASS_RE` / `function splitTitle(` ⇒ 当场红。
+   *    （2026-10-01 之前正是两份：演示数据上看不出差别，真实数据上就分叉了。）
+   */
+  const srcClassroom = await readSource(SRC_CLASSROOM)
+  const srcCourse = await readSource(SRC_COURSE)
+  const srcParse = await readSource(SRC_SCHEDULE_PARSE)
+  for (const [name, src] of [
+    ['Classroom.tsx', srcClassroom],
+    ['CourseAdmin.tsx', srcCourse],
+  ]) {
+    const ownRe = /(const|let)\s+LEADING_CLASS_RE\s*=/.test(src)
+    const ownFn = /function\s+splitTitle\s*\(|const\s+splitTitle\s*=/.test(src)
+    check(
+      !ownRe && !ownFn,
+      `🔴 拆标题只有一处实现：\`${name}\` 里**没有**自己那一份 \`LEADING_CLASS_RE\` / \`splitTitle\``,
+      `本地班名正则=${ownRe} · 本地拆函数=${ownFn}`,
+    )
+  }
+  check(
+    /export function splitLessonTitle\(/.test(srcParse) && /export const LEADING_CLASS_RE/.test(srcParse),
+    '🔴 那一份实现在 `lib/scheduleParse.ts` 里：`LEADING_CLASS_RE` + `splitLessonTitle` 都导出了（两页都从它拿）',
+    `导出正则=${/export const LEADING_CLASS_RE/.test(srcParse)} · 导出函数=${/export function splitLessonTitle\(/.test(srcParse)}`,
+  )
 }
 
 /* ---------------- 主流程 ---------------- */
@@ -2323,6 +2413,118 @@ await withLock(async () => {
           scoped && widened !== clsSrc && !widened.includes('if (c.changed && c.classId === klass.id)'),
           '🧪 场景 9C 反向对照：把 `Classroom.tsx` 里"只看本班"那一句放宽 → C 那条判据当场判假（证明它盯的是班号）',
           `源码里有那一段=${scoped} · 放宽之后还在=${widened.includes('if (c.changed && c.classId === klass.id)')}`,
+        )
+
+        /*
+         * 🔴 D：**腾空** —— 教务处把这一节"腾出来"。
+         *    数据库那一侧回的正是 `changed=true` + `subject=''` + `teacher_id null`
+         *    （`supabase/schema.sql:10158-10159` 那两句 `case when o.class_id is not null ...`）。
+         *    🔴 2026-10-01 用户报的洞：腾空之后教室里显示成"一节没有科目的课"（标题只剩班名）
+         *       —— 正解是**这一节今天就没有课**：`dayItems` 把它从清单里去掉
+         *       （与教师端 `buildDayCells` 的 `if (over && !over.toSubject) return` 同一口径）。
+         *    ⚠️ 期望值全部现读：同一时刻（09:15 那一节正在上）**只把 `toSubject` 从课改成空串**。
+         */
+        await seedTemp([tempRow({ toSubject: '', toTeacherId: null })])
+        const d = await look('09:15')
+        check(
+          base.card.found === true && d.card.found === false,
+          '🔴 场景 9D **腾空**：这一节被腾出来 → 教室端**不再显示这一节**（不是显示成一节没有科目的课）',
+          `基线 09:15 有「正在上课」卡=${base.card.found} · 腾空之后=${d.card.found}（卡上科目=${JSON.stringify(String(d.card.subject ?? ''))}）`,
+        )
+        /*
+         * D 的第二半：**课表列表里那一行也得消失**。
+         * ⚠️ 列表只在**没有课正在进行**时才渲染 ⇒ 只能量 09:45（照 A 第二半同一套），
+         *    并且用"同一时刻、之前/之后"两次读数对照（不写死科目，那一格是什么由场景 8 决定）。
+         */
+        await seedTemp([])
+        const listBase = await look('09:45')
+        await seedTemp([tempRow({ toSubject: '', toTeacherId: null })])
+        const dList = await look('09:45')
+        check(
+          listBase.all.includes(baseSubject) && !dList.all.includes(baseSubject),
+          '🔴 场景 9D（列表那一支）：腾空之后，课表列表里那一行也**没有了**（09:45 那一刻列表在渲染）',
+          `腾空前列表里有「${baseSubject}」=${listBase.all.includes(baseSubject)} · 腾空之后还有=${dList.all.includes(baseSubject)}`,
+        )
+        /*
+         * 🧪 D 的反向对照：同一条**只把空串换成一门课** → 那一节又回来了（就是 A 的换课）。
+         *    这一条证明 D 盯的是"科目那一栏是空的"，而不是"这一节整个坏了"。
+         */
+        await seedTemp([tempRow({ toSubject: TEMP_TO })])
+        const dNeg = await look('09:15')
+        check(
+          dNeg.card.found === true && dNeg.card.subject === TEMP_TO,
+          '🧪 场景 9D 反向对照：同一条只把 `toSubject` 从空串改回一门课 → 那一节**又出现了**（腾空那条判据不是恒真）',
+          `卡上科目=${JSON.stringify(dNeg.card.subject)}（期望 ${TEMP_TO}）`,
+        )
+
+        /*
+         * 🔴 E：**挪到本来没课的那一节**。
+         *    数据库那一侧 `schedule_day_cells` 把"周课表"与"当天改动"两支拼起来，
+         *    `start` 落在**周课表里没有的那一节**也照样回一条。
+         *    🔴 2026-10-01 用户报的洞：教室里**完全看不到**这一节（旧写法只遍历周课表的行）。
+         *    正解：临时层里"周课表查不到的时段"**自己摆一行**（照教师端 `buildDayCells` 同一口径）。
+         *    ⚠️ 那一刻（09:45）列表在渲染、卡不在（二选一）⇒ 断言读整页文案。
+         *    ⚠️ 那一节从 `PERIOD_SLOTS` 里挑"周四周课表上没有、且在最后一节之后"的那一格 ——
+         *       期望值不写死（`CLS_ROWS` 改了它也还成立）。
+         */
+        const thuStarts = CLS_ROWS.filter((r) => r.weekday === 4).map((r) => r.start)
+        const lastThu = thuStarts.slice().sort().at(-1)
+        const addSlot = PERIOD_SLOTS.find(([s]) => !thuStarts.includes(s) && s > lastThu)
+        check(
+          Boolean(addSlot),
+          '（准备）周四有一个"周课表上本来没课"的标准节次，能拿来放"挪过来的那一节"',
+          `周四已有=${thuStarts.join('、')} · 选中的空档=${addSlot ? addSlot.join('–') : '(没找到)'}`,
+        )
+        const ADD = addSlot ?? ['11:40', '12:20']
+        /* 这一门要**在周四那一整天里都不出现**，否则字符串断言会误判（周四：08:55 被场景 8 改过、11:05 是英语） */
+        const ADD_SUBJECT = '化学'
+        await seedTemp([
+          tempRow({ start: ADD[0], end: ADD[1], toSubject: ADD_SUBJECT, toTeacherId: null }),
+        ])
+        const e = await look('09:45')
+        check(
+          e.all.includes(ADD_SUBJECT) && e.all.includes(ADJ),
+          '🔴 场景 9E **挪到本来没课的那一节**：那一节在教室里**显示得出来**（多出来的一行 + 「已调整」）',
+          `${ADD[0]} 那一节在屏上=${e.all.includes(ADD_SUBJECT)} · 整页${e.all.includes(ADJ) ? '有' : '**没有**'}「${ADJ}」`,
+        )
+        /*
+         * 🧪 E 的反向对照：同一条**只把日期改成昨天** → 多出来的那一行也不该出现。
+         *    这条走的是**新代码**那一支（凭空多出来的行），所以必须单独钉一次。
+         */
+        await seedTemp([
+          tempRow({
+            date: '2026-09-23',
+            start: ADD[0],
+            end: ADD[1],
+            toSubject: ADD_SUBJECT,
+            toTeacherId: null,
+          }),
+        ])
+        const eNeg = await look('09:45')
+        check(
+          !eNeg.all.includes(ADD_SUBJECT),
+          '🧪 场景 9E 反向对照：同一条只把日期改成昨天 → 多出来的那一行**不出现**（新摆的行也照样按日期过滤）',
+          `屏上有「${ADD_SUBJECT}」=${eNeg.all.includes(ADD_SUBJECT)}`,
+        )
+
+        /*
+         * 🧪 D / E 的**源码级反向对照**：把 `Classroom.tsx` 里那两句判据删掉，D / E 的期望当场判假。
+         *    ⚠️ 改的是**内存里的源码文本**，仓库文件一个字节都不动（照 9C 那一套）。
+         */
+        const clsSrc2 = await readSource(SRC_CLASSROOM)
+        const dropGuard = 'if (!t.subject) continue'
+        const dropless = clsSrc2.replace(dropGuard, '')
+        check(
+          clsSrc2.includes(dropGuard) && !dropless.includes(dropGuard),
+          '🧪 场景 9D 反向对照（源码级）：删掉"腾空的那一行不进清单"那一句 → D 的期望判假（它盯着那一句）',
+          `源码里有那一句=${clsSrc2.includes(dropGuard)} · 删掉之后还在=${dropless.includes(dropGuard)}`,
+        )
+        const addGuard = 'if (!t.subject || used.has(start)) continue'
+        const addless = clsSrc2.replace(addGuard, '')
+        check(
+          clsSrc2.includes(addGuard) && !addless.includes(addGuard),
+          '🧪 场景 9E 反向对照（源码级）：删掉"凭空多出来的那一行自己摆"那一句 → E 的期望判假（它盯着那一句）',
+          `源码里有那一句=${clsSrc2.includes(addGuard)} · 删掉之后还在=${addless.includes(addGuard)}`,
         )
 
         /* 收尾：把种下去的那一条清掉，别影响后面的断言 */

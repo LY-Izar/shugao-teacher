@@ -42,10 +42,15 @@ const BACKUP_NAME = '树高备份.json'
 import { checkScheduleConflicts, awayText, dayState, maybeShift, toMinutes, weekdayOf } from '../lib/schedule'
 import { beijingNow, dayKind, holidayOn, isRestDay, nextHoliday, ymdOf } from '../lib/holiday'
 import { pickDailyQuote } from '../lib/quotes'
-import { matchClassName, parseScheduleText, type ParsedScheduleItem } from '../lib/scheduleParse'
+import {
+  matchClassName,
+  parseScheduleText,
+  splitLessonTitle,
+  type ParsedScheduleItem,
+} from '../lib/scheduleParse'
 import { preparePhoto } from '../lib/photo'
 import { recognize } from '../lib/ocr'
-import { WEEKDAY_TEXT } from '../data/types'
+import { WEEKDAY_TEXT, type ScheduleItem } from '../data/types'
 import {
   KIND_TEXT,
   canViewInline,
@@ -99,33 +104,28 @@ const BUBBLE_MIN_MS = 3_500
 /** 每个字至少留多少毫秒给人看（默读中文约 5～8 字/秒，取 180ms/字＝5.5 字/秒，宁可慢一点） */
 const BUBBLE_MS_PER_CHAR = 180
 
-/**
- * 标题开头的**班名**（`高二(4)班` / `高二（4）班` / `高二4班` / `高三1班`）。
- *
- * 为什么标题里会带班名：教室端只显示 `scope='class'` **且 classId 等于本班**的行，
- * 而「粘贴课表」链路里 classId 是 `scheduleParse.ts` 的 `matchClass()` 从**标题文本**
- * 里认出班名才给的 —— 所以真实课表的标题写的往往是「高二(4)班 语文 张老师」。
- * 那个班名是给 matchClass 看的，**不该出现在「正在上课」卡上**（更不该当成科目）。
+/*
+ * 「[班名] 科目 [任课老师]」怎么拆成科目与老师 —— 拆法**只有一处**：
+ * `lib/scheduleParse.ts` 的 `splitLessonTitle`（课程管理页认科目、认姓名也用它）。
+ * 2026-10-01 之前这里是本地的一份 `LEADING_CLASS_RE` + `splitTitle`，与课程管理页那份
+ * 各写一遍，于是同一节课在教室端叫「英语」、在整周网格里叫整串标题 —— 合到一处。
  */
-const LEADING_CLASS_RE = /^[高初][一二三]\s*[（(]?\s*[0-9０-９一二三四五六七八九十]{1,3}\s*[)）]?\s*班/
 
 /**
- * 课表条目的标题约定是「[班名] **科目 [任课老师]**」—— 科目在前，老师在后、用空格分开。
- * 「正在上课」那张卡要把这两样分两行显示（科目大、老师小），所以这里拆开。
+ * **临时层**在这一天、这个班上的那一格（键 = 开始时间）。
  *
- * 拆之前**先剥掉开头的班名**：不剥的话 `indexOf(' ')` 会把「高二(4)班」当成科目，
- * 在卡上以 30px 大字显示；而教室端要能收到这条呼叫，标题里又**必须**有班名
- * （见上面 LEADING_CLASS_RE 的注释）—— 两件事只能在这里解开。
- *
- * 没有空格就整串当科目（「班会」「自习」「体锻」「选修课」这些本来就没有老师）；
- * `room` 是**另一个字段**，不在这里，别把地点也塞进标题。
+ * 🔴 2026-10-01 从"一个科目串"改成一个对象：一格被临时调过有**三种**情况，
+ *    只拿一个科目串分不出来，屏上就出错：
+ *      · 换成别的课（换科目/换老师）→ 显示新的那一门；
+ *      · **腾空**（`to_subject` 是空串）→ 这一节今天**没有课**，那一格要从今天的清单里**去掉**。
+ *        旧写法把空串盖上去，标题拼出来只剩班名 —— 屏上就成了"一节没有科目的课"
+ *        （用户 2026-10-01 在教室里看到的那一幕）。
+ *      · 挪到**本来没课**的那一节 → 今天**多出来一节课**，周课表里没有这一行，要自己摆一行。
+ *        （旧写法这种课在教室里**一条都不显示** —— 同一个洞的另一半。）
+ *    `teacherId` / `end` 是给"多出来的那一行"用的：`end` 周课表里没有，只能从临时层拿
+ *    （数据库 `schedule_day_cells` 回的就是 `coalesce(b.end_time, o.end_time)`）。
  */
-function splitTitle(title: string): { subject: string; teacher: string } {
-  const t = title.replace(LEADING_CLASS_RE, '').trim() || title.trim()
-  const i = t.search(/\s/)
-  if (i < 0) return { subject: t, teacher: '' }
-  return { subject: t.slice(0, i), teacher: t.slice(i + 1).trim() }
-}
+type TempDayCell = { subject: string; teacherId: string | null; end: string }
 /** 播放记录只留最近这一段（轮询窗口是 15 分钟，比它长就够），不然开一整天会一直涨 */
 const SEEN_TTL_MS = 20 * 60_000
 /** 「叮咚」响完到开口的间隔 */
@@ -476,7 +476,7 @@ export default function Classroom() {
    *    "不知道有没有调整"不等于"没有调整"，也**不许**让这块屏空掉（§三.4 的三态纪律）。
    */
   const localTempChanges = useStore((s) => s.tempScheduleChanges)
-  const [dbTempCells, setDbTempCells] = useState<Record<string, string>>({})
+  const [dbTempCells, setDbTempCells] = useState<Record<string, TempDayCell>>({})
   /* 标题的写法要班名（照平台约定「班名 科目」）—— 单独取一份，免得把整个 `klass` 挂进依赖 */
   const klassName = klass?.name ?? ''
 
@@ -486,11 +486,13 @@ export default function Classroom() {
     const load = () => {
       void remote.loadScheduleDay(todayIso).then((r) => {
         if (!alive || r.status !== 'present') return
-        const m: Record<string, string> = {}
+        const m: Record<string, TempDayCell> = {}
         /* ⚠️ 同一条纪律：`r.cells` 是**服务端回来的东西**，这里也不假设它一定是数组 */
         for (const c of r.cells ?? []) {
           /* 🔴 只要**本班**那几格（教室端那条边界），且只要被临时调过的那几格 */
-          if (c.changed && c.classId === klass.id) m[c.start] = c.subject
+          if (c.changed && c.classId === klass.id) {
+            m[c.start] = { subject: c.subject, teacherId: c.teacherId, end: c.end }
+          }
         }
         setDbTempCells(m)
       })
@@ -507,7 +509,7 @@ export default function Classroom() {
   /** 这一天、这个班被临时调过的格：键 = **开始时间**（临时调课锚在"这一天这一节"上） */
   const tempOfDay = useMemo(() => {
     if (isRemote) return dbTempCells
-    const m: Record<string, string> = {}
+    const m: Record<string, TempDayCell> = {}
     /*
      * 🔴 `?? []` 是**入口这一侧的兜底**，不是判据：`store.ts` 那 6 处赋
      *    `tempScheduleChanges` 的地方给的都是数组（见那一处核查记录），类型上也是 `TempScheduleChange[]`。
@@ -515,7 +517,9 @@ export default function Classroom() {
      *    多一个 `?? []` 的代价是零，而漏掉它的代价是一整屏。
      */
     for (const c of localTempChanges ?? []) {
-      if (c.date === todayIso && c.classId === klass?.id) m[c.start] = c.toSubject
+      if (c.date === todayIso && c.classId === klass?.id) {
+        m[c.start] = { subject: c.toSubject, teacherId: c.toTeacherId ?? null, end: c.end }
+      }
     }
     return m
   }, [dbTempCells, localTempChanges, todayIso, klass?.id])
@@ -525,15 +529,49 @@ export default function Classroom() {
       (s) => s.scope === 'class' && s.classId === klass?.id && s.weekday === useWeekday,
     )
     /*
-     * 🔴 今天有临时调整 → 那一格显示**调整后**的课。
+     * 🔴 今天有临时调整 → 那一格照临时层来（三种情况见 `TempDayCell` 的注释）。
+     *    ⚠️ `used` 这一套判据与 `CourseAdmin.tsx` 的 `buildDayCells` **同一口径**：
+     *       一条临时调课只管它锚住的**那一节的第一行** —— 同一时段排了两节课（撞课）时，
+     *       第二条照旧显示它自己的课，不然"改一节课"会把撞在一起的两节都抹掉。
      *    标题按平台约定拼「班名 科目」—— 与 `CourseAdmin` 写进周课表的那一种写法同一口径
-     *    （教室端「正在上课」卡就是靠 `splitTitle` 从这一串里拆出科目与老师）。
+     *    （教室端「正在上课」卡就是靠 `splitLessonTitle` 从这一串里拆出科目与老师）。
      */
-    const merged = raw.map((it) => {
-      const subject = tempOfDay[it.start]
-      if (subject === undefined) return it
-      return { ...it, title: `${klassName} ${subject}`.trim() }
-    })
+    const used = new Set<string>()
+    const merged: ScheduleItem[] = []
+    for (const it of raw) {
+      const t = tempOfDay[it.start]
+      if (!t || used.has(it.start)) {
+        merged.push(it)
+        continue
+      }
+      used.add(it.start)
+      /* 腾空 = 这一节今天**没有课** → 这一行不进今天的清单（照课程管理页的口径） */
+      if (!t.subject) continue
+      merged.push({ ...it, title: `${klassName} ${t.subject}`.trim(), teacherId: t.teacherId ?? undefined })
+    }
+    /*
+     * 🔴 挪到**本来没课**的那一节：临时层里有、周课表里没有这一行 → 今天得**自己摆一行**。
+     *    这一支在 2026-10-01 之前不存在：教务处把一节语文挪到下午那个空档，教室里那节课
+     *    **一条都不显示**（学生看不到、铃也不响）—— 与"腾空显示成空科目"是同一个洞的两半。
+     *    ⚠️ 周课表里本来就有这一节的情况不用再判：上面那个循环已经把它收进 `used` 了。
+     */
+    for (const [start, t] of Object.entries(tempOfDay)) {
+      if (!t.subject || used.has(start)) continue
+      merged.push({
+        id: `temp-${start}`,
+        weekday: useWeekday,
+        start,
+        end: t.end,
+        title: `${klassName} ${t.subject}`.trim(),
+        kind: 'class',
+        notify: false,
+        scope: 'class',
+        classId: klass?.id,
+        teacherId: t.teacherId ?? undefined,
+      })
+    }
+    /* 多出来的那一行要摆回时间顺序里（`maybeShift` 自己也排，但那是在周一才生效） */
+    merged.sort((a, b) => toMinutes(a.start) - toMinutes(b.start))
     // 朝会只在真正的周一早上，所以顺延看的是「今天是不是周一」，
     // 而不是「借用了哪一天的课表」—— 调休借周一的课不代表今天要顺延。
     return maybeShift(merged, weekdayOf(now))
@@ -542,9 +580,21 @@ export default function Classroom() {
   /** 今天哪几节是**被临时调过的**（屏上给一个小标记；`id` 在顺延之后不变） */
   const adjustedIds = useMemo(() => {
     const ids = new Set<string>()
-    for (const it of schedule) {
-      if (it.scope !== 'class' || it.classId !== klass?.id || it.weekday !== useWeekday) continue
-      if (tempOfDay[it.start] !== undefined) ids.add(it.id)
+    const rows = schedule.filter(
+      (s) => s.scope === 'class' && s.classId === klass?.id && s.weekday === useWeekday,
+    )
+    /* 判据与 `dayItems` 同一套（`used` = "这一节的临时调课已经认领过了"），别各写一遍 */
+    const used = new Set<string>()
+    for (const it of rows) {
+      const t = tempOfDay[it.start]
+      if (!t || used.has(it.start)) continue
+      used.add(it.start)
+      /* 腾空那一节今天不显示，也就没有"已调整"可挂 */
+      if (t.subject) ids.add(it.id)
+    }
+    /* 挪到空格那一节是临时层自己摆出来的行（`id` 见 `dayItems`），它也要挂「已调整」 */
+    for (const [start, t] of Object.entries(tempOfDay)) {
+      if (t.subject && !used.has(start)) ids.add(`temp-${start}`)
     }
     return ids
   }, [schedule, klass?.id, useWeekday, tempOfDay])
@@ -621,6 +671,12 @@ export default function Classroom() {
    *  ② 调休上班日教师手选的「今天按周X的课表上」也要算数，否则屏幕上显示的是周三的课，
    *     铃却按真实的周日课表（空表）不响 —— 和 dayItems 必须是同一个星期。
    *     maybeShift 仍然看**真实的今天是不是周一**（借周一的课不代表今天要顺延）。
+   *
+   * 🔴 2026-10-01：这一支**改吃 `dayItems.items`**，不再自己从 `schedule` 筛一遍。
+   *    原来那一份筛法**不看临时层** ⇒ 两个洞都在教室里响得出来：教务处把一个班那一节
+   *    **腾空**了，屏上已经不显示那节课了，铃却照旧提前 5 分钟"叮"（学生白跑）；
+   *    反过来把一节语文**挪到下午的空档**，屏上有那节课，铃却**不响**。
+   *    "屏上显示的那份课表"与"响铃的那份课表"必须是同一份 —— 一份数据一处算。
    */
   const rungRef = useRef('')
   useEffect(() => {
@@ -628,13 +684,7 @@ export default function Classroom() {
       const n = new Date()
       if (isRestDay(ymdOf(n))) return
       const m = n.getHours() * 60 + n.getMinutes()
-      const day = maybeShift(
-        schedule.filter(
-          (s) => s.scope === 'class' && s.classId === klass?.id && s.weekday === useWeekday,
-        ),
-        weekdayOf(n),
-      ).items
-      for (const it of day) {
+      for (const it of dayItems.items) {
         if (toMinutes(it.start) - m !== 5) continue
         const key = `${ymdOf(n)}-${it.id}`
         if (rungRef.current === key) continue
@@ -645,7 +695,7 @@ export default function Classroom() {
     tick()
     const t = window.setInterval(tick, 20_000)
     return () => window.clearInterval(t)
-  }, [schedule, klass?.id, useWeekday])
+  }, [dayItems.items])
 
   /**
    * 19:20 之后当天收尾：统计区换成一句收束。
@@ -1660,9 +1710,9 @@ export default function Classroom() {
                         textAlign: 'center',
                       }}
                     >
-                      {splitTitle(day.current.title).subject}
+                      {splitLessonTitle(day.current.title).subject}
                     </div>
-                    {splitTitle(day.current.title).teacher ? (
+                    {splitLessonTitle(day.current.title).teacher ? (
                       <div
                         style={{
                           fontSize: 16,
@@ -1671,7 +1721,7 @@ export default function Classroom() {
                           textAlign: 'center',
                         }}
                       >
-                        {splitTitle(day.current.title).teacher}
+                        {splitLessonTitle(day.current.title).teacher}
                       </div>
                     ) : null}
                   </div>

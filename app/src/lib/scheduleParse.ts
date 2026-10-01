@@ -148,6 +148,45 @@ export function matchClassName(title: string, classes: Klass[]): string | undefi
   return findByName(title, classes)?.name
 }
 
+/* ---------------- 标题怎么拆成「科目 + 老师」（教室端与课程管理共用这一处） ---------------- */
+
+/**
+ * 标题开头的**班名**（`高二(4)班` / `高二（4）班` / `高二4班` / `高三1班`）。
+ *
+ * 为什么标题里会带班名：教室端只显示 `scope='class'` **且 classId 等于本班**的行，
+ * 而「粘贴课表」链路里 classId 是上面 `matchClass()` 从**标题文本**里认出班名才给的 ——
+ * 所以真实课表的标题写的往往是「高二4班 英语 郭钰峰」。
+ * 那个班名是给 `matchClass` 看的，**既不该出现在「正在上课」卡上，也不该当成科目**。
+ *
+ * ⚠️ 这里**只按形状剥**（高/初 + 一二三 + 数字 + 班），不去跟 `classes.name` 做字符串替换：
+ *    库里的班名**常常没有括号**（「高二4班」），而 `classes.name` 是「高二(4)班」，
+ *    替换匹配不上就会把整串标题原样当成科目（`CourseAdmin.tsx` 的 `subjectOfTitle` 正是这么错的，
+ *    见 `待办与已知缺口.md` §七 第 5 行）。形状匹配吃得住两种写法。
+ */
+export const LEADING_CLASS_RE = /^[高初][一二三]\s*[（(]?\s*[0-9０-９一二三四五六七八九十]{1,3}\s*[)）]?\s*班/
+
+/**
+ * 课表条目的标题约定是「[班名] **科目 [任课老师]**」—— 科目在前，老师在后、用空格分开。
+ *
+ * 🔴 **全线只有这一处拆法**（§12.3 I13「判据只有一处」）：
+ *    · 教室端「正在上课」那张卡要把它分两行显示（科目大、老师小）；
+ *    · 课程管理页要从它身上认**科目**（整周网格那一格写什么）和**老师姓名**
+ *      （真实模式读不到 `teachers` 名册 —— 策略 `teachers_self` 只放自己那一行，
+ *       `remote.ts:1551`；姓名那一截就在标题里，所以从标题认）。
+ *    两边各写一遍迟早在括号/空格上分叉，于是同一节课在教室端叫「英语」、在课表上叫
+ *    「高二4班 英语 郭钰峰」。
+ *
+ * 拆之前**先剥掉开头的班名**：不剥的话 `search(/\s/)` 会把「高二(4)班」当成科目。
+ * 没有空格就整串当科目（「班会」「自习」「体锻」「选修课」这些本来就没有老师）；
+ * `room` 是**另一个字段**，不在这里，别把地点也塞进标题。
+ */
+export function splitLessonTitle(title: string): { subject: string; teacher: string } {
+  const t = title.replace(LEADING_CLASS_RE, '').trim() || title.trim()
+  const i = t.search(/\s/)
+  if (i < 0) return { subject: t, teacher: '' }
+  return { subject: t.slice(0, i), teacher: t.slice(i + 1).trim() }
+}
+
 function build(
   weekday: number,
   start: string,
