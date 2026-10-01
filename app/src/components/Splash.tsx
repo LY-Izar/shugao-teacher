@@ -6,11 +6,14 @@
  *   fontSize 128 · fontWeight 850 · letterSpacing -3 · strokeWidth 1.2
  *   drawDuration 1.6 · fillDelay 0.3 · stagger 0.05 · fillMode 'fade'
  *   描边缓动 sine.inOut · 填色缓动 power2.out（填色时长 = drawDuration * 0.5）
+ * 2026-10-05 用户定稿了两处差别：中文换「志莽行书」、英文换 Playfair Display（都是自托管
+ * 子集，见 `index.css` 的 `@font-face`），笔重随之变成 400 / 900；描边 1.2 → 1.8
+ * （行书笔画细，1.2 那道勾线看不出来）。
  * 机制也照抄：**两层同位置的 `<text>`** —— 下层 `fill: none` 只有描边，
  * `stroke-dasharray` 配 `stroke-dashoffset` 从 `dash` 爬到 0，沿**字形轮廓**画出来；
  * 上层是填色，等 `drawDuration + fillDelay` 之后整层淡入。
  *
- * 两处按本项目的规矩落地（效果本身不变）：
+ * 三处按本项目的规矩落地（效果本身不变）：
  *  1. **不引 gsap**，用浏览器原生的 WAAPI 复刻同样的时长 / 延迟 / 逐字 stagger。
  *     缓动等价：gsap `sine.inOut` = `cubic-bezier(.37,0,.63,1)`；
  *     gsap `power2.out`（= cubic out）= `cubic-bezier(.33,1,.68,1)`。
@@ -20,6 +23,10 @@
  *     动画跑完也只画得出前 896 像素，字会缺一截。所以逐字用 canvas 量一下轮廓长度，
  *     dash 取 `max(原配置那个数, 量出来的长度 × 1.15)`：拉丁字母量出来比 896 小，
  *     用的还是原配置那个数，行为逐像素相同。
+ *  3. **字体子集自托管**。CSP 是 `font-src 'self'`，在线 CDN 压根加载不了；两个字体文件是
+ *     Google Fonts 按 `text=` 现生成的**子集**（2–3 KB，只含开屏用的那十几个字形），
+ *     授权文本跟字体放在同一目录。也正因为要等 webfont：轮廓长度与外框都必须在
+ *     `document.fonts.ready` 之后再量 —— 拿系统字量出来的 dash 会把行书画缺一截。
  */
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 
@@ -30,9 +37,18 @@ const CN_TEXT = '树高教务通'
 const EN_TEXT = 'SD Education'
 const CN_SIZE = 128
 const EN_SIZE = 64
-const FONT_WEIGHT = 850
+/**
+ * 字体＝中文志莽行书、英文 Playfair Display（自托管子集）。
+ * `spec` 是族名本身 —— `document.fonts.load()` 与 canvas 量轮廓都要用它；
+ * 真正的回落链写在 CSS（`.splash__title` / `.splash__sub`）。
+ */
+const CN_FONT_SPEC = 'Zhi Mang Xing'
+const CN_WEIGHT = 400
+const EN_FONT_SPEC = 'Playfair Display'
+const EN_WEIGHT = 900
 const LETTER_SPACING = -3
-const STROKE_WIDTH = 1.2
+/** 2026-10-05 定稿：行书笔画细，原配置的 1.2 勾线几乎看不见 ⇒ 1.8 */
+const STROKE_WIDTH = 1.8
 const DRAW_S = 1.6
 const FILL_DELAY_S = 0.3
 /** 源码：`fillDuration = Math.max(0.4, drawDuration * 0.5)` */
@@ -91,13 +107,20 @@ function contourLength(char: string, fontSize: number, fontWeight: number, famil
 type StrokeTextProps = {
   text: string
   fontSize: number
+  /** 自托管字体的族名（`document.fonts.load` 与 canvas 量轮廓都用它） */
+  fontSpec: string
+  weight: number
   className?: string
 }
 
-function StrokeText({ text, fontSize, className = '' }: StrokeTextProps) {
+function StrokeText({ text, fontSize, fontSpec, weight, className = '' }: StrokeTextProps) {
   const rootRef = useRef<HTMLSpanElement | null>(null)
   const textRef = useRef<SVGTextElement | null>(null)
   const [box, setBox] = useState<Box | null>(null)
+  /** 字体到位了才开始画：轮廓长度按字形量，系统字量出来的 dash 会画不全 */
+  const [fontReady, setFontReady] = useState(
+    () => typeof document === 'undefined' || !document.fonts,
+  )
   const chars = useMemo(() => Array.from(text), [text])
 
   /* 量字的外框（照抄源码的 useLayoutEffect：量一次 + 字体加载完再量一次） */
@@ -131,11 +154,23 @@ function StrokeText({ text, fontSize, className = '' }: StrokeTextProps) {
       )
     }
     measure()
-    document.fonts?.ready.then(measure).catch(() => {})
+    const fonts = document.fonts
+    if (!fonts) return
+    /* 自托管字体是首帧才发请求：先显式催一次，再用 ready 兜住 ——
+       加载完重量一次（viewBox 才是真字体的外框），同时放行下面那段起动画的。 */
+    fonts.load(`${weight} ${fontSize}px "${fontSpec}"`, text).catch(() => {})
+    fonts.ready
+      .then(() => {
+        measure()
+        if (!cancelled) setFontReady(true)
+      })
+      .catch(() => {
+        if (!cancelled) setFontReady(true)
+      })
     return () => {
       cancelled = true
     }
-  }, [chars, fontSize])
+  }, [chars, fontSize, fontSpec, text, weight])
 
   /* 起动画。放在 layout 阶段：先把每个字设成"还没画"再交给 WAAPI，
      否则首帧会先闪一下整行实心字。 */
@@ -154,13 +189,24 @@ function StrokeText({ text, fontSize, className = '' }: StrokeTextProps) {
       !reduced && typeof Element !== 'undefined' && typeof Element.prototype.animate === 'function'
     const anims: Animation[] = []
 
+    /* 一确认字号就先把每个字按"还没画"藏住（填充也藏）：字体没到位之前也不许闪出实心字。
+       这里 dash 先用原配置那个数，等字体到了下面再按真字形重量一遍。 */
+    for (const el of strokes) {
+      el.style.strokeDasharray = String(base)
+      el.style.strokeDashoffset = String(base)
+    }
+    for (const el of fills) el.style.opacity = '0'
+
     const finish = () => {
       for (const el of strokes) el.style.strokeDashoffset = '0'
       for (const el of fills) el.style.opacity = '1'
     }
 
+    /* 字体没就绪就先不画 —— 见文件头第 3 条 */
+    if (!fontReady) return
+
     strokes.forEach((el, index) => {
-      const dash = Math.max(base, contourLength(chars[index] ?? '', fontSize, FONT_WEIGHT, family) * 1.15)
+      const dash = Math.max(base, contourLength(chars[index] ?? '', fontSize, weight, family) * 1.15)
       el.style.strokeDasharray = String(dash)
       el.style.strokeDashoffset = String(dash)
       if (!canAnimate) return
@@ -195,14 +241,14 @@ function StrokeText({ text, fontSize, className = '' }: StrokeTextProps) {
       window.clearTimeout(safety)
       for (const anim of anims) anim.cancel()
     }
-  }, [chars, fontSize])
+  }, [chars, fontSize, fontReady, weight])
 
   const viewBox = box
     ? `${box.x} ${box.y} ${box.width} ${box.height}`
     : `0 ${-fontSize} 600 ${fontSize * 1.3}`
   const fontStyle: CSSProperties = {
     fontSize: `${fontSize}px`,
-    fontWeight: FONT_WEIGHT,
+    fontWeight: weight,
     letterSpacing: `${LETTER_SPACING}px`,
   }
 
@@ -321,10 +367,10 @@ export function Splash({ ready, onDone }: { ready: boolean; onDone: () => void }
       <div className="splash__inner">
         <Emblem n={128} className="splash__emblem" />
         <div className="splash__title">
-          <StrokeText text={CN_TEXT} fontSize={CN_SIZE} />
+          <StrokeText text={CN_TEXT} fontSize={CN_SIZE} fontSpec={CN_FONT_SPEC} weight={CN_WEIGHT} />
         </div>
         <div className="splash__sub">
-          <StrokeText text={EN_TEXT} fontSize={EN_SIZE} />
+          <StrokeText text={EN_TEXT} fontSize={EN_SIZE} fontSpec={EN_FONT_SPEC} weight={EN_WEIGHT} />
         </div>
         <div className="splash__bar" data-splash-bar="">
           <span className="splash__bar-fill" data-splash-bar-fill="" style={{ width: `${pct}%` }} />

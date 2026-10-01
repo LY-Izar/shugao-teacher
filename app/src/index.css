@@ -1,6 +1,32 @@
 @import 'tailwindcss';
 
 /* ============================================================
+   开屏用的两个自托管字体（SIL OFL 1.1，授权文本在同目录）
+   · 志莽行书 Zhi Mang Xing 400 —— 中文「树高教务通」五个字
+   · Playfair Display 900 —— 英文「SD Education」
+   两个都是 Google Fonts 按 `text=` 现生成的**子集**，只含开屏用到的字形，
+   单体 2–3 KB。`font-display: block` 是为了不让系统字先闪一下再被换掉
+   （开屏首帧就画，轮廓长度也是按字形量的，字换晚了会画缺一截）。
+   🔴 只给开屏用，别在别处引用；CSP 是 `font-src 'self'`，换在线 CDN 会直接加载失败。
+   ============================================================ */
+@font-face {
+  font-family: 'Zhi Mang Xing';
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: url('/fonts/zhimangxing-cn.woff2') format('woff2');
+  unicode-range: U+52A1, U+6559, U+6811, U+901A, U+9AD8;
+}
+@font-face {
+  font-family: 'Playfair Display';
+  font-style: normal;
+  font-weight: 900;
+  font-display: block;
+  src: url('/fonts/playfair-900-en.woff2') format('woff2');
+  unicode-range: U+20, U+44-45, U+53, U+61, U+63-64, U+69, U+6E-6F, U+74-75;
+}
+
+/* ============================================================
    树高教务通 · 设计令牌
    基调：仪表盘式的精密感。发丝线分隔、小圆角、克制动效。
    刻意回避：大圆角卡片、柔和投影堆叠、渐变紫、填充式图标。
@@ -2158,11 +2184,15 @@ body::before {
 .splash__title {
   width: 100%;
   max-width: 660px;
+  /* 开屏中文＝志莽行书（自托管子集，见文件顶部的 @font-face）。回落链挂在这一层：
+     `getComputedStyle` 量轮廓、`document.fonts.load` 都读它。 */
+  font-family: 'Zhi Mang Xing', var(--font-sans);
 }
 .splash__sub {
   width: 68%;
   max-width: 420px;
   margin-top: 10px;
+  font-family: 'Playfair Display', var(--font-sans);
 }
 /* 进度条：`data-bar` 上来之前是透明的，但**一直占着位置**，文字不会跳一下 */
 .splash__bar {
