@@ -4,6 +4,7 @@ import { useStore } from '../data/store'
 import { getSupabase, isRemote, connectionMode, SUPABASE_URL } from '../lib/supabase'
 import { APP_VERSION, APP_VERSION_LABEL, BUILD_HASH } from '../lib/version'
 import { deviceRole, deviceRoleAt, authDaysLeft } from '../lib/session'
+import { loginFailText, toEmail } from '../lib/accounts'
 import { isSuperAdmin } from '../lib/roles'
 import { getExamTablesProbeStatus, probeReport } from '../data/remote'
 import { getFileClassColsProbeAt, getFileClassColsStatus } from '../lib/files'
@@ -417,11 +418,17 @@ function PanelLogin({ reason }: { reason: string }) {
       setErr('当前是本地模式，没有云端会话可登录。')
       return
     }
-    const email = account.includes('@') ? account.trim() : `${account.trim()}@qq.com`
-    const { error } = await sb.auth.signInWithPassword({ email, password: pwd })
+    /*
+     * 🔴 2026-10-01（A5）：这里原来**自己拼了一个"只补 @qq.com"的版本**，
+     *    与登录页 / 建号用的规则不一致（`lib/accounts.ts` 文件头那条纪律：
+     *    "建号与登录必须用同一个函数"）—— 短名账号在这个入口根本敲不进去。改成 `toEmail()`。
+     * 🔴 失败文案同样走 `loginFailText()`：**不回显 GoTrue 原文**
+     *    （原文会漏"账号在不在 / 有没有确认过 / 有没有被限流"）。
+     */
+    const { error } = await sb.auth.signInWithPassword({ email: toEmail(account), password: pwd })
     if (error) {
       setBusy(false)
-      setErr(error.message === 'Invalid login credentials' ? '邮箱或密码不正确' : error.message)
+      setErr(loginFailText(error.message))
       return
     }
     await hydrate()

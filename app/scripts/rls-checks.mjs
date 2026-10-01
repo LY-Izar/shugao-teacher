@@ -829,6 +829,26 @@ await withLock(async () => {
          */
         return text
       }
+      if (mode === 'function-exec-open') {
+        /*
+         * 🆕 第二十六节（安全加固 A8）的负向对照：把 §39 那条**规则式 revoke** 换成
+         * A8 的第一版**一刀切**（`revoke execute on all functions …`）——
+         * 等于"没给 definer 函数收口" + "把所有函数的 PUBLIC 默认值一起收走"。
+         * 期望：那一节 **A 段与 C 段必须变红**（A：anon 一个都调不动了 ⇒ 期望值对不上；
+         *    C：`student_subject_check` 等客户端入口对 authenticated 断供 —— 就是 `grade-checks` K3）；
+         *    B 段（写入口对 anon 关闭）在两种形态下都是绿的 —— 一刀切比规则式收得更狠，不是更松。
+         */
+        const anchor = "'revoke execute on function %s from public, anon'"
+        if (!text.includes(anchor)) {
+          throw new Error(
+            '负向对照锚点没找到：schema.sql §39 里那条规则式 revoke 不见了（模式 function-exec-open）',
+          )
+        }
+        return text.replace(
+          anchor,
+          "'revoke execute on all functions in schema public from public, anon'",
+        )
+      }
       throw new Error(`不认识的 RLS_NEGATIVE=${mode}`)
     }
 
@@ -9107,6 +9127,164 @@ await withLock(async () => {
         globalThis.fetch = sRealFetch
       }
     }
+
+    /* ============================================================
+       二十六、🆕 安全加固 A8（2026-10-01）：函数执行权限收口
+       ------------------------------------------------------------
+       背景：`create function` 的默认是 **EXECUTE to PUBLIC** —— 没显式 revoke 的函数，
+       **未登录的 anon 也能调**。本项目 41 个判据函数当年只 `grant … to authenticated`、
+       漏了 revoke；而 `promote_grades` / `grade_delete` / `write_student_subject` 这些
+       **只该由 service_role 调的写入口**更是连 grant 都没有、纯靠 PUBLIC 默认值活着
+       ⇒ **anon 的可达面比原先判断的大**（判据读了 `auth.uid()` 恒 false 不要紧，
+       写入口不是判据）。`schema.sql` §39 在**文件末尾**收口。
+       🔴 **收口是规则式的，不是一刀切**：只收 `security definer` 且**非触发器**的函数
+          （当前 105 个）；非 definer 函数（纯函数 / 序列号工具）与触发器函数一律不碰。
+          A8 的第一版写的是 `revoke execute on all functions …` —— `grade-checks` 的 K3
+          当场红（`student_subject_check` 只靠 PUBLIC 默认值）—— 下面 C 段就是那条红的门禁版。
+       🔴 三条跟着它的事（漏一条就出事故）：
+         ① `report_frontend_error()` 必须**再 grant 回 anon**（登录页 / 教室端 /
+            `hydrate()` 失败这三个现场都没有会话，恰恰最该报上来）；
+         ② 裸版判据 `can_edit_student_subject(uuid)` 必须**显式 grant 给 authenticated** ——
+            它原来只靠 PUBLIC 默认值，而两条 RLS 策略里要调它
+            （`schema.sql:6269-6270` / `:9012`），漏了就是当场 `permission denied for function`；
+         ③ §29 那批"服务端拿 service_role 调"的写入口必须**带角色存在性守卫**显式补回 ——
+            门禁的替身库（PGlite）里没有 `service_role` 这个角色，所以这里测不到它，
+            只能靠 `nav-checks` 的 D14-F ③ 去钉源码里那段守卫。
+       ============================================================ */
+
+    section('二十六、🆕 安全加固 A8：函数执行权限收口（anon 只调得动那一个）')
+
+    /**
+     * 以 anon 身份**问权限**（不切角色，直接问 has_function_privilege —— 它会把 PUBLIC 的授权也算进去）。
+     * 🔴 口径与 §39 的规则一致：只看 `security definer` 且**非触发器**的函数
+     *    （触发器函数由系统调用、非 definer 函数是纯函数 / 序列号工具，两类**故意不碰**）。
+     */
+    const ANON_EXEC_SQL = `
+      select p.proname from pg_proc p
+        join pg_namespace n on n.oid = p.pronamespace
+       where n.nspname = 'public'
+         and p.prosecdef
+         and p.prorettype <> 'trigger'::regtype
+         and has_function_privilege('anon', p.oid, 'EXECUTE')
+       order by 1`
+
+    const anonExec = await B.db.query(ANON_EXEC_SQL)
+    eq(
+      '🔴 A8：public 里 anon 只调得动 `report_frontend_error` 一个（唯一"故意给匿名"的 definer 函数：三个最该上报的现场都没有会话）',
+      anonExec.rows.map((r) => r.proname),
+      ['report_frontend_error'],
+    )
+
+    /* B：只该由 service_role 调的写入口，anon 一个都够不着（A8 之前它们连 grant 都没有、纯靠 PUBLIC 默认值） */
+    const WRITE_ENTRIES = [
+      'promote_grades',
+      'grade_delete',
+      'write_student_subject',
+      'bulk_write_class_subjects',
+      'write_academic_year',
+      'db_usage_report',
+      'grade_backup_by_token',
+    ]
+    const openWrites = await B.db.query(`
+      select p.proname from pg_proc p
+        join pg_namespace n on n.oid = p.pronamespace
+       where n.nspname = 'public'
+         and p.proname in (${WRITE_ENTRIES.map((s) => `'${s}'`).join(', ')})
+         and has_function_privilege('anon', p.oid, 'EXECUTE')
+       order by 1`)
+    eq(
+      '🔴 A8：只该由 service_role 调的写入口（提档 / 毕业删除 / 写选科 / 备份下载 …）anon **一个都调不动**',
+      openWrites.rows.map((r) => r.proname),
+      [],
+    )
+
+    /* C：**不许一刀切** —— 客户端 RPC 入口与裸版判据对 authenticated 一个都不能少。
+       （A8 第一版的 `revoke … on all functions` 就是在这里翻车的：`grade-checks` K3 红。） */
+    const AUTH_ENTRIES = [
+      'student_subject_check',
+      'can_edit_student_subject',
+      'apply_temp_schedule_change',
+      'apply_perm_schedule_change',
+      'purge_expired_schedule_changes',
+      'schedule_day_cells',
+      'schedule_conflicts_on',
+      'can_manage_schedule',
+      'write_stream_members',
+    ]
+    const authedExec = await B.db.query(`
+      select p.proname from pg_proc p
+        join pg_namespace n on n.oid = p.pronamespace
+       where n.nspname = 'public'
+         and p.proname in (${AUTH_ENTRIES.map((s) => `'${s}'`).join(', ')})
+         and has_function_privilege('authenticated', p.oid, 'EXECUTE')
+       order by 1`)
+    eq(
+      '🔴 A8：客户端 RPC 入口 + 裸版判据对 authenticated **一个都不能少**（一刀切 revoke 会把它们一起断供 —— `grade-checks` K3 那条红就是其中最小的一例）',
+      authedExec.rows.map((r) => r.proname),
+      [...AUTH_ENTRIES].sort(),
+    )
+
+    const barePred = await B.db.query(
+      `select has_function_privilege('authenticated', 'public.can_edit_student_subject(uuid)', 'EXECUTE') as v`,
+    )
+    eq(
+      '🔴 A8：裸版判据 `can_edit_student_subject(uuid)` 对 authenticated **仍然可执行**（RLS 策略里要用它；漏补这条 grant = 两条策略当场 permission denied）',
+      Boolean(barePred.rows[0].v),
+      true,
+    )
+
+    /* 🧪 反向对照一：**就地**把 EXECUTE 整体 grant 回 anon → 那条查询必须查出很多名字 */
+    await B.db.exec('grant execute on all functions in schema public to anon;')
+    const reopened = await B.db.query(
+      `select count(*)::int as n from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+        where n.nspname = 'public' and has_function_privilege('anon', p.oid, 'EXECUTE')`,
+    )
+    ok(
+      '🧪 A8 反向对照一：就地 grant 回 anon → 能调的个数当场变多（证明 A 段那条真的在读权限，不是恒真）',
+      Number(reopened.rows[0].n) > 1,
+      `grant 回去之后 = ${reopened.rows[0].n} 个（收口时是 1 个）`,
+    )
+
+    /*
+     * 🧪 反向对照二：**就地**退化成 A8 的第一版（一刀切 `revoke … on all functions`）——
+     *    B 段的写入口与 C 段的客户端入口必须当场翻车。
+     *    ⚠️ 这一段必须先跑，因为一刀切之后要靠"grant 回 PUBLIC + 重放规则"才能复原。
+     */
+    await B.db.exec('revoke execute on all functions in schema public from public, anon;')
+    const blanketBreaks = await B.db.query(`
+      select has_function_privilege(
+        'authenticated', 'public.student_subject_check(text,text,text[],text)', 'EXECUTE') as k3`)
+    ok(
+      '🧪 A8 反向对照二（a）：一刀切 revoke → `student_subject_check` 对 authenticated 当场 false（这正是 `grade-checks` K3 那条红）',
+      blanketBreaks.rows[0].k3 === false,
+      `一刀切之后 K3 = ${blanketBreaks.rows[0].k3}`,
+    )
+    /* 复原：先把 PUBLIC 默认值给回去，再重放 §39 的规则与两条例外 —— 回到收口后的状态 */
+    await B.db.exec('grant execute on all functions in schema public to public;')
+    await B.db.exec(`
+      do $$
+      declare r record;
+      begin
+        for r in
+          select p.oid::regprocedure as sig
+            from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+           where n.nspname = 'public' and p.prosecdef and p.prorettype <> 'trigger'::regtype
+        loop
+          execute format('revoke execute on function %s from public, anon', r.sig);
+        end loop;
+      end $$;`)
+    await B.db.exec(
+      'grant execute on function public.can_edit_student_subject(uuid) to authenticated;',
+    )
+    await B.db.exec(
+      'grant execute on function public.report_frontend_error(text, text, text, text, text, text, text, text) to anon;',
+    )
+    const anonExec2 = await B.db.query(ANON_EXEC_SQL)
+    eq(
+      '🧪 A8 反向对照二（b）：复原之后又只剩它一个（这两次 grant/revoke 都是就地改的，不是改文件）',
+      anonExec2.rows.map((r) => r.proname),
+      ['report_frontend_error'],
+    )
 
     await B.db.close()
     await A.db.close()

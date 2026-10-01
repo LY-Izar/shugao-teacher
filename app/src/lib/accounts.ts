@@ -44,6 +44,27 @@ export function toEmail(raw: string): string {
   return QQ_RE.test(s) ? `${s}${QQ_DOMAIN}` : `${s}${ACCOUNT_DOMAIN}`
 }
 
+/**
+ * 把登录失败的原因翻成**一句人话**（2026-10-01 安全加固 A5）。
+ *
+ * 为什么不能像原来那样把 GoTrue 的原文直接摆上屏：
+ *  ① 那些话是**实现口吻**（`Email not confirmed` / `Email rate limit exceeded`），
+ *     老师看不懂；文案纪律也要求界面上只说"这里是什么、我能做什么"；
+ *  ② 更要紧的是：原文会把"这个邮箱存不存在 / 这个账号确没确认过 / 是不是被限流了"
+ *     一并漏出去。密码错与账号不存在**上游本来已经统一成同一句**
+ *     （`Invalid login credentials`）—— 我们别在最后一步又把它拆开。
+ *
+ * ⚠️ 认不出的一律同一句、**不回显原文**：上游以后换文案，提示只会变笼统，不会反过来漏信息。
+ */
+export function loginFailText(raw: string): string {
+  const m = (raw ?? '').toLowerCase()
+  if (m.includes('invalid login credentials')) return '邮箱或密码不正确'
+  if (m.includes('rate limit') || m.includes('too many')) return '尝试太频繁了，过几分钟再试'
+  if (m.includes('not confirmed')) return '这个账号还没确认，请联系管理员'
+  if (m.includes('failed to fetch') || m.includes('network')) return '连不上服务器，检查一下网络'
+  return '登录没成功，稍后再试一次'
+}
+
 /* ---------------- 服务端返回的形状 ---------------- */
 
 export type DirRole = {

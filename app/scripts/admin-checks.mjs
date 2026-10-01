@@ -1414,15 +1414,15 @@ await withLock(async () => {
     )
     const nums = C.SCHEMA_STAGES.map((s) => s.n)
     ok(
-      '补〇ⓑ 🆕 §35 / §36 / §37 / §38 在清单里（旧的手写清单只到 §19）',
-      [35, 36, 37, 38].every((n) => nums.includes(n)),
+      '补〇ⓑ 🆕 §35 / §36 / §37 / §38 / §39 在清单里（旧的手写清单只到 §19）',
+      [35, 36, 37, 38, 39].every((n) => nums.includes(n)),
       nums.join(','),
     )
     ok(
       '补〇ⓑ 清单覆盖到 `schema.sql` 的**最后一个段头**（不是写死的数字 —— 加段就自动跟上）',
       nums.length === parsed.length &&
         Math.max(...nums) === parsed[parsed.length - 1].n &&
-        Math.max(...nums) === 38,
+        Math.max(...nums) === 39,
       `${nums.length} 段 / 最大 §${Math.max(...nums)}（schema.sql 末段 §${parsed[parsed.length - 1].n}）`,
     )
     ok(

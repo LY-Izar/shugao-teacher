@@ -116,7 +116,14 @@ export default function Files() {
   }
 
   const open = async (f: SharedFile) => {
-    const url = await signedUrl(f.storagePath)
+    /*
+     * 🔴 A6（2026-10-01 安全加固）：**能不能内嵌看**决定这次要不要强制下载。
+     *    能看的（图片 / PDF / 视频）新窗口打开；其余（含 `.html/.htm/.svg`）一律下载 ——
+     *    上传的网页被浏览器当**本站同源文档**渲染过，里面的 JS 能读到会话。
+     *    四层里这是第二层，另外三层在 `lib/files.ts`（`kindOf` / `canViewInline` / 上传的 contentType）。
+     */
+    const k = kindOf(f.name, f.mime)
+    const url = await signedUrl(f.storagePath, 7200, !canViewInline(k))
     if (!url) {
       push({ text: '取不到访问链接，重试一次', tone: 'bad' })
       return
@@ -154,7 +161,12 @@ export default function Files() {
           ref={fileRef}
           type="file"
           multiple
-          accept="image/*,.pdf,.html,.htm,.ppt,.pptx,.doc,.docx,.xls,.xlsx,.mp4,.mov"
+          /*
+           * 🔴 A6：`accept` 里**没有** `.html/.htm/.svg` —— 这三类会被浏览器当**本站同源文档**
+           *    渲染，里面的脚本能读到 localStorage 里的会话。前端这一层只是"建议"，
+           *    真正的三层在 `lib/files.ts`（见那三个函数的注释）。
+           */
+          accept="image/*,.pdf,.ppt,.pptx,.doc,.docx,.xls,.xlsx,.mp4,.mov"
           className="hidden"
           onChange={(e) => {
             void doUpload(e.target.files)

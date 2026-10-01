@@ -5,7 +5,7 @@ import { Emblem } from '../components/Emblem'
 import { StarBorder } from '../components/StarBorder'
 import { Button } from '../components/ui'
 import { useStore, useToast } from '../data/store'
-import { toEmail } from '../lib/accounts'
+import { loginFailText, toEmail } from '../lib/accounts'
 import { getSupabase, isRemote } from '../lib/supabase'
 import { markLogin, setDeviceRole } from '../lib/session'
 import { APP_VERSION_LABEL } from '../lib/version'
@@ -45,7 +45,8 @@ export default function Login() {
         push({
           text: '登录失败',
           tone: 'bad',
-          desc: error.message === 'Invalid login credentials' ? '邮箱或密码不正确' : error.message,
+          /* 🔴 A5：**不回显 GoTrue 原文**（原文会漏"账号在不在 / 有没有确认过 / 有没有被限流"） */
+          desc: loginFailText(error.message),
         })
         return
       }

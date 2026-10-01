@@ -23,24 +23,32 @@ export type SharedFile = {
   createdAt: number
 }
 
-export type FileKind = 'image' | 'html' | 'pdf' | 'ppt' | 'doc' | 'video' | 'other'
+export type FileKind = 'image' | 'pdf' | 'ppt' | 'doc' | 'video' | 'other'
 
-/** 按扩展名判类型 —— 手机拍的照片 mime 常常不准，扩展名更可信 */
+/**
+ * 按扩展名判类型 —— 手机拍的照片 mime 常常不准，扩展名更可信。
+ *
+ * 🔴 2026-10-01 安全加固 A6：`.html/.htm` 与 `.svg` **不再单独成类**，一律落进 `'other'`。
+ *    原因是它们会被浏览器当**同源文档**渲染：同事点开一个上传的 `.html`，
+ *    里面的 JS 就跑在**本站 origin** 上、能读到 `localStorage` 里的会话（`安全加固方案.md` A6）。
+ *    `.svg` 同理（SVG 里可以带 `<script>`）。
+ *    判"是什么"与判"能不能内嵌打开"本是两件事，但这一类**两者都得收紧**，
+ *    所以在这里就断掉，而不是只在 `canViewInline()` 上补一句。
+ */
 export function kindOf(name: string, mime = ''): FileKind {
   const ext = name.toLowerCase().split('.').pop() ?? ''
   if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'heic'].includes(ext)) return 'image'
-  if (['html', 'htm'].includes(ext)) return 'html'
   if (ext === 'pdf') return 'pdf'
   if (['ppt', 'pptx'].includes(ext)) return 'ppt'
   if (['doc', 'docx', 'xls', 'xlsx'].includes(ext)) return 'doc'
   if (['mp4', 'mov', 'webm', 'm4v'].includes(ext)) return 'video'
-  if (mime.startsWith('image/')) return 'image'
+  /* ⚠️ 扩展名认不出时才看 mime，而且 `image/svg+xml` 不算图片 */
+  if (mime.startsWith('image/') && !mime.includes('svg')) return 'image'
   return 'other'
 }
 
 export const KIND_TEXT: Record<FileKind, string> = {
   image: '图片',
-  html: '网页',
   pdf: 'PDF',
   ppt: 'PPT',
   doc: '文档',
@@ -50,7 +58,7 @@ export const KIND_TEXT: Record<FileKind, string> = {
 
 /** 教室端能不能直接打开看 —— 这决定了界面上是「看」还是「下载」 */
 export function canViewInline(k: FileKind): boolean {
-  return k === 'image' || k === 'html' || k === 'pdf' || k === 'video'
+  return k === 'image' || k === 'pdf' || k === 'video'
 }
 
 const BUCKET = 'classroom-files'
@@ -250,10 +258,19 @@ export async function uploadFile(file: File, teacherId: string, classIds: string
 
   const path = `${teacherId}/${crypto.randomUUID()}-${safeName(file.name)}`
 
+  /*
+   * 🔴 A6：**不信浏览器报的类型**。`.html/.svg` 与认不出的一律存成
+   * `application/octet-stream` —— 这样即便有人拿到直链，浏览器也只会下载、
+   * 不会把它当页面（或脚本）在**本站 origin** 里跑起来。
+   * 认得出的那几类仍按真实类型存（图片 / PDF / 视频要能内嵌看、要能播）。
+   */
+  const storeType =
+    kindOf(file.name, file.type) === 'other' ? 'application/octet-stream' : file.type || undefined
+
   const up = await c.storage.from(BUCKET).upload(path, file, {
     cacheControl: '3600',
     upsert: false,
-    contentType: file.type || undefined,
+    contentType: storeType,
   })
   if (up.error) throw up.error
 
@@ -281,9 +298,23 @@ export async function deleteFile(f: SharedFile): Promise<void> {
   if (del.error) throw del.error
 }
 
-/** 取一个限时直链。私有桶必须走签名，默认 2 小时够一节课用。 */
-export async function signedUrl(path: string, seconds = 7200): Promise<string | null> {
-  const { data, error } = await sb().storage.from(BUCKET).createSignedUrl(path, seconds)
+/**
+ * 取一个限时直链。私有桶必须走签名，默认 2 小时够一节课用。
+ *
+ * 🔴 A6：`download` 为真时带上下载选项 —— 上游会回 `Content-Disposition: attachment`，
+ *    浏览器只存盘、**不会在站点自己的 origin 里渲染它**。
+ *    界面上"能内嵌看的那几类"（图片 / PDF / 视频）才传 false，其余一律 true。
+ *    ⚠️ 这是第二层；第一层在 `kindOf()`（html / svg 已不算是"能看的"），
+ *       第三层在 `uploadFile()`（那几类连存储里的 contentType 都不是 text/html）。
+ */
+export async function signedUrl(
+  path: string,
+  seconds = 7200,
+  download = false,
+): Promise<string | null> {
+  const { data, error } = await sb()
+    .storage.from(BUCKET)
+    .createSignedUrl(path, seconds, download ? { download: true } : undefined)
   if (error) return null
   return data?.signedUrl ?? null
 }

@@ -33,6 +33,7 @@
  * ============================================================
  */
 import { readFileSync, readdirSync, existsSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { dirname, join, resolve, extname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { registerTsResolve } from './lib/ts-resolve.mjs'
@@ -3725,6 +3726,265 @@ section('第十五节 · D13：自己改密码（只作用自己 · 失败显式
   )
 }
 
+/* ============================================================
+   第十六节 · D14：安全加固 A 档（2026-10-01）
+   ------------------------------------------------------------
+   这一节守的是**"安全这件事没有门禁"**那个缺口 —— `rls-checks` 是数据库权限的真测试，
+   但它不覆盖：响应头 / CSP 内联脚本哈希 / 中转白名单 / 内嵌打开 / 登录文案。
+   这几样里的每一样都有一个"悄悄退回去"的坏法，而**退回去了没人会看见**：
+     · `_headers` 里的 sha256 与 `index.html` 那段内联脚本**一旦不同步**，
+       浏览器的 CSP 会把那段脚本**静默拦掉** —— 页面照常打开，只有暗色用户先白闪一下；
+     · `_middleware.ts` 少掉 `/api/sb` 那一句放行，Realtime / 文件全断，而且只有线上才现；
+     · `/api/sb` 的白名单与抹头两件事，删掉任何一件都不影响任何功能（只影响安全）；
+     · `.html` 回到 accept 里、判定回到"能内嵌看" —— 功能上毫无变化，安全上直接开口子。
+   所以这里**每一条都配反向对照**（AGENTS.md §三：把修复改回去必须红）。
+   ============================================================ */
+
+section('第十六节 · D14：安全加固 A 档（响应头 · CSP 哈希配对 · 中转白名单 · 内嵌打开 · 登录文案）')
+
+{
+  /** 读一个 app/ 下的文件；**读不到回 null**（不抛）—— 让断言自己报"文件不在"，而不是脚本崩掉 */
+  const readOr = (rel, root = APP) => {
+    const p = join(root, rel)
+    return existsSync(p) ? readFileSync(p, 'utf8') : null
+  }
+  const S = (x) => String(x ?? '')
+
+  const HDR = readOr('public/_headers')
+  const HTML = readOr('index.html')
+  const MW = readOr('functions/api/_middleware.ts')
+  const SB = readOr('functions/api/sb/[[path]].ts')
+  const FILELIB = readOr('src/lib/files.ts')
+  const FILEPAGE = readOr('src/pages/Files.tsx')
+  const LOGIN = readOr('src/pages/Login.tsx')
+  const ADMIN = readOr('src/pages/Admin.tsx')
+  const ACCOUNTS = readOr('src/lib/accounts.ts')
+  const SCHEMA = readOr('supabase/schema.sql', REPO)
+
+  /* ---------- A：静态资源的安全响应头（A3）+ 内联脚本的哈希配对 ---------- */
+
+  const NEED_HDR = [
+    ['X-Frame-Options', /X-Frame-Options:\s*DENY/i],
+    ['X-Content-Type-Options', /X-Content-Type-Options:\s*nosniff/i],
+    ['Referrer-Policy', /Referrer-Policy:\s*strict-origin-when-cross-origin/i],
+    ['Strict-Transport-Security', /Strict-Transport-Security:\s*max-age=\d+/i],
+    ['Content-Security-Policy', /Content-Security-Policy:\s*default-src 'self'/i],
+  ]
+  const hdrMissing = NEED_HDR.filter(([, re]) => !re.test(S(HDR))).map(([n]) => n)
+  check(
+    HDR !== null && hdrMissing.length === 0,
+    'D14-A ① `app/public/_headers` 在，且五类头都在（XFO / nosniff / Referrer / HSTS / CSP）',
+    HDR === null ? '文件不在' : hdrMissing.length ? `少了 ${hdrMissing.join('、')}` : '五类齐全',
+  )
+
+  /*
+   * CSP 的 sha256 必须与**内联脚本元素的文本内容**逐字对上（含首尾空白）。
+   * ⚠️ 口径：浏览器算的是 `<script>` 与 `</script>` 之间的**全部字符** ——
+   *    去掉首尾空白去算会得到一个**永远对不上**的哈希（本轮第一次就是这么算错的）。
+   */
+  const hashOf = (s) => createHash('sha256').update(s, 'utf8').digest('base64')
+  const inlineOf = (html) => {
+    const m = S(html).match(/<script>([\s\S]*?)<\/script>/)
+    return m ? m[1] : null
+  }
+  const inline = inlineOf(HTML)
+  const wantHash = inline === null ? '(没有内联脚本)' : hashOf(inline)
+  const cspHashes = [...S(HDR).matchAll(/sha256-([A-Za-z0-9+/=]+)/g)].map((m) => m[1])
+  check(
+    inline !== null && cspHashes.includes(wantHash),
+    '🔴 D14-A ② CSP 里的 sha256 = `index.html` 那段内联主题脚本算出来的哈希（不同步 = 浏览器**静默**拦掉它，只有暗色用户先白闪一下）',
+    `内联脚本算出 ${wantHash} · CSP 里写着 ${cspHashes.join('、') || '（没有）'}`,
+  )
+  /* 🧪 反向对照①：脚本内容动一个字符 → 哈希就对不上了（证明 ② 真的在算） */
+  const inlineShifted = inline === null ? null : `${inline} `
+  check(
+    inlineShifted !== null && hashOf(inlineShifted) !== wantHash,
+    '🧪 D14-A 反向对照①：内联脚本尾部多一个空格 → 哈希当场变（证明 ② 是在真算哈希，不是恒真）',
+    inlineShifted === null ? '（没抠到内联脚本）' : `多一个空格后 ${hashOf(inlineShifted)}`,
+  )
+  /* 🧪 反向对照②：把 CSP 里那段哈希改掉 → ② 的判据当场假（证明 ② 真的在读那个文件） */
+  const hdrBadHash = S(HDR).replace(/sha256-[A-Za-z0-9+/=]+/, 'sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=')
+  check(
+    hdrBadHash !== S(HDR) && !hdrBadHash.includes(wantHash),
+    '🧪 D14-A 反向对照②：把 CSP 里那段 sha256 换成假的 → ② 当场红（"配对"不是摆设）',
+    `改后还含真哈希 = ${hdrBadHash.includes(wantHash)}`,
+  )
+
+  /* ---------- B：Functions 的响应头（A4）---------- */
+
+  check(
+    MW !== null &&
+      /X-Content-Type-Options/.test(S(MW)) &&
+      /X-Frame-Options/.test(S(MW)) &&
+      /Referrer-Policy/.test(S(MW)),
+    'D14-B ① `app/functions/api/_middleware.ts` 在，且给接口响应补了 nosniff / XFO / Referrer-Policy（`_headers` 管不到 Functions）',
+    MW === null ? '文件不在' : '找了三个头名',
+  )
+  const mwBypass = /startsWith\('\/api\/sb\/'\)[\s\S]{0,60}?return res/.test(S(MW))
+  check(
+    mwBypass,
+    '🔴 D14-B ② `/api/sb/*` **原样放行**（它是数据库中转：重造 Response 会破坏 `content-encoding`，Realtime 的 Upgrade 也走它）',
+    mwBypass ? '放行那一句在' : '没找到"判 /api/sb 就 return res"这一句',
+  )
+  const mwNoBypass = S(MW).replace(/if \(path === '\/api\/sb' \|\| path\.startsWith\('\/api\/sb\/'\)\) return res/, '')
+  check(
+    mwNoBypass !== S(MW) && !/startsWith\('\/api\/sb\/'\)[\s\S]{0,60}?return res/.test(mwNoBypass),
+    '🧪 D14-B 反向对照：把放行那一句删掉 → ② 当场红（证明它真的在读那句）',
+    `删掉之后还在 = ${/startsWith\('\/api\/sb\/'\)[\s\S]{0,60}?return res/.test(mwNoBypass)}`,
+  )
+
+  /* ---------- C：数据库中转的路径白名单 + 抹掉可伪造的 IP 头（A7）---------- */
+
+  const PREFIXES = ['/auth/v1/', '/rest/v1/', '/storage/v1/', '/realtime/v1/', '/functions/v1/']
+  const missingPrefix = PREFIXES.filter((p) => !S(SB).includes(p))
+  check(
+    SB !== null && missingPrefix.length === 0,
+    'D14-C ① `/api/sb` 的白名单里五段路径都在（auth / rest / storage / realtime / functions）',
+    SB === null ? '文件不在' : missingPrefix.length ? `少了 ${missingPrefix.join('、')}` : '五段齐全',
+  )
+  const guardPos = S(SB).indexOf('if (!allowedPath(rest))')
+  const fetchPos = S(SB).indexOf('await fetch(')
+  check(
+    guardPos >= 0 && fetchPos > guardPos,
+    '🔴 D14-C ② 名单判定在**转发之前**（判在 fetch 之后 = 白名单等于没写）',
+    `allowedPath 在第 ${guardPos + 1} 字符 · await fetch 在第 ${fetchPos + 1} 字符`,
+  )
+  const STRIP_NEED = ['x-forwarded-for', 'x-real-ip', 'cf-connecting-ip']
+  const stripMissing = STRIP_NEED.filter((h) => !S(SB).includes(`'${h}'`))
+  check(
+    stripMissing.length === 0 && /headers\.delete\(h\)/.test(S(SB)),
+    '🔴 D14-C ③ 客户端可伪造的 IP 头被逐个删掉（`x-forwarded-for` / `x-real-ip` / `cf-connecting-ip`）—— 不删的话，攻击者每换一个假 IP 就等于换一只限流桶',
+    stripMissing.length ? `常量里少了 ${stripMissing.join('、')}` : '三个都在、并且真的 delete',
+  )
+  const sbNoGuard = S(SB).replace('if (!allowedPath(rest))', 'if (false)')
+  check(
+    sbNoGuard !== S(SB) && !sbNoGuard.includes('if (!allowedPath(rest))'),
+    '🧪 D14-C 反向对照：把守卫改成 `if (false)` → ①/② 的口径当场假（证明这几条真的在读那句守卫）',
+    `改后还找得到原句 = ${sbNoGuard.includes('if (!allowedPath(rest))')}`,
+  )
+
+  /* ---------- D：内嵌打开那一类收紧（A6）---------- */
+
+  const accept = (S(FILEPAGE).match(/accept="([^"]*)"/) ?? [])[1] ?? ''
+  check(
+    accept !== '' && !/\.html|\.htm|\.svg/.test(accept),
+    '🔴 D14-D ① `Files.tsx` 的上传 `accept` 里没有 `.html/.htm/.svg`',
+    `accept="${accept}"`,
+  )
+  check(
+    !/return 'html'/.test(S(FILELIB)) &&
+      !/FileKind =[^\n]*'html'/.test(S(FILELIB)) &&
+      !/k === 'html'/.test(S(FILELIB)),
+    '🔴 D14-D ② `files.ts` 里 html 这一类**从类型到判定都不存在**（`FileKind` 没有 html、`kindOf` 不再返回它、`canViewInline` 不认它）',
+    `还剩 html 字样 = ${/html/.test(S(FILELIB))}`,
+  )
+  check(
+    /application\/octet-stream/.test(S(FILELIB)) && /kindOf\(file\.name, file\.type\) === 'other'/.test(S(FILELIB)),
+    '🔴 D14-D ③ 上传时**不信浏览器报的类型**：认不出的（含 html/svg）一律存 `application/octet-stream`',
+    '在 `uploadFile()` 里找那一句',
+  )
+  check(
+    /download \? \{ download: true \} : undefined/.test(S(FILELIB)) &&
+      /!canViewInline\(k\)/.test(S(FILEPAGE)),
+    '🔴 D14-D ④ 签名直链能强制下载，且「打开」那个按钮**按能不能内嵌看**决定要不要强制（能看的才内嵌）',
+    `库里带 download = ${/download \? \{ download: true \} : undefined/.test(S(FILELIB))} · 页面上传了 = ${/!canViewInline\(k\)/.test(S(FILEPAGE))}`,
+  )
+  const acceptBack = S(FILEPAGE).replace('accept="image/*,.pdf', 'accept="image/*,.html,.htm,.pdf')
+  check(
+    acceptBack !== S(FILEPAGE) && /\.html/.test((acceptBack.match(/accept="([^"]*)"/) ?? [])[1] ?? ''),
+    '🧪 D14-D 反向对照：把 `.html` 塞回 accept → ① 当场红（证明 ① 真的在读那一行）',
+    `塞回去之后 accept 里还有 .html = ${/\.html/.test((acceptBack.match(/accept="([^"]*)"/) ?? [])[1] ?? '')}`,
+  )
+
+  /* ---------- E：登录失败不再直出 GoTrue 原文（A5）---------- */
+
+  const loginUses = /desc: loginFailText\(error\.message\)/.test(S(LOGIN))
+  const adminUses = /setErr\(loginFailText\(error\.message\)\)/.test(S(ADMIN))
+  check(
+    loginUses && adminUses && !/error\.message === 'Invalid login credentials'/.test(S(LOGIN) + S(ADMIN)),
+    '🔴 D14-E ① 两处登录（登录页 / 管理台）的失败文案都走 `loginFailText()`，都不再把 GoTrue 原文摆上屏',
+    `登录页 = ${loginUses} · 管理台 = ${adminUses}`,
+  )
+  const loginRaw = S(LOGIN).replace('desc: loginFailText(error.message)', 'desc: error.message')
+  check(
+    !/desc: loginFailText\(error\.message\)/.test(loginRaw) && loginRaw !== S(LOGIN),
+    '🧪 D14-E 反向对照：把那一句换回 `error.message` → ① 当场红（原文会漏"账号在不在 / 有没有被限流"）',
+    `换回去之后还走 loginFailText = ${/desc: loginFailText\(error\.message\)/.test(loginRaw)}`,
+  )
+  check(
+    /return '登录没成功，稍后再试一次'/.test(S(ACCOUNTS)) && /export function loginFailText/.test(S(ACCOUNTS)),
+    '🔴 D14-E ② `loginFailText()` 认不出的一律回**固定那一句**（不回显原文 —— 上游以后换文案，只会变笼统，不会漏信息）',
+    '在 `lib/accounts.ts` 里找那一句兜底',
+  )
+  check(
+    /signInWithPassword\(\{ email: toEmail\(account\)/.test(S(ADMIN)) && /import \{ loginFailText, toEmail \}/.test(S(ADMIN)),
+    '🔴 D14-E ③ 管理台登录也走 `toEmail()`（原来自己拼了一个"只补 @qq.com"的版本 —— 同一个账号两套口径）',
+    '在 `Admin.tsx` 里找那一句',
+  )
+
+  /* ---------- F：数据库那一侧的执行权限收口（A8）---------- */
+
+  /*
+   * A8 的第一版写的是 `revoke execute on all functions in schema public from public, anon;`
+   * —— 一刀切会把"没有显式 grant"的函数对 `authenticated` / `service_role` **一起断供**：
+   * `grade-checks` 的 K3 当场红（`student_subject_check` 靠 PUBLIC 默认值），
+   * 而 §29 那批"只该由 service_role 调"的写入口（`promote_grades` / `grade_backup*`）
+   * 门禁里测不到、会在线上炸。下面这几条钉的就是"规则式 revoke"这个形态本身。
+   */
+  const CLOSE_RULE = "execute format('revoke execute on function %s from public, anon', r.sig);"
+  const BLANKET = 'revoke execute on all functions in schema public from public, anon;'
+  const S_SCHEMA = S(SCHEMA)
+  const closePos = S_SCHEMA.indexOf(CLOSE_RULE)
+  const blanketPos = S_SCHEMA.indexOf(BLANKET)
+  const grantBarePos = S_SCHEMA.indexOf(
+    'grant execute on function public.can_edit_student_subject(uuid) to authenticated;',
+  )
+  const reGrantAnonPos = S_SCHEMA.indexOf('to anon;', closePos)
+  check(
+    closePos > 0 && blanketPos === -1 && grantBarePos > closePos && reGrantAnonPos > closePos,
+    '🔴 D14-F ① 末尾那条收口是**规则式**（只收 definer 非触发器函数），且**不许**出现一刀切的 `revoke … on all functions`；两条补 grant 都在它之后',
+    `规则在第 ${closePos + 1} 字符 · 一刀切位置 = ${blanketPos} · 裸版判据补 grant = ${grantBarePos > closePos} · 匿名上报再 grant = ${reGrantAnonPos > closePos}`,
+  )
+  check(
+    /p\.prosecdef/.test(S_SCHEMA) && /p\.prorettype <> 'trigger'::regtype/.test(S_SCHEMA),
+    '🔴 D14-F ② 那条规则只在 `security definer` 且非触发器函数上生效（非 definer 的裸函数与触发器函数一个都不许碰）',
+    '在 `schema.sql` 的 §39 里找 `p.prosecdef` 与 `p.prorettype`',
+  )
+  /*
+   * ③ 只看**那条 grant 语句本身**（`grant execute on function public.report_frontend_error(`）——
+   *    不看函数名：上面那段注释里也写着 `report_frontend_error()`，用函数名去判会恒真（本轮第一次就是这么写错的）。
+   */
+  const anonGrantRe = /grant execute on function public\.report_frontend_error\(/
+  const svcGuardRe = /if exists \(select 1 from pg_roles where rolname = 'service_role'\)/
+  check(
+    /🔴 三条必须跟着它/.test(S_SCHEMA) &&
+      anonGrantRe.test(S_SCHEMA.slice(closePos)) &&
+      svcGuardRe.test(S_SCHEMA.slice(closePos)),
+    '🔴 D14-F ③ 三条"必须跟着它"的事写在原地：`report_frontend_error()`（故意给 anon）· 裸版判据（RLS 策略要调）· service_role 显式补回（带角色存在性守卫）',
+    `规则之后还找得到匿名 grant = ${anonGrantRe.test(S_SCHEMA.slice(closePos))} · service_role 守卫 = ${svcGuardRe.test(S_SCHEMA.slice(closePos))}`,
+  )
+  /* 🧪 反向对照一：把那条 grant 整行删掉（不是只换名字）→ ③ 的"规则之后还有它"当场假 */
+  const schemaNoAnonGrant = S_SCHEMA.replace(
+    /grant execute on function public\.report_frontend_error\([^\n]*\n/,
+    '',
+  )
+  const noGrantAfter = anonGrantRe.test(
+    schemaNoAnonGrant.slice(schemaNoAnonGrant.indexOf(CLOSE_RULE)),
+  )
+  check(
+    schemaNoAnonGrant !== S_SCHEMA && noGrantAfter === false,
+    '🧪 D14-F 反向对照一：把那条匿名 grant 整行删掉 → ③ 当场假（证明 ③ 真的在读规则之后那一段，不是恒真）',
+    `删掉之后规则之后还找得到 = ${noGrantAfter}`,
+  )
+  /* 🧪 反向对照二：往末尾塞回一刀切那条 → ① 的"不许出现"当场假 */
+  const schemaBlanket = `${S_SCHEMA}\n${BLANKET}\n`
+  check(
+    schemaBlanket.includes(BLANKET) && S_SCHEMA.includes(BLANKET) === false,
+    '🧪 D14-F 反向对照二：塞回一刀切的 `revoke … on all functions` → ① 的"不许出现"当场假（A8 第一版就是这样，`grade-checks` K3 抓到的）',
+    `塞回之后找得到 = ${schemaBlanket.includes(BLANKET)} · 原文里本来有 = ${S_SCHEMA.includes(BLANKET)}`,
+  )
+}
+
 /* ---------------- 结果 ---------------- */
 console.log(`\n================ 结果 ================`)
 console.log(`  断言：通过 ${passed} 条，失败 ${failures.length} 条`)
@@ -3733,6 +3993,6 @@ if (failures.length) {
   console.log('\n  ⛔ 有断言没过（上面每一条都写了实测值）')
   process.exitCode = 1
 } else {
-  console.log('  全部通过 ✅（纯函数 A1–A10 / 静态 D1–D7 · D9 · D10 · D11 · D12 · D13 / 编码 + 不可见字符 D8）')
+  console.log('  全部通过 ✅（纯函数 A1–A10 / 静态 D1–D7 · D9 · D10 · D11 · D12 · D13 · D14 / 编码 + 不可见字符 D8）')
 }
 }, { script: 'nav-checks.mjs' })
