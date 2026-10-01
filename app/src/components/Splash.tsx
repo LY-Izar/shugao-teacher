@@ -319,7 +319,7 @@ export function Splash({ ready, onDone }: { ready: boolean; onDone: () => void }
       style={{ '--splash-leave': `${leaveMs}ms` } as CSSProperties}
     >
       <div className="splash__inner">
-        <Emblem n={64} className="splash__emblem" />
+        <Emblem n={96} className="splash__emblem" />
         <div className="splash__title">
           <StrokeText text={CN_TEXT} fontSize={CN_SIZE} />
         </div>

@@ -2115,7 +2115,10 @@ body::before {
   user-select: none;
 }
 .stroke-text__stroke {
-  stroke: var(--color-accent);
+  /* 描边**不用 accent**：用户看了第一版说「所有的字体框都用这个紫色有点难看」。
+     改成墨色的浅版（`--color-ink3`）—— 描边像铅笔勾线、填色像上墨，整幅字是单色的，
+     `--color-accent` 全屏只留在进度条那一处，才显得是"有意为之"而不是到处撒品牌色。 */
+  stroke: var(--color-ink3);
 }
 .stroke-text__fill {
   fill: var(--color-ink);
@@ -2146,7 +2149,9 @@ body::before {
   max-width: 720px;
 }
 .splash__emblem {
-  margin-bottom: 8px;
+  /* 96 那一档（盒 = 徽 / 0.87 ≈ 110px）；上一版 64 是"跟一行的字差不多大"，
+     现在压在 130px 的标题上才配得住。 */
+  margin-bottom: 14px;
 }
 /* 两行的宽度上限 = 该字号下的自然宽度（128px 五个汉字 ≈ 654、64px 那句 ≈ 412），
    于是像素比 ≈ 1：字号就是配置里写的那个数；窄屏交给 viewBox 整体等比缩。 */
@@ -2184,11 +2189,13 @@ body::before {
   position: absolute;
   left: 50%;
   bottom: max(22px, env(safe-area-inset-bottom, 0px));
-  width: 44px;
-  height: 44px;
+  width: 64px;
+  height: 64px;
   transform: translateX(-50%);
-  background-color: var(--color-ink3);
-  opacity: 0.55;
+  background-color: var(--color-ink2);
+  /* 上一版 44px / ink3 / .55 —— 用户说"太小、太不明显"，所以放大 + 提对比，
+     但仍然是"角落里的签名"，不抢中间那两行字。 */
+  opacity: 0.82;
   -webkit-mask: url(/izar.png) center / contain no-repeat;
   mask: url(/izar.png) center / contain no-repeat;
 }
