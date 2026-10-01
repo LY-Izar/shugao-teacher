@@ -2088,17 +2088,38 @@ body::before {
    开屏（`app/src/components/Splash.tsx`）
    ============================================================
 
-   ① **每个字一圈擦除框**（`.splash-ch` 的 `clip-path` 从左到右放开 = "写出来"）。
-      ⚠️ 每个字都有内边距、再配等量负外边距：那圈内边距是给描边留的 ——
-         `-webkit-text-stroke` 是压在轮廓**中线**上的，会往字外多出半个描边宽，
-         割掉就会在字与字之间、字顶字底看见一道缝。
-   ② 描边层绝对定位、填色层相对定位：两层都"定位"过了，DOM 顺序说了算（描边在下）。
-      描边层用 `padding: inherit` 跟着外层内边距走，两层文字才对得齐。
-   ③ `--d`（每个字的延迟）与 `--splash-wipe` / `--splash-fill` / `--splash-fillgap`
-      全部由 `Splash.tsx` 内联写进来 —— 时间只有一处定义，JS 那个"动画播完"的点
-      和 CSS 不会各走各的。
-   ④ 颜色一律走令牌：四套主题（`data-theme` × `data-accent`）自动跟，页面里零十六进制。
+   描边字这套效果照用户给的素材做（`StrokeText.tsx` + `配置.txt`，出处写在
+   `Splash.tsx` 顶上）：两层同位置的 `<text>` —— 下层 `fill: none` 只有描边，靠
+   `stroke-dasharray` 配 `stroke-dashoffset` 沿**字形轮廓**画出来；上层是填色，
+   画完再整层淡入。`stroke-dasharray` / `stroke-dashoffset` / 填色层 `opacity`
+   全由 `Splash.tsx` 逐字写下（WAAPI），CSS 只管颜色和盒子。
+
+   ① 字号活在 SVG 的 viewBox 用户单位里（以配置值为准，128px），屏幕窄就整体等比
+      缩小：`height: auto` 配 viewBox 的宽高比就是自然高度，两行各自贴合、不互相挤。
+   ② 颜色一律走令牌：四套主题（`data-theme` × `data-accent`）自动跟，页面里零十六进制。
+      原配置的 `#7C3AED` / `#F8FAFC` 是深底亮字配色，硬写会让浅色主题下填色看不见。
+   ③ 进度条在动画播完之后才出现，但它**一直占着位置**，文字不会跳一下。
    ============================================================ */
+.stroke-text {
+  display: block;
+  width: 100%;
+  line-height: 0;
+}
+.stroke-text__svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+.stroke-text__stroke,
+.stroke-text__fill {
+  user-select: none;
+}
+.stroke-text__stroke {
+  stroke: var(--color-accent);
+}
+.stroke-text__fill {
+  fill: var(--color-ink);
+}
 .splash {
   position: fixed;
   inset: 0;
@@ -2119,64 +2140,24 @@ body::before {
   flex-direction: column;
   align-items: center;
   padding: 0 20px;
+  /* 这一层必须有**确定的宽度**：SVG 是 width:100% + height:auto，父层宽度不定时
+     它会退回 SVG 的默认固有尺寸 300×150，字号被缩成一半（实测 59px / 128px）。 */
+  width: 100%;
+  max-width: 720px;
 }
 .splash__emblem {
-  margin-bottom: 14px;
+  margin-bottom: 8px;
 }
-.splash__title,
-.splash__sub {
-  display: flex;
-  align-items: flex-end;
-  justify-content: center;
-}
+/* 两行的宽度上限 = 该字号下的自然宽度（128px 五个汉字 ≈ 654、64px 那句 ≈ 412），
+   于是像素比 ≈ 1：字号就是配置里写的那个数；窄屏交给 viewBox 整体等比缩。 */
 .splash__title {
-  font-size: clamp(30px, 9.4vw, 46px);
-  font-weight: 800;
-  line-height: 1.1;
+  width: 100%;
+  max-width: 660px;
 }
 .splash__sub {
-  margin-top: 12px;
-  font-size: clamp(13px, 3.5vw, 18px);
-  font-weight: 600;
-  line-height: 1.2;
-}
-.splash-ch {
-  position: relative;
-  display: inline-block;
-  padding: 0.1em 0.07em;
-  margin: 0 -0.07em;
-  clip-path: inset(0 100% 0 0);
-  animation: splash-wipe var(--splash-wipe, 420ms) cubic-bezier(0.33, 0, 0.2, 1) var(--d, 0ms) both;
-}
-.splash-ch__stroke,
-.splash-ch__fill {
-  white-space: pre;
-}
-.splash-ch__stroke {
-  position: absolute;
-  inset: 0;
-  padding: inherit;
-  color: transparent;
-  -webkit-text-stroke: 0.03em var(--color-accent);
-}
-.splash-ch__fill {
-  position: relative;
-  color: var(--color-ink);
-  animation: splash-fill var(--splash-fill, 380ms) ease-out
-    calc(var(--d, 0ms) + var(--splash-fillgap, 230ms)) both;
-}
-.splash__sub .splash-ch__stroke {
-  -webkit-text-stroke-color: var(--color-line3);
-}
-.splash__sub .splash-ch__fill {
-  color: var(--color-ink2);
-}
-/* 逐字排的时候 `letter-spacing` 不管用（每个字是独立的盒子）→ 用右外边距顶字距 */
-.splash__sub .splash-ch {
-  margin-right: 0.08em;
-}
-.splash__sub .splash-ch:last-child {
-  margin-right: -0.07em;
+  width: 68%;
+  max-width: 420px;
+  margin-top: 10px;
 }
 /* 进度条：`data-bar` 上来之前是透明的，但**一直占着位置**，文字不会跳一下 */
 .splash__bar {
@@ -2223,30 +2204,9 @@ body::before {
   white-space: nowrap;
   border: 0;
 }
-@keyframes splash-wipe {
-  from {
-    clip-path: inset(0 100% 0 0);
-  }
-  to {
-    clip-path: inset(0 0 0 0);
-  }
-}
-@keyframes splash-fill {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
-}
 @media (prefers-reduced-motion: reduce) {
-  /* 关动效的人看**静态终态**：字直接全在，不是"慢慢擦出来"（顶回文件末尾那条全局兜底） */
-  .splash-ch,
-  .splash-ch__fill {
-    animation: none !important;
-    clip-path: none !important;
-    opacity: 1 !important;
-  }
+  /* 描边和填色是 WAAPI 起的，已经走"直接给终态"那条路（见 `Splash.tsx`）；
+     这里只管进度条那两条 CSS 过渡。 */
   .splash__bar,
   .splash__bar-fill {
     transition: none;

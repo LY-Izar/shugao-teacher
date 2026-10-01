@@ -1,170 +1,339 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+/**
+ * 开屏：描边字（沿字形轮廓画出来）+ 进度条。
+ *
+ * 效果照用户给的素材 `C:\Users\Administrator\Desktop\动画\6\` 做
+ * （`StrokeText.tsx` + `StrokeText.css` + `配置.txt`），参数逐项照抄：
+ *   fontSize 128 · fontWeight 850 · letterSpacing -3 · strokeWidth 1.2
+ *   drawDuration 1.6 · fillDelay 0.3 · stagger 0.05 · fillMode 'fade'
+ *   描边缓动 sine.inOut · 填色缓动 power2.out（填色时长 = drawDuration * 0.5）
+ * 机制也照抄：**两层同位置的 `<text>`** —— 下层 `fill: none` 只有描边，
+ * `stroke-dasharray` 配 `stroke-dashoffset` 从 `dash` 爬到 0，沿**字形轮廓**画出来；
+ * 上层是填色，等 `drawDuration + fillDelay` 之后整层淡入。
+ *
+ * 两处按本项目的规矩落地（效果本身不变）：
+ *  1. **不引 gsap**，用浏览器原生的 WAAPI 复刻同样的时长 / 延迟 / 逐字 stagger。
+ *     缓动等价：gsap `sine.inOut` = `cubic-bezier(.37,0,.63,1)`；
+ *     gsap `power2.out`（= cubic out）= `cubic-bezier(.33,1,.68,1)`。
+ *     浏览器没有 `Element.animate` 时直接给终态（和 reduce 那条路一样）。
+ *  2. **dash 不是定值**。原配置 `Math.max(fontSize * 7, 200)` 是按拉丁字母调的：
+ *     128px 时是 896，而一个汉字（比如「树」）的轮廓有两三千像素 —— 用 896 的话，
+ *     动画跑完也只画得出前 896 像素，字会缺一截。所以逐字用 canvas 量一下轮廓长度，
+ *     dash 取 `max(原配置那个数, 量出来的长度 × 1.15)`：拉丁字母量出来比 896 小，
+ *     用的还是原配置那个数，行为逐像素相同。
+ */
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+
 import { Emblem } from './Emblem'
 
-/* ============================================================
-   开屏 —— 「树高教务通」描边写出来 → 进度条 → 渐变进首页
-   ============================================================
+/* ---------------- 配置（照抄 `配置.txt`） ---------------- */
+const CN_TEXT = '树高教务通'
+const EN_TEXT = 'SD Education'
+const CN_SIZE = 128
+const EN_SIZE = 64
+const FONT_WEIGHT = 850
+const LETTER_SPACING = -3
+const STROKE_WIDTH = 1.2
+const DRAW_S = 1.6
+const FILL_DELAY_S = 0.3
+/** 源码：`fillDuration = Math.max(0.4, drawDuration * 0.5)` */
+const FILL_S = Math.max(0.4, DRAW_S * 0.5)
+const STAGGER_S = 0.05
+/** 缓动等价关系见文件头 */
+const EASE_DRAW = 'cubic-bezier(.37, 0, .63, 1)'
+const EASE_FILL = 'cubic-bezier(.33, 1, .68, 1)'
 
-   口径（用户 2026-10-01 两次点名）：
-     · 上行中文「树高教务通」、下行英文 `SD Education`，校徽在文字上方；
-     · 动画**完整播一遍之后**，文字下方才从左向右出现进度条；
-     · 加载好了 → 渐变过渡到首页；还没加载好 → 进度条自己模拟着爬；
-     · 个人标志（IZAR）只放在这一屏（`public/izar.png`，靠 mask 染色跟着主题走）。
-
-   🔴 为什么不是 SVG 的 `stroke-dasharray` 描边生长（桌面 `动画\6\代码.txt` 那一版）：
-      SVG `<text>` **量不到轮廓长度** —— `getTotalLength()` 只在 `<path>` 上，
-      `pathLength` 对 `<text>` 不生效；而那一版把 dash 估成 `fontSize * 7`，
-      拉丁字母够用，一个汉字几十笔、轮廓长度是字号的十几到几十倍 ⇒ 会断笔、
-      或者"动画刚开始就有几笔先显形"。逐字转 `<path>` 要引字体解析（太重）。
-      所以这里改成**逐字从左到右擦出**（每个字一个 `clip-path` 擦除框），
-      擦完再让填色追上来 —— 不依赖任何长度测量，中英文都稳，
-      也就**不需要 gsap**（项目本来没有动画库依赖）。
-
-   ⚠️ 只在**后端模式**（真要去等会话与数据）出现：`shots.mjs` 跑的是本地演示模式
-      （`isRemote === false`，`hydrated` 恒为 true），所以它**不会**进那 141 张截图。
-      本地想看：`?boot=1`（演示模式没有后端可等，进度条会立刻走满）。
-   ============================================================ */
-
-const CN = '树高教务通'
-const EN = 'SD Education'
-
-/** 每个字错开多久开始擦（ms） */
-const STAGGER = 45
-/** 单个字擦出来用多久（ms） */
-const WIPE = 420
-/** 填色比描边晚多少开始淡入（ms） */
-const FILL_GAP = 230
-/** 填色淡入用多久（ms） */
-const FILL = 380
-/** 中文写完 → 英文开头之间歇多久（ms） */
-const EN_GAP = 220
-/** 渐变退出用多久（ms）—— 必须与 `index.css` 的 `.splash` 过渡时长同一个数 */
-const LEAVE = 420
-
-const CN_MS = STAGGER * CN.length + WIPE
-const EN_MS = STAGGER * EN.length + WIPE
-/** 「动画播完一遍」的时刻：两行都擦完了（最后一笔的填色还在追） */
-const ANIM_MS = CN_MS + EN_GAP + EN_MS
-
-/** 还没加载好时，模拟进度条爬到多少就停住（剩下的留给真实的加载结果） */
+/** 整个动画（含最后一字的填色）跑完需要多久 —— 进度条在这个点之后才出现 */
+const ANIM_MS = Math.round(
+  (DRAW_S + FILL_DELAY_S + FILL_S + STAGGER_S * Math.max(0, EN_TEXT.length - 1)) * 1000,
+)
+const LEAVE_MS = 420
+/** 没加载完时模拟进度爬到哪就停住 */
 const SIM_CAP = 88
 
+type Box = { x: number; y: number; width: number; height: number }
+
+/**
+ * 量一个字形轮廓有多长（像素）：把字填进 canvas，再数边界像素 —— 汉字一笔有两侧、
+ * 各算一次，累加起来就约等于轮廓总长（斜笔画会略微高估，这里宁大不小）。
+ * 拿不到（没 canvas / 读不出像素）就返回 0，调用处会退回原配置那个 dash。
+ */
+function contourLength(char: string, fontSize: number, fontWeight: number, family: string) {
+  try {
+    const pad = Math.ceil(fontSize * 0.25)
+    const side = Math.ceil(fontSize * 1.5)
+    const canvas = document.createElement('canvas')
+    canvas.width = side + pad * 2
+    canvas.height = side + pad * 2
+    const ctx = canvas.getContext('2d', { willReadFrequently: true })
+    if (!ctx) return 0
+    ctx.font = `${fontWeight} ${fontSize}px ${family}`
+    ctx.textBaseline = 'alphabetic'
+    ctx.fillStyle = '#000'
+    ctx.fillText(char, pad, side)
+    const { width, height } = canvas
+    const pixels = ctx.getImageData(0, 0, width, height).data
+    const on = (x: number, y: number) =>
+      x >= 0 && y >= 0 && x < width && y < height && pixels[(y * width + x) * 4 + 3] > 127
+    let outline = 0
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        if (!on(x, y)) continue
+        if (on(x - 1, y) && on(x + 1, y) && on(x, y - 1) && on(x, y + 1)) continue
+        outline += 1
+      }
+    }
+    return outline
+  } catch {
+    return 0
+  }
+}
+
+type StrokeTextProps = {
+  text: string
+  fontSize: number
+  className?: string
+}
+
+function StrokeText({ text, fontSize, className = '' }: StrokeTextProps) {
+  const rootRef = useRef<HTMLSpanElement | null>(null)
+  const textRef = useRef<SVGTextElement | null>(null)
+  const [box, setBox] = useState<Box | null>(null)
+  const chars = useMemo(() => Array.from(text), [text])
+
+  /* 量字的外框（照抄源码的 useLayoutEffect：量一次 + 字体加载完再量一次） */
+  useLayoutEffect(() => {
+    const node = textRef.current
+    if (!node) return
+    let cancelled = false
+    const measure = () => {
+      if (cancelled || !textRef.current) return
+      let bbox: DOMRect
+      try {
+        bbox = textRef.current.getBBox()
+      } catch {
+        return
+      }
+      if (!bbox || !bbox.width) return
+      const pad = Math.max(STROKE_WIDTH, fontSize * 0.1)
+      const next: Box = {
+        x: bbox.x - pad,
+        y: bbox.y - pad,
+        width: bbox.width + pad * 2,
+        height: bbox.height + pad * 2,
+      }
+      setBox((prev) =>
+        prev &&
+        Math.abs(prev.x - next.x) < 0.5 &&
+        Math.abs(prev.y - next.y) < 0.5 &&
+        Math.abs(prev.width - next.width) < 0.5
+          ? prev
+          : next,
+      )
+    }
+    measure()
+    document.fonts?.ready.then(measure).catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [chars, fontSize])
+
+  /* 起动画。放在 layout 阶段：先把每个字设成"还没画"再交给 WAAPI，
+     否则首帧会先闪一下整行实心字。 */
+  useLayoutEffect(() => {
+    const root = rootRef.current
+    if (!root) return
+    const strokes = Array.from(root.querySelectorAll<SVGElement>('[data-stroke-char]'))
+    const fills = Array.from(root.querySelectorAll<SVGElement>('[data-fill-char]'))
+    if (!strokes.length) return
+
+    const family = textRef.current ? getComputedStyle(textRef.current).fontFamily : 'sans-serif'
+    /* 原配置里的 dash —— 拉丁字母用它就够 */
+    const base = Math.max(fontSize * 7, 200)
+    const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
+    const canAnimate =
+      !reduced && typeof Element !== 'undefined' && typeof Element.prototype.animate === 'function'
+    const anims: Animation[] = []
+
+    const finish = () => {
+      for (const el of strokes) el.style.strokeDashoffset = '0'
+      for (const el of fills) el.style.opacity = '1'
+    }
+
+    strokes.forEach((el, index) => {
+      const dash = Math.max(base, contourLength(chars[index] ?? '', fontSize, FONT_WEIGHT, family) * 1.15)
+      el.style.strokeDasharray = String(dash)
+      el.style.strokeDashoffset = String(dash)
+      if (!canAnimate) return
+      anims.push(
+        el.animate([{ strokeDashoffset: `${dash}` }, { strokeDashoffset: '0' }], {
+          duration: DRAW_S * 1000,
+          delay: index * STAGGER_S * 1000,
+          easing: EASE_DRAW,
+          fill: 'both',
+        }),
+      )
+    })
+
+    fills.forEach((el, index) => {
+      el.style.opacity = '0'
+      if (!canAnimate) return
+      anims.push(
+        el.animate([{ opacity: 0 }, { opacity: 1 }], {
+          duration: FILL_S * 1000,
+          delay: (DRAW_S + FILL_DELAY_S) * 1000 + index * STAGGER_S * 1000,
+          easing: EASE_FILL,
+          fill: 'both',
+        }),
+      )
+    })
+
+    if (!canAnimate) finish()
+    /* 兜底：不管动画跑没跑成，到点就是终态 —— 宁可"啪"地出现，也不能一直看不见 */
+    const safety = window.setTimeout(finish, ANIM_MS + 400)
+
+    return () => {
+      window.clearTimeout(safety)
+      for (const anim of anims) anim.cancel()
+    }
+  }, [chars, fontSize])
+
+  const viewBox = box
+    ? `${box.x} ${box.y} ${box.width} ${box.height}`
+    : `0 ${-fontSize} 600 ${fontSize * 1.3}`
+  const fontStyle: CSSProperties = {
+    fontSize: `${fontSize}px`,
+    fontWeight: FONT_WEIGHT,
+    letterSpacing: `${LETTER_SPACING}px`,
+  }
+
+  return (
+    <span ref={rootRef} className={`stroke-text ${className}`.trim()} role="img" aria-label={text}>
+      <svg
+        className="stroke-text__svg"
+        viewBox={viewBox}
+        preserveAspectRatio="xMidYMid meet"
+        aria-hidden="true"
+      >
+        <text
+          ref={textRef}
+          className="stroke-text__stroke"
+          x="0"
+          y="0"
+          fill="none"
+          strokeWidth={STROKE_WIDTH}
+          strokeLinejoin="round"
+          strokeLinecap="round"
+          xmlSpace="preserve"
+          style={fontStyle}
+        >
+          {chars.map((char, index) => (
+            <tspan data-stroke-char key={`s-${index}`}>
+              {char}
+            </tspan>
+          ))}
+        </text>
+
+        <text
+          className="stroke-text__fill"
+          x="0"
+          y="0"
+          stroke="none"
+          xmlSpace="preserve"
+          style={fontStyle}
+        >
+          {chars.map((char, index) => (
+            <tspan data-fill-char key={`f-${index}`}>
+              {char}
+            </tspan>
+          ))}
+        </text>
+      </svg>
+    </span>
+  )
+}
+
+/**
+ * 教师端冷启动的开屏：动画播完一遍 → 进度条出现 → 就绪就填满并渐隐到已经渲染好的真页面。
+ * 只在后端模式出现（本地演示模式要 `?boot=1`，见 `App.tsx` 的 `bootSplash()`）。
+ */
 export function Splash({ ready, onDone }: { ready: boolean; onDone: () => void }) {
-  /* 动效开关：项目硬要求（`index.css` 末尾那条全局兜底也是这个口径）——
-     关掉动效的人看到的是**静态终态**，不是"慢慢擦出来"。 */
   const [reduced] = useState(
     () =>
       typeof window !== 'undefined' &&
-      window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true,
+      (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false),
   )
-  const animMs = reduced ? 0 : ANIM_MS
-  /** 渐变退出用多久 —— 与内联写进 CSS 的 `--splash-leave` 必须是同一个数 */
-  const leaveMs = reduced ? 200 : LEAVE
-
-  /** 动画播完一遍了没有（播完才出进度条） */
-  const [showBar, setShowBar] = useState(animMs === 0)
+  const [showBar, setShowBar] = useState(reduced)
   const [pct, setPct] = useState(0)
   const [leaving, setLeaving] = useState(false)
 
   /* `onDone` 每次渲染都是新的箭头函数 —— 存进 ref，免得那个定时器 effect
-     被父组件的重渲染打断、一遍遍从头计时（否则开屏可能永远退不出去） */
+     被父组件的重渲染打断、一遍遍从头计时（否则开屏可能永远退不出去）。 */
   const doneRef = useRef(onDone)
   useEffect(() => {
     doneRef.current = onDone
   })
 
-  /* ① 先让文字写完一遍 —— 用户口径是"待该动画播放完一遍后"才出进度条 */
+  const animMs = reduced ? 0 : ANIM_MS
+  const leaveMs = reduced ? 200 : LEAVE_MS
+
+  /* ① 动画播完一遍，进度条才出现 */
   useEffect(() => {
-    if (animMs === 0) return
-    const t = window.setTimeout(() => setShowBar(true), animMs)
-    return () => window.clearTimeout(t)
+    const timer = window.setTimeout(() => setShowBar(true), animMs)
+    return () => window.clearTimeout(timer)
   }, [animMs])
 
-  /* ② 进度条只往前走：没有真实结果就模拟着爬到 `SIM_CAP` 停住 */
+  /* ② 还没就绪：模拟加载（二次缓出爬到 88% 停住，等真的加载） */
   useEffect(() => {
-    if (!showBar || ready) return
-    const t0 = performance.now()
+    if (reduced || ready) return
     let raf = 0
-    const tick = () => {
-      const k = Math.min(1, (performance.now() - t0) / 1200)
-      setPct(Math.round(SIM_CAP * (1 - (1 - k) * (1 - k))))
-      if (k < 1) raf = window.requestAnimationFrame(tick)
+    const started = performance.now()
+    const tick = (now: number) => {
+      const progress = Math.min(1, (now - started) / 1200)
+      setPct(Math.round((1 - (1 - progress) * (1 - progress)) * SIM_CAP))
+      if (progress < 1) raf = window.requestAnimationFrame(tick)
     }
     raf = window.requestAnimationFrame(tick)
     return () => window.cancelAnimationFrame(raf)
-  }, [showBar, ready])
+  }, [reduced, ready])
 
-  /* ③ 加载好了：补满 → 停一拍 → 渐变退出 → 把屏幕交还给页面
-     （补满这一下**不能**在 effect 里同步 setState：先让它按当前值渲染一帧，
-       下一帧再推 100%，那一段交给 CSS 的 `transition: width` 去走） */
+  /* ③ 真就绪：填满 → 停一下 → 渐隐 → 交班 */
   useEffect(() => {
     if (!showBar || !ready) return
     const raf = window.requestAnimationFrame(() => setPct(100))
-    /* 关动效的人：静态那一屏也留一下（不然只闪一帧等于没有），渐变收短一点 */
-    const hold = reduced ? 400 : 520
-    const t1 = window.setTimeout(() => setLeaving(true), hold)
-    const t2 = window.setTimeout(() => doneRef.current(), hold + leaveMs)
+    const hold = reduced ? 400 : 300
+    const leavingTimer = window.setTimeout(() => setLeaving(true), hold)
+    const doneTimer = window.setTimeout(() => doneRef.current(), hold + leaveMs)
     return () => {
       window.cancelAnimationFrame(raf)
-      window.clearTimeout(t1)
-      window.clearTimeout(t2)
+      window.clearTimeout(leavingTimer)
+      window.clearTimeout(doneTimer)
     }
   }, [showBar, ready, reduced, leaveMs])
-
-  const cn = useMemo(() => [...CN], [])
-  const en = useMemo(() => [...EN], [])
-
-  const vars = {
-    '--splash-wipe': `${WIPE}ms`,
-    '--splash-fill': `${FILL}ms`,
-    '--splash-fillgap': `${FILL_GAP}ms`,
-    '--splash-leave': `${leaveMs}ms`,
-  } as CSSProperties
 
   return (
     <div
       className="splash"
-      data-splash
+      data-splash=""
       data-bar={showBar ? '' : undefined}
       data-leaving={leaving ? '' : undefined}
-      style={vars}
+      style={{ '--splash-leave': `${leaveMs}ms` } as CSSProperties}
     >
       <div className="splash__inner">
         <Emblem n={64} className="splash__emblem" />
-        <div className="splash__title" data-splash-line="cn">
-          {cn.map((ch, i) => (
-            <Cell key={i} ch={ch} delay={i * STAGGER} />
-          ))}
+        <div className="splash__title">
+          <StrokeText text={CN_TEXT} fontSize={CN_SIZE} />
         </div>
-        <div className="splash__sub" data-splash-line="en">
-          {en.map((ch, i) => (
-            <Cell key={i} ch={ch === ' ' ? '\u00a0' : ch} delay={CN_MS + EN_GAP + i * STAGGER} />
-          ))}
+        <div className="splash__sub">
+          <StrokeText text={EN_TEXT} fontSize={EN_SIZE} />
         </div>
-        {/* 进度条：`data-bar` 没上来之前是透明的，但**占着位置**，文字不会跳一下 */}
-        <div className="splash__bar" data-splash-bar>
-          <span className="splash__bar-fill" data-splash-bar-fill style={{ width: `${pct}%` }} />
+        <div className="splash__bar" data-splash-bar="">
+          <span className="splash__bar-fill" data-splash-bar-fill="" style={{ width: `${pct}%` }} />
         </div>
       </div>
-      <span className="splash__mark" data-splash-mark aria-hidden="true" />
-      {/* 屏上不留百分比之类的内部数字，只给读屏软件一句状态 */}
+      <span className="splash__mark" data-splash-mark="" aria-hidden="true" />
       <span className="splash__sr" role="status">
         正在打开树高教务通
       </span>
     </div>
-  )
-}
-
-/** 一个字：底下描边、上面填色；外层那圈的 `clip-path` 就是"从左到右写出来"的擦除框 */
-function Cell({ ch, delay }: { ch: string; delay: number }) {
-  return (
-    <span className="splash-ch" style={{ '--d': `${delay}ms` } as CSSProperties}>
-      <span className="splash-ch__stroke" aria-hidden="true">
-        {ch}
-      </span>
-      <span className="splash-ch__fill" aria-hidden="true">
-        {ch}
-      </span>
-    </span>
   )
 }
