@@ -36,7 +36,7 @@ import { Emblem } from './Emblem'
 const CN_TEXT = '树高教务通'
 const EN_TEXT = 'SD Education'
 const CN_SIZE = 128
-const EN_SIZE = 64
+const EN_SIZE = 52
 /**
  * 字体＝中文志莽行书、英文 Playfair Display（自托管子集）。
  * `spec` 是族名本身 —— `document.fonts.load()` 与 canvas 量轮廓都要用它；
@@ -365,7 +365,7 @@ export function Splash({ ready, onDone }: { ready: boolean; onDone: () => void }
       style={{ '--splash-leave': `${leaveMs}ms` } as CSSProperties}
     >
       <div className="splash__inner">
-        <Emblem n={192} className="splash__emblem" />
+        <Emblem n={150} className="splash__emblem" />
         <div className="splash__title">
           <StrokeText text={CN_TEXT} fontSize={CN_SIZE} fontSpec={CN_FONT_SPEC} weight={CN_WEIGHT} />
         </div>
