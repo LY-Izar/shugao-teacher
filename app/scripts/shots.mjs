@@ -2680,98 +2680,118 @@ await withLock(async () => {
           `${SNM}：展开之后同一颗按钮**换成了「收起」的形态**（名字 + 箭头都跟着状态走）`,
           `aria-label="${afterToggle.label}" aria-expanded="${afterToggle.expanded}" transform ${beforeToggle.arrow} → ${afterToggle.arrow}`,
         )
-        const sheet = await page.evaluate(() => {
-          const box = document.querySelector('.sheet')
+        const panel = await page.evaluate(() => {
+          const box = document.querySelector('[data-nav-pop]')
+          const morph = document.querySelector('[data-nav-morph]')
           return {
-            open: Boolean(box),
-            title: (box?.querySelector('h2')?.textContent ?? '').trim(),
+            exists: Boolean(box),
+            open: morph?.getAttribute('data-open') === 'true',
+            title: (box?.querySelector('h2, .panel-head')?.textContent ?? '').trim(),
+            closeX: Boolean(box?.querySelector('button[aria-label="关闭"]')),
+            footer: Boolean(box?.querySelector('.sheet-foot-safe')),
             body: (box?.innerText ?? '').replace(/\s+/g, ' ').trim(),
           }
         })
         check(
-          sheet.open && sheet.title === '更多入口',
-          `${SNM}：点圆按钮弹出「更多入口」`,
-          `open=${sheet.open} title="${sheet.title}"`,
+          panel.exists && panel.open,
+          `${SNM}：点圆按钮弹出那块玻璃面板（\`[data-nav-pop]\`、容器 \`data-open="true"\`）`,
+          `exists=${panel.exists} data-open=${panel.open}`,
+        )
+        /* 🔴 用户口径②：面板里**没有标题、没有关闭 X、没有底部「收起」** —— 三样都要实测"不在"。
+              ⚠️ 为什么不写成"面板里只有那几行"：那种断言在"多出来一个页脚"时**照样绿**
+                 （多出来的东西不在白名单里比），所以必须逐样点名。 */
+        check(
+          panel.title === '' && !panel.closeX && !panel.footer,
+          `${SNM}：面板里**没有标题 / 没有关闭 X / 没有底部「收起」**（口径②：只装那几行入口）`,
+          `标题="${panel.title}" · 关闭 X=${panel.closeX} · 页脚「收起」=${panel.footer}`,
         )
         for (const label of ['班级', '考试', '错题集', '日程表']) {
           check(
-            sheet.body.includes(label),
+            panel.body.includes(label),
             `${SNM}：展开层里有「${label}」`,
-            short(sheet.body, 150),
+            short(panel.body, 150),
           )
         }
         check(
-          !sheet.body.includes('呼叫记录'),
+          !panel.body.includes('呼叫记录'),
           `${SNM}：展开层里**没有**「呼叫记录」（用户明确说不加）`,
-          sheet.body.includes('呼叫记录') ? short(sheet.body, 150) : '没有这条',
+          panel.body.includes('呼叫记录') ? short(panel.body, 150) : '没有这条',
         )
 
         /* ============================================================
-         * 🔴 2026-09-28 **第二轮**：**展开态整栏淡出**（用户改口径，这一节整体重写）
+         * 🔴 2026-10-01 **第四轮**：展开层从**圆按钮里长出来**（用户改口径，这一节第三次重写）
          *
-         * 上一轮这一节钉的是"**展开态圆按钮仍然看得见、可点**"（做法：把 `<nav>` 抬到
-         * Sheet 之上 `z-[52]`，靠 `elementFromPoint(圆按钮中心)` 命中按钮本身来证明）。
-         * 用户看过之后说：「但是点开后导航栏浮在上面会不会太奇怪了 / 展开后整个导航栏淡出吧」，
-         * 于是**抬层叠整个回退**（现在 `<nav>` 恒 `z-40`），语义**反过来了**：
+         * 这一节的语义**第三次翻转**，三次都是用户拍板：
+         *   ① 最早：展开态上抬层叠，圆按钮**浮在** Sheet 之上（钉"仍可见、可点"）；
+         *   ② 2026-09-28：用户说「展开后整个导航栏淡出吧」→ 反过来钉
+         *      "展开态导航必须 **不可见（opacity 0）且不可点**"；
+         *   ③ 2026-10-01（本轮）：用户说「我想把移动端右下角的展开界面改成**从按钮弹出来的**
+         *      一个**半透明的液态玻璃界面**，例如这种」→ 形态从**贴底整宽 Sheet** 变成
+         *      **锚在圆按钮上方的玻璃块**，而且**导航不淡出、背景不压暗**。
+         *      ⇒ 于是 ①②两条的判据**又反回来**：展开态整栏 `opacity` 必须是 `1`、
+         *        两个子控件 `pointer-events` 必须是 `auto`（"再点一下 = 收起"要靠它）。
          *
-         *   展开态 → 导航必须 **不可见（`opacity: 0`）且不可点**
-         *            （`elementFromPoint` 命中的**不是**导航里的任何元素）
+         * 🔴 本轮**新钉的一条**是"从按钮里长出来" —— 动效本身只能靠眼睛，能钉的是**几何**：
+         *    面板整体落在圆按钮**上方**、右边缘与按钮**对齐**，且宽高都 > 0。
+         *    这条要是没有任何对照，改回"贴底整宽"时它会**静默变绿**（面板还在、只是跑到别处）。
          *
-         * 三条纪律与上一轮相同（缺一条断言就变成摆设）：
-         *   ① **带反向对照**：去掉淡化（`opacity` 与三处 `pointer-events` 一起还原）→ 必须红；
+         * 三条纪律与前两轮相同（缺一条断言就变成摆设）：
+         *   ① **每个判据都要有反向对照**：三条对照分别把"淡出""压暗遮罩""面板挪到按钮下方"
+         *      还原回去，对应的三条断言**必须**红；
          *   ② **点取真中心**（`getBoundingClientRect` 算），不写死坐标；
          *   ③ 对照用**内联 `style.setProperty(…, 'important')`** —— 按元素打，与类名无关
-         *      （上一轮实测过：注入 `<style>` 按类名选，改版后选择器**静默失配**，对照永远绿）。
+         *      （前一轮实测过：注入 `<style>` 按类名选，改版后选择器**静默失配**，对照永远绿）。
          *
-         * 🔴🔴 **本轮实测踩到的两个"断言会变成摆设"的坑（都写下来）**：
-         *
-         *   ① **"命中谁"在展开态证明不了"能不能点到"**：Sheet（z-51）本来就盖住导航
-         *      那一整条（实测：sheet.top=475、nav.top=804），所以 `elementFromPoint(圆按钮中心)`
-         *      命中 Sheet 里的东西是**理所当然**的，把淡化去掉它照样命中 Sheet
-         *      —— 只按"命中谁"写，对照**永远不红**（第一版就是这么写的，实测红不了）。
-         *      所以"能不能点到"改成直接量**计算出来的 `pointer-events`**：
-         *      淡化在 → 圆按钮/胶囊都是 `none`；淡化去掉 → 回到 `auto`。
-         *   ② **对照要连 `transition` 一起停掉**：`<nav>` 上有 260ms 的
-         *      `transition-opacity`，只把 `opacity` 内联改成 1 的话，**过渡还在跑**
-         *      （实测量到 `opacity=0.23`）—— 那时 `elementFromPoint` 会**跳过**这个
-         *      半透明的层，命中的是下面的 Sheet，对照于是"看着没生效"。
-         *      所以要一起写 `transition: none !important`，让它**立刻**是 1。
-         *
-         * ⚠️ 还留了一条"**真的点一下**"（不只是量样式）：在圆按钮中心 `page.mouse.click()`，
-         *    断言 **URL 没动**。上一轮的回归正是"导航浮在浮层之上、点了会跳页"。
-         * ⚠️ **顺序**：这条"真点一下"挪到了本节**最后** —— 那一下落在 Sheet 自己的
-         *    页脚/条目上，会把 Sheet 关掉（正常语义），所以后面不能再有用 `.sheet` 的断言。
+         * ⚠️ 还留了一条"**真的点一下**"（不只是量样式）：在圆按钮中心 `page.mouse.click()`。
+         *    本轮它的语义变了 —— 那里现在**就是那颗按钮**（导航不再淡出、面板在旁边），
+         *    所以这一下 = **收起面板**；仍然断言 **URL 一动都不动**（"点了导航跳页"是本轮要防的回归）。
+         *    ⚠️ 所以它必须放在本节**最后**：点完面板就收起了，后面不能再有面板展开态的断言。
          * ============================================================ */
         const stackProbe = async (c) =>
           await page.evaluate(async ({ c }) => {
             const nav = document.querySelector('nav[aria-label="主导航"]')
-            const pill = nav?.querySelector('div')
+            /* ⚠️ `[data-nav-pill]` = 那颗胶囊（工作台/作业/我的）。
+               以前这里取的是 `nav?.querySelector('div')` —— 那其实是**外面那条居中带**
+               （它自己没写 `pointer-events`，从 `<nav>` 继承到 `none`），
+               于是"胶囊能不能点"这件事**一直没被真正量到**（实测 2026-10-01 第四轮才暴露）。 */
+            const pill = nav?.querySelector('[data-nav-pill]')
             const circle = nav?.querySelector('button[aria-haspopup="dialog"]')
-            const sheet = document.querySelector('.sheet')
-            const box = sheet?.querySelector('.sheet-foot-safe')
-            const foot = box
-              ? [...box.querySelectorAll('button')].find((b) => (b.innerText ?? '').trim() === '收起')
-              : null
-            if (!nav || !pill || !circle || !sheet || !box || !foot) {
+            const morph = nav?.querySelector('[data-nav-morph]')
+            const pop = morph?.querySelector('[data-nav-pop]')
+            if (!nav || !pill || !circle || !morph || !pop) {
               return {
                 c,
                 missing:
-                  'nav / 胶囊 / 圆按钮 / .sheet / .sheet-foot-safe / 页脚「收起」按钮 有一样没找到',
+                  'nav / 胶囊 / 圆按钮 / [data-nav-morph] / [data-nav-pop] 有一样没找到',
               }
             }
             /*
-             * 对照场景：
-             *   · `neg-fade`  —— 去掉淡化（opacity 1 + 三处 pointer-events auto + 停掉过渡）
-             *                     = 用户改口径之前那种"展开态导航还浮在上面"的样子。
-             * ⚠️ 同时打三处**不是保险起见**：父级 `pointer-events: none` **挡不住**子级
-             *    自己写的 `auto`（这正是"看不见却还能点到"的成因），所以坏样子要完整还原。
+             * 对照场景（每个都对应上面一条断言必须变红）：
+             *   · `neg-fade`  —— 把"展开态整栏淡出"那套旧做法原样还原
+             *                    （`opacity: 0` + 两个子控件 `pointer-events: none`）
+             *                    ⇒ ①② 两条必须红；
+             *   · `neg-scrim` —— 往 `body` 里塞一个旧做法里的压暗遮罩 `.scrim`
+             *                    ⇒ ④ 那条（"页面上没有 `.scrim`"）必须红；
+             *   · `neg-drop`  —— 给面板容器打一条 `translateY(200px)`，把它挪到按钮**下面**
+             *                    （旧形态）⇒ ③ 那条几何必须红。
+             * ⚠️ `neg-fade` 同时打两处**不是保险起见**：父级 `pointer-events: none`
+             *    **挡不住**子级自己写的 `auto`（这正是"看不见却还能点到"的成因）。
              */
+            let injected = null
             if (c === 'neg-fade') {
-              nav.style.setProperty('opacity', '1', 'important')
-              nav.style.setProperty('pointer-events', 'auto', 'important')
+              nav.style.setProperty('opacity', '0', 'important')
+              nav.style.setProperty('pointer-events', 'none', 'important')
               nav.style.setProperty('transition', 'none', 'important')
-              pill.style.setProperty('pointer-events', 'auto', 'important')
-              circle.style.setProperty('pointer-events', 'auto', 'important')
+              pill.style.setProperty('pointer-events', 'none', 'important')
+              circle.style.setProperty('pointer-events', 'none', 'important')
+            }
+            if (c === 'neg-scrim') {
+              injected = document.createElement('div')
+              injected.className = 'scrim'
+              document.body.appendChild(injected)
+            }
+            if (c === 'neg-drop') {
+              morph.style.setProperty('transform', 'translateY(200px)', 'important')
             }
             const rectOf = (el) => {
               const r = el.getBoundingClientRect()
@@ -2779,6 +2799,8 @@ await withLock(async () => {
                 raw: r,
                 left: Math.round(r.left),
                 top: Math.round(r.top),
+                right: Math.round(r.right),
+                bottom: Math.round(r.bottom),
                 width: Math.round(r.width),
                 height: Math.round(r.height),
                 z: getComputedStyle(el).zIndex,
@@ -2786,7 +2808,7 @@ await withLock(async () => {
               }
             }
             const circleRect = rectOf(circle)
-            const footRect = rectOf(foot)
+            const popRect = rectOf(pop)
             const pillRect = rectOf(pill)
             /*
              * ⚠️ 这一整段都必须在 `undo()` **之前**读：它们就是"对照到底改上没有"的证据，
@@ -2794,30 +2816,38 @@ await withLock(async () => {
              */
             const out = {
               case: c,
+              morphOpen: morph.getAttribute('data-open'),
               circle: {
                 pe: getComputedStyle(circle).pointerEvents,
                 rect: {
                   left: circleRect.left,
                   top: circleRect.top,
+                  right: circleRect.right,
+                  bottom: circleRect.bottom,
                   width: circleRect.width,
                   height: circleRect.height,
                   z: circleRect.z,
-                  pe: circleRect.pe,
                 },
                 center: [Math.round(circleRect.raw.left + circleRect.raw.width / 2), Math.round(circleRect.raw.top + circleRect.raw.height / 2)],
               },
               pill: { pe: getComputedStyle(pill).pointerEvents, width: pillRect.width },
-              foot: {
+              pop: {
                 rect: {
-                  left: footRect.left,
-                  top: footRect.top,
-                  width: footRect.width,
-                  height: footRect.height,
+                  left: popRect.left,
+                  top: popRect.top,
+                  right: popRect.right,
+                  bottom: popRect.bottom,
+                  width: popRect.width,
+                  height: popRect.height,
+                  z: popRect.z,
+                  pe: popRect.pe,
                 },
-                center: [Math.round(footRect.raw.left + footRect.raw.width / 2), Math.round(footRect.raw.top + footRect.raw.height / 2)],
-                padBottom: getComputedStyle(box).paddingBottom,
-                /* 页脚按钮下沿距视口底多少：> 0 = 完全看得见 */
-                bottomGap: Math.round(window.innerHeight - footRect.raw.bottom),
+                visibility: getComputedStyle(pop).visibility,
+                opacity: getComputedStyle(pop).opacity,
+                /* 右边缘对齐的偏差：0 = 完全对齐（圆按钮在带子的最右一格） */
+                rightGap: popRect.right - circleRect.right,
+                /* 面板下沿到按钮上沿的距离：> 0 = 面板整个在按钮**上方** */
+                above: circleRect.top - popRect.bottom,
               },
               nav: {
                 opacity: getComputedStyle(nav).opacity,
@@ -2826,10 +2856,12 @@ await withLock(async () => {
                 top: Math.round(nav.getBoundingClientRect().top),
                 height: Math.round(nav.getBoundingClientRect().height),
               },
-              sheet: { z: getComputedStyle(sheet).zIndex, top: Math.round(sheet.getBoundingClientRect().top) },
+              /* ④ 那条要钉的：页面上**没有**压暗遮罩（旧做法是 `.scrim` 压暗 + 模糊） */
+              scrim: Boolean(document.querySelector('.scrim')),
             }
-            /* 对照改完样式到"计算值真的变了"之间隔一次样式重算：等两帧再收尾（口径照上一轮） */
+            /* 对照改完样式到"计算值真的变了"之间隔一次样式重算：等两帧再收尾（口径照前两轮） */
             await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))
+            if (injected) injected.remove()
             if (c === 'neg-fade') {
               nav.style.removeProperty('opacity')
               nav.style.removeProperty('pointer-events')
@@ -2837,81 +2869,118 @@ await withLock(async () => {
               pill.style.removeProperty('pointer-events')
               circle.style.removeProperty('pointer-events')
             }
+            if (c === 'neg-drop') morph.style.removeProperty('transform')
             return out
           }, { c })
 
-        /* 两次取数，各处只取一次：`real` = 真状态；`negFade` = 对照（去掉淡化） */
+        /* 三次取数，各处只取一次：`real` = 真状态，另两个 = 对照 */
         const real = await stackProbe('real')
         const negFade = await stackProbe('neg-fade')
-        for (const [c, r] of [['real', real], ['neg-fade', negFade]]) {
+        const negScrim = await stackProbe('neg-scrim')
+        const negDrop = await stackProbe('neg-drop')
+        for (const [c, r] of [
+          ['real', real],
+          ['neg-fade', negFade],
+          ['neg-scrim', negScrim],
+          ['neg-drop', negDrop],
+        ]) {
           if (r?.missing) throw new Error(`${SNM}：层叠探针（${c}）取数失败 —— ${r.missing}`)
         }
 
-        /* ① 视觉上真的消失了（`opacity` 是"看不见"这件事的可量证据） */
+        /* ① 整栏照旧看得见（`opacity` 是"看不见"这件事的可量证据，本轮反过来钉 1） */
         check(
-          real.nav?.opacity === '0',
-          `${SNM}：展开态**整栏淡出**（\`<nav>\` 的计算 opacity 为 0）`,
-          `opacity=${real.nav?.opacity}（收起态是 1）· nav z=${real.nav?.z} · .sheet z=${real.sheet?.z}（sheet.top=${real.sheet?.top}）`,
+          real.nav?.opacity === '1',
+          `${SNM}：展开态**整栏照旧可见**（\`<nav>\` 的计算 opacity 是 1，不再淡出）`,
+          `opacity=${real.nav?.opacity} · nav z=${real.nav?.z} · nav top=${real.nav?.top}`,
         )
-        /* ② **而且点不到** —— 两个子控件各自的 `pointer-events` 都必须被关掉。
-              ⚠️ 为什么不写成"elementFromPoint 命中谁"：Sheet（z-51）本来就盖住导航那一整条，
-                 命中 Sheet 里的东西是**理所当然**的、把淡化去掉也一样（实测过，那样写对照永远不红）。
-                 真正会出事故的是"透明了但 `pointer-events` 还是 auto"——那才是"看不见却会误触"。 */
+        /* ② **而且照旧点得到** —— 两个子控件各自的 `pointer-events` 都是 auto。
+              ⚠️ 这条是"展开态再点一下圆按钮 = 收起"的前提；也是与第②轮口径相反的判据。 */
         check(
-          real.circle?.pe === 'none' && real.pill?.pe === 'none',
-          `${SNM}：展开态**两个子控件的 pointer-events 都被关掉**（不只是透明）`,
+          real.circle?.pe === 'auto' && real.pill?.pe === 'auto',
+          `${SNM}：展开态**两个子控件照旧可点**（圆按钮 / 胶囊的 pointer-events 都是 auto）`,
           `圆按钮 pointer-events=${real.circle?.pe} · 胶囊 pointer-events=${real.pill?.pe} · nav pointer-events=${real.nav?.pointerEvents}`,
-          '父级设 none 是**挡不住**子级自己写的 auto 的 —— 所以这两处必须分别量',
+          '⚠️ 父级设 none 是**挡不住**子级自己写的 auto 的 —— 所以这两处必须分别量',
         )
-        /* ③ 🔴 **反向对照**：把淡化去掉（opacity 1 + 三处 pointer-events 还原成 auto + 停过渡）
-              → ②那条必须红。实测：还原之后两个子控件都回到 auto。 */
+        /* ③ 🔴 本轮新钉：**面板是从圆按钮里长出来的**（整体在按钮上方、右边缘对齐、宽高都 > 0）。
+              ⚠️ 这一条是"从按钮弹出来"这件事唯一可量的部分（动效本身只能靠眼睛）。 */
         check(
-          negFade.nav?.opacity === '1' &&
-            negFade.circle?.pe === 'auto' &&
-            negFade.pill?.pe === 'auto',
-          `${SNM}：🧪 反向对照 —— 去掉淡化的瞬间，两个子控件又**变成可点**了（②那条**必须**红）`,
+          real.pop &&
+            real.pop.above > 0 &&
+            Math.abs(real.pop.rightGap) <= 2 &&
+            real.pop.rect.width > 0 &&
+            real.pop.rect.height > 0,
+          `${SNM}：面板**从圆按钮上方长出来**（整体在按钮之上、右边缘与按钮对齐）`,
+          `面板=${JSON.stringify(real.pop?.rect)} · 圆按钮=${JSON.stringify(real.circle?.rect)} · 面板下沿距按钮上沿 ${real.pop?.above}px · 右边缘偏差 ${real.pop?.rightGap}px`,
+        )
+        /* ④ 背景**不压暗**：页面上不存在 `.scrim`（旧做法是遮罩压暗 + 模糊，用户口径①不要） */
+        check(
+          real.scrim === false,
+          `${SNM}：展开时**没有压暗遮罩**（页面上不存在 \`.scrim\`）`,
+          `scrim=${real.scrim}`,
+          '旧做法那一层是 `ui.tsx` 的 Sheet 自带的；本轮的面板不是 Sheet，所以它不该出现',
+        )
+        /* ⑤ 🔴 **三条反向对照**（对应上面 ①②③，缺一条都会变成摆设） */
+        check(
+          negFade.nav?.opacity === '0' &&
+            negFade.circle?.pe === 'none' &&
+            negFade.pill?.pe === 'none',
+          `${SNM}：🧪 反向对照 —— 把"整栏淡出"那套旧做法还原回去，①②两条**必须**红`,
           `还原成 opacity=${negFade.nav?.opacity} 之后：圆按钮 pointer-events=${negFade.circle?.pe}、胶囊=${negFade.pill?.pe}`,
-          '⚠️ 对照必须连 `transition:none` 一起写：只改 opacity 的话 260ms 的过渡还在跑，量到的是中间值（实测 opacity=0.23）',
+          '⚠️ 对照必须连 `transition:none` 一起写：只改 opacity 的话过渡还在跑，量到的是中间值（实测 opacity=0.23）',
         )
-        /* ④ 页脚不再需要让位（`.sheet-foot-safe` 按用户要求回退）：按钮整体可见即可。
-              实测 414×880：按钮占 y=826~868、距视口底 12px —— 完整可见、不用滚。 */
         check(
-          real.foot?.bottomGap > 0,
-          `${SNM}：页脚那个「收起」按钮**完整落在视口内**（导航不再压它，页脚恢复 p-3 也放得下）`,
-          `按钮实占=${JSON.stringify(real.foot?.rect)} 中心=${JSON.stringify(real.foot?.center)} · 下沿距视口底 ${real.foot?.bottomGap}px · 页脚 pad-bottom=${real.foot?.padBottom}`,
-          '这一条替代了上一轮的"页脚安全区"那条（`.sheet-foot-safe` 已按用户要求回退）',
+          negScrim.scrim === true,
+          `${SNM}：🧪 反向对照 —— 塞一个压暗遮罩进页面，④那条**必须**红`,
+          `塞进去之后 scrim=${negScrim.scrim}`,
+          '不塞的话"页面上没有 .scrim"可能是**恒真**（页面里根本没有这个类）——那就等于没测',
+        )
+        check(
+          negDrop.pop && negDrop.pop.above <= 0,
+          `${SNM}：🧪 反向对照 —— 把面板挪到按钮**下方**（旧形态），③那条几何**必须**红`,
+          `挪下去之后：面板下沿距按钮上沿 ${negDrop.pop?.above}px（面板 bottom=${negDrop.pop?.rect.bottom}、按钮 top=${negDrop.circle?.rect.top}）`,
         )
 
-        // 展开层里点一条 → 真的跳过去（收起的四条路径之一：点条目先收起再 navigate）
-        await page.locator('.sheet button').filter({ hasText: '日程表' }).first().click()
+        // 展开层里点一条 → 真的跳过去（收起的三条路径之一：点条目先收起再 navigate）
+        await page
+          .locator('[data-nav-pop] button')
+          .filter({ hasText: '日程表' })
+          .first()
+          .click()
         await page.waitForURL('**/schedule', { timeout: 8000 })
         await page.waitForTimeout(400)
         const after = await pageInfo(page)
+        const afterOpen = await page.evaluate(
+          () => document.querySelector('[data-nav-morph]')?.getAttribute('data-open'),
+        )
         check(
-          after.url === '/schedule' && !after.sheetOpen,
+          after.url === '/schedule' && afterOpen === 'false',
           `${SNM}：点「日程表」跳过去且展开层收起`,
-          `url=${after.url} sheetOpen=${after.sheetOpen}`,
+          `url=${after.url} data-open=${afterOpen}`,
         )
         /* 收回导航（上一步跳页时已经自动收起，这里显式再点一次展开，给下面的"真点一下"用） */
         await ensureFront()
         await page.locator('nav[aria-label="主导航"] button[aria-haspopup="dialog"]').click({
           force: true,
         })
-        /* 🔴 等**条件**（`opacity` 真的变成 0），不是等固定毫秒 —— 理由见上面 `ensureFront` 那段 */
+        /* 🔴 等**条件**（面板真的开了），不是等固定毫秒 —— 理由见上面 `ensureFront` 那段 */
         await pollUntil(
           () =>
             page.evaluate(() => {
-              const nav = document.querySelector('nav[aria-label="主导航"]')
-              return { opacity: getComputedStyle(nav).opacity }
+              const morph = document.querySelector('[data-nav-morph]')
+              const pop = document.querySelector('[data-nav-pop]')
+              return {
+                open: morph?.getAttribute('data-open'),
+                height: pop ? Math.round(pop.getBoundingClientRect().height) : -1,
+              }
             }),
-          (r) => r.opacity === '0',
+          (r) => r.open === 'true' && r.height > 0,
         )
         await page.waitForTimeout(80)
         const reopened = await stackProbe('real')
         check(
-          reopened.nav?.opacity === '0',
-          `${SNM}：再展开一次，导航又是透明的（下面那条"真点一下"要在展开态量）`,
-          `opacity=${reopened.nav?.opacity} · sheet.top=${reopened.sheet?.top} · 圆按钮中心=${JSON.stringify(reopened.circle?.center)}`,
+          reopened.morphOpen === 'true' && reopened.pop?.rect.height > 0,
+          `${SNM}：再展开一次，面板又长出来了（下面那条"真点一下"要在展开态量）`,
+          `data-open=${reopened.morphOpen} · 面板高=${reopened.pop?.rect.height} · 圆按钮中心=${JSON.stringify(reopened.circle?.center)}`,
         )
         /* ⚠️ 圆按钮的坐标要在**等停稳之后**重取：`stackProbe` 只给形状，
            坐标交给 Playwright（它自己会等元素稳定），别拿旧坐标去点。 */
@@ -2920,20 +2989,26 @@ await withLock(async () => {
           .boundingBox()
         if (!circleBox) throw new Error(`${SNM}：量不到圆按钮的位置`)
         const clickAt = [circleBox.x + circleBox.width / 2, circleBox.y + circleBox.height / 2]
-        /* ⑤ 🔴 **真点一下**：在圆按钮中心点一次 —— 那里现在没有导航，
-              点下去命中的是 Sheet 自己的东西，并且 **URL 绝不许动**
-              （"点了导航跳页"正是本轮要防的那个回归）。
-              ⚠️ 不把"Sheet 还开着"当判据：那一点下面是 Sheet 的页脚/条目，
-                 点到「收起」把它关掉是**正常语义**（上一轮实测也是这么记的）。
-              ⚠️ 这一条必须放在**最后**：它会把 Sheet 关掉，后面不能再有 `.sheet` 断言。 */
+        /* ⑥ 🔴 **真点一下**：在圆按钮中心点一次 —— 那里现在**就是那颗按钮**（导航不再淡出、
+              面板在它上方），所以这一下命中的是按钮自己 = **收起面板**；
+              并且 **URL 绝不许动**（"点了导航跳页"是要防的回归）。
+              ⚠️ 这一条必须放在**最后**：点完面板就收起了，后面不能再有展开态的断言。 */
         const urlBeforeClick = page.url()
         await page.mouse.click(clickAt[0], clickAt[1])
         await page.waitForTimeout(320)
+        const clicked = await page.evaluate(() => {
+          const morph = document.querySelector('[data-nav-morph]')
+          const pop = document.querySelector('[data-nav-pop]')
+          return {
+            open: morph?.getAttribute('data-open'),
+            visibility: pop ? getComputedStyle(pop).visibility : 'missing',
+          }
+        })
         check(
-          page.url() === urlBeforeClick,
-          `${SNM}：**在圆按钮的位置真点一下 → URL 一动都不动**（那里已经不是导航了）`,
-          `点之前 url=${urlBeforeClick} · 点之后 url=${page.url()}`,
-          '展开态那颗按钮在 DOM 里还在（只是透明 + 不可点），所以"点不动"这件事必须实测',
+          page.url() === urlBeforeClick && clicked.open === 'false',
+          `${SNM}：**在圆按钮中心真点一下 → 面板收起、URL 一动都不动**`,
+          `点之前 url=${urlBeforeClick} · 点之后 url=${page.url()} · data-open=${clicked.open} · 面板 visibility=${clicked.visibility}`,
+          '这一下命中的就是那颗按钮本身（"展开态再点一下收起"那条路径），不是浮层上的别的东西',
         )
       })
 
@@ -3092,13 +3167,17 @@ await withLock(async () => {
         )
 
         /* ---- ②' **展开态那张面板**：同一块玻璃（大圆角 + 模糊 + 折射 + **读得清的兜底白底**） ----
-         * 🔴 那条"白底不透明度"是**可读性的机器版**：面板上有 11.5px 的说明小字，
+         * 🔴 那条"白底不透明度"是**可读性的机器版**：面板上有 12px 的说明小字，
          *    底下可能是课表 / 名单 / 深色内容 —— 兜底白底太透就会读不清（用户第一条硬约束）。
-         *    数值口径见 `index.css` 里 `.sheet:has([data-nav-glass])` 那一段的算式。 */
+         *    数值口径见 `index.css` 里 `.nav-pop`（与 `.nav-morph[data-open='true'] .nav-pop`）那段算式。
+         * ⚠️ 2026-10-01 第四轮：展开层从 `.sheet` 换成 `[data-nav-pop]`（从圆按钮里长出来的玻璃块），
+         *    同时按用户口径③ 把白底从 **0.88 降到 0.6 一带**（说明小字 11.5 → 12px 补回可读性）
+         *    ⇒ 上面那条从"≥0.6"升级成 **0.6 ~ 0.72 这个带**：太透（读不清）和偷偷加厚回 0.88
+         *      （"更透"这件事没做）**两种都要红**。 */
         await page.getByRole('button', { name: '展开更多入口' }).click()
         await page.waitForTimeout(600)
         const panel = await page.evaluate(() => {
-          const sh = document.querySelector('.sheet')
+          const sh = document.querySelector('[data-nav-pop]')
           if (!sh) return null
           const cs = getComputedStyle(sh)
           const img = cs.backgroundImage
@@ -3107,8 +3186,14 @@ await withLock(async () => {
             radius: cs.borderTopLeftRadius,
             backdrop: cs.backdropFilter,
             minAlpha: alphas.length ? Math.min(...alphas) : null,
-            headBg: getComputedStyle(sh.querySelector('.panel-head') ?? sh).backgroundColor,
-            marker: Boolean(sh.querySelector('[data-nav-glass]')),
+            maxAlpha: alphas.length ? Math.max(...alphas) : null,
+            marker: sh.hasAttribute('data-nav-glass'),
+            /* 面板里**最小那一档字号** = 那行说明小字（口径③：11.5 → 12px；别的地方都比它大） */
+            hintPx: Math.min(
+              ...[...sh.querySelectorAll('span')]
+                .map((el) => parseFloat(getComputedStyle(el).fontSize))
+                .filter((n) => n > 0),
+            ),
           }
         })
         check(
@@ -3118,14 +3203,20 @@ await withLock(async () => {
             panel.backdrop.includes('url('),
           `${SG}：**展开态那张面板**也是同一块玻璃（大圆角 18 + 模糊 + 折射接上了）`,
           panel
-            ? `圆角=${panel.radius} · backdrop-filter=${panel.backdrop} · 标记=${panel.marker} · 头部底=${panel.headBg}`
-            : '没找到 .sheet',
+            ? `圆角=${panel.radius} · backdrop-filter=${panel.backdrop} · 标记=${panel.marker}`
+            : '没找到 [data-nav-pop]',
         )
         check(
-          panel !== null && panel.minAlpha !== null && panel.minAlpha >= 0.6,
-          `${SG}：🔴 面板的**兜底白底够厚**（最浅那一档 ≥ 0.6）—— 最坏背景下菜单里的字仍读得清`,
-          panel ? `白底最浅那一档 alpha=${panel.minAlpha}（${panel.minAlpha >= 0.6 ? '过' : '太透'}）` : '没找到 .sheet',
-          '参考图的背景是蓝天白云，这个平台的背景可能是课表 / 名单 / 深色内容：可读性优先于好看',
+          panel !== null &&
+            panel.minAlpha !== null &&
+            panel.minAlpha >= 0.6 &&
+            panel.minAlpha <= 0.72 &&
+            panel.hintPx >= 12,
+          `${SG}：🔴 面板的**兜底白底在 0.6 ~ 0.72 这个带**、**说明小字 ≥ 12px**（口径③的"更透"这一对）`,
+          panel
+            ? `白底 ${panel.minAlpha} ~ ${panel.maxAlpha}（${panel.minAlpha >= 0.6 && panel.minAlpha <= 0.72 ? '过' : panel.minAlpha < 0.6 ? '太透' : '没做透'}）· 最小字号=${panel.hintPx}px`
+            : '没找到 [data-nav-pop]',
+          '背景可能是课表 / 名单 / 深色内容：可读性优先于好看 —— 透下去的那点余量要用字号换回来',
         )
         await page.keyboard.press('Escape')
         await page.waitForTimeout(400)
@@ -3764,14 +3855,15 @@ await withLock(async () => {
           ),
         )
 
-      /** 移动端展开层里那几项（点开圆按钮之后读 `.sheet`；`收起` 是页脚那个按钮，不算入口） */
+      /** 移动端展开层里那几项（点开圆按钮之后读 `[data-nav-pop]`；面板里已经没有页脚了） */
       const sheetLabels = async () => {
         await navPage.getByRole('button', { name: '展开更多入口' }).click()
         await navPage.waitForTimeout(360)
         const out = await navPage.evaluate(() => {
-          const box = document.querySelector('.sheet')
+          const box = document.querySelector('[data-nav-pop]')
+          const morph = document.querySelector('[data-nav-morph]')
           return {
-            open: Boolean(box),
+            open: Boolean(box) && morph?.getAttribute('data-open') === 'true',
             items: box
               ? [...box.querySelectorAll('button')]
                   .map((b) => (b.innerText ?? '').split('\n')[0].trim())

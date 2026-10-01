@@ -1354,62 +1354,88 @@ body::before {
     }
   }
 
-  /* ---------- 展开态：**更多入口**那张面板 —— 同一块玻璃，但厚得多 ----------
+  /* ---------- 展开态：**更多入口**那张面板 —— 从圆按钮里长出来的一块玻璃 ----------
    *
-   * 用户这一轮要的是"移动端底部导航的**展开态**"也是液态玻璃（原来它是一张**不透明白底**
-   * 的 Sheet，和底下那颗玻璃胶囊是两种材料，展开的一瞬间像换了个 App）。
+   * 🔴 2026-10-01 第四轮（用户三次拍板，口径见 `功能设计与不变量.md` §十五）：
+   *   · 面板**从右边那颗圆按钮弹出来** —— 原来是一张贴着底边的整宽 Sheet，
+   *     展开的一瞬间像换了个 App；
+   *   · 展开时**导航不再淡出、背景不再压暗**（这一层没有 `.scrim`）；
+   *     收起有三条路径：点面板里的一行、再点那颗圆按钮、**点面板外空白处或按 Esc**；
+   *   · 面板上**没有标题、没有关闭 X、没有底部「收起」**（点外面就会关，那颗按钮是重复的）。
    *
-   * ⚠️ **只给导航那张面板**：`ui.tsx` 的 `Sheet` 是全站共用的（十来个页面都在用），
-   *   所以这里按 `:has([data-nav-glass])` 收口 —— 壳子在 `AppShell.tsx` 里给导航自己那张
-   *   面板打了这个标记，别的地方 `:has()` 命中不了，**一行都不会受影响**。
-   *   老浏览器不认 `:has()` → 面板维持原来的不透明白底（**可用性零损失**，只是没玻璃）。
+   * 动效形式照 **transitions.dev 的 "Plus to menu morph"**（用户给的参考）：
+   *   展开 350ms `cubic-bezier(.34,1.25,.64,1)`（带一点过冲 = "长出来"）·
+   *   收起 250ms `cubic-bezier(.22,1,.36,1)` · 淡入淡出与模糊 200ms ·
+   *   `transform-origin` 钉在**右下角**（= 圆按钮那一侧），所以是"从按钮里长出来"，
+   *   不是"从屏幕底升上来"。`prefers-reduced-motion` 下三个都取消（项目硬要求）。
    *
-   * 🔴 **白底 0.88/0.84 —— 这是为"读得清"付的代价，不是审美选择**：
-   *   这张面板上有 **11.5px 的说明小字**（`MORE_HINT`）。玻璃越透，小字越吃背景。
-   *   按最坏背景（底下是纯黑内容、又被 `.scrim` 压了一层）算：
-   *     · 主标签 `--color-ink` #0e141b ≈ **13:1**；
-   *     · 说明小字（本轮已从 `--color-ink3` 提到 `--color-ink2` #4a5563）≈ **5.2:1**（AA 过线）。
-   *   再透一档（0.7 左右）小字就掉到 4:1 以下 —— 那正是"为了好看牺牲可读"。
-   *   ⚠️ 想让面板更透，前提是**先把那行小字删掉或放大**：那是产品决定，不是调参数。
+   * 🔴 **兜底白底 0.66/0.60 —— 这是为"读得清"付的代价，不是审美选择**：
+   *   面板上有 **12px 的说明小字**（`MORE_HINT`）。用户这一轮选了"明显更透"，口径是：
+   *     · 主标签 `--color-ink` #0e141b 压在最浅那一档（0.60 白 + 最坏背景纯黑）上 ≈ **10:1**；
+   *     · 说明小字 `--color-ink2` #4a5563 在同一档上 ≈ **4.9:1**（12px 仍过 AA）。
+   *   ⚠️ **0.60 是地板**：`scripts/shots.mjs` 有一条断言钉住"最浅那一档 ≥ 0.6"；
+   *      再往下调（0.5 之类）小字会掉到 4:1 以下 —— 那是"为了好看牺牲可读"。
+   *      （上一版是 0.88/0.84：那是因为面板上还有 11.5px 小字 + 一层压暗遮罩，两者这一轮都变了。）
    *
-   * 模糊 / 饱和度 / 内描边与胶囊同一套口径（同一个 SVG 滤镜），只是 blur 略小
-   *   （它面积大得多，36px 在 88vh 的面板上既贵又糊得过火）。
-   * `overflow: hidden` 是为了让 `ui.tsx` 里 `.panel-head` 那个内联的 `10px 10px 0 0`
-   *   圆角被父级的大圆角**裁掉** —— 不裁的话上面两个角还是旧的 10，下面两个角是 18，一眼看得出。
-   *   （不改 `ui.tsx` 是硬约束：那个内联样式是**全站** Sheet 的，动它会牵连十来个页面。）
+   * 模糊 / 饱和度 / 内描边与胶囊同一套口径（同一个 SVG 滤镜），blur 取 30px
+   *   （面板面积比胶囊大得多，36px 既贵又糊得过火）。
+   * ⚠️ **只给导航这张面板**：类名与 `data-nav-*` 标记都是导航专用的，
+   *   `ui.tsx` 的 `Sheet`（全站十来个页面在用）**一行都不受影响**。
    */
-  .sheet:has([data-nav-glass]) {
-    background: linear-gradient(180deg, rgb(255 255 255 / 0.88) 0%, rgb(255 255 255 / 0.84) 100%);
+  .nav-morph {
+    /* 面板的锚：`absolute right-4 bottom-full` 把它摆在圆按钮正上方、右边缘对齐 */
+    transform-origin: 100% 100%;
+  }
+  .nav-pop {
+    background: linear-gradient(180deg, rgb(255 255 255 / 0.66) 0%, rgb(255 255 255 / 0.6) 100%);
     -webkit-backdrop-filter: blur(30px) saturate(170%);
     backdrop-filter: blur(30px) saturate(170%);
-    border-top: 1px solid rgb(255 255 255 / 0.95);
-    border-radius: var(--radius-liquid) var(--radius-liquid) 0 0;
-    overflow: hidden;
+    border: 1px solid rgb(255 255 255 / 0.6);
     box-shadow:
-      inset 0 1px 0 rgb(255 255 255 / 0.95),
-      inset 0 0 0 1px rgb(255 255 255 / 0.55),
-      inset 0 0 0 2.5px rgb(255 255 255 / 0.2),
-      0 -10px 30px -20px rgb(14 20 27 / 0.24);
+      inset 0 1px 0 rgb(255 255 255 / 0.85),
+      inset 0 0 0 1px rgb(255 255 255 / 0.4),
+      0 18px 44px -18px rgb(14 20 27 / 0.4),
+      0 2px 10px -4px rgb(14 20 27 / 0.18);
+    /* 收起态：**看不见、也点不到**
+       ⚠️ `visibility: hidden` 是必须的 —— 只写 `opacity: 0` 的话里面的按钮**还在 Tab 序列里**
+          （键盘能走进去、屏幕阅读器也会念），那正是本项目栽过的"看不见却点得到"。
+       收起动画要把 `visibility` 延到最后才切（`transition-delay` 250ms）。 */
+    visibility: hidden;
+    opacity: 0;
+    transform: translateY(14px) scale(0.9);
+    filter: blur(2px);
+    pointer-events: none;
+    transition:
+      opacity 200ms cubic-bezier(0.22, 1, 0.36, 1),
+      transform 250ms cubic-bezier(0.22, 1, 0.36, 1),
+      filter 200ms cubic-bezier(0.22, 1, 0.36, 1),
+      visibility 0s linear 250ms;
+  }
+  .nav-morph[data-open='true'] .nav-pop {
+    visibility: visible;
+    opacity: 1;
+    transform: none;
+    filter: none;
+    pointer-events: auto;
+    transition:
+      opacity 200ms cubic-bezier(0.22, 1, 0.36, 1),
+      transform 350ms cubic-bezier(0.34, 1.25, 0.64, 1),
+      filter 200ms cubic-bezier(0.22, 1, 0.36, 1),
+      visibility 0s;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .nav-pop,
+    .nav-morph[data-open='true'] .nav-pop {
+      transition: none;
+      transform: none;
+      filter: none;
+    }
   }
   @supports (backdrop-filter: url(#shugao-liquid-refract)) {
-    .sheet:has([data-nav-glass][data-refract='on']) {
+    .nav-pop[data-refract='on'] {
       -webkit-backdrop-filter: url(#shugao-liquid-refract) blur(30px) saturate(170%);
       backdrop-filter: url(#shugao-liquid-refract) blur(30px) saturate(170%);
     }
-  }
-  /* 面板头也跟着玻璃走：`.panel-head` 本身是**不透明浅灰**（#f7f9fb）的通用样式，
-     留它的话整块玻璃最上面那一条（正是大圆角最显眼的地方）会是一条灰带子。
-     只对导航这张面板改成透明（`:has()` 收口，别的 Sheet 一行不受影响）。 */
-  .sheet:has([data-nav-glass]) .panel-head {
-    background: transparent;
-    border-bottom-color: rgb(255 255 255 / 0.6);
-  }
-  /* 遮罩给玻璃让路：面板既然是玻璃，遮罩就**别把它后面糊成一块灰** ——
-     压暗收窄到 0.22、模糊 7 → 3px（只收口、不糊背景）。同样只认导航那张面板。 */
-  .scrim:has(+ .sheet:has([data-nav-glass])) {
-    background: rgb(14 20 27 / 0.22);
-    -webkit-backdrop-filter: blur(3px) saturate(120%);
-    backdrop-filter: blur(3px) saturate(120%);
   }
 
   /* ---------- 悬浮侧栏 ----------
@@ -1501,25 +1527,20 @@ body::before {
     0 8px 20px -16px rgb(0 0 0 / 0.7);
 }
 
-:root[data-theme='dark'] .sheet:has([data-nav-glass]) {
-  /* 展开层那张面板：亮色 88/84% 白 → 暗色 "深面 + 白 8%" */
+:root[data-theme='dark'] .nav-pop {
+  /* 「更多入口」那块玻璃：亮色 66/60% 白 → 暗色 "深面 + 白 6%"（它比亮色那一档厚，
+     因为暗底下"太透"会让 12px 小字直接糊进背景里） */
   background: linear-gradient(
     180deg,
-    rgb(var(--color-surface2rgb) / 0.94) 0%,
-    rgb(var(--color-surface2rgb) / 0.9) 100%
+    rgb(var(--color-surface2rgb) / 0.86) 0%,
+    rgb(var(--color-surface2rgb) / 0.8) 100%
   );
-  border-top: 1px solid rgb(255 255 255 / 0.14);
+  border: 1px solid rgb(255 255 255 / 0.16);
   box-shadow:
     inset 0 1px 0 rgb(255 255 255 / 0.12),
     inset 0 0 0 1px rgb(255 255 255 / 0.08),
-    inset 0 0 0 2.5px rgb(255 255 255 / 0.04),
-    0 -10px 30px -20px rgb(0 0 0 / 0.6);
-}
-:root[data-theme='dark'] .sheet:has([data-nav-glass]) .panel-head {
-  border-bottom-color: rgb(255 255 255 / 0.1);
-}
-:root[data-theme='dark'] .scrim:has(+ .sheet:has([data-nav-glass])) {
-  background: rgb(0 0 0 / 0.5);
+    0 18px 44px -18px rgb(0 0 0 / 0.7),
+    0 2px 10px -4px rgb(0 0 0 / 0.5);
 }
 
 :root[data-theme='dark'] .floating-rail {

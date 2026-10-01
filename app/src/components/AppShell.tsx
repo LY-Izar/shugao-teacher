@@ -757,6 +757,8 @@ function MobileNav() {
     n.end ? pathname === n.to : pathname.startsWith(n.to),
   )
 
+  /** 🔴 移动端底栏那一整条 `<nav>`：**只用来判"点面板外面"**（`contains(target)`，见下面的 effect） */
+  const navRef = useRef<HTMLElement>(null)
   const pillRef = useRef<HTMLDivElement>(null)
   const hiRef = useRef<HTMLSpanElement>(null)
   /** 高光边那一层（**在 goo 层外面**，见上面 `data-hi-ring` 的注释）：它要跟着填充一起做拉伸回弹 */
@@ -797,6 +799,41 @@ function MobileNav() {
   const corridorRef = useRef<{ left: number; width: number } | null>(null)
   /** 上一次的落点（走廊的"起点那一格"从这里来；`null` = 还没量过第一格） */
   const hiPrevRef = useRef<{ left: number; width: number } | null>(null)
+
+  /* ============================================================
+     🔴 **2026-10-01 第四轮：「点面板外面 / 按 Esc」收起**（用户口径，见 §十五）
+     展开层不再是 `<Sheet>`，于是少了三样**它原来白送给我们的东西**，这一轮必须自己补：
+       · `<Sheet>` 自带的 `.scrim` —— 原来"点外面"点的是那层遮罩；现在**背景不压暗、
+         没有遮罩**，所以"点面板外空白处"这行为**没有任何元素**替我们兜着；
+       · `<Sheet>` 自带的 Esc 监听（`ui.tsx` 里那个 `window` keydown）；
+       · `<Sheet>` 自带的面板头（标题 + 关闭 X）与页脚「收起」按钮 —— 用户这一轮**全删了**，
+         于是收起只剩三条路径：**点面板里的一行 / 再点那颗圆按钮 / 点外面或按 Esc**。
+     实现要点：
+       · 判定用 `navRef.current.contains(target)`：面板与圆按钮**都在** `<nav>` 里，
+         所以点它们不算"外面"（点按钮那条由按钮自己的 `onClick` 管，不在文档层抢）；
+         ⚠️ 面板**不能**搬到 `<nav>` 外面（比如挂 Portal）——那样点它自己就会收起，
+            而且 `nav > div` 那条拖拽选择器也会跟着变。
+       · 用 `pointerdown` 而不是 `click`：手指按下去那一刻就开始收，
+         等抬手才收会有"按着不动、面板还挡着"的一帧。
+       · 只在展开时挂（`if (!more) return`），收起后监听全部摘掉。
+     ============================================================ */
+  useEffect(() => {
+    if (!more) return
+    const onDown = (e: PointerEvent) => {
+      const t = e.target as Node | null
+      if (t && navRef.current?.contains(t)) return
+      setMoreAt(null)
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMoreAt(null)
+    }
+    document.addEventListener('pointerdown', onDown, true)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('pointerdown', onDown, true)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [more])
 
   /* 高亮块的落点靠**量**（不写死 48×序号）：字号/间距将来变了也不会错位 */
   useEffect(() => {
@@ -1022,56 +1059,50 @@ function MobileNav() {
       {/* 实时滤镜（内联 SVG：折射 + gooey）：哪个开关打开才挂哪个，见 `LiquidGlassFilter` */}
       {refract || goo ? <LiquidGlassFilter refract={refract} goo={goo} /> : null}
       <nav
+        ref={navRef}
         aria-label="主导航"
         /*
-         * 🔴 **层叠 · 2026-09-28 第二轮（用户拍板改做法：展开时整栏淡出）**
+         * 🔴 **层叠 · 2026-10-01 第四轮（用户又改了一次口径：展开时整栏**不淡出**）**
          *
-         * 上一轮的做法是"把整个 `<nav>` 抬到 Sheet 之上（展开态 `z-[52]`）"，
-         * 好让"朝下的收起箭头"看得见。用户看过之后说：
-         *   「但是点开后导航栏浮在上面会不会太奇怪了 / 展开后整个导航栏淡出吧」
-         * —— 于是**抬层叠这件事被整个推翻**：展开时这一栏自己消失，
-         *    就不存在"要不要浮在上面"的问题，也不会有"看不见却还能点到"的误触。
-         *
-         * 现在：
-         *   · `<nav>` **恒为 `z-40`**（和最早一样，收起态压在内容之上、在 `.scrim`(z-50)
-         *     与 `.sheet`(z-51) 之下 —— 展开时被 Sheet 盖住也无所谓，因为它正在淡出）；
-         *   · 展开态加 `opacity-0`；而带子本身 `pointer-events-none` **恒定保留**（I22 那条：
-         *     这条带子从来就只有胶囊与圆按钮可点）。
-         *     注意"看不见"与"点不到"是两件事：**只把它变透明的话它仍然能点到** ——
-         *     那正是"看不见却会误触"。所以展开态**两件事一起做**：
-         *     ① 整栏 `opacity-0`（视觉上彻底消失）；
-         *     ② 那两个子控件（胶囊 / 圆按钮）各自的 `pointer-events-auto` **也一起去掉**
-         *        （`pointerEvents: more ? 'none' : 'auto'`）—— 只把父级设成 `none`
-         *        是**不够**的，子级自己写了 `auto`，照样能在透明状态下被点到（实测这条坑）。
-         *   · 过渡 `260ms` 与 `.sheet` 的升/降动画（`@keyframes sheet-up` 0.26s，
-         *     同一条 `cubic-bezier(.22,.8,.24,1)`）**对齐** —— 别各弹各的。
-         *     收起时 Sheet 往下走、导航同步淡回来，不会"先看不见再跳出来"。
-         *
-         * ⚠️ 因为不再抬层叠，AppShell 根节点那个 `z-index` 也**照旧不能有**
-         *    （上一轮为抬层叠摘掉过 `z-[1]`；摘掉本身对淡出无害，但"根节点带 z-index"
-         *    这件事仍然会把整棵子树关进层叠上下文 —— 页面里那些浮层的层叠口径见 §十五 15.3）。
+         * 三个版本一路走过来，前两条都是踩过的坑：
+         *   ① 最早：展开态把 `<nav>` 抬到浮层之上（`z-[52]`）—— 用户说像"导航浮在上面"；
+         *   ② 2026-09-28：改成**展开时整栏淡出**（`opacity-0`）—— 于是"看不见"与"点不到"
+         *      必须**一起**做（子级自己写着 `pointer-events-auto`，只把父级设成 `none`
+         *      挡不住，实测过这条坑）；
+         *   ③ **本轮**：展开层从"贴底的整宽 Sheet"改成**从圆按钮里长出来的玻璃块**
+         *      （用户：「把移动端右下角的展开界面改成从按钮弹出来的一个半透明的液态玻璃界面」）
+         *      —— 参考图里那一排导航**一直是亮的**，面板还要能**看穿背景**；
+         *      淡出 + 压暗恰恰把这两件事都毁了。所以：
+         *        · 整栏**不淡出**（没有 `opacity-0`、没有 `aria-hidden`）；
+         *        · 也没有 `.scrim`（**背景不压暗**，面板后面就是页面本身）；
+         *        · 收起的三条路径 = 点面板里的一行 / 再点那颗圆按钮 / **点面板外或按 Esc**
+         *          （见下面那个 `useEffect`：没有遮罩，所以"点外面"这行为**没有任何元素**
+         *           替我们兜着，只能挂文档监听）。
+         * ⚠️ 因此那两个子控件的 `pointerEvents` **恒为 `auto`** —— 这条带子仍然只有
+         *    胶囊与圆按钮可点（父级 `pointer-events-none` 不变，I22）。
+         * ⚠️ 绝不能往 `<nav>` 里再加兄弟 `div`：`shots.mjs` 的底栏拖拽回归按
+         *    `nav[aria-label="主导航"] > div` 取**第一条**居中带（见那一段的注释）。
          * ⚠️ **尺寸一个字没动**：底距、58、48、52 全照旧（I21）。
          */
-        aria-hidden={more || undefined}
-        className={cx(
-          'pointer-events-none fixed inset-x-0 lg:hidden z-40',
-          'transition-opacity duration-[260ms] ease-[cubic-bezier(.22,.8,.24,1)]',
-          more ? 'opacity-0' : 'opacity-100',
-        )}
+        className="pointer-events-none fixed inset-x-0 lg:hidden z-40"
         style={{ bottom: 'calc(env(safe-area-inset-bottom, 0px) + 18px)' }}
       >
         {/*
          * 这一行**只包住两个控件**（fit-content + 居中），不铺满整屏：
          * ① 它中间那段空隙要让点击穿过去（父级是 pointer-events-none）；
          * ② `scripts/shots.mjs` 的拖拽回归按 `nav > div` 取拖拽区，宽度等于控件本身才对得上。
+         * ③ 🆕 **`relative`：展开那张面板以它为定位祖先**（`absolute right-4 bottom-full`，
+         *    右边缘与圆按钮对齐、底边在按钮上方 12px）—— 所以它是**这一行的子节点**，
+         *    不是 `<nav>` 的兄弟（`nav > div` 那条选择器只认第一条居中带，见上面注释）。
          */}
         <div
-          className="mx-auto flex items-center gap-3"
+          className="relative mx-auto flex items-center gap-3"
           style={{ width: 'fit-content', maxWidth: 640, padding: '0 16px' }}
         >
           {/* ① 胶囊：工作台 / 作业 / 我的 —— 半透明**亮色**液态玻璃、细描边、**大圆角 18** */}
           <div
             ref={pillRef}
+            data-nav-pill=""
             data-refract={refract ? 'on' : 'off'}
             className="glass-light pointer-events-auto relative flex items-center"
             style={{
@@ -1084,8 +1115,8 @@ function MobileNav() {
                  理由写在令牌那一行）。⚠️ 只改圆角不动任何尺寸：58 / 48 / 4 全照旧（I21）。 */
               borderRadius: LG_RADIUS,
               touchAction: 'pan-y',
-              /* 展开态整栏在淡出：这时候**不能还能点**（见 `<nav>` 上那段层叠注释） */
-              pointerEvents: more ? 'none' : 'auto',
+              /* 展开态**不再淡出**（本轮口径）：这颗胶囊照旧可见、可点（见 `<nav>` 上那段注释） */
+              pointerEvents: 'auto',
             }}
             onPointerDown={onDown}
             onPointerMove={onMove}
@@ -1240,13 +1271,12 @@ function MobileNav() {
                     更容易读成"同一件事的开关"；桌面那侧没有这个按钮，不用跟着改。
               🔴 **无障碍名跟着状态变**（视觉与 aria-label 必须一致，§十五 I21 那一挂）：
                  `展开更多入口` ↔ `收起更多入口`。`shots.mjs` 是按**收起态那个名字**点的。
-              🔴 **2026-09-28 第二轮：展开态它随整栏一起淡出**（用户：「展开后整个导航栏淡出吧」）。
-                 所以"展开态这颗按钮看不看得见"这件事**不再是**要钉的东西 —— 反过来，
-                 展开态它**必须看不见、也点不到**（`pointer-events` 一起去掉），
-                 `shots.mjs` 现在钉的是这一条（见 §十五 15.3 与 15.5）。
-                 ⚠️ 本组件里那个"已展开 → 箭头朝下"的 `rotate(90deg)` **留着**：
-                    它是**收起动画那 0.26s** 里唯一能读到的方向信号（Sheet 往下走、导航淡回来），
-                    而且一次点击就能把状态读出来 —— 别以为"反正看不见"就把它删了。
+              🔴 **2026-10-01 第四轮：展开态它照旧可见、可点**
+                 面板也不再盖住它 —— 它是**收起的一条路径**：开着的时候再点一下 = 收起。
+                 所以 `shots.mjs` 这一节钉的是**反过来的**三条（见 §十五 15.3 / 15.5）：
+                 展开态整栏 `opacity` 仍是 `1`、这颗按钮与胶囊的 `pointer-events` 仍是 `auto`。
+                 ⚠️ 那个"已展开 → 箭头朝下"的 `rotate(90deg)` **留着**：一眼读出"现在开着"，
+                    而且一次点击就能把状态读出来 —— 别以为"反正能关"就把它删了。
               ⚠️ 颜色用 `--color-accentink`（#0847c4）：它压在近白的玻璃上 ≈ **7.3:1**。
                  原来那个暖黄 `#f5c469` 是"深底上的显眼强调物"，在这套亮色玻璃上只有
                  ≈ **1.5:1**，而且按钮现在的语义是个功能开关 —— 与全站其它控件同用
@@ -1266,9 +1296,9 @@ function MobileNav() {
               height: 58,
               borderRadius: 999,
               color: 'var(--color-accentink)',
-              /* 展开态整栏在淡出：**必须连它自己那层 `pointer-events-auto` 一起去掉** ——
-                 只把 `<nav>` 设成 none 是没用的，这一层写着 auto，透明了照样能点到（实测）。 */
-              pointerEvents: more ? 'none' : 'auto',
+              /* 🔴 展开态**照旧可点**（本轮口径：整栏不淡出）：它是收起的一条路径 ——
+                 开着的时候再点一下 = 收起（`onClick` 里那个三元）。 */
+              pointerEvents: 'auto',
               /* 当前页在展开层里时描一圈同色蓝，免得"高亮不见了" */
               outline:
                 more || moreActive ? `2px solid rgb(${HI_LINE} / .55)` : '2px solid transparent',
@@ -1295,114 +1325,131 @@ function MobileNav() {
               <IconChevronRight size={26} strokeWidth={2.1} />
             </span>
           </button>
+
+          {/*
+            🔴 **展开层：从圆按钮里长出来的一块玻璃**（2026-10-01 第四轮，用户三次拍板）
+
+            用户原话：「我想把移动端右下角的展开界面改成**从按钮弹出来**的一个**半透明的液态
+            玻璃界面**，例如这种」（附了两张参考图：鼠标停在某一项上 → 面板从那一项里长出来，
+            能看穿背后的花草背景，那一排导航**仍然亮着**）。三个口径都是用户选的：
+              ① 展开时**导航不淡出、背景不压暗**（没有 `.scrim`），**点面板外空白处关闭**；
+              ② 面板里**没有标题、没有关闭 X、没有底部「收起」** —— 只有那几行入口；
+              ③ 玻璃**明显更透**（白约 60%），说明小字 `11.5 → 12px`（最坏背景下仍过 AA）。
+
+            ⚠️ 为什么它**不是** `<Sheet>`：`ui.tsx` 的 `Sheet` 是**贴着底边的整宽抽屉**
+               （十来个页面在用，不许动），形态上就是"换了个 App"；而且它自带
+               `.scrim` 压暗 + 标题栏 + 页脚 + Esc 监听 —— 这四条**这一轮全都不用**，
+               于是"点外面 / Esc 收起"得由壳子自己补（见上面那个 `useEffect`）。
+            ⚠️ 定位：`absolute right-4 bottom-full` + `marginBottom: 12` —— 右边缘与圆按钮
+               对齐、底边在按钮上方 12px。定位祖先是**这一行**（它带 `relative`），
+               所以这块面板是这一行的子节点（`nav > div` 那条拖拽选择器只认第一条居中带）。
+            ⚠️ `data-nav-glass` / `data-refract` 是**给 CSS 与门禁认的标记**：
+               玻璃那套规则写在 `index.css` 的 `.nav-pop` 上（只认这两个类名/标记，
+               别的 `.sheet` 一行都不受影响）；`scripts/shots.mjs` 按它们读玻璃与折射。
+            ⚠️ 收起态不是"删掉 DOM"而是 `data-open='false'`（`index.css` 里负责
+               `visibility: hidden` + 淡出 + 缩小 + 模糊）—— **为了收起那一帧的动画**，
+               顺便让 `visibility: hidden` 把里面的按钮从 Tab 序列里摘掉。
+          */}
+          <div
+            data-nav-morph=""
+            data-open={more ? 'true' : 'false'}
+            className="nav-morph absolute right-4 bottom-full"
+            style={{ marginBottom: 12 }}
+          >
+            <div
+              data-nav-pop=""
+              data-nav-glass=""
+              data-refract={refract ? 'on' : 'off'}
+              role="dialog"
+              aria-label="更多入口"
+              aria-hidden={more ? undefined : true}
+              className="nav-pop overflow-hidden"
+              style={{ width: 'min(86vw, 300px)', borderRadius: LG_RADIUS }}
+            >
+              {collapsed.map((n, i) => {
+                const on = n.end ? pathname === n.to : pathname.startsWith(n.to)
+                const Icon = n.icon
+                return (
+                  <button
+                    key={n.to}
+                    type="button"
+                    onClick={() => {
+                      setMoreAt(null)
+                      navigate(n.to)
+                    }}
+                    className="flex w-full items-center gap-3 px-3 text-left"
+                    style={{
+                      minHeight: 52,
+                      borderBottom:
+                        i === collapsed.length - 1 ? undefined : '1px solid var(--color-line)',
+                      /* 🔴 行底**透明**（不是实心白）：面板自己已经是一块奶白玻璃，
+                         行再垫一层实白就把玻璃全挡掉了。
+                         ⚠️ 透出去的是**面板那一层的白**（不是页面），所以字仍然压在白底上 ——
+                            "读得清"靠的是面板的兜底层，不是这一行的实心白（`index.css` 有算式）。
+                         ⚠️ 当前页那一行仍是 `accentsoft`（实色）：它是"我在这一页"的记号，要稳。 */
+                      background: on ? 'var(--color-accentsoft)' : 'transparent',
+                    }}
+                  >
+                    <span
+                      className="relative grid shrink-0 place-items-center"
+                      style={{
+                        width: 34,
+                        height: 34,
+                        border: '1px solid var(--color-line2)',
+                        borderRadius: 4,
+                        background: 'var(--color-surface2)',
+                        color: on ? 'var(--color-accent)' : 'var(--color-ink2)',
+                      }}
+                    >
+                      <Icon size={18} />
+                      {n.to === '/notices' && hasUnreadNotice ? <UnreadDot /> : null}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span
+                        className="block truncate"
+                        style={{
+                          fontSize: 14.5,
+                          fontWeight: on ? 660 : 560,
+                          color: on ? 'var(--color-accentink)' : 'var(--color-ink)',
+                        }}
+                      >
+                        {n.label}
+                      </span>
+                      {MORE_HINT[n.to] ? (
+                        /* ⚠️ 说明小字这一轮从 **11.5px 提到 12px**（用户口径③ 的一部分）：
+                           面板从"白 0.88 + 压暗遮罩"变成"白 0.60、不压暗"，小字是这块玻璃上
+                           最细的一档，所以把字号提上去换回那点余量。
+                           颜色仍是 `--color-ink2`（`--color-ink3` 在最坏背景上只剩 ≈1.9:1，早就换掉了）。
+                           `index.css` 里 `.nav-pop` 那一段写着两档对比度的算式（≈10:1 / ≈4.9:1）。 */
+                        <span style={{ fontSize: 12, color: 'var(--color-ink2)' }}>
+                          {MORE_HINT[n.to]}
+                        </span>
+                      ) : null}
+                    </span>
+                    <span
+                      style={{
+                        color: on ? 'var(--color-accent)' : 'var(--color-ink4)',
+                        display: 'grid',
+                        placeItems: 'center',
+                      }}
+                    >
+                      {on ? <IconCheck size={16} /> : <IconChevronRight size={16} />}
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
+          </div>
         </div>
       </nav>
 
       {/*
-        展开：其余入口（班级 / 错题集 …）。一行 52px，够手指点。
-        ⚠️ 这一层（`.sheet`）本来就是**白底亮色**（`index.css` 的 `.sheet`），
-           所以上一轮改亮色玻璃**没有**把它也算进来 —— 先读清再动手，别无脑统一。
-        ⚠️ 底部原来还有一行说明「工作台 / 作业 / 我的 在底部那颗胶囊里；这一层装的是
-           其余入口。」（按实际胶囊项动态拼，`pinnedLabel()`）—— 用户 2026-09-28 拍板
-           **删掉**，那段拼字符串的逻辑也一起删了（它只有这一个用处，留着就是死代码）。
-           `shots.mjs` 的「按身份显示导航」那一节反过来钉住"它不在"。
+        🔴 **原来这里是那张贴底整宽 `<Sheet>`**（标题「更多入口」+ 右上角 X + 页脚「收起」）。
+        2026-10-01 第四轮按用户口径整块搬进了 `<nav>`：展开层现在是**从圆按钮弹出来的一块
+        玻璃**（`[data-nav-morph]` / `[data-nav-pop]`，见上面那一行里的注释与 `index.css`
+        的 `.nav-pop`）。⚠️ `Sheet` 组件本身**照旧留着**（下面还有一处、别的页面也在用）——
+        这一轮只是**不再拿它当导航的展开层**，`ui.tsx` 一行没动。
       */}
-      <Sheet
-        open={more}
-        onClose={() => setMoreAt(null)}
-        title="更多入口"
-        footer={
-          <Button block onClick={() => setMoreAt(null)}>
-            收起
-          </Button>
-        }
-      >
-        {/*
-          🔴 `data-nav-glass` 是**给 CSS 认的标记**（`index.css` 的 `.sheet:has([data-nav-glass])`）：
-          这一轮要的"移动端底部导航**展开态**也是液态玻璃"，只能从壳子这边指过去 ——
-          `ui.tsx` 的 `Sheet` 是全站共用的（十来个页面在用），**不许动它**（那是别的页面的脸）。
-          `:has()` 认不出这个标记的老浏览器 → 面板维持原来的不透明白底，**可用性零损失**。
-          ⚠️ `data-refract` 同理：`on` 时那张面板才接上折射（判定在 `useLiquidRefract`）。
-        */}
-        <div
-          data-nav-glass=""
-          data-refract={refract ? 'on' : 'off'}
-          className="overflow-hidden"
-          style={{ border: '1px solid var(--color-line)', borderRadius: 4 }}
-        >
-          {collapsed.map((n, i) => {
-            const on = n.end ? pathname === n.to : pathname.startsWith(n.to)
-            const Icon = n.icon
-            return (
-              <button
-                key={n.to}
-                type="button"
-                onClick={() => {
-                  setMoreAt(null)
-                  navigate(n.to)
-                }}
-                className="flex w-full items-center gap-3 px-3 text-left"
-                style={{
-                  minHeight: 52,
-                  borderBottom:
-                    i === collapsed.length - 1 ? undefined : '1px solid var(--color-line)',
-                  /* 🔴 这一轮行底从**实心白**改成**透明**：面板自己已经是一块奶白玻璃，
-                     行再垫一层实白就把玻璃全挡掉了（展开态看着还是"一张白纸"）。
-                     ⚠️ 透出去的是**面板那一层 0.88 的白**（不是页面），所以字仍然压在白底上 ——
-                        "读得清"靠的是面板的兜底层，不是这一行的实心白（`index.css` 那一段有算式）。
-                     ⚠️ 当前页那一行仍是 `accentsoft`（实色）：它是"我在这一页"的记号，要稳。 */
-                  background: on ? 'var(--color-accentsoft)' : 'transparent',
-                }}
-              >
-                <span
-                  className="relative grid shrink-0 place-items-center"
-                  style={{
-                    width: 34,
-                    height: 34,
-                    border: '1px solid var(--color-line2)',
-                    borderRadius: 4,
-                    background: 'var(--color-surface2)',
-                    color: on ? 'var(--color-accent)' : 'var(--color-ink2)',
-                  }}
-                >
-                  <Icon size={18} />
-                  {n.to === '/notices' && hasUnreadNotice ? <UnreadDot /> : null}
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span
-                    className="block truncate"
-                    style={{
-                      fontSize: 14.5,
-                      fontWeight: on ? 660 : 560,
-                      color: on ? 'var(--color-accentink)' : 'var(--color-ink)',
-                    }}
-                  >
-                    {n.label}
-                  </span>
-                  {MORE_HINT[n.to] ? (
-                    /* ⚠️ 说明小字这一轮从 `--color-ink3` 提到 **`--color-ink2`**：
-                       面板变成半透明之后，最坏背景（底下是深色内容）上 ink3 只剩 ≈1.9:1，
-                       而 ink2 在**面板的兜底白**上仍有 ≈5.2:1（AA 过线）。
-                       要不要再浅，先看 `index.css` 里那段算式 —— 这行字是"菜单里的字"里最细的一档。 */
-                    <span style={{ fontSize: 11.5, color: 'var(--color-ink2)' }}>
-                      {MORE_HINT[n.to]}
-                    </span>
-                  ) : null}
-                </span>
-                <span
-                  style={{
-                    color: on ? 'var(--color-accent)' : 'var(--color-ink4)',
-                    display: 'grid',
-                    placeItems: 'center',
-                  }}
-                >
-                  {on ? <IconCheck size={16} /> : <IconChevronRight size={16} />}
-                </span>
-              </button>
-            )
-          })}
-        </div>
-      </Sheet>
     </>
   )
 }
