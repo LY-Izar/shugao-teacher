@@ -1288,7 +1288,16 @@ function parseMatrix() {
   return { paths, perRole, sum, cells, unknown }
 }
 
-{
+d2Matrix: {
+  /*
+   * 🆕 2026-10-02（E1 CI 轮）：这份方案**不进 git**（根目录 *.md 全被 .gitignore 拦下），
+   * CI 的 checkout 里没有它。没结论必须灰、绝不红：文档不在就打印说明、整节跳过
+   * （与 exam-checks 三之二那份本机 xlsx 同一模式）；文档在的地方下面一条断言都不变。
+   */
+  if (!existsSync(join(REPO, '按身份显示导航方案.md'))) {
+    console.log('  ⏭ 按身份显示导航方案.md 不在（它不进 git，只在维护者机器上）—— D2 整节跳过')
+    break d2Matrix
+  }
   let mx = null
   let boom = null
   try {
@@ -1472,7 +1481,15 @@ function parseMatrix13() {
   return { paths, cells, perCol, sum, heads, unknown }
 }
 
-{
+d9Matrix: {
+  /*
+   * 🆕 2026-10-02（E1 CI 轮）：这份方案**不进 git**（同 D2 的口径）—— CI 的 checkout
+   * 里没有它。文档不在就打印说明、整节跳过（灰），绝不红；文档在的地方一条断言都不变。
+   */
+  if (!existsSync(join(REPO, '管理架构与角色权限方案.md'))) {
+    console.log('  ⏭ 管理架构与角色权限方案.md 不在（它不进 git，只在维护者机器上）—— D9 整节跳过')
+    break d9Matrix
+  }
   let mx = null
   let boom = null
   try {
