@@ -1,0 +1,76 @@
+# 验证：push 到 main / PR / 手动触发时，跑 lint + 全部纯 Node 门禁。
+#
+# 口径（2026-10-02 批准）：
+# · CI **不重复跑 tsc** —— Cloudflare Pages 每次 push 已在跑 `npm run build`
+#   （= `tsc -b && vite build`），类型错会直接变成部署红。
+# · `clock-checks` 依赖本机常驻的 5178 dev server，`shots` 依赖 Playwright + 约 8 分钟
+#   —— 这两道只能留在开发机，不进 CI。
+# · 例外：`nav-checks` 的 D7 节要读 `app/dist/assets`（dist 不进 git，缺了它会红着退出），
+#   所以这里跑一步 `npx vite build` 只为产出被测产物，**不带 tsc**。
+#
+# 七道 check 共用 `%TEMP%/shugao-verify.lock`（scripts/lib/lock.mjs）；
+# 下面按 job 内 step 串行跑，不会互相撞锁。Node 版本跟 `app/.nvmrc`（22 线）——
+# 这些脚本靠 Node 原生 TS 类型剥离 import 仓库里的真源码，22.18.0 起默认开启。
+name: 验证
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: app/.nvmrc
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: 安装依赖
+        run: npm ci
+        working-directory: app
+
+      - name: lint
+        run: npm run lint
+        working-directory: app
+
+      - name: 出 dist 产物（nav-checks D7 的输入）
+        run: npx vite build
+        working-directory: app
+
+      - name: nav-checks
+        run: node scripts/nav-checks.mjs
+        working-directory: app
+
+      - name: rls-checks
+        run: node scripts/rls-checks.mjs
+        working-directory: app
+
+      - name: exam-checks
+        run: node scripts/exam-checks.mjs
+        working-directory: app
+
+      - name: backup-checks
+        run: node scripts/backup-checks.mjs
+        working-directory: app
+
+      - name: grade-checks
+        run: node scripts/grade-checks.mjs
+        working-directory: app
+
+      - name: admin-checks
+        run: node scripts/admin-checks.mjs
+        working-directory: app
+
+      - name: ocr-checks
+        run: node scripts/ocr-checks.mjs
+        working-directory: app
