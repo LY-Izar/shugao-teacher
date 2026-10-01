@@ -1,5 +1,5 @@
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom'
-import { useEffect, useLayoutEffect, useState } from 'react'
+import { Suspense, lazy, useEffect, useLayoutEffect, useState } from 'react'
 import { AppShell, ToastHost } from './components/AppShell'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { MaintenanceGate } from './components/MaintenanceGate'
@@ -11,44 +11,55 @@ import { authExpired, hasAuthStamp, isClassroomDevice, markLogin } from './lib/s
 import { devInjectedAccountKind, devInjectedRoles, devInjectedSyncError } from './lib/roles'
 import { isRemote } from './lib/supabase'
 import type { TeacherRole } from './data/types'
-import Admin from './pages/Admin'
-import Administration from './pages/Administration'
-import AssignmentCall from './pages/AssignmentCall'
-import AssignmentCollect from './pages/AssignmentCollect'
-import AssignmentGrade from './pages/AssignmentGrade'
-import AssignmentGradeDone from './pages/AssignmentGradeDone'
-import AssignmentNew from './pages/AssignmentNew'
-import AssignmentStats from './pages/AssignmentStats'
-import Assignments from './pages/Assignments'
-import Calls from './pages/Calls'
-import ClassDetail from './pages/ClassDetail'
-import Classroom from './pages/Classroom'
-import Classes from './pages/Classes'
-import ExamGrade from './pages/ExamGrade'
-import ExamNew from './pages/ExamNew'
-import Exams from './pages/Exams'
-import ExamStats from './pages/ExamStats'
-import GradeDetail from './pages/GradeDetail'
-import GradePromote from './pages/GradePromote'
-import Grades from './pages/Grades'
-import GradeSetup from './pages/GradeSetup'
-import ImportPaste from './pages/ImportPaste'
-import ImportPhoto from './pages/ImportPhoto'
 import Login from './pages/Login'
-import ManageCourse from './pages/ManageCourse'
 import NotFound from './pages/NotFound'
-import NoticeNew from './pages/NoticeNew'
-import Notices from './pages/Notices'
-import WrongBook from './pages/WrongBook'
-import WrongBookClass from './pages/WrongBookClass'
-import AssignmentCorrect from './pages/AssignmentCorrect'
-import AssignmentImport from './pages/AssignmentImport'
-import Files from './pages/Files'
-import Schedule from './pages/Schedule'
-import Settings from './pages/Settings'
-import TeacherAccounts from './pages/TeacherAccounts'
-import Terms from './pages/Terms'
-import Workbench from './pages/Workbench'
+/*
+ * 🔴 路由级代码分割（E6，2026-10-02）：页面一律 `lazy`，登录页与 404 兜底页留静态
+ *    （它们是首屏 / 最少见路径，不该多付一次 chunk 往返）。
+ * ⚠️ 每个路由的 JSX 形状一个字没动 —— `admin-checks` T6 用字面正则钉着 /admin
+ *    那行路由的形状（`element={<Admin />}，裸的、不包壳）；这里只换 import 的来路。
+ *    ⚠️ 本段注释里**不许出现字面的路由形状串**（path= 加引号加内容那种）——
+ *       nav-checks 的 D1 数的就是这个串，注释里多一条它就多算一条路由。
+ * ⚠️ 登录后第一次进某个页面要现拉它的 chunk：教师页的兜底在 `Guard` 内层
+ *    （AppShell 留在屏上），/admin 与 /classroom 的兜底在 `<Routes>` 外层
+ *    （它们本来就不套教师壳）。chunk 真拉失败由最外层 `<ErrorBoundary>` 接住并上报。
+ */
+const Admin = lazy(() => import('./pages/Admin'))
+const Administration = lazy(() => import('./pages/Administration'))
+const AssignmentCall = lazy(() => import('./pages/AssignmentCall'))
+const AssignmentCollect = lazy(() => import('./pages/AssignmentCollect'))
+const AssignmentGrade = lazy(() => import('./pages/AssignmentGrade'))
+const AssignmentGradeDone = lazy(() => import('./pages/AssignmentGradeDone'))
+const AssignmentNew = lazy(() => import('./pages/AssignmentNew'))
+const AssignmentStats = lazy(() => import('./pages/AssignmentStats'))
+const Assignments = lazy(() => import('./pages/Assignments'))
+const Calls = lazy(() => import('./pages/Calls'))
+const ClassDetail = lazy(() => import('./pages/ClassDetail'))
+const Classroom = lazy(() => import('./pages/Classroom'))
+const Classes = lazy(() => import('./pages/Classes'))
+const ExamGrade = lazy(() => import('./pages/ExamGrade'))
+const ExamNew = lazy(() => import('./pages/ExamNew'))
+const Exams = lazy(() => import('./pages/Exams'))
+const ExamStats = lazy(() => import('./pages/ExamStats'))
+const GradeDetail = lazy(() => import('./pages/GradeDetail'))
+const GradePromote = lazy(() => import('./pages/GradePromote'))
+const Grades = lazy(() => import('./pages/Grades'))
+const GradeSetup = lazy(() => import('./pages/GradeSetup'))
+const ImportPaste = lazy(() => import('./pages/ImportPaste'))
+const ImportPhoto = lazy(() => import('./pages/ImportPhoto'))
+const ManageCourse = lazy(() => import('./pages/ManageCourse'))
+const NoticeNew = lazy(() => import('./pages/NoticeNew'))
+const Notices = lazy(() => import('./pages/Notices'))
+const WrongBook = lazy(() => import('./pages/WrongBook'))
+const WrongBookClass = lazy(() => import('./pages/WrongBookClass'))
+const AssignmentCorrect = lazy(() => import('./pages/AssignmentCorrect'))
+const AssignmentImport = lazy(() => import('./pages/AssignmentImport'))
+const Files = lazy(() => import('./pages/Files'))
+const Schedule = lazy(() => import('./pages/Schedule'))
+const Settings = lazy(() => import('./pages/Settings'))
+const TeacherAccounts = lazy(() => import('./pages/TeacherAccounts'))
+const Terms = lazy(() => import('./pages/Terms'))
+const Workbench = lazy(() => import('./pages/Workbench'))
 
 function Guard({ children }: { children: React.ReactNode }) {
   const teacher = useStore((s) => s.teacher)
@@ -87,7 +98,12 @@ function Guard({ children }: { children: React.ReactNode }) {
   if (!teacher || expired) {
     return <Navigate to="/login" replace state={{ from: loc.pathname, expired }} />
   }
-  return <AppShell>{children}</AppShell>
+  return (
+    <AppShell>
+      {/* E6：页面是 lazy 的 —— chunk 没到时 AppShell 留在屏上，只换中间这一块 */}
+      <Suspense fallback={<PageFallback />}>{children}</Suspense>
+    </AppShell>
+  )
 }
 
 /**
@@ -215,7 +231,8 @@ function ClassroomGate({ children }: { children: React.ReactNode }) {
           一体机上那台用的是教室端账号，只看得见它自己那个班。
         </div>
       ) : null}
-      {children}
+      {/* E6：同 Guard —— 教室端那一屏自己的 chunk 没到时先给一行"加载中…" */}
+      <Suspense fallback={<PageFallback />}>{children}</Suspense>
     </>
   )
 }
@@ -275,6 +292,24 @@ function SyncErrorBanner() {
 }
 
 /** 后端模式下的首次加载（通常一闪而过） */
+/*
+ * 路由分包（E6）的兜底：某个页面的 chunk 还没拉到时显示的一行字。
+ * ⚠️ 刻意只用最朴素的元素 —— 它出现的时刻那个页面模块还没加载，不能依赖任何业务组件。
+ * ⚠️ chunk **拉失败**不会停在这里：挂掉的 Promise 会沿 Suspense 抛给最外层
+ *    `<ErrorBoundary>`（"这一页出了点问题" ＋ 走上报通道 —— 无人值守的教室端也一样）。
+ */
+function PageFallback() {
+  return (
+    <div
+      data-page-fallback
+      className="grid min-h-full place-items-center px-6"
+      style={{ color: 'var(--color-ink3)', fontSize: 13 }}
+    >
+      加载中…
+    </div>
+  )
+}
+
 function BootScreen() {  return (
     <div className="grid min-h-full place-items-center px-6">
       <div className="flex flex-col items-center gap-3">
@@ -394,6 +429,7 @@ export default function App() {
            因为**心跳必须照发**、学生数据要就地清掉）。
       */}
       <MaintenanceGate>
+      <Suspense fallback={<PageFallback />}>
       <Routes>
         <Route path="/login" element={<Login />} />
         {/*
@@ -796,6 +832,7 @@ export default function App() {
         />
         <Route path="*" element={<NotFound />} />
       </Routes>
+      </Suspense>
       </MaintenanceGate>
       {/* 开屏放最后：它是全屏浮层（`z-index: 200`），盖住上面所有东西 */}
       {!bootDone && <Splash ready={hydrated} onDone={() => setBootDone(true)} />}

@@ -519,6 +519,12 @@ function crumb(msg) {
  *    外面那个 `<a>` 上挂的是 `aria-current="page"` —— 两个都读，别只读一个。
  */
 async function pageInfo(page) {
+  /*
+   * E6（2026-10-02）路由分包后：**每一次读屏前**先等 `[data-page-fallback]` 退场。
+   * 关口放在这里而不是各个调用点 —— 断言往往是"上一次导航之后紧接着读一次"，
+   * 读到「加载中…」就等于读了一屏没渲染完的 DOM（2026-10-01 验收实测 10 条假红全出在这）。
+   */
+  await waitPageSettled(page)
   return page.evaluate(() => {
     const norm = (s) => String(s ?? '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim()
     const nav = document.querySelector('nav[aria-label="主导航"]')
@@ -563,6 +569,8 @@ async function pageInfo(page) {
 }
 
 async function bodyText(page) {
+  /* 同 `pageInfo`：读屏前先等路由兜底退场（这个函数是各处**自定义断言**的取文本口） */
+  await waitPageSettled(page)
   return page.evaluate(() => String(document.body.innerText ?? '').replace(/\s+/g, ' ').trim())
 }
 
@@ -593,7 +601,21 @@ async function dateOnScreen(page) {
  * 传字符串时若屏上有弹窗、文案对不上，照样红（这比"整步跳过弹窗检查"强得多）。
  */
 async function expectPage(page, label, { url, markers = [], absent = [], allowModal = false }) {
-  const info = await pageInfo(page)
+  /*
+   * `pageInfo` 只保证"路由兜底退场了"。还有第二种"还没好"：这一次读屏比 React 把
+   * 新页提交上去更早（读到的还是上一页）。正向标记能等就等 —— 等「这页该有 X」，
+   * 最多 8s。**只等 `markers`**：`absent` 是负向断言，等它既没意义、又等于放水。
+   * 等不到照样往下走，后面的 check 原样去红（不吞错、不假装通过）。
+   */
+  let info = await pageInfo(page)
+  if (markers.length) {
+    const t0 = Date.now()
+    while (!markers.every((m) => info.body.includes(m))) {
+      if (Date.now() - t0 > 8000) break
+      await page.waitForTimeout(150)
+      info = await pageInfo(page)
+    }
+  }
   const esc = (s) => s.replace(/[/\\^$*+?.()|[\]{}]/g, '\\$&')
   const wantUrl = url instanceof RegExp ? url : new RegExp(`^${esc(url)}$`)
   check(
@@ -652,9 +674,36 @@ async function goto(page, stepName, path, expect = {}) {
   await step(stepName, async () => {
     crumb(`goto ${path}`)
     await page.goto(`${BASE}${path}`, { waitUntil: 'networkidle' })
+    /* 整页加载也会经历一次 lazy 路由（dev 下是整条模块瀑布）—— 读之前先等兜底退场 */
+    await waitPageSettled(page)
     await expectPage(page, stepName, { url: expect.url ?? path, ...expect })
     if (expect.date) await clockOnScreen(page, expect.date)
   })
+}
+
+/**
+ * E6（2026-10-02）路由分包后的配套等待：页面是 `lazy` 的，SPA 导航 = 先落 URL、
+ * 再现拉那个页面的 chunk —— 期间屏上是 `[data-page-fallback]`（"加载中…"）。
+ * **等条件，不等固定毫秒**（同一教训 §35-37 那三条 2026-10-11 已踩过一次）：
+ * 等它退场，最多 `ms`；超时**照常返回**让断言去读、去红 —— 不吞错、不假装等到。
+ * （chunk 在 dev 是整条模块瀑布、在 prod 是单个文件；都远快于这个上限的常态。）
+ */
+async function waitPageSettled(pg, ms = 8000) {
+  const t0 = Date.now()
+  for (;;) {
+    let stuck
+    try {
+      stuck = await pg.evaluate(() => Boolean(document.querySelector('[data-page-fallback]')))
+    } catch {
+      /* 调用点常紧贴一次导航（navGoto 的 location.replace）—— 执行环境被掀掉时等一拍重试 */
+      if (Date.now() - t0 > ms) return false
+      await pg.waitForTimeout(120)
+      continue
+    }
+    if (!stuck) return true
+    if (Date.now() - t0 > ms) return false
+    await pg.waitForTimeout(120)
+  }
 }
 
 /* ---------------- 截图 ---------------- */
@@ -671,6 +720,12 @@ async function shot(page, stepName, name, { full = false, wait = 520, expect = n
     }
     shotOwner.set(name, currentStep)
     await page.waitForTimeout(wait)
+    /*
+     * 截图本身也要"落定"：`shot` 的调用点里很多没带 `expect`（纯拍照），兜底还在的时候
+     * 拍下去，基线图上就是一句「加载中…」（比断言红更难发现）。
+     * 放在固定 `wait` **之后**：`wait: 0` 那几张要的是"这一瞬间"的画面，不能被拉长。
+     */
+    await waitPageSettled(page)
     if (expect) await expectPage(page, `${stepName} · ${file}`, expect)
     await page.screenshot({ path: join(OUT, file), fullPage: full })
     written.push(file)
@@ -2599,7 +2654,7 @@ await withLock(async () => {
          */
         await page.getByRole('link', { name: '作业' }).click()
         await page.waitForURL('**/assignments', { timeout: 8000 })
-        await page.waitForTimeout(240)
+        await waitPageSettled(page)
       })
       await shot(page, SN, '36-nav-travel', {
         wait: 0,
@@ -3844,6 +3899,7 @@ await withLock(async () => {
           [TEACHER_STATE.state, as, 'teacher'],
         )
         await navPage.waitForLoadState('networkidle')
+        await waitPageSettled(navPage) // E6：路由 chunk 现拉，等兜底退场（原固定 420ms 实测是竞态）
         await navPage.waitForTimeout(420)
       }
 
@@ -4975,9 +5031,18 @@ await withLock(async () => {
         await shot(navPage, SNAV, '105-manage-teacher', { full: true })
         /* 反向对照：同一个地址，教导处看得到卡、任课教师看不到 —— 两边的差就在这一条上 */
         await navGoto('/manage', 'admin')
-        const adminCards = await navPage.evaluate(
-          () => document.querySelectorAll('[data-manage-card]').length,
-        )
+        /* E6：卡片跟着 ?as= 的身份走 —— 等它们**真的摆上来**再数（同 expectPage 的
+           markers 等待：只等正向、超时照常往下走让断言去红）。这条在 2026-10-02 的
+           全量 shots 里红过一次（教导处 0 张）—— 卡片渲染晚于兜底退场的那一拍。 */
+        let adminCards = 0
+        {
+          const t0 = Date.now()
+          for (;;) {
+            adminCards = await navPage.evaluate(() => document.querySelectorAll('[data-manage-card]').length)
+            if (adminCards > 0 || Date.now() - t0 > 8000) break
+            await navPage.waitForTimeout(150)
+          }
+        }
         check(
           adminCards > 0,
           `${SNAV}：**同一条地址**，教导处看得到卡（与上一条"任课教师 0 张"构成反向对照）`,

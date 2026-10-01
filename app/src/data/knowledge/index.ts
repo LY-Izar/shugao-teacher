@@ -16,9 +16,21 @@
       所以本文件里没有任何一处 `throw`，取用函数也不返回 `null`。
 
    🔴 **九科各写各的文件，谁都不用改这个文件**：REGISTRY 里每一科
-      都已经写好了一行（物理已实现，其余是空树）。要填哪一科，
-      就去改**那一科自己的文件**（把 `textbooks` 里的 `chapters: []` 填上），
+      都已经写好了一行。要填哪一科，就去改**那一科自己的文件**
+      （把 `textbooks` 里的 `chapters: []` 填上），
       别的文件一个字都不用动，也就不存在互相踩。
+      （🆕 2026-10-02 E7 对账：今天**九科有正文**——语/数/英/物/化/生/政/史/地，
+        另六科 it / general_tech / pe / music / art / mental_health 是空树；
+        原来那句"物理已实现，其余是空树"早就过期了。）
+
+   🔴 **为什么这些 import 是静态的、没有按科 `import()` 拆**（E7 复核后的决定，别"补"）：
+      `lib/knowledge.ts` 的全局表（POINT_NAME / POINT_CHAPTER / POINT_SUBJECT）
+      在模块初始化时就要**跨学科**聚合九科（裸 id 反查依赖它），
+      wrongbook / examDoc / examStats 又在**同步渲染路径**里读表 ——
+      按科动态加载只会制造"先未归类、后来才对"的静默竞态，
+      打破"examParse / examDoc / wrongbook 一行都不用改"的兼容层承诺。
+      "不打开知识功能就不付这 505 KB"这件事由 E6 的路由分包实现
+      （这几个 lib 只被 错题集 / 考试 / 导入 那几条路由引用）。
 
    ⚠️ 这个文件**只做查询与拼装，不放任何学科正文**；
      正文一律在 `<code>.ts` 里（见 `physics.ts` 的写法）。
@@ -47,7 +59,7 @@ export { GRADES, ID_PREFIXES, MAX_POINTS } from './types'
 export type { NineSubjectCode } from './types'
 
 /**
- * 物理那棵树（教科版）—— **唯一的现成样本**。
+ * 物理那棵树（教科版）—— **最早写成的样本**（今天语/数/英等八科也都有正文了）。
  * ⚠️ 它今天横跨三个年级（力学是高一前置、电磁是高二高三），所以没有 `grade`；
  *    `chaptersOf('physics', '高一')` 会把 5 章全给出来，这是刻意的，别改。
  */
@@ -66,7 +78,7 @@ function emptyTree(code: SubjectCode): KnowledgeTree {
  *
  * ⚠️ 用**函数**而不是直接放对象：模块初始化时只跑这 15 个 `() => …`，
  *    每棵树本身要等第一次取用才求值（`loaded` 缓存住）——
- *    将来某一科大到几千个知识点时，语文老师打开平台不必付物理的代价。
+ *    下载层面的"不付代价"由 E6 的路由分包兜住（见文件头"为什么这些 import 是静态的"）。
  */
 const REGISTRY: Record<SubjectCode, (code: SubjectCode) => KnowledgeTree> = {
   chinese: () => CHINESE_TREE,
