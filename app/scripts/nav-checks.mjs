@@ -3058,7 +3058,7 @@ section("第十三节 · D10：表存在性探针不许假设列存在（select(
       anchor: true,
       own,
       onlySuper: /x\.role === 'super'/.test(own),
-      /* ⚠️ 判据里**不许出现 admin** —— 教务处（唐友余那一档）要照旧能选 */
+      /* ⚠️ 判据里**不许出现 admin** —— 教务处那一档要照旧能选 */
       notAdmin: !/'admin'/.test(own),
       roomFiltered: /\.filter\(\(t\) => !roomIds\.has\(t\.id\)\)/.test(src),
     }
