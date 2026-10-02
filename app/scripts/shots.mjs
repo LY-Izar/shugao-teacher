@@ -62,7 +62,7 @@ import { launchBrowser } from './lib/edge-path.mjs'
 
 // 先装 TS 解析钩子，再 import 仓库里的种子数据（见 scripts/lib/ts-resolve.mjs）
 registerTsResolve()
-const { makeDemoClasses, makeDemoExams } = await import('../src/data/seed.ts')
+const { makeDemoClasses, makeDemoExams, makeDemoAssignments } = await import('../src/data/seed.ts')
 
 /* 目标 dev server：默认 5178（`vite.config.ts` 里 strictPort，端口被占会直接报错而不是偷偷换） */
 const BASE = process.env.SHUGAO_BASE || 'http://localhost:5178'
@@ -86,6 +86,7 @@ const OUT_REL = `.shots/${runId}`
  */
 const DEMO_CLASSES = makeDemoClasses()
 const DEMO_EXAMS = makeDemoExams(DEMO_CLASSES)
+const DEMO_ASSIGNMENTS = makeDemoAssignments(DEMO_CLASSES)
 
 /**
  * 🆕 公告预览夹具（2026-09-28 公告轮）—— 模拟"超管在 `/admin` 点了「预览」"写进本机的那一份
@@ -397,6 +398,20 @@ const written = []
 const dupWrites = []
 
 function check(ok, label, observed, extra = '') {
+  /*
+   * 🔴 参数写反的兜底（2026-10-13）：签名是 `check(条件, 标签, 实测)` —— **条件在第一个**。
+   *    写反成 `check('标签', 条件, 实测)` 时，`ok` 拿到的是那句标签字符串（非空 ⇒ 恒真）
+   *    ⇒ 这条断言**永远是绿的**；比"抓不到 bug"更坏：它让人以为验过了。
+   *    全仓审计出 27 处（学生档案 04b/04c/04d 10 处 · 改班内学号/收缴/改回 9 处 ·
+   *    班主任调课 04e 6 处 · `grade_delete` / `teacher_profiles` 源码断言各 1 处），
+   *    同一天已逐处对调过来。留这道兜底：以后再写反，**当场红**，绝不静默通过。
+   */
+  if (typeof ok === 'string') {
+    const first = JSON.stringify(ok.slice(0, 60))
+    failures.push(`[${currentStep}] 🔴 check() 参数写反（条件必须在第一个）：${first}`)
+    console.log(`     🔴 check() 参数写反 —— 第一个参数是字符串：${first}`)
+    return
+  }
   if (ok) {
     passed++
     console.log(`     ✅ ${label}\n          实测：${observed}${extra ? ` （${extra}）` : ''}`)
@@ -675,6 +690,32 @@ async function goto(page, stepName, path, expect = {}) {
     crumb(`goto ${path}`)
     await page.goto(`${BASE}${path}`, { waitUntil: 'networkidle' })
     /* 整页加载也会经历一次 lazy 路由（dev 下是整条模块瀑布）—— 读之前先等兜底退场 */
+    await waitPageSettled(page)
+    await expectPage(page, stepName, { url: expect.url ?? path, ...expect })
+    if (expect.date) await clockOnScreen(page, expect.date)
+  })
+}
+
+/**
+ * **同文档**（SPA）导航：只换 URL、让 react-router 重渲染，**不重新加载文档**。
+ *
+ * 为什么需要它：夹具那个 `addInitScript`（见本文件 S1 开头）在**每次整页导航**时
+ * 都会把 `shugao.teacher.v1` 重写成注入的那份快照。于是"先在页面上改点什么、
+ * 再去另一页看结果"这类断言，用 `page.goto` 走就**必然读到改之前的世界** ——
+ * 改的东西在整页加载时被冲掉。2026-10-02 的 09c（改班内学号 → 看收缴档案）就是这么红的：
+ * 断言本身没错，是**走错了导航**，而它先前一直"绿"只是因为 27 处 `check()` 参数写反。
+ *
+ * 用法与 `goto` 完全一样（同样等懒加载路由退场、同样按 `expect` 校屏），
+ * 只是把"加载文档"换成 `pushState + popstate`。前提：**当前这一屏已经在应用里**
+ * （已登录、store 已经起来）—— 从登录页出发的那几步仍然该用 `goto`。
+ */
+async function spaGoto(page, stepName, path, expect = {}) {
+  await step(stepName, async () => {
+    crumb(`spa ${path}`)
+    await page.evaluate((p) => {
+      window.history.pushState({}, '', p)
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    }, path)
     await waitPageSettled(page)
     await expectPage(page, stepName, { url: expect.url ?? path, ...expect })
     if (expect.date) await clockOnScreen(page, expect.date)
@@ -983,25 +1024,25 @@ await withLock(async () => {
         await page.waitForTimeout(320)
         const info = await pageInfo(page)
         check(
-          '打开的是「学生档案」那一张浮层',
           info.sheetOpen && info.sheetTitle.startsWith('学生档案'),
+          '打开的是「学生档案」那一张浮层',
           `sheetOpen=${info.sheetOpen} · 标题=${info.sheetTitle}`,
         )
         const labels = ['民族', '出生年月', '家长电话', '家庭住址']
         check(
-          '四个字段的标题都在屏上',
           labels.every((l) => info.body.includes(l)),
+          '四个字段的标题都在屏上',
           labels.map((l) => `${l}:${info.body.includes(l)}`).join(' · '),
         )
         check(
-          '还没录过时写的是「未录入」（**不是**「读不到」—— 三态不许混）',
           info.body.includes('未录入') && !info.body.includes('读不到学生档案'),
+          '还没录过时写的是「未录入」（**不是**「读不到」—— 三态不许混）',
           short(info.body, 130),
         )
         const canEdit = await page.getByRole('button', { name: '修改档案' }).count()
         check(
-          '🔴 任课教师 / 无身份 → **不摆**"修改档案"（前端只决定摆不摆，判据在数据库）',
           canEdit === 0,
+          '🔴 任课教师 / 无身份 → **不摆**"修改档案"（前端只决定摆不摆，判据在数据库）',
           `按钮数=${canEdit}`,
         )
       })
@@ -1014,15 +1055,15 @@ await withLock(async () => {
         await page.waitForTimeout(260)
         const before = await page.getByRole('button', { name: '修改档案' }).count()
         check(
-          '🔴 班主任（`?as=head_teacher`）→ **摆**"修改档案"（用户口径：班主任通过班级改本班这些信息）',
           before === 1,
+          '🔴 班主任（`?as=head_teacher`）→ **摆**"修改档案"（用户口径：班主任通过班级改本班这些信息）',
           `按钮数=${before}`,
         )
         if (before !== 1) return
         await page.getByRole('button', { name: '修改档案' }).click()
         await page.waitForTimeout(220)
         const boxCount = await page.locator('.sheet input').count()
-        check('点开之后是四个输入框（民族 / 出生年月 / 家长电话 / 家庭住址）', boxCount === 4, `输入框数=${boxCount}`)
+        check(boxCount === 4, '点开之后是四个输入框（民族 / 出生年月 / 家长电话 / 家庭住址）', `输入框数=${boxCount}`)
         if (boxCount !== 4) return
         await page.locator('.sheet input').nth(0).fill('汉族')
         await page.locator('.sheet input').nth(1).fill('2010-05')
@@ -1032,13 +1073,13 @@ await withLock(async () => {
         await page.waitForTimeout(450)
         const after = await pageInfo(page)
         check(
-          '🔴 保存之后屏上就出现了刚录进去的家长电话（录入 → 看到是一条真链路）',
           after.body.includes('13800138000') && after.body.includes('汉族'),
+          '🔴 保存之后屏上就出现了刚录进去的家长电话（录入 → 看到是一条真链路）',
           short(after.body, 130),
         )
         check(
-          '而且回到了只读视图（"修改档案"又摆出来了）—— 不是卡在编辑态',
           after.sheetOpen && (await page.getByRole('button', { name: '修改档案' }).count()) === 1,
+          '而且回到了只读视图（"修改档案"又摆出来了）—— 不是卡在编辑态',
           `sheetOpen=${after.sheetOpen}`,
         )
       })
@@ -1050,14 +1091,14 @@ await withLock(async () => {
         await page.waitForTimeout(260)
         const cnt = await page.getByRole('button', { name: '修改档案' }).count()
         check(
-          '🔴 反向对照：明写 `?as=teacher`（任课教师）→ **又不摆**"修改档案"（证明上一步不是"恒摆"）',
           cnt === 0,
+          '🔴 反向对照：明写 `?as=teacher`（任课教师）→ **又不摆**"修改档案"（证明上一步不是"恒摆"）',
           `按钮数=${cnt}`,
         )
         const info = await pageInfo(page)
         check(
-          '⚠️ 而字段**照旧看得见**（只读）—— 科任老师不是"看不到"，是"改不了"',
           info.body.includes('家长电话') && info.body.includes('家庭住址'),
+          '⚠️ 而字段**照旧看得见**（只读）—— 科任老师不是"看不到"，是"改不了"',
           short(info.body, 110),
         )
       })
@@ -1085,8 +1126,8 @@ await withLock(async () => {
         await page.waitForTimeout(420)
         const asTeacher = await page.locator('[data-adj-open]').count()
         check(
-          '🔴 反向对照：任课教师（`?as=teacher`）→ **不摆**「调课 / 停课」（前端只决定摆不摆，判据在数据库）',
           asTeacher === 0,
+          '🔴 反向对照：任课教师（`?as=teacher`）→ **不摆**「调课 / 停课」（前端只决定摆不摆，判据在数据库）',
           `按钮数=${asTeacher}`,
         )
 
@@ -1095,8 +1136,8 @@ await withLock(async () => {
         const opener = page.locator('[data-adj-open]')
         const openerCount = await opener.count()
         check(
-          '🔴 班主任（`?as=head_teacher`）→ **摆**「本班课表」里的「调课 / 停课」入口',
           openerCount === 1,
+          '🔴 班主任（`?as=head_teacher`）→ **摆**「本班课表」里的「调课 / 停课」入口',
           `按钮数=${openerCount}`,
         )
         if (openerCount !== 1) return
@@ -1104,16 +1145,16 @@ await withLock(async () => {
         await page.waitForTimeout(420)
         const sheet = await pageInfo(page)
         check(
-          '点开的是「调课 / 停课（只改这一天）」那一张浮层',
           sheet.sheetOpen && sheet.sheetTitle.includes('调课'),
+          '点开的是「调课 / 停课（只改这一天）」那一张浮层',
           `sheetOpen=${sheet.sheetOpen} · 标题=${sheet.sheetTitle}`,
         )
         await page.locator('[data-adj-date]').fill(iso)
         await page.waitForTimeout(360)
         const cells = await page.locator('[data-adj-cell]').count()
         check(
-          `这一天（${iso}）这个班有几节**真的列出来**（读的是那一天的口径，不是周课表那张网格）`,
           cells > 0,
+          `这一天（${iso}）这个班有几节**真的列出来**（读的是那一天的口径，不是周课表那张网格）`,
           `节数=${cells}`,
         )
         if (!cells) return
@@ -1122,8 +1163,8 @@ await withLock(async () => {
         await page.waitForTimeout(260)
         const offBtn = await page.locator('[data-adj-off]').count()
         check(
-          '点一节之后摆出「这节课今天不上」（停课＝把这一节今天腾空 —— 与换人同一条通路）',
           offBtn === 1,
+          '点一节之后摆出「这节课今天不上」（停课＝把这一节今天腾空 —— 与换人同一条通路）',
           `按钮数=${offBtn}`,
         )
         if (offBtn !== 1) return
@@ -1131,8 +1172,8 @@ await withLock(async () => {
         await page.waitForTimeout(520)
         const after = await page.locator('[data-adj-cell]').count()
         check(
-          '🔴 停课之后那一节**当场从这一天的列表里消失**（只改这一天 —— 每周课表那张表一个字不动）',
           after === cells - 1,
+          '🔴 停课之后那一节**当场从这一天的列表里消失**（只改这一天 —— 每周课表那张表一个字不动）',
           `${cells} → ${after}（停的是 ${firstStart}）`,
         )
       })
@@ -1278,6 +1319,65 @@ await withLock(async () => {
         )
       })
 
+      /*
+       * 04g 门禁自身的兜底（2026-10-13）。
+       *
+       * `check(条件, 标签, 实测)` —— **条件必须在第一个**。2026-10-13 全仓审计出 27 处写反：
+       * `ok` 拿到的是那句标签字符串（非空 ⇒ 恒真）⇒ 那 27 条**永远是绿的**，比"抓不到 bug"
+       * 更坏：它让人以为验过了。27 处＝学生档案 04b/04c/04d 10 处 · 改班内学号/收缴/改回 9 处
+       * · 04e 班主任调课 6 处 · `grade_delete`、`teacher_profiles` 两处源码断言各 1 处。
+       *
+       * 这里钉住 `check()` 里那道兜底（`typeof ok === 'string'` → 当场记失败并打印）：
+       * 兜底被人删掉时，这一条就红 —— 否则下一次写反又是一片假绿，而且没人看得见。
+       */
+      await step('04g 门禁自身：check() 参数写反的兜底还在', async () => {
+        const selfSrc = readFileSync(fileURLToPath(import.meta.url), 'utf8')
+        const guard = /if \(typeof ok === 'string'\)/.test(selfSrc)
+        const shout = /参数写反/.test(selfSrc)
+        check(
+          guard && shout,
+          '🔴 `app/scripts/shots.mjs` 的 `check()` 里留着「参数写反」的兜底（第一个参数是字符串 → 当场记失败，不静默通过）',
+          `兜底语句=${guard} · 提示语=${shout}`,
+          '反向对照：把 check() 里那段 `if (typeof ok === \'string\')` 删掉 → 这条必须红',
+        )
+      })
+
+      /*
+       * 04h 门禁自身：动态 import prebundle 依赖时的 `?v=` 取法（2026-10-02）。
+       *
+       * 三处「在真浏览器里挂组件」的探针（开学准备 · 六步脊 / S23 / S23 reduced-motion）都要
+       * `import('/node_modules/.vite/deps/react.js?v=…')`。原先三处都是
+       * `mainSrc.match(/[?&]v=([0-9a-f]+)/)` —— **拿入口里第一个 `?v=` 去套所有依赖**。
+       * rolldown-vite 8 **每个依赖各有自己的哈希**，于是 `react-dom_client.js` 拿到的是
+       * `react.js` 的哈希 → 请求恒 504 `(Outdated Optimize Dep)` → `shots` 跑到
+       * 「撤下图标 + 开学准备 · 六步脊」就异常中断（少了 15 张图）。
+       * 实测：`react.js?v=f9ef6f5a` 200 · `react-dom_client.js?v=f9ef6f5a` 504 ·
+       * `react-dom_client.js?v=d7362595` 200。
+       *
+       * 这里钉住"按文件名取各自 URL"这条写法（旧写法回来就红）。
+       */
+      await step('04h 门禁自身：依赖的 ?v= 按文件名取', async () => {
+        const selfSrc = readFileSync(fileURLToPath(import.meta.url), 'utf8')
+        const perDep = /depUrl\('react-dom_client'\)/.test(selfSrc)
+        /* 旧写法（把**同一个哈希变量**拼进所有 `deps/*.js` 的 `?v=`）在源码里必须一处都不剩。
+           ⚠️ 这里连注释都**不能把旧写法逐字写出来** —— 否则这段文字会被下面这个匹配式扫到；
+           本轮第一版就踩了这一下（注释里写了旧写法 → 04h 自己判红）。 */
+        const legacy = new RegExp('deps/[a-z_-]+\\.js\\?v=' + '\\$\\{depV\\}').test(selfSrc)
+        check(
+          perDep && !legacy,
+          '🔴 动态 import prebundle 依赖时**按文件名取各个依赖自己的 `?v=`**（每个依赖哈希都不同；拿入口第一个哈希去套 → `react-dom_client.js` 恒被 Vite 判成 504）',
+          `按名取=${perDep} · 还留着单哈希写法=${legacy}`,
+          '反向对照：把任意一处改回 `?v=` 拼单一哈希变量 → 这条必须红',
+        )
+        const sites = (selfSrc.match(/depUrl\('react-dom_client'\)/g) ?? []).length
+        check(
+          sites === 3,
+          '🔴 三处「挂组件」的探针都用同一个取法（`react` / `react-dom_client` 两个 URL 各自按名取）',
+          `按名取的出现次数 = ${sites}（期望 3）`,
+          '反向对照：漏改一处（那一处仍用单哈希）→ 这一条与上面那条一起红',
+        )
+      })
+
       await goto(page, '05–07 拍照录名单', '/classes/c-demo-1/import/photo', {
         markers: ['拍照录名单', '第 1 步 · 拍摄花名册', '识别约定'],
       })
@@ -1352,8 +1452,8 @@ await withLock(async () => {
           who.name,
         )
         check(
-          '🔴 名单里**序列号那一列**显示的是 7 位序列号（不是班内学号）',
           /2025\d{3}/.test(rowText),
+          '🔴 名单里**序列号那一列**显示的是 7 位序列号（不是班内学号）',
           short(rowText, 90),
           `期望含 2025xxx（该生序列号 = ${who.serial}）`,
         )
@@ -1368,13 +1468,13 @@ await withLock(async () => {
           value: el.value,
         }))
         check(
-          '🔴 编辑面板上「序列号」是**只读**（readOnly/disabled 都算）',
           ro.readOnly || ro.disabled,
+          '🔴 编辑面板上「序列号」是**只读**（readOnly/disabled 都算）',
           JSON.stringify(ro),
         )
         check(
-          '🔴 只读框里显示的就是这个学生的序列号',
           ro.value === (who.serial ?? ''),
+          '🔴 只读框里显示的就是这个学生的序列号',
           `框里 = ${ro.value}，快照里 = ${who.serial}`,
         )
 
@@ -1391,77 +1491,101 @@ await withLock(async () => {
               .find((t) => t.includes(name)) ?? '',
           who.name,
         )
-        check('改完之后名单里出现 99 号', /\b99\b/.test(after), short(after, 90))
+        check(/\b99\b/.test(after), '改完之后名单里出现 99 号', short(after, 90))
         check(
-          '🔴 改完之后**序列号没变**（被改的只是班内学号）',
           after.includes(who.serial ?? '###'),
+          '🔴 改完之后**序列号没变**（被改的只是班内学号）',
           short(after, 90),
         )
       })
       await shot(page, '09b 改班内学号', '09b-after-rename', { full: true })
 
-      await goto(page, '09c 档案不受影响', '/assignments/a-demo-1/collect', {
+      await spaGoto(page, '09c 档案不受影响', '/assignments/a-demo-1/collect', {
         markers: ['收作业查缺', '已交'],
       })
       await step('09c 档案不受影响', async () => {
         /*
-         * `a-demo-1` 的未交名单在演示数据里是"第 7、19、33 个学生"（按档案键存的）。
-         * 改完学号之后：**未交的仍是同样 3 个人**，只是其中一个现在显示 99。
+         * `a-demo-1` 的未交名单在演示数据里按**档案键（序列号）**存：
+         * `missingNos = ['2025007','2025019','2025033']`。
+         * 改完班内学号之后：**未交的仍是同样 3 个人**，只是沈子那一格从 7 变成 99。
          * 这正是"档案只认序列号、不认班内学号"的直接证据。
+         *
+         * 🔴 这一步**必须走同文档导航**（`spaGoto`），不能 `page.goto`：
+         *    夹具的 `addInitScript` 每次整页导航都会把 `shugao.teacher.v1` 重写成注入快照，
+         *    上一步刚改的学号会被冲掉 —— 屏上永远是 7，这条断言**结构上不可能通过**。
          */
-        const info = await page.evaluate(() => {
-          const cells = [...document.querySelectorAll('button')]
-            .map((b) => (b.innerText ?? '').replace(/\s+/g, ' ').trim())
-            .filter((t) => /^\d+(\s|$)/.test(t) && t.length <= 24)
-          const missing = [...document.querySelectorAll('button')]
-            .filter((b) => (getComputedStyle(b).backgroundColor || '').includes('rgb'))
-            .map((b) => (b.innerText ?? '').replace(/\s+/g, ' ').trim())
-          return { cells, missing, body: String(document.body.innerText ?? '').replace(/\s+/g, ' ') }
+        const chips = await page.evaluate(() => {
+          const panel = [...document.querySelectorAll('section.panel')].find((p) =>
+            (p.querySelector('h2')?.textContent ?? '').includes('未交名单'),
+          )
+          return panel
+            ? [...panel.querySelectorAll('b.num')].map((b) => (b.innerText ?? '').trim())
+            : []
         })
+        /* 期望值从**注入的那份快照**算，不拍字面量（seed 一改，字面量就变成假通过） */
+        const a1 = DEMO_ASSIGNMENTS.find((x) => x.id === 'a-demo-1')
+        const renamedId = DEMO_CLASSES[0]?.students[6]?.id
+        const expectMissing = DEMO_CLASSES[0].students
+          .filter((s) => (a1?.missingNos ?? []).includes(s.serial ?? s.studentNo))
+          .map((s) => (s.id === renamedId ? '99' : s.studentNo))
+        const asNums = (list) => [...list].map(Number).sort((a, b) => a - b).join(',')
+
         check(
+          chips.includes('99'),
           '🔴 收缴页上，这个孩子现在显示成 **99 号**（改的确实生效了）',
-          /(^|\s)99(\s|$)/.test(info.body),
-          short(info.body, 140),
+          `未交名单上的学号：${chips.join('/') || '(一个都没有)'}`,
+        )
+        check(
+          !chips.includes('7'),
+          '反向对照：原来的 **7 号**已经不在这一屏（否则就是把两个号都画上了）',
+          `未交名单上的学号：${chips.join('/') || '(一个都没有)'}`,
+        )
+        check(
+          asNums(chips) === asNums(expectMissing),
+          '🔴 未交名单还是**同样那 3 个人**（按序列号认人，改学号挤不掉人）',
+          `屏上 ${chips.join('/') || '(空)'}，按快照算应为 ${expectMissing.join('/')}`,
+          `a-demo-1.missingNos = ${(a1?.missingNos ?? []).join('/')}（键 = 序列号）`,
         )
         const stat = await page.evaluate(() => {
           const m = String(document.body.innerText ?? '').match(/未交\s*(\d+)/)
           return m ? Number(m[1]) : -1
         })
         check(
-          '🔴 未交人数**没变**（还是 3）—— 改学号没有把任何人从名单里挤出去',
           stat === 3,
+          '🔴 未交人数**没变**（还是 3）—— 改学号没有把任何人从名单里挤出去',
           `屏上「未交 ${stat}」`,
           '演示数据 a-demo-1 的未交名单是 3 个人',
         )
       })
       await shot(page, '09c 档案不受影响', '09c-collect-after-rename', { full: true })
 
-      // 改回去（后面的步骤看到的世界必须与这一轮开始时一致）
-      await goto(page, '09d 改回原学号', '/classes/c-demo-1', { markers: ['学生名单 · 45 人'] })
-      await step('09d 改回原学号', async () => {
+      /*
+       * 整页导航 ⇒ `addInitScript` 重写快照 ⇒ 上一步改出来的 99 **已经不在**（学号回到 7）。
+       * 这一步就是钉住这件事：它既是"09c 为什么必须同文档导航"的机器版说明，
+       * 也是"后面的步骤看到的世界与这一轮开始时一致"的依据 —— 不再靠"改回去"这个动作假装一致。
+       */
+      await goto(page, '09d 夹具回到原样', '/classes/c-demo-1', { markers: ['学生名单 · 45 人'] })
+      await step('09d 夹具回到原样', async () => {
         const who = DEMO_CLASSES[0].students[6]
         if (!who) return
-        const idx = await page.evaluate(
-          (name) =>
-            [...document.querySelectorAll('tbody tr')].findIndex((tr) =>
-              (tr.innerText ?? '').includes(name),
-            ),
-          who.name,
-        )
-        check('改回之前：还能在名单里找到他（按 99 号那行）', idx >= 0, `第 ${idx + 1} 行`)
-        await page.getByRole('button', { name: '编辑' }).nth(idx).click()
-        await page.waitForTimeout(300)
-        await page.locator('.sheet input.num').first().fill(who.studentNo)
-        await page.getByRole('button', { name: '保存' }).click()
-        await page.waitForTimeout(400)
-        const back = await page.evaluate(
+        const row = await page.evaluate(
           (name) =>
             [...document.querySelectorAll('tbody tr')]
               .map((tr) => (tr.innerText ?? '').replace(/\s+/g, ' ').trim())
               .find((t) => t.includes(name)) ?? '',
           who.name,
         )
-        check('🔴 学号改回原值（这一轮结束时世界与开始时一致）', back.includes(who.studentNo), short(back, 90))
+        check(
+          row.includes(who.studentNo),
+          '整页导航之后学号回到原值（夹具快照每次导航重写）',
+          short(row, 90),
+          `期望含 ${who.studentNo}（注入快照里就是它）`,
+        )
+        check(
+          !/\b99\b/.test(row),
+          '反向对照：上一屏改出来的 **99 不在**了 —— 这正是 09c 必须走同文档导航的原因',
+          short(row, 90),
+        )
       })
 
       /* ================= S2：作业列表 / 新建 / 收作业查缺 ================= */
@@ -6488,7 +6612,7 @@ await withLock(async () => {
       await step(S63, async () => {
         const schemaSql = readFileSync(join(ROOT, 'supabase', 'schema.sql'), 'utf8')
         const at = schemaSql.indexOf('create or replace function public.grade_delete(')
-        check(`${S63}：\`schema.sql\` 里找得到 \`grade_delete\` 的函数体`, at > 0, at > 0 ? `下标 ${at}` : '没找到')
+        check(at > 0, `${S63}：\`schema.sql\` 里找得到 \`grade_delete\` 的函数体`, at > 0 ? `下标 ${at}` : '没找到')
         const body = at > 0 ? schemaSql.slice(at, at + 3000) : ''
         const ra = [...body.matchAll(/raise exception '([^']*)'/g)].map((m) => m[1])
         check(
@@ -8520,7 +8644,7 @@ await withLock(async () => {
         /* 库里那三列：从 `schema.sql` 的建表段里读（**两处必须逐字对齐**，靠这条钉住） */
         const schemaSrc = readFileSync(join(HERE, '..', '..', 'supabase', 'schema.sql'), 'utf8')
         const start = schemaSrc.indexOf('create table if not exists teacher_profiles')
-        check(`${S21}：\`schema.sql\` 里找得到 \`teacher_profiles\` 的建表段`, start > 0, start > 0 ? `下标 ${start}` : '没找到')
+        check(start > 0, `${S21}：\`schema.sql\` 里找得到 \`teacher_profiles\` 的建表段`, start > 0 ? `下标 ${start}` : '没找到')
         const block = start > 0 ? schemaSrc.slice(start, start + 400) : ''
         const cols = [...block.matchAll(/^\s{2}([a-z_]+)\s+text/gm)].map((m) => m[1])
         check(
@@ -9288,11 +9412,24 @@ await withLock(async () => {
                 .find((u) => /\/src\/main\.tsx/.test(u))
               const entrySrc = entry || '/src/main.tsx'
               const mainSrc = await (await fetch(entrySrc, { cache: 'no-cache' })).text()
-              const depM = mainSrc.match(/[?&]v=([0-9a-f]+)/)
-              const depV = depM ? depM[1] : null
-              if (!depV) return { why: `读不到 Vite 的 dep hash（入口 ${entrySrc}）` }
-              const rmod = await import(`/node_modules/.vite/deps/react.js?v=${depV}`)
-              const rdc = await import(`/node_modules/.vite/deps/react-dom_client.js?v=${depV}`)
+              /* 🔴 **每个依赖各有自己的 `?v=`**（rolldown-vite 8）：按**文件名**取它自己那一行。
+                 不能拿入口里**第一个** `?v=` 去套所有依赖 —— 那样 `react-dom_client.js` 拿到的是
+                 `react.js` 的哈希，请求恒被 Vite 判成 `504 (Outdated Optimize Dep)`（2026-10-02 实测：
+                 `react.js?v=f9ef6f5a` → 200，`react-dom_client.js?v=f9ef6f5a` → 504，
+                 而 `react-dom_client.js?v=d7362595` → 200）。 */
+              const depUrls = [
+                ...mainSrc.matchAll(
+                  /["'](\/node_modules\/\.vite\/deps\/([A-Za-z0-9_@.-]+)\.js\?v=[0-9a-f]+)["']/g,
+                ),
+              ]
+              const depUrl = (file) => depUrls.find((m) => m[2] === file)?.[1] ?? null
+              const reactUrl = depUrl('react')
+              const rdcUrl = depUrl('react-dom_client')
+              if (!reactUrl || !rdcUrl) {
+                return { why: `入口 ${entrySrc} 里读不到依赖 URL（react=${reactUrl} / react-dom_client=${rdcUrl}）` }
+              }
+              const rmod = await import(reactUrl)
+              const rdc = await import(rdcUrl)
               /* 动态 import 这两个 prebundle 拿到的是 CJS interop 形状，具名导出挂在 `.default` 上（同 S23） */
               const createElement = rmod.createElement ?? rmod.default?.createElement
               const createRoot = rdc.createRoot ?? rdc.default?.createRoot
@@ -11505,11 +11642,20 @@ await withLock(async () => {
             .find((u) => /\/src\/main\.tsx/.test(u))
           const entrySrc = entry || '/src/main.tsx'
           const mainSrc = await (await fetch(entrySrc, { cache: 'no-cache' })).text()
-          const m = mainSrc.match(/[?&]v=([0-9a-f]+)/)
-          const depV = m ? m[1] : null
-          if (!depV) return { why: `读不到 Vite 的 dep hash（入口 ${entrySrc}）` }
-          const rmod = await import(`/node_modules/.vite/deps/react.js?v=${depV}`)
-          const rdc = await import(`/node_modules/.vite/deps/react-dom_client.js?v=${depV}`)
+          const depUrls = [
+            ...mainSrc.matchAll(
+              /["'](\/node_modules\/\.vite\/deps\/([A-Za-z0-9_@.-]+)\.js\?v=[0-9a-f]+)["']/g,
+            ),
+          ]
+          /* 🔴 每个依赖各有自己的 `?v=`：按文件名取（理由见「撤下图标 + 开学准备 · 六步脊」那一节） */
+          const depUrl = (file) => depUrls.find((m) => m[2] === file)?.[1] ?? null
+          const reactUrl = depUrl('react')
+          const rdcUrl = depUrl('react-dom_client')
+          if (!reactUrl || !rdcUrl) {
+            return { why: `入口 ${entrySrc} 里读不到依赖 URL（react=${reactUrl} / react-dom_client=${rdcUrl}）` }
+          }
+          const rmod = await import(reactUrl)
+          const rdc = await import(rdcUrl)
           /* ⚠️ 动态 import 这两个 prebundle 拿到的是 **CJS interop** 形状：具名导出挂在
              模块对象的 `.default` 上（`{default: {createElement, …}}`），**不是**顶层具名导出。
              （直接从 `/src/*.tsx` 静态 import 时才拿到顶层具名 —— 两回事，别照抄。） */
@@ -11676,11 +11822,20 @@ await withLock(async () => {
             .find((u) => /\/src\/main\.tsx/.test(u))
           const entrySrc = entry || '/src/main.tsx'
           const mainSrc = await (await fetch(entrySrc, { cache: 'no-cache' })).text()
-          const depM = mainSrc.match(/[?&]v=([0-9a-f]+)/)
-          const depV = depM ? depM[1] : null
-          if (!depV) return { why: `读不到 Vite 的 dep hash（入口 ${entrySrc}）` }
-          const rdc = await import(`/node_modules/.vite/deps/react-dom_client.js?v=${depV}`)
-          const rmod = await import(`/node_modules/.vite/deps/react.js?v=${depV}`)
+          const depUrls = [
+            ...mainSrc.matchAll(
+              /["'](\/node_modules\/\.vite\/deps\/([A-Za-z0-9_@.-]+)\.js\?v=[0-9a-f]+)["']/g,
+            ),
+          ]
+          /* 🔴 每个依赖各有自己的 `?v=`：按文件名取（理由见「撤下图标 + 开学准备 · 六步脊」那一节） */
+          const depUrl = (file) => depUrls.find((m) => m[2] === file)?.[1] ?? null
+          const reactUrl = depUrl('react')
+          const rdcUrl = depUrl('react-dom_client')
+          if (!reactUrl || !rdcUrl) {
+            return { why: `入口 ${entrySrc} 里读不到依赖 URL（react=${reactUrl} / react-dom_client=${rdcUrl}）` }
+          }
+          const rdc = await import(rdcUrl)
+          const rmod = await import(reactUrl)
           /* ⚠️ 动态 import 这两个 prebundle 拿到的是 **CJS interop** 形状：具名导出挂在
              模块对象的 `.default` 上（`{default: {createRoot, …}}`），不是顶层具名导出。 */
           const createRoot = rdc.createRoot ?? rdc.default?.createRoot
