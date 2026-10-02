@@ -214,14 +214,75 @@ export function AnnouncementStack({ suppressPopup = false }: { suppressPopup?: b
   useLayoutEffect(() => {
     const el = rootRef.current
     const syncEl = () => document.querySelector<HTMLElement>('[data-sync-error-banner]')
-    const apply = () => {
+    /*
+   * 🔴🔴 **状态栏让位**（2026-10-03，用户 apk 截图报出来的）。
+   *
+   * 症状：手机上那条「平台开始第一次范围公测」被**系统状态栏压住** ——
+   * 时间/信号/电池那一行盖在公告文字上，两个都读不全。
+   *
+   * 根因：这一叠全是 `position: fixed; top: 0`（本组件）/ `top: var(--top-stack-h)`
+   * （移动端顶栏），而 `--top-stack-h` **只由这两条的高度算出来**，
+   * 🔴 **从来没算过 `env(safe-area-inset-top)`** —— 也就是"系统状态栏占了多高"
+   * 这件事从头到尾没被量进去。
+   *
+   * 为什么不能只在某个组件上补 `padding-top`：这一叠有**四层**
+   * （公告条 / 报错横幅 / 移动端顶栏 / Toast），各补各的必然对不齐
+   * （截图里就有一处是"补了但没补齐"的样子）。→ 统一在这里量一次，
+   * 写进 `--top-stack-h`，那一叠所有消费者一起让开。
+   *
+   * ⚠️ 网页/PWA 上 `env(safe-area-inset-top)` 恒为 0 ⇒ **网页行为逐字不变**
+   *    （`--top-stack-h` 与改之前算出来的是同一个数）。
+   *
+   * ⚠️ Chrome 的规则：**只有 `viewport-fit=cover` 时 `env()` 才非零**。
+   *    那条 meta 在 `index.html` 里 —— 少了它这段代码恒等于 0。
+   * ==================================================================
+   * 🔴🔴🔴 **这里踩过一次自激循环，记下来别再踩**（2026-10-03）
+   * ------------------------------------------------------------------
+   * 第一版：`insetTop()` 每调一次就**往 `body` 插一个探针 div、量完 remove**。
+   * 而 `apply()` 恰好被挂在 **`document.body` 的 MutationObserver（childList）** 上
+   *    —— 那正是"报错横幅是挂上/摘下"才需要的那一个。
+   * ⇒ 插 div → 触发 MutationObserver → `apply()` → 再插 → **无限循环**。
+   *
+   * 症状极难认：`page.goto(..., { waitUntil: 'networkidle' })` **超时 30s**，
+   * 报「Timeout 30000ms exceeded」，而页面**完全正常、控制台零报错** ——
+   * 第一反应会以为是自己改坏了页面（我确实先怀疑了那三个文件）。
+   * 🔴 破案办法：**直接开一次页面看屏上是什么**（真信号），别盯着错误码猜。
+   *
+   * ✅ 修法：**缓存**。状态栏高度只在**转屏 / 改窗口大小时**才可能变，
+   *    所以量一次存起来，`resize` / `orientationchange` 时才清缓存重算。
+   *    重算那次虽然也会触发一次 MutationObserver，但那时缓存已填好、
+   *    不再插探针 ⇒ 循环第二次就停了。
+   */
+  let cachedInset: number | null = null
+
+  const insetTop = () => {
+    if (cachedInset !== null) return cachedInset
+    /*
+     * 探针元素最稳：读 `documentElement` 上的 `env()` 在部分 WebView 里读不到
+     * （UA 差异），而一个 0 宽的探针 div 一定读得到。
+     * ⚠️ 必须挂在 **body** 上 —— 它得参与同一套布局上下文。
+     */
+    const probe = document.createElement('div')
+    probe.style.cssText =
+      'position:fixed;top:0;left:0;width:0;pointer-events:none;visibility:hidden;height:env(safe-area-inset-top,0px);'
+    document.body.appendChild(probe)
+    cachedInset = Math.ceil(probe.getBoundingClientRect().height)
+    probe.remove()
+    return cachedInset
+  }
+
+  const apply = () => {
       const node = rootRef.current
       if (!node) return
+      /* 🔴 先把 `top` 归零再量**它自己的高度** —— 否则量到的是"已经被推到下面那条"的高度 */
+      node.style.top = '0px'
       const own = Math.ceil(node.getBoundingClientRect().height)
       const s = syncEl()
       const sync = s ? Math.ceil(s.getBoundingClientRect().height) : 0
-      node.style.top = `${sync}px`
-      document.documentElement.style.setProperty('--top-stack-h', `${sync + own}px`)
+      /* 状态栏那一段：公告条与报错横幅**都要**从它下面开始 */
+      const inset = insetTop()
+      node.style.top = `${inset + sync}px`
+      document.documentElement.style.setProperty('--top-stack-h', `${inset + sync + own}px`)
     }
     apply()
     let ro: ResizeObserver | null = null
@@ -234,11 +295,20 @@ export function AnnouncementStack({ suppressPopup = false }: { suppressPopup?: b
     /* 报错横幅是**挂上/摘下**（不是改高度）—— 只有 MutationObserver 抓得到 */
     const mo = new MutationObserver(apply)
     mo.observe(document.body, { childList: true })
-    window.addEventListener('resize', apply)
+    /* 🔴 resize / 转屏时**清掉状态栏缓存**再重算 —— 那是它唯一会变的时机。
+     * ⚠️ 清与算必须挂在**同一个**函数上：只清不算 → 公告条停在旧值；
+     *    只算不清 → 永远是第一次量到的那个值。 */
+    const onResize = () => {
+      cachedInset = null
+      apply()
+    }
+    window.addEventListener('resize', onResize)
+    window.addEventListener('orientationchange', onResize)
     return () => {
       ro?.disconnect()
       mo.disconnect()
-      window.removeEventListener('resize', apply)
+      window.removeEventListener('resize', onResize)
+      window.removeEventListener('orientationchange', onResize)
       document.documentElement.style.setProperty('--top-stack-h', '0px')
     }
     /* 依赖：条数/A 展开态 会改高度；`syncError` 变了要**重新观察**那一棵元素 */

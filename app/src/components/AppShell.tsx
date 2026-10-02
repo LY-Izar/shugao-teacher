@@ -218,7 +218,22 @@ export function ToastHost() {
   const toasts = useToast((s) => s.toasts)
   const dismiss = useToast((s) => s.dismiss)
   return (
-    <div className="pointer-events-none fixed inset-x-0 top-0 z-[80] flex flex-col items-center gap-2 pt-3">
+    /*
+     * 🔴🔴 `paddingTop` 是**状态栏让位**（2026-10-03，用户 apk 截图报出来的）：
+     *   这一叠全是 `position: fixed`，而 Toast 原来从 `top: 0` + `pt-3` 起画 ——
+     *   在 apk 上就是**压在系统状态栏（时间/信号/电池）底下**，前几秒读不全
+     *   （用户截图里「平台开始第一次范围公测」那行就是中招的）。
+     *
+     * ⚠️ 为什么**不**跟公告条那样统一由 `--top-stack-h` 管：Toast 飘在**最上面**
+     *    （z-80，高于公告条 z-45 与报错横幅 z-70），它不该被公告条顶开；
+     *    它只需要避开**系统状态栏**那一段。
+     * ⚠️ `env(safe-area-inset-top)` 在网页/PWA 上恒为 0 ⇒ **网页行为逐字不变**。
+     *    `pt-3`(12px) 保留（那是它原有的呼吸位），只是前面多了状态栏那一段。
+     */
+    <div
+      className="pointer-events-none fixed inset-x-0 top-0 z-[80] flex flex-col items-center gap-2 pt-3"
+      style={{ paddingTop: 'calc(env(safe-area-inset-top, 0px) + 12px)' }}
+    >
       {toasts.map((t) => (
         <button
           key={t.id}

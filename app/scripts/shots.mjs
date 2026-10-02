@@ -7952,6 +7952,23 @@ await withLock(async () => {
           }
           return {
             varTopStack: getComputedStyle(document.documentElement).getPropertyValue('--top-stack-h').trim(),
+            /*
+             * 🔴 状态栏那一段（2026-10-03 加）：用**探针 div** 量，不用 getComputedStyle。
+             * ⚠️ 为什么不用 `getComputedStyle(document.documentElement).getPropertyValue('padding-top')`
+             *    —— 那读到的是"我们写在哪"，不是"系统状态栏占了多高"；
+             *    而 Web 侧 `AnnouncementStack.tsx` 里用的也是探针，两边口径必须一致。
+             * ⚠️ 网页门禁里它恒为 0（桌面没有状态栏）—— 所以它钉的是"公式有这一项"，
+             *    不是"apk 上真的让开了"（那要真机，见 §13 那条）。
+             */
+            insetTop: (() => {
+              const probe = document.createElement('div')
+              probe.style.cssText =
+                'position:fixed;top:0;left:0;height:env(safe-area-inset-top,0px);'
+              document.body.appendChild(probe)
+              const h = Math.round(probe.getBoundingClientRect().height)
+              probe.remove()
+              return h
+            })(),
             stack: r('[data-ann-stack]'),
             sync: r('[data-sync-error-banner]'),
             header: r('header.glass'),
@@ -8125,14 +8142,85 @@ await withLock(async () => {
          *    这一条要抓的是"只算了一段 / 一段都没算"（那会差 35~69px）。
          *    反向对照（实测）：把变量注射成"只有报错横幅"的 59px → **这条当场红**。
          */
-        const wantTopStack = (g.sync?.h ?? 0) + (g.stack?.h ?? 0)
+        const wantTopStack = (g.sync?.h ?? 0) + (g.stack?.h ?? 0) + (g.insetTop ?? 0)
         const gotTopStack = Number.parseFloat(String(g.varTopStack))
         check(
           Number.isFinite(gotTopStack) && Math.abs(gotTopStack - wantTopStack) <= 1,
-          `${SAN}：让位量 = **报错横幅 + 公告条**（--top-stack-h 把两段加起来：${gotTopStack} ≈ ${g.sync?.h} + ${g.stack?.h}）`,
-          `变量 ${g.varTopStack} · 报错横幅 ${g.sync?.h ?? '(没有)'}px + 公告条 ${g.stack?.h ?? '(没有)'}px = ${wantTopStack}px`,
+          `${SAN}：让位量 = **状态栏 + 报错横幅 + 公告条**（--top-stack-h 把三段加起来：${gotTopStack} ≈ ${g.insetTop ?? 0} + ${g.sync?.h ?? 0} + ${g.stack?.h ?? 0}）`,
+          `变量 ${g.varTopStack} · 状态栏 ${g.insetTop ?? '(量不到)'}px + 报错横幅 ${g.sync?.h ?? '(没有)'}px + 公告条 ${g.stack?.h ?? '(没有)'}px = ${wantTopStack}px`,
+        )
+        /*
+         * 🔴🔴 **状态栏那一段必须被算进去**（2026-10-03 加）。
+         *
+         * 用户在 apk 上看到「平台开始第一次范围公测」被系统状态栏压住 ——
+         * 根因就是这个变量**只按自家元素高度算**，从来没算 `env(safe-area-inset-top)`。
+         *
+         * ⚠️ 这条在**网页门禁里恒为 0**：桌面浏览器没有状态栏，`env()` 返回 0。
+         *    所以它**证明不了 apk 上的效果** —— 真正拦住那个 bug 的是
+         *    `_src/android/.../MainActivity.java` 里的 edge-to-edge（那边 env() 才有值）。
+         *    那边的判据是**源码级**（下面两条）+ 真机；本条只钉"公式里有这一项"。
+         */
+        check(
+          typeof g.insetTop === 'number' && g.insetTop >= 0,
+          `${SAN}：让位公式里**含**状态栏那一段（env(safe-area-inset-top)，网页上是 0）`,
+          `inset-top = ${g.insetTop}px（网页门禁里必为 0；真值要看 apk）`,
+          '少了这一项，apk 上那条公告会被系统状态栏压住',
         )
         await shot(annPage, SAN, '91-ann-with-sync-banner')
+      })
+
+      /* --- ⑥b 🔴 状态栏让位（2026-10-03，用户 apk 截图报出来的）**源码级** ---
+       ⚠️ 编号是 ⑥b 而不是 ⑥ —— 下面已有一节「⑥ 桌面：左栏/右栏也要让位」（8289 行）。 */
+      await step(SAN, async () => {
+        /*
+         * 🔴🔴 为什么这一节是**源码级**而不是量屏：
+         *   症状发生在 **apk**（WebView 里），而这个门禁跑在**桌面浏览器**上 ——
+         *   那里没有系统状态栏，`env(safe-area-inset-top)` **恒为 0**。
+         *   ⇒ 「在屏上量出状态栏高度」这件事在网页门禁里**原理上做不到**。
+         *
+         *   所以这里钉的是**两侧口径一致**（缺任一侧都会坏）：
+         *     ① Web 侧：`--top-stack-h` 的公式里**含** inset-top
+         *     ② 原生侧：`MainActivity` 做了 edge-to-edge（不做的话 env() 恒 0，① 白写）
+         *
+         * ⚠️ 反向对照（实测过）：把 ① 里的 insetTop() 删掉 → ② 那条仍绿、
+         *    而 apk 上那个 bug 原样复现 —— 所以**光有 ② 抓不住它**，
+         *    两条必须都在。这是本节写下来的原因。
+         */
+        const annSrc = readFileSync(join(HERE, '..', 'src', 'components', 'AnnouncementStack.tsx'), 'utf8')
+        /* 🔴🔴 判据必须**剥掉注释**再查 —— 实测踩过（2026-10-03）：
+         *   第一版直接 `annSrc.match(/env\(safe-area-inset-top/)`，而这个文件里
+         *   **注释正在 explaining 它**（文件头与 insetTop 那段都写着这个名字）——
+         *   于是我把代码里的 env() 换成 0，断言**照样绿**。
+         *   那是一条**恒绿的假断言**：它量的不是"代码里有没有"，是"文件里提没提"。
+         *   ⚠️ 这是本仓库第二次同款（另一处是 `class_rep_pins` 那条）。
+         *   → 统一：`stripComments()` 之后再查（见下面那个局部函数）。
+         */
+        const stripComments = (s) =>
+          s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+        const annCode = stripComments(annSrc)
+        const webSideOk = /env\(\s*safe-area-inset-top/.test(annCode)
+        check(
+          webSideOk,
+          `🔴 ${SAN}：让位公式里量了 env(safe-area-inset-top)（Web 侧口径，**剥掉注释后**查）`,
+          webSideOk ? 'AnnouncementStack.tsx 的**代码**里读了 env(safe-area-inset-top)' : '🔴 剥掉注释后没有 —— apk 上会被状态栏压住',
+          '少了这一项，公告条以为上面没人，就贴在 y=0',
+        )
+
+        // 原生侧：仓外那一份（壳不在 git 里，所以只查在不在 + 关键那句）
+        const mainActivity =
+          'C:\\Users\\Administrator\\Desktop\\树高教务通打包\\_src\\android\\app\\src\\main\\java\\com\\shugao\\jiaowu\\MainActivity.java'
+        const hasNative = existsSync(mainActivity)
+        const nativeSrc = hasNative ? readFileSync(mainActivity, 'utf8') : ''
+        check(
+          hasNative && /setDecorFitsSystemWindows\s*\(\s*getWindow\(\)\s*,\s*false\s*\)/.test(nativeSrc),
+          `🔴 ${SAN}：原生侧做了 edge-to-edge（不设的话 env() 恒 0，Web 侧白写）`,
+          hasNative
+            ? /setDecorFitsSystemWindows/.test(nativeSrc)
+              ? 'MainActivity 调了 setDecorFitsSystemWindows(window, false)'
+              : '🔴 MainActivity 里没有 —— env() 会返回 0'
+            : '🔴 找不到 MainActivity.java（壳的目录变了？）',
+          '两侧口径必须一致，否则要么压住、要么多让一段空白',
+        )
       })
 
       /* --- ⑤ 弹窗与**早间欢迎弹窗**同时到点：公告弹窗排队礼让（08:00 那一支） --- */

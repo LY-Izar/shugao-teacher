@@ -273,6 +273,14 @@ function SyncErrorBanner() {
         color: 'var(--color-badink)',
         fontSize: 12.5,
         lineHeight: 1.65,
+        /*
+         * 🔴 状态栏让位（2026-10-03）：原来是 `top: 0`，在 apk 上被系统状态栏压住。
+         * ⚠️ 这条横幅**不消费** `--top-stack-h`（那个变量是"我下面还有公告条"的
+         *    让位量，方向相反）—— 它只需要避开**系统状态栏**那一段。
+         *    公告条与顶栏读的那个值里已经**含**了这一段（见 AnnouncementStack.tsx）。
+         *    网页/PWA 上 env() 恒 0 ⇒ 行为逐字不变。
+         */
+        paddingTop: 'calc(env(safe-area-inset-top, 0px) + 8px)',
       }}
     >
       <span className="min-w-0 flex-1">
