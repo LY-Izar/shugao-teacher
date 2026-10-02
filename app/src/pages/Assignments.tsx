@@ -539,7 +539,7 @@ export default function Assignments() {
             }
           >
             <div style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.7 }}>
-              {friendlyDate(dhDate)} · 教室里那块屏「每日作业」读的就是这里（同一天同一科可以留多条）。
+              {friendlyDate(dhDate)} · 教室里那块屏也会显示（同一天同一科可以留多条）。
             </div>
 
             {/* 这一天已经有的 */}
@@ -637,7 +637,7 @@ export default function Assignments() {
                 </Button>
                 {dhCanWrite === false ? (
                   <span style={{ fontSize: 11.5, color: 'var(--color-warn)' }}>
-                    数据库说这一科不该由你写 —— 不是你教的这一科？教务处只读。
+                    这一科不该由你写 —— 不是你教的这一科？教务处只读。
                   </span>
                 ) : dhCanWrite === null && dhBundle ? (
                   <span style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
@@ -645,7 +645,7 @@ export default function Assignments() {
                   </span>
                 ) : dhMine && !dhMine.has(dhSubject) ? (
                   <span style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
-                    你教的科后面点了 ·；写不写由数据库判，这里不拦。
+                    你教的科后面点了 ·。
                   </span>
                 ) : null}
               </div>

@@ -348,7 +348,7 @@ export default function SchoolCalendar() {
               重读一遍
             </Button>
             <span style={{ fontSize: 11.5, color: 'var(--color-ink4)' }}>
-              改动只有教务处能做（数据库说了算）；导出的表格能直接拿去做校历通知。
+              改动只有教务处能做；导出的表格能直接拿去做校历通知。
             </span>
           </div>
 
@@ -360,8 +360,7 @@ export default function SchoolCalendar() {
           {probe === 'missing' || probe === 'unknown' ? (
             <div className="mt-2" style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.7 }}>
               现在显示的是<b>官方那一层</b>（法定节假日 + 调休）。
-              学校自己改的日子要等数据库里 §40 那张 `school_calendar` 表跑起来才能录
-              —— 在那之前，这一页只看不改。
+              学校自己改的日子现在录不了 —— 这一页只看不改。
             </div>
           ) : null}
         </Panel>
@@ -394,8 +393,7 @@ export default function SchoolCalendar() {
         >
           <div style={{ fontSize: 12.5, color: 'var(--color-ink3)', lineHeight: 1.8 }}>
             官方那一层说这一天是「{editing?.over ? cellOf(editIso ?? '', null).label : editing?.label}」。
-            改了就按你定的算 —— 教室端那句「今天放假」、以及值日生按学号往下轮，
-            <b>都读这一条</b>。
+            改了就按你定的算。
           </div>
           <div className="mt-3 flex flex-wrap gap-1.5" data-cal-kinds>
             {([

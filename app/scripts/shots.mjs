@@ -12530,7 +12530,7 @@ await withLock(async () => {
       const legendRaw = await p.locator('[data-course-legend]').textContent()
       check(
         (legendRaw ?? '').includes('临时调课') && (legendRaw ?? '').includes('周末没有课'),
-        '🔴 S27-W6 整周网格下面有**底部图例**：说清「有课 / 空 = 没课 / 临时调课（只这一天） / 撞课」，并且明说「周末没有课 —— 空格子就是没课，不是出错了」（**空格子不是出错**这件事必须写在屏上，不能靠用户猜）',
+        '🔴 S27-W6 整周网格下面有**底部图例**：说清「有课 / 空 = 没课 / 临时调课（只这一天） / 撞课」，并且明说「周末没有课 —— 空白格子就是没课」（**周末的空格子 = 没课**这件事必须写在屏上，不能靠用户猜）',
         JSON.stringify((legendRaw ?? '').replace(/\s+/g, ' ').trim()),
       )
       await shot(p, 'S27：课程管理 · 整周视图（7 列 × 这一周出现过的时段 + 底部图例）', '130-course-week', {

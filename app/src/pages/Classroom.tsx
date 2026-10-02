@@ -2097,10 +2097,6 @@ export default function Classroom() {
                     <Button size="sm" disabled={!todayHw.length} onClick={() => void saveHomeworkImage()}>
                       存成图片
                     </Button>
-                    <span className="flex-1" />
-                    <span style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
-                      各科老师在教师端录 · 课代表用班里口令也能录
-                    </span>
                   </div>
                 </div>
               </section>
@@ -3201,7 +3197,7 @@ function RepHomeworkSheet({
       }
     >
       <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.75, marginBottom: 10 }}>
-        只能录<b>今天</b>、只能录<b>自己那一科</b>。口令问班主任要（他能在教师端换）。
+        只能录<b>今天</b>、只能录<b>自己那一科</b>。口令问班主任要。
       </p>
       <div className="flex flex-wrap gap-2" data-rep-subjects>
         {SUBJECTS.map((s) => (

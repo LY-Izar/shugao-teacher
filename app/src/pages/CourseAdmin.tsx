@@ -2022,7 +2022,7 @@ const planSlot = (m: SwapPlan, which: 'a' | 'b'): DaySlot | undefined => {
                         </span>
                         <Tag tone="bad">撞课</Tag>
                         <span style={{ color: 'var(--color-ink4)' }}>
-                          周末没有课 —— 空格子就是没课，不是出错了
+                          周末没有课 —— 空白格子就是没课
                         </span>
                       </div>
                     </>

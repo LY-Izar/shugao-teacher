@@ -80,7 +80,7 @@ export function resetDailyProbe(): void {
 
 /** 探测结论 → 给页面的一句话（空串 = 不用说话） */
 export function dailyNotice(state: DailyTables): string {
-  if (state === 'missing') return '每日作业 / 值日生还没开通（数据库里还没跑 §40 那一段）。'
+  if (state === 'missing') return '每日作业 / 值日生还没开通。'
   if (state === 'unknown') return '这一次没读出每日作业 / 值日生，先按空显示。'
   return ''
 }
@@ -562,7 +562,7 @@ function rpcResult(data: unknown, reasons: Record<string, string>): DailyResult 
   const body = (data ?? {}) as { ok?: boolean; reason?: string }
   if (body.ok === true) return { ok: true }
   const reason = String(body.reason ?? '')
-  return { ok: false, message: reasons[reason] ?? '写不了（数据库没给理由）。' }
+  return { ok: false, message: reasons[reason] ?? '没写进去（没说明原因）。' }
 }
 
 /** 写失败时的统一人话：权限那一条单独说清（老师最常撞的就是它） */
@@ -571,10 +571,10 @@ function writeMessage(error: unknown): string {
   const code = String(e?.code ?? '')
   const msg = String(e?.message ?? '')
   if (code === '42501' || /row-level security|permission denied/i.test(msg)) {
-    return '数据库说这一条不该由你写（不是你在教的那一科？）。'
+    return '这一条不该由你写（不是你在教的那一科？）。'
   }
   if (code === '42P01' || MISSING_TABLE_RE.test(msg)) {
-    return '数据库里还没跑 §40 那一段。'
+    return '这个功能还没开通。'
   }
   return msg || '没写进去。'
 }

@@ -1472,8 +1472,7 @@ export default function ClassDetail() {
               <Panel bodyClass="p-3">
                 <div style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.8 }}>
                   每天<b>一人</b>，按<b>学号升序</b>轮，周末与放假日跳过。你在这里定了某一天是谁，
-                  从那天起就接着往下轮 —— 教室里那块大屏「下课了，值日生·××× 不要忘记擦黑板」
-                  读的就是这里。
+                  从那天起就接着往下轮。
                 </div>
 
                 <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -1577,7 +1576,7 @@ export default function ClassDetail() {
               <Panel bodyClass="p-3">
                 <div style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.8 }}>
                   课代表在教室那块屏上录作业时要输它（他只能录<b>自己那一科</b>、只能录<b>今天</b>）。
-                  库里存的是哈希，<b>设完谁都看不到原文</b> —— 忘了就再设一个。
+                  <b>设完谁都看不到原文</b> —— 忘了就再设一个。
                 </div>
                 <div className="mt-3 flex flex-wrap items-center gap-2">
                   <input
@@ -1849,7 +1848,7 @@ export default function ClassDetail() {
                   style={{ fontSize: 12.5, color: 'var(--color-ink2)', lineHeight: 1.85 }}
                 >
                   {adjDay?.status === 'missing'
-                    ? '数据库里还没跑课表那几段，这一天的临时改动现在改不了。'
+                    ? '课表功能还没开通，这一天的改动暂时改不了。'
                     : '这一天的课表没读到（不是"这一天没课"）。'}
                 </div>
               ) : (
@@ -1991,7 +1990,7 @@ export default function ClassDetail() {
                     className="mt-2"
                     style={{ fontSize: 11.5, color: 'var(--color-ink4)', lineHeight: 1.7 }}
                   >
-                    只影响 <span className="num">{adjDate}</span> 这一天；每周课表那张表一个字不动。
+                    只改 <span className="num">{adjDate}</span> 这一天；每周的课表不动。
                   </div>
                 </div>
               ) : null}

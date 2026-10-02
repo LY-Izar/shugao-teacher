@@ -172,7 +172,7 @@ export default function Administration() {
             <CardShell
               icon={IconCalendar}
               label="校历"
-              desc="法定节假日 · 调休 · 学校自己改的日子（能导出表格）"
+              desc="法定节假日 · 调休 · 导出表格"
               data-calendar-card="1"
               onClick={() => navigate('/manage/calendar')}
               right={
