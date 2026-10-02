@@ -638,6 +638,176 @@ export default function ClassDetail() {
     push({ text: '这一节去掉了', tone: 'ok' })
   }
 
+  /* ============================================================
+     🆕 某一天的**临时调课 / 停课**（2026-10-13 追加）。
+     用户口径：**班主任也要能改某一天的课** —— 此前那个界面只有课程管理页有，
+     而那一页的入口判据 `hasManagingRole()` **不含班主任**（＝他没有任何入口）。
+     · 写的是 `schedule_temp_changes`（**只影响这一天**），每周那张表一个字不动。
+     · 判据在数据库：§38.0b 的 `can_manage_temp_schedule()`（超管 / 教务处 /
+       本年级年级主任 ∪ **本班班主任**）；前端只决定**摆不摆**这一块（`canManageThis`）——
+       "是不是本班班主任"由数据库那一支自己验，前端**不新写角色数组**。
+     · 读的是权威口径：`schedule_day_cells(p_date)`（临时层已经压好了）＋
+       `schedule_conflicts_on(p_date)`（三类撞课只有那一份算法）。
+     ⚠️ 演示模式没有数据库（`loadScheduleDay` 回 `'local'`）→ 这里用内存那两层自己拼，
+        与课程管理页 `buildDayCells` 同一个口径。
+     ============================================================ */
+  const tempChanges = useStore((s) => s.tempScheduleChanges)
+  const addTempScheduleChange = useStore((s) => s.addTempScheduleChange)
+  const [adjOpen, setAdjOpen] = useState(false)
+  const [adjDate, setAdjDate] = useState(() => ymdOf(beijingNow()))
+  const [adjDay, setAdjDay] = useState<remote.ScheduleDayRead | null>(null)
+  const [adjConf, setAdjConf] = useState<remote.ScheduleDayConflict[]>([])
+  const [adjPick, setAdjPick] = useState('')
+  const [adjSubject, setAdjSubject] = useState('')
+  const [adjTeacher, setAdjTeacher] = useState('')
+  const [adjBusy, setAdjBusy] = useState(false)
+  const [adjTick, setAdjTick] = useState(0)
+
+  useEffect(() => {
+    if (!adjOpen || !canManageThis) return
+    let alive = true
+    void (async () => {
+      const [d, c] = await Promise.all([
+        remote.loadScheduleDay(adjDate),
+        remote.loadScheduleConflicts(adjDate),
+      ])
+      if (!alive) return
+      setAdjDay(d)
+      setAdjConf(c.status === 'present' ? c.conflicts : [])
+    })()
+    return () => {
+      alive = false
+    }
+  }, [adjOpen, adjDate, adjTick, canManageThis])
+
+  const adjWeekday = weekdayOfISO(adjDate)
+
+  /** 这一天这个班实际有哪些节（**读不到就是读不到**，不许拿每周课表冒充） */
+  const adjCells = useMemo<remote.ScheduleDayCell[]>(() => {
+    if (adjDay?.status === 'present') {
+      return adjDay.cells
+        .filter((c) => c.classId === klass?.id)
+        .sort((a, b) => (a.start < b.start ? -1 : 1))
+    }
+    /* 数据库那一层读不到时（`missing` / `unknown`）**不摆任何格** ——
+       "这一天排得开"与"没读到"是两件事（同 `loadScheduleDay` 的纪律） */
+    if (adjDay && adjDay.status !== 'local') return []
+    const base0 = classRows.filter((r) => r.weekday === adjWeekday)
+    /* ⚠️ **只在演示模式**：班级课表那一份夹具挂在这些行上、但 `scope` 空着
+       （全平台按 `'mine'` 读）—— 一行都没有时退回"挂在这个班名下的那些行"，
+       否则演示里这一页永远说"这一天这个班没有课"（与课程管理页 `classRows()` 自相矛盾）。
+       真实模式只认 `scope='class'`。 */
+    const base =
+      base0.length || isRemote
+        ? base0
+        : schedule.filter((s) => s.classId === klass?.id && s.weekday === adjWeekday)
+    const mine = tempChanges.filter((t) => t.date === adjDate && t.classId === klass?.id)
+    /* 后写的压先写的（同一节改第二次就是后写的那条说了算） */
+    const at = (start: string) => [...mine].reverse().find((t) => t.start === start)
+    const out: remote.ScheduleDayCell[] = []
+    for (const r of base) {
+      const t = at(r.start)
+      if (t && !t.toSubject) continue
+      out.push({
+        classId: r.classId ?? klass?.id ?? '',
+        start: r.start,
+        end: t?.end ?? r.end,
+        subject: t ? t.toSubject : (splitLessonTitle(r.title).subject ?? ''),
+        teacherId: t ? (t.toTeacherId ?? null) : (r.teacherId ?? null),
+        changed: !!t,
+      })
+    }
+    for (const t of mine) {
+      if (!t.toSubject || out.some((c) => c.start === t.start)) continue
+      out.push({
+        classId: t.classId,
+        start: t.start,
+        end: t.end,
+        subject: t.toSubject,
+        teacherId: t.toTeacherId ?? null,
+        changed: true,
+      })
+    }
+    return out.sort((a, b) => (a.start < b.start ? -1 : 1))
+  }, [adjDay, classRows, schedule, tempChanges, adjDate, adjWeekday, klass])
+
+  const adjListable = adjDay === null || adjDay.status === 'present' || adjDay.status === 'local'
+  const adjPicked = adjCells.find((c) => c.start === adjPick) ?? null
+  const adjBaseRow =
+    classRows.find((r) => r.weekday === adjWeekday && r.start === adjPick) ?? null
+  /** 认不出名字就**不把 id 打到屏上**（同 `teacherOf` 那一条纪律） */
+  const adjTeacherText = (tid: string | null) => {
+    if (!tid) return '（没写老师）'
+    return classTeachers.find((t) => t.id === tid)?.name ?? '（认不出名字）'
+  }
+  const adjStartConf = adjConf.filter(
+    (c) =>
+      c.start === adjPicked?.start &&
+      (c.kind !== 'teacher' || c.teacherId === adjPicked?.teacherId || c.classId === klass?.id),
+  )
+
+  /**
+   * 落一笔临时改动。
+   * 🔴 库里那条 check（§38.1）：`kind='teacher'` **只许换老师、不许改科目** ——
+   *    科目一动就得走 `'whole'`；停课与"恢复成每周课表那一节"也一律 `'whole'`。
+   * 🔴 停课＝`to_subject` 空串 + `to_teacher_id` **`null`**（不许递空串，理由见 `remote.ts`）。
+   */
+  const submitAdj = async (mode: 'swap' | 'off' | 'restore') => {
+    if (!klass || !adjPicked) return
+    let toSubject = adjSubject ? subjectName(adjSubject, adjSubject) : ''
+    let toTeacherId: string | null = adjTeacher || null
+    if (mode === 'off') {
+      toSubject = ''
+      toTeacherId = null
+    }
+    if (mode === 'restore') {
+      if (!adjBaseRow) return
+      toSubject = splitLessonTitle(adjBaseRow.title).subject || ''
+      toTeacherId = adjBaseRow.teacherId ?? null
+    }
+    const kind: 'teacher' | 'whole' =
+      mode === 'swap' && toSubject && toSubject === adjPicked.subject ? 'teacher' : 'whole'
+    setAdjBusy(true)
+    const r = await remote.saveTempScheduleChange({
+      onDate: adjDate,
+      classId: klass.id,
+      start: adjPicked.start,
+      end: adjPicked.end,
+      fromSubject: adjPicked.subject,
+      fromTeacherId: adjPicked.teacherId,
+      toSubject,
+      toTeacherId,
+      kind,
+    })
+    /* 演示模式（`!isRemote`）没有数据库 —— 同时把这一笔记进内存那一层，
+       屏上才会真的变（与课程管理页 `applyPlan` 同一套） */
+    if (!isRemote || r.ok) {
+      addTempScheduleChange({
+        date: adjDate,
+        classId: klass.id,
+        start: adjPicked.start,
+        end: adjPicked.end,
+        fromSubject: adjPicked.subject,
+        fromTeacherId: adjPicked.teacherId,
+        toSubject,
+        toTeacherId,
+        kind,
+      })
+    }
+    setAdjBusy(false)
+    if (!r.ok) {
+      push({ text: '这一笔没写成', tone: 'bad', desc: r.message })
+      return
+    }
+    setAdjPick('')
+    setAdjTick((t) => t + 1)
+    push({
+      text: mode === 'off' ? '这一节今天不上了' : mode === 'restore' ? '恢复成每周课表那一节' : '这一节今天换过了',
+      tone: 'ok',
+      desc: `${adjDate} 只改这一天`,
+    })
+  }
+
   if (!klass) {
     return (
       <>
@@ -1441,12 +1611,23 @@ export default function ClassDetail() {
               <Panel bodyClass="p-3">
                 <div style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.8 }}>
                   这里改的是<b>以后每周都生效</b>的本班课表（教室里那块大屏读的就是它）。
-                  只想改<b>某一天</b>的，用「课程管理 → 临时调课」——那是另一条路，不动这张表。
+                  只想改<b>某一天</b>的（换一节课的老师 / 这节课今天不上了），
+                  用下面的「调课 / 停课」——那是另一条路，不动这张表。
                 </div>
 
                 <div className="mt-3 flex flex-wrap items-center gap-2">
                   <Button size="sm" onClick={() => setBatchOpen(true)}>
                     <IconPaste size={14} /> 粘贴 / 上传整份课表
+                  </Button>
+                  <Button
+                    size="sm"
+                    data-adj-open="1"
+                    onClick={() => {
+                      setAdjPick('')
+                      setAdjOpen(true)
+                    }}
+                  >
+                    <IconSwap size={14} /> 调课 / 停课（只改某一天）
                   </Button>
                   <span style={{ fontSize: 11.5, color: 'var(--color-ink4)' }}>
                     {classRows.length ? `现在有 ${classRows.length} 节` : '现在还是空的'}
@@ -1603,6 +1784,217 @@ export default function ClassDetail() {
               <div className="mt-2" style={{ fontSize: 11.5, color: 'var(--color-ink4)' }}>
                 名单来自这个班的任课关系（教师管理里配的那张表）。
               </div>
+            </Sheet>
+
+            {/*
+              调课 / 停课（**只改这一天**）—— 见上面那一段注释。
+              写 `schedule_temp_changes`（§38.0b 起的判据含本班班主任）；
+              ⚠️ 这里的"这一天有几节"读的是 `schedule_day_cells`，**不是**上面那张周课表。
+            */}
+            <Sheet
+              open={adjOpen}
+              onClose={() => setAdjOpen(false)}
+              title="调课 / 停课（只改这一天）"
+              footer={
+                <Button block onClick={() => setAdjOpen(false)}>
+                  完成
+                </Button>
+              }
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  type="date"
+                  className="input"
+                  data-adj-date="1"
+                  style={{ width: 'auto' }}
+                  value={adjDate}
+                  onChange={(e) => {
+                    setAdjDate(e.target.value)
+                    setAdjPick('')
+                  }}
+                />
+                {[
+                  ['今天', 0],
+                  ['明天', 1],
+                  ['后天', 2],
+                ].map(([text, n]) => {
+                  const iso = isoOffset(Number(n))
+                  return (
+                    <button
+                      key={text}
+                      type="button"
+                      data-adj-quick={String(n)}
+                      onClick={() => {
+                        setAdjDate(iso)
+                        setAdjPick('')
+                      }}
+                      className="rounded-full px-2.5 py-1"
+                      style={{
+                        fontSize: 12,
+                        border: '1px solid var(--color-line2)',
+                        background: adjDate === iso ? 'var(--color-accentsoft)' : 'transparent',
+                        color: adjDate === iso ? 'var(--color-ink)' : 'var(--color-ink2)',
+                        fontWeight: adjDate === iso ? 650 : 400,
+                      }}
+                    >
+                      {text}
+                    </button>
+                  )
+                })}
+              </div>
+
+              {!adjListable ? (
+                <div
+                  className="mt-3"
+                  style={{ fontSize: 12.5, color: 'var(--color-ink2)', lineHeight: 1.85 }}
+                >
+                  {adjDay?.status === 'missing'
+                    ? '数据库里还没跑课表那几段，这一天的临时改动现在改不了。'
+                    : '这一天的课表没读到（不是"这一天没课"）。'}
+                </div>
+              ) : (
+                <>
+                  <div className="mt-3" style={{ fontSize: 12.5, color: 'var(--color-ink2)' }}>
+                    这一天这个班有 <b className="num">{adjCells.length}</b> 节 · 点一节改它
+                  </div>
+                  <div className="mt-2 flex flex-col gap-1.5">
+                    {adjCells.length ? (
+                      adjCells.map((c) => (
+                        <button
+                          key={c.start}
+                          type="button"
+                          data-adj-cell={c.start}
+                          onClick={() => {
+                            setAdjPick(c.start)
+                            setAdjSubject(subjectCodeOfName(c.subject) ?? '')
+                            setAdjTeacher(c.teacherId ?? '')
+                          }}
+                          className="w-full rounded-md px-2.5 py-2 text-left"
+                          style={{
+                            border: '1px solid var(--color-line2)',
+                            background:
+                              adjPick === c.start ? 'var(--color-accentsoft)' : 'transparent',
+                          }}
+                        >
+                          <span
+                            className="flex items-center gap-1.5"
+                            style={{ fontSize: 12.5, fontWeight: 620 }}
+                          >
+                            <span className="num">
+                              {c.start}–{c.end}
+                            </span>
+                            <span>{c.subject || '（空）'}</span>
+                            {c.changed ? <Tag tone="warn">今天改过</Tag> : null}
+                          </span>
+                          <span
+                            className="mt-0.5 block"
+                            style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}
+                          >
+                            {adjTeacherText(c.teacherId)}
+                          </span>
+                        </button>
+                      ))
+                    ) : (
+                      <div style={{ fontSize: 12.5, color: 'var(--color-ink3)' }}>
+                        这一天这个班没有课。
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
+
+              {adjPicked ? (
+                <div
+                  className="mt-4"
+                  style={{ borderTop: '1px solid var(--color-line2)', paddingTop: 12 }}
+                >
+                  <div style={{ fontSize: 12.5, color: 'var(--color-ink2)' }}>
+                    这一节（
+                    <span className="num">
+                      {adjPicked.start}–{adjPicked.end}
+                    </span>
+                    ）今天改成
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {SUBJECTS.map((s) => (
+                      <button
+                        key={s.code}
+                        type="button"
+                        data-adj-subject={s.code}
+                        onClick={() => setAdjSubject(s.code)}
+                        className="rounded-full px-2.5 py-1"
+                        style={{
+                          fontSize: 12,
+                          border: '1px solid var(--color-line2)',
+                          background:
+                            adjSubject === s.code ? 'var(--color-accentsoft)' : 'transparent',
+                          color: adjSubject === s.code ? 'var(--color-ink)' : 'var(--color-ink2)',
+                          fontWeight: adjSubject === s.code ? 650 : 400,
+                        }}
+                      >
+                        {s.name}
+                      </button>
+                    ))}
+                  </div>
+                  <select
+                    className="input mt-3"
+                    data-adj-teacher="1"
+                    style={{ width: 'auto', maxWidth: 300 }}
+                    value={adjTeacher}
+                    onChange={(e) => setAdjTeacher(e.target.value)}
+                  >
+                    <option value="">（不写老师）</option>
+                    {classTeachers.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {subjectName(t.subjectCode, t.subjectCode)} · {t.name}
+                      </option>
+                    ))}
+                  </select>
+                  {adjStartConf.length ? (
+                    <div
+                      className="mt-2"
+                      style={{ fontSize: 11.5, color: 'var(--color-badink)', lineHeight: 1.7 }}
+                    >
+                      注意：{adjStartConf.map((c) => c.detail).join('；')}
+                    </div>
+                  ) : null}
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      data-adj-save="1"
+                      disabled={adjBusy || !adjSubject}
+                      onClick={() => void submitAdj('swap')}
+                    >
+                      存这一笔
+                    </Button>
+                    <Button
+                      size="sm"
+                      data-adj-off="1"
+                      disabled={adjBusy}
+                      onClick={() => void submitAdj('off')}
+                    >
+                      这节课今天不上
+                    </Button>
+                    {adjBaseRow ? (
+                      <Button
+                        size="sm"
+                        data-adj-restore="1"
+                        disabled={adjBusy}
+                        onClick={() => void submitAdj('restore')}
+                      >
+                        恢复成每周课表那一节
+                      </Button>
+                    ) : null}
+                  </div>
+                  <div
+                    className="mt-2"
+                    style={{ fontSize: 11.5, color: 'var(--color-ink4)', lineHeight: 1.7 }}
+                  >
+                    只影响 <span className="num">{adjDate}</span> 这一天；每周课表那张表一个字不动。
+                  </div>
+                </div>
+              ) : null}
             </Sheet>
 
             {/* 批量录入：粘贴 / 上传整份课表 —— 与「我的日程表」那一页同一个组件 */}

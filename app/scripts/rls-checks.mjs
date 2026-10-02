@@ -4486,9 +4486,10 @@ await withLock(async () => {
           ' + 🆕P10 1 个 `old_subject_data_counts_for`（旧科目数据的清单）' +
           ' + 🆕2026-10-08 超管唯一 1 个 `can_assign_super_role_for`（发 super 只有超管能发）' +
           ' + 🆕课程管理 1 个 `can_manage_schedule_for`（能不能改这个班的课表）' +
-          ' + 🆕教室端改造 2 个 `can_write_daily_homework_for` / `is_classroom_of_class_for`）' +
+          ' + 🆕教室端改造 2 个 `can_write_daily_homework_for` / `is_classroom_of_class_for`' +
+          ' + 🆕2026-10-13 临时调课单独一档 1 个 `can_manage_temp_schedule_for`（含本班班主任））' +
           ' —— id 变体也算判据的两件套，新增判据别只写裸版',
-        forNames.length === 36,
+        forNames.length === 37,
         `实际 ${forNames.length} 个：${forNames.join('、')}`,
       )
       const hasBare = await db.query(`select has_function_privilege('authenticated', 'public.can_edit_exam(uuid[], text, text)', 'EXECUTE') as v`)
@@ -8596,8 +8597,12 @@ await withLock(async () => {
         await write(db, U.grade, insertSql('schedule_temp_changes', tempPayload(C.c1, mk('5e', 92)))))
       denied('🔴 ⑤ 反向对照：年级主任写**别的年级**（高三 c3）→ 被拒',
         await write(db, U.grade, insertSql('schedule_temp_changes', tempPayload(C.c3, mk('5e', 93)))))
-      denied('🔴 ⑤ 反向对照：**班主任**改自己班的课表 → 被拒',
-        await write(db, U.head, insertSql('schedule_temp_changes', tempPayload(C.c1, mk('5e', 94)))))
+      allowed('🆕 ⑤ 班主任：改**自己班**的临时课表**写得动**（2026-10-13 追加口径 —— 见 `schema.sql` 38.0b）',
+        await write(db, U.head, insertSql('schedule_temp_changes',
+          tempPayload(C.c1, mk('5e', 94), { start_time: '13:00', end_time: '13:40' }))))
+      denied('🔴 ⑤ 反向对照：**班主任改别的班**（高三 c3）→ 仍然被拒（38.0b 那一支只认自己班）',
+        await write(db, U.head, insertSql('schedule_temp_changes',
+          tempPayload(C.c3, mk('5e', 98), { start_time: '13:00', end_time: '13:40' }))))
       denied('🔴 ⑤ 反向对照：任课老师 → 被拒',
         await write(db, U.phy, insertSql('schedule_temp_changes', tempPayload(C.c1, mk('5e', 95)))))
       denied('🔴 ⑤ 反向对照：**教室端** → 被拒（一个字都写不了）',
@@ -9218,6 +9223,7 @@ await withLock(async () => {
       'schedule_day_cells',
       'schedule_conflicts_on',
       'can_manage_schedule',
+      'can_manage_temp_schedule',
       'write_stream_members',
     ]
     const authedExec = await B.db.query(`

@@ -9786,6 +9786,9 @@ revoke all on function public.write_stream_members(uuid, uuid[]) from public, an
 --      `can_manage_class` 里有班主任那一支，因为"加删自己班的学生 / 改班级课表"是他分内的事；
 --      而用户对「课程管理」这一档点名的原话是**教务处（+ 最高管理员 + 年级主任）** ——
 --      班主任能不能动**课表**，用户没有点头，而课表一动就是连锁（老师 / 班 / 走班学生）。
+--      ⚠️ 2026-10-13 用户追加了口径「班主任要能做**只换某一天**的调课 / 停课」——
+--         **这一档仍然不含班主任**（永久调课 / 留档 / 清理都不放），
+--         那件事另开了一对判据：见下面 **38.0b** `can_manage_temp_schedule(_for)`。
 --    · 🔴 **任课老师 / 教室端一律不在**（教室端那条红线的理由与 §17 那三条收窄逐字相同）。
 create or replace function public.can_manage_schedule_for(p_uid uuid, p_class_id uuid)
 returns boolean
@@ -9816,6 +9819,47 @@ set search_path = public
 as $$ select public.can_manage_schedule_for(auth.uid(), p_class_id) $$;
 
 grant execute on function public.can_manage_schedule(uuid) to authenticated;
+
+-- -------- 38.0b 🆕 2026-10-13：**临时调课**这一件事单独开一档（判据对，与上面那对逐字同形）--------
+--  用户口径（2026-10-13 追加）：班主任要能在班级页做**「只换某一天」的调课 / 停课**。
+--  🔴 为什么**不**把班主任加进上面那个 `can_manage_schedule_for()`：
+--     它的使用面是**永久调整 / 留档 / 清理**那一整套（38.7 / 38.8 / 38.9 的 RPC 与两张留档表的读）。
+--     班主任一旦进了那一档，就连"永久改课表 + 翻别人班的留档"一起拿到了 —— 比用户要的多。
+--     所以**只**放宽"临时调课"这一件事，换掉 4 个调用点：
+--       · 38.1.1 触发器守卫（`schedule_temp_changes_guard`）
+--       · 38.5 的两条写策略（`schedule_temp_changes_insert` / `_update`）
+--       · 38.7b `apply_temp_schedule_change()` 的守卫
+--     ✅ 读路径一个字都不用改：`schedule_temp_changes_read`（38.5）用的是 `visible_class_ids()`，
+--        它本来就含班主任（还有任课老师与教室端本班）。
+--  为什么"停课"也走这一档：停课 = 那一格腾空（科目空、老师也空，见 38.7b 里那句 check），
+--  它与"换人"是同一张表、同一条通路，所以两件事一起放开。
+--  ⚠️ 与"永久调课"的分界必须留着：`can_manage_schedule_for()` 里班主任**仍然是 false**，
+--     `rls-checks` 的「① 班主任不在这一档」与「⑦ 班主任调不动（永久）」两条断言照旧成立。
+create or replace function public.can_manage_temp_schedule_for(p_uid uuid, p_class_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select
+    public.can_manage_schedule_for(p_uid, p_class_id)
+    or exists (select 1 from teacher_roles r
+                where r.teacher_id = p_uid and r.role = 'head_teacher'
+                  and r.scope_type = 'class' and r.scope_id = p_class_id);
+$$;
+
+revoke all on function public.can_manage_temp_schedule_for(uuid, uuid) from public, anon, authenticated;
+
+create or replace function public.can_manage_temp_schedule(p_class_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$ select public.can_manage_temp_schedule_for(auth.uid(), p_class_id) $$;
+
+grant execute on function public.can_manage_temp_schedule(uuid) to authenticated;
 
 -- -------- 38.1 临时调课表（`schedule_temp_changes`）--------
 --  一条 = **哪一天 · 哪个班 · 哪一节** 的一次改动。字段与语义（一个字段只有一种语义）：
@@ -9977,7 +10021,9 @@ begin
     new.revoked_by_name := '';
     /* ⚠️ 只有**带身份的调用者**（authenticated）才判：没有 uid = 属主 / 服务端那条路
        （`service_role` 的 JWT 没有 sub）—— 那条路本来就绕过 RLS，是平台既有的口径（§21.2 同一句） */
-    if auth.uid() is not null and not public.can_manage_schedule(new.class_id) then
+    /* 🆕 2026-10-13（38.0b）：判据从 `can_manage_schedule` 换成 `can_manage_temp_schedule` ——
+       **临时**调课这一件事上，本班班主任也做得动；永久调课那条路（38.7）仍旧不含班主任 */
+    if auth.uid() is not null and not public.can_manage_temp_schedule(new.class_id) then
       raise exception '你没有改这个班课表的权限';
     end if;
     /* 留档线索：能对上就往 `schedule_item_id` 写一份（对不上也不拦 —— 那一格本来可能是空的） */
@@ -10387,7 +10433,8 @@ begin
   if p_on_date is null then
     raise exception '临时调课必须落在某一天上';
   end if;
-  if not public.can_manage_schedule(p_class_id) then
+  /* 🆕 2026-10-13（38.0b）：临时调课这一档含**本班班主任**（永久调课 38.8 那一条路不含） */
+  if not public.can_manage_temp_schedule(p_class_id) then
     raise exception '你没有改这个班课表的权限';
   end if;
 
@@ -10575,16 +10622,17 @@ create policy schedule_temp_changes_read on schedule_temp_changes for select to 
     or from_teacher_id = auth.uid()
   );
 
--- 写（临时调课）：**只有那三档**（教务处 / 最高管理员 / 本年级年级主任）——
---   判据只有一份：`can_manage_schedule()` 自己取 `auth.uid()`，前端塞不进别人的身份
+-- 写（临时调课）：**教务处 / 最高管理员 / 本年级年级主任 —— 外加本班班主任**（2026-10-13 追加，见 38.0b）——
+--   判据只有一份：`can_manage_temp_schedule()` 自己取 `auth.uid()`，前端塞不进别人的身份。
+--   ⚠️ 班主任那一支**只认自己班**（`scope_type='class' and scope_id = 这个班`），别的班照样拒。
 drop policy if exists schedule_temp_changes_insert on schedule_temp_changes;
 create policy schedule_temp_changes_insert on schedule_temp_changes for insert to authenticated
-  with check (can_manage_schedule(class_id));
+  with check (can_manage_temp_schedule(class_id));
 
 drop policy if exists schedule_temp_changes_update on schedule_temp_changes;
 create policy schedule_temp_changes_update on schedule_temp_changes for update to authenticated
-  using (can_manage_schedule(class_id))
-  with check (can_manage_schedule(class_id));
+  using (can_manage_temp_schedule(class_id))
+  with check (can_manage_temp_schedule(class_id));
 
 -- 读（两张留档）：**同一把尺子**（能不能管这个班的课表）——
 --   教务处/超管全校 · 年级主任本年级。⚠️ **教室端读不到**（它不是这一档），
@@ -10610,8 +10658,16 @@ create policy schedule_perm_changes_read on schedule_perm_changes for select to 
 --  -- select public.can_manage_schedule_for('<教务处 uid>', '<班 id>') as 教务处,
 --  --        public.can_manage_schedule_for('<本年级年级主任 uid>', '<班 id>') as 本年级主任,
 --  --        public.can_manage_schedule_for('<别年级年级主任 uid>', '<班 id>') as 别年级主任,
---  --        public.can_manage_schedule_for('<该班班主任 uid>', '<班 id>') as 班主任,   -- 期望 false
+--  --        public.can_manage_schedule_for('<该班班主任 uid>', '<班 id>') as 班主任,   -- 期望 false（永久档）
 --  --        public.can_manage_schedule_for('<任课老师 uid>', '<班 id>') as 任课老师;   -- 期望 false
+--  ③b 🆕 2026-10-13 **临时**调课那一档（38.0b）：班主任**是 true**，别的班照样 false：
+--  -- select public.can_manage_temp_schedule_for('<该班班主任 uid>', '<本班 id>')  as 本班班主任,   -- 期望 true
+--  --        public.can_manage_temp_schedule_for('<该班班主任 uid>', '<别的班 id>') as 别班班主任,   -- 期望 false
+--  --        public.can_manage_temp_schedule_for('<任课老师 uid>',   '<本班 id>')  as 任课老师,     -- 期望 false
+--  --        public.can_manage_temp_schedule_for('<教室端 uid>',     '<本班 id>')  as 教室端;       -- 期望 false
+--  -- -- 两件套的权限口径与上面同：裸版给 authenticated、`_for` 版 revoke：
+--  -- select has_function_privilege('authenticated', 'public.can_manage_temp_schedule(uuid)', 'EXECUTE') as 裸版,
+--  --        has_function_privilege('authenticated', 'public.can_manage_temp_schedule_for(uuid, uuid)', 'EXECUTE') as for版;
 --  ④ 这一天实际什么课（临时调课压在周课表上；**过期那条不参与**）：
 --  -- select * from public.schedule_day_cells(current_date);        -- 传**北京时区**的那一天
 --  -- select * from public.schedule_conflicts_on(current_date);   -- 三类冲突

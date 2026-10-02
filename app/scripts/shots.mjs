@@ -1062,6 +1062,81 @@ await withLock(async () => {
         )
       })
 
+      /*
+       * 04e 班级页的「调课 / 停课」（2026-10-13 追加口径：**班主任也要能改某一天的课**）。
+       * 判据在数据库（`supabase/schema.sql` §38.0b 的 `can_manage_temp_schedule()` = 超管 /
+       * 教务处 / 本年级年级主任 ∪ **本班班主任**），这里只验**界面这一层**：
+       *   ① `?as=head_teacher` → 摆这个入口；`?as=teacher` → **不摆**（反向对照）；
+       *   ② 点开 → 选定某一天 → 这一天有几节**真的列出来**；
+       *   ③ 「这节课今天不上」→ 那一节当场从这个列表里消失（只改这一天）。
+       * ⚠️ 演示模式没有数据库：`loadScheduleDay` 回 `'local'`，页面转用内存那一层
+       *    （`saveTempScheduleChange` 在 `!isRemote` 时直接回 ok）。**远程那一侧**由
+       *    `rls-checks` 第二十×节的 ⑤ 块逐身份验（班主任本班写得动 / 别班仍然被拒）。
+       */
+      await step('04e 班级页：班主任调某一天的课', async () => {
+        /* 取一个**工作日**：演示夹具按星期几挂课，周末那一天这个班可能真没课 */
+        const day = new Date()
+        while (day.getDay() === 0 || day.getDay() === 6) day.setDate(day.getDate() + 1)
+        const iso = `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, '0')}-${String(
+          day.getDate(),
+        ).padStart(2, '0')}`
+
+        await page.goto(`${BASE}/classes/c-demo-1?as=teacher`, { waitUntil: 'networkidle' })
+        await page.waitForTimeout(420)
+        const asTeacher = await page.locator('[data-adj-open]').count()
+        check(
+          '🔴 反向对照：任课教师（`?as=teacher`）→ **不摆**「调课 / 停课」（前端只决定摆不摆，判据在数据库）',
+          asTeacher === 0,
+          `按钮数=${asTeacher}`,
+        )
+
+        await page.goto(`${BASE}/classes/c-demo-1?as=head_teacher`, { waitUntil: 'networkidle' })
+        await page.waitForTimeout(500)
+        const opener = page.locator('[data-adj-open]')
+        const openerCount = await opener.count()
+        check(
+          '🔴 班主任（`?as=head_teacher`）→ **摆**「本班课表」里的「调课 / 停课」入口',
+          openerCount === 1,
+          `按钮数=${openerCount}`,
+        )
+        if (openerCount !== 1) return
+        await opener.click()
+        await page.waitForTimeout(420)
+        const sheet = await pageInfo(page)
+        check(
+          '点开的是「调课 / 停课（只改这一天）」那一张浮层',
+          sheet.sheetOpen && sheet.sheetTitle.includes('调课'),
+          `sheetOpen=${sheet.sheetOpen} · 标题=${sheet.sheetTitle}`,
+        )
+        await page.locator('[data-adj-date]').fill(iso)
+        await page.waitForTimeout(360)
+        const cells = await page.locator('[data-adj-cell]').count()
+        check(
+          `这一天（${iso}）这个班有几节**真的列出来**（读的是那一天的口径，不是周课表那张网格）`,
+          cells > 0,
+          `节数=${cells}`,
+        )
+        if (!cells) return
+        const firstStart = await page.locator('[data-adj-cell]').first().getAttribute('data-adj-cell')
+        await page.locator('[data-adj-cell]').first().click()
+        await page.waitForTimeout(260)
+        const offBtn = await page.locator('[data-adj-off]').count()
+        check(
+          '点一节之后摆出「这节课今天不上」（停课＝把这一节今天腾空 —— 与换人同一条通路）',
+          offBtn === 1,
+          `按钮数=${offBtn}`,
+        )
+        if (offBtn !== 1) return
+        await page.locator('[data-adj-off]').click()
+        await page.waitForTimeout(520)
+        const after = await page.locator('[data-adj-cell]').count()
+        check(
+          '🔴 停课之后那一节**当场从这一天的列表里消失**（只改这一天 —— 每周课表那张表一个字不动）',
+          after === cells - 1,
+          `${cells} → ${after}（停的是 ${firstStart}）`,
+        )
+      })
+
       await goto(page, '05–07 拍照录名单', '/classes/c-demo-1/import/photo', {
         markers: ['拍照录名单', '第 1 步 · 拍摄花名册', '识别约定'],
       })
