@@ -2020,7 +2020,12 @@ export type Toast = {
   text: string
   tone: 'ok' | 'warn' | 'bad' | 'info'
   desc?: string
+  /** T2（2026-10-02）：退场中 —— ToastHost 据此挂 `anim-toast-out`，播完由 dismiss 的兜底定时器硬删 */
+  leaving?: boolean
 }
+
+/** 退场动画时长（与 `.anim-toast-out` 的 `--dur-exit` 一致）；兜底在它后面再 +400ms */
+const TOAST_EXIT_MS = 180
 
 type ToastState = {
   toasts: Toast[]
@@ -2033,7 +2038,18 @@ export const useToast = create<ToastState>((set) => ({
   push: (t) => {
     const id = uid()
     set((s) => ({ toasts: [...s.toasts, { ...t, id }] }))
-    setTimeout(() => set((s) => ({ toasts: s.toasts.filter((x) => x.id !== id) })), 2600)
+    setTimeout(() => useToast.getState().dismiss(id), 2600)
   },
-  dismiss: (id) => set((s) => ({ toasts: s.toasts.filter((x) => x.id !== id) })),
+  dismiss: (id) => {
+    /*
+     * T2（2026-10-02）：退场 = 先标 `leaving` 播 180ms 退出动画，再硬删。
+     * 🔴 兜底纪律（抄 Splash.tsx:190 的「宁可啪地出现，不能一直看不见」）：
+     *    **宁可秒关，不能关不掉** —— animationend 不来（reduced-motion、后台标签页
+     *    被节流、display:none）也由这个 +400ms 的定时器强制移除，绝不依赖动画本身。
+     */
+    set((s) => ({
+      toasts: s.toasts.map((x) => (x.id === id && !x.leaving ? { ...x, leaving: true } : x)),
+    }))
+    setTimeout(() => set((s) => ({ toasts: s.toasts.filter((x) => x.id !== id) })), TOAST_EXIT_MS + 400)
+  },
 }))

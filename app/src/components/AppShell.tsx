@@ -224,7 +224,7 @@ export function ToastHost() {
           key={t.id}
           type="button"
           onClick={() => dismiss(t.id)}
-          className="glass-dark anim-toast pointer-events-auto flex items-center gap-2.5 px-3.5 py-2.5 text-left"
+          className={`glass-dark ${t.leaving ? 'anim-toast-out' : 'anim-toast'} pointer-events-auto flex items-center gap-2.5 px-3.5 py-2.5 text-left`}
           style={{
             maxWidth: 420,
             /* ⚠️ 这里是 `#fff` 而**不是** `var(--color-ink)`：Toast 是 `.glass-dark`（**永远深底**，

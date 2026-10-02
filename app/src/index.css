@@ -1211,6 +1211,19 @@ body::before {
   animation: toast-in 0.22s var(--ease-out) both;
 }
 
+/* T2（2026-10-02）：退场 —— 首次使用的 `--dur-exit` / `--ease-exit`（只引用、值不许改）。
+   180ms 上飘淡出；store.ts 的 dismiss 在 +400ms 兜底硬删（宁可秒关，不能关不掉）。 */
+.anim-toast-out {
+  animation: toast-out var(--dur-exit, 180ms) var(--ease-exit, var(--ease-out)) both;
+}
+
+@keyframes toast-out {
+  to {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+}
+
 /* 线条自绘：完成批改时的那一下 */
 .draw-check circle {
   stroke-dasharray: 170;
