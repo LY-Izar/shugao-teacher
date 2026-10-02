@@ -2280,3 +2280,53 @@ body::before {
     transition: none;
   }
 }
+
+/* ============================================================
+   T7（2026-10-02）· 玻璃的两段降级（施工单批注版：只做这两段）
+   ------------------------------------------------------------
+   ⚠️ 上面 9 组 backdrop-filter 的**数值一个都没动** —— 这两段只在条件
+   成立时生效；支持 backdrop-filter 的浏览器（教师端绝大多数、教室端
+   那台新机）永远走不到这里。
+   兜底色用 `--color-surface2rgb`（surface2 的 RGB 分量：亮 247 249 251 /
+   暗 26 31 39），与表头那层玻璃同一条思路 —— 兜底跟着**面层级**变量走，
+   暗色下不会发白。blur 没了，透明度必须抬到近实，可读性优先于通透。
+   ============================================================ */
+
+/* ① 引擎不支持 backdrop-filter（老 Safari / 老安卓 WebView）→ 实色 */
+@supports not (backdrop-filter: blur(1px)) {
+  .scrim {
+    background: rgb(var(--color-scrim) / 0.78);
+  }
+  .tbl th {
+    background: rgb(var(--color-surface2rgb));
+  }
+  .glass {
+    background: rgb(var(--color-surface2rgb) / 0.95);
+  }
+  .glass-dark {
+    background: rgb(20 26 34 / 0.95);
+  }
+  .glass-light {
+    background: rgb(var(--color-surface2rgb) / 0.88);
+  }
+  .nav-pop {
+    background: rgb(var(--color-surface2rgb) / 0.92);
+  }
+  .floating-rail {
+    background: rgb(var(--color-surface2rgb) / 0.96);
+  }
+}
+
+/* ② Windows 高对比度 → 玻璃退成系统色，描边换系统色；模糊对系统色没有意义，直接关 */
+@media (forced-colors: active) {
+  .glass,
+  .glass-dark,
+  .glass-light,
+  .nav-pop,
+  .floating-rail {
+    background: Canvas;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    border-color: ButtonText;
+  }
+}
