@@ -11,7 +11,7 @@
    （PPT / Word）再触发一次浏览器下载，落到「下载」文件夹。
    ============================================================ */
 
-import { saveBlob, openInPlace } from './fileOut'
+import { saveBlob, openInPlace, type OpenResult } from './fileOut'
 
 const DB_NAME = 'shugao.classroom'
 const STORE = 'files'
@@ -90,10 +90,21 @@ export function saveToDisk(f: LocalFile) {
   void saveBlob(f.name, f.blob)
 }
 
-/** 可直接在浏览器里看的类型，用 Blob URL 打开 */
-export function openLocal(f: LocalFile) {
-  // 🔴 R4：这是**第二种能力**，不能并进 saveBlob。
-  // 网页上 `window.open(blobUrl)`；壳里必须走原生 —— 否则会在**没有 preload 的
-  // 浏览器窗口**里打开，样式全丢、点不了（Android WebView 里更是静默失败）。
-  void openInPlace(f.name, f.blob)
+/**
+ * 可直接在浏览器里看的类型，用 Blob URL 打开。
+ *
+ * 🔴 R4：这是**第二种能力**，不能并进 saveBlob。
+ *   网页上 `window.open(blobUrl)`；壳里必须走原生 —— 否则会在**没有 preload 的
+ *   浏览器窗口**里打开，样式全丢、点不了（Android WebView 里更是静默失败）。
+ *
+ * 🔴🔴 **2026-10-03：改成返回结局，不再 `void` 掉**
+ *   原先这里 `void openInPlace(...)`，而底下那一支把壳的返回值整个扔了
+ *   ⇒ 教室端那台机器上「这个 .png 没有系统程序能打开」时，
+ *   **老师点了什么都不会发生，界面也不会说为什么**（静默失败）。
+ *   返回 `'failed'` 是调用方给提示的唯一机会 —— 别再 `void` 掉。
+ *
+ * @returns `'failed'` = 没打开成（调用方**应该**提示，可问"要不要改成另存为"）
+ */
+export function openLocal(f: LocalFile): Promise<OpenResult> {
+  return openInPlace(f.name, f.blob)
 }

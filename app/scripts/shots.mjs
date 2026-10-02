@@ -186,6 +186,9 @@ const EXPECTED_FILES = [
   '33-classroom-list.png',
   '34-classroom-broadcast.png',
   '120-classroom-paste-sheet.png',
+  // 121 = 课代表在教室端录作业那张表（2026-10-03 补）—— 🔴 那条链原来零断言，
+  //       而它是教室端**唯一的写入口**。详见教室端那一节的说明。
+  '121-classroom-rep-sheet.png',
   '35-nav-frost.png',
   '36-nav-travel.png',
   '37-nav-settled.png',
@@ -1592,9 +1595,87 @@ await withLock(async () => {
 
       await goto(page, '11 作业列表', '/assignments', {
         // 5 份 = 演示种子那 4 份 + 极简模式那份（a-demo-5，已批改 → 待收缴仍是 2）
-        markers: ['5 份档案 · 2 份待收缴', '按上次新建', '全部班级'],
+        // 🔴🔴 「留今日作业」2026-10-03 起**默认收起**（用户定的：它原来占最上方，
+        //   把老师最高频的「看档案/收缴」压到了第二屏）。所以这一屏**看不到**
+        //   那块录入表单 —— 上面这两个 marker 必须换成收起态真有的那两样。
+        //   ⚠️ 判据盯的是**"档案区在前、每日作业收成一行"**这件事，
+        //   不是"每日作业那块面板还在最上面" —— 后者正是被改掉的。
+        markers: ['5 份档案 · 2 份待收缴', '按上次新建', '全部班级', '留今日作业'],
+        absent: ['每日作业内容'],
       })
       await shot(page, '11 作业列表', '11-assignments', { full: true })
+      await step('11 作业列表 · 每日作业收成一行', async () => {
+        /*
+         * 🔴🔴 钉住 2026-10-03 那一改（用户定的：每日作业原来占作业页最上方，
+         *   把老师最高频的「看档案 / 收缴」压到了第二屏）。
+         *
+         * 三个方向都钉 —— 少一个方向，这个不变量就可能"假绿"：
+         *   ① 收起态：录入表单**不在**屏上（只留一行按钮 + 摘要）
+         *   ② 展开态：点开之后**功能一个字不能少**（学科按钮 / 输入框 / 班级下拉）
+         *   ③ 位置：折叠行在档案筛选**上方**（保留入口，但不再占一整块）
+         *
+         * ⚠️ 为什么要 ②：只钉 ① 的话，把面板改成"永远展开但高度塌掉"也能绿。
+         * ⚠️ 判据用 `data-dh-*` 属性（本轮加的），**不用**"屏上有没有那句话" ——
+         *   那样会因为其它地方出现同一句话而误判。
+         */
+        const collapsed = await page.evaluate(() => ({
+          toggle: document.querySelectorAll('[data-dh-toggle="open"]').length,
+          form: document.querySelectorAll('textarea[aria-label="每日作业内容"]').length,
+          summary: document.querySelectorAll('[data-dh-summary]').length,
+        }))
+        check(
+          collapsed.toggle === 1 && collapsed.form === 0 && collapsed.summary === 1,
+          '11 作业列表：每日作业**默认收起**，只留一行入口 + 摘要（不占一整块）',
+          `按钮 ${collapsed.toggle} · 表单 ${collapsed.form} · 摘要 ${collapsed.summary}`,
+          '它原来在最上方占一整块，把「看档案/收缴」压到了第二屏',
+        )
+
+        // ③ 位置：折叠行必须**在档案筛选之上**（入口还在，只是收起来了）
+        const order = await page.evaluate(() => {
+          const btn = document.querySelector('[data-dh-toggle="open"]')
+          const filter = [...document.querySelectorAll('select')].find(
+            (s) => s.getAttribute('aria-label') === '按班级筛选',
+          )
+          if (!btn || !filter) return null
+          return Math.round(btn.getBoundingClientRect().top + window.scrollY) <
+            Math.round(filter.getBoundingClientRect().top + window.scrollY)
+        })
+        check(
+          order === true,
+          '11 作业列表：折叠行在档案筛选之上（入口还在最上方，但只占一行）',
+          order === null ? '没找到那两个元素' : `折叠行在筛选上方 = ${order}`,
+          '入口不该被挪走 —— 老师每天都要留作业',
+        )
+
+        // ② 展开态：功能一个字不能少
+        await page.locator('[data-dh-toggle="open"]').click()
+        await waitPageSettled(page)
+        const opened = await page.evaluate(() => ({
+          form: document.querySelectorAll('textarea[aria-label="每日作业内容"]').length,
+          subjects: document.querySelectorAll('[data-dh-subject]').length,
+          classPick: document.querySelectorAll('select[aria-label="每日作业班级"]').length,
+          close: document.querySelectorAll('[data-dh-toggle="close"]').length,
+        }))
+        check(
+          opened.form === 1 && opened.subjects > 0 && opened.classPick === 1 && opened.close === 1,
+          '11 作业列表：点开之后输入框 / 学科 / 班级下拉 / 收起开关**都还在**',
+          `表单 ${opened.form} · 学科 ${opened.subjects} · 班级 ${opened.classPick} · 收起 ${opened.close}`,
+          '收起只能是"藏起来"，不能是"功能没了"',
+        )
+
+        // 收回收起态 —— 不然后面那几张图都带着展开的面板
+        await page.locator('[data-dh-toggle="close"]').click()
+        await waitPageSettled(page)
+        const reclosed = await page.evaluate(
+          () => document.querySelectorAll('textarea[aria-label="每日作业内容"]').length,
+        )
+        check(
+          reclosed === 0,
+          '11 作业列表：收起之后表单真的退场了（能来回，不是只能一直开着）',
+          `收起后表单 ${reclosed}`,
+          '否则老师点开一次就被永远留在那个大表单里',
+        )
+      })
       await step('11 作业列表', async () => {
         /*
          * 🔴 **题数只在普通模式显示**（2026-09-25 用户拍板）。
@@ -2121,6 +2202,135 @@ await withLock(async () => {
         await expectRoom(SR)
       })
       await shotRaw(room, SR, '32-classroom')
+
+      /* ---------------- 🆕 课代表在教室端录作业：**必须输班级口令**（2026-10-03 补）
+       *
+       * 🔴🔴 **为什么这一节原来一条断言都没有**：
+       *   全仓 `data-rep` / `课代表` / `班级口令` / `rep-` 在 shots.mjs 里**零命中** ——
+       *   也就是说"教室端能不能录、口令框在不在、口令错了有没有话说"这件事
+       *   **完全没有回归保护**。而它恰恰是这块屏上**唯一的写入口**
+       *   （`Classroom.tsx:2094` 的「课代表录一条」）。
+       *   老师改坏了它，**门禁一声不响**，教室里那条路就悄悄没了。
+       *
+       * 设计上必须钉住的三条（`schema.sql:10955` 的 `rep_set_daily_homework`）：
+       *   ① 屏上**明写**规则：只能录今天 / 只能录这台机器的班 / 只能录自己那一科；
+       *   ② 那张 Sheet 里**真的有口令输入框**，且规则写在明面上；
+       *   ③ 口令校验**只在数据库里**（`class_rep_pins` 不给客户端任何表权限）——
+       *      前端**不许**出现"先在本地比一下口令"那种写法。
+       *
+       * ⚠️ 这一节**跑在演示模式**（本地存储），所以只能验"入口与规则在屏上"，
+       *    验不了真库上口令比中对不对 —— **那是 `rls-checks.mjs` 的活**。
+       */
+      await step(SR, async () => {
+        await room.getByRole('button', { name: '课代表录一条' }).click()
+        await room.waitForTimeout(400)
+        const sheet = await room.evaluate(() => {
+          const body = document.body.innerText ?? ''
+          const inputs = [...document.querySelectorAll('input')]
+          const pin = inputs.find(
+            (i) => /口令/.test(i.getAttribute('placeholder') ?? '') || /口令/.test(
+              (i.closest('div')?.parentElement?.innerText ?? '').slice(0, 60),
+            ),
+          )
+          const textarea = document.querySelector('textarea')
+          return {
+            title: body.includes('课代表录作业'),
+            hasPinInput: Boolean(pin),
+            pinPlaceholder: pin?.getAttribute('placeholder') ?? '',
+            hasContent: Boolean(textarea?.getAttribute('placeholder')?.trim()),
+            /* 规则那三条必须写在明面上 */
+            ruleToday: body.includes('今天'),
+            ruleSelfSubject: body.includes('自己那一科'),
+            rulePinFromTeacher: body.includes('口令问班主任要'),
+            /* 🔴 反向：前端不许自己拿口令去比（真正的校验在 security definer 里） */
+            body: body.slice(0, 600),
+          }
+        })
+        check(
+          sheet.title && sheet.hasPinInput,
+          `🔴 ${SR}：课代表录作业那张表**有口令输入框**（这是那块屏唯一的写入口，必须有它）`,
+          sheet.hasPinInput ? `placeholder：${sheet.pinPlaceholder}` : '没找到口令输入框',
+          '没有口令框 = 课代表根本录不了，或被当成老师直接放行',
+        )
+        check(
+          sheet.ruleToday && sheet.ruleSelfSubject && sheet.rulePinFromTeacher,
+          `${SR}：并且把规则写在明面上（今天 / 自己那一科 / 口令问班主任要）`,
+          `今天=${sheet.ruleToday} · 自己那一科=${sheet.ruleSelfSubject} · 口令来源=${sheet.rulePinFromTeacher}`,
+          '规则只写在代码注释里，课代表不知道自己能录什么',
+        )
+        check(
+          sheet.hasContent,
+          `${SR}：作业内容输入框也在（不是只让输口令）`,
+          sheet.hasContent ? 'placeholder 有内容' : '没找到内容输入框',
+        )
+        await shot(room, SR, '121-classroom-rep-sheet')
+        await room.keyboard.press('Escape')
+        await room.waitForTimeout(300)
+      })
+
+      await step(SR, async () => {
+        /*
+         * 🔴🔴 **源码级判据**（照本文件 2595 / 2897 那几处的既有做法）：
+         * 校验口令的地方**必须**是 RPC，前端**不许**自己比。
+         *
+         * 为什么这条比屏上断言更重要：屏上只能看到"有个口令框"，
+         * 看不到**它被拿去干什么**。而这里守的是**安全边界**：
+         * `class_rep_pins` 那张表**一个表权限都不给客户端**，
+         * 比对只发生在 `security definer` 的 `rep_set_daily_homework` 里
+         * （`schema.sql:10955`，比对那行是 `digest(p_class_id::text || ':' || pin)`）。
+         * 一旦有人改成前端本地比 —— 课代表就能**撞库试口令**。
+         *
+         * 两个方向都钉（少一个就可能假绿）：
+         *   ① `daily.ts` **必须**走 `sb.rpc('rep_set_daily_homework')`
+         *   ② `daily.ts` **不许**直接查 `class_rep_pins` 这张表
+         */
+        const dailySrc = readFileSync(join(HERE, '..', 'src', 'lib', 'daily.ts'), 'utf8')
+        check(
+          /rpc\(\s*'rep_set_daily_homework'/.test(dailySrc),
+          `🔴 ${SR}：课代表录作业走的是 **RPC**（口令校验在数据库里，前端碰不到口令）`,
+          /rpc\(\s*'rep_set_daily_homework'/.test(dailySrc)
+            ? "daily.ts 里调 sb.rpc('rep_set_daily_homework')"
+            : 'daily.ts 里没找到那个 RPC —— 校验跑到别处去了',
+          '改成前端本地比口令 = 课代表能撞库试出来',
+        )
+        /* 🔴🔴 判据必须**剥掉注释**再查 —— 第一版直接 `includes('class_rep_pins')`，
+         *   而 daily.ts 的**文件头注释里正 explaining 这张表**（第 10/38 行），
+         *   于是这条断言**恒红**，而红的原因是"注释里提了一句"。
+         *   那是**又一次"核对工具自己先得是对的"**：
+         *   断言红 ⇒ 先问"我量的是不是我想量的那件事"，别直接去改被测代码。
+         * ⚠️ 为什么要查这张表：它 revoke 了客户端全部权限，前端查它只会拿到空；
+         *    一旦有人改成前端 `.from('class_rep_pins').select()`，
+         *    口令校验就等于**没有**（拿不到任何行）。
+         */
+        const dailyCode = dailySrc
+          .replace(/\/\*[\s\S]*?\*\//g, '') // 块注释
+          .replace(/^\s*\/\/.*$/gm, '') // 行注释
+        check(
+          !dailyCode.includes('class_rep_pins'),
+          `${SR}：并且前端**没有**去查 class_rep_pins 那张表（它 revoke 了客户端全部权限）`,
+          dailyCode.includes('class_rep_pins')
+            ? '🔴 剥掉注释后 daily.ts 里还有 class_rep_pins —— 前端真的在查它'
+            : `剥掉注释后没有（注释里共 ${dailySrc.split('class_rep_pins').length - 1} 处提及，不算）`,
+          '改成前端查这张表 = 口令校验等于没有（拿不到任何行）',
+        )
+        /* 🔴 反向对照的前置条件：真库上那两个 RPC **必须存在**。
+         *   少了它们，屏上那个口令框就是个摆设（点了只会报"function does not exist"）。
+         *   读 schema.sql 钉住 —— 这是"课代表那条路真的通"的地基。 */
+        const schemaSrc = readFileSync(join(HERE, '..', '..', 'supabase', 'schema.sql'), 'utf8')
+        check(
+          /create or replace function public\.rep_set_daily_homework\(/.test(schemaSrc) &&
+            /create or replace function public\.set_class_rep_pin\(/.test(schemaSrc),
+          `🔴 ${SR}：那两个 RPC 在 schema.sql 里都真的定义了（录作业 / 设口令）`,
+          /public\.rep_set_daily_homework\(/.test(schemaSrc) ? 'rep_set_daily_homework ✔' : 'rep_set_daily_homework ✘',
+          'RPC 不在库里 = 口令框点了只会报错',
+        )
+        check(
+          /digest\(p_class_id::text \|\| ':' \|\| btrim\(coalesce\(p_pin/.test(schemaSrc),
+          `${SR}：口令比对在库里做，而且**绑定班 id**（不是全局一个口令）`,
+          /digest\(p_class_id::text/.test(schemaSrc) ? "比对式：digest('<班id>:<口令>')" : '没找到那条比对',
+          '不绑班 id 的话，隔壁班的课代表拿同一个口令也能录',
+        )
+      })
 
       /* ---------------- 🆕 粘贴课表的示例必须带班名（2026-09-28 用户实测） ----------------
        *

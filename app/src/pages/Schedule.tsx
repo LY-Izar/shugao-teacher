@@ -54,7 +54,16 @@ export default function Schedule() {
   const [open, setOpen] = useState(false)
   const [batchOpen, setBatchOpen] = useState(false)
   const [form, setForm] = useState<Omit<ScheduleItem, 'id'>>(BLANK)
-  const [perm, setPerm] = useState(() => notifyPermission())
+  /*
+ * 🔴 `'native'` 这一档是 2026-10-03 加的（apk 里的 WebView **没有** `Notification`
+ *    ⇒ 原来恒显示「这个浏览器不支持系统通知」，而那句建议在 apk 里是错的）。
+ *    所以本地的 `perm` 状态类型必须**跟着加一档**，否则 tsc 会报
+ *    `types '"default"' and '"native"' have no overlap` —— 那不是"比较多余"，
+ *    是"我漏了一档"。⚠️ 别为了让 tsc 过而把 `native` 那两段删掉。
+ */
+const [perm, setPerm] = useState<
+  NotificationPermission | 'unsupported' | 'native'
+>(() => notifyPermission())
 
   const today = weekdayOf()
   /**
@@ -160,6 +169,9 @@ export default function Schedule() {
             <span style={{ color: perm === 'unsupported' ? 'var(--color-warn)' : 'var(--color-accent)' }}>
               {perm === 'unsupported' ? <IconAlert size={17} /> : <IconBell size={17} />}
             </span>
+            {/* ⚠️ 上面那段 `background` / `border` / `icon` 三处都按 `unsupported` 分档，
+                与文案是**两处独立的判据** —— 2026-10-03 加 `native` 档时三处都要跟着看，
+                别只改文案不改配色（那会出现"图标是告警色、文案却在说正常"）。 */}
             <div className="flex-1" style={{ fontSize: 12.5, lineHeight: 1.7 }}>
               <div
                 style={{
@@ -168,17 +180,30 @@ export default function Schedule() {
                 }}
               >
                 {perm === 'unsupported'
-                  ? '这个浏览器不支持系统通知'
+                  ? '这个设备收不到系统通知'
                   : perm === 'denied'
                     ? '系统通知被拒绝了'
-                    : `开启通知，上课前 ${REMIND_BEFORE} 分钟提醒你`}
+                    : perm === 'native'
+                      ? `开启通知，上课前 ${REMIND_BEFORE} 分钟提醒你`
+                      : `开启通知，上课前 ${REMIND_BEFORE} 分钟提醒你`}
               </div>
               <div style={{ color: perm === 'unsupported' ? 'var(--color-warnink2)' : 'var(--color-ink2)', marginTop: 2 }}>
                 {perm === 'unsupported'
-                  ? '会改用页内提醒（需要平台开着）。把网站装到手机桌面后再授权，通常就能收到。'
+                  ? /*
+                     * 🔴🔴 这句话 2026-10-03 改过（用户在 apk 上截图报出来的）。
+                     *   原文案是「**这个浏览器不支持**系统通知」+「把网站装到手机桌面后再授权」——
+                     *   而 apk 的 WebView 里**压根没有 Notification**，`notifySupported()` 恒 false
+                     *   ⇒ **老师明明已经装成 apk 了**，却还被建议"再装到桌面"。
+                     *   那是**照着做也没用的建议**（AGENTS.md：不可写的路径要显式报错，
+                     *   不能给一条执行不了的出路）。
+                     *   现在只说事实 + 给真正能做的事（页内提醒 / 用网页版）。
+                     */
+                    '会改用页内提醒（需要平台开着）。要在手机上收到系统通知，请用浏览器打开网站并允许通知。'
                   : perm === 'denied'
-                    ? '请到浏览器设置里允许本网站通知，或改用页内提醒。'
-                    : '只在这台设备上提醒，内容不会外发。'}
+                    ? '请到系统或浏览器设置里允许本网站通知，或改用页内提醒。'
+                    : perm === 'native'
+                      ? '只在这台设备上提醒，内容不会外发。'
+                      : '只在这台设备上提醒，内容不会外发。'}
               </div>
             </div>
             {perm === 'default' ? (
@@ -187,11 +212,28 @@ export default function Schedule() {
                 variant="primary"
                 onClick={async () => {
                   const r = await requestNotify()
-                  setPerm(r)
-                  push({
-                    text: r === 'granted' ? '通知已开启' : '未授权，将用页内提醒',
-                    tone: r === 'granted' ? 'ok' : 'warn',
-                  })
+                  /*
+                   * 🔴 `'native'` 不能当成"未授权"（2026-10-03）：
+                   *   `requestNotify()` 在原生那一支返回 'native'，意思是
+                   *   **"这要走系统设置，不是网页能弹的框"**。
+                   *   原来 `r === 'granted' ? … : '未授权，将用页内提醒'` 会把它
+                   *   说成"未授权"—— 而 apk 上真正的入口是**系统通知设置**。
+                   *   ⚠️ R9 把 `openNotificationSettings()` 接上后，这里换成真的跳设置。
+                   */
+                  push(
+                    r === 'granted'
+                      ? { text: '通知已开启', tone: 'ok' }
+                      : r === 'native'
+                        ? {
+                            text: '要在系统里开通知',
+                            tone: 'warn',
+                            desc: '这条要走手机的系统设置才能打开，平台会继续用页内提醒。',
+                          }
+                        : { text: '未授权，将用页内提醒', tone: 'warn' },
+                  )
+                  /* 原生那一支的权限状态还没接（R9），所以这里**不** setPerm('native')：
+                     * 那会让这块横幅直接消失，而实际上原生通知一条也还没发出去。 */
+                  if (r !== 'native') setPerm(r)
                 }}
               >
                 开启通知

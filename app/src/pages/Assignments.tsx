@@ -7,6 +7,7 @@ import {
   IconGrid,
   IconHash,
   IconList,
+  IconPencil,
   IconPlus,
   IconRefresh,
   IconScan,
@@ -194,6 +195,24 @@ export default function Assignments() {
        · 所以这一块**不读身份槽位**、也不自己拼角色数组 —— 判据只有一处。
      ============================================================ */
   const teacher = useStore((s) => s.teacher)
+  /*
+   * 🔴🔴 「每日作业」这块**默认收起**（2026-10-03，用户定的）
+   *
+   * 为什么：它原来**占据作业页最上方**，而一进页面先撞上的是一整块录入表单
+   * （选班 / 今天昨天 / 学科 / 输入框）。可老师在这个页面上**最高频**的动作是
+   * **看档案、收缴、批改** —— 那些全被这块表单压到了第二屏。
+   *
+   * 为什么是「收起」而不是「挪到下面」：
+   *   · 「留作业」是**一天一次**的低频动作，「收缴批改」是**每节课一次**的高频动作
+   *     —— 顺序应当按频次排，不是按"谁先写完"。
+   *   · 挪到列表下面会变成"要找一会儿才找到"，而收成一行按钮是**一眼可见 + 一点就开**。
+   *   · ⚠️ 收起**不丢信息**：折叠那一行仍然写着"今天留了几条"（见下面的按钮文案），
+   *     老师不必展开就知道今天留没留。
+   *
+   * ⚠️ 教室端那块屏**不受影响**：它是**只读**展示（`Classroom.tsx:1062`），
+   *    与这里的开合无关 —— 这里只是教师端的录入入口。
+   */
+  const [dhOpen, setDhOpen] = useState(false)
   const [dhClassId, setDhClassId] = useState('')
   const [dhDate, setDhDate] = useState(() => ymdOf(beijingNow()))
   const [dhSubject, setDhSubject] = useState('chinese')
@@ -497,13 +516,33 @@ export default function Assignments() {
           同一天同一科可以留**多条**；档案那套是一次收缴 / 批改的完整流程。
           🔴 能写哪些科**由数据库说了算**（`can_write_daily_homework()` + RLS）——
              所以这一块不读身份槽位，问出来是"不能写"就把按钮按住、把理由写出来。
+
+          🔴🔴 **默认收起**（2026-10-03，用户定的）—— 原来它在最上方，
+             把老师最高频的「看档案 / 收缴」压到了第二屏。理由见上面 `dhOpen` 那段。
+             收起时这一行仍然写着**今天留了几条** ⇒ 不展开也知道留没留。
         */}
         {classes.length ? (
+          dhOpen ? (
           <Panel
             className="mb-3"
             head="每日作业"
             extra={
               <span className="flex items-center gap-2">
+                {/*
+                  🔴 **必须有「收起」**（2026-10-03 补，第一个版本漏了）：
+                  展开之后如果回不去，这个"收起"就等于没有 ——
+                  老师点开一次就被永远留在那个大表单里。
+                  ⚠️ 它做在 `extra`（面板标题右侧）而不是按钮行里：
+                     那一行在收起态才有，展开后就没了。
+                */}
+                <button
+                  type="button"
+                  data-dh-toggle="close"
+                  onClick={() => setDhOpen(false)}
+                  style={{ fontSize: 12, color: 'var(--color-ink3)' }}
+                >
+                  收起
+                </button>
                 <select
                   className="input"
                   style={{ width: 'auto', height: 30, fontSize: 12.5 }}
@@ -651,6 +690,31 @@ export default function Assignments() {
               </div>
             </div>
           </Panel>
+          ) : (
+            /*
+             * 收起时的那一行。⚠️ 它**必须**写着"今天留了几条" ——
+             *   否则老师为了确认"今天留没留"就得每次都展开一遍，
+             *   收起就变成了"藏起来"，那是把问题换了个方向而不是解决。
+             * 🔴 `dhRows` 在 `dhBundle` 之前就已经算好了（useMemo），
+             *    所以这里直接用它，不需要额外的查询。
+             */
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              <Button
+                size="sm"
+                variant="ghost"
+                icon={<IconPencil size={14} />}
+                data-dh-toggle="open"
+                onClick={() => setDhOpen(true)}
+              >
+                留今日作业
+              </Button>
+              <span style={{ fontSize: 12.5, color: 'var(--color-ink3)' }} data-dh-summary>
+                {dhRows.length
+                  ? `${friendlyDate(dhDate)} 已经留了 ${dhRows.length} 条 —— 教室里那块屏上也在显示。`
+                  : `${friendlyDate(dhDate)} 还没留。`}
+              </span>
+            </div>
+          )
         ) : null}
 
         {/* 筛选：班级 · 时间 · 状态 */}

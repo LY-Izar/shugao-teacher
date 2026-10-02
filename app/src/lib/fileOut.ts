@@ -50,6 +50,18 @@ export function inShell(): boolean {
 export type SaveResult = 'saved' | 'cancelled' | 'failed'
 
 /**
+ * `openInPlace` 的结局。
+ *
+ * 🔴 为什么**必须有**这个返回值（2026-10-03）：壳那一支有真实的失败可能
+ * （系统没有能打开这个类型的程序 —— 教室端那台机器上**真的会遇到**），
+ * 而调用方原先拿到的是 `void` ⇒ 点了没反应，界面也不会说为什么。
+ *
+ * ⚠️ `'opened'` 在**网页那一支**是"没在壳里、没报错"，**不是**"确认打开了"
+ *    —— 浏览器不给这种反馈。这与 `SaveResult` 里网页支恒为 `'saved'` 同理。
+ */
+export type OpenResult = 'opened' | 'failed'
+
+/**
  * 🔴 把一个 Blob 存到磁盘。
  *
  * - **壳**：走 `dialog.showSaveDialog`（弹"另存为"）或原生写文件
@@ -84,17 +96,31 @@ export async function saveBlob(filename: string, blob: Blob): Promise<SaveResult
  *   · Electron：新开一个窗口，**没有 Electron 的能力**（preload 没了、样式可能丢、点不了）
  *   · Android WebView：`window.open` 被拦、`blob:` 又跨源 → **什么都不发生**（静默失败）
  */
-export async function openInPlace(filename: string, blob: Blob): Promise<void> {
+export async function openInPlace(filename: string, blob: Blob): Promise<OpenResult> {
   const s = shell()
   if (s?.openInPlace) {
-    await s.openInPlace(filename, blob)
-    return
+    // 🔴🔴 **返回值不许扔**（2026-10-03 补，之前是 `await` 完直接 `return`）：
+    //    壳侧 `shell-ipc.mjs` 的 openInPlace 有三种结局 ——
+    //      'opened' / 'failed' / 抛异常，
+    //    而教室端那台机器上「某个 .png 没有系统程序能打开」是**真的会发生的**。
+    //    把返回值丢掉的后果：老师点了**什么都不会发生**，而界面**不会告诉他为什么**
+    //    —— 这正是项目硬规矩「不可写的路径要显式报错」要防的那种静默。
+    //
+    // ⚠️ 这里**故意不回退到网页那一支**：网页分支是 `window.open(blobUrl)`，
+    //    在壳里会新开一个**没有 Electron 能力的浏览器窗口**（样式全丢、点不了）——
+    //    那才是更坏的结局（见 preload.js 里 openInPlace 上面那段说明）。
+    //    失败就明确返回 'failed'，让调用方决定要不要提示"要不要改成另存为"。
+    const r = await s.openInPlace(filename, blob)
+    return r === 'opened' ? 'opened' : 'failed'
   }
 
   // 网页分支：与原 `openLocal` 逐字一致
   const url = URL.createObjectURL(blob)
   window.open(url, '_blank', 'noopener')
   window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
+  // ⚠️ 网页这一支**恒为 'opened'**：浏览器不给反馈（`window.open` 被弹窗拦截也
+  //    不会告诉你）。**不是**"确认打开了"，只是"没在壳里、不该报失败"。
+  return 'opened'
 }
 
 /**

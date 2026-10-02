@@ -2786,7 +2786,26 @@ export default function Classroom() {
                                 icon={
                                   viewable ? <IconEye size={15} /> : <IconDownload size={15} />
                                 }
-                                onClick={() => (viewable ? openLocal(f) : saveToDisk(f))}
+                                onClick={() => {
+                                  /* 🔴 2026-10-03：`openLocal` 现在**返回结局**了。
+                                     壳里"系统没有能打开这个类型的程序"是**真会发生的**
+                                     （教室端那台机器上尤其容易遇到）——
+                                     而这一支原先把返回值 `void` 掉了，
+                                     结果是**点了没反应、界面也不说为什么**。
+                                     失败时顺带给一句"要不要改存下来"，那是唯一出路。 */
+                                  if (!viewable) {
+                                    void saveToDisk(f)
+                                    return
+                                  }
+                                  void openLocal(f).then((r) => {
+                                    if (r === 'opened') return
+                                    push({
+                                      text: '这台机器打不开它',
+                                      tone: 'bad',
+                                      desc: '系统里没有能打开这个文件的程序。要不改成另存为，放到电脑上再看？',
+                                    })
+                                  })
+                                }}
                               >
                                 {viewable ? '打开' : '下载'}
                               </Button>
