@@ -2,6 +2,7 @@ import type { ButtonHTMLAttributes, ReactNode } from 'react'
 import { useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { cx } from '../lib/cx'
+import { useExit } from '../lib/useExit'
 import { IconArrowLeft, IconX } from './icons'
 
 /**
@@ -246,13 +247,25 @@ export function Sheet({
   title,
   children,
   footer,
+  exitMs,
 }: {
   open: boolean
   onClose: () => void
   title: ReactNode
   children: ReactNode
   footer?: ReactNode
+  /**
+   * P1a：退场时长（毫秒）。
+   *
+   * 🔴 这是**产品级选项**，不是绕过门禁的后门：
+   * - 不传（默认 180ms，与 `--dur-exit` 一致）→ 抽屉滑下去，比"啪地消失"好；
+   * - 传 `0` → 关掉即卸载。**有的调用点就该这样**（例如连点两次要立刻能再打开的），
+   *   而"关掉后元素不存在"这类断言也走这一支（不必干等 180ms）。
+   */
+  exitMs?: number
 }) {
+  const mounted = useExit(open, exitMs ?? 180)
+
   useEffect(() => {
     if (!open) return
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
@@ -260,11 +273,21 @@ export function Sheet({
     return () => window.removeEventListener('keydown', onKey)
   }, [open, onClose])
 
-  if (!open) return null
+  // ⚠️ 渲染跟 `mounted`（留 180ms 播退场），语义跟 `open`（退场期间立刻 inert）
+  if (!mounted) return null
   return (
     <Portal>
-      <div className="scrim" onClick={onClose} />
-      <div className="sheet">
+      <div
+        className={open ? 'scrim' : 'scrim scrim--out'}
+        onClick={onClose}
+        aria-hidden={!open || undefined}
+        inert={!open || undefined}
+      />
+      <div
+        className={open ? 'sheet' : 'sheet sheet--out'}
+        aria-hidden={!open || undefined}
+        inert={!open || undefined}
+      >
         <div className="panel-head" style={{ borderRadius: '10px 10px 0 0' }}>
           <h2 className="flex-1 truncate">{title}</h2>
           <button
@@ -300,12 +323,17 @@ export function Modal({
   onClose,
   children,
   labelledBy,
+  exitMs,
 }: {
   open: boolean
   onClose: () => void
   children: ReactNode
   labelledBy?: string
+  /** P1a：同 `Sheet` 的 `exitMs`（0 = 关掉即卸载） */
+  exitMs?: number
 }) {
+  const mounted = useExit(open, exitMs ?? 180)
+
   useEffect(() => {
     if (!open) return
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
@@ -313,11 +341,24 @@ export function Modal({
     return () => window.removeEventListener('keydown', onKey)
   }, [open, onClose])
 
-  if (!open) return null
+  // ⚠️ 同 Sheet：渲染跟 `mounted`，语义跟 `open`
+  if (!mounted) return null
   return (
     <Portal>
-      <div className="scrim" onClick={onClose} />
-      <div className="modal" role="dialog" aria-modal="true" aria-labelledby={labelledBy}>
+      <div
+        className={open ? 'scrim' : 'scrim scrim--out'}
+        onClick={onClose}
+        aria-hidden={!open || undefined}
+        inert={!open || undefined}
+      />
+      <div
+        className={open ? 'modal' : 'modal modal--out'}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={labelledBy}
+        aria-hidden={!open || undefined}
+        inert={!open || undefined}
+      >
         {children}
       </div>
     </Portal>

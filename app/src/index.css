@@ -893,6 +893,24 @@ body::before {
     flex-direction: column;
   }
 
+  /* --- P1a 退场（2026-10-02）------------------------------------------
+     `ui.tsx` 的 `Sheet` / `Modal` 改成用 `lib/useExit.ts` 挂载延迟：
+     open 变 false 后元素**留在 DOM 里 180ms**，靠下面这两个类名把进场 animation
+     换成退场 animation，播完才卸载。
+
+     ⚠️ **fill-mode 必须 `both`**：`.sheet` 的进场是 `sheet-up`（从屏幕下方上来），
+     如果退场那条不 fill 住终点，最后一瞬会闪回 `sheet-up` 的**起点**（= 抽屉"弹回屏幕外"）。
+     ⚠️ 这两条必须**排在 `.sheet` 之后**：同 specificity，靠源码顺序赢。
+     ⚠️ 时长统一 `var(--dur-exit)`（180ms）—— 退场时长是**参数**，由 `useExit` 的
+     `exitMs` 决定；调用点若要立刻消失，显式传 `exitMs={0}`。
+     -------------------------------------------------------------------- */
+  .scrim--out {
+    animation: fade-out var(--dur-exit) var(--ease-exit) both;
+  }
+  .sheet--out {
+    animation: sheet-down var(--dur-exit) var(--ease-exit) both;
+  }
+
   /* ------------------------------------------------------------------
      ✅ 2026-09-28 第二轮：`.sheet-foot-safe` 那条 `padding-bottom` **已回退删掉**，
         这里只留一段留档（类名本身还挂在 `ui.tsx` 的 `Sheet` 页脚上，等价于没用）。
@@ -930,6 +948,14 @@ body::before {
     border-radius: 10px;
     box-shadow: 0 28px 70px -22px rgb(var(--color-shadow) / 0.38);
     animation: modal-in 0.36s cubic-bezier(0.34, 1.24, 0.5, 1) both;
+  }
+
+  /* P1a：退场。⚠️ 排在 `.modal` **之后** —— 同 specificity，靠源码顺序赢。
+     🔴 退场**不**碰上面那条 `cubic-bezier(0.34, 1.24, 0.5, 1)`：那是**进场**的
+     曲线（`1.24` 与 `--ease-spring` 的 `1.3` **不等**，换成 var 就是改行为）。
+     退场一律 `var(--ease-exit)` —— 退出不加弹跳。 */
+  .modal--out {
+    animation: modal-out var(--dur-exit) var(--ease-exit) both;
   }
 
   /* --- 分段控件 --- */
@@ -1057,6 +1083,33 @@ body::before {
   }
   to {
     transform: translate(-50%, 0);
+  }
+}
+
+/* ------------------------------------------------------------------
+   P1a 退场（2026-10-02）：补上全站最大的一块缺口 —— **只有进场、没有退场**。
+   挂载延迟在 `lib/useExit.ts`，CSS 这一侧是「关掉期间挂哪个 animation」。
+
+   🔴 **退出绝不加弹跳** —— 这是 transitions.dev 的原则：**overshoot 只用于入场**。
+   入场要"到位感"，退场要"干脆"；退场还带回弹会让人觉得界面在犹豫。
+   → 所以这三条**一律 `var(--ease-exit)`**，不用 `--ease-spring`（那是 `1.3` 过冲的那支）。
+
+   ⚠️ `toast-out` **不在这里**：它早就在下面（Toast 那轮 T2 加的），重复定义会覆盖它。
+   ------------------------------------------------------------------ */
+@keyframes sheet-down {
+  to {
+    transform: translate(-50%, 100%);
+  }
+}
+@keyframes modal-out {
+  to {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.96);
+  }
+}
+@keyframes fade-out {
+  to {
+    opacity: 0;
   }
 }
 

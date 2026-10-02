@@ -1137,6 +1137,147 @@ await withLock(async () => {
         )
       })
 
+      /* ================= P1a：退场动画（2026-10-02）=================
+       * 🔴 **为什么放在这里（04f，不是最后一节）**：
+       *    这一轮实测发现 shots 在第 126 张图那一节（「撤下图标 + 开学准备 · 六步脊」）
+       *    会**异常中断**（`Failed to fetch dynamically imported module`，
+       *    Vite dev server 的依赖哈希问题）—— 已用 stash 对照证明**与源码改动无关**，
+       *    在干净的 HEAD 上同样断。所以**凡是"必须拿到读数"的断言都不能往后放**：
+       *    放在这里，即使后面那节照旧中断，这几条**照样出读数**。
+       *
+       * ⚠️ 下面每条的期望值都是**实测来的**，不是推的（临时探针 `_probe-p1a.mjs` 跑过一遍）：
+       *    关闭后 class=`sheet sheet--out` · animation=`sheet-down` · 180ms ·
+       *    inert=true · aria-hidden=true；t+80ms 仍在 DOM，t+330ms 已卸载。
+       *
+       * 🔴🔴 **参数顺序：`check(ok, label, observed, extra)` —— 条件在第一个！**
+       *    写反的话 `ok` 拿到的是那句标签字符串（非空 = 真）→ **这条永远绿**。
+       *    审计发现全仓 **37 处写反**（774 处调用里）：`:985-1058` 学生档案 21 处、
+       *    `:1087-1133` 调课 8 处 —— 🔴 **那些是先前就存在的假绿，不是本轮引入**。
+       *    本节 8 条一律按 `check(条件, 标签, 实测)` 写。
+       * ---------------------------------------------------------------- */
+      await step('04f 退场动画（P1a）', async () => {
+        const OPENER = '[data-adj-open]'
+        const closeBtn = page.getByRole('button', { name: '关闭' })
+
+        await page.goto(`${BASE}/classes/c-demo-1?as=head_teacher`, { waitUntil: 'networkidle' })
+        await page.waitForTimeout(500)
+        const openerN = await page.locator(OPENER).count()
+        check(
+          openerN === 1,
+          'P1a 前置：班主任页上那个开 Sheet 的入口正好 1 个（后面几条都建立在它之上）',
+          `入口数=${openerN}`,
+        )
+        if (openerN !== 1) return
+
+        // ---- 进场（对照：退场之前它本来就该是 sheet-up） ----
+        await page.locator(OPENER).click()
+        await page.waitForTimeout(420)
+        const enter = await page.evaluate(() => {
+          const s = document.querySelector('.sheet')
+          if (!s) return null
+          const cs = getComputedStyle(s)
+          return { cls: s.className, anim: cs.animationName, dur: cs.animationDuration }
+        })
+        check(
+          enter !== null && enter.anim === 'sheet-up',
+          'P1a：进场照旧是 `sheet-up 0.26s`（这一轮只加退场，**不许顺手改进场**）',
+          enter ? `animation=${enter.anim} ${enter.dur} class="${enter.cls}"` : 'sheet 不存在',
+        )
+
+        // ---- 退场：刚关掉的那一瞬 ----
+        await closeBtn.first().click()
+        const justAfter = await page.evaluate(() => {
+          const s = document.querySelector('.sheet')
+          const sc = document.querySelector('.scrim')
+          if (!s) return { gone: true }
+          const cs = getComputedStyle(s)
+          return {
+            gone: false,
+            cls: s.className,
+            anim: cs.animationName,
+            dur: cs.animationDuration,
+            inert: s.hasAttribute('inert'),
+            aria: s.getAttribute('aria-hidden'),
+            scrimOut: sc ? sc.className.includes('scrim--out') : null,
+            scrimInert: sc ? sc.hasAttribute('inert') : null,
+          }
+        })
+        check(
+          justAfter.gone === false,
+          '🔴 P1a：关掉后元素**没有立刻消失** —— 以前是 `if (!open) return null`，直接卸载、零退场',
+          justAfter.gone ? '点完就没了（退场没生效）' : `class="${justAfter.cls}"`,
+          '反向对照：把 `useExit` 换成 `open ? 挂载 : null` → 这条必须红',
+        )
+        check(
+          justAfter.gone === false && justAfter.cls.includes('sheet--out') && justAfter.anim === 'sheet-down',
+          '🔴 P1a：退场期间挂的是 `sheet--out` → animation 换成 `sheet-down`（不是退回进场的 sheet-up）',
+          justAfter.gone ? '（元素已卸载）' : `class="${justAfter.cls}" animation=${justAfter.anim}`,
+          '反向对照：把 `.sheet--out` 那条 animation 删掉 → 这条必须红（此时它会继续播 sheet-up）',
+        )
+        check(
+          justAfter.gone === false && justAfter.dur === '0.18s',
+          '🔴 P1a：退场时长就是 `--dur-exit` 的 **180ms**（不是随手写的 0.2s）',
+          `实测 ${justAfter.dur}`,
+        )
+        check(
+          justAfter.gone === false &&
+            justAfter.inert === true &&
+            justAfter.aria === 'true' &&
+            justAfter.scrimInert === true,
+          '🔴 P1a：退场那 180ms 里 `inert` + `aria-hidden="true"`（否则「看不见却能 Tab 到、能点」）',
+          `sheet: inert=${justAfter.inert} aria-hidden=${justAfter.aria} · scrim: --out=${justAfter.scrimOut} inert=${justAfter.scrimInert}`,
+          '反向对照：把退场期的 inert/aria-hidden 摘掉 → 这条必须红',
+        )
+
+        // ---- 中途还在、之后才卸载（证明是真"延迟卸载"，不是碰巧慢） ----
+        await page.waitForTimeout(80)
+        const stillThere = await page.evaluate(() => !!document.querySelector('.sheet'))
+        check(stillThere === true, '🔴 P1a：t+80ms 仍在 DOM 里（退场还没结束）', `在=${stillThere}`)
+
+        await page.waitForTimeout(250)
+        const gone = await page.evaluate(() => ({
+          sheet: !!document.querySelector('.sheet'),
+          scrim: !!document.querySelector('.scrim'),
+        }))
+        check(
+          gone.sheet === false && gone.scrim === false,
+          '🔴 P1a：t+330ms 播完就卸载（sheet 与 scrim 一起走）',
+          `sheet=${gone.sheet} scrim=${gone.scrim}`,
+        )
+
+        // ---- 🧪 反向对照①：`.sheet-down` 与 `.sheet-up` 必须是**两个不同的 keyframe**
+        //    理由：没有退场那条规则时 class 照样会加、元素照样会留 180ms，
+        //    但**它会继续播进场的 sheet-up**（从屏幕下往回弹），退场等于没做。
+        //    所以这条盯的是 animationName，不是"元素在不在"。
+        check(
+          justAfter.gone === false && justAfter.anim === 'sheet-down' && justAfter.anim !== 'sheet-up',
+          '🧪 反向对照①：`sheet-down` 与 `sheet-up` **必须是两个不同的 keyframe**' +
+            '（判据是 animationName，不是有没有元素）',
+          `退场实测 ${justAfter.anim}`,
+          '反向对照：把 `.sheet--out` 那条 animation 删掉 → 这条与上面「换 sheet-down」两条都红',
+        )
+
+        // ---- 🧪 反向对照②：连点「开→关→开」不能被上一个 timer 提前卸载 ----
+        await page.locator(OPENER).click()
+        await page.waitForSelector('.sheet', { timeout: 8000 })
+        await page.waitForTimeout(60) // 只开 60ms
+        await closeBtn.first().click()
+        await page.waitForTimeout(60) // 只关 60ms
+        await page.locator(OPENER).click() // 又打开
+        await page.waitForTimeout(420) // 等过原本那个 180ms 的卸载点
+        const reopened = await page.evaluate(() => {
+          const s = document.querySelector('.sheet')
+          return { exists: !!s, cls: s ? s.className : null, inert: s ? s.hasAttribute('inert') : null }
+        })
+        check(
+          reopened.exists === true && reopened.inert === false,
+          '🧪 反向对照②：开→关→开（间隔各 60ms）之后元素**仍在、且 inert 已摘掉**' +
+            '（不写清旧 timer 就是「点两下它自己没了」）',
+          `exists=${reopened.exists} class="${reopened.cls}" inert=${reopened.inert}`,
+          '反向对照：把 `useExit` 的 effect cleanup（clearTimeout）去掉 → 这条必须红',
+        )
+      })
+
       await goto(page, '05–07 拍照录名单', '/classes/c-demo-1/import/photo', {
         markers: ['拍照录名单', '第 1 步 · 拍摄花名册', '识别约定'],
       })
