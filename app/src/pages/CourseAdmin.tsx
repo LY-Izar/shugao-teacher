@@ -444,8 +444,16 @@ function buildDayCells(
      *    （"没课的那一格本来就没有课可撞" —— 与 `预览-v3.html:1351` 同一条口径）。
      */
     if (over && !over.toSubject) return
-    /* 演示用的任课老师：同一科在同一个班上固定是第一位（这样"同一门课换人"才有得换） */
-    const roster = DEMO_TEACHERS[subjectOfTitle(s.title)] ?? []
+    /*
+     * 演示用的任课老师：同一科在同一个班上固定是第一位（这样"同一门课换人"才有得换）。
+     * 🔴 **只在演示模式**回落到这份写死的名册（`demoFallback`）——
+     *    真实数据下它会把四科印成名册上的人（2026-10-20 实测：物理显示 周庆 / 王琳鑫、
+     *    化学显示 陈立、数学显示 谢伦菊，而标题里写的是 曾辉 / 谢伦菊 / 王琳鑫），
+     *    因为库里这个班 45 行的 `teacher_id` 全是**导入者**、真老师只写在标题里 ——
+     *    真名字一律由 `titleTeacherAt()` 从标题上拆（见页面组件里那个函数），
+     *    **绝不拿演示名册顶替**；认不出就不印老师那一行。
+     */
+    const roster = demoFallback ? (DEMO_TEACHERS[subjectOfTitle(s.title)] ?? []) : []
     const fixed = roster.length ? roster[i % Math.min(roster.length, 2)] : null
     out.push({
       period: 0,
@@ -1145,11 +1153,21 @@ const planSlot = (m: SwapPlan, which: 'a' | 'b'): DaySlot | undefined => {
    */
   const teacherNamesByTitle = useMemo(() => {
     const m = new Map<string, string>()
+    const seen = new Map<string, number>()
     for (const s of schedule) {
-      if (!s.teacherId || m.has(s.teacherId)) continue
+      if (!s.teacherId) continue
+      seen.set(s.teacherId, (seen.get(s.teacherId) ?? 0) + 1)
+      if (m.has(s.teacherId)) continue
       const name = splitLessonTitle(s.title).teacher
       if (name) m.set(s.teacherId, name)
     }
+    /*
+     * 🔴 **一个 id 落在多行上 ⇒ 它就不是"这一节的老师"**，一个名字都不认。
+     *    真实库里这个班 45 行的 `teacher_id` 全是**导入者**那一个 id；
+     *    照旧写法会把"第一行标题上那个人"摊到整张表上（屏上每一格都印同一个名字）。
+     *    认不出比认错强 —— 真名字由 `titleTeacherAt()` 从标题上取。
+     */
+    for (const [id, n] of seen) if (n > 1) m.delete(id)
     return m
   }, [schedule])
 
@@ -1168,6 +1186,41 @@ const planSlot = (m: SwapPlan, which: 'a' | 'b'): DaySlot | undefined => {
     if (!id) return '没定老师'
     return teacherOf(id) ?? '老师名字没读到'
   }
+
+  /**
+   * 这一节是谁的课 —— **真实数据里的答案只在标题上**。
+   *
+   * 🔴 为什么不问 `teacherId`：库里这个班 45 行的 `teacher_id` 全是**导入者**那一个 id
+   *    （`schedule_items.teacher_id` 记的是"谁建的这一行"，见 `remote.ts` 的写入口径），
+   *    真老师写在标题「高二4班 物理 曾辉」里 —— 课程页写入时也是**科目 + 老师一起写进标题**。
+   *    于是按 **星期 + 钟点** 回这个班的周课表行，把姓名那一截拆下来
+   *    （`splitLessonTitle`，与教室端「正在上课」卡、与 `teacherNamesByTitle` 同一处拆法）。
+   *
+   * ⚠️ **演示模式一律回 `null`**：那一支的名字由 `DEMO_TEACHERS` 轮着给（夹具口径），
+   *    这一条一并回到 `null` 才不会动那 141 张基线。
+   * ⚠️ 这一格被**临时调课**盖过时不认（调用方把 `changed` 传进来）：标题写的是原来那一节。
+   */
+  const titleTeacherAt = (wd: number, start: string): string | null => {
+    if (DEMO_FALLBACK || !klass) return null
+    const row = classRows(klass.id).find(
+      (s) => s.weekday === wd && s.start === start && s.scope === 'class',
+    )
+    const name = row ? splitLessonTitle(row.title).teacher : ''
+    return name || null
+  }
+
+  /**
+   * 一格上该印的老师名（**认不出回 `null`，绝不印 id**）：
+   * 先认 `teacherId`（真名册在手时它最准），认不出再回到标题上那一截。
+   * ⚠️ 屏上"认不出"的两种说法（「没定老师」/「老师名字没读到」）仍然只由 `teacherName()`
+   *    一个地方出 —— 这里返回 `null`，调用方自己决定要不要退回那句话。
+   */
+  const lessonTeacher = (
+    wd: number,
+    start: string,
+    teacherId: string | null,
+    changed = false,
+  ): string | null => teacherOf(teacherId) ?? (changed ? null : titleTeacherAt(wd, start))
 
   /**
    * 「只换老师」那几格能换成谁。
@@ -1874,14 +1927,16 @@ const planSlot = (m: SwapPlan, which: 'a' | 'b'): DaySlot | undefined => {
                                                   {l.subject}
                                                 </span>
                                                 {/*
-                                                 * 🔴 这一行**只在真的认得出姓名时**才印（`teacherOf`）。
+                                                 * 🔴 这一行**只在真的认得出姓名时**才印（`lessonTeacher`）。
                                                  *    两个原因，都是实测出来的：
                                                  *    ① **id 一律不上屏**（认不出就什么都不印，别印 UUID）；
-                                                 *    ② 真实数据的 `teacher_id` 常常是空的，而**标题那一行里已经带着姓名**
-                                                 *       （`高二4班 英语 郭钰峰`）—— 这时再补一句「没定老师 / 名字没读到」，
-                                                 *       就是**同一格上自相矛盾**（用户 2026-09-30 截图里周一那几格正是这样）。
+                                                 *    ② 真实数据的 `teacher_id` 记的是**导入者**（不是这一节的老师），
+                                                 *       而**标题那一行里已经带着姓名**（`高二4班 英语 郭钰峰`）——
+                                                 *       名字从标题上取（`titleTeacherAt`）；取不到就**什么都不印**，
+                                                 *       别补一句「没定老师 / 名字没读到」（那是**同一格上自相矛盾**，
+                                                 *       用户 2026-09-30 截图里周一那几格正是这样）。
                                                  */}
-                                                {teacherOf(l.teacherId) ? (
+                                                {lessonTeacher(wd, l.start, l.teacherId, l.changed) ? (
                                                   <span
                                                     style={{
                                                       display: 'block',
@@ -1889,7 +1944,7 @@ const planSlot = (m: SwapPlan, which: 'a' | 'b'): DaySlot | undefined => {
                                                       color: 'var(--color-ink3)',
                                                     }}
                                                   >
-                                                    {teacherOf(l.teacherId)}
+                                                    {lessonTeacher(wd, l.start, l.teacherId, l.changed)}
                                                   </span>
                                                 ) : null}
                                                 {/* 「只这一天」与「撞课」是两件事：同时成立就两个都挂 */}
@@ -2207,6 +2262,7 @@ const planSlot = (m: SwapPlan, which: 'a' | 'b'): DaySlot | undefined => {
               }}
               plan={plan}
               teacherName={teacherName}
+              lessonTeacher={lessonTeacher}
               teacherPick={teacherPick}
               onTeacherPick={setTeacherPick}
               classroomEffect={classroomEffect}
@@ -2433,6 +2489,17 @@ type AdjustPanelProps = {
   onClearPick: () => void
   plan: SwapPlan | null
   teacherName: (id: string | null) => string
+  /**
+   * 这一格该印的**老师名**（认不出回 `null`）—— 真实数据里名字只在标题上，
+   * 由页面那层从标题上拆（`titleTeacherAt`）。屏上"认不出"的两种说法仍只由
+   * `teacherName()` 一个地方出，所以调用方写 `… ?? teacherName(id)`。
+   */
+  lessonTeacher: (
+    wd: number,
+    start: string,
+    teacherId: string | null,
+    changed?: boolean,
+  ) => string | null
   teacherOptions: Array<{ id: string; name: string }>
   teacherPick: Record<string, string>
   onTeacherPick: (m: Record<string, string>) => void
@@ -2458,6 +2525,7 @@ function AdjustPanel({
   onClearPick,
   plan,
   teacherName,
+  lessonTeacher,
   teacherOptions,
   teacherPick,
   onTeacherPick,
@@ -2723,7 +2791,12 @@ function AdjustPanel({
                       color: c ? undefined : 'var(--color-ink3)',
                     }}
                   >
-                    {c ? `${c.subject} · ${teacherName(c.teacherId)}` : '空'}
+                    {c
+                      ? `${c.subject} · ${
+                          lessonTeacher(col.wd, c.start, c.teacherId, c.changed) ??
+                          teacherName(c.teacherId)
+                        }`
+                      : '空'}
                   </span>
                   {c?.changed ? <Tag tone="warn">这一天已调</Tag> : null}
                   {on ? <Tag tone="accent">第 {idx + 1} 格</Tag> : null}
