@@ -101,10 +101,10 @@ const isMissingError = (code: string, msg: string) =>
  * 把 PostgREST 回来的行**逼成 `Record<string, unknown>[]`**。
  *
  * ⚠️ 为什么要显式写这一步：`supabase-js` 的泛型在"没给表类型"时会把 `data` 推成
- *    `any[] | null`，而本仓库开了 `noImplicitAny` —— 于是 `.map((r) => …)` 里的 `r`
- *    就是一个**隐式 any**（TS7006），`tsc -b` 会红。这不是矫情：
- *    这一页读的每一列都是"线上库可能还没有"的新列，**按 `unknown` 一行一行取键**
- *    正是它该有的写法（直接信 `any` 就会把"列不存在"读成 `undefined` 而悄悄放过）。
+ *    `any[] | null` —— 按 `unknown` 一行一行取键正是它该有的写法
+ *    （直接信 `any` 就会把"列不存在"读成 `undefined` 而悄悄放过）。
+ *    🆕 2026-10-02（E4 对账）：原来这里写"本仓库开了 `noImplicitAny`"——**不实**，
+ *    三份 tsconfig 一直没开它；2026-10-02 起开的是 **`strictNullChecks`**。
  */
 const rowsOf = (data: unknown): Record<string, unknown>[] =>
   Array.isArray(data) ? (data as Record<string, unknown>[]) : []
