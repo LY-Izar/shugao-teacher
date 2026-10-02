@@ -9,6 +9,8 @@
      · deflate —— 用原生 CompressionStream('deflate-raw')
    ============================================================ */
 
+import { saveBlob } from './fileOut'
+
 /* ---------------- CRC32 ---------------- */
 
 const CRC_TABLE = (() => {
@@ -224,14 +226,18 @@ export async function buildDocx(blocks: DocBlock[], images: Map<string, DocImage
   ])
 }
 
-/** 下载一个 Blob 到本机 */
+/**
+ * 下载一个 Blob 到本机。
+ *
+ * 🔴 R4：这一层原来是**逐字抄**的 `<a download>`，全仓共五处同构的抄本之一。
+ * 现在转发给 `fileOut.saveBlob` —— 网页上那一支逐字照抄原动作（**行为零变化**），
+ * 壳里则走原生另存为。
+ *
+ * ⚠️ **导出名与参数顺序都不许改**（`(blob, filename)`，注意 blob 在前）：
+ * 有 5 个调用点靠这个名字，`SchoolCalendar.tsx` 等页面直接 import 它。
+ */
 export function downloadBlob(blob: Blob, filename: string) {
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  document.body.appendChild(a)
-  a.click()
-  a.remove()
-  window.setTimeout(() => URL.revokeObjectURL(url), 30_000)
+  // 🔴 不 await：原来的签名是同步 `void`，调用方没等它；
+  //    这里保持同步返回，别把签名悄悄改成 Promise（那会让"导出后立刻读文件"的调用点踩空）。
+  void saveBlob(filename, blob)
 }

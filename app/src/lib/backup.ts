@@ -4,6 +4,7 @@ import { useStore, useToast } from '../data/store'
 import { toISODate } from './date'
 import { clampQuestionCount, isUnassigned } from './assignments'
 import { isSerial, assignMissingSerials, yearLookupFromClasses } from './serial'
+import { saveJson } from './fileOut'
 import {
   DEFAULT_SUBJECT_CODE,
   alignAssignmentSubject,
@@ -732,15 +733,11 @@ export async function notifyBackupDone(
   return { ok: true }
 }
 
-export function downloadJson(data: unknown, filename: string) {  const blob = new Blob([JSON.stringify(data)], { type: 'application/json' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  document.body.appendChild(a)
-  a.click()
-  a.remove()
-  window.setTimeout(() => URL.revokeObjectURL(url), 30_000)
+export function downloadJson(data: unknown, filename: string) {
+  // 🔴 R4：原来这里自己造 Blob 再抄一份 `<a download>`（全仓第五处同构抄本）。
+  // 现在转给 `fileOut.saveJson` —— 于是**备份文件在壳里也能真正落到磁盘上**，
+  // 而不是在 Electron 里悄悄落进下载目录。
+  void saveJson(filename, data)
 }
 
 export async function readJsonFile(file: File): Promise<unknown> {

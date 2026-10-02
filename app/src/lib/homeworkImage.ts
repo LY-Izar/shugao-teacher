@@ -15,6 +15,7 @@
    ============================================================ */
 
 import { subjectShort } from './subjects'
+import { saveBlob } from './fileOut'
 import type { DailyHomework } from '../data/types'
 
 const W = 800
@@ -143,12 +144,12 @@ export function homeworkImageBlob(input: HomeworkImageInput): Promise<Blob | nul
 
 /** 交给浏览器下载（教室端那块屏上点的，不写本机文件夹） */
 export function downloadBlob(blob: Blob, filename: string): void {
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  document.body.appendChild(a)
-  a.click()
-  a.remove()
-  window.setTimeout(() => URL.revokeObjectURL(url), 10_000)
+  // 🔴 R4：原来这里**又抄了一份**与 `docxWrite.downloadBlob` 逐行同构的 `<a download>`
+  //（只有回收延迟不同：这里 10s、那边 30s —— 复制粘贴漂移的证据）。
+  // 现在直接转给统一那一支：`fileOut.saveBlob` 的网页分支取**最保守的 60s**。
+  //
+  // ⚠️ 顺带修掉一个小毛病：这一份原来只等 10 秒就 revoke，
+  //    800×600 的 PNG 在慢一点的机器上**可能还没开始下就被回收**（导出点了没反应）。
+  //    统一成 60s 之后这个毛病没了 —— 而这正是"抄一遍"的代价。
+  void saveBlob(filename, blob)
 }

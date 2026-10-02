@@ -11,6 +11,8 @@
    （PPT / Word）再触发一次浏览器下载，落到「下载」文件夹。
    ============================================================ */
 
+import { saveBlob, openInPlace } from './fileOut'
+
 const DB_NAME = 'shugao.classroom'
 const STORE = 'files'
 const VERSION = 1
@@ -84,20 +86,14 @@ export async function localUsage(): Promise<{ count: number; bytes: number }> {
 
 /** 把 Blob 交给浏览器下载（PPT / Word 这类要本地软件打开的） */
 export function saveToDisk(f: LocalFile) {
-  const url = URL.createObjectURL(f.blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = f.name
-  document.body.appendChild(a)
-  a.click()
-  a.remove()
-  // 给下载留点时间再回收
-  window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
+  // 🔴 R4：转发给统一那一支（网页分支逐字照抄这里原来的实现 —— 60s 回收那一版）
+  void saveBlob(f.name, f.blob)
 }
 
 /** 可直接在浏览器里看的类型，用 Blob URL 打开 */
 export function openLocal(f: LocalFile) {
-  const url = URL.createObjectURL(f.blob)
-  window.open(url, '_blank', 'noopener')
-  window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
+  // 🔴 R4：这是**第二种能力**，不能并进 saveBlob。
+  // 网页上 `window.open(blobUrl)`；壳里必须走原生 —— 否则会在**没有 preload 的
+  // 浏览器窗口**里打开，样式全丢、点不了（Android WebView 里更是静默失败）。
+  void openInPlace(f.name, f.blob)
 }

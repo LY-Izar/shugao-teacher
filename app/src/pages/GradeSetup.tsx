@@ -25,6 +25,7 @@ import {
   type StreamPlan,
 } from '../lib/stream'
 import { ROSTER_HEADER, compareRoster, gradeRosterToText } from '../lib/roster'
+import { saveBlob } from '../lib/fileOut'
 import {
   applyRoster,
   classTypeLabel,
@@ -767,12 +768,11 @@ function downloadRoster(
   const text = gradeRosterToText(rows)
   try {
     const blob = new Blob([`\ufeff${text}`], { type: 'text/tab-separated-values;charset=utf-8' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `${gradeName}-名单.tsv`
-    a.click()
-    URL.revokeObjectURL(url)
+    // 🔴 R4：原来这里内联抄了一份 `<a download>`，而且是全仓**唯一立即
+    //    `revokeObjectURL` 的一处**（其余五处都延迟 10~60 秒）——
+    //    也就是"点了没反应"最容易发生的那一档。
+    //    现在转给统一那一支，网页上逐字照抄原动作、回收 60s。
+    void saveBlob(`${gradeName}-名单.tsv`, blob)
   } catch {
     void navigator.clipboard?.writeText(text)
   }
