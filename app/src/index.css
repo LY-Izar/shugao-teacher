@@ -2330,3 +2330,21 @@ body::before {
     border-color: ButtonText;
   }
 }
+
+/* T8.1（2026-10-02）：标签页切走 → 暂停 7 条**纯装饰**的无限动画，回来即恢复
+   （`App.tsx` 的 visibilitychange 监听切 html[data-anim-hidden]）。
+   名单就是基础态 infinite 的全部 7 条：.skeleton / .sweep::after /
+   .glass-liquid > .sheen / .rail-pill::after / .scanline / .sb > .sb-glow-b /
+   .sb > .sb-glow-t。
+   ⚠️ .live-dot 与 .status-mark__ring 的呼吸**刻意不在名单里** —— 上面
+   reduced-motion 那两条顶回（「永远在跑」）是那几步"页面还活着"的唯一指示，
+   冻住 = 看起来像卡死（index.css:2044-2060 有完整留档）。 */
+html[data-anim-hidden] .skeleton,
+html[data-anim-hidden] .sweep::after,
+html[data-anim-hidden] .glass-liquid > .sheen,
+html[data-anim-hidden] .rail-pill::after,
+html[data-anim-hidden] .scanline,
+html[data-anim-hidden] .sb > .sb-glow-b,
+html[data-anim-hidden] .sb > .sb-glow-t {
+  animation-play-state: paused;
+}

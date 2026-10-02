@@ -413,6 +413,21 @@ export default function App() {
    *    也必须报得上来（判据全在服务端：`report_frontend_error()` 自己做限流与截断）。
    */
   useEffect(() => installErrorReporting(), [])
+  /*
+   * T8.1（2026-10-02）：标签页切走时暂停 7 条纯装饰的无限动画（skeleton / 横扫 /
+   * 流光 / 星光 / 扫描线），回来即恢复 —— 教师端不常驻，合盖前那几秒是白烧电。
+   * ⚠️ live-dot 与 StatusMark 的呼吸刻意不停：reduced-motion 下它们被顶回成
+   *    "永远在跑"，是"页面还活着"的唯一指示（index.css:2044-2060 留档）。
+   */
+  useEffect(() => {
+    const el = document.documentElement
+    const onVis = () => {
+      if (document.hidden) el.setAttribute('data-anim-hidden', '')
+      else el.removeAttribute('data-anim-hidden')
+    }
+    document.addEventListener('visibilitychange', onVis)
+    return () => document.removeEventListener('visibilitychange', onVis)
+  }, [])
   return (
     <ErrorBoundary>
     <BrowserRouter>
