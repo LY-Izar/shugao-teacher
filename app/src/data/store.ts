@@ -1443,57 +1443,64 @@ export const useStore = create<State>()(
       },
 
       setGrade: (id, data) => {
-        set((s) => ({
-          isDemo: false,
-          assignments: s.assignments.map((a) => {
-            if (a.id !== id) return a
-            /**
-             * 批改过的人一律视为「已交」。
-             * 有同学当天才交作业，教师会先批改再回头登记 ——
-             * 批完还挂着"未交"的话，查人界面会显示成红的，自相矛盾。
+        set((s) => {
+          /*
+           * E5（2026-10-02）：`.map` 全量遍历 → 按 id 定位、局部替换。
+           * ⚠️ 仍返回**新数组 / 新对象** —— zustand 的浅比较依赖引用变化
+           * （`功能设计与不变量.md` §十四.2 记着一次「聚合时只写计数、忘了明细」的同类事故）。
+           * 新对象只造匹配那一个；id 不存在时不动 assignments（没有可改的东西，也不必惊动订阅者）。
+           */
+          const idx = s.assignments.findIndex((a) => a.id === id)
+          if (idx < 0) return { isDemo: false }
+          const a = s.assignments[idx]
+          /**
+           * 批改过的人一律视为「已交」。
+           * 有同学当天才交作业，教师会先批改再回头登记 ——
+           * 批完还挂着"未交"的话，查人界面会显示成红的，自相矛盾。
+           */
+          const done = new Set(a.confirmedNos ?? [])
+          for (const no of data.confirmedNos ?? []) done.add(no)
+          /**
+           * 「已改错」必须跟着改错名单一起收缩。
+           * 只写名单不清理的话，一次"全选有错"把名单换掉就会留下孤儿记录，
+           * 列表按钮会显示「2/1」这种"已改的比该改的还多"的数。
+           * 名单是 `?? ` 继承来的，所以这里按**合并后**的名单过滤，谁写都能兜住。
+           */
+          const correctionNos = data.correctionNos ?? a.correctionNos ?? []
+          const next: (typeof s.assignments)[number] = {
+            ...a,
+            wrong: data.wrong ?? a.wrong,
+            confirmedNos: data.confirmedNos ?? a.confirmedNos,
+            subQuestions: data.subQuestions ?? a.subQuestions,
+            status: data.status ?? a.status,
+            gradeSeconds: data.gradeSeconds ?? a.gradeSeconds,
+            grades: data.grades ?? a.grades,
+            focusNos: data.focusNos ?? a.focusNos,
+            correctionNos,
+            correctedNos: (data.correctedNos ?? a.correctedNos ?? []).filter((n) =>
+              correctionNos.includes(n),
+            ),
+            missingNos: (data.missingNos ?? a.missingNos).filter((n) => !done.has(n)),
+            lateNos: (a.lateNos ?? []).filter((n) => !done.has(n)),
+            /*
+             * ⚠️ `collected` 是**收缴登记**的标记（列表据此说"已交 36/36 · 全员交齐"），
+             * 只有「收缴登记」和「确认完成批改」这两条真正点过全班的路才能置它。
+             *
+             * 以前这里还有一句 `|| Boolean(data.confirmedNos?.length)` ——
+             * 只要临时保存时批了几个人，列表就宣称"全员交齐"（`missingNos` 还是空的），
+             * 教师会以为收缴登记做过了。批改过的人算"已交"这件事，
+             * 已经由上一行的 `missingNos.filter(!done)` 表达，不需要动 `collected`。
+             *
+             * `missingNos` 只有「确认完成批改」会传（未批改的人一律登记为未交），
+             * 那一步确实把全班都定下来了，所以那一种情况可以置。
              */
-            const done = new Set(a.confirmedNos ?? [])
-            for (const no of data.confirmedNos ?? []) done.add(no)
-            /**
-             * 「已改错」必须跟着改错名单一起收缩。
-             * 只写名单不清理的话，一次"全选有错"把名单换掉就会留下孤儿记录，
-             * 列表按钮会显示「2/1」这种"已改的比该改的还多"的数。
-             * 名单是 `?? ` 继承来的，所以这里按**合并后**的名单过滤，谁写都能兜住。
-             */
-            const correctionNos = data.correctionNos ?? a.correctionNos ?? []
-            return {
-              ...a,
-              wrong: data.wrong ?? a.wrong,
-              confirmedNos: data.confirmedNos ?? a.confirmedNos,
-              subQuestions: data.subQuestions ?? a.subQuestions,
-              status: data.status ?? a.status,
-              gradeSeconds: data.gradeSeconds ?? a.gradeSeconds,
-              grades: data.grades ?? a.grades,
-              focusNos: data.focusNos ?? a.focusNos,
-              correctionNos,
-              correctedNos: (data.correctedNos ?? a.correctedNos ?? []).filter((n) =>
-                correctionNos.includes(n),
-              ),
-              missingNos: (data.missingNos ?? a.missingNos).filter((n) => !done.has(n)),
-              lateNos: (a.lateNos ?? []).filter((n) => !done.has(n)),
-              /*
-               * ⚠️ `collected` 是**收缴登记**的标记（列表据此说"已交 36/36 · 全员交齐"），
-               * 只有「收缴登记」和「确认完成批改」这两条真正点过全班的路才能置它。
-               *
-               * 以前这里还有一句 `|| Boolean(data.confirmedNos?.length)` ——
-               * 只要临时保存时批了几个人，列表就宣称"全员交齐"（`missingNos` 还是空的），
-               * 教师会以为收缴登记做过了。批改过的人算"已交"这件事，
-               * 已经由上一行的 `missingNos.filter(!done)` 表达，不需要动 `collected`。
-               *
-               * `missingNos` 只有「确认完成批改」会传（未批改的人一律登记为未交），
-               * 那一步确实把全班都定下来了，所以那一种情况可以置。
-               */
-              collected: a.collected || data.missingNos !== undefined,
-              gradedAt:
-                data.status === 'graded' || data.status === 'reviewed' ? Date.now() : a.gradedAt,
-            }
-          }),
-        }))
+            collected: a.collected || data.missingNos !== undefined,
+            gradedAt: data.status === 'graded' || data.status === 'reviewed' ? Date.now() : a.gradedAt,
+          }
+          const assignments = s.assignments.slice()
+          assignments[idx] = next
+          return { isDemo: false, assignments }
+        })
         const a = get().assignments.find((x) => x.id === id)
         const tid = get().teacher?.id
         if (a && tid) void remote.saveAssignment(a, tid)
