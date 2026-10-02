@@ -718,3 +718,52 @@ export type TempScheduleChange = {
   /** 什么时候记下的（本地演示模式用；库里由触发器写 `now()`） */
   at: number
 }
+
+/* ---------------- 教室端改造（`schema.sql` §40） ---------------- */
+
+/**
+ * **每日作业**的一条（`daily_homework`，§40.1）—— 「今天各科留了什么」这种清单。
+ *
+ * 🔴 它与 `Assignment` **不是一件事**，别互相顶替：
+ *    · `Assignment`＝一份**作业档案**（有应交 / 已交 / 逐题正确率），一科一天通常一份；
+ *    · `DailyHomework`＝老师（或课代表）随手写的一行**家庭作业正文**，
+ *      **同一班同一天同一科可以有多条**（用户口径：「每科肯定不止一项作业」）。
+ *    教室端左栏常驻的是这一份；作业档案区是**折叠**的那一份。
+ */
+export type DailyHomework = {
+  id: string
+  classId: string
+  /** 哪一天（北京时间口径的 `YYYY-MM-DD`） */
+  onDate: string
+  /** 学科**显示名**（可以是不在字典里的临时科目 —— 所以它是文本，不是 code） */
+  subject: string
+  /**
+   * 学科代码（`lib/subjects.ts` 的 `SubjectCode`）。
+   * ⚠️ 兼容期读法：**允许为空**（临时科目、或老库还没跑 §40 的列）——
+   *    判"能不能写"时按 `subjectCodeOf()` 那个口径（先看 code、再按显示名反查）。
+   */
+  subjectCode?: string
+  content: string
+  /** 同一天同一科内的次序（只用来排序） */
+  seq: number
+  /** 谁录的：`teacher` 老师录 · `rep` 课代表在教室端用班级口令录（屏上要能区分） */
+  source: 'teacher' | 'rep'
+  /** 录入人显示名（课代表录的是「课代表」） */
+  authorName: string
+  createdAt: number
+}
+
+/**
+ * **校历覆盖**（`school_calendar`，§40.3）—— 学校**自己改过**的那些天。
+ *
+ * 🔴 它不是"全年课表"：没有行的日子一律按**官方节假日 + 周末**判（`lib/holiday.ts`）。
+ *    只有两种行：`off`＝学校放假（哪怕本来是工作日）、`school`＝学校上课（哪怕本来是假期）。
+ */
+export type SchoolCalendarDay = {
+  /** YYYY-MM-DD（库里的主键，一天只能有一条） */
+  onDate: string
+  kind: 'school' | 'off'
+  note: string
+  updatedByName: string
+  updatedAt: number
+}

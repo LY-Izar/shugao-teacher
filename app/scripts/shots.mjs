@@ -2095,8 +2095,13 @@ await withLock(async () => {
         check(
           /loadClassMembersFull\(\[id\]\)/.test(cdSrc) &&
             /* ⚠️ 2026-10-11：名单那一份挪到 `if (!klass)` **之前**了（档案那一次读也要按它读），
-               所以现在是 `(klass?.students ?? [])`，不再是 `klass.students`（这一句跟着改） */
-            /const roster = isStream \? members : \(klass\?\.students \?\? \[\]\)/.test(cdSrc),
+               所以现在是 `(klass?.students ?? [])`，不再是 `klass.students`（这一句跟着改）。
+               ⚠️ 2026-10-13：`roster` 外面包了 `useMemo`（lint 的 exhaustive-deps 嫌它每渲染都是新数组），
+               原来那行字面量拆成了「先取 `classStudents`，再 `useMemo` 里 `isStream ? members : (classStudents ?? [])`」
+               —— 判据盯的仍然是同一件事：**走班班那一支读 `members`（class_members），不是 `klass.students`**。 */
+            /const classStudents = klass\?\.students/.test(cdSrc) &&
+            /const roster = useMemo\(/.test(cdSrc) &&
+            /\(\) => \(isStream \? members : \(classStudents \?\? \[\]\)\)/.test(cdSrc),
           `${S8}：班级页的名单 —— 走班班那一支从 class_members 读（loadClassMembersFull），不是 klass.students`,
           /loadClassMembersFull/.test(cdSrc) ? '读成员那一路在' : '搜不到（改回旧写法这条就红）',
         )

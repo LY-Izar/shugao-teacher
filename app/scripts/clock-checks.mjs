@@ -313,6 +313,22 @@ async function schedText(page) {
   })
 }
 
+/**
+ * 同上，但要**整块**「这个班的课」面板的文案（把课表**列表**那一支也包进来）。
+ * ⚠️ `schedText()` 只取面板的第一个子 div（「正在上课」卡那一区），列表里的行与
+ *    「已调整」标记都读不到；而 `document.body.innerText` 又太宽 —— 教室里新加的
+ *    「今日作业 / 作业档案区」会摆出语文、数学、化学这些**同名**的字，
+ *    用它做"这一行还在不在"的断言会假绿/假红（2026-10-13 实测：9D 列表那一支、
+ *    9E 反向对照两条就是被新卡片上的科目名带红的）。
+ */
+async function schedPanelText(page) {
+  return page.evaluate(() => {
+    const secs = [...document.querySelectorAll('section.panel')]
+    const t = secs.find((s) => /这个班的课/.test(s.textContent ?? ''))
+    return t ? (t.textContent ?? '').replace(/\s+/g, ' ').trim() : null
+  })
+}
+
 /** 等课表面板出现（Vite 首包 + store 水合要一点时间；HMR 重建时偶尔会慢一拍） */
 async function waitSched(page, timeout = 20_000) {
   const t0 = Date.now()
@@ -2316,17 +2332,20 @@ await withLock(async () => {
           ...patch,
         })
         /**
-         * 拨到"那一节课正在进行"的中间时刻，读「正在上课」卡 + **整页文案**。
-         * ⚠️ 这里读 `document.body.innerText` 而不是 `schedText()` —— 后者只取"这个班的课"
-         *    那块面板的**第一个**子 div（「正在上课」卡那一区），课表**列表**里的
+         * 拨到"那一节课正在进行"的中间时刻，读「正在上课」卡 + **整块课表面板**的文案。
+         * ⚠️ 这里读 `schedPanelText()`（整块面板）而不是 `schedText()` —— 后者只取"这个班的课"
+         *    那块的**第一个**子 div（「正在上课」卡那一区），课表**列表**里的
          *    「已调整」标记不在它的窗口里（2026-10-13 实测：A 卡上科目对了、标记却读不到）。
+         * ⚠️ 也不要读 `document.body.innerText`：教室里新加的「今日作业 / 作业档案区」
+         *    会摆出同名的科目（语文、数学、化学），那些字跟课表无关
+         *    （2026-10-13 实测：9D 列表那一支、9E 反向对照两条就是这么红的）。
          */
         const look = async (hhmm) => {
           await ctx.clock.setFixedTime(new Date(`${T_DAY}T${hhmm}:00`))
           await goto(page, '/classroom', { clock: hhmm, date: T_DAY, weekday: '四' })
           const card = await readCardLines(page)
-          const all = await page.evaluate(() => document.body.innerText.replace(/\s+/g, ' '))
-          return { card, all }
+          const panel = await schedPanelText(page)
+          return { card, panel }
         }
         const ADJ = '已调整'
 
@@ -2337,9 +2356,9 @@ await withLock(async () => {
         const base = await look('09:15')
         const baseSubject = String(base.card.subject ?? '')
         check(
-          base.card.found === true && baseSubject.length > 0 && !base.all.includes(ADJ),
+          base.card.found === true && baseSubject.length > 0 && !base.panel.includes(ADJ),
           '🔴 场景 9 基线：没有临时调整时，那一节显示的是课表上原本那一门（不写死科目，从屏上现读）',
-          `卡上科目=${JSON.stringify(baseSubject)} · 整页${base.all.includes(ADJ) ? '**有**' : '没有'}「${ADJ}」`,
+          `卡上科目=${JSON.stringify(baseSubject)} · 课表面板${base.panel.includes(ADJ) ? '**有**' : '没有'}「${ADJ}」`,
         )
         /* 换成**与基线不同**的一门（否则 A/B/C 三条会变成恒真） */
         const TEMP_TO = baseSubject === '数学' ? '英语' : '数学'
@@ -2361,9 +2380,9 @@ await withLock(async () => {
          */
         const aList = await look('09:45')
         check(
-          aList.all.includes(ADJ),
+          aList.panel.includes(ADJ),
           `🔴 场景 9A（列表那一支）课表里那一行标着「${ADJ}」（09:45，没有课正在进行 → 列表是渲染出来的）`,
-          `整页${aList.all.includes(ADJ) ? '有' : '**没有**'}「${ADJ}」· 列表文案=${JSON.stringify(String(aList.all).slice(0, 160))}`,
+          `课表面板${aList.panel.includes(ADJ) ? '有' : '**没有**'}「${ADJ}」· 面板文案=${JSON.stringify(String(aList.panel).slice(0, 160))}`,
         )
         /*
          * 🧪 A 的反向对照（在页面之外做）：同一条记录**只把日期改成昨天** → A 的判据当场判假。
@@ -2381,18 +2400,18 @@ await withLock(async () => {
         await seedTemp([tempRow({ date: '2026-09-23', toSubject: TEMP_TO })])
         const b = await look('09:15')
         check(
-          b.card.subject === baseSubject && !b.all.includes(ADJ),
+          b.card.subject === baseSubject && !b.panel.includes(ADJ),
           '🔴 场景 9B **过了那天自动恢复**：同一条调课落在昨天 → 屏上回到原来的那一门（读时按日期过滤）',
-          `卡上科目=${JSON.stringify(b.card.subject)}（期望 ${JSON.stringify(baseSubject)}）· 整页${b.all.includes(ADJ) ? '**有**' : '没有'}「${ADJ}」`,
+          `卡上科目=${JSON.stringify(b.card.subject)}（期望 ${JSON.stringify(baseSubject)}）· 课表面板${b.panel.includes(ADJ) ? '**有**' : '没有'}「${ADJ}」`,
         )
 
         /* C：教室端只读本班（同一条，只是班级换成别的班） */
         await seedTemp([tempRow({ classId: 'c-demo-2', toSubject: TEMP_TO })])
         const c = await look('09:15')
         check(
-          c.card.subject === baseSubject && !c.all.includes(ADJ),
+          c.card.subject === baseSubject && !c.panel.includes(ADJ),
           "🔴 场景 9C **教室端仍然只读本班**：同一条调课挂在别的班 → 本班这块屏一个字都不变（`scope='class'` 边界没被放宽）",
-          `卡上科目=${JSON.stringify(c.card.subject)}（期望 ${JSON.stringify(baseSubject)}）· 整页${c.all.includes(ADJ) ? '**有**' : '没有'}「${ADJ}」`,
+          `卡上科目=${JSON.stringify(c.card.subject)}（期望 ${JSON.stringify(baseSubject)}）· 课表面板${c.panel.includes(ADJ) ? '**有**' : '没有'}「${ADJ}」`,
         )
 
         /*
@@ -2441,9 +2460,9 @@ await withLock(async () => {
         await seedTemp([tempRow({ toSubject: '', toTeacherId: null })])
         const dList = await look('09:45')
         check(
-          listBase.all.includes(baseSubject) && !dList.all.includes(baseSubject),
+          listBase.panel.includes(baseSubject) && !dList.panel.includes(baseSubject),
           '🔴 场景 9D（列表那一支）：腾空之后，课表列表里那一行也**没有了**（09:45 那一刻列表在渲染）',
-          `腾空前列表里有「${baseSubject}」=${listBase.all.includes(baseSubject)} · 腾空之后还有=${dList.all.includes(baseSubject)}`,
+          `腾空前课表面板里有「${baseSubject}」=${listBase.panel.includes(baseSubject)} · 腾空之后还有=${dList.panel.includes(baseSubject)}`,
         )
         /*
          * 🧪 D 的反向对照：同一条**只把空串换成一门课** → 那一节又回来了（就是 A 的换课）。
@@ -2483,9 +2502,9 @@ await withLock(async () => {
         ])
         const e = await look('09:45')
         check(
-          e.all.includes(ADD_SUBJECT) && e.all.includes(ADJ),
+          e.panel.includes(ADD_SUBJECT) && e.panel.includes(ADJ),
           '🔴 场景 9E **挪到本来没课的那一节**：那一节在教室里**显示得出来**（多出来的一行 + 「已调整」）',
-          `${ADD[0]} 那一节在屏上=${e.all.includes(ADD_SUBJECT)} · 整页${e.all.includes(ADJ) ? '有' : '**没有**'}「${ADJ}」`,
+          `${ADD[0]} 那一节在课表面板上=${e.panel.includes(ADD_SUBJECT)} · 面板${e.panel.includes(ADJ) ? '有' : '**没有**'}「${ADJ}」`,
         )
         /*
          * 🧪 E 的反向对照：同一条**只把日期改成昨天** → 多出来的那一行也不该出现。
@@ -2502,9 +2521,9 @@ await withLock(async () => {
         ])
         const eNeg = await look('09:45')
         check(
-          !eNeg.all.includes(ADD_SUBJECT),
+          !eNeg.panel.includes(ADD_SUBJECT),
           '🧪 场景 9E 反向对照：同一条只把日期改成昨天 → 多出来的那一行**不出现**（新摆的行也照样按日期过滤）',
-          `屏上有「${ADD_SUBJECT}」=${eNeg.all.includes(ADD_SUBJECT)}`,
+          `课表面板上有「${ADD_SUBJECT}」=${eNeg.panel.includes(ADD_SUBJECT)}`,
         )
 
         /*

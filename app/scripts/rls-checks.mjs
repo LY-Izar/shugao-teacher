@@ -4470,9 +4470,13 @@ await withLock(async () => {
        *    它是作业写策略的判据（`class_id` 可空之后要能容纳"未归属"），
        *    与 §13/§16 的 `can_grade_subject` 并列、**不替换它**，所以也要两件套 + revoke。
        */
+      // 🆕 34 → **36**：**教室端改造**（`schema.sql` §40）新增两条 ——
+      //    `can_write_daily_homework_for`（"每日作业"这一科是不是你能留的：本班班主任 **或** 任课老师；
+      //    **故意不含 super/admin/grade_head** ＝ 用户口径"教务处只能看不能写"）与
+      //    `is_classroom_of_class_for`（这个 uid 是不是这个班的教室端账号 —— 课代表口令那条路要先过它）。
       const forNames = forCount.rows.map((r) => r.proname)
       ok(
-        '`_for` 变体一共 34 个（13 + 管理架构轮 8 个 + 公告轮 1 个 `can_publish_announcement_for`' +
+        '`_for` 变体一共 36 个（13 + 管理架构轮 8 个 + 公告轮 1 个 `can_publish_announcement_for`' +
           ' + 管理台第二期 1 个 `can_contact_admin_for`' +
           ' + 🆕P4 2 个 `can_promote_grades_for` / `can_delete_grade_for`' +
           ' + 🆕集成修复 4 个 `can_manage_grade_setup_for` / `can_edit_student_subject_for` /' +
@@ -4481,9 +4485,10 @@ await withLock(async () => {
           ' + 🆕P9 1 个 `can_call_for`（事务性呼叫的判据）' +
           ' + 🆕P10 1 个 `old_subject_data_counts_for`（旧科目数据的清单）' +
           ' + 🆕2026-10-08 超管唯一 1 个 `can_assign_super_role_for`（发 super 只有超管能发）' +
-          ' + 🆕课程管理 1 个 `can_manage_schedule_for`（能不能改这个班的课表））' +
+          ' + 🆕课程管理 1 个 `can_manage_schedule_for`（能不能改这个班的课表）' +
+          ' + 🆕教室端改造 2 个 `can_write_daily_homework_for` / `is_classroom_of_class_for`）' +
           ' —— id 变体也算判据的两件套，新增判据别只写裸版',
-        forNames.length === 34,
+        forNames.length === 36,
         `实际 ${forNames.length} 个：${forNames.join('、')}`,
       )
       const hasBare = await db.query(`select has_function_privilege('authenticated', 'public.can_edit_exam(uuid[], text, text)', 'EXECUTE') as v`)
@@ -7552,9 +7557,13 @@ await withLock(async () => {
         RESTRICT_EXPECT.map((k) => `${k}(a)`).sort(),
       )
       ok(
-        '🔴 ① 另外 **17** 条是 `on delete set null`（数据库自己置空，**不拦人**）—— 别把它们也算进"要手工清"里' +
+        '🔴 ① 另外 **21** 条是 `on delete set null`（数据库自己置空，**不拦人**）—— 别把它们也算进"要手工清"里' +
           '（🆕课程管理那三张表加进来 11 条：改课的人 / 原来那位老师 / 撤回人 / 清理人 …）',
-        setNull(toTeachers).length === 17,
+        // 🆕 17 → 21（教室端改造 `schema.sql` §40 又加进来 4 条，全是 `on delete set null`）：
+        //    `class_rep_pins.updated_by` / `daily_homework.author_id` /
+        //    `duty_assignments.author_id` / `school_calendar.updated_by`
+        //    —— 删老师不会拦人，那几行只是把"谁写的"置空。
+        setNull(toTeachers).length === 21,
         `${setNull(toTeachers).length} 条 set null · ${setNull(toTeachers).join(' / ')}`,
       )
       ok(

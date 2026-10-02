@@ -7,6 +7,7 @@ import type {
   Assignment,
   AssignmentTemplate,
   ClassroomClient,
+  DailyHomework,
   Klass,
   QuestionMeta,
   ScheduleItem,
@@ -778,4 +779,75 @@ export function makeDemoExams(classes: Klass[]): { exams: Exam[]; scores: ExamSc
   }
 
   return { exams, scores }
+}
+
+/* ---------------- 教室端改造（`schema.sql` §40）的演示数据 ----------------
+ *
+ * 🔴 为什么演示模式必须有这几条：教室端左栏那块「今日作业」是**常驻**的，
+ *    而 `shots` 那 141 张基线里教室端那几张是**演示模式**跑出来的 ——
+ *    没有演示数据，那几张图上是空框，等于新功能没人看得见（也断言不了）。
+ *
+ * ⚠️ 演示模式没有权限层（写进内存，谁点都生效），所以这里的 `source` / `authorName`
+ *    只是**摆样子**：让人看出"哪条是课代表录的"这件事在屏上怎么区分。
+ *    真判据一律在数据库（`schema.sql` §40 的 RLS 与那两个安全定义函数）。
+ * ------------------------------------------------------------------------ */
+
+/** 演示用的每日作业正文 —— 语数外物化五科，语**故意两条**（口径：每科不止一项） */
+export function makeDemoDailyHomework(classes?: Klass[]): DailyHomework[] {
+  const list = classes ?? makeDemoClasses()
+  const today = isoOffset(0)
+  const yesterday = isoOffset(-1)
+  const out: DailyHomework[] = []
+  let n = 0
+  const row = (
+    classId: string,
+    onDate: string,
+    subjectCode: string,
+    content: string,
+    seq: number,
+    source: 'teacher' | 'rep' = 'teacher',
+  ): DailyHomework => {
+    n += 1
+    return {
+      id: `dh-demo-${n}`,
+      classId,
+      onDate,
+      subject: subjectName(subjectCode),
+      subjectCode,
+      content,
+      seq,
+      source,
+      authorName: source === 'rep' ? '课代表' : `${subjectName(subjectCode)}老师`,
+      createdAt: Date.now() - (today === onDate ? 0 : 86400000),
+    }
+  }
+  for (const k of list) {
+    out.push(
+      row(k.id, today, 'chinese', '背诵《琵琶行》全文，明天早读抽查。', 1),
+      row(k.id, today, 'chinese', '作文素材：整理三个关于「坚持」的事例，各写一句点评。', 2),
+      row(k.id, today, 'math', '必修一 P62–P65 习题 3.1 第 1–8 题。', 3),
+      row(k.id, today, 'english', 'Unit 2 单词 1–20 抄写两遍，明天听写。', 4, 'rep'),
+      row(k.id, today, 'physics', '第三章课后题 5、6、7；实验报告补齐。', 5),
+      row(k.id, today, 'chemistry', '离子方程式配平练习 10 题。', 6),
+      row(k.id, yesterday, 'chinese', '文言实词积累：一词多义整理 10 组。', 1),
+      row(k.id, yesterday, 'math', '错题订正（周测卷 1–3 题）。', 2),
+    )
+  }
+  return out
+}
+
+/**
+ * 演示用的值日生锚点：**四天前**是名单里第 6 个人 —— 今天轮到谁由
+ * `lib/duty.ts` 按"只数上课日"推出来（演示模式下就该看见它是推出来的，不是写死的）。
+ * ⚠️ 形状与 `lib/duty.ts` 的 `DutyAnchor` 一致；这里**不 import** 它，
+ *    免得 `data/seed` 与 `lib/*` 多一条无谓的依赖（结构化类型天然兼容）。
+ */
+export function makeDemoDutyAnchors(classes?: Klass[]): Array<{ onDate: string; studentId: string }> {
+  const list = classes ?? makeDemoClasses()
+  const out: Array<{ onDate: string; studentId: string }> = []
+  for (const k of list) {
+    const sixth = k.students[5]
+    if (sixth) out.push({ onDate: isoOffset(-4), studentId: sixth.id })
+  }
+  return out
 }

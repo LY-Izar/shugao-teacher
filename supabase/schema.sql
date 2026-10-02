@@ -10696,3 +10696,339 @@ begin
 end $$;
 
 
+-- ============================================================
+-- §40 教室端改造（**数据层**）—— 每日作业 / 值日生 / 校历 / 课代表口令
+--  用户口径（2026-10-02，逐条问过、已确认）：
+--   ① 「每日作业」＝按（班级, 日期, 科目）的一条条文本；**同一班同一天同一科允许多条**
+--      （用户原话：「每科肯定不止一项作业」）。科目按高考规定科目，另**允许临时新增科目**
+--      ⇒ `subject` 只存显示名（**不做外键**），`subject_code` 可空（沿用多学科那套兼容期口径）。
+--   ② 谁能写：**任课老师只写自己那一科**（既有判据 `teaches_subject_for()`，走 `class_subjects`）
+--      · **班主任写本班全部科** · **教务处只能看不能写**。
+--      🔴 教务处**不在**下面写的那两支里 —— 这是用户点名的口径，**别顺手加 `is_school_admin()`**。
+--   ③ 值日生：**每天 1 人**；班主任指定某一天的人当锚点，**之后按学号升序只在上课日往下轮**
+--      （周末 / 法定假期 / 调休上班之外的休息日一律跳过）⇒ 库里**只存"明确指定过的那天"**，
+--      其余日期由 `app/src/lib/duty.ts` 按锚点推出来（教室端与教师端共用同一个纯函数）。
+--   ④ 校历：默认层本来就是官方的（`app/src/data/holidays.ts`，由 `scripts/fetch-holidays.mjs`
+--      生成，含法定假期与调休）⇒ 这张表**只是覆盖层**（学校自己的放假 / 补课）。
+--   ⑤ 课代表：教室端屏上入口 + **班级口令**（班主任设、可换）。口令**只存哈希**，
+--      而且**连读策略都不给** —— 校验只走 §40.5 那个安全定义函数。
+--
+--  🔴 三条纪律（与全文件一致）：
+--    · **判据以数据库为准**：前端只决定"摆不摆入口"，能不能写成由这里的策略与函数判；
+--    · **读得宽、写得窄**：读一律走 §10.3 的 `visible_class_ids()`（它已含"教室端：本班"那一支
+--      —— 教室端那块屏要看本班全天作业），写各自收口；
+--    · 本段**必须幂等**：`create table / index if not exists`、`drop policy if exists` 后再建。
+-- ============================================================
+
+-- -------- 40.1 每日作业 --------
+--  🔴 为什么不是复用 `assignments`：那是"一份作业档案"（有应交/已交/逐题正确率，
+--     一科一天最多一份是它的自然形状）。用户要的是"今天各科留了什么"这种**清单**，
+--     而且明确要**每科多条** ⇒ 另立一张轻表，两者互不干扰（`assignments` 一个字没动）。
+create table if not exists daily_homework (
+  id           uuid primary key default gen_random_uuid(),
+  class_id     uuid not null references classes (id) on delete cascade,
+  on_date      date not null,
+  subject      text not null,
+  /* 学科代码（可空）：与 `assignments.subject_code` 同一套兼容期口径 —— 认不出就走显示名 */
+  subject_code text,
+  content      text not null,
+  /* 同一天同一科里的次序（前端按它排；不追求全库唯一） */
+  seq          int  not null default 0,
+  /* 谁录的：`teacher` 老师录 / `rep` 课代表在教室端用班级口令录（屏上要能区分） */
+  source       text not null default 'teacher' check (source in ('teacher', 'rep')),
+  author_id    uuid references teachers (id) on delete set null,
+  author_name  text not null default '',
+  created_at   timestamptz not null default now(),
+  updated_at   timestamptz not null default now()
+);
+-- 热路径：教室端"今天的作业"、教师端"这一天的作业"
+create index if not exists daily_homework_day_idx
+  on daily_homework (class_id, on_date);
+
+-- -------- 40.2 值日生（只存锚点）--------
+--  🔴 库里**不存每一天**：轮值由算法推（`app/src/lib/duty.ts`）。存一整年的话，
+--     "改一个人的学号 / 转进来一个学生"就会让整张表与事实分叉 —— 而锚点只有一个真相。
+--  ⚠️ `unique (class_id, on_date)`：一天一个人（用户口径"每天 1 人"）。
+--     要换人 = 改这一行（upsert 到 `on_date`），不是插第二行。
+create table if not exists duty_assignments (
+  id          uuid primary key default gen_random_uuid(),
+  class_id    uuid not null references classes (id) on delete cascade,
+  on_date     date not null,
+  student_id  uuid not null references students (id) on delete cascade,
+  /* 这一行是怎么来的：`set` 老师明确指定（锚点）/ `anchor` 老师只定起点 / `auto` 预留 */
+  source      text not null default 'set' check (source in ('set', 'anchor', 'auto')),
+  author_id   uuid references teachers (id) on delete set null,
+  author_name text not null default '',
+  created_at  timestamptz not null default now(),
+  unique (class_id, on_date)
+);
+create index if not exists duty_assignments_day_idx on duty_assignments (on_date);
+
+-- -------- 40.3 校历（**覆盖层**，不是全量）--------
+--  🔴 默认层 = 官方安排（`data/holidays.ts`：法定假期 + 调休）+ 周末。这张表只回答
+--     "学校自己改过的那些天"：`off` = 学校放假（哪怕那天本来是工作日）·
+--     `school` = 学校上课（哪怕那天本来是法定假期 / 周末）。
+--  ⚠️ 一天只能有一条 ⇒ `on_date` 直接当主键（写就是 upsert 到它，没有第二个真相）。
+create table if not exists school_calendar (
+  on_date         date primary key,
+  kind            text not null check (kind in ('school', 'off')),
+  note            text not null default '',
+  updated_at      timestamptz not null default now(),
+  updated_by      uuid references teachers (id) on delete set null,
+  updated_by_name text not null default ''
+);
+
+-- -------- 40.4 课代表口令（一班一条，只存哈希）--------
+--  🔴 口令**明文不落库**：存 `sha256(<班 id>:<口令>)`（盐就是班 id —— 一个班的哈希
+--     在另一个班身上无效，也防止同一口令在不同班之间"通用"）。
+--     ⚠️ 这是**校园场景的低强度口令**（4~8 位数字），不是账号密码：数据库真泄露时
+--        短口令的哈希可被暴力枚举 —— 所以这张表**没有任何读策略**，能读到的只有属主与
+--        安全定义函数（§40.5），"拿到哈希"本身不该发生。
+create table if not exists class_rep_pins (
+  class_id        uuid primary key references classes (id) on delete cascade,
+  pin_hash        text not null,
+  updated_at      timestamptz not null default now(),
+  updated_by      uuid references teachers (id) on delete set null,
+  updated_by_name text not null default ''
+);
+
+-- -------- 40.5 判据与两个写入口（安全定义函数）--------
+--  ⚠️ `_for` 变体（接受任意 uid）一律 **revoke from public, anon, authenticated** ——
+--     与 §10.3 / §16.2 同一条纪律：不 revoke 就等于任何教师都能枚举别人的班。
+
+-- 我是这个班的教室端账号吗（屏上那台机器）。§10.3 里"教室端：本班"那一支的**逐支照抄**，
+-- 只把 `visible_class_ids_for` 里那一段单独拿出来给 §40.5 的 RPC 用。
+create or replace function public.is_classroom_of_class_for(p_uid uuid, p_class_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1 from classroom_accounts ca
+     where ca.id = p_uid and ca.class_id = p_class_id and not ca.disabled
+  );
+$$;
+
+revoke all on function public.is_classroom_of_class_for(uuid, uuid) from public, anon, authenticated;
+
+-- 我能不能写「这个班的这一科」的每日作业 —— **只有两支**：
+--   ① 班主任（本班，**全科**）② 该班该科的任课老师（既有判据，不另写一份）。
+--  🔴 **没有** super / admin / grade_head —— 用户口径「教务处只能看不能写」。
+--     （要改这一条：只动这一个函数体，策略与 RPC 都调它。）
+create or replace function public.can_write_daily_homework_for(
+  p_uid uuid,
+  p_class_id uuid,
+  p_subject_code text,
+  p_subject text
+)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select
+    exists (select 1 from teacher_roles r
+             where r.teacher_id = p_uid and r.role = 'head_teacher'
+               and r.scope_type = 'class' and r.scope_id = p_class_id)
+    or teaches_subject_for(p_uid, p_class_id, p_subject_code, p_subject);
+$$;
+
+revoke all on function public.can_write_daily_homework_for(uuid, uuid, text, text)
+  from public, anon, authenticated;
+
+create or replace function public.can_write_daily_homework(
+  p_class_id uuid,
+  p_subject_code text,
+  p_subject text
+)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$ select can_write_daily_homework_for(auth.uid(), p_class_id, p_subject_code, p_subject) $$;
+
+grant execute on function public.can_write_daily_homework(uuid, text, text) to authenticated;
+revoke all on function public.can_write_daily_homework(uuid, text, text) from public, anon;
+
+-- 班主任设 / 换班级口令。**口令明文只在这一个调用里出现**，落库的是哈希。
+--  判据 = 既有 `can_manage_class()`（超管 / 教务处 / 本年级年级主任 / **本班班主任**）——
+--  值日生与口令都归"管得着这个班的人"，与 §16.2 同一个入口。
+create or replace function public.set_class_rep_pin(p_class_id uuid, p_pin text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_pin text := btrim(coalesce(p_pin, ''));
+begin
+  if not public.can_manage_class(p_class_id) then
+    return jsonb_build_object('ok', false, 'reason', 'forbidden');
+  end if;
+  if length(v_pin) < 4 or length(v_pin) > 12 then
+    return jsonb_build_object('ok', false, 'reason', 'length');
+  end if;
+  insert into class_rep_pins (class_id, pin_hash, updated_at, updated_by, updated_by_name)
+  values (
+    p_class_id,
+    encode(digest(p_class_id::text || ':' || v_pin, 'sha256'), 'hex'),
+    now(),
+    auth.uid(),
+    coalesce((select t.name from teachers t where t.id = auth.uid()), '')
+  )
+  on conflict (class_id) do update
+    set pin_hash        = excluded.pin_hash,
+        updated_at      = excluded.updated_at,
+        updated_by      = excluded.updated_by,
+        updated_by_name = excluded.updated_by_name;
+  return jsonb_build_object('ok', true);
+end $$;
+
+revoke all on function public.set_class_rep_pin(uuid, text) from public, anon;
+grant execute on function public.set_class_rep_pin(uuid, text) to authenticated;
+
+-- 课代表在教室端录一条（**口令校验只能在这里** —— RLS 策略读不到调用者手里的口令）。
+--  ⚠️ 这是唯一不经 RLS 的写每日作业的入口，所以三件事都要在这一段里钉住：
+--     ① 调用者必须是**这个班的教室端账号**（屏上那台机器）或本来就有权的老师；
+--     ② 口令哈希必须对得上（§40.4 的盐口径）；
+--     ③ 只能写**今天**（`beijing_today()`）—— 课代表不许回头改历史。
+create or replace function public.rep_set_daily_homework(
+  p_class_id uuid,
+  p_subject text,
+  p_subject_code text,
+  p_content text,
+  p_pin text
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_hash   text;
+  v_body   text := btrim(coalesce(p_content, ''));
+  v_subj   text := btrim(coalesce(p_subject, ''));
+  v_code   text := nullif(btrim(coalesce(p_subject_code, '')), '');
+  v_id     uuid;
+  v_today  date := public.beijing_today();
+begin
+  if v_subj = '' then
+    return jsonb_build_object('ok', false, 'reason', 'no-subject');
+  end if;
+  if v_body = '' then
+    return jsonb_build_object('ok', false, 'reason', 'empty');
+  end if;
+  if length(v_body) > 500 then
+    return jsonb_build_object('ok', false, 'reason', 'too-long');
+  end if;
+  if not (
+    public.is_classroom_of_class_for(auth.uid(), p_class_id)
+    or public.can_write_daily_homework(p_class_id, v_code, v_subj)
+  ) then
+    return jsonb_build_object('ok', false, 'reason', 'forbidden');
+  end if;
+  select pin_hash into v_hash from class_rep_pins where class_id = p_class_id;
+  if v_hash is null then
+    return jsonb_build_object('ok', false, 'reason', 'no-pin');
+  end if;
+  if v_hash <> encode(digest(p_class_id::text || ':' || btrim(coalesce(p_pin, '')), 'sha256'), 'hex') then
+    return jsonb_build_object('ok', false, 'reason', 'bad-pin');
+  end if;
+  insert into daily_homework
+    (class_id, on_date, subject, subject_code, content, source, author_id, author_name)
+  values
+    (p_class_id, v_today, v_subj, v_code, v_body, 'rep', null, '课代表')
+  returning id into v_id;
+  return jsonb_build_object('ok', true, 'id', v_id, 'on_date', v_today);
+end $$;
+
+revoke all on function public.rep_set_daily_homework(uuid, text, text, text, text) from public, anon;
+grant execute on function public.rep_set_daily_homework(uuid, text, text, text, text) to authenticated;
+
+-- -------- 40.6 RLS：读得宽、写得窄 --------
+alter table daily_homework   enable row level security;
+alter table duty_assignments enable row level security;
+alter table school_calendar  enable row level security;
+alter table class_rep_pins   enable row level security;
+
+--  · 每日作业：读 + 写（按科目收口）· 值日生：读 + 写（管得着这个班）
+grant select, insert, update, delete on daily_homework   to authenticated;
+grant select, insert, update, delete on duty_assignments to authenticated;
+--  · 校历：**全校**可读（每个班都要知道哪天上课）、只有管校历的那一档能写
+grant select, insert, update, delete on school_calendar  to authenticated;
+--  · 🔴 课代表口令：**一个表权限都不给**客户端 —— 读写都只走 §40.5 那两个函数
+revoke all on class_rep_pins from anon, authenticated;
+revoke all on daily_homework, duty_assignments, school_calendar from anon;
+
+-- 读（每日作业 / 值日生）：**看得见这个班的人**（教务处 / 超管全校 · 年级主任本年级 ·
+--   班主任 / 任课老师本班 · 🔴 **教室端本班** —— 那块屏要看本班全天安排）
+drop policy if exists daily_homework_read on daily_homework;
+create policy daily_homework_read on daily_homework for select to authenticated
+  using (class_id in (select visible_class_ids()));
+
+drop policy if exists duty_assignments_read on duty_assignments;
+create policy duty_assignments_read on duty_assignments for select to authenticated
+  using (class_id in (select visible_class_ids()));
+
+-- 写（每日作业）：**班主任本班全科 · 任课老师本班本科**（`can_write_daily_homework`）
+--   ⚠️ update / delete 也按**行里那一科**判 —— 不然任课老师能改别人那一科的行。
+drop policy if exists daily_homework_insert on daily_homework;
+create policy daily_homework_insert on daily_homework for insert to authenticated
+  with check (can_write_daily_homework(class_id, subject_code, subject));
+
+drop policy if exists daily_homework_update on daily_homework;
+create policy daily_homework_update on daily_homework for update to authenticated
+  using (can_write_daily_homework(class_id, subject_code, subject))
+  with check (can_write_daily_homework(class_id, subject_code, subject));
+
+drop policy if exists daily_homework_delete on daily_homework;
+create policy daily_homework_delete on daily_homework for delete to authenticated
+  using (can_write_daily_homework(class_id, subject_code, subject));
+
+-- 写（值日生）：**管得着这个班的人**（`can_manage_class` = 超管 / 教务处 / 本年级年级主任 /
+--   本班班主任）。⚠️ 与每日作业**故意不同档**：值日生是班务，教务处兜底说得通；
+--   每日作业是"各科老师自己留的作业"，教务处不该替他们写（用户口径）。
+drop policy if exists duty_assignments_write on duty_assignments;
+create policy duty_assignments_write on duty_assignments for all to authenticated
+  using (can_manage_class(class_id))
+  with check (can_manage_class(class_id));
+
+-- 读（校历）：**全校**（它就是"哪天上课"这一个事实，没有任何班级维度）
+drop policy if exists school_calendar_read on school_calendar;
+create policy school_calendar_read on school_calendar for select to authenticated
+  using (true);
+
+-- 写（校历）：**教务处 / 最高管理员**（`is_school_admin()`，与 §15 考试那一档同源）。
+--   ⚠️ 年级主任与班主任**只能看** —— 全校一张校历，不能一个年级一个版本。
+drop policy if exists school_calendar_write on school_calendar;
+create policy school_calendar_write on school_calendar for all to authenticated
+  using (is_school_admin())
+  with check (is_school_admin());
+
+-- 🔴 `class_rep_pins` **一条策略都不建**（RLS 开了、没有策略 = 谁也读不到、谁也写不进）：
+--    写只走 `set_class_rep_pin()`，校验只走 `rep_set_daily_homework()`。
+
+-- -------- 40.7 核对（把下面整段粘进 SQL 编辑器；以**有权限的人**的 JWT 跑）--------
+--  ① 四张表与列都在：
+--  -- select table_name, column_name, data_type from information_schema.columns
+--  --  where table_schema='public'
+--  --    and table_name in ('daily_homework','duty_assignments','school_calendar','class_rep_pins')
+--  --  order by table_name, ordinal_position;
+--  ② 策略清单（期望 7 条：每日作业 4 + 值日生 1 + 校历 2；`class_rep_pins` **一条都没有**）：
+--  -- select tablename, policyname, cmd from pg_policies
+--  --  where schemaname='public'
+--  --    and tablename in ('daily_homework','duty_assignments','school_calendar','class_rep_pins')
+--  --  order by 1, 3;
+--  ③ 三档各试一次（把 uid 换成真实值）：
+--  -- select public.can_write_daily_homework_for('<任课老师 uid>', '<班 id>', null, '数学');  -- true
+--  -- select public.can_write_daily_homework_for('<班主任 uid>',   '<班 id>', null, '数学');  -- true
+--  -- select public.can_write_daily_homework_for('<教务处 uid>',   '<班 id>', null, '数学');  -- false
+--  ④ 整份脚本跑两遍都不该报错（幂等；第二遍四张表与 7 条策略的数量不变）。
+-- ============================================================
+
+
+

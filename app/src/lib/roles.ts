@@ -416,6 +416,14 @@ export type EntryKey =
    * （超管 / 教务处全校 · 年级主任本年级）同形。
    */
   | '/manage/course'
+  /*
+   * 🆕 2026-10-XX「校历」`/manage/calendar`（教室端改造那一轮）。
+   * 🔴 同样**必须排在 `/manage` 那条之前**（匹配是"前缀 + / 或结尾"，排后面会被 `/manage` 吃掉）。
+   * 判据与 `/manage/course` 同形（`hasManagingRole` = 超管 / 教务处 / 年级主任）：
+   * 看得见这一页的是管理身份，而**真正改得动的是教务处** ——
+   * 那一刀在数据库的 `school_calendar_write`（`is_school_admin()`）上，不在这一层。
+   */
+  | '/manage/calendar'
   /* 🆕 2026-10-01 行政管理（`/manage`）：**一个页面，三张入口卡** ——
      年级管理 / 档案管理 / 教师管理。它的判据是那三张卡各自的判据的**并集**
      （见下面 `seesAdministration()` 的长注释）—— 不新造一套。 */
@@ -608,6 +616,16 @@ export const ENTRIES: Record<EntryKey, EntryRule> = {
    *    否则矩阵里那一行会算成 V（实测撞到过：D9 的 `/manage/course × office_head`）。
    */
   '/manage/course': { label: '课程管理', visibleFor: hasManagingRole },
+  /*
+   * 🆕 2026-10-XX **校历**（`/manage/calendar`）：行政管理那一页的**第五张卡**的地址。
+   *
+   * 🔴 判据 = `hasManagingRole`（超管 / 教务处 / 年级主任），与 `/manage/course` **同一条**：
+   *    · 对得上的数据库那一侧是 `school_calendar_write`（`is_school_admin()` = 超管 / 教务处）——
+   *      也就是说**年级主任看得见、写不动**，写不动时数据库的话会原样贴到屏上（这一页只负责摆）；
+   *    · 为什么不让年级主任也写：校历是**全校一张**（法定节假日 + 调休），
+   *      不是"本年级的事"—— 与课表那种"本班 / 本年级"分得开的权限不是一回事。
+   */
+  '/manage/calendar': { label: '校历', visibleFor: hasManagingRole },
   /*
    * ★ 将来：**super / admin / 年级主任**（`hasManagingRole`）。
    *

@@ -108,6 +108,15 @@ export default function Administration() {
    *       而这一页只是**入口合集**，它自己的卡摆不摆由上面那句回答。
    */
   const mayCourse = hasManagingRole(myRoles)
+  /*
+   * 🆕 2026-10-XX「校历」—— **第五张卡**（点一下跳到 `/manage/calendar`）。
+   *
+   * 🔴 摆不摆问的**还是** `hasManagingRole()` 这一条 —— 就是 `ENTRIES['/manage/calendar']`
+   *    用的那一句，两边不会走散（这一页只是入口合集，不新造判据、不写角色数组）。
+   *    ⚠️ 与课程管理**故意同档**：看得见这一页的是管理身份，而**改得动改不动某一天**
+   *       在数据库（`school_calendar_write` = `is_school_admin()`），不在这一层。
+   */
+  const mayCalendar = hasManagingRole(myRoles)
 
   return (
     <>
@@ -143,6 +152,29 @@ export default function Administration() {
               desc="课表：按年级看班 · 调课 · 冲突"
               data-course-card="1"
               onClick={() => navigate('/manage/course')}
+              right={
+                <span
+                  style={{ display: 'grid', placeItems: 'center', color: 'var(--color-ink3)' }}
+                >
+                  <IconChevronRight size={16} />
+                </span>
+              }
+            />
+          ) : null}
+          {/*
+           * 🆕 第五张卡：**校历**（点一下**跳到 `/manage/calendar`**）。
+           *
+           * ⚠️ 带的是 `data-calendar-card` —— **不是** `data-manage-card`（B4 那一节按张数
+           *    断言"这一页摆着三张卡"）、**也不是** `data-course-card`（它的落点由 S27 单独钉）。
+           *    三种卡都跳页，差别只剩"谁来断言它"。
+           */}
+          {mayCalendar ? (
+            <CardShell
+              icon={IconCalendar}
+              label="校历"
+              desc="法定节假日 · 调休 · 学校自己改的日子（能导出表格）"
+              data-calendar-card="1"
+              onClick={() => navigate('/manage/calendar')}
               right={
                 <span
                   style={{ display: 'grid', placeItems: 'center', color: 'var(--color-ink3)' }}

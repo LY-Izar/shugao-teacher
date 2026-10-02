@@ -18,15 +18,24 @@ import {
   IconUsers,
   IconX,
 } from '../components/icons'
+import { ScheduleBatch } from '../components/ScheduleBatch'
 import { Button, PageHead, Panel, Sect, Sheet, StatStrip, Tag } from '../components/ui'
 import { useStore, useToast } from '../data/store'
-import { STUDENT_STATUS_NAME, type Student, type StudentStatus } from '../data/types'
+import {
+  STUDENT_STATUS_NAME,
+  WEEKDAY_TEXT,
+  type ScheduleItem,
+  type Student,
+  type StudentStatus,
+} from '../data/types'
 import { compareStudentNo, rosterStateOf } from '../lib/roster'
 import { CALL_LIMIT, CUSTOM_MAX, composeCallText } from '../lib/calls'
 import { archiveKeyOf } from '../lib/keys'
 import { classKindOf } from '../lib/pick'
+import { PERIOD_SLOTS, splitLessonTitle } from '../lib/scheduleParse'
+import { checkScheduleConflicts } from '../lib/schedule'
 import { canEditClassFor } from '../lib/roles'
-import { subjectName } from '../lib/subjects'
+import { SUBJECTS, subjectCodeOfName, subjectName } from '../lib/subjects'
 import {
   PROFILE_FIELDS,
   emptyProfile,
@@ -43,6 +52,18 @@ import {
   type OldSubjectCounts,
 } from '../lib/gradeSetup'
 import { isRemote } from '../lib/supabase'
+import { beijingNow, weekdayOfISO, ymdOf } from '../lib/holiday'
+import { isoOffset } from '../lib/date'
+import { dutyPool } from '../lib/duty'
+import {
+  dutyOn,
+  dutyPreview,
+  loadDailyBundle,
+  setClassRepPin,
+  setDutyAssignment,
+  toDutyInput,
+  type DailyBundle,
+} from '../lib/daily'
 import {
   PASSWORD_SHOWN_ONCE,
   apiClassroomAccountStatus,
@@ -232,7 +253,11 @@ export default function ClassDetail() {
    * 搜索 / 人数 / 档案 / 行内操作**全部从它算** —— 哪一处单独回去读 `klass.students`，
    * 在走班班上就查不到人（2026-10-09 行内那颗铅笔点了没反应，根因就是它）。
    */
-  const roster = isStream ? members : (klass?.students ?? [])
+  const classStudents = klass?.students
+  const roster = useMemo(
+    () => (isStream ? members : (classStudents ?? [])),
+    [isStream, members, classStudents],
+  )
   /** 名单里那些 id（拼成串当依赖：学生一增一删就要重读一次） */
   const profileIds = roster.map((s) => s.id).join(',')
   /** 教室端账号那一块的班 id（`''` = 班还没读出来；换班时它变 → 下面那个 effect 重读） */
@@ -379,6 +404,239 @@ export default function ClassDetail() {
       alive = false
     }
   }, [id, isStream])
+
+  /* ============================================================
+     🆕 班务：值日生轮值 + 课代表口令（`supabase/schema.sql` §40）
+     ------------------------------------------------------------
+     口径（用户 2026-10-02 / 10-03）：
+       · 值日生**每天一人**，池子 = 本班在读学生、按**学号升序**，只在上课日轮；
+       · 班主任可以**指定某一天**是谁，从那天起接着往下轮（锚点 = `duty_assignments` 一行）；
+       · 轮值算法**只有一处**（`app/src/lib/duty.ts` 的纯函数）——
+         教室里那块大屏的下课提醒、这里的预览、导出的作业图，读的都是同一份；
+       · 课代表口令由班主任设，库存 `sha256('<班 id>:<口令>')`；`class_rep_pins`
+         **对客户端零权限**（写只走 `set_class_rep_pin()`，校验只走 RPC）。
+     🔴 摆不摆这一块 = `canManageThis`（`can_manage_class_for()` 的前端影子，
+        与上面「教室端账号」同一档）：科任老师看不到。真正那一刀在数据库里。
+     ============================================================ */
+  const [daily, setDaily] = useState<DailyBundle | null>(null)
+  const [dutyDate, setDutyDate] = useState(() => ymdOf(beijingNow()))
+  const [dutyPick, setDutyPick] = useState('')
+  const [dutyBusy, setDutyBusy] = useState(false)
+  const [pinInput, setPinInput] = useState('')
+  const [pinBusy, setPinBusy] = useState(false)
+  const [pinMsg, setPinMsg] = useState('')
+  const [dailyTick, setDailyTick] = useState(0)
+
+  /*
+   * 往前 30 天（看得到最近指定过谁）+ 往后 60 天（够预览这一轮的走向）。
+   * 读不到就**当没有**、由界面自己说出来，不假装"没人指定过"。
+   */
+  useEffect(() => {
+    if (!id) return
+    let alive = true
+    loadDailyBundle(id, isoOffset(-30), isoOffset(60))
+      .then((b) => {
+        if (alive) setDaily(b)
+      })
+      .catch(() => {
+        if (alive) setDaily(null)
+      })
+    return () => {
+      alive = false
+    }
+  }, [id, dailyTick])
+
+  const dutyInput = useMemo(
+    () =>
+      klass
+        ? toDutyInput({
+            students: roster,
+            anchors: daily?.anchors ?? [],
+            calendar: daily?.calendar ?? [],
+            classCreatedAt: klass.createdAt,
+          })
+        : null,
+    [klass, roster, daily],
+  )
+  const dutyDay = dutyInput ? dutyOn(dutyDate, dutyInput) : null
+  const dutyNext = useMemo(
+    () => (dutyInput ? dutyPreview(ymdOf(beijingNow()), 14, dutyInput) : []),
+    [dutyInput],
+  )
+  const dutyCandidates = useMemo(() => dutyPool(roster), [roster])
+
+  const saveDuty = async () => {
+    if (!klass || !dutyPick) return
+    setDutyBusy(true)
+    const r = await setDutyAssignment({
+      classId: klass.id,
+      onDate: dutyDate,
+      studentId: dutyPick,
+      authorName: teacherName || undefined,
+    })
+    setDutyBusy(false)
+    if (!r.ok) {
+      push({ text: r.message, tone: 'bad' })
+      return
+    }
+    push({ text: `已定：${dutyDate} 的值日生`, tone: 'ok' })
+    setDailyTick((t) => t + 1)
+  }
+
+  const savePin = async () => {
+    if (!klass) return
+    setPinBusy(true)
+    const r = await setClassRepPin(klass.id, pinInput.trim())
+    setPinBusy(false)
+    setPinMsg(r.ok ? '已设定。原文谁也看不到，忘了就重设一个。' : r.message)
+    if (r.ok) {
+      push({ text: '课代表口令已设定', tone: 'ok' })
+      setPinInput('')
+    }
+  }
+
+  /* ============================================================
+     🆕 本班课表（用户口径 ⑨：**班主任在班级管理处调本班课表**）
+     ------------------------------------------------------------
+     背景（2026-10-03 核实，写给后来的人）：
+       · 数据库本来就允许班主任改本班课表 —— `schedule_items` 的
+         `schedule_class_write` = `scope='class' and can_manage_class(class_id)`，
+         而 `can_manage_class_for()` 含 head_teacher 本班那一支；
+       · 但**能改课表的界面**只有「课程管理」（`/manage/course`），
+         那一页的入口判据是另一条更窄的 `can_manage_schedule()`
+         （超管 / 教务处 / 年级主任本年级，**故意不含班主任**，见 `schema.sql` §38.0）——
+         所以班主任在这之前**没有任何界面**能调本班课表。
+       · 这一块就是那条路：写的是 `scope='class'` 的行（教室端大屏读它），
+         判据用 `canManageThis`（`can_manage_class_for()` 的前端影子），
+         真正那一刀仍在数据库（RLS 挡）。
+     🔴 口径分界：这里改的是「**以后每周都生效**」的课表；
+        只改某一天走课程管理页的**临时调课**（`schedule_temp_changes`），是另一条路。
+     ============================================================ */
+  const schedule = useStore((s) => s.schedule)
+  const addScheduleMany = useStore((s) => s.addScheduleMany)
+  const updateSchedule = useStore((s) => s.updateSchedule)
+  const removeSchedule = useStore((s) => s.removeSchedule)
+
+  const classRows = useMemo(
+    () => (klass ? schedule.filter((s) => s.scope === 'class' && s.classId === klass.id) : []),
+    [schedule, klass],
+  )
+
+  /**
+   * 这张网格的**行**＝这一周真正出现过的时段 ∪ 平台标准节次 ——
+   * 演示数据的时间点与 `PERIOD_SLOTS` 只有第 1 节碰得上（这是 2026-10 排课那轮的既有事实），
+   * 所以不能只按标准节次画，否则库里那几节会**整行看不见**。
+   */
+  const weekSlots = useMemo(() => {
+    const seen = new Map<string, [string, string]>()
+    for (const [a, b] of PERIOD_SLOTS) seen.set(a, [a, b])
+    for (const r of classRows) if (!seen.has(r.start)) seen.set(r.start, [r.start, r.end])
+    return [...seen.values()].sort((x, y) => (x[0] < y[0] ? -1 : 1))
+  }, [classRows])
+
+  /** 列＝周一至周五；周六周日**只在真有课时**才多一列（不摆空列） */
+  const weekDays = useMemo(() => {
+    const ds = [1, 2, 3, 4, 5]
+    for (const r of classRows) if (r.weekday >= 6 && !ds.includes(r.weekday)) ds.push(r.weekday)
+    return ds.sort((a, b) => a - b)
+  }, [classRows])
+
+  const cellRows = (wd: number, start: string) =>
+    classRows.filter((r) => r.weekday === wd && r.start === start)
+
+  /** 本班各科的任课老师（编辑那一格时挑老师用）—— 认不出名字时**不把 id 打到屏上** */
+  const [classTeachers, setClassTeachers] = useState<{ id: string; name: string; subjectCode: string }[]>([])
+  useEffect(() => {
+    if (!canManageThis || !id) return
+    let alive = true
+    void (async () => {
+      const [rows, t] = await Promise.all([remote.loadClassSubjects([id]), listTeachers()])
+      if (!alive) return
+      const nameOf = new Map((t.ok ? t.data.teachers : []).map((x) => [x.id, x.name]))
+      setClassTeachers(
+        (rows ?? []).map((r) => ({
+          id: r.teacherId,
+          name: nameOf.get(r.teacherId) ?? '（认不出名字）',
+          subjectCode: r.subjectCode,
+        })),
+      )
+    })()
+    return () => {
+      alive = false
+    }
+  }, [canManageThis, id])
+
+  const [lessonCell, setLessonCell] = useState<{ wd: number; start: string; end: string } | null>(null)
+  const [lessonSubject, setLessonSubject] = useState('')
+  const [lessonTeacher, setLessonTeacher] = useState('')
+  const [lessonBusy, setLessonBusy] = useState(false)
+  const [batchOpen, setBatchOpen] = useState(false)
+
+  /** 点一格：把那一格已有那节填进编辑面板（空着就是新加） */
+  const openCell = (wd: number, start: string, end: string, rows: ScheduleItem[]) => {
+    setLessonCell({ wd, start, end })
+    setLessonSubject(subjectCodeOfName(splitLessonTitle(rows[0]?.title ?? '').subject) ?? '')
+    setLessonTeacher(rows[0]?.teacherId ?? '')
+  }
+
+  /**
+   * 走班冲突校验 —— 与单条录入、教室端粘贴**同一个** `checkScheduleConflicts`
+   * （这节课会落到哪个走班班，只有那一处算得对）。
+   */
+  const guardConflicts = async (items: Omit<ScheduleItem, 'id'>[]): Promise<boolean> => {
+    const gate = await checkScheduleConflicts(
+      { items: items.map((x, i) => ({ ...x, id: `pending-${i}` })), schedule, classes },
+      { loadMembers: remote.loadClassMembers, loadSubjects: remote.loadClassSubjects },
+    )
+    if (gate.blocked) {
+      push({ text: '这份课表和走班班撞了，没有保存', tone: 'bad', desc: gate.message })
+      return false
+    }
+    return true
+  }
+
+  const saveLesson = async () => {
+    if (!klass || !lessonCell || !lessonSubject) return
+    const title = `${klass.name} ${subjectName(lessonSubject, lessonSubject)}`
+    const teacherId = lessonTeacher || null
+    const existing = cellRows(lessonCell.wd, lessonCell.start)
+    setLessonBusy(true)
+    if (existing.length) {
+      /* 已经有这一节 → **改那一行**（科目与老师一起改，与课程管理页同一口径） */
+      updateSchedule(existing[0].id, { title, teacherId })
+      setLessonBusy(false)
+      setLessonCell(null)
+      push({ text: '这一节改了', tone: 'ok', desc: '以后每周都按新的上' })
+      return
+    }
+    const item: Omit<ScheduleItem, 'id'> = {
+      weekday: lessonCell.wd,
+      start: lessonCell.start,
+      end: lessonCell.end,
+      title,
+      classId: klass.id,
+      room: '',
+      kind: 'class',
+      notify: true,
+      scope: 'class',
+      teacherId,
+    }
+    const ok = await guardConflicts([item])
+    setLessonBusy(false)
+    if (!ok) return
+    addScheduleMany([item])
+    setLessonCell(null)
+    push({ text: '加了一节', tone: 'ok', desc: '以后每周都按新的上' })
+  }
+
+  const removeLesson = () => {
+    if (!lessonCell) return
+    const existing = cellRows(lessonCell.wd, lessonCell.start)
+    if (!existing.length) return
+    removeSchedule(existing[0].id)
+    setLessonCell(null)
+    push({ text: '这一节去掉了', tone: 'ok' })
+  }
 
   if (!klass) {
     return (
@@ -1027,6 +1285,348 @@ export default function ClassDetail() {
               )}
             </Panel>
           </div>
+        ) : null}
+
+        {/*
+          🆕 值日生 + 课代表口令（用户口径 ⑧ + 追问 5）。
+          🔴 摆不摆 = 上面那一个 `canManageThis`（与「教室端账号」同一档判据）——
+             科任老师看不到这一块；真正那一刀在数据库（`duty_assignments_write`
+             是 `can_manage_class()`、口令只能走 RPC）。
+          ⚠️ 值日生的**顺序**不由这里决定：这里只写"某天是谁"这一个锚点，
+             其余日子全部由 `lib/duty.ts` 按学号顺序推出来（判据只有一处）。
+        */}
+        {canManageThis ? (
+          <>
+            <div className="mt-6">
+              <Sect>值日生</Sect>
+              <Panel bodyClass="p-3">
+                <div style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.8 }}>
+                  每天<b>一人</b>，按<b>学号升序</b>轮，周末与放假日跳过。你在这里定了某一天是谁，
+                  从那天起就接着往下轮 —— 教室里那块大屏「下课了，值日生·××× 不要忘记擦黑板」
+                  读的就是这里。
+                </div>
+
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <input
+                    type="date"
+                    className="input"
+                    style={{ width: 'auto' }}
+                    value={dutyDate}
+                    onChange={(e) => setDutyDate(e.target.value || ymdOf(beijingNow()))}
+                  />
+                  <Button size="sm" onClick={() => setDutyDate(ymdOf(beijingNow()))}>
+                    回到今天
+                  </Button>
+                  <span className="flex-1" />
+                  <span style={{ fontSize: 12.5, color: 'var(--color-ink2)' }}>
+                    {dutyDay ? (
+                      <>
+                        这一天：<b>{dutyDay.name}</b>
+                        <span style={{ color: 'var(--color-ink3)' }}>（学号 {dutyDay.studentNo}）</span>
+                      </>
+                    ) : (
+                      '这一天不上课（周末 / 放假）'
+                    )}
+                  </span>
+                  {dutyDay ? (
+                    <Tag tone={dutyDay.source === 'set' ? 'accent' : 'idle'}>
+                      {dutyDay.source === 'set' ? '你定的' : '按学号轮'}
+                    </Tag>
+                  ) : null}
+                </div>
+
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <select
+                    className="input"
+                    style={{ width: 'auto', maxWidth: 260 }}
+                    value={dutyPick}
+                    onChange={(e) => setDutyPick(e.target.value)}
+                  >
+                    <option value="">（挑一个学生）</option>
+                    {dutyCandidates.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.studentNo} {s.name}
+                      </option>
+                    ))}
+                  </select>
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    disabled={dutyBusy || !dutyPick || !dutyDay}
+                    onClick={() => void saveDuty()}
+                  >
+                    就定他
+                  </Button>
+                  {!daily ? (
+                    <span style={{ fontSize: 11.5, color: 'var(--color-warn)' }}>
+                      这一次没读出值日生记录，定了可能存不下去。
+                    </span>
+                  ) : null}
+                </div>
+
+                <div className="mt-4" style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
+                  接下来两周（只列上课日，点一行跳到那天）
+                </div>
+                <div className="mt-1 flex flex-col">
+                  {dutyNext.length ? (
+                    dutyNext.map((r) => (
+                      <button
+                        key={r.date}
+                        type="button"
+                        data-duty-row={r.date}
+                        onClick={() => setDutyDate(r.date)}
+                        className="flex items-center gap-3 py-2 text-left"
+                        style={{
+                          borderBottom: '1px solid var(--color-line2)',
+                          background: r.date === dutyDate ? 'var(--color-accentsoft)' : undefined,
+                        }}
+                      >
+                        <span className="num" style={{ fontSize: 12.5, color: 'var(--color-ink2)' }}>
+                          {r.date.slice(5).replace('-', '/')}
+                        </span>
+                        <span style={{ fontSize: 12, color: 'var(--color-ink3)' }}>
+                          周{['一', '二', '三', '四', '五', '六', '日'][weekdayOfISO(r.date) - 1]}
+                        </span>
+                        <span className="flex-1" style={{ fontSize: 12.5, fontWeight: 600 }}>
+                          {r.name}
+                        </span>
+                        {r.source === 'set' ? <Tag tone="accent">你定的</Tag> : null}
+                      </button>
+                    ))
+                  ) : (
+                    <div style={{ fontSize: 12, color: 'var(--color-ink4)' }}>
+                      这两周没有上课日（放假？）。
+                    </div>
+                  )}
+                </div>
+              </Panel>
+            </div>
+
+            <div className="mt-6">
+              <Sect>课代表口令</Sect>
+              <Panel bodyClass="p-3">
+                <div style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.8 }}>
+                  课代表在教室那块屏上录作业时要输它（他只能录<b>自己那一科</b>、只能录<b>今天</b>）。
+                  库里存的是哈希，<b>设完谁都看不到原文</b> —— 忘了就再设一个。
+                </div>
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <input
+                    className="input"
+                    style={{ width: 'auto', maxWidth: 200 }}
+                    value={pinInput}
+                    onChange={(e) => setPinInput(e.target.value)}
+                    placeholder="4–12 位"
+                  />
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    disabled={pinBusy || pinInput.trim().length < 4 || pinInput.trim().length > 12}
+                    onClick={() => void savePin()}
+                  >
+                    设定 / 换口令
+                  </Button>
+                  {pinMsg ? (
+                    <span style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>{pinMsg}</span>
+                  ) : null}
+                </div>
+              </Panel>
+            </div>
+
+            {/*
+              🆕 本班课表（用户口径 ⑨）—— 班主任在班级管理处调本班课表。
+              逻辑与判据见上面「本班课表」那一段注释；这里只画。
+            */}
+            <div className="mt-6">
+              <Sect>本班课表</Sect>
+              <Panel bodyClass="p-3">
+                <div style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.8 }}>
+                  这里改的是<b>以后每周都生效</b>的本班课表（教室里那块大屏读的就是它）。
+                  只想改<b>某一天</b>的，用「课程管理 → 临时调课」——那是另一条路，不动这张表。
+                </div>
+
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <Button size="sm" onClick={() => setBatchOpen(true)}>
+                    <IconPaste size={14} /> 粘贴 / 上传整份课表
+                  </Button>
+                  <span style={{ fontSize: 11.5, color: 'var(--color-ink4)' }}>
+                    {classRows.length ? `现在有 ${classRows.length} 节` : '现在还是空的'}
+                  </span>
+                </div>
+
+                <div className="mt-3 overflow-x-auto">
+                  <div style={{ minWidth: 560 }}>
+                    <div
+                      className="flex items-stretch"
+                      style={{ borderBottom: '1px solid var(--color-line2)' }}
+                    >
+                      <div style={{ width: 64 }} />
+                      {weekDays.map((wd) => (
+                        <div
+                          key={wd}
+                          className="flex-1 py-1.5 text-center"
+                          style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}
+                        >
+                          {WEEKDAY_TEXT[wd - 1]}
+                        </div>
+                      ))}
+                    </div>
+                    {weekSlots.map(([start, end]) => (
+                      <div
+                        key={start}
+                        data-class-slot={start}
+                        className="flex items-stretch"
+                        style={{ borderBottom: '1px solid var(--color-line2)' }}
+                      >
+                        <div
+                          className="flex items-center"
+                          style={{ width: 64, fontSize: 11, color: 'var(--color-ink4)' }}
+                        >
+                          <span className="num">{start}</span>
+                        </div>
+                        {weekDays.map((wd) => {
+                          const rows = cellRows(wd, start)
+                          return (
+                            <div
+                              key={wd}
+                              className="min-w-0 flex-1 p-1"
+                              data-class-cell={`${wd}-${start}`}
+                            >
+                              {rows.length ? (
+                                rows.map((r) => (
+                                  <button
+                                    key={r.id}
+                                    type="button"
+                                    onClick={() => openCell(wd, start, r.end, rows)}
+                                    className="mb-1 w-full rounded-md px-1.5 py-1 text-left"
+                                    style={{
+                                      background: 'var(--color-accentsoft)',
+                                      border: '1px solid var(--color-line2)',
+                                    }}
+                                  >
+                                    <span
+                                      className="block truncate"
+                                      style={{ fontSize: 12, fontWeight: 600 }}
+                                    >
+                                      {splitLessonTitle(r.title).subject || r.title}
+                                    </span>
+                                  </button>
+                                ))
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => openCell(wd, start, end, [])}
+                                  aria-label={`加一节课：${WEEKDAY_TEXT[wd - 1]} ${start}`}
+                                  className="w-full rounded-md"
+                                  style={{
+                                    border: '1px dashed var(--color-line3)',
+                                    color: 'var(--color-ink4)',
+                                    fontSize: 13,
+                                    lineHeight: '22px',
+                                  }}
+                                >
+                                  ＋
+                                </button>
+                              )}
+                            </div>
+                          )
+                        })}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </Panel>
+            </div>
+
+            {/* 编辑那一节：钟点与星期几来自**点的那一格**，这里只挑科目与老师 */}
+            <Sheet
+              open={!!lessonCell}
+              onClose={() => setLessonCell(null)}
+              title={lessonCell ? `${WEEKDAY_TEXT[lessonCell.wd - 1]} ${lessonCell.start}` : ''}
+              footer={
+                <div className="flex gap-2">
+                  {lessonCell && cellRows(lessonCell.wd, lessonCell.start).length ? (
+                    <Button block onClick={removeLesson}>
+                      去掉这一节
+                    </Button>
+                  ) : null}
+                  <Button
+                    block
+                    variant="primary"
+                    disabled={lessonBusy || !lessonSubject}
+                    onClick={() => void saveLesson()}
+                  >
+                    保存
+                  </Button>
+                </div>
+              }
+            >
+              <div style={{ fontSize: 12.5, color: 'var(--color-ink2)' }}>这一节上哪一科</div>
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {SUBJECTS.map((s) => (
+                  <button
+                    key={s.code}
+                    type="button"
+                    data-lesson-subject={s.code}
+                    onClick={() => setLessonSubject(s.code)}
+                    className="rounded-full px-2.5 py-1"
+                    style={{
+                      fontSize: 12,
+                      border: '1px solid var(--color-line2)',
+                      background:
+                        lessonSubject === s.code ? 'var(--color-accentsoft)' : 'transparent',
+                      color:
+                        lessonSubject === s.code ? 'var(--color-ink)' : 'var(--color-ink2)',
+                      fontWeight: lessonSubject === s.code ? 650 : 400,
+                    }}
+                  >
+                    {s.name}
+                  </button>
+                ))}
+              </div>
+
+              <div className="mt-4" style={{ fontSize: 12.5, color: 'var(--color-ink2)' }}>
+                谁上（可以不填）
+              </div>
+              <select
+                className="input mt-2"
+                style={{ width: 'auto', maxWidth: 300 }}
+                value={lessonTeacher}
+                onChange={(e) => setLessonTeacher(e.target.value)}
+              >
+                <option value="">（不写老师）</option>
+                {classTeachers.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {subjectName(t.subjectCode, t.subjectCode)} · {t.name}
+                  </option>
+                ))}
+              </select>
+              <div className="mt-2" style={{ fontSize: 11.5, color: 'var(--color-ink4)' }}>
+                名单来自这个班的任课关系（教师管理里配的那张表）。
+              </div>
+            </Sheet>
+
+            {/* 批量录入：粘贴 / 上传整份课表 —— 与「我的日程表」那一页同一个组件 */}
+            <ScheduleBatch
+              open={batchOpen}
+              onClose={() => setBatchOpen(false)}
+              classes={[klass]}
+              today={weekdayOfISO(ymdOf(beijingNow()))}
+              onSave={async (items) => {
+                const mapped: Omit<ScheduleItem, 'id'>[] = items.map((x) => ({
+                  ...x,
+                  classId: klass.id,
+                  scope: 'class',
+                  kind: 'class',
+                }))
+                const ok = await guardConflicts(mapped)
+                if (!ok) return false
+                const n = addScheduleMany(mapped)
+                setBatchOpen(false)
+                push({ text: `已加入 ${n} 节`, tone: 'ok', desc: '以后每周都按新的上' })
+                return true
+              }}
+            />
+          </>
         ) : null}
       </Page>
 

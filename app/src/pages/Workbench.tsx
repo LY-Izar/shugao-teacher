@@ -1,15 +1,23 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Page } from '../components/AppShell'
 import {
   IconAlert,
   IconBell,
-  IconCamera,
+  IconCalendar,
+  IconChart,
   IconCheck,
   IconChevronRight,
   IconClipboard,
+  IconClock,
+  IconGrid,
+  IconPencil,
   IconPlus,
   IconScan,
+  IconSliders,
+  IconStack,
+  IconTarget,
+  IconUser,
   IconUsers,
   IconZap,
 } from '../components/icons'
@@ -24,7 +32,18 @@ import { collectStats } from '../lib/assignments'
 import { friendlyDate } from '../lib/date'
 import { isAdminClass } from '../lib/pick'
 import { analyzeRoster } from '../lib/roster'
-import { currentIdentityLabel, IDENTITY_TAG_STYLE } from '../lib/roles'
+import {
+  canAssignRoles,
+  canEditClassFor,
+  canManageTeachers,
+  currentIdentityLabel,
+  entryVisible,
+  hasManagingRole,
+  IDENTITY_TAG_STYLE,
+  isSuperAdmin,
+  seesTeachingData,
+  type EntryKey,
+} from '../lib/roles'
 import { noticeScopeText } from '../lib/notices'
 import { pendingForMe, type TeachingRow } from '../lib/teaching'
 import { loadClassSubjects } from '../data/remote'
@@ -119,38 +138,169 @@ export default function Workbench() {
     '日一二三四五六'[today.getDay()]
   }`
 
-  const tiles = [
-    {
+  /*
+   * ============================================================
+   * 快捷操作：**按身份给不同的格子**（2026-10-XX，教室端改造那一轮）
+   * ------------------------------------------------------------
+   * 用户口径：功能加了这么多之后，"每个身份平时用的功能不同，
+   * 那是不是每个身份看见的快捷键应该不一样？"
+   *
+   * 🔴 三条纪律：
+   *   ① 判据**只用 `lib/roles.ts` 既有函数**（`isSuperAdmin` / `canAssignRoles` /
+   *      `hasManagingRole` / `canManageTeachers` / `seesTeachingData` /
+   *      `canEditClassFor` / `entryVisible`）—— 这里**不写角色数组**，
+   *      也不另立一套"谁能看哪一页"的规矩（那是 `ENTRIES` 那张表的事）；
+   *   ② 每一格都带 `entry`，末尾统一过一遍 `entryVisible(entry, myRoles)` ——
+   *      这滤的是**入口**、不是数据行（M3）：摆出来的格子一定点得进去；
+   *   ③ 不拿角色去筛数据：那一次 `find` 只是为了拿到"我那个班的 id"，
+   *      用的是 `canEditClassFor()` 这个**既有的前端影子**，不是新判据。
+   *
+   * ⚠️ 「拍照录名单」**从工作台撤掉**了（它属于开学准备那条链，班级页里有入口）。
+   * ⚠️ 「收 / 批」那一格在我一份待处理作业都没有时**整格不摆**。
+   * ⚠️ 「每日作业」是这一轮新加的（那一屏就是教室端"今天各科留了什么"的录入处）。
+   */
+  type Tile = {
+    key: string
+    entry: EntryKey
+    icon: ReactNode
+    title: string
+    desc: string
+    onClick: () => void
+  }
+
+  /* 「我的班」那一格要的那个班：班主任身份带的范围就是班 id（`canEditClassFor` 认它） */
+  const ledClass = adminClasses.find((c) => canEditClassFor(myRoles, c.id, c.gradeId))
+
+  const T = {
+    assignment: {
       key: 'assignment',
+      entry: '/assignments',
       icon: <IconClipboard size={19} />,
       title: '新建作业档案',
       desc: '名称 · 题数 · 班级 · 日期',
       onClick: () => navigate('/assignments/new'),
     },
-    {
+    collect: {
       key: 'collect',
+      entry: '/assignments',
       icon: <IconScan size={19} />,
       title: pending[0]?.a.status === 'collected' ? '继续批改' : '收作业查缺',
       desc: pending.length ? `${pending.length} 份待处理` : '拍一摞作业的侧面',
       onClick: () => navigate(pending[0] ? todoPath(pending[0].a) : '/assignments'),
     },
-    {
-      key: 'photo',
-      icon: <IconCamera size={19} />,
-      title: '拍照录名单',
-      desc: '录入新班级花名册',
-      /* ⚠️ 用 `adminClasses[0]`（不是 `classes[0]`）：录名单只对行政班有意义 */
-      onClick: () =>
-        navigate(adminClasses[0] ? `/classes/${adminClasses[0].id}/import/photo` : '/classes'),
+    daily: {
+      key: 'daily',
+      entry: '/assignments',
+      icon: <IconPencil size={19} />,
+      title: '每日作业',
+      desc: ledClass ? '本班各科 · 今天留了什么' : '我这一科 · 今天留了什么',
+      onClick: () => navigate('/assignments'),
     },
-    {
-      key: 'manage',
+    myclass: {
+      key: 'myclass',
+      entry: '/classes',
       icon: <IconUsers size={19} />,
-      title: '班级管理',
-      desc: `${adminClasses.length} 个班 · ${total} 人`,
-      onClick: () => navigate('/classes'),
+      title: '我的班',
+      desc: ledClass ? `${ledClass.name} · ${activeStudents(ledClass).length} 人` : '班级 · 名单',
+      onClick: () => navigate(ledClass ? `/classes/${ledClass.id}` : '/classes'),
     },
-  ]
+    schedule: {
+      key: 'schedule',
+      entry: '/schedule',
+      icon: <IconClock size={19} />,
+      title: '我的日程表',
+      desc: '今天几节课 · 临时调课',
+      onClick: () => navigate('/schedule'),
+    },
+    course: {
+      key: 'course',
+      entry: '/manage/course',
+      icon: <IconGrid size={19} />,
+      title: '课程管理',
+      desc: '课表 · 临时调课 · 录课',
+      onClick: () => navigate('/manage/course'),
+    },
+    calendar: {
+      key: 'calendar',
+      entry: '/manage/calendar',
+      icon: <IconCalendar size={19} />,
+      title: '校历',
+      desc: '法定节假日 · 调休 · 导出表格',
+      onClick: () => navigate('/manage/calendar'),
+    },
+    accounts: {
+      key: 'accounts',
+      entry: '/accounts',
+      icon: <IconUser size={19} />,
+      title: '教师管理',
+      desc: '账号 · 任课关系 · 身份',
+      onClick: () => navigate('/accounts'),
+    },
+    grades: {
+      key: 'grades',
+      entry: '/grades',
+      icon: <IconChart size={19} />,
+      title: '年级管理',
+      desc: '年级 · 班级名册',
+      onClick: () => navigate('/grades'),
+    },
+    promote: {
+      key: 'promote',
+      entry: '/grades/promote',
+      icon: <IconStack size={19} />,
+      title: '档案管理',
+      desc: '提档 · 毕业删除',
+      onClick: () => navigate('/grades/promote'),
+    },
+    notices: {
+      key: 'notices',
+      entry: '/notices',
+      icon: <IconBell size={19} />,
+      title: '通知',
+      desc: '收通知 · 看发过什么',
+      onClick: () => navigate('/notices'),
+    },
+    exams: {
+      key: 'exams',
+      entry: '/exams',
+      icon: <IconTarget size={19} />,
+      title: '考试',
+      desc: '成绩录入 · 统计',
+      onClick: () => navigate('/exams'),
+    },
+    ops: {
+      key: 'ops',
+      entry: '/admin',
+      icon: <IconSliders size={19} />,
+      title: '平台运维',
+      desc: '隐私 · 数据库 · 体检',
+      onClick: () => navigate('/admin'),
+    },
+  } satisfies Record<string, Tile>
+
+  /*
+   * 身份 → 格子（顺序就是屏上的顺序）；末尾统一过 `entryVisible` ——
+   * **点不进去的一格都不摆**（所以某些身份实际拿到的比下面列得少，
+   * 那是 `ENTRIES` 那张表说了算，不是这里"漏了"）。
+   */
+  const tiles: Tile[] = (
+    isSuperAdmin(myRoles)
+      ? [T.course, T.calendar, T.accounts, T.grades, T.ops]
+      : canAssignRoles(myRoles)
+        ? [T.course, T.calendar, T.accounts, T.grades]
+        : hasManagingRole(myRoles)
+          ? [T.course, T.calendar, T.grades, T.exams]
+          : canManageTeachers(myRoles)
+            ? [T.accounts, T.promote, T.grades, T.notices]
+            : seesTeachingData(myRoles)
+              ? [T.accounts, T.promote, T.grades, T.notices]
+              : [
+                  T.assignment,
+                  ...(pending.length ? [T.collect] : []),
+                  T.daily,
+                  ledClass ? T.myclass : T.schedule,
+                ]
+  ).filter((t) => entryVisible(t.entry, myRoles))
 
   return (
     <Page>

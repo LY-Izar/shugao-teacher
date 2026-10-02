@@ -42,6 +42,15 @@ const BACKUP_NAME = '树高备份.json'
 import { checkScheduleConflicts, awayText, dayState, maybeShift, toMinutes, weekdayOf } from '../lib/schedule'
 import { beijingNow, dayKind, holidayOn, isRestDay, nextHoliday, ymdOf } from '../lib/holiday'
 import { pickDailyQuote } from '../lib/quotes'
+import { SUBJECTS, subjectCodeOf, subjectName } from '../lib/subjects'
+import {
+  loadDailyBundle,
+  repSetDailyHomework,
+  toDutyInput,
+  todayDuty,
+  type DailyBundle,
+} from '../lib/daily'
+import { downloadBlob, homeworkImageBlob, homeworkImageName } from '../lib/homeworkImage'
 import {
   matchClassName,
   parseScheduleText,
@@ -79,10 +88,17 @@ import {
   stopSpeaking,
   unlockAudio,
 } from '../lib/tts'
-import { friendlyDate } from '../lib/date'
-import type { CallRecord } from '../data/types'
+import { friendlyDate, isoOffset } from '../lib/date'
+import type { CallRecord, DailyHomework } from '../data/types'
 
 const CLASS_KEY = 'shugao.classroom.classId'
+
+/**
+ * 教室端读「每日作业 / 值日生」的日期窗口（相对今天的天数）：往前两周 + 明天。
+ * 往前两周是因为这块屏也会翻前几天的作业；往后一天是为了"提前录了也看得见"。
+ */
+const DAILY_FROM = -14
+const DAILY_TO = 1
 
 /* ---------------- 播报队列的几个常数 ---------------- */
 
@@ -144,7 +160,20 @@ const callKey = (c: CallRecord) => `${c.id}:${lastAt(c)}`
  * 自己带 1 秒的 useState + interval、`memo` —— 秒针跳动只重渲染这一个 <Panel>，
  * 不再把整棵子树每秒拖着重算（顶层 now 降到分钟级，见主组件里的时钟 effect）。
  */
-const ClockBig = memo(function ClockBig({ klassName }: { klassName: string }) {
+const ClockBig = memo(function ClockBig({
+  klassName,
+  duty,
+}: {
+  klassName: string
+  /**
+   * 今天的值日生（由 `lib/duty.ts` 推出来，见主组件里那一段）。
+   *
+   * 🆕 2026-10-02 用户口径：**下课**要提醒值日生擦黑板（不是放学）。
+   * 这里只做"小字一行"，`null` 时**整个不摆** ——
+   * 这块屏挂在教室墙上，多一块面板就会挤掉别的（用户要求"别破坏原有布局"）。
+   */
+  duty?: string | null
+}) {
   const [now, setNow] = useState(() => new Date())
   useEffect(() => {
     const t = window.setInterval(() => setNow(new Date()), 1000)
@@ -162,6 +191,16 @@ const ClockBig = memo(function ClockBig({ klassName }: { klassName: string }) {
           {now.getFullYear()} 年 {now.getMonth() + 1} 月 {now.getDate()} 日 · 周
           {'日一二三四五六'[now.getDay()]} · {klassName}
         </div>
+        {/* 🆕 今天值日生：紧贴在日期行下面的一行 13px 小字（不新增区域、不动排版） */}
+        {duty ? (
+          <div
+            data-classroom-duty
+            style={{ fontSize: 13, color: 'var(--color-ink3)', marginTop: 5 }}
+          >
+            今天值日生 ·{' '}
+            <b style={{ fontWeight: 620, color: 'var(--color-ink)' }}>{duty}</b>
+          </div>
+        ) : null}
       </div>
     </Panel>
   )
@@ -496,6 +535,13 @@ export default function Classroom() {
   const todayIso = ymdOf(now)
 
   /*
+   * 课表重排只认"今天是星期几"这一个数（T4 的口径：分钟级的变化不该惊动重排）。
+   * 单独取出来：那个 `useMemo` 的依赖里既不能放 `now`（身份每次都变），
+   * 也不能放没被用到的日期串。
+   */
+  const nowWeekday = weekdayOf(now)
+
+  /*
    * 🆕 2026-10-13「课程管理」第 4 轮 · **教室端认"今天有临时调整"**（`schema.sql` §38.6）。
    *
    * 🔴 数据源是**数据库那一份** `schedule_day_cells(p_date)`：它把"读时按日期过滤"做在里面了
@@ -607,10 +653,10 @@ export default function Classroom() {
     merged.sort((a, b) => toMinutes(a.start) - toMinutes(b.start))
     // 朝会只在真正的周一早上，所以顺延看的是「今天是不是周一」，
     // 而不是「借用了哪一天的课表」—— 调休借周一的课不代表今天要顺延。
-    return maybeShift(merged, weekdayOf(now))
-    /* T4：依赖从 now 换成 todayIso（天级）—— 这里只按星期几重排，午夜翻天才需要重算；
-       分钟级 now 的身份变化不该惊动它。 */
-  }, [schedule, klass?.id, klassName, useWeekday, todayIso, tempOfDay])
+    return maybeShift(merged, nowWeekday)
+    /* T4：依赖是天级的「今天星期几」（`nowWeekday`）—— 这里只按星期几重排，
+       午夜翻天才需要重算；分钟级 now 的身份变化不该惊动它。 */
+  }, [schedule, klass?.id, klassName, useWeekday, nowWeekday, tempOfDay])
 
   /** 今天哪几节是**被临时调过的**（屏上给一个小标记；`id` 在顺延之后不变） */
   const adjustedIds = useMemo(() => {
@@ -1007,6 +1053,160 @@ export default function Classroom() {
     setAssignmentId('')
   }, [maintOn, mutateQueue])
 
+  /* ============================================================
+     🆕 每日作业 + 值日生（`supabase/schema.sql` §40 那三张表）
+     ------------------------------------------------------------
+     🔴 这一块**必须放在下面那几个 early return 之前**（`:1010` 起）——
+        `rules-of-hooks`：维护中 / 后端没同步 / 没登录 / 没班级，这四种整屏状态
+        也会走一遍 render，钩子少走一次就会报"渲染的 hook 数变了"。
+     🔴 这块屏**只读**：值日生由教师端指定，每日作业由老师在教师端录
+        （课代表那一条走口令，校验在数据库里）。教室端只回答"今天该看见什么"。
+     ============================================================ */
+  const [dl, setDl] = useState<DailyBundle | null>(null)
+  /** 课代表录作业那张 Sheet（屏上入口 + 班级口令） */
+  const [repOpen, setRepOpen] = useState(false)
+  /** 作业档案区的两个筛选：学科（`''` = 全部）与日期（默认**今天**） */
+  const [hwSubject, setHwSubject] = useState('')
+  const [hwDate, setHwDate] = useState<'today' | 'yesterday' | 'all'>('today')
+  /** 档案**默认全收起**：点开一条，下面才展开它的逐题正确率 */
+  const [hwOpen, setHwOpen] = useState(false)
+
+  useEffect(() => {
+    const id = klass?.id
+    if (!id) return
+    let alive = true
+    /* 窗口：往前两周（教室端也会翻到前几天）+ 明天（有人提前录了也看得见） */
+    loadDailyBundle(id, isoOffset(DAILY_FROM), isoOffset(DAILY_TO))
+      .then((b) => {
+        if (alive) setDl(b)
+      })
+      .catch(() => {
+        if (!alive) return
+        /* 🔴 读不到就**按空显示**，并把话说出来（不假装"今天没作业"） */
+        setDl({
+          state: 'unknown',
+          homework: [],
+          anchors: [],
+          calendar: [],
+          notice: '这一次没读出每日作业 / 值日生。',
+        })
+      })
+    return () => {
+      alive = false
+    }
+  }, [klass?.id, todayIso])
+
+  /**
+   * 值日生：池子 = 本班在读学生（`students` 已按学号排好），锚点 = 老师指定过的那些天。
+   * **轮值算法只有一处**（`lib/duty.ts` 的纯函数，教师端预览 / 导出图片共用同一份）。
+   */
+  const dutyInput = useMemo(
+    () =>
+      klass
+        ? toDutyInput({
+            students,
+            anchors: dl?.anchors ?? [],
+            calendar: dl?.calendar ?? [],
+            classCreatedAt: klass.createdAt,
+          })
+        : null,
+    [klass, students, dl],
+  )
+  const dutyTodayRes = dutyInput ? todayDuty(dutyInput) : null
+  const dutyTodayName = dutyTodayRes?.name ?? null
+
+  /** 今天各科留的作业（同一天同一科**可以不止一条** —— 口径见 §40） */
+  const todayHw = useMemo(
+    () => (dl?.homework ?? []).filter((h) => h.onDate === todayIso),
+    [dl, todayIso],
+  )
+
+  /**
+   * 今天这几条按**学科**归拢（一科一组，组内按 `seq`）。
+   * 为什么不在渲染里现算：这块屏一分钟重渲染好几次（时钟），分组是纯函数，算一次就够。
+   * ⚠️ 顺序按 `lib/subjects.ts` 那张字典（语文数学英语…），不是插入顺序。
+   */
+  const hwGroups = useMemo(() => {
+    const order = new Map(SUBJECTS.map((s, i) => [s.code as string, i]))
+    const groups: Array<{ key: string; label: string; code: string; rep: boolean; items: DailyHomework[] }> = []
+    const byKey = new Map<string, (typeof groups)[number]>()
+    for (const h of todayHw) {
+      const code = subjectCodeOf(h) ?? ''
+      const key = code || h.subject || '其他'
+      let g = byKey.get(key)
+      if (!g) {
+        g = { key, label: subjectName(code, h.subject || '其他'), code, rep: false, items: [] }
+        byKey.set(key, g)
+        groups.push(g)
+      }
+      if (h.source === 'rep') g.rep = true
+      g.items.push(h)
+    }
+    groups.sort((a, b) => (order.get(a.code) ?? 99) - (order.get(b.code) ?? 99))
+    return groups
+  }, [todayHw])
+
+  /**
+   * 档案区**看得见的那几行**：先按日期档（今天 / 昨天 / 全部）再按学科筛。
+   *
+   * 🔴 只影响这一块的显示。上面那个 `<select>` 必须继续列**全部** `graded` ——
+   *    `app/scripts/clock-checks.mjs:1421-1425` 数它的 options 个数、
+   *    `app/scripts/shots.mjs:1900-1905` 断言它只有普通模式那一份。
+   * ⚠️ 演示数据里**今天没有已批改档案**（`app/src/data/seed.ts` 那几份在 -1/-2 天），
+   *    所以默认这一档必须给诚实空态 + 一键切「全部」，不能看起来像坏了。
+   */
+  const hwRows = useMemo(() => {
+    const hit = (a: { assignDate: string }) => {
+      if (hwDate === 'all') return true
+      if (hwDate === 'yesterday') return a.assignDate === isoOffset(-1)
+      return a.assignDate === todayIso
+    }
+    const list = graded.filter(
+      (a) => hit(a) && (!hwSubject || subjectCodeOf(a) === hwSubject),
+    )
+    return [...list].sort((x, y) =>
+      x.assignDate === y.assignDate
+        ? x.title.localeCompare(y.title, 'zh')
+        : x.assignDate < y.assignDate
+          ? 1
+          : -1,
+    )
+  }, [graded, hwDate, hwSubject, todayIso])
+
+  /** 档案区里**实际出现过**的学科（按字典顺序）—— 15 个全摆太挤，只摆有的 */
+  const hwSubjects = useMemo(() => {
+    const order = new Map(SUBJECTS.map((s, i) => [s.code as string, i]))
+    const codes = [...new Set(graded.map((a) => subjectCodeOf(a) ?? ''))]
+    codes.sort((x, y) => (order.get(x) ?? 99) - (order.get(y) ?? 99))
+    return codes.map((code) => ({ code, label: subjectName(code, code || '其他') }))
+  }, [graded])
+
+  /**
+   * 现在是不是"课间"（值日生提醒的时机）。
+   *
+   * 🔴 用户 2026-10-02 纠正过一次口径：**不是放学**，是**每节课下课**要有人擦黑板。
+   * 判据只用课表本身：上一节已经下课、下一节还没开始 ⇒ 中间这段就是课间。
+   * 最后一节下课仍然提醒一次（擦完黑板再走），但只留 30 分钟 ——
+   * 放学后不该一直挂着一枚浮标。放假 / 今天没课 / 今天不上课 ⇒ 不提醒。
+   */
+  const breakReminder = useMemo(() => {
+    if (restDay) return false
+    const items = dayItems.items
+    if (!items.length) return false
+    const sorted = [...items].sort((a, b) => toMinutes(a.start) - toMinutes(b.start))
+    for (let i = 0; i < sorted.length; i += 1) {
+      const end = toMinutes(sorted[i].end)
+      if (nowMin < end) continue // 这一节还没下课
+      const nxt = sorted[i + 1]
+      if (nxt) {
+        if (nowMin < toMinutes(nxt.start)) return true // 课间
+        continue // 已经上课了，看下一节
+      }
+      return nowMin - end <= 30 // 最后一节：只留半小时
+    }
+    return false
+  }, [dayItems.items, nowMin, restDay])
+
   /* ---------- 维护中：整屏维护画面（心跳与清理见上面那一段） ---------- */
   if (maintOn) {
     return (
@@ -1126,6 +1326,37 @@ export default function Classroom() {
     if (!old.length) return
     old.forEach((s) => removeSchedule(s.id))
     push({ text: `已清掉旧课表 ${old.length} 条`, tone: 'warn' })
+  }
+
+  /**
+   * 🆕 重新读一遍"每日作业 / 值日生"（课代表刚录完一条时用）。
+   * 不去动上面那个 load effect：它挂的是 `[klass?.id, todayIso]`，录一条不该重挂。
+   */
+  const reloadDaily = async () => {
+    if (!klass) return
+    setDl(await loadDailyBundle(klass.id, isoOffset(DAILY_FROM), isoOffset(DAILY_TO)))
+  }
+
+  /**
+   * 🆕 把"今天的每日作业"存成一张 800×600 的 PNG。
+   *
+   * 版式就是用户给的那份壁纸工具（紫→紫灰渐变、左上日期、一科一行）——
+   * 口径 ⑨"把那个项目内置到教室端"落到这里：**教室端只负责出图**，
+   * 它不设 Windows 壁纸（那是打包成 exe 以后外壳的活，《打包与系统能力清单.md》里写了）。
+   */
+  const saveHomeworkImage = async () => {
+    const blob = await homeworkImageBlob({
+      className: klassName,
+      onDate: todayIso,
+      rows: todayHw,
+      duty: dutyTodayName,
+    })
+    if (!blob) {
+      push({ text: '这张图没画出来', tone: 'bad' })
+      return
+    }
+    downloadBlob(blob, homeworkImageName(klassName, todayIso))
+    push({ text: '作业图片已生成，去浏览器的下载里拿', tone: 'ok' })
   }
 
   return (
@@ -1543,7 +1774,7 @@ export default function Classroom() {
           >
             {/* 左列 */}
             <div className="flex flex-col gap-4">
-              <ClockBig klassName={klass.name} />
+              <ClockBig klassName={klass.name} duty={dutyTodayName} />
 
               {/*
                 每日名言 —— 这一屏是**给学生看的**，所以内容来自 `lib/quotes.ts`
@@ -1806,6 +2037,73 @@ export default function Classroom() {
                   </div>
                 ) : null}
               </Panel>
+
+              {/* 🆕 每日作业（用户口径 ③⑥：**每天常驻**，按学科分组）。
+                  🔴 这是"今天各科留了什么"的清单；下面那块「本次作业」（应交/已交/未交）
+                     是**某一份作业档案**的收缴情况 —— 两件事，口径 ⑤ 把后者改成档案。
+                  🔴 版式照抄上面那几块的 `.panel`，不新增区域样式；也**不加带 ▾ 的按钮**
+                     （`app/scripts/clock-checks.mjs:423-436` 会数全页 ▾ 的个数）。 */}
+              <section className="panel anim-in" data-classroom-homework>
+                <div className="panel-head">
+                  <h2>每日作业</h2>
+                  <span className="flex-1" />
+                  <span style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
+                    {friendlyDate(todayIso)}
+                    {todayHw.length ? ` · 共 ${todayHw.length} 条` : ''}
+                  </span>
+                </div>
+                <div className="p-4">
+                  {todayHw.length ? (
+                    <div className="flex flex-col gap-3">
+                      {hwGroups.map((g) => (
+                        <div key={g.key} data-classroom-hw-subject={g.code || g.key}>
+                          <div className="flex items-center gap-2">
+                            <span style={{ fontSize: 12.5, fontWeight: 700 }}>{g.label}</span>
+                            {g.rep ? <Tag tone="idle">课代表</Tag> : null}
+                          </div>
+                          {g.items.map((h) => (
+                            <div
+                              key={h.id}
+                              style={{
+                                fontSize: 13,
+                                color: 'var(--color-ink2)',
+                                lineHeight: 1.75,
+                                marginTop: 2,
+                                wordBreak: 'break-word',
+                              }}
+                            >
+                              {h.content}
+                            </div>
+                          ))}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: 13, color: 'var(--color-ink3)', lineHeight: 1.8 }}>
+                      今天还没有人留作业。
+                      {dl?.notice ? (
+                        <>
+                          <br />
+                          {dl.notice}
+                        </>
+                      ) : null}
+                    </div>
+                  )}
+
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <Button size="sm" onClick={() => setRepOpen(true)}>
+                      课代表录一条
+                    </Button>
+                    <Button size="sm" disabled={!todayHw.length} onClick={() => void saveHomeworkImage()}>
+                      存成图片
+                    </Button>
+                    <span className="flex-1" />
+                    <span style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
+                      各科老师在教师端录 · 课代表用班里口令也能录
+                    </span>
+                  </div>
+                </div>
+              </section>
 
               {collect ? (
                 <Panel className="overflow-hidden">
@@ -2179,6 +2477,129 @@ export default function Classroom() {
                     {pipWin ? <Tag tone="ok">小窗已开启</Tag> : null}
                   </div>
 
+                  {/*
+                   * 🆕 作业档案区（口径 ②⑤：按学科筛、默认当天的作业；**默认全收起**）。
+                   *
+                   * 🔴 上面那个带 ▾「按日期选作业」按钮、它的 Sheet、下面那个 `<select>`
+                   *    必须**原样留着**（`clock-checks.mjs:423-436` 数全页 ▾ 的个数、
+                   *    `:1421-1425` 数 select 的 options）。筛选用的是**小圆片按钮**，
+                   *    不是再摆一个 `<select>`。
+                   * 点开一条 = 选中这份档案 + 展开下面的「逐题正确率」（那块面板一字没改）。
+                   */}
+                  <div className="flex flex-wrap items-center gap-2" data-hw-filters>
+                    <button
+                      type="button"
+                      data-hw-subject=""
+                      data-on={hwSubject === '' ? '1' : '0'}
+                      onClick={() => setHwSubject('')}
+                      style={chipStyle(hwSubject === '')}
+                    >
+                      全部
+                    </button>
+                    {hwSubjects.map((s) => (
+                      <button
+                        key={s.code || 'other'}
+                        type="button"
+                        data-hw-subject={s.code || 'other'}
+                        data-on={hwSubject === s.code ? '1' : '0'}
+                        onClick={() => setHwSubject(s.code)}
+                        style={chipStyle(hwSubject === s.code)}
+                      >
+                        {s.label}
+                      </button>
+                    ))}
+                    <span className="flex-1" />
+                    {([
+                      ['today', '今天'],
+                      ['yesterday', '昨天'],
+                      ['all', '全部'],
+                    ] as const).map(([k, label]) => (
+                      <button
+                        key={k}
+                        type="button"
+                        data-hw-date={k}
+                        data-on={hwDate === k ? '1' : '0'}
+                        onClick={() => setHwDate(k)}
+                        style={chipStyle(hwDate === k)}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="flex flex-col gap-2" data-hw-archive>
+                    {hwRows.length ? (
+                      hwRows.map((a) => {
+                        const cs = collectStats(students, a)
+                        const on = a.id === assignmentId && hwOpen
+                        return (
+                          <button
+                            key={a.id}
+                            type="button"
+                            data-hw-card={a.id}
+                            data-on={on ? '1' : '0'}
+                            onClick={() => {
+                              setAssignmentId(a.id)
+                              setSeq(1)
+                              setHwOpen(!on)
+                            }}
+                            className="flex flex-wrap items-center gap-3 text-left"
+                            style={{
+                              padding: '10px 12px',
+                              borderRadius: 6,
+                              border: '1px solid var(--color-line2)',
+                              background: on ? 'var(--color-accentsoft)' : 'var(--color-surface)',
+                            }}
+                          >
+                            <span
+                              className="min-w-0 flex-1 truncate"
+                              style={{ fontSize: 13.5, fontWeight: 650 }}
+                            >
+                              {a.title}
+                            </span>
+                            <span style={{ fontSize: 12, color: 'var(--color-ink3)' }}>
+                              {subjectName(subjectCodeOf(a), a.subject)}
+                            </span>
+                            <span className="num" style={{ fontSize: 12, color: 'var(--color-ink3)' }}>
+                              {a.assignDate.slice(5).replace('-', '/')}
+                            </span>
+                            <span
+                              style={{
+                                fontSize: 12,
+                                color: cs.missing ? 'var(--color-bad)' : 'var(--color-ink3)',
+                              }}
+                            >
+                              已交 <b className="num">{cs.submitted}</b>/{cs.total}
+                            </span>
+                            <span style={{ fontSize: 11.5, color: 'var(--color-ink4)' }}>
+                              {on ? '收起' : '展开'}
+                            </span>
+                          </button>
+                        )
+                      })
+                    ) : (
+                      <div style={{ fontSize: 12, color: 'var(--color-ink4)', lineHeight: 1.8 }}>
+                        {hwDate === 'today'
+                          ? '今天还没有已批改的作业档案。'
+                          : '这一档、这一科都没有已批改的档案。'}
+                        {hwDate !== 'all' || hwSubject ? (
+                          <button
+                            type="button"
+                            data-hw-all="1"
+                            onClick={() => {
+                              setHwDate('all')
+                              setHwSubject('')
+                            }}
+                            style={{ ...chipStyle(false), marginLeft: 8 }}
+                          >
+                            看全部
+                          </button>
+                        ) : null}
+                      </div>
+                    )}
+                  </div>
+
+                  {hwOpen && cur ? (
                   <Panel className="overflow-hidden">
                     <div className="panel-head">
                       <h2>逐题正确率 · 点一行切换小窗</h2>
@@ -2265,6 +2686,7 @@ export default function Classroom() {
                       })}
                     </div>
                   </Panel>
+                  ) : null}
 
                   {/* 老师传来的文件：走班班的屏**不摆**（Q17：它只看作业与考试）。
                       ⚠️ 读那一半**一个字没改**（"读得宽"）—— 只是这块屏不显示。 */}
@@ -2562,6 +2984,50 @@ export default function Classroom() {
           </div>
         </div>
       ) : null}
+
+      {/*
+       * 🆕 课间值日提醒（口径 ①）。
+       * 🔴 用户 2026-10-02 纠正过一次口径：**不是放学**，是**每节课下课**要有人擦黑板。
+       * 时机判据只用课表本身（`breakReminder`）：上一节下课、下一节没开始 ⇒ 现在就是课间。
+       * 它是**右下角一枚圆角浮标**，不弹窗、不遮内容，下一节上课自动收起（没有"知道了"按钮）。
+       * 放假 / 今天没课 / 没有值日生 ⇒ 整枚不摆，平时这块屏与以前一模一样。
+       */}
+      {breakReminder && dutyTodayRes ? (
+        <div
+          data-classroom-duty-tip
+          style={{
+            position: 'fixed',
+            right: 18,
+            bottom: 18,
+            zIndex: 40,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            padding: '11px 16px',
+            borderRadius: 999,
+            background: 'var(--color-accent)',
+            color: 'var(--color-onaccent)',
+            boxShadow: 'var(--lift-2)',
+            fontSize: 14,
+            lineHeight: 1.5,
+            maxWidth: '72vw',
+          }}
+        >
+          <span style={{ fontSize: 12.5, opacity: 0.85 }}>值日</span>
+          <span>
+            下课了，值日生·<b>{dutyTodayRes.name}</b> 不要忘记擦黑板
+          </span>
+        </div>
+      ) : null}
+
+      {/* 🆕 课代表录作业（口径 ⑦ + 追问 5「屏上入口 + 班级口令」） */}
+      <RepHomeworkSheet
+        open={repOpen}
+        onClose={() => setRepOpen(false)}
+        classId={klass.id}
+        className={klassName}
+        onSaved={reloadDaily}
+      />
     </Shell>
   )
 }
@@ -2668,4 +3134,125 @@ function SyncWrap() {
       <SyncBanner />
     </div>
   )
+}
+
+/**
+ * 🆕 课代表在教室端录一条作业（口径 ⑦ + 追问 5「屏上入口 + 班级口令」）。
+ *
+ * 这块屏平时是**只读**的，这是唯一的写入口 —— 所以规则写在明面上：
+ *   · 只能录**今天**（数据库那边也写死 `beijing_today()`，这里不给人挑日期）；
+ *   · 只能录**这台机器所属的那个班**（RPC 按 `classroom_accounts` 判）；
+ *   · 只能录**自己那一科**（`class_subjects` 的任教关系）；
+ *   · 口令由班主任在教师端设。`class_rep_pins` 那张表**不给客户端任何表权限**，
+ *     比对发生在 `security definer` 函数里 —— 这里只把 `reason` 翻成人话。
+ * 🔴 本地演示模式没有权限层，照常能录（与 `canManageSchedule()` 回 `'local'` 同一口径）。
+ */
+function RepHomeworkSheet({
+  open,
+  onClose,
+  classId,
+  className,
+  onSaved,
+}: {
+  open: boolean
+  onClose: () => void
+  classId: string
+  className: string
+  onSaved: () => void | Promise<void>
+}) {
+  const push = useToast((s) => s.push)
+  const [subject, setSubject] = useState<string>('chinese')
+  const [content, setContent] = useState('')
+  const [pin, setPin] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const save = async () => {
+    if (busy) return
+    setBusy(true)
+    /* 老师那一条路直接写表（能不能写由 RLS 判）；课代表这一条**必须**走 RPC + 口令 */
+    const r = await repSetDailyHomework({
+      classId,
+      subject: subjectName(subject),
+      subjectCode: subject,
+      content,
+      pin,
+    })
+    setBusy(false)
+    if (!r.ok) {
+      push({ text: r.message, tone: 'bad' })
+      return
+    }
+    push({ text: '已录进今天的每日作业', tone: 'ok' })
+    setContent('')
+    setPin('')
+    onClose()
+    await onSaved()
+  }
+
+  return (
+    <Sheet
+      open={open}
+      onClose={onClose}
+      title={`课代表录作业 · ${className}`}
+      footer={
+        <Button variant="primary" block disabled={busy} onClick={() => void save()}>
+          {busy ? '在写…' : '写进今天的作业'}
+        </Button>
+      }
+    >
+      <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.75, marginBottom: 10 }}>
+        只能录<b>今天</b>、只能录<b>自己那一科</b>。口令问班主任要（他能在教师端换）。
+      </p>
+      <div className="flex flex-wrap gap-2" data-rep-subjects>
+        {SUBJECTS.map((s) => (
+          <button
+            key={s.code}
+            type="button"
+            data-rep-subject={s.code}
+            data-on={subject === s.code ? '1' : '0'}
+            onClick={() => setSubject(s.code)}
+            style={chipStyle(subject === s.code)}
+          >
+            {s.name}
+          </button>
+        ))}
+      </div>
+      <div style={{ fontSize: 11.5, color: 'var(--color-ink3)', margin: '12px 0 6px' }}>
+        作业内容
+      </div>
+      <textarea
+        className="input"
+        rows={4}
+        value={content}
+        onChange={(e) => setContent(e.target.value)}
+        placeholder="例：背《琵琶行》全文，明天早读抽查。"
+      />
+      <div style={{ fontSize: 11.5, color: 'var(--color-ink3)', margin: '12px 0 6px' }}>
+        班级口令
+      </div>
+      <input
+        className="input"
+        value={pin}
+        onChange={(e) => setPin(e.target.value)}
+        placeholder="问班主任要的 4–12 位口令"
+      />
+    </Sheet>
+  )
+}
+
+/**
+ * 筛选用的小圆片。
+ * 🔴 它是 `<button>`，**不是 `<select>`** —— 教室端 `select` 的判据见
+ *    `app/scripts/shots.mjs:1900-1905` 与 `app/scripts/clock-checks.mjs:1421-1425`。
+ */
+function chipStyle(on: boolean): React.CSSProperties {
+  return {
+    padding: '5px 11px',
+    borderRadius: 999,
+    fontSize: 12.5,
+    fontWeight: on ? 650 : 500,
+    border: `1px solid ${on ? 'var(--color-accent)' : 'var(--color-line2)'}`,
+    background: on ? 'var(--color-accentsoft)' : 'var(--color-surface)',
+    color: on ? 'var(--color-accentink)' : 'var(--color-ink2)',
+  }
 }

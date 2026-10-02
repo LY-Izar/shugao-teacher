@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Page } from '../components/AppShell'
 import {
@@ -16,7 +16,13 @@ import {
 } from '../components/icons'
 import { Button, Empty, PageHead, Panel, Sect, Sheet, Tag } from '../components/ui'
 import { useStore, useToast } from '../data/store'
-import { STATUS_TEXT, type Assignment, type AssignmentStatus, type Klass } from '../data/types'
+import {
+  STATUS_TEXT,
+  type Assignment,
+  type AssignmentStatus,
+  type DailyHomework,
+  type Klass,
+} from '../data/types'
 import { UNASSIGNED_CLASS_ID, collectStats, isUnassigned } from '../lib/assignments'
 import { isStreamClass } from '../lib/pick'
 import { friendlyDate, isoOffset, parseISODate, toISODate } from '../lib/date'
@@ -29,6 +35,15 @@ import {
   termMatches,
   type TermFilterValue,
 } from '../lib/terms'
+import { beijingNow, ymdOf } from '../lib/holiday'
+import {
+  addDailyHomework,
+  canWriteDailyHomework,
+  deleteDailyHomework,
+  loadDailyBundle,
+  type DailyBundle,
+} from '../lib/daily'
+import { loadClassSubjects, type ClassSubjectRow } from '../data/remote'
 
 const wrongTotal = (a: Assignment) =>
   Object.values(a.wrong ?? {}).reduce((n, keys) => n + keys.length, 0)
@@ -163,6 +178,154 @@ export default function Assignments() {
   const [confirmId, setConfirmId] = useState<string | null>(null)
   /** 正在改布置日期的档案 id */
   const [dateFor, setDateFor] = useState<string | null>(null)
+
+  /* ============================================================
+     🆕 每日作业（`supabase/schema.sql` §40）
+     ------------------------------------------------------------
+     它**不是**下面那套「作业档案」：
+       · 「每日作业」= 今天各科留了什么（同一天同一科可以多条、当天就能录、
+         教室那块屏上常驻的那一份）；
+       · 「作业档案」= 一次收缴 / 批改的完整流程（谁没交、逐题正确率）。
+     口径（用户 2026-10-02 / 10-03）：
+       · 任课老师**只写自己那一科**；班主任写本班**全部科**；教务处**只能看不能写**；
+       · 🔴 这一刀**不在前端**：能不能写由数据库的 `can_write_daily_homework()` 与
+         `daily_homework_*` 那几条策略判（口径：权限判据一律以数据库为准），
+         这里只是把问出来的结果画出来（问不出来就照着"不拦、让写去试"处理）。
+       · 所以这一块**不读身份槽位**、也不自己拼角色数组 —— 判据只有一处。
+     ============================================================ */
+  const teacher = useStore((s) => s.teacher)
+  const [dhClassId, setDhClassId] = useState('')
+  const [dhDate, setDhDate] = useState(() => ymdOf(beijingNow()))
+  const [dhSubject, setDhSubject] = useState('chinese')
+  const [dhContent, setDhContent] = useState('')
+  const [dhBusy, setDhBusy] = useState(false)
+  const [dhTick, setDhTick] = useState(0)
+  const [dhBundle, setDhBundle] = useState<DailyBundle | null>(null)
+  /** 学科 code → 数据库说这一科能不能写（`null` = 这一次没问出来） */
+  const [dhCan, setDhCan] = useState<Record<string, boolean | null>>({})
+  /** 我的任教关系（`class_subjects`）—— **只**用来给学科排个序、标一个"你教的" */
+  const [teachingRows, setTeachingRows] = useState<ClassSubjectRow[] | null>(null)
+
+  /*
+   * 默认班 = 第一个班。**不写成「effect 里同步 setState」**：那会多渲染一轮，也让 lint 的红灯亮起。
+   * 直接派生 —— 选中过的班不在了就退回第一个班；`dhClassId` 只记"用户自己点过的那一个"。
+   */
+  const dhClass =
+    dhClassId && classes.some((c) => c.id === dhClassId) ? dhClassId : (classes[0]?.id ?? '')
+
+  /* 任教关系：读不到回 `null`（"不知道"），与 `lib/teaching.ts` 同一条纪律 */
+  useEffect(() => {
+    let alive = true
+    const ids = classes.map((c) => c.id)
+    /* 一个班都没有也要异步回一次 —— effect 体里同步 setState 会多渲染一轮 */
+    const job = ids.length ? loadClassSubjects(ids) : Promise.resolve(null)
+    void job.then((r) => {
+      if (alive) setTeachingRows(r)
+    })
+    return () => {
+      alive = false
+    }
+  }, [classes])
+
+  /* 这一天的每日作业（只读这一天：往前翻就用日期控件） */
+  useEffect(() => {
+    if (!dhClass) {
+      /* 一个班都没有：把上一次读到的清掉（同样走异步，不在 effect 体里同步 setState） */
+      void Promise.resolve().then(() => setDhBundle(null))
+      return
+    }
+    let alive = true
+    loadDailyBundle(dhClass, dhDate, dhDate)
+      .then((b) => {
+        if (alive) setDhBundle(b)
+      })
+      .catch(() => {
+        if (alive) setDhBundle(null)
+      })
+    return () => {
+      alive = false
+    }
+  }, [dhClass, dhDate, dhTick])
+
+  /** 这一天已有的条目：按字典顺序、同科按录入顺序 */
+  const dhRows = useMemo(() => {
+    const order = new Map<string, number>(SUBJECTS.map((s, i) => [s.code, i]))
+    return [...(dhBundle?.homework ?? [])].sort(
+      (x, y) =>
+        (order.get(x.subjectCode ?? '') ?? 900) - (order.get(y.subjectCode ?? '') ?? 900) ||
+        x.seq - y.seq,
+    )
+  }, [dhBundle])
+
+  /** 这个班里"我教的科"；`null` = 不知道（那就不标）。`teacherId` 取成普通变量，别在 memo 里做成员访问 */
+  const teacherId = teacher?.id ?? ''
+  const dhMine = useMemo(() => {
+    if (!teachingRows || !teacherId) return null
+    const set = new Set<string>()
+    for (const r of teachingRows) {
+      if (r.classId === dhClass && r.teacherId === teacherId) set.add(r.subjectCode)
+    }
+    return set
+  }, [teachingRows, teacherId, dhClass])
+
+  /*
+   * 问数据库：现在选的这一科能不能写；顺手把这一天**已经有的那几科**也问一遍
+   * （决定每一条的删除图标摆不摆）。问不出来就当成"不知道"，界面按"不拦"处理。
+   */
+  useEffect(() => {
+    if (!dhClass) return
+    const codes = new Set<string>([dhSubject])
+    for (const h of dhBundle?.homework ?? []) {
+      const c = subjectCodeOf(h)
+      if (c) codes.add(c)
+    }
+    let alive = true
+    void Promise.all(
+      [...codes].map(async (code) => {
+        const name = SUBJECTS.find((s) => s.code === code)?.name ?? code
+        return [code, await canWriteDailyHomework(dhClass, name, code)] as const
+      }),
+    ).then((pairs) => {
+      if (alive) setDhCan(Object.fromEntries(pairs))
+    })
+    return () => {
+      alive = false
+    }
+  }, [dhClass, dhSubject, dhBundle])
+
+  const dhCanWrite = dhCan[dhSubject] ?? null
+
+  const saveDaily = async () => {
+    const name = SUBJECTS.find((s) => s.code === dhSubject)?.name ?? dhSubject
+    setDhBusy(true)
+    const r = await addDailyHomework({
+      classId: dhClass,
+      onDate: dhDate,
+      subject: name,
+      subjectCode: dhSubject,
+      content: dhContent,
+      authorId: teacher?.id ?? null,
+      authorName: teacher?.name ?? '',
+    })
+    setDhBusy(false)
+    if (!r.ok) {
+      push({ text: r.message, tone: 'bad' })
+      return
+    }
+    setDhContent('')
+    push({ text: '已留一条', tone: 'ok', desc: `${name} · ${friendlyDate(dhDate)}` })
+    setDhTick((t) => t + 1)
+  }
+
+  const removeDaily = async (row: DailyHomework) => {
+    const r = await deleteDailyHomework(row.id)
+    if (!r.ok) {
+      push({ text: r.message, tone: 'bad' })
+      return
+    }
+    push({ text: '已删除一条', tone: 'warn' })
+    setDhTick((t) => t + 1)
+  }
 
   /**
    * `classId → 班` 的索引。
@@ -328,6 +491,168 @@ export default function Assignments() {
       />
 
       <Page>
+        {/*
+          🆕 每日作业（`supabase/schema.sql` §40）—— 教室那块屏上常驻的那一份。
+          它与下面那套"作业档案"是两件事：这里录的是「今天各科留了什么」，
+          同一天同一科可以留**多条**；档案那套是一次收缴 / 批改的完整流程。
+          🔴 能写哪些科**由数据库说了算**（`can_write_daily_homework()` + RLS）——
+             所以这一块不读身份槽位，问出来是"不能写"就把按钮按住、把理由写出来。
+        */}
+        {classes.length ? (
+          <Panel
+            className="mb-3"
+            head="每日作业"
+            extra={
+              <span className="flex items-center gap-2">
+                <select
+                  className="input"
+                  style={{ width: 'auto', height: 30, fontSize: 12.5 }}
+                  value={dhClass}
+                  onChange={(e) => setDhClassId(e.target.value)}
+                  aria-label="每日作业班级"
+                >
+                  {classes.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+                <span className="seg" style={{ whiteSpace: 'nowrap' }}>
+                  {[
+                    ['今天', 0],
+                    ['昨天', -1],
+                  ].map(([label, off]) => {
+                    const iso = isoOffset(off as number)
+                    return (
+                      <button
+                        key={label as string}
+                        type="button"
+                        data-on={dhDate === iso}
+                        onClick={() => setDhDate(iso)}
+                      >
+                        {label as string}
+                      </button>
+                    )
+                  })}
+                </span>
+              </span>
+            }
+          >
+            <div style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.7 }}>
+              {friendlyDate(dhDate)} · 教室里那块屏「每日作业」读的就是这里（同一天同一科可以留多条）。
+            </div>
+
+            {/* 这一天已经有的 */}
+            <div className="mt-2 flex flex-col">
+              {dhRows.length ? (
+                dhRows.map((h) => {
+                  const code = subjectCodeOf(h)
+                  /* 删除图标摆不摆**也问数据库**（`null` = 没问出来 → 摆着，让它去试） */
+                  const mayDel = code ? dhCan[code] !== false : true
+                  return (
+                    <div
+                      key={h.id}
+                      data-dh-row={h.id}
+                      className="flex items-start gap-2 py-2"
+                      style={{ borderBottom: '1px solid var(--color-line2)' }}
+                    >
+                      <span style={{ fontSize: 12.5, fontWeight: 650, minWidth: 52 }}>
+                        {subjectName(code, h.subject)}
+                      </span>
+                      <span className="min-w-0 flex-1" style={{ fontSize: 13, lineHeight: 1.7 }}>
+                        {h.content}
+                      </span>
+                      <span
+                        style={{ fontSize: 11, color: 'var(--color-ink4)', whiteSpace: 'nowrap' }}
+                      >
+                        {h.source === 'rep' ? '课代表' : h.authorName || '老师'}
+                      </span>
+                      {mayDel ? (
+                        <button
+                          type="button"
+                          aria-label="删掉这一条"
+                          onClick={() => void removeDaily(h)}
+                          style={{ color: 'var(--color-ink4)', padding: 2 }}
+                        >
+                          <IconTrash size={14} />
+                        </button>
+                      ) : null}
+                    </div>
+                  )
+                })
+              ) : (
+                <div style={{ fontSize: 12.5, color: 'var(--color-ink4)', padding: '6px 0' }}>
+                  {dhBundle?.notice || '这一天还没有人留作业。'}
+                </div>
+              )}
+            </div>
+
+            {/* 留一条 */}
+            <div className="mt-3">
+              <div className="mb-2 flex flex-wrap gap-1.5" data-dh-subjects>
+                {SUBJECTS.map((s) => {
+                  const on = dhSubject === s.code
+                  const mine = dhMine?.has(s.code) ?? false
+                  return (
+                    <button
+                      key={s.code}
+                      type="button"
+                      data-dh-subject={s.code}
+                      data-on={on}
+                      onClick={() => setDhSubject(s.code)}
+                      title={mine ? '你教的科' : undefined}
+                      style={{
+                        padding: '3px 9px',
+                        borderRadius: 999,
+                        fontSize: 12,
+                        border: `1px solid ${on ? 'var(--color-accent)' : 'var(--color-line2)'}`,
+                        background: on ? 'var(--color-accentsoft)' : 'var(--color-surface)',
+                        color: on ? 'var(--color-accentink)' : 'var(--color-ink2)',
+                        fontWeight: on ? 650 : 500,
+                      }}
+                    >
+                      {s.name}
+                      {mine ? ' ·' : ''}
+                    </button>
+                  )
+                })}
+              </div>
+              <textarea
+                className="input"
+                rows={2}
+                placeholder={`${subjectName(dhSubject)}今天留了什么`}
+                value={dhContent}
+                onChange={(e) => setDhContent(e.target.value)}
+                aria-label="每日作业内容"
+              />
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="primary"
+                  icon={<IconPlus size={14} />}
+                  disabled={dhBusy || !dhContent.trim() || dhCanWrite === false}
+                  onClick={() => void saveDaily()}
+                >
+                  留一条
+                </Button>
+                {dhCanWrite === false ? (
+                  <span style={{ fontSize: 11.5, color: 'var(--color-warn)' }}>
+                    数据库说这一科不该由你写 —— 不是你教的这一科？教务处只读。
+                  </span>
+                ) : dhCanWrite === null && dhBundle ? (
+                  <span style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
+                    这一次没问出「这一科能不能写」，先别急。
+                  </span>
+                ) : dhMine && !dhMine.has(dhSubject) ? (
+                  <span style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
+                    你教的科后面点了 ·；写不写由数据库判，这里不拦。
+                  </span>
+                ) : null}
+              </div>
+            </div>
+          </Panel>
+        ) : null}
+
         {/* 筛选：班级 · 时间 · 状态 */}
         <div className="mb-3 flex flex-col gap-2">
           {/*

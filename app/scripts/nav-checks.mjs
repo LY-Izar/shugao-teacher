@@ -304,13 +304,15 @@ for (const entry of NOTICE_ROWS) {
    * 🆕 2026-10-12：再加一行 `/manage/course`（课程管理第 3 轮）之后，
    *    `MATRIX_SHAPE` 是 **36 / 151 / 31 / 34** → 这一组的期望值是 **159 / 33 / 36**
    *    （V 151+8、E 31+2、B 34+2）。**三个数都是派生的，别手算**。
+   * 🆕 2026-10-XX：再加一行 `/manage/calendar`（校历）之后，
+   *    `MATRIX_SHAPE` 是 **37 / 154 / 33 / 35** → 这一组的期望值是 **162 / 35 / 37**。
    */
-  eq(`A8 对账：${MATRIX_SHAPE.v} + 8 = ${MATRIX_SHAPE.v + 8}（①′ 的 V）`, MATRIX_SHAPE.v + 8, 159)
-  eq(`A8 对账：${MATRIX_SHAPE.e} + 2 = ${MATRIX_SHAPE.e + 2}（①′ 的 E）`, MATRIX_SHAPE.e + 2, 33)
+  eq(`A8 对账：${MATRIX_SHAPE.v} + 8 = ${MATRIX_SHAPE.v + 8}（①′ 的 V）`, MATRIX_SHAPE.v + 8, 162)
+  eq(`A8 对账：${MATRIX_SHAPE.e} + 2 = ${MATRIX_SHAPE.e + 2}（①′ 的 E）`, MATRIX_SHAPE.e + 2, 35)
   eq(
     `A8 对账：${MATRIX_SHAPE.b} + 2 = ${MATRIX_SHAPE.b + 2}（①′ 的 B —— 教室端那两格）`,
     MATRIX_SHAPE.b + 2,
-    36,
+    37,
   )
   eq(
     'A8 对账自证：①′ 的 V+E+B == (矩阵行数 + 2 行) × 6',
@@ -1137,11 +1139,14 @@ section('第七节 · D1：App.tsx 的 path="…" ↔ lib/pages.ts 的 PAGES（�
  *
  * 为什么写死而不是读文档：D1 要能独立于 D2 的解析器工作 ——
  * D2 的锚点一旦坏了，D2 自己会红，但 D1 不该跟着一起瞎。
- * ⚠️ 这 **36** 条**一条都不许改**（`MATRIX_SHAPE` 那个口径的实体）。
+ * ⚠️ 这 **37** 条**一条都不许改**（`MATRIX_SHAPE` 那个口径的实体）。
  * 🆕 2026-10-01 加 `/manage`（行政管理）—— 这一条是**真的新地址**（§2.2 里原来没有它），
  *    所以 `MATRIX_SHAPE` 也跟着从 34/145/27/32 变成 35/146/28/32。
  * 🆕 2026-10-12 加 `/manage/course`（课程管理）—— 同样是**真地址**（§2.2 里原来没有它），
  *    → **36 / 151 / 31 / 34**（三个聚合数按 §2.2 逐行读回来，不是手算）。
+ * 🆕 2026-10-XX 加 `/manage/calendar`（校历）—— 同样是**真地址**，
+ *    → **37 / 154 / 33 / 35**（同一套纪律：跑一次 `nav-checks` 把实测抄回来，
+ *      别按"我加了什么"去推 —— 那三个数一个都不是"加一行就 +1"）。
  */
 const MATRIX_PATHS = [
   '/login', '/classroom', '/', '/classes', '/classes/:id',
@@ -1152,6 +1157,7 @@ const MATRIX_PATHS = [
   '/exams/:id/grade', '/exams/:id/stats', '/schedule', '/files', '/wrong', '/wrong/:classId',
   '/settings', '/accounts', '/grades', '/grades/:id', '/grades/:id/setup',
   '/grades/promote', '/settings/terms', '/admin', '/admin/probes', '/manage', '/manage/course',
+  '/manage/calendar',
 ]
 
 const appSrc = readApp('src/App.tsx')
@@ -1233,7 +1239,7 @@ const realRoutes = routes.filter((p) => p !== '*')
    第八节 · D2：方案 §2.2 的矩阵路径 ↔ PAGES（**新增页面时的纪律**的机器版）
    ============================================================ */
 
-section('第八节 · D2：方案 §2.2 矩阵（第二个单元格）↔ PAGES — 36 行 / V151 / E31 / B34')
+section('第八节 · D2：方案 §2.2 矩阵（第二个单元格）↔ PAGES — 37 行 / V154 / E33 / B35')
 
 function parseMatrix() {
   const doc = readRepo('按身份显示导航方案.md')
@@ -1311,7 +1317,7 @@ d2Matrix: {
     /*
      * 🔴 **先自证条数与形状，再逐条比**（§4.4 原文：条数不对就直接报"锚点解析错了"，
      * 不许静默通过）。`MATRIX_SHAPE` 是方案 §2.2 "规模感"那张表的自检值
-     * —— 🆕 2026-10-01 加了 `/manage` 那一行之后是 **35 / 146 / 28 / 32**。
+     * —— 🆕 2026-10-XX 加了 `/manage/calendar` 那一行之后是 **37 / 154 / 33 / 35**。
      */
     eq('D2 自证：矩阵行数', mx.paths.length, MATRIX_SHAPE.rows)
     eq('D2 自证：V 格数', mx.sum.v, MATRIX_SHAPE.v)
@@ -1319,18 +1325,18 @@ d2Matrix: {
     eq('D2 自证：B 格数', mx.sum.b, MATRIX_SHAPE.b)
     eq('D2 自证：V+E+B == 行数 × 6', mx.sum.v + mx.sum.e + mx.sum.b, MATRIX_SHAPE.rows * 6)
     eqSet(
-      'D2：矩阵路径 ↔ PAGES 里那 36 条（通知两行不在 §2.2 的矩阵里，见 D9）',
+      'D2：矩阵路径 ↔ PAGES 里那 37 条（通知两行不在 §2.2 的矩阵里，见 D9）',
       mx.paths,
       PAGES.map((p) => p.path).filter((p) => MATRIX_PATHS.includes(p)),
     )
     /* 逐角色的小计也核（方案 §2.2 里那张"每个角色 V/E/B"的表） */
     const ROLE_SUM = [
-      { v: 35, e: 1, b: 0 },
-      { v: 33, e: 3, b: 0 },
-      { v: 31, e: 5, b: 0 },
-      { v: 25, e: 11, b: 0 },
-      { v: 25, e: 11, b: 0 },
-      { v: 2, e: 0, b: 34 },
+      { v: 36, e: 1, b: 0 },
+      { v: 34, e: 3, b: 0 },
+      { v: 32, e: 5, b: 0 },
+      { v: 25, e: 12, b: 0 },
+      { v: 25, e: 12, b: 0 },
+      { v: 2, e: 0, b: 35 },
     ]
     ROLES6.forEach((r, i) => {
       const g = mx.perRole[i]
@@ -1348,7 +1354,7 @@ d2Matrix: {
    * 方案 §2.2 是按路由族排的；`/files` 在 PAGES 里排在 `/accounts` 前面，矩阵里是 #23 vs #27）
    * → **按路径 join**（`pathEntry` 那张表），不是 `PAGES[i]`。
    *
-   * ⚠️ **只比那 34 行**（`MATRIX_PATHS`）：`PAGES` 现在还多了通知那两行，
+   * ⚠️ **只比那 37 行**（`MATRIX_PATHS`）：`PAGES` 现在还多了通知那两行，
    *    而**那两行不在 §2.2 的矩阵里**（它们是 `管理架构与角色权限方案.md` §4.2 的第 18 / 19 行）。
    *    上一版这里是按 `mx.paths[i]` 与 `PAGES.map(...)` 直接 `eqSet` 的，所以加了两行就红了 ——
    *    那正是它该有的样子（"每加一条路由都要登记"的机器版），这里把**范围**说清楚。
@@ -1407,7 +1413,7 @@ d2Matrix: {
       没有它，13 列那 481 格就只是文档里的一堆字母。
    ============================================================ */
 
-section('第八节之二 · D9：管理架构方案 §4.2 的 13 列矩阵（38 行 / V352 / E90 / B36 / —16）')
+section('第八节之二 · D9：管理架构方案 §4.2 的 13 列矩阵（39 行 / V355 / E99 / B37 / —16）')
 
 /**
  * 解析 `管理架构与角色权限方案.md` §4.2 的矩阵。
@@ -1532,8 +1538,10 @@ d9Matrix: {
      * 🆕 2026-10-01：`/manage` 那一行是**两张表一起加**的（§2.2 与 §4.2）——
      *    所以这里的 `MATRIX_PATHS` 也跟着多一条。⚠️ 别只加一处：`MATRIX_PATHS`
      *    是 D1/D2/D9 三处共用的那一份写死清单，改了它三处一起动（这正是它的用途）。
+     * 🆕 2026-10-XX：校历（`/manage/calendar`）同样**两张表一起加** ——
+     *    `MATRIX_PATHS` 又多一条。§4.2 那 13 列矩阵现在有 **39 行**（37 条矩阵路径 + 通知两行）。
      */
-    eqSet('D9：13 列矩阵的行 ↔ §2.2 的 36 条路径 + 通知两行', mx.paths, [
+    eqSet('D9：13 列矩阵的行 ↔ §2.2 的 37 条路径 + 通知两行', mx.paths, [
       ...MATRIX_PATHS,
       '/notices',
       '/notices/new',
@@ -1765,7 +1773,14 @@ section('第九节 · D3/D4/D5：判据白名单 · myRoles 读取点白名单 �
           '手打 URL 进来而够不着时给一句说明。**班级粒度**能不能改仍由服务端回的布尔判（`canManageSchedule()`）',
       ],
       ['src/components/AppShell.tsx', '当前身份标签（显示）+ NAV 过滤（**唯一一处真·入口判据**）+ 🆕通知未读红点'],
-      ['src/pages/Workbench.tsx', '问候语里的身份标签（显示）+ 🆕「最新通知」那一块的入口显隐'],
+      [
+        'src/pages/Workbench.tsx',
+        '问候语里的身份标签（显示）+ 「最新通知」那一块的入口显隐 + ' +
+          '🆕**快捷操作按身份分格**（2026-10-XX）：`isSuperAdmin` / `canAssignRoles` / ' +
+          '`hasManagingRole` / `canManageTeachers` / `seesTeachingData` / `canEditClassFor` ' +
+          '—— **全是既有函数**，这里不写角色数组；每一格末尾过一遍 ' +
+          '`entryVisible(格子的 entry, myRoles)`（滤**入口**），**不读任何数据行**',
+      ],
       ['src/pages/Admin.tsx', '面板内的东西显隐（isSuperAdmin）+ 只读体检屏（上一轮新落）'],
       ['src/pages/Notices.tsx', '🆕「发通知」按钮的显隐（canPublishNotice）—— 只决定摆不摆，服务端仍会 403'],
       ['src/pages/NoticeNew.tsx', '🆕 发通知页：不能发的人进来看到一句说明（不是判据）+ 职位显示名'],
@@ -1854,7 +1869,14 @@ section('第九节 · D3/D4/D5：判据白名单 · myRoles 读取点白名单 �
         '这一页不读 classes / students / grades 里的任何一行',
     ],
     ['src/pages/TeacherAccounts.tsx', 'filter 的是任课关系多选（与角色无关）'],
-    ['src/pages/Workbench.tsx', 'filter 的是今日待办（与角色无关）'],
+    [
+      'src/pages/Workbench.tsx',
+      'filter 的是今日待办（与角色无关）+ 🆕快捷操作那一组格子末尾的 ' +
+        '`entryVisible(格子的 entry, myRoles)` —— 滤的是**入口清单**（与 `AppShell` 的 ' +
+        '`NAV.filter(...)`、`Administration` 的 `CARDS.filter(...)` 同一款，M3 那条线）；' +
+        '`myRoles` 也出现在 `adminClasses.find(c => canEditClassFor(myRoles, …))` 里 —— ' +
+        '那是**既有前端影子**，只为拿"我那个班的 id"，**没有拿角色去筛数据行**',
+    ],
     ['src/pages/Notices.tsx', '🆕 filter 的是通知列表的**排序前拷贝**（与角色无关，未读那一段也是服务端给的）'],
     ['src/pages/NoticeNew.tsx', '🆕 filter 的是"我能发的范围选项"（**选项，不是数据行** —— 清单由数据库给）'],
     [

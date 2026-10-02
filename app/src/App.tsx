@@ -56,6 +56,7 @@ const AssignmentCorrect = lazy(() => import('./pages/AssignmentCorrect'))
 const AssignmentImport = lazy(() => import('./pages/AssignmentImport'))
 const Files = lazy(() => import('./pages/Files'))
 const Schedule = lazy(() => import('./pages/Schedule'))
+const SchoolCalendar = lazy(() => import('./pages/SchoolCalendar'))
 const Settings = lazy(() => import('./pages/Settings'))
 const TeacherAccounts = lazy(() => import('./pages/TeacherAccounts'))
 const Terms = lazy(() => import('./pages/Terms'))
@@ -842,6 +843,26 @@ export default function App() {
           element={
             <Guard>
               <ManageCourse />
+            </Guard>
+          }
+        />
+        {/*
+          🆕 2026-10-XX「校历」`/manage/calendar`（教室端改造那一轮）——
+          「行政管理」那一页的**第五张卡**。
+
+          🔴 为什么单独一页而不是塞在课程管理里：校历是**全校一张**（法定节假日 + 调休 +
+            学校自己改的日子），跟"哪个年级哪节课"不是一件事；谁改得动也差一档
+            （校历只有教务处/超管，课表还有年级主任与班主任）。
+
+          ⚠️ 与 `/manage/course` 同款：**刻意不套额外守卫** —— 手打 URL 进得来，
+            然后页面自己回答"摆不摆那一段"，写入口的闸门在数据库
+            （`school_calendar_write` = `is_school_admin()`）。
+        */}
+        <Route
+          path="/manage/calendar"
+          element={
+            <Guard>
+              <SchoolCalendar />
             </Guard>
           }
         />
