@@ -1,22 +1,14 @@
 @import 'tailwindcss';
 
 /* ============================================================
-   开屏用的两个自托管字体（SIL OFL 1.1，授权文本在同目录）
-   · 志莽行书 Zhi Mang Xing 400 —— 中文「树高教务通」五个字
+   开屏用的自托管字体（SIL OFL 1.1，授权文本在同目录）
    · Playfair Display 900 —— 英文「SD Education」
-   两个都是 Google Fonts 按 `text=` 现生成的**子集**，只含开屏用到的字形，
-   单体 2–3 KB。`font-display: block` 是为了不让系统字先闪一下再被换掉
+   是 Google Fonts 按 `text=` 现生成的**子集**，只含开屏用到的字形，单体 2–3 KB。
+   `font-display: block` 是为了不让系统字先闪一下再被换掉
    （开屏首帧就画，轮廓长度也是按字形量的，字换晚了会画缺一截）。
    🔴 只给开屏用，别在别处引用；CSP 是 `font-src 'self'`，换在线 CDN 会直接加载失败。
+   （中文那套志莽行书 2026-10-13 随中文行一起删了 —— 用户说那行"太土"。）
    ============================================================ */
-@font-face {
-  font-family: 'Zhi Mang Xing';
-  font-style: normal;
-  font-weight: 400;
-  font-display: block;
-  src: url('/fonts/zhimangxing-cn.woff2') format('woff2');
-  unicode-range: U+52A1, U+6559, U+6811, U+901A, U+9AD8;
-}
 @font-face {
   font-family: 'Playfair Display';
   font-style: normal;
@@ -412,7 +404,7 @@
   --dur-sheet: 260ms; /* = 实测 0.26s：.sheet 的 sheet-up（原 --dur-enter 拆成 sheet / scrim 两个） */
   --dur-scrim: 180ms; /* = 实测 0.18s：.scrim 的 fade */
   --dur-exit: 180ms; /* 新增，退场（P1a 才用）；全站目前没有退场动画 */
-  --dur-swap: 260ms; /* 暂无对应：260ms 现在只出现在 splash 进度条的 width 过渡，语义不同 */
+  --dur-swap: 260ms; /* 暂无对应：260ms 原来出现在 splash 进度条的 width 过渡，那个进度条 2026-10-13 已删 */
   --dur-mark: 320ms; /* 暂无对应：StatusMark 画线用的是 --sm-draw: 240ms（原注释引用的 动效方案.md 并不存在，引用已删） */
   --dur-grow: 200ms; /* 暂无对应：最接近的是 .nav-pop 的展开 350ms / 收起 250ms */
   --dur-page: 160ms; /* 占位：.page-enter page-in 实际 0.3s → ⚠️ P0 不换值 */
@@ -2182,8 +2174,8 @@ body::before {
 }
 .stroke-text__stroke {
   /* 描边**不用 accent**：用户看了第一版说「所有的字体框都用这个紫色有点难看」。
-     改成墨色的浅版（`--color-ink3`）—— 描边像铅笔勾线、填色像上墨，整幅字是单色的，
-     `--color-accent` 全屏只留在进度条那一处，才显得是"有意为之"而不是到处撒品牌色。 */
+     改成墨色的浅版（`--color-ink3`）—— 描边像铅笔勾线、填色像上墨，整幅字是单色的。
+     （2026-10-13 起进度条也删了 ⇒ 开屏上再没有任何一处品牌色。） */
   stroke: var(--color-ink3);
 }
 .stroke-text__fill {
@@ -2219,44 +2211,46 @@ body::before {
      每次都是用户看过之后说"再大一点"；192 之后用户说"150 就差不多，太大了"。 */
   margin-bottom: 14px;
 }
-/* 两行的宽度上限 = 该字号下的自然宽度（志莽行书 128px 五个字 ≈ 587、Playfair 52px 那句 ≈ 302），
-   于是像素比 ≈ 1：字号就是配置里写的那个数；窄屏交给 viewBox 整体等比缩。
-   ⚠️ 中文那行留的是 660 —— 行书比黑体窄，587 的自然宽度被拉到 660，**实际是 144px**
-      （这个上限当初是按黑体的 654 定的；用户看惯了就先不动，改字号时记得一并核）。
+/* 宽度上限 = 该字号下的自然宽度（Playfair 52px 那句 ≈ 302），于是像素比 ≈ 1：
+   字号就是配置里写的那个数；窄屏交给 viewBox 整体等比缩。
    🔴 改字号必须同时改这里的上限 —— 上限比自然宽度大，SVG 被"拉宽"，
       屏幕上反而看不出字变小（52px 配 420 的旧上限 ≈ 屏幕上 65px，等于白改）。 */
-.splash__title {
-  width: 100%;
-  max-width: 660px;
-  /* 开屏中文＝志莽行书（自托管子集，见文件顶部的 @font-face）。回落链挂在这一层：
-     `getComputedStyle` 量轮廓、`document.fonts.load` 都读它。 */
-  font-family: 'Zhi Mang Xing', var(--font-sans);
-}
 .splash__sub {
   width: 68%;
   max-width: 302px;
-  margin-top: 10px;
+  margin-top: 4px;
   font-family: 'Playfair Display', var(--font-sans);
 }
-/* 进度条：`data-bar` 上来之前是透明的，但**一直占着位置**，文字不会跳一下 */
-.splash__bar {
-  width: clamp(170px, 54vw, 250px);
-  height: 3px;
-  margin-top: 28px;
-  border-radius: 99px;
-  background: var(--color-line2);
-  opacity: 0;
-  transition: opacity 320ms ease;
+/* 「加载中…」：一行很小的墨色小字，在动画播完之后才出现（2026-10-13 取代原来的进度条）。
+   用 `ink2` 而不是 `ink4` —— 12px 的字要够 4.5:1，`ink4` 那一档是**刻意**低于 AA 的
+   （见 `app/scripts/shots.mjs` 的 F4④）；也**不动明暗**（降透明度就不够 AA 了），
+   要"在动"就让三个点逐个蹦出来。 */
+.splash__loading {
+  margin-top: 26px;
+  font-size: 12px;
+  letter-spacing: 0.18em;
+  color: var(--color-ink2);
 }
-.splash[data-bar] .splash__bar {
-  opacity: 1;
+.splash__loading::after {
+  display: inline-block;
+  width: 1.6em;
+  text-align: left;
+  content: '';
+  animation: splash-dots 1.8s steps(1, end) infinite;
 }
-.splash__bar-fill {
-  display: block;
-  height: 100%;
-  border-radius: 99px;
-  background: var(--color-accent);
-  transition: width 260ms ease-out;
+@keyframes splash-dots {
+  0% {
+    content: '';
+  }
+  25% {
+    content: '.';
+  }
+  50% {
+    content: '..';
+  }
+  75% {
+    content: '...';
+  }
 }
 /* 个人标志（IZAR，`public/izar.png`）：底图是**透明底黑标**，靠 mask 染成主题色 */
 .splash__mark {
@@ -2287,10 +2281,10 @@ body::before {
 }
 @media (prefers-reduced-motion: reduce) {
   /* 描边和填色是 WAAPI 起的，已经走"直接给终态"那条路（见 `Splash.tsx`）；
-     这里只管进度条那两条 CSS 过渡。 */
-  .splash__bar,
-  .splash__bar-fill {
-    transition: none;
+     这里只管「加载中…」那三个点 —— 直接给满三点。 */
+  .splash__loading::after {
+    animation: none;
+    content: '...';
   }
 }
 

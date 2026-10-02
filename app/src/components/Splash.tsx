@@ -1,5 +1,9 @@
 /**
- * 开屏：描边字（沿字形轮廓画出来）+ 进度条。
+ * 开屏：校徽 + 英文描边字（沿字形轮廓画出来）+ 一行小字「加载中…」。
+ *
+ * 2026-10-13：用户说中文那行（志莽行书「树高教务通」）"太土"，进度条也"不好看" ⇒
+ * **中文整行删掉、进度条换成一行很小的「加载中…」**；校徽与英文 Playfair 那行动画留着。
+ * 志莽行书的 `@font-face` 与字体文件同时清掉（不再有任何地方用它）。
  *
  * 效果照用户给的素材 `C:\Users\Administrator\Desktop\动画\6\` 做
  * （`StrokeText.tsx` + `StrokeText.css` + `配置.txt`），参数逐项照抄：
@@ -33,17 +37,13 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperti
 import { Emblem } from './Emblem'
 
 /* ---------------- 配置（照抄 `配置.txt`） ---------------- */
-const CN_TEXT = '树高教务通'
 const EN_TEXT = 'SD Education'
-const CN_SIZE = 128
 const EN_SIZE = 52
 /**
- * 字体＝中文志莽行书、英文 Playfair Display（自托管子集）。
+ * 字体＝英文 Playfair Display（自托管子集）。
  * `spec` 是族名本身 —— `document.fonts.load()` 与 canvas 量轮廓都要用它；
- * 真正的回落链写在 CSS（`.splash__title` / `.splash__sub`）。
+ * 真正的回落链写在 CSS（`.splash__sub`）。
  */
-const CN_FONT_SPEC = 'Zhi Mang Xing'
-const CN_WEIGHT = 400
 const EN_FONT_SPEC = 'Playfair Display'
 const EN_WEIGHT = 900
 const LETTER_SPACING = -3
@@ -58,13 +58,11 @@ const STAGGER_S = 0.05
 const EASE_DRAW = 'cubic-bezier(.37, 0, .63, 1)'
 const EASE_FILL = 'cubic-bezier(.33, 1, .68, 1)'
 
-/** 整个动画（含最后一字的填色）跑完需要多久 —— 进度条在这个点之后才出现 */
+/** 整个动画（含最后一字的填色）跑完需要多久 —— 小字「加载中…」在这个点之后才出现 */
 const ANIM_MS = Math.round(
   (DRAW_S + FILL_DELAY_S + FILL_S + STAGGER_S * Math.max(0, EN_TEXT.length - 1)) * 1000,
 )
 const LEAVE_MS = 420
-/** 没加载完时模拟进度爬到哪就停住 */
-const SIM_CAP = 88
 
 type Box = { x: number; y: number; width: number; height: number }
 
@@ -299,7 +297,7 @@ function StrokeText({ text, fontSize, fontSpec, weight, className = '' }: Stroke
 }
 
 /**
- * 教师端冷启动的开屏：动画播完一遍 → 进度条出现 → 就绪就填满并渐隐到已经渲染好的真页面。
+ * 教师端冷启动的开屏：动画播完一遍 → 小字「加载中…」出现 → 就绪就渐隐到已经渲染好的真页面。
  * 只在后端模式出现（本地演示模式要 `?boot=1`，见 `App.tsx` 的 `bootSplash()`）。
  */
 export function Splash({ ready, onDone }: { ready: boolean; onDone: () => void }) {
@@ -308,8 +306,7 @@ export function Splash({ ready, onDone }: { ready: boolean; onDone: () => void }
       typeof window !== 'undefined' &&
       (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false),
   )
-  const [showBar, setShowBar] = useState(reduced)
-  const [pct, setPct] = useState(0)
+  const [showLoading, setShowLoading] = useState(reduced)
   const [leaving, setLeaving] = useState(false)
 
   /* `onDone` 每次渲染都是新的箭头函数 —— 存进 ref，免得那个定时器 effect
@@ -322,59 +319,41 @@ export function Splash({ ready, onDone }: { ready: boolean; onDone: () => void }
   const animMs = reduced ? 0 : ANIM_MS
   const leaveMs = reduced ? 200 : LEAVE_MS
 
-  /* ① 动画播完一遍，进度条才出现 */
+  /* ① 动画播完一遍，「加载中…」才出现 */
   useEffect(() => {
-    const timer = window.setTimeout(() => setShowBar(true), animMs)
+    const timer = window.setTimeout(() => setShowLoading(true), animMs)
     return () => window.clearTimeout(timer)
   }, [animMs])
 
-  /* ② 还没就绪：模拟加载（二次缓出爬到 88% 停住，等真的加载） */
+  /* ② 真就绪：停一下 → 渐隐 → 交班 */
   useEffect(() => {
-    if (reduced || ready) return
-    let raf = 0
-    const started = performance.now()
-    const tick = (now: number) => {
-      const progress = Math.min(1, (now - started) / 1200)
-      setPct(Math.round((1 - (1 - progress) * (1 - progress)) * SIM_CAP))
-      if (progress < 1) raf = window.requestAnimationFrame(tick)
-    }
-    raf = window.requestAnimationFrame(tick)
-    return () => window.cancelAnimationFrame(raf)
-  }, [reduced, ready])
-
-  /* ③ 真就绪：填满 → 停一下 → 渐隐 → 交班 */
-  useEffect(() => {
-    if (!showBar || !ready) return
-    const raf = window.requestAnimationFrame(() => setPct(100))
+    if (!showLoading || !ready) return
     const hold = reduced ? 400 : 300
     const leavingTimer = window.setTimeout(() => setLeaving(true), hold)
     const doneTimer = window.setTimeout(() => doneRef.current(), hold + leaveMs)
     return () => {
-      window.cancelAnimationFrame(raf)
       window.clearTimeout(leavingTimer)
       window.clearTimeout(doneTimer)
     }
-  }, [showBar, ready, reduced, leaveMs])
+  }, [showLoading, ready, reduced, leaveMs])
 
   return (
     <div
       className="splash"
       data-splash=""
-      data-bar={showBar ? '' : undefined}
       data-leaving={leaving ? '' : undefined}
       style={{ '--splash-leave': `${leaveMs}ms` } as CSSProperties}
     >
       <div className="splash__inner">
         <Emblem n={150} className="splash__emblem" />
-        <div className="splash__title">
-          <StrokeText text={CN_TEXT} fontSize={CN_SIZE} fontSpec={CN_FONT_SPEC} weight={CN_WEIGHT} />
-        </div>
         <div className="splash__sub">
           <StrokeText text={EN_TEXT} fontSize={EN_SIZE} fontSpec={EN_FONT_SPEC} weight={EN_WEIGHT} />
         </div>
-        <div className="splash__bar" data-splash-bar="">
-          <span className="splash__bar-fill" data-splash-bar-fill="" style={{ width: `${pct}%` }} />
-        </div>
+        {showLoading && (
+          <div className="splash__loading" data-splash-loading="">
+            加载中
+          </div>
+        )}
       </div>
       <span className="splash__mark" data-splash-mark="" aria-hidden="true" />
       <span className="splash__sr" role="status">
