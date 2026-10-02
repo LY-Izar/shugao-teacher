@@ -1178,6 +1178,30 @@ body::before {
 .stagger > *:nth-child(n + 7) {
   animation-delay: 0.19s;
 }
+/* T3（2026-10-02，方案 A）：第 8 条起继续 +30ms 的台阶，**第 14 条起封顶 0.4s**。
+   开学后列表是 21 条量级 —— 不封顶的话最后一条要等 630ms 才轮到，那叫"加载慢"；
+   封顶后总时长 ≈ 0.4s + 0.34s 动画 < 0.8s。1–6 条的现有值一个没动。 */
+.stagger > *:nth-child(8) {
+  animation-delay: 0.22s;
+}
+.stagger > *:nth-child(9) {
+  animation-delay: 0.25s;
+}
+.stagger > *:nth-child(10) {
+  animation-delay: 0.28s;
+}
+.stagger > *:nth-child(11) {
+  animation-delay: 0.31s;
+}
+.stagger > *:nth-child(12) {
+  animation-delay: 0.34s;
+}
+.stagger > *:nth-child(13) {
+  animation-delay: 0.37s;
+}
+.stagger > *:nth-child(n + 14) {
+  animation-delay: 0.4s;
+}
 
 .anim-pop {
   animation: pop 0.32s var(--ease-spring) both;

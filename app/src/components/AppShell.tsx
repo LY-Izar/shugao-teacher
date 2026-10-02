@@ -1945,7 +1945,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       setRailScroll((v) => (v === next ? v : next))
       const el = rw.querySelector<HTMLElement>('[data-active="true"]')
       if (!el) {
-        setRailInd((v) => ({ ...v, show: false }))
+        /* T5（2026-10-02）：已经藏着就别再发新对象 —— 每帧一个新引用 = 整个壳重渲染 */
+        setRailInd((v) => (v.show ? { ...v, show: false } : v))
         return
       }
       const r = el.getBoundingClientRect()
@@ -1959,8 +1960,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
        *    ⚠️ 横竖都别退回 `r.top - pr.top`：不滚时 `scrollTop` 是 0，两条式子等价；
        *       一滚起来只有这条对。`left` 不由这里管（`left/right: 0` 是 CSS 定的）。
        */
-      railTarget.current = { top: r.top - pr.top + rw.scrollTop, height: r.height }
-      setRailInd({ top: railTarget.current.top, height: railTarget.current.height, show: true })
+      const top = r.top - pr.top + rw.scrollTop
+      const height = r.height
+      railTarget.current = { top, height }
+      /*
+       * T5（2026-10-02）：**同一次测量不必反复改 state** —— `measure()` 挂在 window scroll
+       * 上（rAF 合帧后仍每帧一次），`setRailInd` 传新对象时哪怕数值一模一样 React 也会
+       * 重渲染整个壳（左栏 + 底栏 + ToastHost）。数值没变就还回去旧引用；
+       * `railTarget` 照旧每帧更新 —— 弹簧读的是它，不受影响。
+       * （`store.ts` 心跳那条「同一次心跳不必反复改 state」的同族纪律。）
+       */
+      setRailInd((v) => (v.show && v.top === top && v.height === height ? v : { top, height, show: true }))
     }
     measure()
     const t = window.setTimeout(measure, 80)
