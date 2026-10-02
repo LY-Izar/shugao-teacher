@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
 import { PipPanel } from '../components/PipPanel'
@@ -139,6 +139,34 @@ const BK_ISSUE_REPEAT_MS = 10 * 60_000
 const lastAt = (c: CallRecord) => Math.max(0, ...(c.sentAt ?? []))
 const callKey = (c: CallRecord) => `${c.id}:${lastAt(c)}`
 
+/**
+ * 大时钟（T4 2026-10-02）：整间教室**唯一**需要秒级粒度的地方就是它。
+ * 自己带 1 秒的 useState + interval、`memo` —— 秒针跳动只重渲染这一个 <Panel>，
+ * 不再把整棵子树每秒拖着重算（顶层 now 降到分钟级，见主组件里的时钟 effect）。
+ */
+const ClockBig = memo(function ClockBig({ klassName }: { klassName: string }) {
+  const [now, setNow] = useState(() => new Date())
+  useEffect(() => {
+    const t = window.setInterval(() => setNow(new Date()), 1000)
+    return () => window.clearInterval(t)
+  }, [])
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return (
+    <Panel className="anim-in overflow-hidden">
+      <div className="p-5 text-center">
+        <div className="num" style={{ fontSize: 62, fontWeight: 650, letterSpacing: '-.05em', lineHeight: 1 }}>
+          {pad(now.getHours())}:{pad(now.getMinutes())}
+          <span style={{ fontSize: 24, color: 'var(--color-ink4)', marginLeft: 4 }}>{pad(now.getSeconds())}</span>
+        </div>
+        <div style={{ fontSize: 13, color: 'var(--color-ink3)', marginTop: 8 }}>
+          {now.getFullYear()} 年 {now.getMonth() + 1} 月 {now.getDate()} 日 · 周
+          {'日一二三四五六'[now.getDay()]} · {klassName}
+        </div>
+      </div>
+    </Panel>
+  )
+})
+
 export default function Classroom() {
   const classes = useStore((s) => s.classes)
   const assignments = useStore((s) => s.assignments)
@@ -272,9 +300,14 @@ export default function Classroom() {
     }
   }, [klass?.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  /* 时钟 */
+  /* 时钟（T4 2026-10-02）：顶层 now 只到**分钟**粒度 —— 秒针的跳动归 <ClockBig> 自己。
+     这个 1 秒的 interval 只负责探测"分钟变了没有"，没变就不 setNow：
+     否则 merged / dayState / closing / 静音判定这些下游每秒全部重算一遍。 */
   useEffect(() => {
-    const t = window.setInterval(() => setNow(new Date()), 1000)
+    const t = window.setInterval(() => {
+      const d = new Date()
+      setNow((v) => (v.getHours() === d.getHours() && v.getMinutes() === d.getMinutes() ? v : d))
+    }, 1000)
     return () => window.clearInterval(t)
   }, [])
 
@@ -575,7 +608,9 @@ export default function Classroom() {
     // 朝会只在真正的周一早上，所以顺延看的是「今天是不是周一」，
     // 而不是「借用了哪一天的课表」—— 调休借周一的课不代表今天要顺延。
     return maybeShift(merged, weekdayOf(now))
-  }, [schedule, klass?.id, klassName, useWeekday, now, tempOfDay])
+    /* T4：依赖从 now 换成 todayIso（天级）—— 这里只按星期几重排，午夜翻天才需要重算；
+       分钟级 now 的身份变化不该惊动它。 */
+  }, [schedule, klass?.id, klassName, useWeekday, todayIso, tempOfDay])
 
   /** 今天哪几节是**被临时调过的**（屏上给一个小标记；`id` 在顺延之后不变） */
   const adjustedIds = useMemo(() => {
@@ -600,6 +635,9 @@ export default function Classroom() {
   }, [schedule, klass?.id, useWeekday, tempOfDay])
 
   // 传入 useWeekday：调休日教师手选的那天，不能被设备真实星期再筛一次
+  /* T4：dayState 保留**分钟级**重算 —— current/next/minutesToNext 在整分翻转
+     （schedule.ts:62 实测它读 nowMinutes(d)，按天重算会把「下一节」倒计时冻住；
+     施工单说它"按天就够"不成立）。顶层 now 已降到分钟级，这里每分钟一次。 */
   const day = useMemo(() => dayState(dayItems.items, now, useWeekday), [dayItems.items, now, useWeekday])
 
   /**
@@ -937,7 +975,6 @@ export default function Classroom() {
   )
 
   const cur = stats?.questions[seq - 1]
-  const pad = (n: number) => String(n).padStart(2, '0')
 
   /* ============================================================
      🆕 维护模式（2026-09-29 管理台第二期）—— 教室端**自己**渲染维护画面
@@ -1506,23 +1543,7 @@ export default function Classroom() {
           >
             {/* 左列 */}
             <div className="flex flex-col gap-4">
-              <Panel className="anim-in overflow-hidden">
-                <div className="p-5 text-center">
-                  <div
-                    className="num"
-                    style={{ fontSize: 62, fontWeight: 650, letterSpacing: '-.05em', lineHeight: 1 }}
-                  >
-                    {pad(now.getHours())}:{pad(now.getMinutes())}
-                    <span style={{ fontSize: 24, color: 'var(--color-ink4)', marginLeft: 4 }}>
-                      {pad(now.getSeconds())}
-                    </span>
-                  </div>
-                  <div style={{ fontSize: 13, color: 'var(--color-ink3)', marginTop: 8 }}>
-                    {now.getFullYear()} 年 {now.getMonth() + 1} 月 {now.getDate()} 日 · 周
-                    {'日一二三四五六'[now.getDay()]} · {klass.name}
-                  </div>
-                </div>
-              </Panel>
+              <ClockBig klassName={klass.name} />
 
               {/*
                 每日名言 —— 这一屏是**给学生看的**，所以内容来自 `lib/quotes.ts`
