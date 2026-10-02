@@ -4,6 +4,9 @@
  * 2026-10-13：用户说中文那行（志莽行书「树高教务通」）"太土"，进度条也"不好看" ⇒
  * **中文整行删掉、进度条换成一行很小的「加载中…」**；校徽与英文 Playfair 那行动画留着。
  * 志莽行书的 `@font-face` 与字体文件同时清掉（不再有任何地方用它）。
+ * 同一天又追加两句：**「亮色模式下的开屏也用暗色的开屏」**（⇒ `index.css` 的令牌层里
+ * `.splash` 与 `data-theme='dark'` 同一串，这一屏**恒暗**；徽的提亮也跟着那一串）与
+ * **「英文字间隔调宽一点」**（⇒ 下面的 `LETTER_SPACING`，并同步 `.splash__sub` 的宽度上限）。
  *
  * 效果照用户给的素材 `C:\Users\Administrator\Desktop\动画\6\` 做
  * （`StrokeText.tsx` + `StrokeText.css` + `配置.txt`），参数逐项照抄：
@@ -46,7 +49,14 @@ const EN_SIZE = 52
  */
 const EN_FONT_SPEC = 'Playfair Display'
 const EN_WEIGHT = 900
-const LETTER_SPACING = -3
+/**
+ * 字距。`配置.txt` 里给的是 **-3（紧排）** —— 那是按 128px 的汉字调的，
+ * 换成 52px 的英文之后一直显得挤；**2026-10-13 用户说「英文字间隔调宽一点」⇒ 改成 2**。
+ * ⚠️ 改这个数要**同时**改 `index.css` 里 `.splash__sub` 的 `width` / `max-width`：
+ *    那一对上限是"该字号下的自然宽度"，字距一宽自然宽度就变大，不跟着改的话
+ *    窄屏上整行会被等比缩，看着反而更小（那两条注释里写了这件事）。
+ */
+const LETTER_SPACING = 2
 /** 2026-10-05 定稿：行书笔画细，原配置的 1.2 勾线几乎看不见 ⇒ 1.8 */
 const STROKE_WIDTH = 1.8
 const DRAW_S = 1.6
