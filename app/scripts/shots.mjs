@@ -11672,7 +11672,7 @@ await withLock(async () => {
      * ⚠️ 扫的是**去掉注释之后**的源码：注释里写满了 `'done'` / `'failed'` 这些词，
      *    不剔掉的话下面每一条都恒真（AGENTS.md 三·2「永远为绿的摆设」）。
      */
-    await step('S25：StatusMark 终态接线 · 1.0.0 版本号与更新日志', async () => {
+    await step('S25：StatusMark 终态接线 · 1.0.8 版本号与更新日志', async () => {
       const root25 = join(HERE, '..')
       const readSrc = (rel) => readFileSync(join(root25, rel), 'utf8').replace(/\r\n/g, '\n')
       /** 剔掉 `//` 与块注释（剩下的才是真代码） */
@@ -11858,18 +11858,18 @@ await withLock(async () => {
       const ver = verMatch ? verMatch[1] : null
       const top = logSrc.match(/v:\s*'([^']+)'/)
       check(
-        ver === '1.0.0' && pkg.version === ver && top !== null && top[1] === ver,
+        ver === '1.0.8' && pkg.version === ver && top !== null && top[1] === ver,
         '🔴 S25 ⑤ 版本号**三处一致**：`lib/version.ts` · `app/package.json` · `lib/changelog.ts` 顶部那一段',
         `version.ts=${ver} · package.json=${pkg.version} · changelog[0]=${top ? top[1] : '（读不到）'}`,
         '反向对照：只把 `version.ts` 改回 `0.9.9` → 这一条当场判假（对照 A 实测跑过）',
       )
       /* 更新日志顶部那一段的条目数与 `at`（`at` 用"落进仓库的那一天"口径） */
-      const seg = logSrc.slice(logSrc.indexOf("v: '1.0.0'"), logSrc.indexOf("v: '0.9.9'"))
-      const items100 = (seg.match(/^\s{6}'/gm) ?? []).length
+      const seg = logSrc.slice(logSrc.indexOf("v: '1.0.8'"), logSrc.indexOf("v: '1.0.0'"))
+      const itemsTop = (seg.match(/^\s{6}'/gm) ?? []).length
       check(
-        items100 >= 10 && /at:\s*'9月27日'/.test(seg),
-        '🔴 S25 ⑥ `1.0.0` 那一段**真的覆盖了 0.9.9 之后的改动**（不是占位一行），发版日按"落进仓库的那一天"填',
-        `条目 ${items100} 条 · at=${(seg.match(/at:\s*'([^']+)'/) ?? [])[1] ?? '（没有）'}`,
+        itemsTop >= 10 && /at:\s*'10月2日'/.test(seg),
+        '🔴 S25 ⑥ `1.0.8` 那一段**真的覆盖了 1.0.0 之后的改动**（不是占位一行），发版日按"落进仓库的那一天"填',
+        `条目 ${itemsTop} 条 · at=${(seg.match(/at:\s*'([^']+)'/) ?? [])[1] ?? '（没有）'}`,
       )
       /* 🔴 §七 的钉子：给老师看的那一屏**不许出现**「内测」「公测」 */
       const banned = ['内' + '测', '公' + '测']
@@ -11898,12 +11898,12 @@ await withLock(async () => {
       /* A：同一个 sourceCheck，只把 version.ts 的号改掉 → "三处一致"必须判假 */
       const sourceCheckVer = (verSrcIn, pkgVer) => {
         const v = (verSrcIn.match(/APP_VERSION\s*=\s*'([^']+)'/) ?? [])[1] ?? null
-        return v === '1.0.0' && pkgVer === v && top !== null && top[1] === v
+        return v === '1.0.8' && pkgVer === v && top !== null && top[1] === v
       }
       check(
-        sourceCheckVer(verSrc, pkg.version) === true && sourceCheckVer(verSrc.replace("'1.0.0'", "'0.9.9'"), pkg.version) === false,
-        '🧪 S25 对照 A：**同一个判据**喂改过号的源码（`1.0.0`→`0.9.9`）→ 当场判假 —— ⑤ 不是恒真的摆设',
-        `真源码=${sourceCheckVer(verSrc, pkg.version)} · 改过号=${sourceCheckVer(verSrc.replace("'1.0.0'", "'0.9.9'"), pkg.version)}`,
+        sourceCheckVer(verSrc, pkg.version) === true && sourceCheckVer(verSrc.replace("'1.0.8'", "'0.9.9'"), pkg.version) === false,
+        '🧪 S25 对照 A：**同一个判据**喂改过号的源码（`1.0.8`→`0.9.9`）→ 当场判假 —— ⑤ 不是恒真的摆设',
+        `真源码=${sourceCheckVer(verSrc, pkg.version)} · 改过号=${sourceCheckVer(verSrc.replace("'1.0.8'", "'0.9.9'"), pkg.version)}`,
       )
       /* B：往更新日志里塞一个禁词 → "不出现"那条必须判假 */
       const bannedOf = (s) => banned.filter((w) => s.includes(w))
