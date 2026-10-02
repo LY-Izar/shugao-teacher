@@ -6,6 +6,9 @@ import { StarBorder } from '../components/StarBorder'
 import { Button } from '../components/ui'
 import { useStore, useToast } from '../data/store'
 import { loginFailText, toEmail } from '../lib/accounts'
+// 🔴 教室端"只让教室端账号登录"：判据与文案都在这一个文件里（见那里的说明）
+import { CLASSROOM_ONLY, isClassroomShell } from '../lib/classroomShell'
+import { signOutEverywhere } from '../hooks/useAuthBootstrap'
 import { getSupabase, isRemote } from '../lib/supabase'
 import { markLogin, setDeviceRole } from '../lib/session'
 import { APP_VERSION_LABEL } from '../lib/version'
@@ -59,6 +62,29 @@ export default function Login() {
        * 身份是 hydrate() 里查 classroom_accounts 得出的，不是靠猜。
        */
       const kind = useStore.getState().accountKind
+      /*
+       * 🔴🔴 教室端 exe **只让教室端账号登录**（2026-10-03，`lib/classroomShell.ts`）
+       *
+       * 为什么必须在这里拦：教室端和教师端加载的是**同一份 dist**，
+       * 所以教师账号在教室端那台机器上登进来，`accountKind` 是 'teacher'，
+       * `App.tsx` 那条 `Navigate to="/classroom"` 就不成立 ——
+       * **直接落在教师控制台上**，而那块屏是学生面前的：能看全班成绩、能改数据。
+       *
+       * 判据用 `accountKind`（= `classroom_accounts` 里有没有自己那一行），
+       * 不用 `teachers` 表 —— 见 `remote.loadClassroomAccount()` 的注释。
+       *
+       * ⚠️ **这只是客户端拦截，不是安全边界**（改 JS 能绕）。
+       *    真隔离在数据库 RLS，那条策略还没钉死，属单独立项 —— 别把这里当成"防住了"。
+       *
+       * ⚠️ 顺序很重要：**先踢掉会话再提示**。反过来的话提示一弹出会话还活着，
+       *    用户按一下刷新就又进去了。
+       */
+      if (isClassroomShell() && kind !== 'classroom') {
+        await signOutEverywhere()
+        setBusy(false)
+        push({ text: CLASSROOM_ONLY.text, tone: 'bad', desc: CLASSROOM_ONLY.desc })
+        return
+      }
       setDeviceRole(kind === 'classroom' ? 'classroom' : 'teacher')
       navigate(loc.state?.from ?? '/', { replace: true })
       return
