@@ -12458,7 +12458,7 @@ await withLock(async () => {
      * ⚠️ 扫的是**去掉注释之后**的源码：注释里写满了 `'done'` / `'failed'` 这些词，
      *    不剔掉的话下面每一条都恒真（AGENTS.md 三·2「永远为绿的摆设」）。
      */
-    await step('S25：StatusMark 终态接线 · 1.0.8 版本号与更新日志', async () => {
+    await step('S25：StatusMark 终态接线 · 版本号与更新日志', async () => {
       const root25 = join(HERE, '..')
       const readSrc = (rel) => readFileSync(join(root25, rel), 'utf8').replace(/\r\n/g, '\n')
       /** 剔掉 `//` 与块注释（剩下的才是真代码） */
@@ -12643,19 +12643,39 @@ await withLock(async () => {
       const verMatch = verSrc.match(/APP_VERSION\s*=\s*'([^']+)'/)
       const ver = verMatch ? verMatch[1] : null
       const top = logSrc.match(/v:\s*'([^']+)'/)
+      /*
+       * 🔴🔴 **判据里不许出现版本号字面量**（2026-10-03 改，之前写的是 `ver === '1.0.8'`）：
+       *   写死的话，每发一版都要回来手改这三处，改漏一处就是一条**恒红的死断言**，
+       *   而人只会以为"门禁坏了"——不会想到是自己上一轮发版时忘了改。
+       *   ✅ 真正要断的是「**三处彼此一致**」，而"这一版是几"根本不是判据。
+       */
       check(
-        ver === '1.0.8' && pkg.version === ver && top !== null && top[1] === ver,
+        ver !== null && pkg.version === ver && top !== null && top[1] === ver,
         '🔴 S25 ⑤ 版本号**三处一致**：`lib/version.ts` · `app/package.json` · `lib/changelog.ts` 顶部那一段',
         `version.ts=${ver} · package.json=${pkg.version} · changelog[0]=${top ? top[1] : '（读不到）'}`,
-        '反向对照：只把 `version.ts` 改回 `0.9.9` → 这一条当场判假（对照 A 实测跑过）',
+        '反向对照：只把 `version.ts` 改成一个对不上的号 → 这一条当场判假（对照 A 实测跑过）',
       )
       /* 更新日志顶部那一段的条目数与 `at`（`at` 用"落进仓库的那一天"口径） */
-      const seg = logSrc.slice(logSrc.indexOf("v: '1.0.8'"), logSrc.indexOf("v: '1.0.0'"))
+      /*
+       * 🔴 顶部那一段 = **第一条版本号到第二条版本号之间**，两端都**按位置找**，
+       *   不再钉死 `1.0.8` / `1.0.0` 两个串（同上）。
+       * 🔴🔴 **必须按「带引号的版本号」找，不能 `indexOf('v:')`**（第一版就是这么写的，当场错）：
+       *   这个文件里第一个 `v:` 是**类型声明** `v: string`（下标 1468），不是数组里的条目
+       *   ⇒ 截出来的是 `ChangeLogEntry` 那个类型、条目数 0、`at` 也没有。
+       *   「查不到 ≠ 没有」的另一个变体：查错了地方，于是判"没写"。
+       * 🔴 `at` 也不再钉死 `10月2日` —— 那是**上一版**的发版日，
+       *   钉着它等于"只要发版就红"。改成断它**像个日期**（月+日，不是「待定」）。
+       */
+      const vHits = [...logSrc.matchAll(/v:\s*'([^']+)'/g)]
+      const mTop = vHits[0]
+      const mNext = vHits[1]
+      const seg = mTop && mNext && mNext.index > mTop.index ? logSrc.slice(mTop.index, mNext.index) : ''
       const itemsTop = (seg.match(/^\s{6}'/gm) ?? []).length
+      const atTop = (seg.match(/at:\s*'([^']+)'/) ?? [])[1] ?? null
       check(
-        itemsTop >= 10 && /at:\s*'10月2日'/.test(seg),
-        '🔴 S25 ⑥ `1.0.8` 那一段**真的覆盖了 1.0.0 之后的改动**（不是占位一行），发版日按"落进仓库的那一天"填',
-        `条目 ${itemsTop} 条 · at=${(seg.match(/at:\s*'([^']+)'/) ?? [])[1] ?? '（没有）'}`,
+        itemsTop >= 5 && atTop !== null && /^\d{1,2}月\d{1,2}日$/.test(atTop),
+        `🔴 S25 ⑥ 顶部那一段（${top ? top[1] : '?'}）**真的写了改动**（不是占位一行），发版日按"落进仓库的那一天"填`,
+        `条目 ${itemsTop} 条 · at=${atTop ?? '（没有）'}`,
       )
       /* 🔴 §七 的钉子：给老师看的那一屏**不许出现**「内测」「公测」 */
       const banned = ['内' + '测', '公' + '测']
@@ -12684,12 +12704,14 @@ await withLock(async () => {
       /* A：同一个 sourceCheck，只把 version.ts 的号改掉 → "三处一致"必须判假 */
       const sourceCheckVer = (verSrcIn, pkgVer) => {
         const v = (verSrcIn.match(/APP_VERSION\s*=\s*'([^']+)'/) ?? [])[1] ?? null
-        return v === '1.0.8' && pkgVer === v && top !== null && top[1] === v
+        return v !== null && pkgVer === v && top !== null && top[1] === v
       }
+      /* 把真源码里的号换成一个**对不上**的（🔴 用 `ver` 拼出来，不写死字面量） */
+      const verWrong = ver ? verSrc.replace(`'${ver}'`, "'0.9.9'") : verSrc
       check(
-        sourceCheckVer(verSrc, pkg.version) === true && sourceCheckVer(verSrc.replace("'1.0.8'", "'0.9.9'"), pkg.version) === false,
-        '🧪 S25 对照 A：**同一个判据**喂改过号的源码（`1.0.8`→`0.9.9`）→ 当场判假 —— ⑤ 不是恒真的摆设',
-        `真源码=${sourceCheckVer(verSrc, pkg.version)} · 改过号=${sourceCheckVer(verSrc.replace("'1.0.8'", "'0.9.9'"), pkg.version)}`,
+        sourceCheckVer(verSrc, pkg.version) === true && sourceCheckVer(verWrong, pkg.version) === false && verWrong !== verSrc,
+        '🧪 S25 对照 A：**同一个判据**喂改过号的源码（真号→`0.9.9`）→ 当场判假 —— ⑤ 不是恒真的摆设',
+        `真源码=${sourceCheckVer(verSrc, pkg.version)} · 改过号=${sourceCheckVer(verWrong, pkg.version)} · 真的被改过=${verWrong !== verSrc}`,
       )
       /* B：往更新日志里塞一个禁词 → "不出现"那条必须判假 */
       const bannedOf = (s) => banned.filter((w) => s.includes(w))
