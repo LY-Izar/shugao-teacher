@@ -8,6 +8,8 @@ import { installErrorReporting } from './lib/errors'
 import { useStore } from './data/store'
 import { useAuthBootstrap } from './hooks/useAuthBootstrap'
 import { authExpired, hasAuthStamp, isClassroomDevice, markLogin } from './lib/session'
+import { CLASSROOM_ONLY, isClassroomShell } from './lib/classroomShell'
+import { signOutEverywhere } from './hooks/useAuthBootstrap'
 import { devInjectedAccountKind, devInjectedRoles, devInjectedSyncError } from './lib/roles'
 import { isRemote } from './lib/supabase'
 import type { TeacherRole } from './data/types'
@@ -62,6 +64,47 @@ const TeacherAccounts = lazy(() => import('./pages/TeacherAccounts'))
 const Terms = lazy(() => import('./pages/Terms'))
 const Workbench = lazy(() => import('./pages/Workbench'))
 
+/**
+ * 🔴 「这是教室端那个程序，请用教室端账号登录」—— 一屏，不给任何别的入口。
+ *
+ * 🔴 **为什么是"先退出会话"而不是只挡一下**（和 `Login.tsx` 里那条一致）：
+ *   只挡不退出的话，用户按一下刷新就又进去了 —— 那是**用一条提示代替了一道边界**。
+ *
+ * ⚠️ 文案守则（A+ 力度）：只回答"这里是什么、我能做什么"。
+ *   不解释判据、不说怎么绕 —— 那是 `lib/classroomShell.ts` 注释里的事。
+ */
+function ClassroomShellOnly() {
+  const [busy, setBusy] = useState(false)
+  return (
+    <div className="grid min-h-full place-items-center px-6 py-10">
+      <div className="w-full anim-in" style={{ maxWidth: 420 }}>
+        <div className="panel overflow-hidden" data-classroom-shell-only="">
+          <div className="panel-head">
+            <h2>{CLASSROOM_ONLY.text}</h2>
+          </div>
+          <div className="p-4" style={{ fontSize: 13, lineHeight: 1.85 }}>
+            <p style={{ color: 'var(--color-ink2)' }}>{CLASSROOM_ONLY.desc}</p>
+            <button
+              type="button"
+              className="btn block mt-4"
+              disabled={busy}
+              style={{ width: '100%' }}
+              onClick={() => {
+                setBusy(true)
+                void signOutEverywhere().then(() => {
+                  window.location.replace('/login')
+                })
+              }}
+            >
+              {busy ? '处理中…' : '退出这个账号'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function Guard({ children }: { children: React.ReactNode }) {
   const teacher = useStore((s) => s.teacher)
   const hydrated = useStore((s) => s.hydrated)
@@ -82,6 +125,28 @@ function Guard({ children }: { children: React.ReactNode }) {
 
   // 连了后端时，先等会话与数据就绪，否则会误判成「未登录」被踢回登录页
   if (!hydrated) return <BootScreen />
+  /*
+   * 🔴🔴🔴 **教室端那个壳里，不许带着教师账号的会话进来**（2026-10-03）
+   *
+   * 🔴 **必须排在下面那条 `accountKind === 'classroom'` 之前**：
+   *   排在后面的话 TypeScript 会把 `accountKind` 收窄成 `'teacher'`，
+   *   `!== 'classroom'` 就变成恒真、编译器直接报 TS2367
+   *   （"2026-10-03 踩过"—— 顺序不是洁癖，是这一条根本写不下去）。
+   *
+   * 为什么必须在这里也拦一道（`lib/classroomShell.ts` 那条只写在**登录页的提交函数**里）：
+   *   那条只挡「**手输密码**登录」这一条路。**已经有会话**的时候压根不走登录页
+   *   ⇒ 拦截**从来没运行过**。2026-10-03 实测：教师端登录过之后装上教室端，
+   *   教室端直接就是登录好的、落在**教师控制台**上。
+   *   （shell 那一侧已经改成两个壳各用各的 profile，见打包目录的
+   *    `_src/desktop/user-data.mjs`；但**那一侧挡不住"有人把 profile 拷过去"**，
+   *    而且万一路径又变了，这里是最后一道。）
+   *
+   * ⚠️ 判据用 `isClassroomShell()`（壳自报身份）而不是设备标记 ——
+   *    这条要拦的是「**这个程序**是教室端」，不是「这台机器被标成过教室端」。
+   */
+  if (isClassroomShell() && accountKind !== 'classroom') {
+    return <ClassroomShellOnly />
+  }
   /*
    * 教室端账号：它整个可见范围就只有自己那一个班，进教师控制台没有任何意义。
    * 这是**账号身份**决定的，和设备标记无关 —— 换个浏览器、清掉 localStorage 也一样。
