@@ -46,6 +46,7 @@ import {
   type SecretFacts,
   type SuperAdminFacts,
   type Tone,
+  looksLikeServerReport,
 } from '../lib/adminChart'
 import {
   adminDeleteErrors,
@@ -828,6 +829,23 @@ export default function Admin() {
         return { kind: 'not_configured', message: body.message ?? '服务端还没配置好。' }
       }
       if (!r.ok) return { kind: 'error', message: body.message ?? `HTTP ${r.status}` }
+      /*
+       * 🔴 **HTTP 200 ≠ "拿到了那份回话"**（2026-10-04，apk 实测）。
+       *
+       * 两个壳的 origin 都不是线上域名（exe `app://-` / apk `https://localhost`）
+       * ⇒ `fetch('/api/…')` 会被**壳自己的本地服务器**接走，而它对不认识的路径回
+       * **200 + index.html**：`r.ok` 真、`r.json()` 抛错被上面 `.catch` 咽成 `{}`。
+       * 旧逻辑只看 `r.ok` ⇒ 判成"服务端在、只是 secret 没配" ⇒ 面板写「未配置」（**假红**），
+       * 还让超管去 Cloudflare 加 secret —— 而真病因是那条请求根本没出壳。
+       * 形状不对 ⇒ 按"读不到"处理（灰）。判据在 `lib/adminChart.looksLikeServerReport`。
+       */
+      if (!looksLikeServerReport(body)) {
+        return {
+          kind: 'error',
+          message:
+            '面板接口没回那份 JSON（拿到了 200，但内容不是它）—— 多半是这条请求没出壳 / 没到线上域名。',
+        }
+      }
       return { kind: 'ok', report: body }
     } catch (e) {
       return {

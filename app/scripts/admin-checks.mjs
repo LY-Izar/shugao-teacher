@@ -1089,6 +1089,40 @@ await withLock(async () => {
     'bad',
   )
 
+  /* ------------------------------------------------------------------
+     🆕 2026-10-04：**HTTP 200 ≠ 拿到了那份回话**（用户 apk 截图报的"那几个 key 读不到"）
+     ------------------------------------------------------------------
+     实测：两个壳的 origin 都不是线上域名（exe `app://-` / apk `https://localhost`），
+     `fetch('/api/admin/config-check')` 会被**壳自己的本地服务器**接走 —— 它对不认识的
+     路径回 **200 + index.html**：`r.ok` 真、`r.json()` 抛错被 `.catch(() => ({}))` 咽成 `{}`
+     ⇒ 旧逻辑判"服务端在、只是 secret 没配" ⇒ 面板写「未配置」（**假红**），还让超管去
+     Cloudflare 加 secret（病因根本不在那儿）。形状判据把它挡回"读不到"（灰，§三.4）。
+     ------------------------------------------------------------------ */
+  eq('🆕 回话形状①：`{}`（壳回的 HTML 被咽成空对象）→ **不算回话**', C.looksLikeServerReport({}), false)
+  eq(
+    '🆕 回话形状②：HTML 原文 / `null` / 数组 → 都不算',
+    [
+      C.looksLikeServerReport('<!doctype html><html>…'),
+      C.looksLikeServerReport(null),
+      C.looksLikeServerReport([]),
+    ].join(','),
+    'false,false,false',
+  )
+  eq(
+    '🆕 回话形状③：真回话（`status` 为 `ok` + config / backup / db 至少一块是对象）→ 算',
+    [
+      C.looksLikeServerReport({ status: 'ok', config: { keys: {}, selfReady: true, supabaseHost: 'x' } }),
+      C.looksLikeServerReport({ status: 'ok', backup: { configured: false } }),
+      C.looksLikeServerReport({ status: 'ok', db: {} }),
+    ].join(','),
+    'true,true,true',
+  )
+  ok(
+    '🔴 🆕 `Admin.tsx` 真的拿这个判据挡在 `kind: \'ok\'` 之前',
+    /looksLikeServerReport\(body\)/.test(readFileSync(resolvePath(APP, 'src/pages/Admin.tsx'), 'utf8')),
+    '反向对照：把 `Admin.tsx` 里那句 `if (!looksLikeServerReport(body))` 删掉 → 这一条当场红',
+  )
+
   /* ============================================================
      第四节 · T7 面板权限判据：**只有 is_super_admin() 能开**
      ============================================================ */

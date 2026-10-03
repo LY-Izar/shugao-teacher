@@ -1302,6 +1302,29 @@ export type SecretFacts = {
   configured: boolean
 }
 
+/**
+ * 这份回话是不是**面板接口的那份 JSON**（2026-10-04 加）。
+ *
+ * 🔴 **为什么不能只看 HTTP 200**（apk 实测抓到的假红，用户截图报的"那几个 key 读不到"）：
+ *    两个壳（exe / apk）的 origin 都不是线上域名（`app://-` / `https://localhost`）
+ *    ⇒ `fetch('/api/admin/config-check')` 打到的是**壳自己的本地服务器**，而它对不认识的
+ *    路径回 **200 + index.html**。于是 `r.ok === true`、`r.json()` 抛错被
+ *    `.catch(() => ({}))` 咽成 `{}` ⇒ 旧逻辑判"服务端回话拿到了"、`keys` 空
+ *    ⇒ 面板写「`SUPABASE_SERVICE_ROLE_KEY` 未配置」，还让超管去 Cloudflare 加 secret
+ *    —— **假红，而且指引指错了地方**（真病因是那条请求根本没出壳）。
+ *    这件事按 §三.4 的三态**必须是灰**："读不到"绝不许说成"没配"。
+ *
+ * ⚠️ 判据故意**宽松**：只要 `status === 'ok'` 且三块（config / backup / db）里至少有一块
+ *    是对象就算数（`action` 不同、返回的块不同）。宁可把真回话判成"读不到"（灰），
+ *    也不许把"读不到"判成"没配"（假红）。
+ */
+export function looksLikeServerReport(body: unknown): boolean {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return false
+  const isObj = (x: unknown) => Boolean(x) && typeof x === 'object' && !Array.isArray(x)
+  const b = body as { status?: unknown; config?: unknown; backup?: unknown; db?: unknown }
+  return b.status === 'ok' && (isObj(b.config) || isObj(b.backup) || isObj(b.db))
+}
+
 /** `SUPABASE_SERVICE_ROLE_KEY` —— 缺了会让"教师账号 / 教室端账号"那两页打不开 */
 export const SERVICE_KEY_IMPACT =
   '影响：教师账号（建号 / 指派身份 / 重置密码）、教室端账号 —— 这两页会给出"还没配置账号服务"；**其他功能不受影响**'
