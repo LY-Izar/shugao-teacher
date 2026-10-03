@@ -25,7 +25,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { Button } from './ui'
 import { Emblem } from './Emblem'
-import { IconAlert, IconClock, IconRefresh } from './icons'
+import { IconAlert, IconCheck, IconClock, IconRefresh } from './icons'
 import { useMaintenanceStatus } from '../lib/useMaintenance'
 import { beijingNow } from '../lib/holiday'
 import { useStore } from '../data/store'
@@ -340,9 +340,33 @@ export function MaintenanceScreen({
     return () => window.clearInterval(t)
   }, [])
 
+  /* 🔴 「重新检查」的反馈必须由这一屏自己持有（原因见按钮那一段注释：
+     `useMaintenanceStatus` 在状态没变时**一次都不会重渲染**） */
+  const [busy, setBusy] = useState(false)
+  const [spin, setSpin] = useState(0)
+  const [checkedAt, setCheckedAt] = useState<string | null>(null)
+
   const bj = beijingNow(new Date(nowMs))
   const pad = (n: number) => String(n).padStart(2, '0')
   const clock = `${pad(bj.getHours())}:${pad(bj.getMinutes())}:${pad(bj.getSeconds())}`
+
+  /**
+   * 点「重新检查」：先转图标 + 变「检查中…」，收尾后亮一行「已检查 HH:MM:SS · 仍是维护中」。
+   * ⚠️ `refresh()` **没有 promise 可等**（`useMaintenanceStatus` 里是 `void fetch…`），
+   *    而且状态没变时它不 setState ⇒ 这里用一个**最短可见时长**收尾。
+   *    这是"让动作看得见"，不是假装加载：真读数仍然由 hook 自己在轮询里更新。
+   */
+  const onRecheck = () => {
+    if (busy) return
+    setBusy(true)
+    setSpin((n) => n + 1)
+    status.refresh?.()
+    window.setTimeout(() => {
+      setBusy(false)
+      const b = beijingNow(new Date())
+      setCheckedAt(`${pad(b.getHours())}:${pad(b.getMinutes())}:${pad(b.getSeconds())}`)
+    }, 900)
+  }
   const leftMs = status.until === null ? null : status.until - nowMs
   const leftText =
     leftMs === null
@@ -399,7 +423,20 @@ export function MaintenanceScreen({
            教室端那一支是给**学生**看的大屏，那块屏上不该有任何维护入口。
       */}
       {variant === 'teacher' ? <MaintenanceUnlock /> : null}
-      <div className="panel w-full overflow-hidden anim-in" style={{ maxWidth: 460 }}>
+      {/*
+        🔴🔴 `zIndex: 40` 是**必须的**（2026-10-04 用户报"点『重新检查』没有任何反馈"时抓到的）：
+           手势落点那一层是 `position: fixed; inset: 0; zIndex: 39` —— 它**盖在这张卡片上面**，
+           于是卡片上所有的点击（包括「重新检查」按钮）都落到了那层透明落点上，
+           按钮**从来没被点到过**（实测：`elementFromPoint(按钮中心)` 返回的是落点 span；
+           点下去 `/api/status` 一个请求都不发）。
+           ⇒ 卡片必须抬到落点**之上**。⚠️ 密码框是 `z-50`，仍在卡片之上（它就该在最上面）。
+           ⚠️ 门禁那条"按节奏开框"是**直接用 JS 点落点**的，所以它**抓不到**这个 bug ——
+              新加的那条用 `elementFromPoint` 做**真命中测试**。
+      */}
+      <div
+        className="panel w-full overflow-hidden anim-in"
+        style={{ maxWidth: 460, position: 'relative', zIndex: 40 }}
+      >
         <div className="flex items-center gap-2.5 p-4">
           <IconAlert size={19} />
           <div style={{ fontSize: 17, fontWeight: 680 }} data-maintenance-title>
@@ -421,20 +458,53 @@ export function MaintenanceScreen({
           </div>
         </div>
         <div className="flex items-center gap-2 border-t border-line px-4 py-3">
+          {/*
+            🔴 「重新检查」以前**点下去什么都不动**（2026-10-04 用户报：没有反馈、没有动效）。
+               两个原因叠在一起：
+                 ① 按钮被手势落点盖住，根本点不到（见上面 `zIndex: 40` 那段）；
+                 ② 就算点到了，`refresh()` 也是"发出去就不管"的 —— 而 `useMaintenanceStatus`
+                    只在**状态真的变了**时才 setState（见那个 hook 的 `sameStatus`）
+                    ⇒ 维护照旧时**一次重渲染都没有**，屏上自然毫无变化。
+               ⇒ 所以反馈必须由这一屏自己给：点下去先转图标 + 变「检查中…」，
+                  收尾后亮一行**「已检查 HH:MM:SS」**（`refresh()` 没有 promise 可等，
+                  这里用一个最短可见时长收尾 —— 那是"让动作看得见"，不是假装加载）。
+          */}
           <Button
             size="sm"
-            icon={<IconRefresh size={14} />}
-            onClick={() => status.refresh?.()}
+            disabled={busy}
+            icon={
+              <span
+                style={{
+                  display: 'inline-flex',
+                  transform: `rotate(${spin * 360}deg)`,
+                  transition: 'transform .9s var(--ease-out)',
+                }}
+              >
+                <IconRefresh size={14} />
+              </span>
+            }
+            onClick={onRecheck}
           >
-            重新检查
+            {busy ? '检查中…' : '重新检查'}
           </Button>
-          <span
-            className="flex items-center gap-1.5"
-            style={{ fontSize: 11.5, color: 'var(--color-ink4)' }}
-          >
-            <IconClock size={13} />
-            {clock}（北京时间）
-          </span>
+          {checkedAt ? (
+            <span
+              className="anim-in flex items-center gap-1"
+              style={{ fontSize: 11.5, color: 'var(--color-ink2)' }}
+              data-maint-checked
+            >
+              <IconCheck size={13} />
+              已检查 {checkedAt} · 仍是维护中
+            </span>
+          ) : (
+            <span
+              className="flex items-center gap-1.5"
+              style={{ fontSize: 11.5, color: 'var(--color-ink4)' }}
+            >
+              <IconClock size={13} />
+              {clock}（北京时间）
+            </span>
+          )}
         </div>
       </div>
     </div>

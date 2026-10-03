@@ -8736,6 +8736,52 @@ await withLock(async () => {
             '把节奏写在界面上 = 等于贴在公告下面，学生都会试',
           )
 
+          /*
+           * 🆕 2026-10-04：**「重新检查」必须真的点得到，而且点了要有反馈**。
+           *
+           * 用户报的原话：「点击重新检查按钮没有任何反馈，动效没有」。两个原因叠在一起：
+           *   ① 维护卡片（`.panel`）当时**没有 z-index**，而手势落点是
+           *      `position: fixed; inset: 0; z-index: 39` ⇒ 落点盖在卡片上面，
+           *      `elementFromPoint(按钮中心)` 命中的是**落点 span**，按钮从来没被点到过；
+           *   ② 就算点到了，`refresh()` 也只是 `void fetch…`，而 `useMaintenanceStatus`
+           *      在 `sameStatus` 为真时**一次都不 setState** ⇒ 维护照旧时屏上毫无变化。
+           *
+           * ⚠️ 下面那条"按对节奏开框"是**直接用 JS 点落点**的 ⇒ 它抓不到①这一族
+           *    （程序点元素不看层叠）。所以这一条用 `elementFromPoint` 做**真命中测试**。
+           * 🔴 反向对照：把卡片上的 `zIndex: 40` 去掉 → 第 ① 条当场红。
+           */
+          const hit = await mp.evaluate(() => {
+            const b = [...document.querySelectorAll('button')].find((x) => /重新检查/.test(x.textContent ?? ''))
+            if (!b) return { why: '找不到「重新检查」按钮' }
+            const r = b.getBoundingClientRect()
+            const el = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)
+            return {
+              tag: el?.tagName ?? '',
+              zone: el?.hasAttribute?.('data-maintenance-unlock-tapzone') ?? false,
+              text: (el?.textContent ?? '').slice(0, 12),
+            }
+          })
+          check(
+            hit.tag === 'BUTTON' && hit.zone === false,
+            `🔴 ${S2}：「重新检查」按钮**真的点得到**（命中测试不是那层透明落点）`,
+            hit.why ? hit.why : `命中 ${hit.tag}${hit.zone ? '（是落点 span —— 被盖住了）' : ''} · 文案 ${JSON.stringify(hit.text)}`,
+            '反向对照：把维护卡片上的 `zIndex: 40` 去掉 → 这条当场红（"点它没反馈"就是这个）',
+          )
+          await mp.getByRole('button', { name: /重新检查/ }).first().click()
+          await mp.waitForTimeout(260)
+          const duringClick = await mp.getByRole('button', { name: /检查中|重新检查/ }).first().textContent()
+          await mp.waitForTimeout(1100)
+          const afterClick = await mp
+            .locator('[data-maint-checked]')
+            .textContent()
+            .catch(() => null)
+          check(
+            /检查中/.test(duringClick ?? '') && /已检查/.test(afterClick ?? ''),
+            `🔴 ${S2}：点了之后**屏上真的有反馈**（「检查中…」→「已检查 HH:MM:SS · 仍是维护中」）`,
+            `点的瞬间=${JSON.stringify(duringClick)} · 收尾后=${JSON.stringify(afterClick)}`,
+            '`refresh()` 没有 promise 可等、状态没变时 hook 一次都不重渲染 ⇒ 反馈必须由这一屏自己给',
+          )
+
           // ② 按错节奏**不许**开框（否则"乱点几下就开"）
           await mp.evaluate(() => {
             /*
