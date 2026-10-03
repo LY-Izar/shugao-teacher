@@ -70,11 +70,17 @@ const Workbench = lazy(() => import('./pages/Workbench'))
  * 🔴 **为什么是"先退出会话"而不是只挡一下**（和 `Login.tsx` 里那条一致）：
  *   只挡不退出的话，用户按一下刷新就又进去了 —— 那是**用一条提示代替了一道边界**。
  *
- * ⚠️ 文案守则（A+ 力度）：只回答"这里是什么、我能做什么"。
- *   不解释判据、不说怎么绕 —— 那是 `lib/classroomShell.ts` 注释里的事。
+ * ⚠️ **这一屏绝不能在没有会话时出现**（2026-10-03 第一版的教训）：
+ *   `accountKind` 默认值是 `'teacher'`，所以"没登任何账号"和"登了教师账号"
+ *   在那个字段上**分不开**。第一版漏判 `teacher`，结果**全新安装一装上就是这一屏**，
+ *   而它没有登录入口 ⇒ 死锁 ⇒ 整台机器用不了。
+ *   → 调用方必须已经确认"确实登着一个人"；这里再兜一道：
+ *     **没有会话就直接把人送去登录页**，绝不显示这一屏。
  */
 function ClassroomShellOnly() {
+  const teacher = useStore((s) => s.teacher)
   const [busy, setBusy] = useState(false)
+  if (!teacher) return <Navigate to="/login" replace />
   return (
     <div className="grid min-h-full place-items-center px-6 py-10">
       <div className="w-full anim-in" style={{ maxWidth: 420 }}>
@@ -128,23 +134,27 @@ function Guard({ children }: { children: React.ReactNode }) {
   /*
    * 🔴🔴🔴 **教室端那个壳里，不许带着教师账号的会话进来**（2026-10-03）
    *
-   * 🔴 **必须排在下面那条 `accountKind === 'classroom'` 之前**：
-   *   排在后面的话 TypeScript 会把 `accountKind` 收窄成 `'teacher'`，
-   *   `!== 'classroom'` 就变成恒真、编译器直接报 TS2367
-   *   （"2026-10-03 踩过"—— 顺序不是洁癖，是这一条根本写不下去）。
+   * 🔴🔴🔴 **判据里必须有 `teacher`（"确实登着一个人"）** —— 这一条是我第一版漏的，
+   *   后果是**把全新安装锁死在门外**（2026-10-03 实测）：
+   *     `accountKind` 的**默认值就是 `'teacher'`**（`store.ts:759`），
+   *     而 `hydrate()` 里是 `accountKind: room ? 'classroom' : 'teacher'`
+   *     ⇒ **一个都没登的人，`accountKind` 也是 `'teacher'`**
+   *     ⇒ 我那个 `!== 'classroom'` 恒成立 ⇒ 全新装上就是「请用教室端账号登录」，
+   *       而那一屏**没有登录入口**，点「退出这个账号」再回来还是它 ⇒ **死循环**。
+   *   这正是 `AGENTS.md` / `功能设计与不变量.md` 里反复警告的那一类：
+   *   **「开维护的人把自己关在外面」**。
+   *   ✅ 所以要判「**确实有一个教师账号登着**」，而不是「accountKind 不是 classroom」。
    *
-   * 为什么必须在这里也拦一道（`lib/classroomShell.ts` 那条只写在**登录页的提交函数**里）：
-   *   那条只挡「**手输密码**登录」这一条路。**已经有会话**的时候压根不走登录页
-   *   ⇒ 拦截**从来没运行过**。2026-10-03 实测：教师端登录过之后装上教室端，
-   *   教室端直接就是登录好的、落在**教师控制台**上。
-   *   （shell 那一侧已经改成两个壳各用各的 profile，见打包目录的
-   *    `_src/desktop/user-data.mjs`；但**那一侧挡不住"有人把 profile 拷过去"**，
-   *    而且万一路径又变了，这里是最后一道。）
+   * ⚠️ 也**必须排在下面那条 `accountKind === 'classroom'` 之前**：
+   *   排在后面 TS 会把 `accountKind` 收窄成 `'teacher'`，`!== 'classroom'` 恒真、报 TS2367。
    *
-   * ⚠️ 判据用 `isClassroomShell()`（壳自报身份）而不是设备标记 ——
-   *    这条要拦的是「**这个程序**是教室端」，不是「这台机器被标成过教室端」。
+   * 为什么要在运行时也拦一道（`lib/classroomShell.ts` 那条只写在**登录页的提交函数**里）：
+   *   那条只挡「**手输密码**登录」这一条路。**已经有会话**时压根不走登录页
+   *   ⇒ 拦截**从来没运行过**。
+   *   （shell 那一侧已改成两个壳各用各的 profile，见打包目录的
+   *    `_src/desktop/user-data.mjs`；但**那一侧挡不住"有人把 profile 拷过去"**。）
    */
-  if (isClassroomShell() && accountKind !== 'classroom') {
+  if (isClassroomShell() && teacher && accountKind !== 'classroom') {
     return <ClassroomShellOnly />
   }
   /*
