@@ -2255,10 +2255,33 @@ body::before {
   background: var(--color-canvas);
   overflow: hidden;
   transition: opacity var(--splash-leave, 420ms) ease;
+  /*
+   * 🔴🔴🔴 **`pointer-events: none` 从一开始就加，不是只在渐隐时**（2026-10-03 修）
+   *
+   * 病根：开屏是**浮层**（不是替换页面），而底下那一层**已经是真的页面**了
+   *      —— 登录表单从第一帧就渲染在它下面。
+   *      ⇒ 开屏只要还在（不透明、还在 DOM 里），它就把**整页的点击全吃掉**。
+   *
+   * 用户报的现象（实测复现）：装完双击 exe → 一看到登录框就点 → **打不了字**。
+   *   实测那一刻 `document.elementsFromPoint()` 自下而上第 0 层是开屏里的 `<IMG>`，
+   *   第 4 层才是那个 `INPUT` —— 点击被那层吃掉了，**没有任何人 preventDefault**。
+   *   再点一次就好了（那时开屏已经退了）⇒ 表现为"间歇性打不了字"。
+   *
+   * 🔴 为什么这个窗口不短：本机实测约 3~5 秒。
+   *   而**冷启动的教室一体机（机械硬盘、杀毒软件首扫）会明显更久** ——
+   *   那正是最可能"装完第一次打开"的场景。
+   *
+   * 为什么 `pointer-events: none` 是安全的：开屏是**纯装饰**，
+   *   它内部没有任何可点的东西（徽、字、进度条、那条 mark 全是 `aria-hidden` 的图/字），
+   *   click-through 到下面的登录框**没有任何副作用**。
+   * ⚠️ 别改回"只在 [data-leaving] 里才关"—— 那样等于把这个坑原样留着。
+   */
+  pointer-events: none;
 }
 .splash[data-leaving] {
   opacity: 0;
-  pointer-events: none;
+  /* 🔴 `pointer-events: none` 已经在 `.splash` 上了，这里**不用再写一遍**：
+       开着的那几秒（`hold` + 渐隐 `leaveMs`）同样不能吃点击 —— 那正是用户会点的那几秒。 */
 }
 .splash__inner {
   display: flex;
