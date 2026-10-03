@@ -38,8 +38,20 @@ import { useEffect, useRef, useState } from 'react'
  *   · `ms <= 0` 那一支**完全不碰 state**，由 `open` 直接派生 → 同步，且断言不用等。
  */
 export function useExit(open: boolean, ms = 180) {
-  /** 退场**已经播完**（= 可以卸载了）。存的是"已完成"，不是"是否挂载" */
-  const [exited, setExited] = useState(false)
+  /**
+   * 退场**已经播完**（= 可以卸载了）。存的是"已完成"，不是"是否挂载"。
+   *
+   * 🔴 **初值必须是 `!open`，不能是 `false`**（2026-10-03 修）：返回值是 `open || !exited`，
+   * 初值若写 `false`，则**首次就以 `open=false` 挂载**（＝页面第一次渲染里那个关着的
+   * `Sheet`/`Modal`）会算成"正在退场"→ 元素被挂出来，而 `.sheet--out` / `.scrim--out`
+   * 挂的是 `sheet-down` / `fade-out`，这两条 `@keyframes` **只有 `to`、没有 `from`**
+   * ⇒ 起点就是元素自己的静态样式（屏幕内、`opacity:1`），于是**每次都真的画出一个
+   * 整屏暗幕 + 一张满高抽屉，再滑下去**，180ms 后才卸载。
+   * 实测（390×844 探针，点底部「我的」）：切页后 +453ms 插进 DOM，`scrim` box
+   * `[0,0,390,844]`、`op=1`，`sheet` box `[0,101,390,743]`、`op=1`，`sheet-down@180`，
+   * +641ms 才删掉 —— 用户报的「底部弹窗出现又消失、闪一下」就是它（与滚动位置无关）。
+   */
+  const [exited, setExited] = useState(!open)
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
   // render 期调整：重新打开 → 撤销"卸载"这个结论。
