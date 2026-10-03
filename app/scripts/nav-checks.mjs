@@ -26,16 +26,19 @@
  *     🆕 **D12（2026-10-12）：念出来的号 / 摆上屏的号 = 班内学号** ——
  *     「呼叫后教室端播报的应该是学生的班级内学号，而不是年级序列号」（用户原话）；
  *     谁在拼"念出来的话"、谁自己抄了一遍 `s.serial || s.studentNo`，两样都钉住。
+ *     🆕 **D15（2026-10-03）：关着的浮层不许在第一帧被挂出来** —— `useExit` 初值写错
+ *     （`false` 而不是 `!open`）时每次切页真的画出一整屏暗幕再滑下去（用户报的
+ *     "底部弹窗闪一下"）；`shots` 的 04f 测的是反方向（关掉之后留 180ms），钉不住它。
  *   · 编码（D8）：全仓文本文件的无 BOM / 严格 UTF-8 / 中文没被 mojibake，
  *     外加**不可见字符 / 全角标点混进代码** ——
  *     这个项目**反复栽在编码上**（BOM 出过构建失败、上一轮又出双重编码乱码），
  *     而全仓扫一遍成本极低。带反向对照（伪造的坏字节流 / 坏字符必须被判坏）。
  * ============================================================
  */
-import { readFileSync, readdirSync, existsSync } from 'node:fs'
+import { readFileSync, readdirSync, existsSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { dirname, join, resolve, extname } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { registerTsResolve } from './lib/ts-resolve.mjs'
 import { withLock } from './lib/lock.mjs'
 
@@ -4024,6 +4027,89 @@ section('第十六节 · D14：安全加固 A 档（响应头 · CSP 哈希配�
   )
 }
 
+/* ============================================================
+   第十七节 · D15：**关着的浮层不许在第一帧被挂出来**（`useExit` 初值 = 切页那一下的闪动）
+   ------------------------------------------------------------
+   2026-10-03 修掉的那个 bug（提交 `f525054`）：
+     · `useExit(open)` 的返回值是 `open || !exited`，那个 state 存的是"退场**已经播完**"；
+     · 初值写成 `useState(false)`（＝"已经播完"）⇒ **页面第一次渲染**里那些本来关着的
+       `Sheet` / `Modal` 被算成"正在退场" ⇒ **元素被挂进 DOM**；
+     · 而 `.sheet--out` / `.scrim--out` 挂的是 `sheet-down` / `fade-out`，这两条 `@keyframes`
+       （`src/index.css:1099-1114`）**只有 `to`、没有 `from`** ⇒ 起点就是元素自己的静态样式
+       （屏幕内、`opacity:1`）⇒ 真的画出一整屏暗幕 + 一张满高白抽屉，再滑下去
+       （390×844 实测：切页后 +453ms 插进 DOM，+641ms 才删掉）。
+   为什么 `shots` 的 04f 钉不住它：那一节测的是"**关掉之后**留 180ms 播退场"（退场机制本身）；
+   "第一次挂载就被算成退场"是**另一个方向** —— 改回 `useState(false)`，04f 照样全绿。
+   怎么钉：**不看拼写看行为**。用 `react-dom/server` 把 `useExit` 的**第一帧返回值**渲染出来
+   （Node 里跑真源码，走 `scripts/lib/ts-resolve.mjs`），再拿"就地改坏的副本"做反向对照；
+   判据是"第一帧挂没挂"，所以换一种更漂亮的写法（`useState(() => !open)` 之类）不会冤。
+   ============================================================ */
+
+section('第十七节 · D15：关着的浮层不许在第一帧被挂出来（`useExit` 初值 · 切页那一下的闪动）')
+
+{
+  const React = await import('react')
+  const { renderToStaticMarkup } = await import('react-dom/server')
+  const EXIT_REL = 'src/lib/useExit.ts'
+  const EXIT_SRC = readApp(EXIT_REL)
+
+  /** 第一帧渲染成什么。`mounted` = 元素进了 DOM（＝那次闪动）；`gone` = 干净的 */
+  const firstFrame = (hook, open) =>
+    renderToStaticMarkup(
+      React.createElement(function Probe() {
+        return React.createElement('i', null, hook(open) ? 'mounted' : 'gone')
+      }),
+    )
+
+  /* 锚点自证：声明那个 state 的行还在。改名 / 重构 ⇒ 这一节必须跟着改，而不是静默变绿 */
+  const declLine = EXIT_SRC.split('\n').find((l) => /=\s*useState\(/.test(l) && !/^\s*[*/]/.test(l))
+  check(
+    Boolean(declLine),
+    'D15 锚点自证：`useExit` 里找得到 `= useState(初值)` 那一行',
+    declLine ? short(declLine) : `在 ${EXIT_REL} 里没找到（改名了？那就得改这一节）`,
+  )
+
+  if (declLine) {
+    const real = await import('../src/lib/useExit.ts')
+    const realHtml = firstFrame(real.useExit, false)
+    check(
+      realHtml === '<i>gone</i>',
+      '🔴 D15 ①：`useExit(false)` 的**第一帧不挂载** —— 关着的浮层不许进 DOM（切页不闪的那一条）',
+      `第一帧 = ${realHtml}`,
+      '反向对照：把初值改回 `useState(false)` → 这条必须红（下一条反向对照就是它）',
+    )
+
+    /* 🧪 反面对照：同一个探针喂 `open=true` 必须挂载 —— 否则 ① 可能只是"恒 gone"的摆设 */
+    const openHtml = firstFrame(real.useExit, true)
+    check(
+      openHtml === '<i>mounted</i>',
+      '🧪 D15 ① 反面对照：`useExit(true)` 第一帧**必须**挂载（证明这个探针分得出两种输入，不是恒 gone）',
+      `第一帧 = ${openHtml}`,
+    )
+
+    /* 🧪 反向对照：把初值就地改回 `useState(false)`，写成 .tmp-gates/ 里的副本（gitignore 了，跑完删） */
+    const broken = EXIT_SRC.replace(declLine, declLine.replace(/useState\([^)]*\)/, 'useState(false)'))
+    const TMP = join(APP, '.tmp-gates', `useExit-old-${process.pid}.ts`)
+    let oldHtml = '(没跑起来)'
+    try {
+      mkdirSync(dirname(TMP), { recursive: true })
+      writeFileSync(TMP, broken)
+      const oldMod = await import(pathToFileURL(TMP).href)
+      oldHtml = firstFrame(oldMod.useExit, false)
+    } catch (e) {
+      oldHtml = `副本没跑起来：${e?.message ?? e}`
+    } finally {
+      rmSync(TMP, { force: true })
+    }
+    check(
+      broken !== EXIT_SRC && oldHtml === '<i>mounted</i>',
+      '🧪 D15 反向对照：把初值改回 `useState(false)` → ① 当场假（证明 ① 量的是**行为**，不是拼写、不是摆设）',
+      `改回去之后第一帧 = ${oldHtml}`,
+      '这一段在仓库里不留痕：副本写在 gitignore 的 `.tmp-gates/`，finally 里删',
+    )
+  }
+}
+
 /* ---------------- 结果 ---------------- */
 console.log(`\n================ 结果 ================`)
 console.log(`  断言：通过 ${passed} 条，失败 ${failures.length} 条`)
@@ -4032,6 +4118,6 @@ if (failures.length) {
   console.log('\n  ⛔ 有断言没过（上面每一条都写了实测值）')
   process.exitCode = 1
 } else {
-  console.log('  全部通过 ✅（纯函数 A1–A10 / 静态 D1–D7 · D9 · D10 · D11 · D12 · D13 · D14 / 编码 + 不可见字符 D8）')
+  console.log('  全部通过 ✅（纯函数 A1–A10 / 静态 D1–D7 · D9 · D10 · D11 · D12 · D13 · D14 · D15 / 编码 + 不可见字符 D8）')
 }
 }, { script: 'nav-checks.mjs' })
