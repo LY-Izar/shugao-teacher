@@ -29,6 +29,7 @@
    ============================================================ */
 
 import { getSupabase } from './supabase'
+import { apiUrl } from './apiBase'
 import { beijingNow, ymdOf } from './holiday'
 import type { Announcement, AnnouncementLevel, AnnouncementPopup } from '../data/types'
 
@@ -520,7 +521,7 @@ async function call(
   }
   let res: Response
   try {
-    res = await fetch('/api/announcement', {
+    res = await fetch(apiUrl('/api/announcement'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       body: JSON.stringify(body),

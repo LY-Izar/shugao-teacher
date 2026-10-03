@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useStore } from '../data/store'
 import { getSupabase, isRemote, connectionMode, SUPABASE_URL } from '../lib/supabase'
+import { apiUrl } from '../lib/apiBase'
 import { APP_VERSION, APP_VERSION_LABEL, BUILD_HASH } from '../lib/version'
 import { deviceRole, deviceRoleAt, authDaysLeft } from '../lib/session'
 import { loginFailText, toEmail } from '../lib/accounts'
@@ -813,7 +814,7 @@ export default function Admin() {
       const {
         data: { session },
       } = await sb.auth.getSession()
-      const r = await fetch('/api/admin/config-check', {
+      const r = await fetch(apiUrl('/api/admin/config-check'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

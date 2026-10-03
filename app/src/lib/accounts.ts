@@ -16,6 +16,7 @@
    ============================================================ */
 
 import { getSupabase } from './supabase'
+import { apiUrl } from './apiBase'
 
 /**
  * 内部账号的邮箱后缀。
@@ -151,7 +152,7 @@ async function call<T>(body: Record<string, unknown>): Promise<Result<T>> {
 
   let res: Response
   try {
-    res = await fetch('/api/teacher-account', {
+    res = await fetch(apiUrl('/api/teacher-account'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       body: JSON.stringify(body),

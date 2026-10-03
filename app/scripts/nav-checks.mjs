@@ -29,6 +29,10 @@
  *     🆕 **D15（2026-10-03）：关着的浮层不许在第一帧被挂出来** —— `useExit` 初值写错
  *     （`false` 而不是 `!open`）时每次切页真的画出一整屏暗幕再滑下去（用户报的
  *     "底部弹窗闪一下"）；`shots` 的 04f 测的是反方向（关掉之后留 180ms），钉不住它。
+ *     🆕 **D16（2026-10-04）：站内接口只有一个基址** —— 两个壳（`app://-` /
+ *     `https://localhost`）加载的是打进包里的网页产物，**相对路径**的 `/api/*` 会被壳
+ *     自己的本地服务器接走（回 `200 + index.html`）⇒ 维护模式读不到、面板误报"未配置"。
+ *     一律走 `src/lib/apiBase.ts` 的 `apiUrl()`；跨域预检在 `functions/api/_middleware.ts`。
  *   · 编码（D8）：全仓文本文件的无 BOM / 严格 UTF-8 / 中文没被 mojibake，
  *     外加**不可见字符 / 全角标点混进代码** ——
  *     这个项目**反复栽在编码上**（BOM 出过构建失败、上一轮又出双重编码乱码），
@@ -4110,6 +4114,105 @@ section('第十七节 · D15：关着的浮层不许在第一帧被挂出来（`
   }
 }
 
+/* ============================================================
+   第十八节 · D16：站内接口只有一个基址（`apiUrl`）—— 壳里才不会把 `/api/*` 丢给本地服务器
+   ------------------------------------------------------------
+   用户 2026-10-04 报的「维护模式读不到 / `/admin` 说那几个 key 没配」的根因：
+   exe（`app://-`）与 apk（`https://localhost`）加载的是**打进包里的网页产物**，
+   **相对路径**的 `/api/*` 会被壳自己的本地服务器接走 —— 它对不认识的路径回
+   `200 + index.html`（`JSON.parse` 抛 `Unexpected token '<'`）：
+     · 维护状态 → 按"未维护"放行（fail-open）⇒ **壳里维护模式永远不生效**；
+     · 面板接口 → 拿到一坨 HTML（应用侧已改成"读不到"而不是"未配置"，但接口还是没通）。
+   数据那条路**本来就是绝对地址**（`.env.production` 的 `VITE_SUPABASE_URL=…/api/sb`），
+   所以壳里读得到班级/作业 —— 出问题的只有站点自己那些 `/api` 路由。
+   ⇒ ① 站内接口一律走 `src/lib/apiBase.ts` 的 `apiUrl()`（基址来自 `.env.production` 的
+        `VITE_API_BASE`；**留空 = 相对路径，网页行为逐字不变**）；
+      ② 壳里是**跨域**调用，服务端要点头：`functions/api/_middleware.ts` 把预检自己答掉
+        （线上实测：不做的话 `OPTIONS` 回 405 ⇒ 带 `authorization` 的 POST 一条都发不出去）。
+   ============================================================ */
+
+section('第十八节 · D16：站内接口只有一个基址（`apiUrl` · 壳里不许把 `/api/*` 丢给本地服务器）')
+
+{
+  const { apiUrl } = await import('../src/lib/apiBase.ts')
+
+  /* ① 纯函数：没有基址时**逐字返回**（网页 / `vite dev` / 门禁里的行为不变） */
+  check(
+    apiUrl('/api/status') === '/api/status' && apiUrl('/api/admin/config-check') === '/api/admin/config-check',
+    'D16 ① 没有 `VITE_API_BASE` 时 `apiUrl()` **原样返回**相对路径（网页行为逐字不变）',
+    `apiUrl('/api/status') = ${apiUrl('/api/status')}`,
+  )
+  eq(
+    'D16 ② 给了基址 → 绝对地址；基址末尾的斜杠 / 路径缺前导斜杠都不许拼出 `//`',
+    [
+      apiUrl('/api/status', 'https://x.dev'),
+      apiUrl('api/status', 'https://x.dev/'),
+      apiUrl('/api/status', 'https://x.dev///'),
+    ].join(' '),
+    'https://x.dev/api/status https://x.dev/api/status https://x.dev/api/status',
+  )
+
+  /* ② 静态：`src` 里不许再出现相对路径的 `fetch('/api/…')`。
+     ⚠️ 注释**先剥掉** —— 解释这件事的注释里就写着这个形状（`stripComments`）。 */
+  const stripComments = (s) =>
+    String(s)
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/(^|[^:])\/\/[^\n]*/g, '$1')
+  const RAW = /fetch\(\s*['"]\/api\//
+  const offenders = []
+  const walk = (dir) => {
+    for (const e of readdirSync(join(APP, dir), { withFileTypes: true })) {
+      const rel = `${dir}/${e.name}`
+      if (e.isDirectory()) walk(rel)
+      else if (/\.tsx?$/.test(e.name) && RAW.test(stripComments(readApp(rel)))) offenders.push(rel)
+    }
+  }
+  walk('src')
+  check(
+    offenders.length === 0,
+    "🔴 D16 ③ `src` 里没有一处相对路径的 `fetch('/api/…')`（一律走 `apiUrl()`）",
+    offenders.length ? `还有 ${offenders.length} 处：${offenders.slice(0, 4).join('、')}` : '0 处',
+    "反向对照：在任意页面里写一句 `fetch('/api/notice')` → 这条必须红",
+  )
+  /* 🧪 反向对照：把一句真的相对 fetch 拼进**真源码的文本**里，同一条判据必须当场抓到 */
+  const sample = stripComments(readApp('src/lib/notices.ts'))
+  const patched = `${sample}\nasync function __probe() { await fetch('/api/notice') }\n`
+  check(
+    RAW.test(sample) === false && RAW.test(patched) === true,
+    '🧪 D16 反向对照：把 `fetch(\'/api/notice\')` 塞进真源码文本 → ③ 的判据当场为真（证明它在真扫，不是恒绿）',
+    `原文命中 = ${RAW.test(sample)} · 塞进去之后 = ${RAW.test(patched)}`,
+  )
+
+  /* ③ `.env.production` 的基址必须是**绝对 https 域名**（壳里靠它才出得去） */
+  const ENV_PROD = readApp('.env.production')
+  const baseLine = /^VITE_API_BASE=(.+)$/m.exec(ENV_PROD)
+  check(
+    Boolean(baseLine) && /^https:\/\/[a-z0-9.-]+$/.test(String(baseLine[1]).trim()),
+    'D16 ④ `.env.production` 里 `VITE_API_BASE` 是**绝对 https 域名**（空着的话壳里还是出不去）',
+    baseLine ? `VITE_API_BASE=${short(String(baseLine[1]).trim(), 60)}` : '没找到这一行',
+  )
+
+  /* ④ 跨域预检：**必须在 `next()` 之前**答（晚一步就是 405，浏览器判预检失败） */
+  const MW = readApp('functions/api/_middleware.ts')
+  const orderOk = (s) => {
+    const o = String(s).indexOf("method === 'OPTIONS'")
+    const n = String(s).indexOf('await context.next()')
+    return o > 0 && n > o
+  }
+  check(
+    orderOk(MW) && /Access-Control-Allow-Origin/.test(MW),
+    '🔴 D16 ⑤ `_middleware.ts`：预检在 `next()` **之前**答（204 + ACAO）—— 晚一步就是 405，壳里带 `authorization` 的 POST 全死',
+    `预检在 next() 之前 = ${orderOk(MW)} · ACAO 在 = ${/Access-Control-Allow-Origin/.test(MW)}`,
+  )
+  /* 🧪 反向对照：顺序换过来的写法必须判假（证明 ⑤ 真的在看顺序） */
+  const swapped = `await context.next()\nif (context.request.method === 'OPTIONS') return pre()`
+  check(
+    orderOk(swapped) === false,
+    '🧪 D16 反向对照：把预检挪到 `next()` 之后 → ⑤ 当场假（证明它看的是顺序，不是"这两句在不在"）',
+    `顺序反了的写法 = ${orderOk(swapped)}`,
+  )
+}
+
 /* ---------------- 结果 ---------------- */
 console.log(`\n================ 结果 ================`)
 console.log(`  断言：通过 ${passed} 条，失败 ${failures.length} 条`)
@@ -4118,6 +4221,6 @@ if (failures.length) {
   console.log('\n  ⛔ 有断言没过（上面每一条都写了实测值）')
   process.exitCode = 1
 } else {
-  console.log('  全部通过 ✅（纯函数 A1–A10 / 静态 D1–D7 · D9 · D10 · D11 · D12 · D13 · D14 · D15 / 编码 + 不可见字符 D8）')
+  console.log('  全部通过 ✅（纯函数 A1–A10 / 静态 D1–D7 · D9 · D10 · D11 · D12 · D13 · D14 · D15 · D16 / 编码 + 不可见字符 D8）')
 }
 }, { script: 'nav-checks.mjs' })

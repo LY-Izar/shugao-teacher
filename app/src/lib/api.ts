@@ -12,6 +12,7 @@
    ============================================================ */
 
 import { getSupabase, isRemote } from './supabase'
+import { apiUrl } from './apiBase'
 
 export type ApiResult = {
   ok: boolean
@@ -57,7 +58,7 @@ export async function postApi(path: string, body: Record<string, unknown>): Prom
     }
   }
   try {
-    const res = await fetch(path, {
+    const res = await fetch(apiUrl(path), {
       method: 'POST',
       headers: await authHeaders(),
       body: JSON.stringify(body),

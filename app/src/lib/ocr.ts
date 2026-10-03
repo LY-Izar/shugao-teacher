@@ -10,6 +10,7 @@
    ============================================================ */
 
 import { getSupabase } from './supabase'
+import { apiUrl } from './apiBase'
 
 export type OcrNumber = {
   value: number
@@ -163,7 +164,7 @@ export async function recognize(
   const ctl = new AbortController()
   const timer = window.setTimeout(() => ctl.abort(), TIMEOUT_MS)
   try {
-    const res = await fetch('/api/ocr', {
+    const res = await fetch(apiUrl('/api/ocr'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       signal: ctl.signal,

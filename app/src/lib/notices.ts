@@ -26,6 +26,7 @@
    ============================================================ */
 
 import { getSupabase } from './supabase'
+import { apiUrl } from './apiBase'
 import { departmentName } from './departments'
 import { roleName } from './roles'
 import { subjectShort } from './subjects'
@@ -129,7 +130,7 @@ async function call(body: Record<string, unknown>): Promise<
 
   let res: Response
   try {
-    res = await fetch('/api/notice', {
+    res = await fetch(apiUrl('/api/notice'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       body: JSON.stringify(body),

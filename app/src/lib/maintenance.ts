@@ -18,6 +18,7 @@
 
 import { isRemote } from './supabase'
 import { apiMessage, postApi } from './api'
+import { apiUrl } from './apiBase'
 
 /** 自动关闭（小时）：四档可选、**不许留空** */
 export const MAINTENANCE_HOURS = [1, 4, 12, 24] as const
@@ -86,7 +87,7 @@ export async function fetchMaintenanceStatus(): Promise<MaintenanceStatus> {
   const at = Date.now()
   if (!isRemote) return { ...MAINTENANCE_UNKNOWN, at }
   try {
-    const res = await fetch('/api/status', { headers: { Accept: 'application/json' } })
+    const res = await fetch(apiUrl('/api/status'), { headers: { Accept: 'application/json' } })
     if (!res.ok) {
       let why = `HTTP ${res.status}`
       try {
@@ -144,7 +145,7 @@ export async function unlockMaintenance(
   }
   let res: Response
   try {
-    res = await fetch('/api/admin/maintenance', {
+    res = await fetch(apiUrl('/api/admin/maintenance'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify({ action: 'unlock', email: email.trim(), password }),
