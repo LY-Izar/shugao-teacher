@@ -370,3 +370,12 @@ export const IconImage = (p: IconProps) => (
     <path d="m4.4 17 4.3-4.1 3.4 3.2 3.1-2.9 4.4 4" />
   </Svg>
 )
+
+/* 加密（档案导出用：这一份只有超管的私钥能解开） */
+export const IconLock = (p: IconProps) => (
+  <Svg {...p}>
+    <rect x="4.6" y="10.3" width="14.8" height="9.7" rx="1.9" />
+    <path d="M8.2 10.3V7.8a3.8 3.8 0 0 1 7.6 0v2.5" />
+    <path d="M12 14v2.3" />
+  </Svg>
+)

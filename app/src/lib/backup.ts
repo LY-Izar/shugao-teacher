@@ -702,6 +702,51 @@ export async function exportWithProfiles(s: {
   }
 }
 
+export type SplitExport = {
+  /** 业务数据那一份（**明文**，老师自己能恢复）：两张档案表是**空数组** */
+  plain: Backup
+  /** 档案那一份的正文（交给 `sealForAdmin` 封起来；两张表都空 = 没有可封的东西） */
+  profiles: { studentProfiles: StudentProfile[]; teacherProfiles: TeacherProfile[] }
+  /** 读不到档案的原因（与 `exportWithProfiles` 同一套；空 = 两张表都读到了） */
+  issues: string[]
+}
+
+/**
+ * **导出的唯一入口（2026-10-03 起）**：一份拆成两份。
+ *
+ * 🔴 用户口径：**人人可点导出，但档案那份只有超管能解开。**
+ *    · `plain` —— 班级 / 学生 / 作业 / 课表 / 呼叫 / 教室端设备，**明文**，谁都能自己恢复；
+ *    · `profiles` —— 两张档案表（学生：民族 / 出生年月 / 家长电话 / 家庭住址；
+ *      教师：住址 / 电话 / 邮箱），只以超管公钥封存的形式落地（见 `lib/backupCrypto.ts`）。
+ *
+ * ⚠️ 为什么**不是**"档案照旧留在明文里、再额外加一份加密的"：那等于明文那份照样能把
+ *    家长电话整班带走（导出文件是可以转发、可以放进网盘的），加密就成了装饰。
+ *    这一刀必须切在"**明文文件里没有**"。
+ *
+ * ⚠️ 拿一份 `plain` 去恢复**不会删掉云端已有的档案**：`pushBackupToCloud` 全程是 `upsert`
+ *    （空数组 = 一批都不推，不是删除；见那条函数里"档案行引用不存在的学生就跳过"的同一套纪律）。
+ *    "少了两张表"只影响本机 state；换设备时那两张表仍然从云端 `hydrate` 回来。
+ *    🔴 所以界面文案**不许**写成"档案没了"——要写成"档案在加密那份 / 云端那份还在"。
+ */
+export async function splitExport(s: {
+  teacher: Teacher | null
+  classes: Klass[]
+  assignments: Assignment[]
+  schedule: ScheduleItem[]
+  calls: CallRecord[]
+  classrooms: ClassroomClient[]
+}): Promise<SplitExport> {
+  const full = await exportWithProfiles(s)
+  return {
+    plain: { ...full.data, studentProfiles: [], teacherProfiles: [] },
+    profiles: {
+      studentProfiles: full.data.studentProfiles,
+      teacherProfiles: full.data.teacherProfiles,
+    },
+    issues: full.issues,
+  }
+}
+
 /* ---------------- ① 导出 / 导入 ---------------- */
 
 /* ============================================================

@@ -8,6 +8,7 @@ import {
   IconChevronRight,
   IconDownload,
   IconLogout,
+  IconLock,
   IconPencil,
   IconSend,
   IconSliders,
@@ -32,12 +33,13 @@ import { CHANGELOG } from '../lib/changelog'
 import {
   backupSummary,
   downloadJson,
-  exportWithProfiles,
   notifyBackupDone,
   pushBackupToCloud,
   readJsonFile,
+  splitExport,
   validateBackup,
 } from '../lib/backup'
+import { isAdminSealed, sealForAdmin } from '../lib/backupCrypto'
 import { REMIND_BEFORE, itemsForDate } from '../lib/schedule'
 // 只用到时间工具：节假日「数据来源」面板已删（见 功能设计与不变量.md §十七 17.2），
 // 判定函数（isRestDay / dayKind / holidayOn / nextHoliday）仍在别处使用，没有动。
@@ -598,7 +600,23 @@ export default function Settings() {
                 e.target.value = ''
                 if (!f) return
                 try {
-                  const v = validateBackup(await readJsonFile(f))
+                  const raw = await readJsonFile(f)
+                  /*
+                   * 🆕 2026-10-03：**加密档案那份不许当业务备份恢复**。
+                   * 它是 `lib/backupCrypto.ts` 的信封（`fmt: 'shugao-admin-sealed'`），
+                   * 里面只有学生 / 教师档案，**没有** `v` / `classes` / `students` 这些键。
+                   * ⚠️ 必须先认信封：直接丢给 `validateBackup` 只会得到一句"这不像是备份文件"，
+                   *    用户拿着一份超管给的文件会以为文件坏了。
+                   */
+                  if (isAdminSealed(raw)) {
+                    push({
+                      text: '这是加密的档案备份，不是业务数据备份',
+                      tone: 'warn',
+                      desc: '加密档案只有超管的私钥能解开 —— 请把这份文件交给超管，在 /admin 里解开',
+                    })
+                    return
+                  }
+                  const v = validateBackup(raw)
                   if (!v.ok) {
                     push({ text: v.why, tone: 'bad' })
                     return
@@ -621,23 +639,74 @@ export default function Settings() {
                 icon={<IconDownload size={16} />}
                 onClick={async () => {
                   /*
-                   * 🆕 2026-10：走 `exportWithProfiles()`（而不是直接 `makeBackup`）——
-                   * 学生档案 / 教师档案在**两张独立的表**里，必须异步读出来一起打包，
-                   * 否则老师点这个按钮搬走的数据里**没有家长电话 / 家庭住址 / 老师住址**
-                   * （这是这一轮补的那个静默缺口）。
-                   * ⚠️ 读不到时**照样导出**，但把原因说出来（`desc`）——
-                   * 少两张表也比"什么都没导出"强，而"缺了却不说"是不可接受的。
+                   * 🆕 2026-10：走 `splitExport()`（而不是直接 `makeBackup`）——
+                   * 学生档案 / 教师档案在**两张独立的表**里，必须异步读出来。
+                   *
+                   * 🔴 2026-10-03 用户拍板：**档案不进这份明文文件**（`plain` 里两张表是空数组），
+                   *    档案单独一份、用超管公钥封起来（见下面那个「导出档案备份（加密）」按钮）。
+                   *    为什么：这份文件会被转发 / 进网盘 / 落在下载目录，而它里面装的是
+                   *    **全班家长电话和住址** —— 见 `lib/backupCrypto.ts` 文件头。
+                   *    （键**保留**、值置空：备份形状不变，老版本仍然能读。）
+                   * ⚠️ 读不到档案时**照样导出业务数据**，但把原因说出来（`desc`）——
+                   *    业务数据是老师自己恢复要用的，少两张表也比"什么都没导出"强。
                    */
-                  const r = await exportWithProfiles(useStore.getState())
-                  downloadJson(r.data, `树高备份-${ymdOf(beijingNow())}.json`)
+                  const r = await splitExport(useStore.getState())
+                  downloadJson(r.plain, `树高备份-${ymdOf(beijingNow())}.json`)
                   push({
-                    text: `已导出：${backupSummary(r.data)}`,
+                    text: `已导出：${backupSummary(r.plain)}`,
                     tone: 'ok',
-                    ...(r.issues.length ? { desc: `这份文件里没有学生/教师档案（${r.issues[0]}）` } : {}),
+                    ...(r.issues.length ? { desc: `档案没能读到（${r.issues[0]}），加密那份会缺这几条` } : {}),
                   })
                 }}
               >
                 导出备份文件
+              </Button>
+              {/*
+                🆕 2026-10-03：**档案那份单独导出、用超管的公钥封起来**
+                  （用户原话："人人可点，但是能不能加密？就是只有找超管才能解开"）。
+
+                ⚠️ 为什么不能"顺手一起导"：明文文件是可以被转发、被丢进网盘、被留在
+                   下载目录里的，而这两张表是**家长电话 + 家庭住址 + 老师住址**。
+                ⚠️ 加密失败（设备不是安全上下文 / 没有 WebCrypto）**必须说出来**，
+                   `sealForAdmin` 是 fail-closed 的 —— 绝不静默退回明文。
+                ⚠️ 顺序：两次下载**必须顺序 await**（壳里是两次"另存为"模态，见 fileOut.ts 文件头）。
+              */}
+              <Button
+                block
+                icon={<IconLock size={16} />}
+                data-backup-seal
+                onClick={async () => {
+                  const r = await splitExport(useStore.getState())
+                  const nStu = r.profiles.studentProfiles.length
+                  const nTea = r.profiles.teacherProfiles.length
+                  if (!nStu && !nTea) {
+                    push({
+                      text: '没有可加密的档案',
+                      tone: 'warn',
+                      ...(r.issues.length
+                        ? { desc: r.issues[0] }
+                        : { desc: '这台设备读不到学生 / 教师档案（教室端账号读不到档案，这是正常的）' }),
+                    })
+                    return
+                  }
+                  try {
+                    const sealed = await sealForAdmin(r.profiles)
+                    downloadJson(sealed, `树高备份-档案-加密-${ymdOf(beijingNow())}.json`)
+                    push({
+                      text: `已导出加密档案：学生 ${nStu} 条 / 教师 ${nTea} 条`,
+                      tone: 'ok',
+                      desc: '这份文件只有超管的私钥能解开；换设备时先恢复业务数据那份，档案仍从云端回来',
+                    })
+                  } catch (e) {
+                    push({
+                      text: '档案没能加密导出',
+                      tone: 'bad',
+                      desc: e instanceof Error ? e.message : String(e),
+                    })
+                  }
+                }}
+              >
+                导出档案备份（加密）
               </Button>
               {/*
                 🆕 2026-09-29 管理台第二期：「**毕业备份**」那条链的落点
@@ -654,13 +723,17 @@ export default function Settings() {
                 disabled={bkNotifyBusy}
                 data-backup-notify
                 onClick={async () => {
-                  /* 与「导出备份文件」同一个入口（档案要一起带上，读不到就把原因说出来） */
-                  const r = await exportWithProfiles(useStore.getState())
-                  downloadJson(r.data, `树高备份-${ymdOf(beijingNow())}.json`)
+                  /*
+                   * 与「导出备份文件」同一个入口。
+                   * 🔴 2026-10-03：档案**不在这一份里**（`splitExport().plain` 两张表是空的）。
+                   *    这里之所以仍然读档案，只为了"读不到就说出来"，而不是为了把它写进明文文件。
+                   */
+                  const r = await splitExport(useStore.getState())
+                  downloadJson(r.plain, `树高备份-${ymdOf(beijingNow())}.json`)
                   setBkNotifyBusy(true)
                   window.clearTimeout(backupMarkTimer.current)
                   setBackupMark('running')
-                  const res = await notifyBackupDone(`本机备份已导出：${backupSummary(r.data)}`, `文件：树高备份-${ymdOf(beijingNow())}.json`)
+                  const res = await notifyBackupDone(`本机备份已导出：${backupSummary(r.plain)}`, `文件：树高备份-${ymdOf(beijingNow())}.json`)
                   setBkNotifyBusy(false)
                   /* 🔴 终态取**真结果**：`res.ok` 是绿勾、否则红叉（红叉停住不回到 `pending`） */
                   setBackupMark(res.ok ? 'done' : 'failed')
@@ -668,7 +741,7 @@ export default function Settings() {
                     push({
                       text: '备份已存到云端',
                       tone: 'ok',
-                      ...(r.issues.length ? { desc: `这份文件里没有学生/教师档案（${r.issues[0]}）` } : {}),
+                      ...(r.issues.length ? { desc: `档案没能读到（${r.issues[0]}）—— 业务数据这份是全的` } : {}),
                     })
                     /* ✅ 绿勾亮满 `STATUS_MARK_HOLD_MS` 再回到常态（时长只有共享常量那一处） */
                     backupMarkTimer.current = window.setTimeout(
@@ -706,6 +779,9 @@ export default function Settings() {
             </div>
             <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 10, lineHeight: 1.7 }}>
               云端是主副本，这份备份是<b>额外</b>一道保险 —— 换账号、换设备时把数据搬过去。
+              <br />
+              学生档案 / 教师档案（家长电话、住址）<b>不在上面那份文件里</b>：它们单独导出、
+              用超管的公钥加密，只有超管能解开。
             </p>
           </Panel>
         </div>

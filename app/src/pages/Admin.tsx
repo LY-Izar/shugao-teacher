@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useStore } from '../data/store'
 import { getSupabase, isRemote, connectionMode, SUPABASE_URL } from '../lib/supabase'
@@ -76,6 +76,14 @@ import {
 } from '../lib/maintenance'
 import { useMaintenanceStatus } from '../lib/useMaintenance'
 import { Button, Track } from '../components/ui'
+import { downloadJson, readJsonFile } from '../lib/backup'
+import {
+  isAdminSealed,
+  openAdminSealed,
+  type AdminSealed,
+  type AdminSealedPayload,
+} from '../lib/backupCrypto'
+import { beijingNow, ymdOf } from '../lib/holiday'
 import {
   LEVEL_TEXT,
   POPUP_TEXT,
@@ -96,12 +104,14 @@ import {
   IconGauge,
   IconInfo,
   IconList,
+  IconLock,
   IconMegaphone,
   IconRefresh,
   IconSearch,
   IconSend,
   IconSliders,
   IconTrash,
+  IconUpload,
   IconWifi,
 } from '../components/icons'
 
@@ -388,6 +398,242 @@ function Line({ k, v }: { k: string; v: React.ReactNode }) {
         {v}
       </span>
     </div>
+  )
+}
+
+/* ---------------- ⑥ 档案解密：只有超管能开 ----------------
+ *
+ * 用户口径（2026-10-03）：「人人可点，但是能不能加密？**就是只有找超管才能解开**」。
+ * 封那一步在 `/settings`（「导出档案备份（加密）」→ `lib/backupCrypto.ts` 的 `sealForAdmin`，
+ * 公钥**写死在代码里**）；开只能在这里，用的是超管手里的私钥
+ * （`超管档案备份私钥.pem`，存在密码管理器 / 离线文件里 —— **没进仓库、没进数据库、没进聊天**）。
+ *
+ * 🔴 私钥**只在这台机器的这次解密里过一遍内存**：不写 `localStorage`、不上传、不进日志。
+ * 🔴 解出来的正文是**明文 PII**（家长电话 / 住址）：屏上挂了「请勿投屏」，下载按钮写明"用完删掉"。
+ * 🔴 失败必须有话说 —— `openAdminSealed` 把三类失败分开了，其中
+ *    "**这把私钥不是封它时的那一对**"才是超管最可能碰上的（换过钥匙 / 拿错了文件）。
+ * ⚠️ 它**不是恢复入口**：档案只从云端回来；这份解密件是"云端真没了 / 要打电话"时用的。
+ */
+function SealDecryptCard() {
+  const store = useStore()
+  const [doc, setDoc] = useState<AdminSealed | null>(null)
+  const [name, setName] = useState('')
+  const [pem, setPem] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  const [out, setOut] = useState<AdminSealedPayload | null>(null)
+  const pick = useRef<HTMLInputElement>(null)
+
+  /* 档案里只有学生 uuid：屏上要给看得懂的东西（**班内学号** / 姓名，查不到就明写查不到）。
+     ⚠️ 这里直接取 `studentNo`（= 界面上永远显示的那个号），**不许**自己写
+     `serial || studentNo` 那种回落 —— 号与键的翻译只有 `lib/keys.ts` 一处（D12 会红）。 */
+  const who = useMemo(() => {
+    const m = new Map<string, { no: string; name: string }>()
+    for (const k of store.classes) {
+      for (const s of k.students) m.set(s.id, { no: s.studentNo, name: s.name })
+    }
+    return m
+  }, [store.classes])
+
+  async function onPick(f: File) {
+    setName(f.name)
+    setDoc(null)
+    setOut(null)
+    setErr('')
+    try {
+      const raw = await readJsonFile(f)
+      if (!isAdminSealed(raw)) {
+        setErr('这个文件不是「加密的档案备份」（少了封存标记 shugao-admin-sealed）')
+        return
+      }
+      setDoc(raw)
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : '这个文件读不了')
+    }
+  }
+
+  async function onOpen() {
+    if (!doc) return
+    setBusy(true)
+    setErr('')
+    setOut(null)
+    try {
+      setOut(await openAdminSealed(doc, pem))
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const nStu = out?.studentProfiles.length ?? 0
+  const nTea = out?.teacherProfiles.length ?? 0
+
+  return (
+    <Card
+      tone={err ? 'bad' : out ? 'ok' : 'unknown'}
+      title="⑥ 档案解密（只有超管能开）"
+      headline={
+        doc
+          ? `已选：${name} —— 里面学生 ${doc.n.studentProfiles} 条 / 教师 ${doc.n.teacherProfiles} 条`
+          : '选一份「导出档案备份（加密）」的文件，用超管的私钥解开'
+      }
+      note={doc ? `封存于 ${doc.at} · 钥匙指纹 ${doc.kid}` : undefined}
+      openLabel="展开解密台"
+    >
+      <SubHead>第一步 · 选加密档案（`.json` 可以随便传阅，没有私钥打不开）</SubHead>
+      <div className="flex items-center gap-2 px-3.5 pb-2">
+        <input
+          ref={pick}
+          type="file"
+          accept=".json,application/json"
+          className="hidden"
+          onChange={(e) => {
+            const f = e.target.files?.[0]
+            e.target.value = ''
+            if (f) void onPick(f)
+          }}
+        />
+        <Button size="sm" icon={<IconLock size={14} />} onClick={() => pick.current?.click()}>
+          选择加密档案文件
+        </Button>
+        {name ? <span style={{ fontSize: 12, color: 'var(--color-ink3)' }}>{name}</span> : null}
+      </div>
+
+      <SubHead>第二步 · 私钥（只在这次解密的内存里过一遍：不写本机、不上传、不进日志）</SubHead>
+      <div className="px-3.5 pb-2">
+        <textarea
+          value={pem}
+          onChange={(e) => setPem(e.target.value)}
+          spellCheck={false}
+          autoComplete="off"
+          placeholder={'-----BEGIN PRIVATE KEY-----\n…把那一整段粘进来…\n-----END PRIVATE KEY-----'}
+          className="w-full"
+          style={{
+            height: 92,
+            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+            fontSize: 11.5,
+            lineHeight: 1.6,
+            padding: 8,
+            background: 'var(--color-idlesoft)',
+            border: '1px solid var(--color-line)',
+            borderRadius: 4,
+            color: 'var(--color-ink)',
+            resize: 'vertical',
+          }}
+        />
+        <div className="mt-2 flex items-center gap-2">
+          <Button
+            size="sm"
+            variant="primary"
+            icon={<IconLock size={14} />}
+            disabled={!doc || !pem.trim() || busy}
+            onClick={() => void onOpen()}
+          >
+            {busy ? '正在解开…' : '解开这份档案'}
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={!pem && !out}
+            onClick={() => {
+              /* 清空 = 私钥与已解出的明文一起从内存里撤掉（不留在这块屏上） */
+              setPem('')
+              setOut(null)
+              setErr('')
+            }}
+          >
+            清空私钥与明文
+          </Button>
+        </div>
+      </div>
+
+      {err ? (
+        <div
+          className="mx-3.5 mb-3 flex items-start gap-2 p-2.5"
+          style={{
+            background: 'var(--color-badsoft)',
+            border: '1px solid var(--color-badline)',
+            color: 'var(--color-badink)',
+            borderRadius: 4,
+            fontSize: 12.5,
+            lineHeight: 1.7,
+          }}
+        >
+          <IconAlert size={14} />
+          <span className="flex-1">{err}</span>
+        </div>
+      ) : null}
+
+      {out ? (
+        <>
+          <PrivacyLine />
+          <SubHead>解开的内容（明文 —— 请勿投屏或截图）</SubHead>
+          <Line k="学生档案" v={`${nStu} 条`} />
+          <Line k="教师档案" v={`${nTea} 条`} />
+          <Line
+            k="填了的"
+            v={`有家长电话 ${out.studentProfiles.filter((p) => p.guardianPhone.trim()).length} 条 · 有家庭住址 ${out.studentProfiles.filter((p) => p.homeAddress.trim()).length} 条`}
+          />
+          {nStu ? (
+            <>
+              <SubHead>最前面 5 条（全部内容在下面那份文件里）</SubHead>
+              <div className="px-3.5">
+                <table className="w-full" style={{ fontSize: 12 }}>
+                  <tbody>
+                    {out.studentProfiles.slice(0, 5).map((p) => {
+                      const w = who.get(p.studentId)
+                      return (
+                        <tr key={p.studentId} style={{ borderBottom: '1px solid var(--color-line)' }}>
+                          <td
+                            style={{
+                              padding: '5px 8px 5px 0',
+                              color: 'var(--color-ink3)',
+                              whiteSpace: 'nowrap',
+                            }}
+                          >
+                            {w ? w.no : '查不到'}
+                          </td>
+                          <td style={{ padding: '5px 8px', whiteSpace: 'nowrap' }}>
+                            {w ? w.name : '（本机没有这个学生）'}
+                          </td>
+                          <td className="num" style={{ padding: '5px 0' }}>
+                            {p.guardianPhone || '—'}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          ) : null}
+          <div className="px-3.5 py-2">
+            <Button
+              size="sm"
+              icon={<IconUpload size={14} />}
+              onClick={() => downloadJson(out, `树高档案-已解密-${ymdOf(beijingNow())}.json`)}
+            >
+              下载已解密的档案（明文 JSON）
+            </Button>
+            <div
+              className="mt-2"
+              style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.75 }}
+            >
+              ⚠️ 这份文件是<b>明文</b>的家长电话 / 住址 —— 只在本机保存，用完删掉。
+              平时不该导出它：**云端才是主副本**，解开只为"云端真没了"和"要打电话"这两件事。
+            </div>
+          </div>
+        </>
+      ) : null}
+
+      <HintOnly>
+        私钥**丢了就永远打不开**（没有第二把，也没有"找回"这条路）—— 生成时那份
+        `超管档案备份私钥.pem` 要存进密码管理器 / 离线文件。轮换钥匙 = 重新生成一对 +
+        改 `lib/backupCrypto.ts` 里的公钥 + 重新发版；**旧信封只能用旧私钥开**（按信封上的
+        `kid` 分辨是哪一把）。
+      </HintOnly>
+    </Card>
   )
 }
 
@@ -2011,6 +2257,13 @@ export default function Admin() {
             </code>
           </div>
         </Card>
+
+        {/* ⑥ 档案解密（只有超管能开）。
+            ⚠️ 放在「这块屏的边界」**之后**：它是一条**动作**卡，不属于那五条
+            "平台自己好不好"的指标，也不参与 `index.css` 那套 `[data-tone]`。
+            ⚠️ 标题前缀用 ⑥，与公告分区的「⑥ 全站公告」**不在同一个分区**，
+               `[data-admin-toggle="…"]` 是按整串标题找的，不会互相撞。 */}
+        <SealDecryptCard />
 
         <div
           className="flex items-center gap-2 px-1 pb-2"
