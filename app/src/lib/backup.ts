@@ -4,7 +4,14 @@ import { useStore, useToast } from '../data/store'
 import { toISODate } from './date'
 import { clampQuestionCount, isUnassigned } from './assignments'
 import { isSerial, assignMissingSerials, yearLookupFromClasses } from './serial'
-import { saveJson } from './fileOut'
+import {
+  saveJson,
+  /* 🔴 内置备份文件夹（施工单 §1）—— 这三个是**桥接层**，
+     业务代码一律不许直接摸那个壳桥接对象（preflight 的 SHELL 规则扫的就是这个） */
+  hasBuiltinBackupDir,
+  builtinBackupDir,
+  saveToBuiltinBackupDir,
+} from './fileOut'
 import {
   DEFAULT_SUBJECT_CODE,
   alignAssignmentSubject,
@@ -937,11 +944,29 @@ export async function folderNeedsGrant(): Promise<boolean> {
 /**
  * 写一份备份到授权文件夹。
  *
+ * 🔴 **壳（exe）优先走「内置备份文件夹」，而且它不需要任何人授权**（施工单 §1）：
+ *   教室里那台大屏**经常没有键鼠**，而 `showDirectoryPicker()` **必须有人点一次**、
+ *   浏览器重启后还会掉权限 ⇒ 自动备份一直落在 `whyNoFolder()` 那条分支，
+ *   **一直在写、其实一份都没写**，界面上一个字都不说。
+ *   → exe 自带一个目录：**装上就写**。网页版与 apk **行为逐字不变**。
+ *
  * ⚠️ 失败**不能只是 `return false`**：调用方（教室端的自动备份）是 5 分钟一次的后台定时器，
  * 拿到 false 什么也不显示 —— 教师会一直以为备份在写，直到真需要恢复那天。
  * 这里负责把"为什么没写成"说出口（同一条错 10 分钟只提示一次）。
  */
 export async function writeToFolder(name: string, data: unknown): Promise<boolean> {
+  /* ① 壳的内置备份文件夹：不需要授权、目录由程序自己建 */
+  if (hasBuiltinBackupDir()) {
+    const r = await saveToBuiltinBackupDir(name, data)
+    if (r.ok) {
+      lastIssue = ''
+      return true
+    }
+    reportBackupIssue(`写「${name}」到内置备份文件夹失败：${r.why}`)
+    return false
+  }
+
+  /* ② 网页 / apk：原来那条「教师授权的文件夹」 */
   const dir = await writableFolder()
   if (!dir) {
     reportBackupIssue(await whyNoFolder())
@@ -958,6 +983,20 @@ export async function writeToFolder(name: string, data: unknown): Promise<boolea
     reportBackupIssue(`写「${name}」失败：${reasonOf(e)}`)
     return false
   }
+}
+
+/**
+ * 备份到底落在哪儿 —— 给界面显示用（老师/管理员照着这个路径去 U 盘拷走）。
+ *
+ * 🔴 **壳里必须显示真绝对路径**，不许显示成相对路径或空串：施工单 §1.3 明写。
+ *   网页/apk 没有内置文件夹 ⇒ 返回 `null`，界面改显示「还没选文件夹」那一支。
+ */
+export async function backupTargetHint(): Promise<string | null> {
+  if (!hasBuiltinBackupDir()) return null
+  // 壳里内置目录要么是真路径、要么是 null（三处都写不进去）——
+  // ⚠️ 别在这里去问 writableFolder()：壳里**没有**"教师授权过的文件夹"这回事，
+  //   问它只会拿到 null，于是把一个明明可用的路径显示成"没有"。
+  return builtinBackupDir()
 }
 
 /* ---------------- 恢复时把数据推回云端 ---------------- */

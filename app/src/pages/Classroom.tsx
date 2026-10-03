@@ -29,6 +29,7 @@ import { isRemote } from '../lib/supabase'
 import { setDeviceRole } from '../lib/session'
 import * as remote from '../data/remote'
 import {
+  backupTargetHint,
   fsSupported,
   loadHandle,
   makeBackup,
@@ -36,6 +37,7 @@ import {
   writableFolder,
   writeToFolder,
 } from '../lib/backup'
+import { hasBuiltinBackupDir } from '../lib/fileOut'
 
 /** 备份文件名：固定名字，每次覆盖 —— 免得一天攒几十个文件 */
 const BACKUP_NAME = '树高备份.json'
@@ -469,6 +471,9 @@ export default function Classroom() {
   const [bk, setBk] = useState<number | null>(null)
   const [bkBusy, setBkBusy] = useState(false)
   const [needsGrant, setNeedsGrant] = useState(false)
+  /* 🔴 内置备份文件夹的**真绝对路径**（壳里才有；网页/apk 恒为 null）
+     —— 施工单 §1.3：老师/管理员要照着它去 U 盘拷走，所以必须显示出来、且是真路径 */
+  const [bkDir, setBkDir] = useState<string | null>(null)
 
   /**
    * 备份出问题必须**弹出来**，不能只在面板里留一行小字。
@@ -492,7 +497,27 @@ export default function Classroom() {
   useEffect(() => {
     if (!bkSupported) return
     let alive = true
+    /*
+     * 🔴🔴 **exe 自带备份文件夹：这一整套「授权文件夹」的流程都要跳过**（施工单 §1）。
+     *
+     * 改之前这个定时器第一件事是 `loadHandle()`，**没有句柄就直接 return** ——
+     * 而 exe 里**根本不存在"教师授权过的文件夹"**（`showDirectoryPicker`
+     * 必须有人点一次，教室里那台大屏经常没有键鼠）⇒ 每 5 分钟报一次
+     * 「还没有选备份文件夹」，然后 `writeToFolder` **一次都走不到**：
+     * **一直在写、其实一份都没写**，而屏上看着「自动备份开着呢」。
+     *
+     * → 壳里直接写内置目录（不需要任何人授权），网页/apk 走原来那条一字不改。
+     */
+    const builtin = hasBuiltinBackupDir()
     const tick = async () => {
+      if (builtin) {
+        const ok = await writeToFolder(BACKUP_NAME, makeBackup(useStore.getState()))
+        if (!alive) return
+        setNeedsGrant(false)
+        setBkDir(await backupTargetHint())
+        if (ok) setBk(Date.now())
+        return
+      }
       // 这里**只查询、不申请** —— requestPermission 必须由用户手势触发
       const dir = await loadHandle()
       if (!alive) return
@@ -2254,7 +2279,9 @@ export default function Classroom() {
                   <IconCheck size={15} />
                   <span style={{ color: 'var(--color-ink2)' }}>自动备份到本机</span>
                   <span className="flex-1" />
-                  {bkSupported ? (
+                  {/* 🔴 exe 自带备份文件夹：**装上就写，不需要任何人授权**
+                      ⇒ 不摆「设置文件夹」那个按钮（摆着它反而会让人以为要点一下才开） */}
+                  {bkSupported && !bkDir ? (
                     <button
                       type="button"
                       disabled={bkBusy}
@@ -2290,11 +2317,17 @@ export default function Classroom() {
                 >
                   {!bkSupported
                     ? '这个浏览器不支持自动写文件夹'
-                    : needsGrant
-                      ? '点右上角「点一下恢复」继续自动备份'
-                      : bk
-                        ? `上次备份：${new Date(bk).toLocaleString('zh-CN')} · 每 5 分钟一次`
-                        : '选一个文件夹（建议放在网盘同步目录里），之后每 5 分钟自动写一份备份。'}
+                    : bkDir
+                      ? /* 🔴 壳：显示**真绝对路径** —— 老师照着它去 U 盘拷走（施工单 §1.3）。
+                           ⚠️ 拿不到路径（三处都写不进去）时不许假装有，如实说。 */
+                        (bk
+                          ? `上次备份：${new Date(bk).toLocaleString('zh-CN')} · 每 5 分钟写一份，存到：${bkDir}`
+                          : `每 5 分钟写一份，存到：${bkDir}`)
+                      : needsGrant
+                        ? '点右上角「点一下恢复」继续自动备份'
+                        : bk
+                          ? `上次备份：${new Date(bk).toLocaleString('zh-CN')} · 每 5 分钟一次`
+                          : '选一个文件夹（建议放在网盘同步目录里），之后每 5 分钟自动写一份备份。'}
                 </div>
               </Panel>
               )}

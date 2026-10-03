@@ -290,6 +290,9 @@ const EXPECTED_FILES = [
   '98-admin-errors.png',
   '99-admin-feedback.png',
   '100-maint-teacher.png',
+  // 103 = 超管从维护画面进来的密码框（2026-10-03 补）—— "开了关不掉"的解药：
+  //       维护闸门连 /login 一起挡，没登录过的设备上超管原本进不来。
+  '102b-maint-unlock.png',
   '101-maint-classroom.png',
   '102-maint-admin-exempt.png',
   '103-settings-feedback.png',
@@ -8712,6 +8715,195 @@ await withLock(async () => {
           )
           await shot(mp, S2, '100-maint-teacher', { full: true })
 
+        /* ---- ②b 🔴 超管从维护画面进来的那条路（2026-10-03，用户要求补的）----
+         *
+         * 为什么这一节值钱：维护闸门把**整页**换成维护画面 —— **包括 `/login`**。
+         * ⇒ 一台**没登录过**的设备上超管连登录页都点不开，「开了关不掉」真的会发生。
+         * 这一节钉的是那条出路，而且**四个方向都要钉**，少一个就可能假绿。
+         */
+        await step(S2, async () => {
+          // ① 手势**不写在屏上**（写了就等于贴在公告下面人人可见）
+          const before = await mp.evaluate(() => ({
+            zone: document.querySelectorAll('[data-maintenance-unlock-tapzone]').length,
+            form: document.querySelectorAll('[data-maintenance-unlock="open"]').length,
+            /* 屏上**不许**出现节奏的字样（"X X XXX" 这种） */
+            leaks: /连点|节奏|按\s*\d+\s*下|手势/.test(document.body.innerText),
+          }))
+          check(
+            before.zone === 1 && before.form === 0 && !before.leaks,
+            `🔴 ${S2}：手势入口**屏上不可见**（只留一个点得到的大片空白区域）`,
+            `落点 ${before.zone} 个 · 密码框 ${before.form} 个 · 屏上泄露节奏的字样=${before.leaks}`,
+            '把节奏写在界面上 = 等于贴在公告下面，学生都会试',
+          )
+
+          // ② 按错节奏**不许**开框（否则"乱点几下就开"）
+          await mp.evaluate(() => {
+            /*
+             * 🔴🔴 **每次点击都要重新 querySelector**（下面节奏那段也是同一个坑）。
+             *   每点一下都 setState → 重渲染 → 那个 span 可能被**换成新节点**；
+             *   缓存的 `z` 于是变成**已脱离 DOM** 的节点，`z.click()` **不会冒泡到 React**
+             *   ⇒ 处理器根本不跑 ⇒ 断言恒红，而**产品其实好的**。
+             *   （这就是"独立探针里能开、门禁里开不了"的原因 —— 探针每次都重新取。）
+             */
+            const z = () => document.querySelector('[data-maintenance-unlock-tapzone]')
+            for (let i = 0; i < 11; i++) z().click()
+          })
+          /*
+           * 🔴 乱点之后**必须停够一拍**（这里 1600ms）再按下一段节奏。
+           *   原因：那串狂点的**最后一下**还在缓冲区里，而"同段"判据是
+           *   **两下间隔 ≤380ms** ⇒ 停得不够就会和节奏的第一下**并成一组**，
+           *   整条节奏永久偏移一格、永远开不出框（实测 progress 1→1→2→3→4→1）。
+           *
+           *   ⚠️ 这不是把 bug 藏起来：**真人乱点之后本来就要停一下再重新按**。
+           *     真正要防的"乱点开框"已经被上面那条「狂点 11 下开不出框」单独钉住了。
+           */
+          await mp.waitForTimeout(1600)
+          const afterNoise = await mp.evaluate(
+            () => document.querySelectorAll('[data-maintenance-unlock="open"]').length,
+          )
+          check(
+            afterNoise === 0,
+            `🔴 ${S2}：**乱点一通开不出密码框**（节奏要对上，不是点够次数就行）`,
+            `狂点 11 下后密码框 ${afterNoise} 个`,
+            '否则那不是"隐藏入口"，是"任何人都能开"',
+          )
+
+          // ③ 按对节奏 → 出框，且框里**只有账号密码**，没有"直接进"的路
+          await mp.evaluate(async () => {
+            const z = () => document.querySelector('[data-maintenance-unlock-tapzone]')
+            const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+            for (const n of [1, 1, 3, 2, 4]) {
+              for (let i = 0; i < n; i++) {
+                z().click()
+                await sleep(90)
+              }
+              await sleep(1000)
+            }
+          })
+          await mp.waitForTimeout(500)
+          const opened = await mp.evaluate(() => {
+            const f = document.querySelector('[data-maintenance-unlock="open"]')
+            return {
+              open: f ? 1 : 0,
+              inputs: f ? f.querySelectorAll('input').length : 0,
+              pw: f ? f.querySelectorAll('input[type="password"]').length : 0,
+            }
+          })
+          check(
+            opened.open === 1 && opened.inputs === 2 && opened.pw === 1,
+            `🔴 ${S2}：按对节奏（X X XXX XX XXXX）**真的开出密码框**，且框里是账号 + 密码`,
+            `框 ${opened.open} 个 · 输入框 ${opened.inputs} · 密码框 ${opened.pw}`,
+            '这是唯一一条"没登录也能进超管"的路，它坏了就是"开了关不掉"',
+          )
+          await shot(mp, S2, '102b-maint-unlock', { full: true })
+
+          // ④ 🔴 反向对照：**密码不许在前端比对**（源码级）
+          //    前端只负责"把密码发给服务端"，比对必须在服务端做 ——
+          //    放在前端就等于改一行 JS 就过了。
+          const mgSrc = readFileSync(join(HERE, '..', 'src', 'components', 'MaintenanceGate.tsx'), 'utf8')
+          const strip = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+          const mgCode = strip(mgSrc)
+          check(
+            !/password\s*===|password\s*!==|\.trim\(\)\s*===\s*password/.test(mgCode),
+            `🔴 ${S2}：并且前端**没有**自己比对密码（**剥掉注释后**查）`,
+            /password\s*===|password\s*!==/.test(mgCode) ? '🔴 前端在比密码' : '前端只负责发送',
+            '前端比密码 = 改一行 JS 就过了',
+          )
+          check(
+            /action:\s*'unlock'/.test(readFileSync(join(HERE, '..', 'src', 'lib', 'maintenance.ts'), 'utf8')),
+            `${S2}：它 POST 到服务端（action:'unlock'），不是本地放行`,
+            'lib/maintenance.ts 的 unlockMaintenance()',
+            '没有服务端这一段，这条就只是障眼法',
+          )
+
+          // ⑤ 教室端那一支**不许**有这个入口（那块屏是给学生看的）
+          await mp.goto(`${BASE}/classroom`, { waitUntil: 'networkidle' })
+          await mp.waitForTimeout(700)
+          const inClassroom = await mp.evaluate(
+            () => document.querySelectorAll('[data-maintenance-unlock-tapzone]').length,
+          )
+          check(
+            inClassroom === 0,
+            `🔴 ${S2}：教室端那块屏**没有**这个入口（学生面前不该有）`,
+            `教室端落点 ${inClassroom} 个`,
+            '把超管入口摆到教室大屏上 = 任何能碰屏的学生都能开',
+          )
+
+          /* ================================================================
+             🔴🔴🔴 exe 自带备份文件夹：**装上就写，不需要任何人授权**（施工单 §1）
+             ----------------------------------------------------------------
+             这一段钉的是一个**静默到没人会发现**的故障：
+             教室里那台大屏**经常没有键鼠**，而「选备份文件夹」必须有人点一次
+             ⇒ 自动备份每 5 分钟报一次「还没有选备份文件夹」，
+               然后**一份都没写**，屏上看着「自动备份开着呢」。
+
+             ✅ 所以用**真行为**钉，不钉源码：
+                往页面里注入一个假桥接，看它**有没有真的被调用**。
+             ⚠️ 必须**另开一个 page**：注入 `__shell_out` 会让整页进入"在壳里"状态
+                （`inShell()` 变 true、导出全改走桥接），不能污染同一页后面的断言。
+             ================================================================ */
+          const bkPage = await ctx.newPage()
+          await bkPage.addInitScript(() => {
+            /* 假桥接：只把"被叫过什么"记下来。🔴 不许在这里 return 假成功还顺便
+               改掉文件名 —— 那就变成"自己骗自己"的恒绿断言了。 */
+            window.__bkCalls = []
+            window.__shell_out = {
+              saveBlob: async () => 'saved',
+              openInPlace: async () => 'opened',
+              saveToBackupDir: async (filename) => {
+                window.__bkCalls.push(filename)
+                return { ok: true, path: 'D:\\验包用的假路径\\' + filename }
+              },
+              backupDir: async () => 'D:\\验包用的假路径',
+            }
+          })
+          await bkPage.goto(`${BASE}/classroom`, { waitUntil: 'networkidle' })
+          await bkPage.waitForTimeout(2600)
+          const bkProbe = await bkPage.evaluate(() => ({
+            calls: Array.isArray(window.__bkCalls) ? window.__bkCalls : [],
+            dir: typeof window.__shell_out?.backupDir === 'function' ? 'function' : 'missing',
+          }))
+          await bkPage.close()
+          check(
+            bkProbe.calls.includes('树高备份.json'),
+            `🔴 ${S2}：exe 自带备份文件夹 —— **没选过文件夹也真的写了一份**（装上就写）`,
+            `桥接被调用 ${bkProbe.calls.length} 次：${bkProbe.calls.join(' / ') || '（一次都没有）'}`,
+            '这是那个静默故障：教室端一直报「没选文件夹」、其实一份都没写，屏上却像开着',
+          )
+
+          /* ---- 源码级三条（便宜的确定性判据，剥掉注释后查） ---- */
+          const strip2 = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+          const bkSrc = strip2(readFileSync(join(HERE, '..', 'src', 'lib', 'backup.ts'), 'utf8'))
+          const foSrc = strip2(readFileSync(join(HERE, '..', 'src', 'lib', 'fileOut.ts'), 'utf8'))
+          const crSrc = strip2(readFileSync(join(HERE, '..', 'src', 'pages', 'Classroom.tsx'), 'utf8'))
+          /* ⚠️ **只在 writeToFolder 这一个函数体里比顺序**（第一版扫全文，红了）——
+             `indexOf` 全文会命中函数**前面**别处的同名调用 ⇒ 一个正确的实现也判红。
+             这种"扫全文比位置"的断言本身就脆，别写。 */
+          const w2fBody = (bkSrc.match(/export async function writeToFolder[\s\S]*?\n\}/) ?? [''])[0]
+          const iHas = w2fBody.indexOf('hasBuiltinBackupDir()')
+          const iWant = w2fBody.indexOf('writableFolder()')
+          check(
+            w2fBody !== '' && iHas > 0 && iWant > 0 && iHas < iWant,
+            `${S2}：writeToFolder **先问内置文件夹、再问授权文件夹**（顺序反了就又静默失败）`,
+            w2fBody === ''
+              ? '🔴 没找到 writeToFolder 函数体 —— 判据本身失效了'
+              : `函数体内 hasBuiltinBackupDir @${iHas} · writableFolder @${iWant}`,
+            '顺序反了 = 内置目录形同虚设，仍然要人去点一次文件夹',
+          )
+          check(
+            /saveToBackupDir\?\(/.test(foSrc) && /backupDir\?\(\)/.test(foSrc),
+            `🔴 ${S2}：桥接那两个方法名**逐字没改**（打包那侧照着它们写的，改了就断）`,
+            /saveToBackupDir\?\(/.test(foSrc) && /backupDir\?\(\)/.test(foSrc) ? '两个都在' : '名字对不上',
+            '壳侧的 _src/desktop/shell-ipc.mjs 是照这两个名字写的',
+          )
+          check(
+            /backupTargetHint/.test(crSrc) && /bkDir/.test(crSrc),
+            `${S2}：教室端把**真实路径显示出来**（施工单 §1.3：老师要照着去 U 盘拷走）`,
+            /backupTargetHint/.test(crSrc) && /bkDir/.test(crSrc) ? '接上了' : '没接',
+            '不显示路径 = 备份写了但没人知道它在哪，等于没写',
+          )
+        })
+
           /* ---- ② 教室端：全屏维护画面 + 数据清空 + 心跳照发 ---- */
           await mp.goto(`${BASE}/classroom`, { waitUntil: 'networkidle' })
           await mp.waitForTimeout(700)
@@ -13740,7 +13932,23 @@ await withLock(async () => {
       const p2 = await c.newPage()
       p2.on('pageerror', (e) => errors.push(`PAGEERROR(S27) :: ${e.message}`))
       await p2.goto(`${BASE}/manage/course?as=admin`, { waitUntil: 'networkidle' })
-      await p2.waitForTimeout(400)
+      /*
+       * 🔴 **轮询等它出现，不要 `waitForTimeout(400)` 然后直接数**（2026-10-03 修）：
+       *   这一页要**先把 store hydrate 完**才渲染出课程管理那一段，
+       *   而 400ms 顶不住 —— 它间歇性地返回 `[data-course-admin]=0`，
+       *   **页面其实好好的**（pathname 也对）。
+       *   ⚠️ 这跟本轮改的东西无关（`/manage/course` 不碰 fileOut / backup / Classroom），
+       *   是一条**本来就脆**的断言。但它红着就会让人去查错方向 —— 所以修掉。
+       *   「把等待调大」只能缓解，「轮询到出现为止」才是真的不脆。
+       */
+      await p2
+        .locator('[data-course-admin]')
+        .waitFor({ state: 'attached', timeout: 8000 })
+        .catch(() => {
+          /* 故意吞掉：下面那条 check 会把"没等到"报成一条红断言，
+             这里抛出去会让整个 step 中断、后面几百条断言都不跑（门禁自己也要能红，
+             但"没找到元素"不等于"脚本崩了" —— 要的是一条红，不是一次中断）。 */
+        })
       const onPage =
         new URL(p2.url()).pathname === '/manage/course' &&
         (await p2.locator('[data-course-admin]').count()) === 1

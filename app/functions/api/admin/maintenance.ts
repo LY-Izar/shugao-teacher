@@ -60,10 +60,59 @@ import { MAIL_DAILY_CAP, mailConfigured, mailTo } from '../_lib/mail'
 const NEED_STAGE13 =
   '数据库还没跑权限函数（仓库里 supabase/schema.sql 第 13 段：is_super_admin / can_manage_teachers）。' +
   '到 Supabase → SQL Editor 跑一遍再回来；刚跑完的话等十几秒让接口刷新一下缓存。'
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   🔴 `unlock` 的**限流**（2026-10-03）—— 这是本文件里**唯一免登录**的入口
+   ------------------------------------------------------------------------
+   为什么必须有：其余动作都要求「有 JWT 且 `is_super_admin()`」，
+   而 `unlock` 恰恰是**给"还没有会话"的人**用的 —— 所以它是**唯一能被匿名反复打**的地方。
+   没有限流时它就是一台**在线试密码机**。
+
+   为什么是**内存**计数而不是数据库/Redis：这一层是"减少噪音"，
+   不是安全边界 —— ⚠️ **真正的判据是 Supabase 那边**（它自己也有速率限制）
+   与 `is_super_admin()`。所以这一层**放宽了也不会让人进得去**。
+   ⚠️ 已知局限：Cloudflare 每个 isolate 独立计数 ⇒ 多实例时实际上限会放大。
+     方向是安全的（只放宽次数，不放宽判据）。要更严就得落库，那是另一件事。
+
+   数字怎么定的：5 次失败 → 锁 5 分钟。真人输错两三次很正常（手机输入法+手抖）；
+   而试密码的人不会愿意等 5 分钟。
+   ═══════════════════════════════════════════════════════════════════════ */
+const UNLOCK_MAX_FAILS = 5
+const UNLOCK_LOCK_MS = 5 * 60 * 1000
+/** IP → { 失败次数, 锁定到什么时候 } */
+const unlockFails = new Map<string, { n: number; until: number }>()
+
+function ipOf(request: Request): string {
+  return (
+    request.headers.get('CF-Connecting-IP')?.trim() ||
+    request.headers.get('X-Forwarded-For')?.split(',')[0]?.trim() ||
+    'unknown'
+  )
+}
+
+function unlockGate(request: Request): { ok: true } | { ok: false; message: string } {
+  const rec = unlockFails.get(ipOf(request))
+  if (rec && rec.until > Date.now()) {
+    const mins = Math.max(1, Math.ceil((rec.until - Date.now()) / 60_000))
+    return { ok: false, message: `试太多次了，${mins} 分钟后再试。` }
+  }
+  return { ok: true }
+}
+
+function recordUnlockFailure(request: Request): void {
+  const ip = ipOf(request)
+  const prev = unlockFails.get(ip)
+  const n = (prev?.n ?? 0) + 1
+  unlockFails.set(ip, n >= UNLOCK_MAX_FAILS ? { n: 0, until: Date.now() + UNLOCK_LOCK_MS } : { n, until: 0 })
+}
+
+function clearUnlockFailures(request: Request): void {
+  unlockFails.delete(ipOf(request))
+}
 const NEED_STAGE23 = needStage('23', '平台设置（维护模式）')
 
 type Body = {
-  action?: 'state' | 'set'
+  action?: 'state' | 'set' | 'unlock'
   /** set */
   enabled?: boolean
   message?: string
@@ -108,6 +157,88 @@ export async function onRequestPost(context: { request: Request; env: Env }): Pr
     return json({ status: 'error', message: '请求格式不对' }, 400)
   }
   const action = body.action ?? 'state'
+
+  /* ═══════════════════════════════════════════════════════════════════════
+     🔴🔴 `unlock`：**免登录**的那一条（2026-10-03，用户要求补的）
+     ------------------------------------------------------------------------
+     为什么它必须存在（这是本功能**最坏的失败模式**，之前只挡住了一半）：
+
+       维护闸门把**整页**换成维护画面 —— **包括 `/login`**。
+       ⇒ 一台**没登录过**的设备上，超管**连登录页都进不去**，
+         于是「开维护的人把自己关在外面」真的会发生。
+       （`MAINTENANCE_EXEMPT_PATHS` 只豁免 `/admin` 与 `/classroom` ——
+         那是给**已经登录着**的超管留的路，对**没登录**的那台设备不管用。）
+
+       现在补的这一条是那台设备的路：**在维护画面上按一段固定节奏点页面
+       → 出一个密码框 → 输管理员账号密码 → 进 `/admin` 把维护关掉。**
+
+     🔴 **安全性两道，都在这儿，绝不在前端**：
+       ① 密码由 **Supabase 自己校验**（`auth/v1/token?grant_type=password`，
+          用 **anon key** —— 那把公开钥匙只能"验证身份"，读不到任何表）；
+       ② 拿到 token 后**再问一次数据库** `is_super_admin()` ——
+          密码对的**普通教师也进不去**。
+       ⚠️ 所以"知道别人的密码" ≠ "能进维护面板"，必须**本来就是最高管理员**。
+
+     ⚠️ 为什么把 token 返给前端：`/admin` 要靠会话里的 JWT 才能读接口。
+       这里返回的是**该账号自己的**会话（不是新造的后门 token），
+       前端 `setSession()` 收下之后，一切照常走既有那条路。
+
+     ⚠️ **限流**：这是唯一免登录的入口，🔴 必须限 —— 见 `unlockGate`。
+  ═══════════════════════════════════════════════════════════════════════ */
+  if (action === 'unlock') {
+    const gate = unlockGate(request)
+    if (!gate.ok) return json({ status: 'error', message: gate.message }, 429)
+
+    const raw = body as { email?: unknown; password?: unknown }
+    const email = String(raw.email ?? '').trim()
+    const password = String(raw.password ?? '')
+    if (!email || !password) return json({ status: 'error', message: '账号和密码都要填。' }, 400)
+
+    /* ① 密码交给 Supabase 校验（用 anon key —— 它只能验证身份） */
+    /*
+     * ⚠️ 这里**必须用具名类型**，不能写 `typeof authed`：
+     *   那一行上 `authed` 已经被窄化成 `null`，`as typeof authed` 就变成 `as null`
+     *   ⇒ 后面三行全部报 `Property 'access_token' does not exist on type 'never'`。
+     *   （tsc 抓的，不是猜的。）
+     */
+    type SupaAuthed = { access_token?: string; refresh_token?: string; expires_in?: number }
+    let authed: SupaAuthed | null = null
+    try {
+      const r = await fetch(`${baseUrl(env)}/auth/v1/token?grant_type=password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', apikey: anonKey(env) },
+        body: JSON.stringify({ email, password }),
+      })
+      if (!r.ok) {
+        recordUnlockFailure(request)
+        /* 🔴 **不回显 Supabase 原文**：那会漏"账号在不在 / 有没有确认过 / 被限流了" */
+        return json({ status: 'error', message: '账号或密码不对。' }, 401)
+      }
+      authed = (await r.json()) as SupaAuthed
+    } catch {
+      return json({ status: 'error', message: '连不上账号服务，稍后再试。' }, 502)
+    }
+    const accessToken = authed?.access_token
+    const refreshToken = authed?.refresh_token
+    if (!accessToken || !refreshToken) {
+      return json({ status: 'error', message: '账号服务没有给回会话，请稍后再试。' }, 502)
+    }
+
+    /* ② 再问数据库：这个账号**是不是最高管理员**。密码对但不是超管 ⇒ 一样进不去。 */
+    const isSuper = await rpcBool(env, accessToken, 'is_super_admin')
+    if (isSuper === 'missing') return json({ status: 'error', message: NEED_STAGE13 }, 503)
+    if (!isSuper) {
+      return json({ status: 'forbidden', message: '这个账号不是最高管理员 —— 维护模式只能由平台主人开关。' }, 403)
+    }
+
+    clearUnlockFailures(request)
+    return json({
+      status: 'ok',
+      access_token: accessToken,
+      refresh_token: refreshToken,
+      expires_in: authed?.expires_in ?? 3600,
+    })
+  }
 
   const me = await caller(request, env)
   if (!me) return json({ status: 'error', message: '登录已过期，请重新登录后再试' }, 401)

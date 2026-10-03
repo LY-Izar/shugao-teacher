@@ -34,6 +34,15 @@
 interface ShellBridge {
   saveBlob?(filename: string, blob: Blob): Promise<'saved' | 'cancelled' | 'failed'>
   openInPlace?(filename: string, blob: Blob): Promise<unknown>
+  /*
+   * 🔴 内置备份文件夹那两个（2026-10-03 施工单 §1）。
+   *   ⚠️ **方法名不许改** —— 打包那一侧（`_src/desktop/shell-ipc.mjs`）是照着
+   *   这两个名字写的，改了它那边就断。
+   *   · saveToBackupDir 返回 `{ok:true, path}` 或 `{ok:false, why}`
+   *   · backupDir 返回**真绝对路径**，拿不到返回 null
+   */
+  saveToBackupDir?(filename: string, blob: Blob): Promise<{ ok: boolean; path?: string; why?: string }>
+  backupDir?(): Promise<string | null>
 }
 
 function shell(): ShellBridge | null {
@@ -130,4 +139,66 @@ export async function openInPlace(filename: string, blob: Blob): Promise<OpenRes
  */
 export function saveJson(filename: string, data: unknown): Promise<SaveResult> {
   return saveBlob(filename, new Blob([JSON.stringify(data)], { type: 'application/json' }))
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   🔴🔴🔴 **内置备份文件夹** —— exe 自带一个目录，装上就写（2026-10-03 施工单 §1）
+   ------------------------------------------------------------------------
+   为什么非有它不可（不是"少个功能"，是**一个静默到没人发现的故障**）：
+
+     教室里那台大屏**经常没有键鼠**，而"选备份文件夹"走的是网页的
+     `showDirectoryPicker()` —— **必须有人点一次**，浏览器重启后还会掉权限。
+     结果教室端 exe 在**没人点过文件夹**的机器上，5 分钟一次的自动备份
+     一直落在 `whyNoFolder()` 那条分支 —— **一直在写、其实一份都没写**，
+     而教师看到的是「自动备份开着呢」。
+     → exe 自带一个备份文件夹：**装上就写，不需要任何人授权**。
+
+   ⚠️ **apk 没有这一条**（Android WebView 没有"文件系统"这个概念）——
+     `hasBuiltinBackupDir()` 在那里恒为 false，于是照旧走「选文件夹 / 手动导出」那条路。
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/** 这一支壳**带**不自带备份文件夹 */
+export function hasBuiltinBackupDir(): boolean {
+  return typeof shell()?.saveToBackupDir === 'function'
+}
+
+/**
+ * 内置备份文件夹的**真绝对路径** —— 界面要把它显示给老师看（能照着去 U 盘拷走）。
+ * 🔴 拿不到（网页版 / apk / 三处都写不进去）一律返回 `null`，**不许返回相对路径或空串**。
+ */
+export async function builtinBackupDir(): Promise<string | null> {
+  const s = shell()
+  if (!s?.backupDir) return null
+  try {
+    const p = await s.backupDir()
+    return p && typeof p === 'string' && p ? p : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 写一份**到内置备份文件夹**（同名覆盖，不轮转 —— 用户原话「只有一份就一份」）。
+ *
+ * @returns `{ ok:true, path }` / `{ ok:false, why }`（`why` 是**能给人看**的话）。
+ *   ⚠️ **不许失败就 `return false`** —— 自动备份是后台定时器，拿到 false 什么也不显示，
+ *   教师会一直以为在写，直到真需要恢复那天（这是本文件存在的头号理由）。
+ */
+export async function saveToBuiltinBackupDir(
+  filename: string,
+  data: unknown,
+): Promise<{ ok: true; path: string } | { ok: false; why: string }> {
+  const s = shell()
+  if (!s?.saveToBackupDir) return { ok: false, why: '这一份没有内置备份文件夹。' }
+  try {
+    const blob = new Blob([JSON.stringify(data)], { type: 'application/json' })
+    const r = await s.saveToBackupDir(filename, blob)
+    if (r?.ok === true && r.path) return { ok: true, path: r.path }
+    return { ok: false, why: r?.why ?? '备份文件夹写不进去。' }
+  } catch (e) {
+    return {
+      ok: false,
+      why: e && typeof e === 'object' && 'message' in e ? String((e as { message: unknown }).message) : '备份文件夹写不进去。',
+    }
+  }
 }
