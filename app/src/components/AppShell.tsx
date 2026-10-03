@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
+// 🔴 `useLayoutEffect`：切页回顶部必须在**绘制之前**做（AppShell.tsx:2107 那段说明）
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { useStore, useToast } from '../data/store'
 import { WEEKDAY_TEXT, type Student, type TeacherRole } from '../data/types'
@@ -2088,7 +2089,27 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   /** 当前时刻（北京时间，按分钟）—— 用于右栏判断哪节课已结束 */
   const nowMin = mood.now.getHours() * 60 + mood.now.getMinutes()
 
-  useEffect(() => {
+  /*
+ * 🔴🔴🔴 **切页必须回到顶部 —— 而且必须在"绘制之前"**（2026-10-03 用户报出来的）
+ *
+ * 症状：手机底栏是半透明玻璃（`y 839–897`），而工作台那排快捷卡
+ *   「新建作业档案 / 收作业查缺 / 每日作业 / 我的日程表」正好在 `y 813–923`
+ *   —— **压在玻璃底下**。切页那一瞬它们会透过玻璃**读得出来**，
+ *   看起来就是「页面下方闪出一排选项卡，然后瞬间消失」。
+ *
+ * 🔴 **原来这里是 `useEffect`（被动）** —— 它在**绘制之后**才跑，于是：
+ *   ① 新页按**旧滚动位置**渲染 → ② 浏览器**把这一帧画出来**（闪的就是它）
+ *   → ③ `useEffect` 才跑 `scrollTo(0,0)` → 再画第二帧
+ *   ⇒ 中间那一帧**真的被显示出来了**。
+ *
+ * ✅ 改成 `useLayoutEffect`：它在 DOM 变更之后、**浏览器绘制之前**同步跑完
+ *   ⇒ 滚动位置在被画出来**之前**就纠正了，**那一帧根本不存在**。
+ *   （React 处理"滚动恢复"的规范做法，不是权宜之计。）
+ *
+ * ⚠️ `useLayoutEffect` 在 SSR 会警告 —— 本项目**没有** SSR
+ *   （`main.tsx` 直接 `createRoot` 挂到 `#root`），所以安全。
+ */
+useLayoutEffect(() => {
     window.scrollTo(0, 0)
   }, [pathname])
 

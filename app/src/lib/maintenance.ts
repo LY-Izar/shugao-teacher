@@ -121,7 +121,55 @@ export async function fetchMaintenanceStatus(): Promise<MaintenanceStatus> {
   }
 }
 
-/** 面板上那一下"重新读取"用：带 JWT 走超管接口（顺带把"到点该关"的行落回 false） */
+/**
+ * 🔴 `unlock`：维护画面上的那条「免登录进超管」的路（2026-10-03）。
+ *
+ * ⚠️ 它**必须**是 POST 到 `/api/admin/maintenance` 而不是 `postApi()` ——
+ *    `postApi` 会带上**调用者自己的 JWT**，而这条路的整个意义就是
+ *    「调用者**还没有**会话」。带了也没用（服务端 `unlock` 分支根本不看它），
+ *    但会让排障时误以为"已经登录了却还是不行"。
+ *
+ * @returns 成功时带 `access_token` / `refresh_token`（**该管理员自己的**会话，
+ *          不是新造的后门 token —— 前端 `setSession()` 收下后一切照常）
+ */
+export async function unlockMaintenance(
+  email: string,
+  password: string,
+): Promise<
+  | { ok: true; accessToken: string; refreshToken: string }
+  | { ok: false; message: string }
+> {
+  if (!isRemote) {
+    return { ok: false, message: '本地演示环境没有服务端，这条走不了。' }
+  }
+  let res: Response
+  try {
+    res = await fetch('/api/admin/maintenance', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ action: 'unlock', email: email.trim(), password }),
+    })
+  } catch (e) {
+    return {
+      ok: false,
+      message: `连不上服务器（${e instanceof Error ? e.message : String(e)}）—— 网络好了再试。`,
+    }
+  }
+  const body = (await res.json().catch(() => ({}))) as Record<string, unknown>
+  if (!res.ok) {
+    // 🔴 服务端已经把 Supabase 的原文翻成"账号或密码不对"了，这里**原样透出**，
+    //    不要自己再加一句"密码错误" —— 那等于在替服务端猜原因。
+    return { ok: false, message: typeof body.message === 'string' ? body.message : `HTTP ${res.status}` }
+  }
+  const at = typeof body.access_token === 'string' ? body.access_token : ''
+  const rt = typeof body.refresh_token === 'string' ? body.refresh_token : ''
+  if (!at || !rt) {
+    /* 🔴 这一条要**显式报错**：拿不到 token 就意味着进不去 `/admin`，
+     *   而"看起来像成功了"比失败更糟 —— 用户会在一个进不去的页面上找原因。 */
+    return { ok: false, message: '服务器没有给回会话，请稍后再试。' }
+  }
+  return { ok: true, accessToken: at, refreshToken: rt }
+}
 export async function fetchMaintenanceAdminState(): Promise<
   | { ok: true; state: AdminMaintenanceState }
   | { ok: false; status: number; message: string }
