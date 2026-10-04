@@ -55,6 +55,12 @@
  */
 
 import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync } from 'node:fs'
+/*
+ * 🆕 2026-10-04：第二十七节（课代表口令）要拿**同一段文本**自己算一遍 sha256 ——
+ * 用的是 Node 内核的 `node:crypto`，**不是**手抄一个期望哈希。
+ * 这样"库里存的和前端/函数算的是不是同一串"才是真的被验过（不是拿库的结果验库的结果）。
+ */
+import { createHash } from 'node:crypto'
 import { dirname, join, resolve as resolvePath } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -864,11 +870,48 @@ await withLock(async () => {
     const SCHEMA_FULL = applyNegative(RAW_SCHEMA, NEGATIVE)
     const SCHEMA_BEFORE_STAGE5 = applyNegative(SCHEMA_RAW_SPLIT, NEGATIVE, { abOnly: true })
 
-    /** 建一个库：替身 → create publication → schema.sql 原文 → 固定数据 */
+    /** 建一个库：替身 → Supabase 的扩展布局 → create publication → schema.sql 原文 → 固定数据 */
     async function makeDb(schemaText, withFileFixtures) {
       const db = new PGlite({ extensions: { pgcrypto } })
       await db.waitReady
       await db.exec(STUBS)
+
+      /*
+       * 🔴 2026-10-04：**先把 Supabase 的扩展布局造出来，再灌 schema.sql** —— 这是 §40 课代表口令
+       *    那条线上 bug（`function digest(text, unknown) does not exist`）能被门禁抓到的**唯一前提**。
+       *
+       *    真 Supabase 上 `create extension pgcrypto`（`schema.sql:12`）装在 **`extensions`** schema；
+       *    而 §40.5 那两个函数是 `security definer ... set search_path = public`，把 search_path 钉死了
+       *    ⇒ 它们调 pgcrypto 的 `digest()` 时**看不见**那个扩展（生产上必坏）。
+       *
+       *    ⚠️ 🔴 PGlite / 裸 Postgres 默认把扩展装进 **`public`** ⇒ 同样的旧代码在那里**照样是绿的**
+       *    （典型假绿：门禁会对着一个比真库宽松的库点头）。所以这里必须**抢先**装进 `extensions`：
+       *    之后第 12 行那句 `create extension if not exists pgcrypto` 成为 no-op（扩展已存在），
+       *    两个库于是与 Supabase 同形。第一节末尾那条反向对照就是来证明这一点的。
+       *
+       *    实测（PGlite 0.5.8）：`create extension pgcrypto with schema extensions` 可用，
+       *    `pg_extension.extnamespace = extensions`；不支持时才退化成"先装再搬"；
+       *    两条路都走不通就**当场抛** —— 不许静默退回 `public`（那会把下面整节变成假绿）。
+       */
+      await db.exec('create schema if not exists extensions')
+      try {
+        await db.exec('create extension if not exists pgcrypto with schema extensions')
+      } catch (e1) {
+        try {
+          await db.exec('create extension if not exists pgcrypto')
+          await db.exec('alter extension pgcrypto set schema extensions')
+        } catch (e2) {
+          throw new Error(
+            'PGlite 造不出 Supabase 的扩展布局（pgcrypto 装不进 extensions schema）：' +
+              `${shortErr(e1)} / ${shortErr(e2)} —— 这样 §40 课代表口令那几条断言会退化成假绿，` +
+              '宁可不跑，也不许悄悄退回 public。',
+          )
+        }
+      }
+      const ns = await db.query(`select extnamespace::regnamespace::text as ns from pg_extension where extname = 'pgcrypto'`)
+      if (ns.rows[0]?.ns !== 'extensions') {
+        throw new Error(`pgcrypto 没落在 extensions schema（实际 ${ns.rows[0]?.ns}）—— 与 Supabase 不同形，不许往下跑`)
+      }
 
       let text = schemaText
       let realtime = 'ok'
@@ -1397,6 +1440,47 @@ await withLock(async () => {
 
       const gen = await db.query(`select gen_random_uuid() as id`)
       ok('gen_random_uuid() 可用（§0 的 pgcrypto 已装载）', /^[0-9a-f-]{36}$/.test(gen.rows[0].id))
+
+      /*
+       * 🔴 2026-10-04 加：这个假库必须和 **Supabase 的扩展布局**同形 —— 这是第二十七节（课代表口令）
+       *    能不能测出真 bug 的前提。三条一起读：
+       *      ① pgcrypto 在 `extensions` schema（不是 public）；
+       *      ② 它**真的装着**（否则"看不见"就成了"压根没装"，第二条断言把这两种情况分开）；
+       *      ③ 于是钉死 `set search_path = public` 时 `digest()` 不可见 —— **与用户屏上那句同族**。
+       *    ⚠️ ③ 是**反向对照**：它红了才说明环境造对了。它若是绿的，说明这个假库比真 Supabase 宽松，
+       *       第二十七节那些正断言就全是摆设（旧代码在那边本来也是绿的）。
+       */
+      const extNs = await db.query(`select extnamespace::regnamespace::text as ns from pg_extension where extname = 'pgcrypto'`)
+      eq(
+        '🔴 pgcrypto 装在 `extensions` schema（**与 Supabase 同形**；裸 Postgres / PGlite 默认装 public = 假绿）',
+        extNs.rows[0]?.ns,
+        'extensions',
+      )
+      const qualified = await db.query(`select encode(extensions.digest('x', 'sha256'), 'hex') as h`)
+      eq(
+        '🔴 而它是**真装着**的：`extensions.digest()` 调得动（把"看不见"与"压根没装"分开）',
+        qualified.rows[0]?.h,
+        createHash('sha256').update('x', 'utf8').digest('hex'),
+      )
+      /** 就在这个库里照原样跑一遍 `set search_path = public; select encode(digest('x','sha256'),'hex');` */
+      let pinnedDigest = null
+      let pinnedDigestErr = ''
+      await db.exec('begin')
+      try {
+        await db.exec('set local search_path = public')
+        pinnedDigest = (await db.query(`select encode(digest('x','sha256'),'hex') as h`)).rows[0].h
+      } catch (e) {
+        pinnedDigestErr = shortErr(e)
+      } finally {
+        await db.exec('rollback')
+      }
+      ok(
+        '🧪 反向对照：`set search_path = public` 下 `digest()` **不可见**（必须报 `function digest(...) does not exist`）',
+        pinnedDigest === null && /digest/.test(pinnedDigestErr) && /does not exist/.test(pinnedDigestErr),
+        pinnedDigest !== null
+          ? `竟然返回了 ${JSON.stringify(pinnedDigest)} —— 这个假库比真 Supabase 宽松，第二十七节那些断言全是假绿`
+          : `实际报错「${pinnedDigestErr}」`,
+      )
 
       const seen = await asUser(db, U.phy, async () => (await db.query('select auth.uid() as uid')).rows[0].uid)
       eq('auth.uid() 桩读到会话里的假 uid（"登录成谁"就这一条路）', seen, U.phy)
@@ -9384,6 +9468,169 @@ await withLock(async () => {
       anonExec2.rows.map((r) => r.proname),
       ['report_frontend_error'],
     )
+
+    /* ============================================================
+       二十七、🆕 课代表口令（`schema.sql` §40.4–§40.6）：哈希口径 · 口令校验 · 长度闸门 · 源码防复发
+       ------------------------------------------------------------
+       为什么单开一节（2026-10-04 用户报的 bug）：教室端「课代表口令」点「设定 / 换口令」后屏上报
+         `function digest(text, unknown) does not exist`。
+       根因：§40.5 那两个函数 `security definer` + **钉死 `set search_path = public`**，却用 pgcrypto
+         的 `digest()` 当哈希 —— 而 Supabase 把 `pgcrypto` 装在 **`extensions`** schema（`schema.sql:12`）
+         ⇒ 扩展在被钉死的 search_path 上不可见 ⇒ **生产上必坏**。
+       修法（已在 `schema.sql` 里）：换成**内核**函数的
+         `encode(sha256(convert_to(<同一段文本>, 'UTF8')), 'hex')` —— 不依赖扩展、也不受 search_path 影响。
+
+       🔴 这一节能测到它，**只因为** `makeDb()` 抢先把扩展装进了 `extensions`（第一节那条反向对照
+          就是来钉这件事的）。在裸 Postgres / PGlite 的默认布局下，**改回 `digest()` 这里也照样是绿的**
+          —— 所以下面每一条都是"在 Supabase 的扩展布局下"才成立的正断言：真把哈希换回 `digest(…)`，
+          `set_class_rep_pin` / `rep_set_daily_homework` 会当场抛 `function digest… does not exist`，
+          而那**不会**让本脚本静默通过（见下面 `callRpc()`：异常记成一条红断言，不是"跳过"）。
+
+       节的位置说明：排在二十六（A8 收口）**之后**、`db.close()` 之前 —— A8 末尾那两条反向对照要
+       连着跑完（复原靠重放 §39 的规则），插在中间会把它们拆开。
+       ============================================================ */
+    {
+      /*
+       * ⚠️ 真签名是 `rep_set_daily_homework(班 id, 学科名, 学科代码, 内容, 口令)` —— **没有"日期"参数**：
+       *    "今天"由库里的 `beijing_today()` 定（`schema.sql:11011`），调用者不许指定日期。
+       * 身份用的是仓库现成的夹具：`U.head`（班主任，`can_manage_class(c1)` 为真，见第二节）、
+       * `U.room`（c1 的**教室端账号**，课代表那条路真正走的身份）、`U.fresh`（无身份老师 = 打不动的样本）、
+       * `U.phy`（教 c2 物理 ⇒ 过得了写判据，但 c2 **没设过口令** ⇒ 用来取 `no-pin`）。
+       */
+      const PIN_SQL = 'select public.set_class_rep_pin($1, $2) as r'
+      const REP_SQL = 'select public.rep_set_daily_homework($1, $2, $3, $4, $5) as r'
+
+      await B.db.exec('begin')
+      try {
+        /** 切身份：会话变量里的假 uid + `set local role authenticated`（同一个事务里换得动） */
+        const asAuth = async (uid) => {
+          await B.db.query(`select set_config('request.jwt.claims', $1, true)`, [claimsOf(uid)])
+          await B.db.exec('set local role authenticated')
+        }
+        /** 回到库属主（只为**读回**夹具状态，不作为断言对象；`class_rep_pins` 客户端本来就读不到） */
+        const asOwner = () => B.db.exec('reset role')
+        /**
+         * 调 RPC 并把结果归一成 `{ ok, reason, raw, err }`。
+         * 🔴 异常**不往外抛**：它记成 `err`，由 `rpcIs()` 变成一条**红断言** ——
+         *    本仓库栽过"脚本中断 + 打印全部通过 + exit 0"（`app/AGENTS.md` §三.1），
+         *    这里宁可红一条，也不许"这条没跑到"悄悄溜过去。
+         */
+        const callRpc = async (sql, params) => {
+          try {
+            const r = (await B.db.query(sql, params)).rows[0].r ?? {}
+            return { ok: r.ok ?? null, reason: r.reason ?? null, raw: r, err: '' }
+          } catch (e) {
+            return { ok: null, reason: null, raw: null, err: shortErr(e) }
+          }
+        }
+        const rpcIs = (name, got, wantOk, wantReason) =>
+          ok(
+            name,
+            got.err === '' && got.ok === wantOk && got.reason === wantReason,
+            got.err
+              ? `**抛异常了**（本该返回一个 {ok:false,reason} 的 jsonb）：${got.err}`
+              : `实际 ${JSON.stringify([got.ok, got.reason])}，期望 ${JSON.stringify([wantOk, wantReason])}`,
+          )
+        const pinRow = async () =>
+          (await B.db.query(`select pin_hash, updated_by from class_rep_pins where class_id = $1`, [C.c1])).rows[0] ?? null
+        const one = async (sql, params) => (await B.db.query(sql, params)).rows[0]
+
+        /* ---- ① 长度闸门：3 位 / 13 位 ⇒ reason 'length'，而且**一行都没写进去** ---- */
+        await asAuth(U.head)
+        rpcIs('🔴 口令 3 位 ⇒ `{ok:false, reason:"length"}`（不是抛异常、也不是写进去）',
+          await callRpc(PIN_SQL, [C.c1, '123']), false, 'length')
+        rpcIs('🔴 口令 13 位 ⇒ 同上（上限 12 位）',
+          await callRpc(PIN_SQL, [C.c1, '1234567890123']), false, 'length')
+        await asOwner()
+        eq('越界那两次**一行都没落库**（闸门在 insert 之前 —— 表里还是空的）', await pinRow(), null)
+
+        /* ---- ② 正路：班主任（管得着这个班的人）设定口令 ⇒ ok，落库的是哈希 ---- */
+        await asAuth(U.head)
+        rpcIs('班主任（`can_manage_class(班)` 为真）设定口令 ⇒ `{ok:true}`',
+          await callRpc(PIN_SQL, [C.c1, '1234']), true, null)
+        await asOwner()
+        const row = await pinRow()
+        const pinText = `${C.c1}:1234`
+        const nodeHash = createHash('sha256').update(pinText, 'utf8').digest('hex')
+        eq(
+          '🔴 落库的 `pin_hash` 与 node:crypto 按 `sha256(班id + ":" + 口令)` 算的**逐字相同**（hex 小写）',
+          row?.pin_hash,
+          nodeHash,
+        )
+        eq(
+          '🔴 而且它同时等于 pgcrypto 的 `encode(digest(同一段文本,"sha256"),"hex")` —— **旧口径存过的哈希照样能验**（改哈希口径没把老数据甩掉）',
+          (await one(`select encode(extensions.digest($1, 'sha256'), 'hex') as h`, [pinText]))?.h,
+          row?.pin_hash,
+        )
+        eq('哈希行上记着是谁设的（`updated_by` = 班主任）', row?.updated_by, U.head)
+
+        /* ---- ③ 端到端：教室端那台屏（课代表）拿**对的**口令录今天那一科 ---- */
+        await asAuth(U.room)
+        const rep = await callRpc(REP_SQL, [C.c1, '数学', 'math', '口令内容', '1234'])
+        rpcIs('🔴 教室端（课代表）拿对口令录"今天 · 数学" ⇒ `{ok:true}`', rep, true, null)
+        const written = (await B.db.query(
+          `select subject, content, source, author_id, author_name, on_date = public.beijing_today() as is_today
+             from daily_homework where class_id = $1`, [C.c1])).rows
+        eq(
+          '🔴 落库那一行对：`source=rep` · `author_name=课代表` · `author_id=null` · `subject=数学` · `on_date=`今天（`beijing_today()`）',
+          [written.length, written[0]?.source, written[0]?.author_name, written[0]?.author_id ?? null, written[0]?.subject, written[0]?.content, written[0]?.is_today],
+          [1, 'rep', '课代表', null, '数学', '口令内容', true],
+        )
+
+        /* ---- ④ 错口令：reason 'bad-pin'（不是抛异常、也不是 ok），而且什么都不写 ---- */
+        rpcIs('🔴 换成错口令 `9999` ⇒ `{ok:false, reason:"bad-pin"}`（**不是抛异常、也不是 ok**）',
+          await callRpc(REP_SQL, [C.c1, '数学', 'math', '错口令写的东西', '9999']), false, 'bad-pin')
+        eq('…而且一行都没多写（每日作业还是刚那一条）',
+          Number((await one(`select count(*)::int as n from daily_homework where class_id = $1`, [C.c1])).n), 1)
+
+        /* ---- ⑤ 这条路不是敞着的：打不动这个班的人轮不到试口令；没设口令的班也录不进 ---- */
+        await asAuth(U.fresh)
+        rpcIs("🔴 无身份老师（不是本班教室端、也不是本班任课）⇒ reason 'forbidden'（口令对不对都轮不到他试）",
+          await callRpc(REP_SQL, [C.c1, '数学', 'math', '别人班的内容', '1234']), false, 'forbidden')
+        await asAuth(U.phy)
+        rpcIs("🔴 还没设过口令的班（4 班）⇒ reason 'no-pin'（任课老师那条路也走这个闸门）",
+          await callRpc(REP_SQL, [C.c2, '物理', 'physics', '4 班还没设口令', '1234']), false, 'no-pin')
+
+        /* ---- ⑥ §40.4/§40.6：口令哈希**客户端读不到**（这张表一个表权限都不给，读写只走那两个函数） ---- */
+        await asOwner()
+        eq(
+          '🔴 `class_rep_pins` 对 authenticated **连 select 表权限都没有**（口令哈希不该有人拿得到）',
+          Boolean((await one(`select has_table_privilege('authenticated', 'class_rep_pins', 'select') as v`)).v),
+          false,
+        )
+      } catch (e) {
+        /*
+         * 🔴 这一节自己也要**能红**（`app/AGENTS.md` §三.1：异常一律记账，别让"这条没跑到"
+         *    悄悄溜过去）：没被 `callRpc()` 兜住的异常（例如 PGlite 把事务标成 aborted 之后
+         *    `pinRow()` / `asOwner()` 也跟着抛）在这里变成一条**红断言**，而不是"中断成一个看着像成功的退出"。
+         */
+        ok('🔴 §40 口令这一节**从头跑到尾**（中途没抛异常）', false, shortErr(e))
+      } finally {
+        /* 整段**一律 rollback**：口令与每日作业都是就地试写的，不许污染后面的可见量 */
+        await B.db.exec('rollback')
+      }
+
+      /* ---- ⑦ 源码防复发：`supabase/schema.sql` 里不许再有"拿 `digest(` 当哈希"这个**代码形状** ----
+       *    ⚠️ 判据必须**去掉注释**再判：仓库里那些注释**刻意**写着 `digest` 三个字留档
+       *       （`schema.sql:10944-10953` / `:11032-11033`），裸词一判就会把文档也数进去。 */
+      const stripSqlComments = (s) => s.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n]*/g, ' ')
+      const DIGEST_CALL = /(?<![\w.])digest\s*\(/
+      const schemaCode = stripSqlComments(RAW_SCHEMA)
+      const digestCalls = (schemaCode.match(/(?<![\w.])digest\s*\(/g) ?? []).length
+      eq(
+        '🔴 §40.5 的哈希**不许再用扩展函数的 `digest(`**（钉死 `search_path = public` 时它不可见）—— 去掉注释后的 `schema.sql` 里 0 处',
+        digestCalls,
+        0,
+      )
+      ok(
+        '🧪 反向对照：这个判据**能红**（`encode(digest(v, \'sha256\'), \'hex\')` 会被抓到）',
+        DIGEST_CALL.test(stripSqlComments(`select encode(digest(v_pin, 'sha256'), 'hex')`)),
+      )
+      ok(
+        '🧪 反向对照：**注释里**写它不算数（`stripSqlComments` 那一步是吃重的 —— 本仓正是靠它同时做到"留档"与"代码干净"）',
+        !DIGEST_CALL.test(stripSqlComments(`-- 不许用 digest(v,'sha256') 那种写法（留档）\nselect 1;`)),
+      )
+    }
 
     await B.db.close()
     await A.db.close()

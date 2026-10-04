@@ -10940,6 +10940,17 @@ revoke all on function public.can_write_daily_homework(uuid, text, text) from pu
 -- 班主任设 / 换班级口令。**口令明文只在这一个调用里出现**，落库的是哈希。
 --  判据 = 既有 `can_manage_class()`（超管 / 教务处 / 本年级年级主任 / **本班班主任**）——
 --  值日生与口令都归"管得着这个班的人"，与 §16.2 同一个入口。
+--
+-- 🔴 **哈希用内核的 `sha256()`，不许用 `digest()`**（2026-10-04 用户报：
+--    「课代表口令」点设定后屏上报 `function digest(text, unknown) does not exist`）。
+--    根因：本函数是 `security definer` 且**钉死了 `set search_path = public`**，
+--    而 `digest()` 来自 **pgcrypto** —— Supabase 上 `create extension pgcrypto`
+--    装在 **`extensions`** schema（第 12 行那一条），钉死 search_path 之后它不可见。
+--    ⚠️ 本地 pglite / 裸 Postgres 上扩展默认装在 `public`，**这个 bug 在那边永远看不见**
+--       （典型的"假绿"），所以门禁里必须把扩展也装进 `extensions` 再验一次。
+--    `sha256(bytea)` 自 PG11 起是**内核**函数 ⇒ 与扩展、与 search_path 都无关，
+--    且 `sha256(convert_to(x,'UTF8'))` 与 `digest(x,'sha256')` 的输出逐字节相同
+--    （同一个算法、同一段 UTF-8 字节）⇒ 已存的哈希照样能验。
 create or replace function public.set_class_rep_pin(p_class_id uuid, p_pin text)
 returns jsonb
 language plpgsql
@@ -10958,7 +10969,7 @@ begin
   insert into class_rep_pins (class_id, pin_hash, updated_at, updated_by, updated_by_name)
   values (
     p_class_id,
-    encode(digest(p_class_id::text || ':' || v_pin, 'sha256'), 'hex'),
+    encode(sha256(convert_to(p_class_id::text || ':' || v_pin, 'UTF8')), 'hex'),
     now(),
     auth.uid(),
     coalesce((select t.name from teachers t where t.id = auth.uid()), '')
@@ -11018,7 +11029,9 @@ begin
   if v_hash is null then
     return jsonb_build_object('ok', false, 'reason', 'no-pin');
   end if;
-  if v_hash <> encode(digest(p_class_id::text || ':' || btrim(coalesce(p_pin, '')), 'sha256'), 'hex') then
+  /* ⚠️ 与 `set_class_rep_pin()` 里那一条**必须逐字同源**（同算法、同拼接、同编码）——
+     换哈希口径要两处一起换，否则"设完验不过"。理由（为什么不用 `digest()`）见上面那一段。 */
+  if v_hash <> encode(sha256(convert_to(p_class_id::text || ':' || btrim(coalesce(p_pin, '')), 'UTF8')), 'hex') then
     return jsonb_build_object('ok', false, 'reason', 'bad-pin');
   end if;
   insert into daily_homework
