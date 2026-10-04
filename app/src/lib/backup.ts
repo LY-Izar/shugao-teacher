@@ -6,6 +6,7 @@ import { clampQuestionCount, isUnassigned } from './assignments'
 import { isSerial, assignMissingSerials, yearLookupFromClasses } from './serial'
 import {
   saveJson,
+  type SaveResult,
   /* 🔴 内置备份文件夹（施工单 §1）—— 这三个是**桥接层**，
      业务代码一律不许直接摸那个壳桥接对象（preflight 的 SHELL 规则扫的就是这个） */
   hasBuiltinBackupDir,
@@ -785,11 +786,16 @@ export async function notifyBackupDone(
   return { ok: true }
 }
 
-export function downloadJson(data: unknown, filename: string) {
+export async function downloadJson(data: unknown, filename: string): Promise<SaveResult> {
   // 🔴 R4：原来这里自己造 Blob 再抄一份 `<a download>`（全仓第五处同构抄本）。
   // 现在转给 `fileOut.saveJson` —— 于是**备份文件在壳里也能真正落到磁盘上**，
   // 而不是在 Electron 里悄悄落进下载目录。
-  void saveJson(filename, data)
+  //
+  // 🔴🔴 **返回结果，不再 `void`**（2026-10-04）：调用方（Settings 的「导出备份文件」）
+  //   原来是 `downloadJson(...)` 紧接着**无条件** `push({ text:'已导出：…', tone:'ok' })`
+  //   —— 不看结果。apk 上 `saveBlob` 回 `'failed'` 时照样显示"已导出"。
+  //   那是**假绿**，而这条路上的假绿 = 老师以为有备份（见 fileOut.saveBlob 里那段）。
+  return saveJson(filename, data)
 }
 
 export async function readJsonFile(file: File): Promise<unknown> {

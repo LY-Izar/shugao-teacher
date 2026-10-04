@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Page } from '../components/AppShell'
 import {
@@ -16,7 +16,7 @@ import { useStore, useToast } from '../data/store'
 import { loadClassMembers, loadClassSubjects } from '../data/remote'
 import { WEEKDAY_TEXT, type ScheduleItem, type ScheduleKind } from '../data/types'
 import { goBackOr } from '../lib/back'
-import { notifyPermission, requestNotify } from '../lib/notify'
+import { notifyPermission, readNotifyPermission, requestNotify, shellPlatform } from '../lib/notify'
 import {
   REMIND_BEFORE,
   checkScheduleConflicts,
@@ -64,6 +64,39 @@ export default function Schedule() {
 const [perm, setPerm] = useState<
   NotificationPermission | 'unsupported' | 'native'
 >(() => notifyPermission())
+
+  /*
+   * 🔴🔴 **挂载后把权限读成真值**（2026-10-04 修，用户报"通知还是不对"）
+   *
+   * 上面那个初值 `notifyPermission()` 是**同步的猜测**：原生那一档它恒回 `'default'`，
+   * 因为真值在桥接层那边、只能异步取。
+   * ⇒ 旧版**没有这个 useEffect** ⇒ apk 里即使系统通知早就授权了，
+   *   横幅也永远是「开启通知 + 一个按钮」，绿的「通知已开启」**永远到不了**。
+   *   🔴 和 `97cf3fd`（key 读不到被显示成"未配置"）同一个病根：**答案有，没人去读。**
+   *
+   * 为什么还要监听 `visibilitychange`：
+   *   apk 上点按钮是**跳到系统设置页**去开（`openNotificationSettings()`），
+   *   用户在那边改完切回来 —— 这一页**没有重新挂载**，不重读的话横幅照旧挂着。
+   *   ⚠️ 这一步不加的话，"去设置里开"这个动作**在界面上永远看不见效果**。
+   *
+   * 三态：读不出来就停在初值（`'default'`）—— 灰，不谎称已授权。
+   */
+  useEffect(() => {
+    let alive = true
+    const sync = () => {
+      void readNotifyPermission().then((p) => {
+        if (alive) setPerm(p)
+      })
+    }
+    sync()
+    document.addEventListener('visibilitychange', sync)
+    window.addEventListener('focus', sync)
+    return () => {
+      alive = false
+      document.removeEventListener('visibilitychange', sync)
+      window.removeEventListener('focus', sync)
+    }
+  }, [])
 
   const today = weekdayOf()
   /**
@@ -227,12 +260,35 @@ const [perm, setPerm] = useState<
                         ? {
                             text: '要在系统里开通知',
                             tone: 'warn',
-                            desc: '这条要走手机的系统设置才能打开，平台会继续用页内提醒。',
+                            /*
+                             * 🔴🔴 这句话**原来写死"手机的系统设置"**，而教师端 exe 上
+                             *   也照原样显示（2026-10-04 扫出来的）—— Windows 上弹出
+                             *   「要走**手机的**系统设置」是**错的指示**。
+                             *   现在按壳的 `platform` 分端说：
+                             *     · apk  → 手机的系统设置
+                             *     · exe  → Windows 的系统设置
+                             *     · 网页 / 老 apk（没带 platform）→ 这台设备（不点错设备）
+                             *
+                             * ⚠️ apk 那一支**是真的会跳过去**（`requestNotify()` 里调了
+                             *    `openNotificationSettings()`），所以文案说"去打开"是成立的；
+                             *    exe 没有那个口，只能告知位置，别写成"已跳转"。
+                             */
+                            desc: (() => {
+                              const p = shellPlatform()
+                              const where =
+                                p === 'capacitor'
+                                  ? '手机的'
+                                  : p === 'electron'
+                                    ? 'Windows 的'
+                                    : '这台设备的'
+                              return `这条要走${where}系统设置才能打开，平台会继续用页内提醒。`
+                            })(),
                           }
                         : { text: '未授权，将用页内提醒', tone: 'warn' },
                   )
-                  /* 原生那一支的权限状态还没接（R9），所以这里**不** setPerm('native')：
-                     * 那会让这块横幅直接消失，而实际上原生通知一条也还没发出去。 */
+                  /* ⚠️ 原生那一支**不 setPerm**：`'native'` 不是"已授权"，
+                     真值要等用户从系统设置切回来时由上面那个 effect 重新读
+                     （光靠这里 set 会让横幅在权限其实没开时消失）。 */
                   if (r !== 'native') setPerm(r)
                 }}
               >

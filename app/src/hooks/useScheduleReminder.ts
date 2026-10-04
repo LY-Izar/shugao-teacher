@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 import { useStore, useToast } from '../data/store'
-import { notify, notifyPermission } from '../lib/notify'
+import { notifyAsync, readNotifyPermission } from '../lib/notify'
 import { REMIND_BEFORE, dueReminders } from '../lib/schedule'
 import { beijingNow, dayKind, ymdOf } from '../lib/holiday'
 
@@ -46,7 +46,7 @@ export function useScheduleReminder() {
   useEffect(() => {
     if (schedule.length === 0) return
 
-    const tick = () => {
+    const tick = async () => {
       /*
        * ⚠️ 一次 tick 里只取**一个**「现在」。
        *
@@ -87,14 +87,23 @@ export function useScheduleReminder() {
           .filter(Boolean)
           .join(' · ')
 
-        const ok = notify(title, body)
-        // 系统通知没发出（未授权 / 非 https）就退化成页内提示，不能什么都不说
+        /*
+         * 🔴🔴 用 `notifyAsync` 而不是 `notify`（2026-10-04 修）：
+         *   旧版用同步的 `notify()`，而它在原生那一支**恒返回 true**
+         *   （桥接层如实回的 false 被丢掉了）⇒ `if (!ok)` 从来不成立
+         *   ⇒ **系统通知没发出去时，连这条页内提示也没有** ⇒ 到点无声无息。
+         *   现在拿到的是**真结果**：发失败就一定补一条页内提示。
+         *   ⚠️ 页内那条是**兜底**，不是"多此一举" —— 它正是"失败了会有人知道吗"那一问的答案。
+         */
+        const ok = await notifyAsync(title, body)
+        // 系统通知没发出（未授权 / 非 https / 桥接失败）就退化成页内提示，不能什么都不说
         if (!ok) {
+          const perm = await readNotifyPermission()
           push({
             text: `${REMIND_BEFORE} 分钟后：${item.title}`,
             tone: 'warn',
             desc:
-              notifyPermission() === 'granted'
+              perm === 'granted'
                 ? `${item.start} 开始`
                 : '系统通知未授权，正在用页内提醒代替',
           })
@@ -103,8 +112,10 @@ export function useScheduleReminder() {
       if (changed) saveSeen(seen)
     }
 
-    tick()
-    const t = window.setInterval(tick, 60_000)
+    // `tick` 是 async 的（`notifyAsync` / `readNotifyPermission` 要 await）——
+    // 这里显式 `void`，免得未处理的 Promise 挂在那儿；定时器那一份同理。
+    void tick()
+    const t = window.setInterval(() => void tick(), 60_000)
     return () => window.clearInterval(t)
   }, [schedule, classes, push])
 }

@@ -83,6 +83,29 @@ export async function saveBlob(filename: string, blob: Blob): Promise<SaveResult
   const s = shell()
   if (s?.saveBlob) return s.saveBlob(filename, blob)
 
+  /*
+   * 🔴🔴 **壳里但没有 `saveBlob`（= apk）—— 不许继续报 `'saved'`**（2026-10-04）
+   *
+   * apk 的桥接（`_src/shell-bridge-apk.js`）只有 appRole / notify 那几个，
+   * **没有 `saveBlob`** ⇒ 掉到下面那条 `<a download>` 分支，而：
+   *   · 本文件头 `fileOut.ts:20` 记着「Android WebView 里**根本不触发**」
+   *   · `_tools/preflight.mjs:124` 记着同一条
+   *   · 而下面那条分支**恒回 `'saved'`**（浏览器不给反馈）
+   * ⇒ apk 上点「导出备份文件」→ 屏上「**已导出：…**」，而**可能一个文件都没写**。
+   *   🔴 这是 `97cf3fd` 的同款：**失败被返回值抹平**。
+   *
+   * ⚠️🔴 **为什么宁可报失败也不报成功（这个不对称是刻意的）**：
+   *   · 报假**成功** = 老师以为手上有备份、于是不再备份 ⇒ **需要恢复那天才发现没有**
+   *   · 报假**失败** = 老师多换一种方式导一次 ⇒ 顶多麻烦
+   *   备份这条路上，"以为有"比"以为没有"危险得多。
+   *
+   * ⚠️ **这是推断、不是真机实测**（项目还欠着"apk 无真机"）。
+   *   反向条件写清楚，免得后人当成实测结论：
+   *   **若哪天真机证明 WebView 里 `<a download>` 其实能存，
+   *   就把这一支删掉、走下面的网页分支并回 `'saved'`。**
+   */
+  if (s) return 'failed'
+
   // ⚠️ 网页分支：逐字照抄，**不许"顺手优化"**
   //（改 `a.remove()`、改回收时长、把 setTimeout 去掉 —— 每一个都是改网页行为）
   const url = URL.createObjectURL(blob)

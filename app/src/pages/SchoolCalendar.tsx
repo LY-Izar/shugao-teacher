@@ -16,7 +16,7 @@ import {
   type DailyTables,
 } from '../lib/daily'
 import type { SchoolCalendarDay } from '../data/types'
-import { downloadBlob } from '../lib/docxWrite'
+import { saveBlob } from '../lib/fileOut'
 import { addDays, beijingNow, dayKind, holidayOn, weekdayOfISO, ymdOf } from '../lib/holiday'
 import type { DayKind } from '../lib/holiday'
 
@@ -213,10 +213,26 @@ export default function SchoolCalendar() {
       ])
     }
     const csv = lines.map((row) => row.map(csvCell).join(',')).join('\r\n')
-    downloadBlob(
-      new Blob([`\ufeff${csv}`], { type: 'text/csv;charset=utf-8' }),
+    /*
+     * 🔴🔴 **拿到结果再说"已导出表格"**（2026-10-04）
+     *   原来这里用的是同步的 `downloadBlob(...)`（它 `void` 掉结果，签名**刻意不许改** ——
+     *   见 `docxWrite.ts:240`），紧接着就无条件 `push({tone:'ok'})`
+     *   ⇒ apk 上存不下去时也显示"已导出"（同一个假绿）。
+     *   ✅ 改成直接 `await saveBlob`（`GradeSetup.tsx` 已是这个先例），
+     *      统一出口仍是 `fileOut`，没有绕过它。
+     */
+    const saved = await saveBlob(
       `校历-${from}-至-${to}.csv`,
+      new Blob([`\ufeff${csv}`], { type: 'text/csv;charset=utf-8' }),
     )
+    if (saved === 'failed') {
+      push({ text: '表格没保存下来', tone: 'bad', desc: '这台设备存不了文件，换个方式导出。' })
+      return
+    }
+    if (saved === 'cancelled') {
+      push({ text: '已取消保存', tone: 'warn' })
+      return
+    }
     push({
       text: '已导出表格',
       tone: 'ok',

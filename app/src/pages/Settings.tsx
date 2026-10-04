@@ -651,7 +651,30 @@ export default function Settings() {
                    *    业务数据是老师自己恢复要用的，少两张表也比"什么都没导出"强。
                    */
                   const r = await splitExport(useStore.getState())
-                  downloadJson(r.plain, `树高备份-${ymdOf(beijingNow())}.json`)
+                  /*
+                   * 🔴🔴 **拿到保存结果再说"已导出"**（2026-10-04 修）
+                   *
+                   * 旧版是 `downloadJson(...)` 紧接着**无条件** `push({tone:'ok'})` —— 不看结果。
+                   * 而 apk 上 `saveBlob` 恒回 `'saved'`、实际**可能一个文件都没写**
+                   * （`<a download>` 在 Android WebView 里不触发）⇒ 屏上「已导出」是**假绿**。
+                   * 备份这条路上的假绿最贵：老师以为手上有备份 ⇒ 需要恢复那天才发现没有。
+                   *
+                   * ⚠️ `'cancelled'` 是**用户自己取消**（另存为里点了取消）—— 不算失败，
+                   *    但也不能说"已导出"，如实说一句就行。
+                   */
+                  const saved = await downloadJson(r.plain, `树高备份-${ymdOf(beijingNow())}.json`)
+                  if (saved === 'failed') {
+                    push({
+                      text: '文件没保存下来',
+                      tone: 'bad',
+                      desc: '这台设备存不了文件，换个方式导出（或到别的设备上导）。',
+                    })
+                    return
+                  }
+                  if (saved === 'cancelled') {
+                    push({ text: '已取消保存', tone: 'warn' })
+                    return
+                  }
                   push({
                     text: `已导出：${backupSummary(r.plain)}`,
                     tone: 'ok',
@@ -691,7 +714,22 @@ export default function Settings() {
                   }
                   try {
                     const sealed = await sealForAdmin(r.profiles)
-                    downloadJson(sealed, `树高备份-档案-加密-${ymdOf(beijingNow())}.json`)
+                    /* 🔴 同「导出备份文件」：**拿到结果再说"已导出"**（2026-10-04）。
+                       apk 上存不下去时，这里原来照样报 ok —— 而这份是**档案**，
+                       老师以为封存好了就不再管，损失更难补。 */
+                    const saved = await downloadJson(sealed, `树高备份-档案-加密-${ymdOf(beijingNow())}.json`)
+                    if (saved === 'failed') {
+                      push({
+                        text: '档案文件没保存下来',
+                        tone: 'bad',
+                        desc: '这台设备存不了文件，换个方式导出（或到别的设备上导）。',
+                      })
+                      return
+                    }
+                    if (saved === 'cancelled') {
+                      push({ text: '已取消保存', tone: 'warn' })
+                      return
+                    }
                     push({
                       text: `已导出加密档案：学生 ${nStu} 条 / 教师 ${nTea} 条`,
                       tone: 'ok',
@@ -729,10 +767,26 @@ export default function Settings() {
                    *    这里之所以仍然读档案，只为了"读不到就说出来"，而不是为了把它写进明文文件。
                    */
                   const r = await splitExport(useStore.getState())
-                  downloadJson(r.plain, `树高备份-${ymdOf(beijingNow())}.json`)
+                  /*
+                   * 🔴🔴 **存没存下来要先知道，再决定邮件和提示怎么说**（2026-10-04）
+                   *   旧版是 `downloadJson(...)` 后**无条件**走下面两句，而那两句里有一句是
+                   *   **发进邮箱的**「本机备份已导出」—— 那是**留痕**，假的比屏上的更难撤回。
+                   *   老师收到邮件就以为本机有那份文件了 ⇒ 需要恢复那天才发现没有。
+                   */
+                  const saved = await downloadJson(r.plain, `树高备份-${ymdOf(beijingNow())}.json`)
                   setBkNotifyBusy(true)
                   window.clearTimeout(backupMarkTimer.current)
                   setBackupMark('running')
+                  if (saved === 'failed') {
+                    setBkNotifyBusy(false)
+                    setBackupMark('failed')
+                    push({
+                      text: '文件没能保存下来',
+                      tone: 'bad',
+                      desc: '这台设备存不了文件，先别往云端备份 —— 换个方式导出再试。',
+                    })
+                    return
+                  }
                   const res = await notifyBackupDone(`本机备份已导出：${backupSummary(r.plain)}`, `文件：树高备份-${ymdOf(beijingNow())}.json`)
                   setBkNotifyBusy(false)
                   /* 🔴 终态取**真结果**：`res.ok` 是绿勾、否则红叉（红叉停住不回到 `pending`） */
