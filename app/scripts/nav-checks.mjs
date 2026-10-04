@@ -18,9 +18,30 @@
  *     两个方向都钉（§18.3：两个坏法方向相反，各要一条对照）。
  *     🆕 **A10（2026-09-28 公告轮）：全站公告的纯逻辑** —— 排序 / 生效区间 /
  *     顶部摆哪几条 / 弹窗弹几次。那几件事**没有别的机器能验**（不是布局、不是权限、不是类型）。
+ *     🆕 **A12（2026-10-04 版本更新公告）：前端与 Pages Function 那份"共享区"** ——
+ *     `src/lib/release.ts` 与 `functions/api/_lib/release.ts` 之间那一段**逐字节比对**
+ *     （抄一份的代价必须补回来；逐行 grep **不够**：漏抄一行可能一条都不红），
+ *     外加版本比较 / 三态判定 / 默认正文 / 挑哪条下载链接 / 哪一档 / 回话解析 / 禁词与表单校验，
+ *     以及 `RELEASE_KEYS` ↔ `schema.sql` 种子行、四个列名 ↔ `RELEASE_SELECT_COLS` 的契约。
+ *     🆕 **A13（2026-10-04 输入法组字）：apk 上点按钮吞字** —— `installImeMirror()` 补派发的
+ *     那个 `input` 必须**恰好一个 / 冒泡 / `isComposing:false`**，且监听挂在 `document` 的
+ *     **捕获**阶段（挂冒泡就晚于 React 的容器监听 —— 那正是 bug 本身）；
+ *     反向对照是把那一行 `dispatchEvent` 删掉 ⇒ 一个都不补；
+ *     外加 `main.tsx` 里"调在 `createRoot(` 之前 + import 自 `./lib/imeMirror`"的接线。
+ *     🆕 **A14（2026-10-04 教室端壳能力）：壳声明 ↔ 网页判据** —— 用户报的第 ④ 条
+ *     「**不支持置顶小窗，为什么还要点一下解锁声音**」。实测（真壳 · Electron 33）：
+ *     `documentPictureInPicture` 这个**对象在**（老判据会判"支持"），而 `requestWindow()`
+ *     真手势与 CDP `userGesture:true` **两条路都抛** `InvalidStateError … no window`；
+ *     而"解锁声音"那一步在壳里**本来就多余**（默认 `autoplayPolicy` 免手势）。
+ *     ⇒ 壳用 preload 声明（`autoplayAllowed: true` / `documentPip: false`），网页只认**严格值**。
+ *     A 半打纯函数行为（`pipSupported` / `openPip` 的三态、`requestWindow` 一次都没调），
+ *     B 半钉 `Classroom.tsx` 的**按端分支位置**（不是"这两句话在不在"），每条带反向对照。
  *   · 静态（D1–D7 / D9 / D10）：路由 ↔ 登记表 ↔ 本文档矩阵三方咬合；入口判据不许各写一套；
  *     谁在读 `myRoles` / `ROLE_NAME` 要有白名单；`PIN_KEYS` 不许脱队；
  *     生产构建里测试钩子不许出现；
+ *     🆕 **D18（2026-10-04）：两档公告**必须跟着 `GET /api/status` 那**同一次**取数回来 ——
+ *     `useRelease.ts` 里不许有 `setInterval` / `setTimeout` / `fetch(`，
+ *     而 `<ReleaseGate>` 必须挂在 `MaintenanceGate` **内部**（挂到 `App.tsx` = 第二个轮询）。
  *     🆕 **D10：表存在性探针不许假设任何列存在**（`select('*')`）+
  *     「表不在」与「列不在」判据分流（这一类 bug 已经咬了两次：`subjects` / `notice_targets`）。
  *     🆕 **D12（2026-10-12）：念出来的号 / 摆上屏的号 = 班内学号** ——
@@ -2024,7 +2045,7 @@ section('第十节 · D6：PIN_KEYS ⊆ NAV（移动端胶囊的兜底）')
    第十一节 · D7：生产构建里测试钩子**一次都不许出现**（C5 的机器版）
    ============================================================ */
 
-section('第十一节 · D7：dist 产物里没有 `?as=` / `?kind=` 的痕迹（生产构建无效）')
+section('第十一节 · D7：dist 产物里没有 `?as=` / `?kind=` / `?maint=` / `?rel=` 的痕迹（生产构建无效）')
 
 {
   const dist = join(APP, 'dist', 'assets')
@@ -2041,18 +2062,25 @@ section('第十一节 · D7：dist 产物里没有 `?as=` / `?kind=` 的痕迹�
       ["get('sync')", '`?sync=` 的读取'],
       /* 🆕 2026-09-29 管理台第二期：第四个钩子 `?maint=`（维护模式那三种行为的断言靠它） */
       ["get('maint')", '`?maint=` 的读取'],
+      /*
+       * 🆕 2026-10-04「版本更新公告」：第五个钩子 `?rel=1.1.1[&force=1][&slot=classroom]`。
+       * ⚠️ 别为 `rel="noreferrer"`（`ReleaseGate.tsx` 里那个外链属性）加豁免 ——
+       *    它**不会**命中 `get('rel')`（那个 needle 是"读查询参数"的形状，不是属性名）。
+       */
+      ["get('rel')", '`?rel=` 的读取'],
       ['devInjectedRoles', '钩子函数名'],
       ['devInjectedAccountKind', '钩子函数名'],
       ['devInjectedSyncError', '钩子函数名'],
       ['devInjectedMaintenance', '钩子函数名'],
+      ['devInjectedRelease', '钩子函数名'],
     ]) {
       eq(`D7：产物里没有 ${why}`, all.includes(needle), false)
     }
     /*
-     * 反向对照（**必须的**）：如果构建产物里连 `myRoles` 都没有，那上面四条
+     * 反向对照（**必须的**）：如果构建产物里连 `myRoles` 都没有，那上面那一串
      * "没找到"就是废话（整个应用都被摇掉了）。所以先证明产物里**有**这个东西。
      */
-    check(all.includes('myRoles'), 'D7 反向对照：产物里**有** myRoles（证明上面四条不是"什么都搜不到"）', all.includes('myRoles') ? '在' : '不在（构建产物不对）')
+    check(all.includes('myRoles'), 'D7 反向对照：产物里**有** myRoles（证明上面那一串不是"什么都搜不到"）', all.includes('myRoles') ? '在' : '不在（构建产物不对）')
     check(all.includes('最高管理员'), 'D7 反向对照：产物里有中文（证明读的是真产物、编码没坏）', all.includes('最高管理员') ? '在' : '不在')
   }
 }
@@ -4344,14 +4372,900 @@ section('第十九节 · D17：产物面向老设备的底线（`@layer` 摊平 
   }
 }
 
+/* ============================================================
+   第二十节 · 🆕 A12：**版本更新公告**（2026-10-04，施工单 `施工单-版本更新提示.md`）
+   ------------------------------------------------------------
+   为什么这一节必须有：这个功能的**权威在服务端**（`functions/api/_lib/release.ts`），
+   而前端为了能原样活在浏览器里**另抄了一份"共享区"**（与 `maintenance.ts` ↔
+   `_lib/maintenance.ts` 同一条理由：前端产物与 Pages Function 是两个构建目标，
+   跨目录 import 会把两边绑死）。抄一份的代价，必须**在门禁里补回来**。
+
+   🔴 补的方式是**整段逐字节比对**，不是逐行 grep：
+      漏抄一行在逐行 grep 下**可能一条都不红**（那一行两边的值各自仍自洽）——
+      这正是"前后端各写一套"那类事故的入口。
+      （那段逻辑原来在临时探针 `scripts/_tmp_relblock.mjs` 里，现在搬到这里。）
+
+   ⚠️ 与 A10（全站公告）**一个字都不共享**：那是"给老师看的公告"（`announcements` 表），
+      这是"客户端该不该提示更新"（`site_state` 的两行）。两个数据模型、两个接口。
+   ============================================================ */
+
+section('第二十节 · A12：版本更新公告（共享区逐字节相同 · 纯函数 · key/列名契约）')
+
+{
+  const rel = await import('../src/lib/release.ts')
+  const srvSrc = readApp('functions/api/_lib/release.ts')
+  const uiSrc = readApp('src/lib/release.ts')
+
+  /* ---- ① 🔴 共享区**整段逐字节比对**（本功能最重要的一条）---- */
+  {
+    /** 从"共享区 —— 开始"切到"共享区 —— 结束"（两个锚点缺一个就返回 null，**不静默切空**） */
+    const cut = (s) => {
+      const t = String(s ?? '')
+      const i = t.indexOf('共享区 —— 开始')
+      const j = t.indexOf('共享区 —— 结束')
+      if (i < 0 || j < 0 || j < i) return null
+      return t.slice(i, j)
+    }
+    const a = cut(srvSrc) // 权威那一份（服务端）
+    const b = cut(uiSrc) // 抄的那一份（前端）
+    check(a !== null, 'A12：服务端那一份找得到共享区（开始 / 结束两个锚点都在）', `切出 ${a ? a.length : 0} 字符`)
+    check(b !== null, 'A12：前端那一份找得到共享区', `切出 ${b ? b.length : 0} 字符`)
+    check(
+      a !== null && b !== null && a === b,
+      '🔴 A12：两边的共享区**逐字节相同**（"前后端各写一套"那类事故的解药）',
+      `服务端 ${a ? a.length : 0} 字符 · 前端 ${b ? b.length : 0} 字符` +
+        (a !== null && b !== null ? (a === b ? '（相同）' : ' —— **不一样**') : ' —— **有一边没切出来**'),
+      '反向对照：本节末尾那条（从服务端那一份里漏抄一行 → 本条当场红）',
+    )
+    /* 自证：切出来的确实是那一段（含关键符号、且**不含**结束锚点） */
+    check(
+      a !== null && a.includes('RELEASE_KEYS') && a.includes('validateReleaseForm') && !a.includes('共享区 —— 结束'),
+      'A12 自证：切出来的那一段确实是共享区（含 RELEASE_KEYS / validateReleaseForm，且不含结束锚点）',
+      a === null ? '没切出来' : `${a.length} 字符`,
+    )
+    /* 自证②：锚点缺一个就切不出来 —— 判据本身必须会红，不是恒真 */
+    eq('A12 自证②：锚点缺一个就切不出来（`cut()` 不是恒真）', cut('这里没有那两个锚点'), null)
+    /* 🧪 **真**反向对照：**真的**从服务端那一份里删掉共享区中的一行，再走同一条判据 */
+    const leaked = srvSrc.replace(/^.*export const RELEASE_TITLE_SOFT = .*$/m, '')
+    const c = cut(leaked)
+    check(
+      leaked !== srvSrc && c !== null && c !== b,
+      '🧪 A12 反向对照：从服务端那一份里**漏抄一行**（删掉 RELEASE_TITLE_SOFT）→ 逐字节比对当场红',
+      `删掉那一行后切出 ${c ? c.length : 0} 字符 · 与前端那份相同 = ${c === b}`,
+      '逐行 grep 在这一步**可能一条都不红** —— 这就是"整段比对"存在的唯一理由',
+    )
+  }
+
+  /* ---- ② 纯函数（真 TS 模块，照 A7/A10 的写法 import 进来）---- */
+  {
+    const slotsOf = (notice, read = 'ok') => ({ teacher: notice, classroom: null, read, reason: '' })
+    const N = (patch = {}) => ({ version: '1.1.1', force: false, note: 'x', urlApk: '', urlExe: '', ...patch })
+
+    /* ②-1 版本比较：形状不对就说"认不出"（`null`），**不许当 0** */
+    eq("A12：cmpVersion('1.1.0','1.1.1') === -1", rel.cmpVersion('1.1.0', '1.1.1'), -1)
+    eq("A12：cmpVersion('1.2.0','1.1.9') === 1", rel.cmpVersion('1.2.0', '1.1.9'), 1)
+    eq("A12：cmpVersion('1.1.0','1.1.0') === 0", rel.cmpVersion('1.1.0', '1.1.0'), 0)
+    eq("A12：cmpVersion('1.1','1.1.0') === null（形状不对 ⇒ 认不出，不许当 0）", rel.cmpVersion('1.1', '1.1.0'), null)
+    eq("A12：cmpVersion('v1.1.1','1.1.0') === null（带前缀也不行）", rel.cmpVersion('v1.1.1', '1.1.0'), null)
+
+    /* ②-2 三态判定：五种取值各自一条 */
+    eq("A12：公告 1.1.1、我 1.1.0 → 'behind'", rel.releaseCheck(slotsOf(N()), 'teacher', '1.1.0'), 'behind')
+    eq(
+      "A12：公告与我**同版本**（1.1.0）→ 'uptodate'（不是 behind）",
+      rel.releaseCheck(slotsOf(N({ version: '1.1.0' })), 'teacher', '1.1.0'),
+      'uptodate',
+    )
+    eq(
+      "🔴 A12：read:'failed' → 'unreadable'（**读不到 ⇒ 不提示**）",
+      rel.releaseCheck(slotsOf(N(), 'failed'), 'teacher', '1.1.0'),
+      'unreadable',
+    )
+    eq(
+      "🔴 A12：read:'missing' → 'unreadable'（旧服务端同样不提示）",
+      rel.releaseCheck(slotsOf(N(), 'missing'), 'teacher', '1.1.0'),
+      'unreadable',
+    )
+    eq("A12：没有公告且 read:'ok' → 'none'", rel.releaseCheck(slotsOf(null), 'teacher', '1.1.0'), 'none')
+    eq(
+      "A12：公告版本写成 'abc' → 'notnew'（有公告但比不出来）",
+      rel.releaseCheck(slotsOf({ version: 'abc' }), 'teacher', '1.1.0'),
+      'notnew',
+    )
+    /*
+     * 🔴🔴 本功能最要紧的那条口径：**只有 `behind` 才提示**。
+     *    "读不到不许当已是最新"就落在这一条上 —— 上面那五条各自绿了还不够，
+     *    要**一起**证明除 `behind` 之外的每一种都 `!== 'behind'`（少一种都算漏）。
+     */
+    {
+      const others = [
+        ['同版本', rel.releaseCheck(slotsOf(N({ version: '1.1.0' })), 'teacher', '1.1.0')],
+        ['这一档没有公告', rel.releaseCheck(slotsOf(null), 'teacher', '1.1.0')],
+        ['公告版本写坏了', rel.releaseCheck(slotsOf({ version: 'abc' }), 'teacher', '1.1.0')],
+        ['读库失败', rel.releaseCheck(slotsOf(N(), 'failed'), 'teacher', '1.1.0')],
+        ['回话里没有这一段', rel.releaseCheck(slotsOf(N(), 'missing'), 'teacher', '1.1.0')],
+      ]
+      check(
+        others.length === 5 && others.every(([, v]) => v !== 'behind'),
+        '🔴 A12：**只有 behind 才提示** —— 另外五种（含"读不到"两种）**一个都不是 behind**',
+        others.map(([k, v]) => `${k}=${v}`).join(' · '),
+        '它们被合并进 uptodate 的那一刻，"读不到"就变成了"已是最新"',
+      )
+      eqSet('🔴 A12 自证：这五种里**没有一种**落在 behind 上（多一种就要来这儿说清它为什么该在）', others.filter(([, v]) => v === 'behind').map(([k]) => k), [])
+    }
+
+    /* ②-3 默认正文（两种档位各一句） */
+    eq(
+      "A12：releaseDefaultNote('1.1.1', false) === 'v1.1.1 已发布，建议更新。'",
+      rel.releaseDefaultNote('1.1.1', false),
+      'v1.1.1 已发布，建议更新。',
+    )
+    eq(
+      "A12：releaseDefaultNote('1.1.1', true) === 'v1.1.1 已发布，更新后可继续使用。'",
+      rel.releaseDefaultNote('1.1.1', true),
+      'v1.1.1 已发布，更新后可继续使用。',
+    )
+
+    /* ②-4 点出去是哪条链接：**手机不给 exe、电脑不给 apk**（拿错了那个包装不上） */
+    {
+      const one = {
+        version: '1.1.1',
+        force: false,
+        note: '',
+        urlApk: 'https://a/x.apk',
+        urlExe: 'https://a/x.exe',
+      }
+      eq("A12：platform='capacitor'（手机）→ urlApk", rel.pickReleaseUrl(one, 'capacitor'), 'https://a/x.apk')
+      eq("A12：platform='electron'（电脑）→ urlExe", rel.pickReleaseUrl(one, 'electron'), 'https://a/x.exe')
+      eq('A12：platform=null（网页端）→ urlExe || urlApk', rel.pickReleaseUrl(one, null), 'https://a/x.exe')
+      check(
+        rel.pickReleaseUrl(one, 'capacitor') !== one.urlExe,
+        '🔴 A12：手机那一端**不给 exe**（拿错了装不上）',
+        `capacitor → ${rel.pickReleaseUrl(one, 'capacitor')}`,
+      )
+      check(
+        rel.pickReleaseUrl(one, 'electron') !== one.urlApk,
+        '🔴 A12：电脑那一端**不给 apk**（拿错了装不上）',
+        `electron → ${rel.pickReleaseUrl(one, 'electron')}`,
+      )
+      eq(
+        '🔴 A12：电脑那一端**只有 apk** 时 → 空串（宁可不给按钮，也不给一个装不上的包）',
+        rel.pickReleaseUrl({ ...one, urlExe: '' }, 'electron'),
+        '',
+      )
+      eq(
+        'A12：手机那一端**只有 exe** 时 → 空串（同上，反方向）',
+        rel.pickReleaseUrl({ ...one, urlApk: '' }, 'capacitor'),
+        '',
+      )
+    }
+
+    /* ②-5 我这一台是哪一档（判据只有 `releaseTargetOf` 一处） */
+    eq("A12：releaseTargetOf('classroom','/') === 'classroom'", rel.releaseTargetOf('classroom', '/'), 'classroom')
+    eq(
+      "A12：releaseTargetOf('unknown','/classroom') === 'classroom'（网页里的教室端账号）",
+      rel.releaseTargetOf('unknown', '/classroom'),
+      'classroom',
+    )
+    eq("A12：releaseTargetOf('unknown','/') === 'teacher'（网页端跟随教师端）", rel.releaseTargetOf('unknown', '/'), 'teacher')
+    eq("A12：releaseTargetOf('unknown','/admin') === 'teacher'", rel.releaseTargetOf('unknown', '/admin'), 'teacher')
+
+    /* ②-6 `/api/status` 回话 → 两档公告（含**旧服务端**那一支） */
+    {
+      const u = rel.releaseSlotsFromStatus(undefined)
+      eq("🔴 A12：releaseSlotsFromStatus(undefined) ⇒ read='missing'（旧服务端 / 没部署到这一版）", u.read, 'missing')
+      check(
+        u.teacher === null && u.classroom === null,
+        '🔴 A12：而且**两档都是 null**（回话里没有这一段 ⇒ 一档都不许瞎猜）',
+        `teacher=${JSON.stringify(u.teacher)} · classroom=${JSON.stringify(u.classroom)}`,
+      )
+      eq("A12：{read:'failed'} ⇒ read='failed'（读不到 ≠ 没有公告）", rel.releaseSlotsFromStatus({ read: 'failed' }).read, 'failed')
+      const ok = rel.releaseSlotsFromStatus({
+        read: 'ok',
+        teacher: {
+          enabled: true,
+          version: '1.1.1',
+          force: false,
+          message: '',
+          url_apk: 'https://a/x.apk',
+          url_exe: '',
+        },
+      })
+      eq(
+        'A12：一档 enabled + 版本 1.1.1 + message 空 ⇒ 正文 = **默认那句**',
+        ok.teacher ? ok.teacher.note : null,
+        'v1.1.1 已发布，建议更新。',
+      )
+      check(
+        ok.classroom === null,
+        'A12：回话里**没给**的那一档仍是 null（不是"拿教师端那条顶替"）',
+        JSON.stringify(ok.classroom),
+      )
+      eq(
+        "A12：`{version:'1.1'}`（写坏了）⇒ 那一档 null（写坏的行不许拿去跟客户端比）",
+        rel.releaseSlotsFromStatus({ read: 'ok', teacher: { enabled: true, version: '1.1' } }).teacher,
+        null,
+      )
+    }
+
+    /* ②-7 禁词体检 + 发布前校验（**都必须能红**，所以各带一个反向对照） */
+    {
+      const hit = rel.bannedWordIn('点击这里并允许未知来源')
+      check(
+        hit !== null,
+        '🔴 A12（**反向对照**）：bannedWordIn(\'点击这里并允许未知来源\') 非 null（禁词表真的在生效）',
+        JSON.stringify(hit),
+      )
+      eq(
+        'A12：干净的那句默认正文 → null（反向对照的另一半：别把正常话判成禁词）',
+        rel.bannedWordIn('v1.1.1 已发布，建议更新。'),
+        null,
+      )
+      const bad = rel.validateReleaseForm({
+        target: 'teacher',
+        enabled: true,
+        version: '1.1.1',
+        force: true,
+        note: '禁止安装包提示',
+        urlApk: '',
+        urlExe: '',
+      })
+      eq(
+        "🔴 A12（**反向对照**）：正文写「禁止安装包提示」⇒ validateReleaseForm 判 rule==='R4'",
+        bad.ok === false ? bad.rule : `ok=${JSON.stringify(bad)}`,
+        'R4',
+      )
+      const good = rel.validateReleaseForm({
+        target: 'teacher',
+        enabled: true,
+        version: '1.1.1',
+        force: true,
+        note: '建议更新。',
+        urlApk: 'https://a/x.apk',
+        urlExe: '',
+      })
+      eq('A12：干净的表单 → ok:true（上面那条 R4 不是"一律拒绝"）', good.ok, true)
+    }
+  }
+
+  /* ---- ③ 契约：key 与列名（施工单 §三）---- */
+  {
+    const schemaSql = readRepo('supabase/schema.sql')
+    /*
+     * 种子行 `insert into site_state (key) values ('…')` —— 先把**所有**这样的行扫出来，
+     * 用 `maintenance` 那一行做自证（证明锚点在扫真的 §23，而不是什么都扫不到）。
+     */
+    const seeds = [...schemaSql.matchAll(/insert into site_state \(key\) values \('([^']+)'\)/g)].map((m) => m[1])
+    check(
+      seeds.includes('maintenance'),
+      'A12 自证：锚点在扫 §23 的种子行（`maintenance` 那一行也扫到了 —— 不是"什么都扫不到"）',
+      seeds.join('、'),
+    )
+    const relSeeds = [...new Set(seeds.filter((k) => k.startsWith('release:')))].sort()
+    eqSet(
+      '🔴 A12：schema.sql 里 `release:` 那两行种子 ↔ `RELEASE_KEYS` **逐字相同**（集合相等：多一行也红）',
+      relSeeds,
+      [rel.RELEASE_KEYS.teacher, rel.RELEASE_KEYS.classroom],
+    )
+    eq('A12：`RELEASE_KEYS.teacher` 就是种子行里那两个串之一', rel.RELEASE_KEYS.teacher, 'release:teacher')
+    eq('A12：`RELEASE_KEYS.classroom` 就是种子行里那两个串之一', rel.RELEASE_KEYS.classroom, 'release:classroom')
+
+    /* 列名：只从 §23.2.1 那一段里取 `add column if not exists <列>` */
+    const i1 = schemaSql.indexOf('23.2.1')
+    const i2 = schemaSql.indexOf('23.3 核对')
+    check(i1 >= 0 && i2 > i1, 'A12 自证：找得到 §23.2.1 那一段（到「23.3 核对」之间）', `@${i1} ~ @${i2}`)
+    const sec = i1 >= 0 && i2 > i1 ? schemaSql.slice(i1, i2) : ''
+    const cols = [...sec.matchAll(/alter table site_state add column if not exists ([a-z_]+)/g)].map((m) => m[1])
+    eqSet('🔴 A12：§23.2.1 加的四列就是那四个', cols, ['version', 'force', 'url_apk', 'url_exe'])
+    const selMatch = srvSrc.match(/RELEASE_SELECT_COLS = '([^']*)'/)
+    check(
+      Boolean(selMatch),
+      'A12：服务端找得到 `RELEASE_SELECT_COLS` 的字面量（锚点自证）',
+      selMatch ? JSON.stringify(selMatch[1]) : '没找到',
+    )
+    const sel = selMatch ? selMatch[1] : ''
+    /*
+     * 🔴 这一条防的是"schema 加了列、服务端 select 没加"——
+     *    症状是那一列**静默读不到**（前端拿到 undefined、按空值走），一条报错都没有。
+     */
+    for (const c of cols.length ? cols : ['version', 'force', 'url_apk', 'url_exe']) {
+      check(
+        sel.includes(c),
+        `🔴 A12：\`RELEASE_SELECT_COLS\` **包含**列 \`${c}\`（schema 加了列而这里没加 = 那一列静默读不到）`,
+        sel ? JSON.stringify(sel) : '（没解析到）',
+      )
+    }
+    check(
+      sel.includes('key') && sel.includes('enabled') && sel.includes('message'),
+      'A12：另外三列（key / enabled / message）也在 select 里 —— 少任何一列，那一档就整条读不到',
+      JSON.stringify(sel),
+    )
+    /* 🧪 反向对照：同一个 `includes` 判据喂一个不存在的列名 → 必须判"不包含" */
+    check(
+      sel !== '' && !sel.includes('nope_not_a_column'),
+      '🧪 A12 反向对照：同一个 `includes` 判据喂一个不存在的列名 → 判"不包含"（上面那几条不是恒真）',
+      JSON.stringify(sel),
+    )
+  }
+}
+
+/* ============================================================
+   第二十节之二 · 🆕 D18：**"不许再开一个轮询"** + 闸门的挂载点
+   ------------------------------------------------------------
+   施工单 §二.4 原话：「与维护共用同一次请求，**不许再开一个轮询**」。
+   两档公告跟着 `GET /api/status` 一起回来（`useMaintenance.ts` 的那一次取数），
+   `useRelease.ts` 只做"取哪一档 + 我够不够新"的纯计算。
+
+   为什么两条都要有：
+     · 「没有 effect / 没有定时器」在**源码文本**上判（`shots` 量不到"没发请求"）；
+     · 「闸门挂在 `MaintenanceGate` **里面**」才是"共用同一次取数"的**结构保证** ——
+       一旦谁把 `<ReleaseGate>` 挪到 `App.tsx`，它就得自己去拿一份 status
+       （= 第二个轮询），而那时**没有任何一条断言会响**。
+   ============================================================ */
+
+section('第二十节之二 · D18：两档公告跟着同一次 /api/status 回来（没有第二个轮询）')
+
+{
+  const strip = (s) => String(s).replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+  /* ⚠️ 剥掉注释再查 —— 文件头那段注释里就写着"没有定时器、不发请求"这几个字 */
+  const uiCode = strip(readApp('src/lib/useRelease.ts'))
+  for (const [needle, why] of [
+    ['setInterval', '定时器'],
+    ['setTimeout', '定时器'],
+    ['fetch(', '取数'],
+  ]) {
+    eq(
+      `🔴 D18（施工单 §二.4「不许再开一个轮询」）：\`src/lib/useRelease.ts\` 里没有 ${why} \`${needle}\``,
+      uiCode.includes(needle),
+      false,
+    )
+  }
+  check(
+    uiCode.includes('releaseCheck') && uiCode.includes('releaseTargetOf') && uiCode.includes('pickReleaseUrl'),
+    'D18 自证：useRelease.ts 里确实有那三个纯计算（读的是真文件，不是空串）',
+    `${uiCode.length} 字符`,
+  )
+  /* 🧪 反向对照：同一段判据喂 `useMaintenance.ts`（它**本来就有**这两个定时器）→ 两个 needle 都命中 */
+  const umCode = strip(readApp('src/lib/useMaintenance.ts'))
+  check(
+    umCode.includes('setInterval') && umCode.includes('setTimeout'),
+    '🧪 D18 反向对照：同样的判据喂 `useMaintenance.ts` → `setInterval` / `setTimeout` **都命中**（证明上面那几条不是"什么都搜不到"）',
+    `setInterval=${umCode.includes('setInterval')} · setTimeout=${umCode.includes('setTimeout')}`,
+  )
+
+  /* ---- 闸门挂在 MaintenanceGate **里面**（共用同一次取数）---- */
+  const mgSrc = readApp('src/components/MaintenanceGate.tsx')
+  const appSrc = readApp('src/App.tsx')
+  const gateAt = mgSrc.indexOf('export function MaintenanceGate')
+  const relAt = mgSrc.indexOf('<ReleaseGate')
+  check(
+    gateAt >= 0 && relAt > gateAt && /<ReleaseGate\s+status=\{status\}>\{children\}<\/ReleaseGate>/.test(mgSrc),
+    '🔴 D18：`<ReleaseGate status={status}>{children}</ReleaseGate>` **挂在 `MaintenanceGate` 内部**（`status` 就是手上那一次取数的结果）',
+    `MaintenanceGate @${gateAt} · <ReleaseGate> @${relAt}`,
+    '挪到 App.tsx = 它得自己再拿一份 status = 第二个轮询',
+  )
+  eq(
+    '🔴 D18：`ReleaseGate` 在 `App.tsx` 里**一次都没出现**（出现即 = 第二次取数 / 第二个轮询的入口）',
+    appSrc.includes('ReleaseGate'),
+    false,
+  )
+  check(
+    appSrc.includes('<MaintenanceGate>'),
+    'D18 自证：`App.tsx` 里确实挂着 `<MaintenanceGate>`（上一条读的是真文件，不是"什么都搜不到"）',
+    `${appSrc.length} 字符`,
+  )
+  /* 两张豁免表**各存一份**（理由不同：维护还要豁免 /classroom，公告不豁免）—— 别被"顺手合并"掉 */
+  eq(
+    'D18：两张豁免表**都在各自那一份文件里**（维护那张还含 `/classroom`，公告这张只含 `/login` 与 `/admin`）',
+    `${mgSrc.includes("MAINTENANCE_EXEMPT_PATHS = ['/admin', '/classroom'] as const")}/${readApp('src/components/ReleaseGate.tsx').includes("RELEASE_EXEMPT_PATHS = ['/login', '/admin'] as const")}`,
+    'true/true',
+  )
+}
+
+/* ============================================================
+   第二十节之三 · 🆕 A13：**输入法组字的全局镜像**（2026-10-04，「apk 上点按钮吞字」）
+   ------------------------------------------------------------
+   用户报的症状（原话）：「点按钮后会把输入了的字吞掉几个」；进一步确认是
+   「**字在框里也没了**」—— 不是"没保存"，是屏上就少了那几个字。
+   根因两步（`src/lib/imeMirror.ts` 的文件头写全了）：
+     ① 拼音还没选词时，那几个字**已经在编辑框里**（屏上看得见），而 React 那侧的状态没有它们；
+     ② 于是任何一次「点按钮 → setState → 重渲染 / 重挂载」都可能**把旧值写回** ⇒ 那几个字被冲掉。
+   修法：在 `document` 的**捕获**阶段听 `compositionupdate` / `compositionend`，
+   收到就在那个框上补派发**一个冒泡的 `input`**（`isComposing: false`）⇒ 受控输入重读
+   `el.value`（里面已含未上屏的拼音）⇒ 状态跟上屏 ⇒ 那次写回成了空操作。
+
+   为什么这一节必须有（`shots` 那一节量的是真浏览器里的屏，量不到下面这四件事）：
+     · 补的**恰好一个**（多补 = 无谓重渲染；不补 = 修法等于没装）；
+     · 必须**冒泡**（React 18 的监听挂在容器上，不冒泡就永远到不了它）；
+     · 必须 `isComposing: false`（标成"组字中"，React 会把这一笔当还没上屏丢掉）；
+     · 必须挂在**捕获**阶段（挂冒泡就**晚于** React 的容器监听 —— 那正是这个 bug）。
+   ⚠️ 这里**不 import 任何 React**，自己搭一个最小假 DOM + 真模块（照 D15 那个路子）。
+   ⚠️ 假输入框覆盖四类：`<input type=text>` / `<textarea>` 要补，
+      `<input type=checkbox>` / `<div>` **不许补**（补了就是凭空制造一次输入）。
+   ============================================================ */
+
+section('第二十节之三 · A13：输入法组字镜像（捕获阶段补派发一个冒泡的 input）')
+
+{
+  const IME_REL = 'src/lib/imeMirror.ts'
+  const IME_SRC = readApp(IME_REL)
+  const IME_TMP = join(APP, '.tmp-gates', `imeMirror-no-dispatch-${process.pid}.ts`)
+
+  /* 假 DOM 用完**还回去**：这一节之后（含以后新添的节）还得在干净的 Node 环境里跑 */
+  const SAVED = new Map()
+  const put = (k, v) => {
+    if (!SAVED.has(k)) SAVED.set(k, Object.getOwnPropertyDescriptor(globalThis, k))
+    globalThis[k] = v
+  }
+  const putBack = () => {
+    for (const [k, d] of SAVED) {
+      if (d) Object.defineProperty(globalThis, k, d)
+      else delete globalThis[k]
+    }
+    SAVED.clear()
+  }
+
+  /** 一个"全新页面"的假环境：监听表 + 幂等标记清掉（模块用的是 `window` 上的标记） */
+  const freshPage = () => {
+    const listeners = {}
+    put('window', globalThis)
+    put('document', {
+      addEventListener: (t, fn, capture) => {
+        ;(listeners[t] ||= []).push({ fn, capture })
+      },
+    })
+    delete globalThis.__imeMirrorInstalled
+    return listeners
+  }
+  /** 假输入框：记下它收到了哪些事件（真 DOM 里没写 `type` 的 `<input>` 读出来是 `'text'`） */
+  const field = (props) => {
+    const got = []
+    return {
+      got,
+      el: {
+        ...props,
+        dispatchEvent: (ev) => {
+          got.push(ev)
+          return true
+        },
+      },
+    }
+  }
+  /** 手动放一次组字事件 —— `{ target: 假框 }` 就是那个捕获监听真正会收到的东西 */
+  const fire = (listeners, type, props) => {
+    const f = field(props)
+    for (const l of listeners[type] ?? []) l.fn({ target: f.el })
+    return f.got
+  }
+
+  try {
+    put(
+      'Event',
+      class {
+        constructor(type, init) {
+          this.type = type
+          this.bubbles = !!init?.bubbles
+        }
+      },
+    )
+    put(
+      'InputEvent',
+      class extends globalThis.Event {
+        constructor(type, init) {
+          super(type, init)
+          this.isComposing = !!init?.isComposing
+        }
+      },
+    )
+
+    const ime = await import('../src/lib/imeMirror.ts')
+
+    /* ---- ① 幂等：连装三次，两个事件各**只挂一个**监听 ---- */
+    const L = freshPage()
+    ime.installImeMirror()
+    ime.installImeMirror()
+    ime.installImeMirror()
+    check(
+      L['compositionupdate']?.length === 1 && L['compositionend']?.length === 1,
+      '🔴 A13 ① `installImeMirror()` **连装三次** ⇒ `compositionupdate` / `compositionend` 各只挂**一个**监听（幂等：热更新重装不会让一次组字补三遍）',
+      `compositionupdate=${L['compositionupdate']?.length ?? 0} · compositionend=${L['compositionend']?.length ?? 0}`,
+    )
+    /* ---- ② 挂的是**捕获**阶段（挂冒泡 = 晚于 React 的容器监听 = 补的 input 到不了它）---- */
+    check(
+      L['compositionupdate']?.[0]?.capture === true && L['compositionend']?.[0]?.capture === true,
+      '🔴 A13 ② 两个监听都装在 `document` 的**捕获**阶段（React 18 的监听在容器上 —— 挂冒泡就晚于它）',
+      `update.capture=${L['compositionupdate']?.[0]?.capture} · end.capture=${L['compositionend']?.[0]?.capture}`,
+    )
+
+    /* ---- ③ 补派发：**恰好一个**、冒泡、不是"组字中" ---- */
+    for (const type of ['compositionupdate', 'compositionend']) {
+      const got = fire(L, type, { tagName: 'TEXTAREA' })
+      const one = got[0]
+      check(
+        got.length === 1 && one?.type === 'input' && one.bubbles === true && one.isComposing === false,
+        `🔴 A13 ③ \`${type}\`（textarea）⇒ **恰好一个** \`input\`，\`bubbles === true\` 且 \`isComposing === false\``,
+        got.length
+          ? `${got.length} 个：${got.map((e) => `${e.type}(bubbles=${e.bubbles}, isComposing=${e.isComposing})`).join('、')}`
+          : '一个都没补',
+        '把 `bubbles: true` 改成 false、或 `isComposing` 改成 true → 这条必须红',
+      )
+    }
+
+    /* ---- ④ 哪些框**要**补 ---- */
+    const text = fire(L, 'compositionupdate', { tagName: 'INPUT', type: 'text' })
+    const tel = fire(L, 'compositionupdate', { tagName: 'INPUT', type: 'tel' })
+    check(
+      text.length === 1 && tel.length === 1,
+      "🔴 A13 ④ 文本输入都补：`<input type='text'>` 与 `<input type='tel'>` 各补一个",
+      `text → ${text.length} 个 · tel → ${tel.length} 个`,
+    )
+    /* ---- ⑤ 哪些框**不许**补 ---- */
+    const box = fire(L, 'compositionupdate', { tagName: 'INPUT', type: 'checkbox' })
+    const div = fire(L, 'compositionupdate', { tagName: 'DIV' })
+    check(
+      box.length === 0 && div.length === 0,
+      '🔴 A13 ⑤ 非文本**一个都不许补**（`checkbox` / `div`）—— 补了就是凭空制造一次输入',
+      `checkbox → ${box.length} 个 · div → ${div.length} 个`,
+    )
+
+    /* ---- ⑥ 🔴 反向对照：把补派发那一行就地删掉，写成 `.tmp-gates/` 里的副本（跑完删）---- */
+    const broken = IME_SRC.replace(/^[ \t]*el\.dispatchEvent\(ev\)[ \t]*$/m, '    /* 反向对照：这一行被删掉 */')
+    let brokenGot = null
+    try {
+      mkdirSync(dirname(IME_TMP), { recursive: true })
+      writeFileSync(IME_TMP, broken)
+      const LB = freshPage()
+      const old = await import(pathToFileURL(IME_TMP).href)
+      old.installImeMirror()
+      brokenGot = fire(LB, 'compositionupdate', { tagName: 'TEXTAREA' })
+    } catch (e) {
+      brokenGot = `副本没跑起来：${e?.message ?? e}`
+    } finally {
+      rmSync(IME_TMP, { force: true })
+    }
+    check(
+      broken !== IME_SRC && Array.isArray(brokenGot) && brokenGot.length === 0,
+      '🧪 A13 ⑥ 反向对照：删掉补派发那一行（副本写在 gitignore 的 `.tmp-gates/`，finally 里删）⇒ **一个都不补** —— 判据咬的是那一行代码，不是"什么都通过"',
+      `源码真的被改过 = ${broken !== IME_SRC} · 删掉之后补了 ${Array.isArray(brokenGot) ? brokenGot.length : brokenGot} 个`,
+    )
+
+    /* ---- ⑦ 接线：`main.tsx` 里调在 `createRoot(` **之前**，且 import 自 `./lib/imeMirror` ---- */
+    const MAIN = readApp('src/main.tsx')
+    /* ⚠️ **注释先剥掉**：`main.tsx` 的说明注释里就写着"必须在 `createRoot(...)` 之前装" ——
+       不剥的话 `indexOf('createRoot(')` 命中的是那句注释（本节第一版就这么红过一次，是真的红）。 */
+    const MAIN_CODE = MAIN.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+    const callAt = MAIN_CODE.indexOf('installImeMirror()')
+    const rootAt = MAIN_CODE.indexOf('createRoot(')
+    check(
+      callAt >= 0 && rootAt > callAt,
+      '🔴 A13 ⑦ `src/main.tsx` 里 `installImeMirror()` 调在 `createRoot(` **之前**（首次渲染之前就该生效）',
+      `剥掉注释后：installImeMirror() @${callAt} · createRoot( @${rootAt}`,
+    )
+    check(
+      /import\s*\{[^}]*\binstallImeMirror\b[^}]*\}\s*from\s*'\.\/lib\/imeMirror'/.test(MAIN),
+      '🔴 A13 ⑧ 而且是从 `./lib/imeMirror` import 的（不是别处同名的一个函数）',
+      short(MAIN.split('\n').find((l) => l.includes('imeMirror')) ?? '（没找到那一行）'),
+    )
+    /* 🧪 反向对照：同一套位置判据喂"调在 `createRoot(` 之后"的写法 → 当场假 */
+    const late = `${MAIN_CODE.replace(/^installImeMirror\(\)$/m, '')}\ninstallImeMirror()\n`
+    check(
+      late !== MAIN_CODE && late.indexOf('createRoot(') < late.indexOf('installImeMirror()'),
+      '🧪 A13 ⑦ 反向对照：把那句话挪到 `createRoot(` **之后**（只在文本里挪，不动真文件）⇒ ⑦ 的判据当场假（证明它看的是**顺序**，不是"这两个名字在不在"）',
+      `真文件 ${callAt} < ${rootAt} · 挪到最后 ${late.indexOf('createRoot(')} < ${late.indexOf('installImeMirror()')}`,
+    )
+
+    /* ---- ⑨ 它**一个字节都不改 DOM**（不改 `value`，才不会自己制造出一次输入）---- */
+    const code = IME_SRC.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+    check(
+      !/\.value\s*=/.test(code) && /\.value\s*=/.test(`${code}\nel.value = 'x'\n`),
+      '🔴 A13 ⑨ 镜像**不改 DOM**：剥掉注释后的代码里没有一处 `.value =`（+ 自证：塞一句进去则命中 —— 不是"什么都搜不到"）',
+      `真源码命中 = ${/\.value\s*=/.test(code)} · 塞一句进去 = ${/\.value\s*=/.test(`${code}\nel.value = 'x'\n`)}`,
+    )
+  } finally {
+    putBack()
+  }
+}
+
+/* ============================================================
+   第二十一节 · A14：壳声明 ↔ 网页判据（置顶小窗 / 声音）—— 2026-10-04
+   ------------------------------------------------------------
+   用户报的第 ④ 条原话：「**不支持置顶小窗，为什么还要点一下解锁声音**」（教室端 exe）。
+   已量到的事实（真壳 · Electron 33 / Chromium 130 · `app://` 是安全上下文）：
+     · `typeof window.documentPictureInPicture === 'object'` —— **API 对象在**，
+       所以"有没有这个 API"那条老判据在壳里**永远是"支持"**；
+     · 真手势（click 里调、那一刻 `userActivation.isActive === true`）与
+       CDP `userGesture:true` **两条路都抛同一句**
+       `InvalidStateError: … requestWindow … Internal error: no window`
+       ⇒ **Electron 没实现"创建那个 PiP 窗口"那一层**；
+     · 而"点一下解锁声音"那一步在壳里**本来就是多余的**（默认 `autoplayPolicy` 免手势）。
+   ⇒ 修法是**让壳自己声明**（`_src/desktop/preload.js` 塞 `autoplayAllowed: true` /
+     `documentPip: false`），网页只认**严格值**（`=== true` / `=== false`）。
+     这一节钉的就是这条接口契约 + 它在页面上的两个落点。
+
+   ⚠️ 分两半：**A 半**（①–④）import 真模块（`classroomShell.ts` / `pip.ts`），
+     用假 `window` 打**行为**；**B 半**（⑤–⑧）读 `Classroom.tsx` 源码，
+     钉"按端分支的**位置**"（不是"这两句话在不在"）。
+   ⚠️ 每条都带反向对照；B 半一律**先剥注释** —— 那些句子的原文在注释里也出现过
+     （`startPip` 上面那段说明就引了「需要 Edge / Chrome 116 及以上」），
+     不剥的话"代码里那一句被删掉"照样能命中注释里的那一份 ⇒ 判据恒绿（§三.2）。
+   ============================================================ */
+
+section('第二十一节 · A14：壳声明 ↔ 网页判据（置顶小窗 / 声音 —— 用户报的第 ④ 条）')
+
+{
+  /* ---------------- A 半：纯函数 / 行为（假 `window`，用完还回去） ---------------- */
+
+  const { shellAutoplayAllowed, shellDocumentPipUnavailable } = await import('../src/lib/classroomShell.ts')
+  const pip = await import('../src/lib/pip.ts')
+
+  const SAVED_G = new Map()
+  const putG = (k, v) => {
+    if (!SAVED_G.has(k)) SAVED_G.set(k, Object.getOwnPropertyDescriptor(globalThis, k))
+    if (v === undefined) delete globalThis[k]
+    else globalThis[k] = v
+  }
+  const putBackG = () => {
+    for (const [k, d] of SAVED_G) {
+      if (d) Object.defineProperty(globalThis, k, d)
+      else delete globalThis[k]
+    }
+    SAVED_G.clear()
+  }
+  /**
+   * 装一个假页面：`shell` 给 `window.__shell_out` 的内容（**`null` = 网页版：压根没这个对象**），
+   * `dpip` 给 `window.documentPictureInPicture`（`undefined` = 这个浏览器没有这个 API）。
+   * ⚠️ 每个用例**之前**都重新装一次：不装的话上一条的假 `window` 会漏到下一条（互相污染）。
+   */
+  const page = (shell, dpip) => {
+    const w = {}
+    if (shell !== null) w.__shell_out = shell
+    if (dpip !== undefined) w.documentPictureInPicture = dpip
+    putG('window', w)
+    return w
+  }
+
+  try {
+    /* ---- ① `shellAutoplayAllowed()`：**只认严格 `=== true`** ---- */
+    for (const [shell, want, why] of [
+      [{ autoplayAllowed: true }, true, '壳声明 true'],
+      [{ autoplayAllowed: false }, false, '壳声明 false'],
+      [{}, false, '老壳：没有这个字段'],
+      [null, false, '网页版：压根没有 `__shell_out`'],
+      [{ autoplayAllowed: 'true' }, false, '只认严格 boolean —— 字符串 "true" 不算'],
+    ]) {
+      page(shell, undefined)
+      const got = shellAutoplayAllowed()
+      check(got === want, `🔴 A14 ① \`shellAutoplayAllowed()\` = ${want}（${why}）`, `得到 ${got}`, `期望 ${want}`)
+    }
+
+    /* ---- ② `shellDocumentPipUnavailable()`：**只认严格 `=== false`** ---- */
+    for (const [shell, want, why] of [
+      [{ documentPip: false }, true, '壳显式声明开不了'],
+      [{ documentPip: true }, false, '壳说能开 ⇒ 不推翻原判断'],
+      [{}, false, '老壳：没有这个字段 ⇒ 不推翻原判断'],
+      [null, false, '网页版：压根没有 `__shell_out`'],
+      [{ documentPip: 0 }, false, '只认严格 `=== false` —— `0` / `"false"` 都不算'],
+    ]) {
+      page(shell, undefined)
+      const got = shellDocumentPipUnavailable()
+      check(got === want, `🔴 A14 ② \`shellDocumentPipUnavailable()\` = ${want}（${why}）`, `得到 ${got}`, `期望 ${want}`)
+    }
+
+    /* ---- ③ `pipSupported()`：壳说开不了时**哪怕 API 对象在**也必须判"不支持" ---- */
+    for (const [shell, dpip, want, why] of [
+      [{ documentPip: false }, {}, false, '壳说 documentPip=false ⇒ **API 对象在也不支持**（这是用户报的那一条的判据）'],
+      [{}, {}, true, '壳没说（老壳）+ API 在 ⇒ 照旧支持'],
+      [null, {}, true, '网页版 + API 在 ⇒ 支持（网页版行为一字不变）'],
+      [null, undefined, false, '网页版 + 没有这个 API ⇒ 不支持'],
+    ]) {
+      page(shell, dpip)
+      const got = pip.pipSupported()
+      check(got === want, `🔴 A14 ③ \`pipSupported()\` = ${want}（${why}）`, `得到 ${got}`, `期望 ${want}`)
+    }
+
+    /* ---- ④ `openPip()`：壳声明不支持时**连试都不试**；API 在但抛 ⇒ `failed`（不是 no-api） ---- */
+    let calls = 0
+    page({ documentPip: false }, { requestWindow: async () => { calls++; return null } })
+    const r1 = await pip.openPip()
+    check(
+      r1.ok === false && r1.why === 'no-api' && calls === 0,
+      '🔴 A14 ④ 壳声明 `documentPip:false` ⇒ `openPip()` 直接回 `{ok:false, why:\'no-api\'}`，而且 `requestWindow` **一次都没被调用**（试了就是一屏"没打开"的红字，老师白按一次）',
+      `why=${r1.why} · requestWindow 调用 ${calls} 次`,
+      '期望 why=no-api 且调用 0 次',
+    )
+    calls = 0
+    const boom = new Error('Internal error: no window')
+    boom.name = 'InvalidStateError'
+    page(null, { requestWindow: async () => { calls++; throw boom } })
+    const r2 = await pip.openPip()
+    check(
+      r2.ok === false && r2.why === 'failed' && String(r2.message).includes('InvalidStateError') && calls === 1,
+      '🔴 A14 ④ `requestWindow` 抛 `InvalidStateError` ⇒ `{ok:false, why:\'failed\'}`，`message` 里带着 `InvalidStateError`（**不是**笼统的 no-api）—— 这两档在屏上是两句不同的话',
+      `why=${r2.why} · message=${short(r2.message)} · requestWindow 调用 ${calls} 次`,
+      '期望 why=failed 且 message 含 InvalidStateError',
+    )
+    /* 🧪 自证：同一套假环境也能跑出**成功**那一支 —— 否则上面两条可能只是"恒假" */
+    putG('document', { querySelectorAll: () => [], createElement: () => ({ textContent: '' }) })
+    page(null, {
+      requestWindow: async () => ({
+        /* 小窗那一份 document：`copyStyles()` 会在它上面 createElement + 往 head 里塞 */
+        document: { createElement: () => ({ textContent: '' }), head: { appendChild() {} } },
+      }),
+    })
+    const r3 = await pip.openPip()
+    check(
+      r3.ok === true,
+      '🧪 A14 ④ 自证：`requestWindow` 正常返回时同一条路给出 `{ok:true, win}` —— 上面那两条不是"恒假"',
+      `ok=${r3.ok}${r3.ok ? '' : ` · why=${r3.why} message=${short(r3.message)}`}`,
+    )
+  } finally {
+    putBackG()
+  }
+
+  /* ---------------- B 半：源码断言 + 反向对照 ---------------- */
+
+  const CLS_RAW = readApp('src/pages/Classroom.tsx')
+  /*
+   * ⚠️ **先剥注释**（照 A13 ⑦ 的写法：块注释 + **整行** `//`，只剥整行，免得把 `https://` 里的 `//` 切了）。
+   *    理由见本节标题上面那条：这些句子的原文在注释里也有一份。
+   */
+  const CLS = CLS_RAW.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '')
+
+  /** 取两个锚点**之间**的源码；锚点缺一个 ⇒ `null`（判据据此去红，而不是静默拿到空串） */
+  const between = (s, a, b) => {
+    const i = s.indexOf(a)
+    if (i < 0) return null
+    const j = s.indexOf(b, i + a.length)
+    return j < 0 ? null : s.slice(i, j)
+  }
+  /**
+   * 从一个三目条件处切开，得到「条件为真的那一支」与「其余」。
+   * 按 `()` `[]` `{}` 的**配对深度**找 `?` 与配对的 `:`，所以分支里再嵌三目也不会切错；
+   * JSX 文本里的全角括号 `（）`（例：「（需要 Edge / Chrome 116 及以上）」）不参与深度，正好。
+   */
+  const splitTernary = (s, at) => {
+    let depth = 0
+    let q = -1
+    for (let i = at; i < s.length; i++) {
+      const c = s[i]
+      if (c === '(' || c === '[' || c === '{') depth++
+      else if (c === ')' || c === ']' || c === '}') depth--
+      else if (c === '?' && depth === 0) { q = i; break }
+    }
+    if (q < 0) return null
+    let d2 = 0
+    for (let j = q + 1; j < s.length; j++) {
+      const c = s[j]
+      if (c === '(' || c === '[' || c === '{') d2++
+      else if (c === ')' || c === ']' || c === '}') {
+        if (d2 === 0) return null
+        d2--
+      } else if (c === ':' && d2 === 0) return { yes: s.slice(q + 1, j), no: s.slice(j + 1) }
+    }
+    return null
+  }
+
+  const EDGE = '需要 Edge / Chrome 116'
+  const SHELL_ONLY = '这台机器上开不了'
+
+  /* ---- ⑤ 按端分支：`shellPlatform() === 'electron'` 那一支说"这台机器上开不了"，
+          非壳那一支才提浏览器版本 ---- */
+  const bannerBranches = (s) => {
+    const region = between(s, 'data-classroom-pip-unsupported', 'data-classroom-unlock')
+    if (!region) return null
+    const at = region.indexOf("shellPlatform() === 'electron'")
+    if (at < 0) return null
+    return splitTernary(region, at)
+  }
+  const bannerTextWiredRight = (s) => {
+    const br = bannerBranches(s)
+    return (
+      !!br &&
+      br.no.includes(EDGE) &&
+      !br.yes.includes(EDGE) &&
+      br.yes.includes(SHELL_ONLY) &&
+      !br.no.includes(SHELL_ONLY)
+    )
+  }
+  /*
+   * 🧪 反向对照要用 `replaceAll`：这两句**各出现两处**（`startPip` 里一次、横幅里一次），
+   *    只换第一处的话换到的是 `startPip` 那一份，横幅一个字都没动 ⇒ 对照自己失效。
+   */
+  const CLS_SWAPPED = CLS
+    .replaceAll(SHELL_ONLY, '@@SHELL@@')
+    .replaceAll(EDGE, SHELL_ONLY)
+    .replaceAll('@@SHELL@@', EDGE)
+  check(
+    bannerTextWiredRight(CLS),
+    "🔴 A14 ⑤ 小窗不可用那块横幅里：「需要 Edge / Chrome 116」**只在非壳那一支**，「这台机器上开不了」**只在 `shellPlatform() === 'electron'` 那一支** —— 分支方向没反（壳里说「浏览器太老」是假话）",
+    `取到两支=${!!bannerBranches(CLS)} · 壳支含 116=${bannerBranches(CLS)?.yes.includes(EDGE)} · 网页支含 116=${bannerBranches(CLS)?.no.includes(EDGE)}`,
+  )
+  check(
+    CLS_SWAPPED !== CLS && !bannerTextWiredRight(CLS_SWAPPED),
+    '🧪 A14 ⑤ 反向对照：把那两支的句子**对调**（只在文本里换，不动真文件）⇒ 同一条判据当场判假（它看的是**所属分支**，不是"这两句在不在"）',
+    `对调之后：壳支含 116=${bannerBranches(CLS_SWAPPED)?.yes.includes(EDGE)} · 网页支含 116=${bannerBranches(CLS_SWAPPED)?.no.includes(EDGE)}`,
+  )
+
+  /* ---- ⑥ `armed` 的初值：壳里跳过"先解锁声音"那一步 ---- */
+  const ARMED_INIT = /const \[armed, setArmed\] = useState\(\(\) => shellAutoplayAllowed\(\)\)/
+  const armedInitFromShell = (s) => ARMED_INIT.test(s)
+  const CLS_ARMED_FALSE = CLS.replace('useState(() => shellAutoplayAllowed())', 'useState(false)')
+  check(
+    armedInitFromShell(CLS),
+    '🔴 A14 ⑥ `armed` 的初值 = `useState(() => shellAutoplayAllowed())` —— 壳里**跳过**「先解锁声音」那一步（网页版它恒 false ⇒ 那一屏照旧）',
+    short(CLS.split('\n').find((l) => l.includes('const [armed')) ?? '（没找到那一行）'),
+  )
+  check(
+    CLS_ARMED_FALSE !== CLS && !armedInitFromShell(CLS_ARMED_FALSE),
+    '🧪 A14 ⑥ 反向对照：把初值写回 `useState(false)`（改动前那一版）⇒ 同一条判据当场判假',
+    `改回去之后还命中 = ${armedInitFromShell(CLS_ARMED_FALSE)}`,
+  )
+
+  /* ---- ⑦ 两个落点在（`shots` 与 `verify-exe` 都靠它们量屏） ---- */
+  const hasRoomAttrs = (s) => /data-classroom-unlock\b/.test(s) && /data-classroom-pip-unsupported\b/.test(s)
+  const CLS_RENAMED = CLS
+    .replaceAll('data-classroom-unlock', 'data-room-unlock')
+    .replaceAll('data-classroom-pip-unsupported', 'data-room-pip-unsupported')
+  check(
+    hasRoomAttrs(CLS),
+    '🔴 A14 ⑦ 两个落点都在：`data-classroom-unlock`（网页版那一步照旧）与 `data-classroom-pip-unsupported`（壳里提前按"开不了"处理）—— 门禁就是靠这两个属性量屏',
+    `unlock=${/data-classroom-unlock\b/.test(CLS)} · pip-unsupported=${/data-classroom-pip-unsupported\b/.test(CLS)}`,
+  )
+  check(
+    CLS_RENAMED !== CLS && !hasRoomAttrs(CLS_RENAMED),
+    '🧪 A14 ⑦ 反向对照：把两个属性**改名**（`data-classroom-*` → `data-room-*`）⇒ 同一条判据当场判假',
+    `改名之后 unlock=${/data-classroom-unlock\b/.test(CLS_RENAMED)} · pip-unsupported=${/data-classroom-pip-unsupported\b/.test(CLS_RENAMED)}`,
+  )
+
+  /* ---- ⑧ `startPip` 里**不再**无条件推「需要 Edge / Chrome 116 及以上版本」 ---- */
+  const startPipBody = between(CLS, 'const startPip = async () => {', 'const nameOf = useCallback(')
+  /**
+   * 那一段里每一处 `desc:`：**凡是带着那句 116 的**，都必须挂在按端三目里
+   * （`?` 之前出现端判据 `inShell` / `shellPlatform()`）。不带那句的不管。
+   * 还要自证"真的读到东西了"（`seen > 0 && withEdge > 0`）——
+   * 两样都是 0 时返回 false，`startPip` 被改名/被删会当场红，而不是"什么都搜不到也算过"。
+   */
+  const descNeverUnconditional = (body) => {
+    if (!body) return false
+    let seen = 0
+    let withEdge = 0
+    for (const line of body.split('\n')) {
+      const i = line.indexOf('desc:')
+      if (i < 0) continue
+      seen++
+      if (!line.includes(EDGE)) continue
+      withEdge++
+      const head = line.slice(i, line.indexOf(EDGE))
+      if (!(head.includes('?') && /inShell|shellPlatform\(\)/.test(head))) return false
+    }
+    return seen > 0 && withEdge > 0
+  }
+  const START_PIP_UNCONDITIONAL = (startPipBody ?? '').replace(
+    "desc: '再点一次；还不行就用手机或平板看题号与正确率'",
+    "desc: '需要 Edge / Chrome 116 及以上版本'",
+  )
+  check(
+    descNeverUnconditional(startPipBody),
+    "🔴 A14 ⑧ `startPip` 里**每一处**带「需要 Edge / Chrome 116」的 `desc:` 都在**按端三目**里（壳那一支说的是「用手机/平板」）—— 不再把「浏览器版本」那句无条件甩给老师",
+    startPipBody
+      ? `那一段 ${startPipBody.split('\n').filter((l) => l.includes('desc:')).length} 处 \`desc:\`，带 116 的都在三目里`
+      : '取不到 `startPip` 那一段（锚点不见了）',
+  )
+  check(
+    !!startPipBody && START_PIP_UNCONDITIONAL !== startPipBody && !descNeverUnconditional(START_PIP_UNCONDITIONAL),
+    "🧪 A14 ⑧ 反向对照：在 `startPip` 里塞一处**无条件**的 `desc: '需要 Edge / Chrome 116 及以上版本'` ⇒ 同一条判据当场判假",
+    `塞进去之后：判据=${descNeverUnconditional(START_PIP_UNCONDITIONAL)}`,
+  )
+}
+
 /* ---------------- 结果 ---------------- */
 console.log(`\n================ 结果 ================`)
+
 console.log(`  断言：通过 ${passed} 条，失败 ${failures.length} 条`)
 for (const f of failures) console.log(`  ❌ ${f}`)
 if (failures.length) {
   console.log('\n  ⛔ 有断言没过（上面每一条都写了实测值）')
   process.exitCode = 1
 } else {
-  console.log('  全部通过 ✅（纯函数 A1–A10 / 静态 D1–D7 · D9 · D10 · D11 · D12 · D13 · D14 · D15 · D16 · D17 / 编码 + 不可见字符 D8）')
+  console.log('  全部通过 ✅（纯函数 A1–A14 / 静态 D1–D7 · D9 · D10 · D11 · D12 · D13 · D14 · D15 · D16 · D17 · D18 / 编码 + 不可见字符 D8）')
 }
 }, { script: 'nav-checks.mjs' })
