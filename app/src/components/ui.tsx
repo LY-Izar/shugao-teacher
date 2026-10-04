@@ -201,6 +201,22 @@ export function PageHead({
          *    各自写一个数就是"同一件事四个口径"。
          */
         top: 'var(--top-stack-h, 0px)',
+        /*
+         * 🔴🔴 2026-10-04 加 `backgroundColor` 兜底（扫安卓 8 扫出来的）：
+         *
+         * `color-mix()` 要 **Chrome 111**。老 WebView（安卓 8 上没更新过的那批）
+         * 认不出 ⇒ **整条 `background` 被当无效丢掉** ⇒ 这个吸顶页头**完全透明**，
+         * 滚动时列表内容从底下直接穿过去（`backdropFilter` 还在，于是看起来像
+         * "糊了但没底"）。同款还有 `pages/Admin.tsx:2367` 与 `:2889`。
+         *
+         * ⚠️⚠️ **两个键的顺序不许换**（换成 `background` 在前 = 新浏览器也错）：
+         *   · `backgroundColor` 在前 → 新浏览器先落兜底，再被 `background` 覆盖成 mix ✅
+         *   · 老浏览器 `background: color-mix(...)` **无效被丢**，兜底那条留着 ✅
+         *   · 如果反过来写，新浏览器里 `background-color` 会把 mix **盖掉** ⇒ 恒不透明 ✗
+         *   兜底给的是**不透明的 canvas** —— 老设备上"实底页头"（略平）比
+         *   "透明页头压着内容"（错）好得多，这是**降级不是还原**。
+         */
+        backgroundColor: 'var(--color-canvas)',
         background: 'color-mix(in srgb, var(--color-canvas) 88%, transparent)',
         backdropFilter: 'blur(10px)',
         borderBottom: '1px solid var(--color-line)',

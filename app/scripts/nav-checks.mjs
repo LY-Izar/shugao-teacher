@@ -4270,6 +4270,78 @@ section('第十九节 · D17：产物面向老设备的底线（`@layer` 摊平 
     `target 在 = ${hasTarget} · 插件挂在 plugins 里 = ${hasPlugin}`,
     "这两条是**意图锚点**（真读数由构建时的 esbuild 与 ① 的产物扫描保证）—— `?.` 那种 grep 会误报，见本节注释",
   )
+
+  /* ============================================================
+     D17 ③ ④：`color-mix` 兜底 与 `mask-image` 前缀（2026-10-04 · 安卓 8 那一轮）
+     ------------------------------------------------------------
+     🔴 这两条**只能在产物上判**：`shots` 打的是 dev（未压缩源码 CSS），
+        而要判的是 ① 产物里内联样式的**顺序**、② Tailwind 有没有给 mask 补前缀 ——
+        **`shots` 一条都抓不到**（这正是同批扫描点出的"门禁盲区"）。
+
+     两条的底数都是 **Chrome 84**（flex `gap` 那个地板）：
+       · `color-mix()` = Chrome **111** → 84~110 丢整条 ⇒ sticky 页头**透明**
+       · `mask-image`  = Chrome **120** → 84~119 丢 ⇒ 背景网格不渐隐
+     ============================================================ */
+  if (cssFiles.length) {
+    /* ⚠️ 这里**重新读一次** `css`：`①` 那段的 `const css` 在**它自己那个 `if` 块**里，
+       挪出来要动已有断言的作用域，不值当（读几个产物文件是毫秒级）。
+       🔴 第一版这里直接用了 `css` ⇒ `ReferenceError: css is not defined`，
+       **整个 nav-checks 崩在 D17 之前**，exit=1 —— 错误位置离真因很远（见 §九.8 同类）。 */
+    const css = cssFiles.map((f) => readFileSync(join(DIST, f), 'utf8')).join('\n')
+    /* ④ 每一条非前缀 `mask-image`，都要在同产物里找到值相同的 `-webkit-mask-image` */
+    const norm = (s) => s.replace(/\s+/g, '')
+    const maskMissingOf = (s) => {
+      const un = [...s.matchAll(/(?<!-webkit-)mask-image:\s*([^;}]+)/g)].map((m) => norm(m[1]))
+      const wk = [...s.matchAll(/-webkit-mask-image:\s*([^;}]+)/g)].map((m) => norm(m[1]))
+      return { un: un.length, missing: un.filter((v) => !wk.includes(v)) }
+    }
+    const maskNow = maskMissingOf(css)
+    check(
+      maskNow.un > 0 && maskNow.missing.length === 0,
+      '🔴 D17 ④ 产物 CSS 里**每一条 `mask-image` 都配了 `-webkit-mask-image`**（非前缀要 Chrome 120，`-webkit-` 只要 4）',
+      `非前缀 ${maskNow.un} 条 · 缺前缀 ${maskNow.missing.length} 条${maskNow.missing.length ? '：' + maskNow.missing.join(' | ').slice(0, 120) : ''}`,
+      '反向对照：见下一条（从产物里删掉一条前缀 → 本条当场红）',
+    )
+    /* 🧪 **真**反向对照：从产物 CSS 里删掉第一条 `-webkit-mask-image`，判据必须数出缺前缀。
+       ⚠️ 上一版这里算的是"假设值"，那是**假对照**（判据动不了它、它也永远为真）。 */
+    const cssPoisoned = css.replace(/-webkit-mask-image:\s*[^;}]+;?/, '')
+    const maskPoisoned = maskMissingOf(cssPoisoned)
+    check(
+      maskNow.missing.length === 0 && maskPoisoned.missing.length > 0 && cssPoisoned !== css,
+      '🧪 D17 ④ 反向对照：**从产物 CSS 里删掉一条 `-webkit-mask-image`** → 同一条判据当场数出缺前缀（④ 不是恒真的摆设）',
+      `真产物缺 ${maskNow.missing.length} 条 · 删掉一条前缀后缺 ${maskPoisoned.missing.length} 条 · 源真的被改过 = ${cssPoisoned !== css}`,
+    )
+  }
+  {
+    const jsFiles = existsSync(DIST) ? readdirSync(DIST).filter((f) => f.endsWith('.js')) : []
+    const js = jsFiles.map((f) => readFileSync(join(DIST, f), 'utf8')).join('\n')
+    const backedOf = (s) => ({
+      mix: [...s.matchAll(/background:\s*[`"']color-mix\(/g)].length,
+      /* ⚠️🔴 **必须同时认反引号** —— 产物经 rolldown，字符串字面量是反引号；
+         第一版判据写死 `"` ⇒ 三处兜底明明都在，却判成"一个都没进产物"（**假红**）。 */
+      ok: [...s.matchAll(
+        /backgroundColor:\s*[`"']var\(--color-canvas\)[`"']\s*,\s*background:\s*[`"']color-mix\(/g,
+      )].length,
+    })
+    const now = backedOf(js)
+    check(
+      now.mix > 0 && now.ok === now.mix,
+      '🔴 D17 ③ 产物 JS 里**每一处 `color-mix` 前面都垫了 `backgroundColor` 兜底，且兜底在前**（顺序反了新浏览器也恒不透明）',
+      `color-mix ${now.mix} 处 · 有兜底且在前 ${now.ok} 处 · js 文件 ${jsFiles.length} 个`,
+      '反向对照：见下一条（拿掉一处兜底 → 本条当场红）',
+    )
+    /* 🧪 **真**反向对照：从产物 JS 里删掉**第一处**兜底键，判据必须当场数出缺口 */
+    const jsPoisoned = js.replace(
+      /backgroundColor:\s*[`"']var\(--color-canvas\)[`"']\s*,\s*(background:\s*[`"']color-mix\()/g,
+      '$1',
+    )
+    const poisoned = backedOf(jsPoisoned)
+    check(
+      now.ok === now.mix && poisoned.ok < now.ok && jsPoisoned !== js,
+      '🧪 D17 ③ 反向对照：**从产物 JS 里删掉第一处兜底键** → 同一条判据当场数出"有兜底的"变少（③ 不是恒真的摆设）',
+      `真产物 ${now.ok}/${now.mix} · 删掉一处后 ${poisoned.ok}/${poisoned.mix} · 源真的被改过 = ${jsPoisoned !== js}`,
+    )
+  }
 }
 
 /* ---------------- 结果 ---------------- */

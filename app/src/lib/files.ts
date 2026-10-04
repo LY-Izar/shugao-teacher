@@ -245,6 +245,42 @@ export async function listFiles(): Promise<SharedFile[]> {
   return (data ?? []).map((r) => rowToFile(r as Record<string, unknown>))
 }
 
+/**
+ * 生成一个**标准 v4 UUID**（照 `data/store.ts:58` / `lib/backup.ts:149` 那两份抄，
+ * 本文件是**第三份**）。
+ *
+ * 🔴🔴 **为什么原来这里是裸的 `crypto.randomUUID()`**（2026-10-04 扫安卓 8 扫出来的）：
+ *   它要求两件事，**缺一件就是 `TypeError`**：
+ *     ① **Chrome ≥ 92** —— 安卓 8 上**从没更新过 WebView** 的那批（Chrome 138 之前
+ *        一直在发，但国产机没有 GMS 就不走 Play）达不到；
+ *     ② **安全上下文**（https / localhost）—— `app://` 已在
+ *        `_src/desktop/main-teacher.js:74` 注册 `secure: true` ✅，
+ *        但**局域网 http 访问**不是 ✗（`store.ts:55-56` 早就记着这条）。
+ *   两种情况它都是 `undefined` ⇒ `crypto.randomUUID()` 当场抛
+ *   ⇒ **整个上传断掉**，而报错落在"选完文件之后"，老师看到的是"点了没反应"。
+ *
+ * ⚠️ `store.ts` 与 `backup.ts` **早就各守了一次**，唯独这里漏了 ——
+ *   这是「查不到 ≠ 没有」的另一面：**已有的守卫不代表全都有**。
+ *   三处同构的写法，改一处的判据时**三处都要看**。
+ *
+ * ⚠️ 这里产出**标准 v4**（16 字节 + 版本位），不偷懒写短串 ——
+ *   `backup.ts:148` 记着理由：**uuid 列不接受短串**，哪天这个 id 被拿去写库就坏了。
+ *
+ * ⚠️ 不 `import` `store.ts`：`lib/` 不该反过来依赖 `data/`
+ *   （`backup.ts` 里那条注释写的就是这个理由）。
+ */
+function uuid(): string {
+  const c = globalThis.crypto
+  if (c && typeof c.randomUUID === 'function') return c.randomUUID()
+  const b = new Uint8Array(16)
+  if (c && typeof c.getRandomValues === 'function') c.getRandomValues(b)
+  else for (let i = 0; i < 16; i++) b[i] = Math.floor(Math.random() * 256)
+  b[6] = (b[6] & 0x0f) | 0x40
+  b[8] = (b[8] & 0x3f) | 0x80
+  const h = Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('')
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`
+}
+
 export async function uploadFile(file: File, teacherId: string, classIds: string[] = []): Promise<SharedFile> {
   const c = sb()
 
@@ -256,7 +292,7 @@ export async function uploadFile(file: File, teacherId: string, classIds: string
   const cols = await ensureFileClassCols()
   const classCols = fileClassColumns(classIds, cols.classIds)
 
-  const path = `${teacherId}/${crypto.randomUUID()}-${safeName(file.name)}`
+  const path = `${teacherId}/${uuid()}-${safeName(file.name)}`
 
   /*
    * 🔴 A6：**不信浏览器报的类型**。`.html/.svg` 与认不出的一律存成

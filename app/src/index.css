@@ -478,6 +478,12 @@ body::before {
     linear-gradient(to right, rgb(var(--color-grid) / 0.04) 1px, transparent 1px),
     linear-gradient(to bottom, rgb(var(--color-grid) / 0.04) 1px, transparent 1px);
   background-size: 26px 26px;
+  /* 🔴 `-webkit-mask-image` 2026-10-04 补：非前缀的 `mask-image` 要 **Chrome 120**，
+     而 `-webkit-mask-image` 从 Chrome 4（4–119 只认这一个）。
+     这一处是**同文件里唯一漏了前缀的** —— `:1827` `:1833` `:1838` 三处都带了，
+     只有背景网格这一处漏着 ⇒ 老 WebView 上整条丢掉、网格**不再渐隐**（满屏均匀 0.04 网格）。
+     ⚠️ 顺序讲究：**前缀在前、标准在后** —— 标准属性最后落，新浏览器用它。 */
+  -webkit-mask-image: radial-gradient(ellipse 120% 80% at 50% 0%, #000 20%, transparent 75%);
   mask-image: radial-gradient(ellipse 120% 80% at 50% 0%, #000 20%, transparent 75%);
 }
 

@@ -2364,6 +2364,12 @@ function Shell({ children }: { children: React.ReactNode }) {
         className="sticky top-0 z-30 flex items-center gap-3 px-4"
         style={{
           height: 52,
+          /*
+           * 🔴 同 `components/ui.tsx:204`：`color-mix()` 要 Chrome 111，老 WebView
+           * 认不出 → **整条 `background` 被丢** → 这个 sticky 顶栏**透明**、列表从底下穿过去。
+           * ⚠️ 兜底键**必须排在 `background` 之前**（顺序反了新浏览器也会恒不透明）——
+           *    理由见 `ui.tsx` 那处的注释（三处同款，改一处要看另外两处）。 */
+          backgroundColor: 'var(--color-canvas)',
           background: 'color-mix(in srgb, var(--color-canvas) 88%, transparent)',
           backdropFilter: 'blur(10px)',
           borderBottom: '1px solid var(--color-line)',
@@ -2886,6 +2892,9 @@ function AdminFrame({
       <header
         className="sticky top-0 z-30 flex flex-wrap items-center gap-2 px-4 py-2"
         style={{
+          /* 🔴 同 `components/ui.tsx:204`：`color-mix()` 兜底，理由见那处。
+             ⚠️ 兜底键在前、`background` 在后 —— 顺序反了新浏览器也恒不透明。 */
+          backgroundColor: 'var(--color-canvas)',
           background: 'color-mix(in srgb, var(--color-canvas) 88%, transparent)',
           backdropFilter: 'blur(10px)',
           borderBottom: '1px solid var(--color-line)',
