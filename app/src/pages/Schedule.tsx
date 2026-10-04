@@ -11,6 +11,7 @@ import {
   IconUsers,
 } from '../components/icons'
 import { ScheduleBatch } from '../components/ScheduleBatch'
+import ScheduleDayAxis from '../components/ScheduleDayAxis'
 import { Button, PageHead, Panel, Sect, Sheet, Tag } from '../components/ui'
 import { useStore, useToast } from '../data/store'
 import { loadClassMembers, loadClassSubjects } from '../data/remote'
@@ -25,7 +26,6 @@ import {
   durationText,
   itemsOfDay,
   normalizeTime,
-  nowMinutes,
   toMinutes,
   weekdayOf,
 } from '../lib/schedule'
@@ -322,51 +322,9 @@ const [perm, setPerm] = useState<
                 </span>
               </div>
             ) : (
-              <div>
-                {state.items.map((it) => {
-                  const m = nowMinutes()
-                  const isNow = m >= toMinutes(it.start) && m < toMinutes(it.end)
-                  const isPast = toMinutes(it.end) <= m
-                  return (
-                    <button
-                      key={it.id}
-                      type="button"
-                      className="row"
-                      style={{ padding: '11px 13px', opacity: isPast ? 0.55 : 1 }}
-                      onClick={() => startEdit(it)}
-                    >
-                      <span
-                        className="num shrink-0"
-                        style={{
-                          width: 46,
-                          fontSize: 13,
-                          fontWeight: 700,
-                          color: isNow ? 'var(--color-accent)' : 'var(--color-ink2)',
-                        }}
-                      >
-                        {it.start}
-                      </span>
-                      <span className="min-w-0 flex-1">
-                        <span className="flex items-center gap-2">
-                          <span style={{ fontSize: 14, fontWeight: 620 }}>{it.title}</span>
-                          {isNow ? <Tag tone="accent">进行中</Tag> : null}
-                          {isPast ? <Tag tone="idle">已结束</Tag> : null}
-                        </span>
-                        <span
-                          className="mt-0.5 flex flex-wrap items-center gap-x-3"
-                          style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}
-                        >
-                          <span>
-                            {it.start}–{it.end}
-                          </span>
-                          {className(it.classId) ? <span>{className(it.classId)}</span> : null}
-                          {it.room ? <span>{it.room}</span> : null}
-                          {it.notify ? <span>提前 {REMIND_BEFORE} 分钟提醒</span> : null}
-                        </span>
-                      </span>
-                    </button>
-                  )
-                })}
+              /* 真实时间轴：按真实分钟铺位，看得出每节多长、中间空闲多久、哪两节撞了 */
+              <div className="p-3">
+                <ScheduleDayAxis items={state.items} classNameOf={className} onPick={startEdit} />
               </div>
             )}
           </Panel>

@@ -296,3 +296,103 @@ export async function checkScheduleConflicts(
   if (!conflicts.length) return { blocked: false, message: '', note: '' }
   return { blocked: true, message: conflictBlockMessage(conflicts), note: `${conflicts.length} 处` }
 }
+
+/* ============================================================
+   「今天」那屏的**真实时间轴**要用的三件（2026-10-04）
+   ------------------------------------------------------------
+   为什么需要：我们把今天的课平铺成列表，只有"几点—几点"——
+   看不出每节真实占多长、中间空多久、哪两节真的撞了。
+
+   🔴 三条都必须是**纯函数**：不碰 DOM、不读 `new Date()` 之外的全局、
+      不认识 React —— 这样才能脱离界面单测（判据要能单独红）。
+   ⚠️ 「空档」的门槛 10 分钟是**学校作息里的正常接续**，
+      低于它就标出来等于天天报"冲突"，那teacher 就不看了
+      （假绿/假红之外还有第三条：**假红**）。
+   ============================================================ */
+
+/** 时间轴上下边界：最早开始前 / 最晚结束后各留 30 分钟，向整点取整 */
+export const AXIS_PAD_MIN = 30
+
+/** 短于这个分钟数的空档**不标**（那是正常的课间接续，不是空档） */
+export const GAP_MIN_MINUTES = 10
+
+export type DayRange = { fromMin: number; toMin: number }
+
+/**
+ * 一天的上下边界。
+ *
+ * 空数组时给 `null` —— 界面据此**不渲染轴**（别给一条空轴）。
+ */
+export function dayRange(items: readonly ScheduleItem[]): DayRange | null {
+  if (items.length === 0) return null
+  let lo = Infinity
+  let hi = -Infinity
+  for (const it of items) {
+    const s = toMinutes(it.start)
+    const e = toMinutes(it.end)
+    if (s < lo) lo = s
+    if (e > hi) hi = e
+  }
+  /*
+⚠️ 那两道钳位不是装饰：`AXIS_PAD_MIN` 是导出常量、界面上还有别的入口会传不同值，
+     而**减法没有下界** —— padding 大于一天的起点时会算出负的 fromMin，
+     拿去当 CSS 的 top 就是把整条轴画到容器外面（看起来像"今天没有课"）。
+     倒过来 toMin 超过 1440 同理（那是 24:00 之后）。
+  */
+  const fromMin = Math.floor((lo - AXIS_PAD_MIN) / 60) * 60
+  const toMin = Math.ceil((hi + AXIS_PAD_MIN) / 60) * 60
+  return {
+    fromMin: Math.max(0, fromMin),
+    toMin: Math.min(1440, toMin),
+  }
+}
+
+export type DayGap = { fromMin: number; toMin: number; minutes: number }
+
+/**
+ * 两节课之间的空档，**只回 ≥ `GAP_MIN_MINUTES` 的**。
+ *
+ * 输入会先按开始时间排好序，所以一趟扫就够了。
+ */
+export function dayGaps(items: readonly ScheduleItem[]): DayGap[] {
+  const sorted = [...items].sort((a, b) => toMinutes(a.start) - toMinutes(b.start))
+  const out: DayGap[] = []
+  for (let i = 1; i < sorted.length; i++) {
+    const fromMin = toMinutes(sorted[i - 1].end)
+    const toMin = toMinutes(sorted[i].start)
+    const minutes = toMin - fromMin
+    if (minutes >= GAP_MIN_MINUTES) out.push({ fromMin, toMin, minutes })
+  }
+  return out
+}
+
+/**
+ * 时间重叠的分组。
+ *
+ * ⚠️ 与 `applyMondayShift()` 返回的 `conflicts` **口径一致**（同一件事两个说法）：
+ * 「下一节开始时，上一节还没下课」。那一处已经会把冲突原样交给界面提示，
+ * 这里是让时间轴**画得出来**（并排），而不是让两处各判一次。
+ *
+ * 传递性：连着三节互相压 ⇒ 合成一组（那三节都得并排）。
+ */
+export function overlapGroups(items: readonly ScheduleItem[]): ScheduleItem[][] {
+  const sorted = [...items].sort((a, b) => toMinutes(a.start) - toMinutes(b.start))
+  const out: ScheduleItem[][] = []
+  let cur: ScheduleItem[] = []
+  let curEnd = -Infinity
+  for (const it of sorted) {
+    const s = toMinutes(it.start)
+    const e = toMinutes(it.end)
+    /* `s < curEnd` 才是重叠；`s === curEnd` 是正常接续 */
+    if (cur.length && s < curEnd) {
+      cur.push(it)
+      if (e > curEnd) curEnd = e
+    } else {
+      if (cur.length) out.push(cur)
+      cur = [it]
+      curEnd = e
+    }
+  }
+  if (cur.length) out.push(cur)
+  return out.filter((g) => g.length > 1)
+}

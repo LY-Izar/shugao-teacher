@@ -4660,7 +4660,21 @@ section('第二十节 · A12：版本更新公告（共享区逐字节相同 · 
           （`Settings.tsx` 调的就是它，接线见 D18）。
     */
     {
-      const slotsOf = (t, c) => ({ teacher: t, classroom: c, read: 'ok', reason: '' })
+      /**
+       * 🔴 **期望值 2026-10-04 变了**（用户拍板：「公告撤下了，下载也照样能用」）：
+       *    从前 `releaseDownloads()` 读的是**公告那一层**（`slots.teacher` / `slots.classroom`），
+       *    而那一层在"撤下"时是 `null` ⇒ 三颗按钮跟着公告一起消失。
+       *    现在它读的是 **`slots.downloads`**（服务端 `release.downloads` 子块，
+       *    **不看 `enabled`**）⇒ 按钮**不随公告状态消失**。
+       *    ⚠️ 所以下面每一条都要**显式带上 `downloads`**：
+       *       只给 `teacher` / `classroom`（公告那一层）已经**摆不出**按钮了。
+       */
+      const downloadsOf = (apk, exe) => ({
+        teacher: { url_apk: apk, url_exe: exe },
+        classroom: { url_apk: '', url_exe: '' },
+      })
+      const EMPTY_DL = { teacher: { url_apk: '', url_exe: '' }, classroom: { url_apk: '', url_exe: '' } }
+      const slotsOf = (t, c, dl = EMPTY_DL) => ({ teacher: t, classroom: c, read: 'ok', reason: '', downloads: dl })
       const noticeOf = (apk, exe) => ({ version: '1.1.2', force: false, note: '', urlApk: apk, urlExe: exe })
       const keys = (l) => l.map((d) => d.key)
       const A = 'https://dl.example.com/teacher.apk'
@@ -4668,18 +4682,53 @@ section('第二十节 · A12：版本更新公告（共享区逐字节相同 · 
       const C = 'https://dl.example.com/classroom.exe'
 
       /* ---- 四种组合逐个（"没填就不出现"那一条） ---- */
-      eqSet('🔴 A12：教师端**只填了安卓**那个地址 ⇒ 只有「下载教师端（安卓）」那一颗', keys(rel.releaseDownloads(slotsOf(noticeOf(A, ''), null))), ['teacher-apk'])
-      eqSet('🔴 A12：教师端**只填了 Windows** 那个地址 ⇒ 只有「下载教师端（Windows）」那一颗', keys(rel.releaseDownloads(slotsOf(noticeOf('', E), null))), ['teacher-exe'])
-      eqSet('🔴 A12：两个都填 ⇒ 两颗都在（仍然不摆教室端那颗 —— 那一档没在发公告）', keys(rel.releaseDownloads(slotsOf(noticeOf(A, E), null))), ['teacher-apk', 'teacher-exe'])
-      eqSet('🔴 A12：**一个都没填**（含那一档没在发公告 = `null`）⇒ 一颗都不摆', keys(rel.releaseDownloads(slotsOf(noticeOf('', ''), null))), [])
+      eqSet('🔴 A12：教师端**只填了安卓**那个地址 ⇒ 只有「下载教师端（安卓）」那一颗', keys(rel.releaseDownloads(slotsOf(noticeOf(A, ''), null, downloadsOf(A, '')))), ['teacher-apk'])
+      eqSet('🔴 A12：教师端**只填了 Windows** 那个地址 ⇒ 只有「下载教师端（Windows）」那一颗', keys(rel.releaseDownloads(slotsOf(noticeOf('', E), null, downloadsOf('', E)))), ['teacher-exe'])
+      eqSet('🔴 A12：两个都填 ⇒ 两颗都在', keys(rel.releaseDownloads(slotsOf(noticeOf(A, E), null, downloadsOf(A, E)))), ['teacher-apk', 'teacher-exe'])
+      eqSet('🔴 A12：**一个都没填** ⇒ 一颗都不摆', keys(rel.releaseDownloads(slotsOf(noticeOf('', ''), null, downloadsOf('', '')))), [])
+
+      /* 🔴 2026-10-04 新增（期望值**故意**变了的那一条）：公告那一层翻不动按钮
+         `downloads` 一样、只把公告那一层从"在发"换成"撤下"（`null`）⇒ **按钮数不变** */
+      eqSet(
+        '🔴 A12：**公告撤下**（`teacher: null`）但 `downloads` 有地址 ⇒ 两颗**照样在**' +
+          '（用户 2026-10-04 拍板的那一条：下载与公告分开）',
+        keys(rel.releaseDownloads(slotsOf(null, null, downloadsOf(A, E)))),
+        ['teacher-apk', 'teacher-exe'],
+      )
+      /* 🧪 反向对照 D（**关键**：证明按钮真挂在**新字段**上，而不是"公告那一层还在顺带给"）：
+         URL 一模一样，只把 `downloads` 那一块从 `/api/status` 回话里摘掉，只留公告那一层
+         ⇒ **一颗都摆不出来**。谁把 `releaseDownloads()` 改回去读公告那一层，上面那两颗就会
+         变成 0 颗 ⇒ 当场红。（旧代码正是这么读的 —— 那正是用户点名的那个 bug。） */
+      {
+        const withDl = rel.releaseSlotsFromStatus({
+          read: 'ok',
+          teacher: noticeOf(A, E),
+          classroom: null,
+          downloads: downloadsOf(A, E),
+        })
+        const onlyNotice = rel.releaseSlotsFromStatus({ read: 'ok', teacher: noticeOf(A, E), classroom: null })
+        check(
+          keys(rel.releaseDownloads(withDl)).length === 2 && keys(rel.releaseDownloads(onlyNotice)).length === 0,
+          '🧪 A12 反向对照 D：地址只放在**公告那一层**（没有 `downloads` 那一块）⇒ 0 颗；' +
+            '放进 `downloads` 那一层 ⇒ 2 颗（证明按钮读的是新字段，不是公告）',
+          `带 downloads=${keys(rel.releaseDownloads(withDl)).length} 颗 · 只有公告那一层=${keys(rel.releaseDownloads(onlyNotice)).length} 颗`,
+        )
+      }
 
       /* ---- 教室端那颗只看 exe ---- */
-      const clsOnly = rel.releaseDownloads(slotsOf(null, noticeOf(A, C)))
+      const clsOnly = rel.releaseDownloads(
+        slotsOf(null, noticeOf(A, C), { teacher: { url_apk: '', url_exe: '' }, classroom: { url_apk: A, url_exe: C } }),
+      )
       eqSet('🔴 A12：教室端**只看 `url_exe`**（`url_apk` 填了也不摆那一颗）', keys(clsOnly), ['classroom-exe'])
-      eq('A12：教室端那颗用的就是 `release.classroom.url_exe`', clsOnly[0]?.url, C)
+      eq('A12：教室端那颗用的就是 `release.downloads.classroom.url_exe`', clsOnly[0]?.url, C)
 
       /* ---- 三颗一起：顺序 + 绑定 + 措辞 ---- */
-      const three = rel.releaseDownloads(slotsOf(noticeOf(A, E), noticeOf('', C)))
+      const three = rel.releaseDownloads(
+        slotsOf(noticeOf(A, E), noticeOf('', C), {
+          teacher: { url_apk: A, url_exe: E },
+          classroom: { url_apk: A, url_exe: C },
+        }),
+      )
       eqSet('🔴 A12：两档都填时三颗的 key（就是用户点名的那三种）', keys(three), ['teacher-apk', 'teacher-exe', 'classroom-exe'])
       eq(
         '🔴 A12：三颗各绑**自己那一列**（教师 apk / 教师 exe / 教室 exe），顺序也是摆的顺序',
@@ -4695,7 +4744,11 @@ section('第二十节 · A12：版本更新公告（共享区逐字节相同 · 
       /* ---- 只认 https ---- */
       eqSet(
         '🔴 A12：`http://` 与 `javascript:` 一律不算（三颗一颗都不摆 —— 面板 R5 走的是同一个判据）',
-        keys(rel.releaseDownloads(slotsOf(noticeOf('http://a/x.apk', 'javascript:alert(1)'), noticeOf('', '')))),
+        keys(
+          rel.releaseDownloads(
+            slotsOf(noticeOf('', ''), null, downloadsOf('http://a/x.apk', 'javascript:alert(1)')),
+          ),
+        ),
         [],
       )
 
@@ -4709,7 +4762,7 @@ section('第二十节 · A12：版本更新公告（共享区逐字节相同 · 
         mkdirSync(dirname(REL_TMP_A), { recursive: true })
         writeFileSync(REL_TMP_A, noFilter)
         const mod = await import(pathToFileURL(REL_TMP_A).href)
-        badA = mod.releaseDownloads(slotsOf(noticeOf('', ''), null)).length
+        badA = mod.releaseDownloads(slotsOf(noticeOf('', ''), null, downloadsOf(A, E))).length
       } catch (e) {
         badA = `副本没跑起来：${e?.message ?? e}`
       } finally {
@@ -4721,18 +4774,21 @@ section('第二十节 · A12：版本更新公告（共享区逐字节相同 · 
         `源码真被改过=${noFilter !== REL_SRC} · 去掉滤网后摆了 ${badA} 颗`,
       )
 
-      /* 🧪 反向对照 B：把教师端两颗的**列**对调（apk ↔ exe）⇒「各绑自己那一列」当场假 */
+      /* 🧪 反向对照 B：把教师端两颗的**列**对调（apk ↔ exe）⇒「各绑自己那一列」当场假
+         ⚠️ 2026-10-04 起 `releaseDownloads()` 读的是 `slots.downloads` 那一层，
+            所以这里对调的**锚点**也跟着换成新字段（老锚点已经匹配不上，那条对照会静默失效）。 */
       const REL_TMP_B = join(APP, '.tmp-gates', `release-swap-${process.pid}.ts`)
-      const swapped = REL_SRC.replace(
-        "{ key: 'teacher-apk', label: DL_TEACHER_APK, url: slots.teacher?.urlApk ?? '' },\n    { key: 'teacher-exe', label: DL_TEACHER_EXE, url: slots.teacher?.urlExe ?? '' },",
-        "{ key: 'teacher-apk', label: DL_TEACHER_APK, url: slots.teacher?.urlExe ?? '' },\n    { key: 'teacher-exe', label: DL_TEACHER_EXE, url: slots.teacher?.urlApk ?? '' },",
-      )
+      const swappedFrom =
+        "{ key: 'teacher-apk', label: DL_TEACHER_APK, url: slots.downloads.teacher.url_apk },\n    { key: 'teacher-exe', label: DL_TEACHER_EXE, url: slots.downloads.teacher.url_exe },"
+      const swappedTo =
+        "{ key: 'teacher-apk', label: DL_TEACHER_APK, url: slots.downloads.teacher.url_exe },\n    { key: 'teacher-exe', label: DL_TEACHER_EXE, url: slots.downloads.teacher.url_apk },"
+      const swapped = REL_SRC.replace(swappedFrom, swappedTo)
       let badB = null
       try {
         mkdirSync(dirname(REL_TMP_B), { recursive: true })
         writeFileSync(REL_TMP_B, swapped)
         const mod = await import(pathToFileURL(REL_TMP_B).href)
-        badB = mod.releaseDownloads(slotsOf(noticeOf(A, E), null)).map((d) => d.url)
+        badB = mod.releaseDownloads(slotsOf(noticeOf(A, E), null, downloadsOf(A, E))).map((d) => d.url)
       } catch (e) {
         badB = `副本没跑起来：${e?.message ?? e}`
       } finally {
@@ -4745,34 +4801,84 @@ section('第二十节 · A12：版本更新公告（共享区逐字节相同 · 
       )
     }
 
-    /* ②-9 🔴 「那一档公告撤下 ⇒「关于」那几颗也一起消失」是**接口口径**，不是这一屏的 bug
+    /* ②-9 🔴 2026-10-04 用户拍板：「公告撤下了，下载也照样能用」
        ------------------------------------------------------------
-       `releaseFromRow()` 只在 `enabled === true` 时才认那一行（没发布的档回 `null`，
-       免得把草稿漏出去）⇒ 面板把那一档「撤下」之后 `/api/status` 就不给
-       `url_apk` / `url_exe` ⇒ 那几颗跟着不摆（地址仍留在库里当下次预填）。
-       ⚠️ 这一条**反直觉**（撤下只是为了不再打扰老师），所以要显式钉住它的来源 ——
-          别让后来的人把它当 bug"修"成"撤下也照样给链接"（那等于把草稿漏出去）。
-    */
+       🔴 **期望值为什么翻过来了**（这一段从前钉的是**反面**）：
+         从前「关于」那三颗按钮读的是**公告那一层**（`slots.teacher` / `slots.classroom`），
+         而那一层由 `releaseFromRow()` 把守：`enabled !== true` ⇒ `null`
+         ⇒ 面板把那一档「撤下」之后 `/api/status` 不给地址 ⇒ 那几颗跟着消失
+         （当时把这条写进了门禁，还特意注明"别让后来的人把它当 bug 修掉"）。
+         用户当天实测后拍板：**「公告撤下了，下载也照样能用」** ⇒ 口径改成"两件事分开"——
+           · **公告**（`version` / `force` / `message`）仍然守 `enabled` 那道闸门
+             （草稿不外泄，`releaseFromRow` 一个字没动）；
+           · **下载地址**改读新字段 `release.downloads`（服务端 `releaseDownloadsFromRow()`，
+             **不看 `enabled`**）⇒ 按钮**不再随公告状态变化**。
+         ⚠️ 所以"撤下 ⇒ 收起"这句话现在**只对公告那一层成立**，对按钮那一层是**错的**。
+       ------------------------------------------------------------------ */
     {
       const row = { enabled: false, version: '1.1.2', force: false, message: '', url_apk: 'https://a/x.apk', url_exe: 'https://a/x.exe' }
-      eq('🔴 A12：`enabled:false`（公告撤下）⇒ `releaseFromRow` 回 null（服务端不给这几个字段）', rel.releaseFromRow(row), null)
+      /** 🔴 `keys` 是上面那一块的**块级**变量 —— 这里自己再定义一份（别跨块引用） */
+      const keys = (l) => l.map((d) => d.key)
+      /** 两端地址那一层（**不看 `enabled`**）：与公告那一层各自独立 */
+      const dlOf = (r) => ({
+        teacher: { url_apk: r.url_apk, url_exe: r.url_exe },
+        classroom: { url_apk: '', url_exe: '' },
+      })
+
+      eq('🔴 A12：`enabled:false`（公告撤下）⇒ `releaseFromRow` 回 null（**公告**这几个字段照旧不给）', rel.releaseFromRow(row), null)
       eq(
-        '🔴 A12：所以那一档撤下时「关于」那几颗**跟着不摆**（口径如此，不是漏做）',
-        rel.releaseDownloads(rel.releaseSlotsFromStatus({ read: 'ok', teacher: row, classroom: null })).length,
-        0,
+        '🔴 A12：撤下时**公告**那一层确实是 null（草稿不外泄这条口径一个字没松）',
+        rel.releaseSlotsFromStatus({ read: 'ok', teacher: row, classroom: null, downloads: dlOf(row) }).teacher,
+        null,
       )
+
+      /* 🔴 新口径：撤下时**按钮照样在** */
+      const offSlots = rel.releaseSlotsFromStatus({ read: 'ok', teacher: row, classroom: null, downloads: dlOf(row) })
+      eqSet(
+        '🔴 A12：**撤下也照样摆出那两颗**（用户 2026-10-04 拍板：「公告撤下了，下载也照样能用」）',
+        keys(rel.releaseDownloads(offSlots)),
+        ['teacher-apk', 'teacher-exe'],
+      )
+      eq(
+        '🔴 A12：而且两颗绑的就是库里存着的那两列（撤下只写 `enabled`，地址留在库里当下次预填）',
+        rel.releaseDownloads(offSlots).map((d) => d.url).join(' · '),
+        'https://a/x.apk · https://a/x.exe',
+      )
+
+      /* 🧪 反向对照 C（**期望值变了的那一条**）：
+         从前是"只翻 `enabled` ⇒ 3 颗 → 0 颗"；现在**只翻 `enabled` ⇒ 按钮数不变**，
+         变的只有**公告**那一层（有/无）。这一条同时钉住两件事：
+           · 按钮不再随公告状态变化（新口径）；
+           · 公告那一层仍然跟着 `enabled` 走（老口径那一半没丢）。 */
+      const onRow = { ...row, enabled: true }
+      const onSlots = rel.releaseSlotsFromStatus({ read: 'ok', teacher: onRow, classroom: null, downloads: dlOf(onRow) })
+      check(
+        rel.releaseDownloads(offSlots).length === 2 &&
+          rel.releaseDownloads(onSlots).length === 2 &&
+          offSlots.teacher === null &&
+          onSlots.teacher !== null,
+        '🧪 A12 ②-9 反向对照 C：**只翻 `enabled`** ⇒ 按钮 **2 颗 → 2 颗（不变）**，' +
+          '而公告那一层 `null` → 有公告（**变的是公告，不是按钮**）' +
+          '—— 期望值 2026-10-04 从"3 颗 → 0 颗"改成这一条',
+        `撤下：按钮 ${rel.releaseDownloads(offSlots).length} 颗 / 公告 ${offSlots.teacher === null ? '无' : '有'} · ` +
+          `在发：按钮 ${rel.releaseDownloads(onSlots).length} 颗 / 公告 ${onSlots.teacher === null ? '无' : '有'}`,
+      )
+
       check(
         rel.releaseFromRow({ ...row, enabled: true }) !== null,
-        'A12 自证：同一个行把 `enabled` 翻成 true 就**读得到**（上一条不是"这个函数恒回 null"）',
+        'A12 自证：同一行把 `enabled` 翻成 true 就**读得到公告**（上一条不是"这个函数恒回 null"）',
         `enabled:true → urlExe=${rel.releaseFromRow({ ...row, enabled: true })?.urlExe ?? '(null)'}`,
       )
-      /* 🧪 反向对照 C：只翻 `enabled` 那一位，同一套判据必须从 0 颗变 2 颗 */
-      const onSlots = rel.releaseSlotsFromStatus({ read: 'ok', teacher: { ...row, enabled: true }, classroom: null })
-      const offSlots = rel.releaseSlotsFromStatus({ read: 'ok', teacher: row, classroom: null })
+
+      /* 🧪 反向对照 D（**关键**）：地址只放在公告那一层（回话里**没有** `downloads` 那一块）
+         ⇒ 现在**一颗都摆不出来**。谁把 `releaseDownloads()` 改回去读公告那一层，
+         上面"撤下也照样摆出两颗"那一条就会变成 0 颗 ⇒ 当场红。 */
+      const onlyNotice = rel.releaseSlotsFromStatus({ read: 'ok', teacher: onRow, classroom: null })
       check(
-        rel.releaseDownloads(offSlots).length === 0 && rel.releaseDownloads(onSlots).length === 2,
-        '🧪 A12 ②-9 反向对照 C：只把那一行的 `enabled` 从 false 翻成 true ⇒ 同一套判据 0 颗 → 2 颗（证明"撤下 ⇒ 收起"量的是那个开关本身）',
-        `enabled:false → ${rel.releaseDownloads(offSlots).length} 颗 · enabled:true → ${rel.releaseDownloads(onSlots).length} 颗`,
+        keys(rel.releaseDownloads(onlyNotice)).length === 0 && keys(rel.releaseDownloads(onSlots)).length === 2,
+        '🧪 A12 反向对照 D：地址只放在**公告那一层**（回话里没有 `downloads` 那一块）⇒ **0 颗**；' +
+          '放进 `downloads` 那一层 ⇒ 2 颗（证明这两条判据量的是**新字段**，不是"公告还在顺带给"）',
+        `只有公告那一层=${keys(rel.releaseDownloads(onlyNotice)).length} 颗 · 带 downloads=${keys(rel.releaseDownloads(onSlots)).length} 颗`,
       )
     }
   }
@@ -6179,12 +6285,35 @@ section('第二十四节 · A18：「今天」时间轴 —— 真实时长 / �
     let body = blocks.join('\n').replace(/^import .*$/gm, '')
     // 剥类型：**只碰函数签名上的那一处**（`(items: readonly ScheduleItem[]): DayRange | null`），
     // 体和常量一个字都不动 —— 剥多了会把下一行也吃掉，剥少了求值直接 SyntaxError。
-    body = body.replace(
-      /\(([^()]*?)\)\s*:\s*[A-Za-z_$][\w$[\]<>|,.]*(?=\s*\{)/g,
-      (s, params) => `(${params.replace(/:\s*[^,)]+/g, '').trim()})`,
-    )
+    body = body
+      .replace(
+        // 函数签名上的返回值类型 —— `DayRange | null` 里**有空格**，所以按「到 `{` 为止、不跨行」收
+        /\(([^()]*?)\)\s*:\s*[^\n{]*(?=\{)/g,
+        (s, params) => `(${params.replace(/:\s*[^,)]+/g, '').trim()})`,
+      )
+      // ⚠️ 局部变量上的类型注解（`const out: DayGap[] = []` / `let cur: ScheduleItem[] = []`）
+      //   同样要剥 —— 上一版只剥了签名，于是**求值从"Unexpected token ':'"变成
+      //   "Missing initializer in const declaration"**（同一个坑的下一层症状）
+      .replace(/(:\s*(?:readonly\s+)?[A-Za-z_$][\w$[\]]*(?:\[\])*(?:\s*\|\s*[A-Za-z_$][\w$[\]]*(?:\[\])*)*)\s*(?==)/g, '')
     body = body.replace(/^(\s*)export\s+/gm, '$1').replace(/\sas\s+const/g, '')
-    mutate(body) // 反向对照在这里改源码，不是改判据
+
+    /*
+     * 🔴 `mutate` 做的是**变异**（把实现改坏、验证判据会红）。
+     *    所以它拿到的不是裸字符串，而是 `mustReplaceOnce` ——
+     *      · `String.replace(re, …)` **只换第一处**；源码里若有第二处相同文字
+     *        （哪怕在注释里），改到的就是注释而**判据照样绿** ⇒ 对照成了摆设；
+     *      · 这一版三条反向对照正是这么假绿的（`s < curEnd` 的注释里也有一份，
+     *        排在真代码前面）；所以这里强制「恰好一处」，不是 1 处就抛错。
+     */
+    const mustReplaceOnce = (needle, replacement) => {
+      const n = body.split(needle).length - 1
+      if (n !== 1) {
+        throw new Error(`变异目标出现 ${n} 处（必须恰好 1 处）：${JSON.stringify(needle.slice(0, 60))}`)
+      }
+      body = body.replace(needle, replacement)
+    }
+    mutate(body, mustReplaceOnce)
+
     // eslint-disable-next-line no-new-func
     return new Function(
       `${body}
@@ -6231,7 +6360,8 @@ return { toMinutes, AXIS_PAD_MIN, GAP_MIN_MINUTES, dayRange, dayGaps, overlapGro
   {
     let B
     try {
-      B = loadAxis((s) => s.replace('AXIS_PAD_MIN = 30', 'AXIS_PAD_MIN = 600'))
+      B = loadAxis((_s, must) => must('AXIS_PAD_MIN = 30', 'AXIS_PAD_MIN = 600'))
+      check(typeof B.dayRange === 'function', '🧪 A18 ① 变异体求值成功（变异没生效的话，判据会假绿）', `typeof = ${typeof B?.dayRange}`)
     } catch {
       B = {}
     }
@@ -6270,7 +6400,7 @@ return { toMinutes, AXIS_PAD_MIN, GAP_MIN_MINUTES, dayRange, dayGaps, overlapGro
   {
     let B
     try {
-      B = loadAxis((s) => s.replace('GAP_MIN_MINUTES = 10', 'GAP_MIN_MINUTES = 0'))
+      B = loadAxis((_s, must) => must('GAP_MIN_MINUTES = 10', 'GAP_MIN_MINUTES = 0'))
     } catch {
       B = {}
     }
@@ -6309,7 +6439,7 @@ return { toMinutes, AXIS_PAD_MIN, GAP_MIN_MINUTES, dayRange, dayGaps, overlapGro
   {
     let B
     try {
-      B = loadAxis((s) => s.replace('if (cur.length && s < curEnd)', 'if (cur.length && s <= curEnd)'))
+      B = loadAxis((_s, must) => must('if (cur.length && s < curEnd)', 'if (cur.length && s <= curEnd)'))
     } catch {
       B = {}
     }
@@ -6326,9 +6456,9 @@ return { toMinutes, AXIS_PAD_MIN, GAP_MIN_MINUTES, dayRange, dayGaps, overlapGro
     const AXIS = readApp('src/components/ScheduleDayAxis.tsx')
     const PAGE = readApp('src/pages/Schedule.tsx')
     check(
-      AXIS.includes('空闲') && AXIS.includes(`${'{'}g.minutes}{'}'} 分钟`),
+      /空闲\s*\{g\.minutes\}\s*分钟/.test(AXIS),
       'A18 ④ 空档那行写的是「空闲 N 分钟」—— 让老师一眼看出**这段时间能安排事**',
-      `含「空闲」=${AXIS.includes('空闲')}`,
+      `实测 ${/空闲\s*\{g\.minutes\}\s*分钟/.test(AXIS)}（找的是 JSX 里的 \`空闲 {g.minutes} 分钟\`）`,
     )
     check(AXIS.includes('时间重叠'), 'A18 ④ 重叠那行有「时间重叠」标记（叠在一起看不见就等于没报）', `含「时间重叠」=${AXIS.includes('时间重叠')}`)
     check(
