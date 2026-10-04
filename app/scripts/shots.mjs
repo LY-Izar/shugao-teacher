@@ -13589,16 +13589,23 @@ await withLock(async () => {
         }
       }
       /** 同一条判据（反向对照要喂**它同一份**，不许另写一套口径） */
+      /*
+       * 🔴 `at` 的格式 2026-10-04 变了：**要带年份**（`2026年10月4日`）。
+       *   为什么期望值变了：用户当天要求"多久出的应用版也写进去" —— 只写"10月4日"的话，
+       *   跨年之后这一屏就看不出先后（而这一屏的全部信息量就是"哪天改了什么"）。
+       *   ⇒ 从 `^\d{1,2}月\d{1,2}日$` 收紧成 `^\d{4}年\d{1,2}月\d{1,2}日$`
+       *   （**变严了**，不是放宽：少写年份现在会红）。
+       */
       const topWrittenRight = (t) =>
         t.items.length >= 1 &&
         t.items.every((s) => s.length >= MIN_ITEM_CHARS) &&
         t.at !== null &&
-        /^\d{1,2}月\d{1,2}日$/.test(t.at)
+        /^\d{4}年\d{1,2}月\d{1,2}日$/.test(t.at)
       const T = topOf(logSrc)
       const shortest = T.items.length ? Math.min(...T.items.map((s) => s.length)) : 0
       check(
         topWrittenRight(T),
-        `🔴 S25 ⑥ 顶部那一段（${top ? top[1] : '?'}）**真的写了改动**（不是占位一行）：≥1 条，且**每一条那句话本身 ≥ ${MIN_ITEM_CHARS} 个字符**；发版日按"落进仓库的那一天"填`,
+        `🔴 S25 ⑥ 顶部那一段（${top ? top[1] : '?'}）**真的写了改动**（不是占位一行）：≥1 条，且**每一条那句话本身 ≥ ${MIN_ITEM_CHARS} 个字符**；发版日按"落进仓库的那一天"填、**且要带年份**（如 \`2026年10月4日\`）`,
         `条目 ${T.items.length} 条（纯文本 ${T.plain.length} + 带标 ${T.obj.length}，最短一条 ${shortest} 字）· at=${T.at ?? '（没有）'}`,
       )
       /* 🧪 反向对照：清空条目 / 换成占位一行 ⇒ **同一条判据**当场判假（放宽的是条数，不是"什么都不写也算"） */
@@ -13754,7 +13761,16 @@ await withLock(async () => {
       )
       /* B：往更新日志里塞一个禁词 → "不出现"那条必须判假 */
       const bannedOf = (s) => banned.filter((w) => s.includes(w))
-      const poisoned = logSrc.replace('从这一版起，平台正式给全校用', `从这一版起，平台正式给全校用（结束${banned[0]}）`)
+      /*
+       * ⚠️ **锚点 2026-10-04 跟着更新日志的"简洁化"改过一次**（red 过一次，记下来）：
+       *   原来锚的是整句「从这一版起，平台正式给全校用（此前只在少数几位老师之间试用）」，
+       *   重写后那句变成了「新增：平台从这一版起正式给全校用，有了名字「树高教务通」和校徽」
+       *   ⇒ `String.replace` 找不到 ⇒ `poisoned === logSrc` ⇒ **对照自己先失效**
+       *   （"塞过=0 处"就是它的症状，与 S25 对照 E 那个"摘错地方"是同一类坑）。
+       *   ⇒ 锚点只取**现在真的在**的那一截；以后改文案要连着这行一起看。
+       */
+      const poisonAnchor = '平台从这一版起正式给全校用'
+      const poisoned = logSrc.replace(poisonAnchor, `${poisonAnchor}（结束${banned[0]}）`)
       check(
         bannedOf(logSrc).length === 0 && bannedOf(poisoned).length === 1 && poisoned !== logSrc,
         '🧪 S25 对照 B：往 `1.0.0` 段里**塞一个禁词** → 同一个判据当场判假（⑦ 真的在扫屏上那句话）',
