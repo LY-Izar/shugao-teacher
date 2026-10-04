@@ -16,7 +16,8 @@ import { useStore, useToast } from '../data/store'
 import { loadClassMembers, loadClassSubjects } from '../data/remote'
 import { WEEKDAY_TEXT, type ScheduleItem, type ScheduleKind } from '../data/types'
 import { goBackOr } from '../lib/back'
-import { notifyPermission, readNotifyPermission, requestNotify, shellPlatform } from '../lib/notify'
+import { notifyPermission, readNotifyPermission, requestNotify } from '../lib/notify'
+import { shellPlatform } from '../lib/classroomShell'
 import {
   REMIND_BEFORE,
   checkScheduleConflicts,

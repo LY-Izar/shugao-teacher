@@ -15,6 +15,8 @@ import { docxToText } from '../lib/docx'
 import { PERIOD_SLOTS, matchClassName, parseScheduleRows, parseScheduleText } from '../lib/scheduleParse'
 import { normalizeTime, toMinutes } from '../lib/schedule'
 import { xlsxToRows } from '../lib/xlsx'
+// 「建议在电脑上打开这一页」按端收掉 —— exe 本身就是台电脑（见那句的注释）
+import { shellPlatform } from '../lib/classroomShell'
 
 type Draft = {
   key: string
@@ -228,7 +230,16 @@ export function ScheduleBatch({
           </Button>
         </div>
         <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 8, lineHeight: 1.65 }}>
-          支持 .xlsx / .docx / .csv / .txt。表格有十几列时建议在电脑上打开这一页。
+          支持 .xlsx / .docx / .csv / .txt。
+          {/*
+            🔴 后半句 2026-10-04 按端收掉：它写着「建议在电脑上打开这一页」——
+               而**教师端 exe 本身就是台电脑**，让老师在电脑上"换到电脑上打开"
+               是自相矛盾的话（比没用更糟：会让人以为自己用错了东西）。
+            ⚠️ 网页版和 apk 保留：手机上确实该建议换电脑（表格十几列时手机上没法看）。
+            ⚠️ 网页版**无法**判断是不是在电脑上（也不该拿窗口宽度去猜），
+               所以这句保持"对手机说"的口径 —— 电脑上的网页用户看到也不算错。
+          */}
+          {shellPlatform() !== 'electron' && '表格有十几列时建议在电脑上打开这一页。'}
         </p>
         <button
           type="button"

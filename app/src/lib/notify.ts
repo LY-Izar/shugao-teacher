@@ -39,8 +39,11 @@ interface ShellNotifyBridge {
   notifyPermission?(): Promise<'granted' | 'default' | 'unsupported'>
   /** apk 有；exe 没有 */
   openNotificationSettings?(): Promise<boolean>
-  /** `'electron'` | `'capacitor'`。exe 一直有，apk 2026-10-04 补上 —— 文案按端分支要用 */
-  platform?: string
+  /**
+   * ⚠️ 这里**故意没有** `platform` 字段：通知这一层不读它。
+   * 读它的是 `lib/classroomShell.ts` 的 `shellPlatform()` ——
+   * 留一份在两处正是"声明了没人用"（本项目为此栽过四次）。
+   */
 }
 
 /** 桥接层在不在。与 `fileOut.ts` 用**同一个对象**（`window.__shell_out`）。 */
@@ -244,22 +247,17 @@ export async function notifyAsync(title: string, body: string): Promise<boolean>
 }
 
 /**
- * 这个壳是哪一端 —— **文案按端分支要用的唯一信号**。
+ * 🔴 `platform` 已经搬到 `lib/classroomShell.ts` 的 `shellPlatform()`（2026-10-04）。
  *
- * · `'electron'`   → 教师端 / 教室端 exe（`preload.js` 一直有）
- * · `'capacitor'`   → apk（`_src/shell-bridge-apk.js` 2026-10-04 补上；
- *                     在那之前 apk 和 exe **同值**，所以"手机的系统设置"
- *                     这句话在教师端 exe 上原样显示 —— 那是错的）
- * · `null`          → 网页版（或桥接层没带这个字段）
+ * 搬的理由：它是**壳身份**，不是通知的事 —— 留在这儿会让 `Settings` / `changelog`
+ * 为了判断"这是哪一端"去 import 通知模块，而它们跟通知毫无关系。
+ * ⚠️ 顺带把这个接口里的 `platform?` 字段**删掉**了（通知这一层不读它，
+ *    留着就是"声明了没人用"—— 本项目刚为这个模式栽过四次）。
+ * ⚠️ `Schedule.tsx` 的 import 跟着改到 `classroomShell`，**没有留 re-export**：
+ *    留一个转发会让下一个人继续从错误的模块拿这个能力。
  *
- * ⚠️ 老包（补 `platform` 之前打的 apk）会回 `null` ⇒ 按**网页**分支走文案，
- *    这是安全的降级（不会说出"手机"这个词之外的假话）。
+ * @returns 见 `classroomShell.shellPlatform()`。
  */
-export function shellPlatform(): 'electron' | 'capacitor' | null {
-  const p = shell()?.platform
-  if (p === 'electron' || p === 'capacitor') return p
-  return null
-}
 
 /* ============================================================
    ⚠️ 判据为什么**不能**写成「有没有 Capacitor」（留着，别改回去）

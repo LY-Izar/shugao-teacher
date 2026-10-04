@@ -30,6 +30,10 @@ import {
 } from '../lib/session'
 import { APP_VERSION } from '../lib/version'
 import { CHANGELOG } from '../lib/changelog'
+// 文案按端分支用的**唯一信号**（`only: 'desktop' | 'mobile'` 那套的判据）
+import { shellPlatform } from '../lib/classroomShell'
+// 判据用得到的另一路：`__shell_out` 在不在（见「教室端」那块的注释）
+import { inShell } from '../lib/fileOut'
 import {
   backupSummary,
   downloadJson,
@@ -859,7 +863,28 @@ export default function Settings() {
           （见 功能设计与不变量.md §十七 17.3）。
         */}
 
-        {/* 教室端 */}
+        {/* 教室端
+            🔴🔴 2026-10-04 按端分开（扫「exe 与 apk 文案有没有分开」扫出来的三处）。
+
+            病根：这三样原来**两端逐字同文案**，而壳里它们给不出能用的东西 ——
+              · 地址 = `${window.location.origin}/classroom`
+                · exe origin = `app://-`（`_src/desktop/app-protocol.mjs:11`）
+                · apk origin = `https://localhost`（同文件 `:10`）
+                ⇒ **复制出来谁也打不开**，而上一行还写着「在教室一体机上用
+                  Edge / Chrome 打开下面这个地址」—— 一条**执行不了的指示**。
+              · 「在新标签页打开教室端」`window.open('/classroom','_blank')`
+                · exe：`main-teacher.js:182` 的 `setWindowOpenHandler`
+                  **对所有 url 一律 `return {action:'deny'}`**（非 http 的连
+                  `shell.openExternal` 都不走）⇒ **点了什么都不发生**
+                · apk：WebView 没有标签页这个概念（⚠️ 这半句是**推断**，
+                  没有真机实测；但"壳里没有标签"是架构事实，不是行为猜测）
+            ⇒ 壳里**三样一起收掉**，只留一句站得住的话。
+
+            ⚠️ 判据用 `inShell()`（`__shell_out` 在不在）**而不是** `shellPlatform()`：
+               老 apk（补 `platform` 之前打的那批）`shellPlatform()` 回 `null`
+               ⇒ 按网页分支走 ⇒ **又会把 `https://localhost` 摆出来给人抄** ✗。
+               `inShell()` 对新老壳都成立 ⇒ 这一块不受"老包"影响。
+        */}
         <div className="mb-4">
           <Sect>教室端</Sect>
           <Panel bodyClass="p-3">
@@ -869,47 +894,59 @@ export default function Settings() {
             >
               <IconWifi size={15} />
               <span>
-                在教室一体机上用 <b>Edge / Chrome</b> 打开下面这个地址，点一次「启动置顶小窗」即可。
-                小窗会浮在全屏的新教育平台之上，显示当前题号与正确率。
+                {inShell() ? (
+                  /* 壳里：不说地址、不提新标签页 —— 这句不承诺任何一件
+                     本机做不到的事（置顶小窗那半句也是网页版才有的动作）。 */
+                  <>教室端装在教室一体机上，在那台机器上打开那个程序就行。</>
+                ) : (
+                  <>
+                    在教室一体机上用 <b>Edge / Chrome</b> 打开下面这个地址，点一次「启动置顶小窗」即可。
+                    小窗会浮在全屏的新教育平台之上，显示当前题号与正确率。
+                  </>
+                )}
               </span>
             </div>
-            <div
-              className="flex items-center gap-2 p-3"
-              style={{
-                background: 'var(--color-surface2)',
-                border: '1px solid var(--color-line)',
-                borderRadius: 4,
-              }}
-            >
-              <code
-                className="flex-1 truncate"
-                style={{ fontSize: 12.5, fontFamily: 'var(--font-mono)', color: 'var(--color-ink2)' }}
-              >
-                {typeof window !== 'undefined'
-                  ? `${window.location.origin}/classroom`
-                  : '/classroom'}
-              </code>
-              <Button
-                size="sm"
-                onClick={() => {
-                  const url = `${window.location.origin}/classroom`
-                  void navigator.clipboard?.writeText(url)
-                  push({ text: '已复制教室端地址', tone: 'ok' })
-                }}
-              >
-                复制
-              </Button>
-            </div>
-            <div className="mt-2.5 flex items-center gap-2">
-              <Button
-                size="sm"
-                block
-                icon={<IconChevronRight size={14} />}
-                onClick={() => window.open('/classroom', '_blank')}
-              >
-                在新标签页打开教室端
-              </Button>
-            </div>
+            {!inShell() && (
+              <>
+                <div
+                  className="flex items-center gap-2 p-3"
+                  style={{
+                    background: 'var(--color-surface2)',
+                    border: '1px solid var(--color-line)',
+                    borderRadius: 4,
+                  }}
+                >
+                  <code
+                    className="flex-1 truncate"
+                    style={{ fontSize: 12.5, fontFamily: 'var(--font-mono)', color: 'var(--color-ink2)' }}
+                  >
+                    {typeof window !== 'undefined'
+                      ? `${window.location.origin}/classroom`
+                      : '/classroom'}
+                  </code>
+                  <Button
+                    size="sm"
+                    onClick={() => {
+                      const url = `${window.location.origin}/classroom`
+                      void navigator.clipboard?.writeText(url)
+                      push({ text: '已复制教室端地址', tone: 'ok' })
+                    }}
+                  >
+                    复制
+                  </Button>
+                </div>
+                <div className="mt-2.5 flex items-center gap-2">
+                  <Button
+                    size="sm"
+                    block
+                    icon={<IconChevronRight size={14} />}
+                    onClick={() => window.open('/classroom', '_blank')}
+                  >
+                    在新标签页打开教室端
+                  </Button>
+                </div>
+              </>
+            )}
           </Panel>
         </div>
 
@@ -1138,9 +1175,22 @@ export default function Settings() {
                     marginTop: 2,
                   }}
                 >
-                  {log.items.map((t) => (
-                    <li key={t}>{t}</li>
-                  ))}
+                  {/*
+                    按端过滤（2026-10-04）：`only` 的两档准确含义写在
+                    `lib/changelog.ts` 的 `ChangeLogItem` 注释里 —— 那是**唯一**定义处，
+                    这里只负责照着执行，别在这儿改判据。
+                    ⚠️ 不带 `only` 的条目**两端都显示**（默认值，不许动成"默认隐藏"）。
+                  */}
+                  {log.items
+                    .filter((it) => {
+                      if (typeof it === 'string' || !it.only) return true
+                      const p = shellPlatform()
+                      return it.only === 'desktop' ? p === 'electron' : p !== 'electron'
+                    })
+                    .map((it) => (typeof it === 'string' ? it : it.text))
+                    .map((t) => (
+                      <li key={t}>{t}</li>
+                    ))}
                 </ul>
               </div>
             ))}

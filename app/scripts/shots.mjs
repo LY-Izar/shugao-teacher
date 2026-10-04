@@ -12746,6 +12746,53 @@ await withLock(async () => {
         `功能设计与不变量.md：字数 ${docSrc.length} · 两个词 ${banned.map((w) => (docSrc.includes(w) ? '有' : '没有')).join('/')}`,
       )
 
+      /* ============================================================
+         🔴 更新日志按端分流（`ChangeLogItem.only`，2026-10-04）
+         ------------------------------------------------------------
+         背景：「桌面版自带一个备份文件夹：装上就每 5 分钟自动写一份…」
+         原来在**教师端 apk 上照显**，而 apk 里 `hasBuiltinBackupDir()` 恒 false
+         —— 没有那个文件夹、也没有那张卡片，却写着「照着拷到 U 盘就行」。
+
+         🔴🔴 这里钉**两件事，少一件就等于没钉**：
+           ① 条目**真的打了标**（把标去掉 → 当场红）
+           ② Settings 渲染那一处**真的在读它**（`it.only === 'desktop'`）
+              —— 只在类型上声明、渲染不读 ⇒ 屏上照样显示，
+                 而门禁一条都不会响。本项目为这个模式栽过四次：
+                 **声明了没人用 / 桥接层给了答案业务层没读。**
+         ============================================================ */
+      /* ⚠️ `settingsSrc` 是本作用域**已有的那份**（`:12520`，`noComment` 剔过注释）——
+           别在这里再 `readSrc` 一份：① 重复声明直接 SyntaxError；
+           ② 复用带 `noComment` 的那份更硬 —— 光在注释里写 `it.only === 'desktop'`
+             **骗不过它**（本条断言必须由真代码满足）。 */
+      /** 从**真源码**里把那个标读出来 —— 不在这里另写一份"应该是什么"的真源。 */
+      const onlyOf = (src) => (/备份文件夹[^']*',\s*only:\s*'([^']+)'/.exec(src) ?? [])[1] ?? null
+      /** 判据本体：与 `Settings.tsx` 渲染那处**逐字同义**（改一处必须同步改另一处）。 */
+      const changelogVisible = (platform, only) =>
+        !only ? true : only === 'desktop' ? platform === 'electron' : platform !== 'electron'
+      const readsOnly =
+        /log\.items[\s\S]{0,600}\.filter\(/.test(settingsSrc) && /it\.only === 'desktop'/.test(settingsSrc)
+      const onlyTag = onlyOf(logSrc)
+      check(
+        onlyTag === 'desktop' &&
+          readsOnly &&
+          changelogVisible(null, onlyTag) === false &&
+          changelogVisible('electron', onlyTag) === true,
+        '🔴 S25 ⑧ 更新日志按端分流：那条「桌面版备份文件夹」打了标 **且 Settings 渲染那一处真的在读它**（打标 + 读，两件事都成立）· 网页版不显示、exe 显示',
+        `标=${onlyTag ?? '（没打）'} · 渲染在读=${readsOnly} · 网页可见=${changelogVisible(null, onlyTag)} · exe 可见=${changelogVisible('electron', onlyTag)}`,
+        '反向对照：🧪 对照 E（把标去掉 → 同一个判据当场翻转）',
+      )
+      /* 🧪 对照 E：把标从**真源码**里摘掉 → 判据必须翻转，否则 ⑧ 是恒真的摆设 */
+      const logUntagged = logSrc.replace(/,\s*only:\s*'desktop'/, '')
+      const onlyUntagged = onlyOf(logUntagged)
+      check(
+        logUntagged !== logSrc &&
+          onlyUntagged === null &&
+          changelogVisible(null, onlyTag) === false &&
+          changelogVisible(null, onlyUntagged) === true,
+        '🧪 S25 对照 E：把 `only:` 那个标去掉 → **同一个判据**下网页版从"不显示"翻成"显示"（⑧ 不是恒真的摆设）',
+        `真源标=${onlyTag} · 去标后=${onlyUntagged ?? 'null'} · 网页 ${changelogVisible(null, onlyTag)} → ${changelogVisible(null, onlyUntagged)} · 源码真被改过=${logUntagged !== logSrc}`,
+      )
+
       /* ---------- 🧪 反向对照（**实测跑红**，见 §S25 报告） ---------- */
       /* A：同一个 sourceCheck，只把 version.ts 的号改掉 → "三处一致"必须判假 */
       const sourceCheckVer = (verSrcIn, pkgVer) => {

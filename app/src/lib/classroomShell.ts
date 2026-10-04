@@ -58,6 +58,20 @@ export type ShellRole = 'classroom' | 'teacher' | 'unknown'
 
 interface ShellBridge {
   appRole?: string
+  /**
+   * 哪一端的壳（`'electron'` | `'capacitor'`）—— 网页版没有这个字段。
+   *
+   * 🔴 **为什么它这么晚才补**（2026-10-04 扫「exe 与 apk 文案有没有分开」时发现）：
+   *   exe 的 `_src/desktop/preload.js` **一直带着** `platform: 'electron'`，
+   *   而 apk 的 `_src/shell-bridge-apk.js` **原来没有** ⇒ 页面眼里
+   *   **apk 和教师端 exe 逐字同值**（都是 `appRole:'teacher'`、都没有 platform）
+   *   ⇒ **没法按端分支文案**，于是像「这条要走**手机的**系统设置」在教师端 exe 上
+   *     原样显示（Windows 上弹"手机"）、「桌面版自带备份文件夹」在 apk 上照显。
+   *
+   * ⚠️ **补 `platform` 之前打的那些老 apk 会回 `null`** ⇒ 按**网页**那一支走文案。
+   *   这是刻意的：那个降级路径说的是"这台设备"这类中性话，不会说出假话。
+   */
+  platform?: string
 }
 
 function bridge(): ShellBridge | null {
@@ -80,6 +94,32 @@ export function shellRole(): ShellRole {
 /** 现在是不是教室端那个 exe */
 export function isClassroomShell(): boolean {
   return shellRole() === 'classroom'
+}
+
+/** 见 `shellPlatform()`。 */
+export type ShellPlatform = 'electron' | 'capacitor' | null
+
+/**
+ * 现在跑在**哪种壳**里 —— 文案按端分支的**唯一信号**（2026-10-04 加）。
+ *
+ * · `'electron'` → 两个 exe（教室端 / 教师端）
+ * · `'capacitor'` → 教师端 apk
+ * · `null`        → **网页版**，**以及补 `platform` 之前打的老 apk**（见上面字段的注释）
+ *
+ * 🔴 **判据必须是"认得这两个字面量"，不是"有没有 platform 这个字段"**：
+ *   未知的第三个值（以后加了别的壳）会落进 `null` = 走网页那一支的中性文案，
+ *   而不是猜一个端出来。**认不出就说认不出。**
+ *
+ * ⚠️ 用它之前先问一句：**这句话在另一端是不是错的？**
+ *   只有"只在一端成立"的句子才需要分支（例：`手机的` / `Windows 的`）；
+ *   "去教室那台机器上做某事"这种句子**两端都成立**，不许顺手加分支 ——
+ *   那会把一句本来对的话切成两句半对的话。
+ *
+ * ⚠️ 别在这儿加别的能力（它只回答"哪一端"，不读别的字段）。
+ */
+export function shellPlatform(): ShellPlatform {
+  const p = bridge()?.platform
+  return p === 'electron' || p === 'capacitor' ? p : null
 }
 
 /**
