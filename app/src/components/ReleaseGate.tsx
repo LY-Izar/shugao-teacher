@@ -27,7 +27,7 @@
    ============================================================ */
 
 import type React from 'react'
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useLocation } from 'react-router-dom'
 import type { MaintenanceStatus } from '../lib/maintenance'
 import { ReleaseSlotsContext, useRelease, type ReleaseView } from '../lib/useRelease'
@@ -36,6 +36,11 @@ import {
   RELEASE_BTN_LATER,
   RELEASE_CLASSROOM_HINT,
 } from '../lib/release'
+import {
+  canDownloadAndInstall,
+  downloadAndInstall,
+  openInstallPermissionSettings,
+} from '../lib/fileOut'
 import { Emblem } from './Emblem'
 import { IconDownload, IconSpark, IconX } from './icons'
 import { useStore } from '../data/store'
@@ -46,6 +51,16 @@ import { useStore } from '../data/store'
  *    （与 `MaintenanceGate.tsx` 那张表同一个做法）。
  */
 const RELEASE_EXEMPT_PATHS = ['/login', '/admin'] as const
+
+/**
+ * 「下载最新版」在**没授权**时说的那一句（Android 8+ 要用户对这个来源单独允许装应用）。
+ * ⚠️ 文案纪律（`AGENTS.md` §七）：只回答"这里是什么、我能做什么"，**不解释实现**、
+ *    不写"未知来源""安装包"这类系统弹窗词（那几个词在 `lib/release.ts` 的禁词表里）。
+ */
+const INSTALL_HINT_PERM = '还没允许从这里安装应用。已打开系统设置，打开那个开关后回来再点一次「下载最新版」。'
+
+/** 别的失败（下载断了 / 没地方放…）说一句人话 —— 老师点了**不许没反应** */
+const INSTALL_HINT_FAIL = '没下下来。已改用浏览器下载。'
 
 export function ReleaseGate({
   status,
@@ -116,11 +131,62 @@ export function ReleaseGate({
 function ReleaseScreen({ view, onLater }: { view: ReleaseView; onLater: () => void }) {
   const notice = view.notice
   const school = useStore((s) => s.teacher?.school ?? '')
+
+  /**
+   * 🔴 **应用内更新**（2026-10-05 施工单 `施工单-版本更新提示.md` §八，用户确认这一条是
+   *    **教师端 apk** 的事）：apk 里点了「下载最新版」，原来是**浏览器下载完就完了** ——
+   *    老师还得自己去「文件管理」里翻出那个 apk 才装得上。能拿到壳的那个方法时改走壳
+   *    （原生下载 → 系统安装界面）；**拿不到就保持现在的行为**（下面那颗 `<a>` 照旧）。
+   *
+   * ⚠️ **网页版与两个 exe 一个字都不许变**：桥接方法只在 apk 新壳里有 ⇒
+   *    `canDownloadAndInstall()` 在那边恒 false ⇒ 第一句就 return，原来的链接照旧。
+   * 🔴 **真机未验**：本机没有安卓设备 —— 这条路只做过静态判据（`nav-checks` 第二十六节），
+   *    真机验收只能由用户在手机上做。
+   * ⚠️ 三个 hook **必须放在下面那句 early-return 之前**（与 `useStore` 同一条理由）：
+   *    放在它后面就是"条件调用 hook"，`notice` 一旦从有到无，React 当场报 hook 数不对。
+   */
+  const fallbackClick = useRef(false)
+  const downloadAnchor = useRef<HTMLAnchorElement>(null)
+  /** 空串 = 没话说（网页版 / 两个 exe 恒空串 ⇒ 屏上不会多出任何东西） */
+  const [installHint, setInstallHint] = useState('')
+
   if (!notice) return null
 
   /** 🔴 能不能关，只认服务端那一位（`canClose` 就是 `!force`） */
   const force = !view.canClose
   const classroom = view.target === 'classroom'
+
+  const onDownloadClick = async (e: React.MouseEvent<HTMLAnchorElement>) => {
+    /*
+     * 这一下是**我们自己点出来的**（下面那条退回浏览器）：放它走。
+     * 没有这个闸，退回分支点回来又被同一个 handler 拦住 ⇒ 老师点完什么都没发生
+     * —— 那正是这一轮要修的毛病。
+     */
+    if (fallbackClick.current) {
+      fallbackClick.current = false
+      return
+    }
+    // 拿不到桥接 ⇒ 立刻返回、**什么都不做** = 原来的 `<a href target="_blank">` 行为
+    if (!canDownloadAndInstall()) return
+    e.preventDefault()
+    const r = await downloadAndInstall(view.url)
+    if (r.ok) {
+      // 系统安装界面已经起来了：不用多说（老师看得到那两下）
+      setInstallHint('')
+      return
+    }
+    if (r.needPermission) {
+      // 🔴 没授权**不许静默**：说一句人话 + 引导去系统设置（那条退路也还在）
+      setInstallHint(INSTALL_HINT_PERM)
+      await openInstallPermissionSettings()
+      return
+    }
+    // 别的失败：**退回当前行为**（把那个 https 链接交给浏览器），并且明说已经退了
+    setInstallHint(r.why ? `${r.why}已改用浏览器下载。` : INSTALL_HINT_FAIL)
+    fallbackClick.current = true
+    downloadAnchor.current?.click()
+  }
+
   const btnStyle: React.CSSProperties = {
     display: 'inline-flex',
     alignItems: 'center',
@@ -132,13 +198,17 @@ function ReleaseScreen({ view, onLater }: { view: ReleaseView; onLater: () => vo
   const buttons = (
     <div className={classroom ? 'flex items-center gap-4' : 'flex items-center gap-2'}>
       {view.url ? (
-        /* 🔒 只显示不执行：`target="_blank"` + `noreferrer`（施工单 §六的安全口径） */
+        /* 🔒 只显示不执行：`target="_blank"` + `noreferrer`（施工单 §六的安全口径）。
+           🆕 2026-10-05：apk 新壳里**才**有那条"下载完调起安装器"的路（onClick 里第一句
+           就是"拿不到桥接就什么都不做"）⇒ 网页版与两个 exe 的这颗按钮行为不变。 */
         <a
+          ref={downloadAnchor}
           className="btn btn-primary"
           style={btnStyle}
           href={view.url}
           target="_blank"
           rel="noreferrer"
+          onClick={onDownloadClick}
           data-release-download
         >
           <IconDownload size={classroom ? 22 : 15} />
@@ -187,6 +257,12 @@ function ReleaseScreen({ view, onLater }: { view: ReleaseView; onLater: () => vo
           {RELEASE_CLASSROOM_HINT}
         </div>
         <div style={{ marginTop: 26 }}>{buttons}</div>
+        {/* 只在 apk 上、点了下载之后才出现（网页版 / 两个 exe 恒不渲染） */}
+        {installHint ? (
+          <div style={{ fontSize: 20, color: 'var(--color-ink2)', marginTop: 14 }} data-release-install-hint>
+            {installHint}
+          </div>
+        ) : null}
       </div>
     )
   }
@@ -233,6 +309,16 @@ function ReleaseScreen({ view, onLater }: { view: ReleaseView; onLater: () => vo
             >
               {notice.note}
             </div>
+            {/* 只在 apk 上、点了下载之后才出现（网页版 / 两个 exe 恒不渲染） */}
+            {installHint ? (
+              <div
+                className="mt-2"
+                style={{ fontSize: 12.5, lineHeight: 1.7, color: 'var(--color-ink2)' }}
+                data-release-install-hint
+              >
+                {installHint}
+              </div>
+            ) : null}
           </div>
           {/* 🔴 只有选择性那一档有关闭 × —— 强制那一档**一个能关的落点都没有** */}
           {view.canClose ? (

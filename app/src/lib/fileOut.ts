@@ -30,6 +30,19 @@
    结果就是网页分支被壳的代码接管，而那里根本没有壳。
    ============================================================ */
 
+/**
+ * 壳侧「下载完调起系统安装器」的回话（**只有 apk 新壳会回**）。
+ *   · `ok:true` —— 系统安装界面已经起来了
+ *   · `ok:false` + `needPermission:true` —— 这一来源还没被允许装应用（Android 8+）
+ *   · `ok:false` + `why` —— 下载/安装没成，`why` 是**能给人看**的话
+ */
+export interface ShellInstallResult {
+  ok?: boolean
+  needPermission?: boolean
+  why?: string
+  unsupported?: boolean
+}
+
 /** 壳那边（Electron preload / Capacitor 原生插件）暴露的能力。字段全部可选 —— 网页上整个对象不存在 */
 interface ShellBridge {
   saveBlob?(filename: string, blob: Blob): Promise<'saved' | 'cancelled' | 'failed'>
@@ -43,6 +56,15 @@ interface ShellBridge {
    */
   saveToBackupDir?(filename: string, blob: Blob): Promise<{ ok: boolean; path?: string; why?: string }>
   backupDir?(): Promise<string | null>
+  /*
+   * 🔴 **应用内更新：下载完调起系统安装器**（2026-10-05 施工单 `施工单-版本更新提示.md` §八）。
+   *   ⚠️ **方法名不许改** —— apk 那一侧的桥接（`_src/shell-bridge-apk.js`）与原生插件
+   *   （`YlxbNativePlugin.downloadAndInstall`）是照着这个名字接的，改了它那边就断。
+   *   ⚠️ **只有 apk 的新壳有这两个**：两个 exe 与网页版**都没有** ⇒ `canDownloadAndInstall()`
+   *   恒 false ⇒ 调用方照旧走"打开那个 https 链接"，行为一字不变。
+   */
+  downloadAndInstall?(url: string): Promise<ShellInstallResult>
+  openInstallPermissionSettings?(): Promise<boolean>
 }
 
 function shell(): ShellBridge | null {
@@ -223,5 +245,74 @@ export async function saveToBuiltinBackupDir(
       ok: false,
       why: e && typeof e === 'object' && 'message' in e ? String((e as { message: unknown }).message) : '备份文件夹写不进去。',
     }
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   🔴🔴 **应用内更新：下载完调起系统安装器**（2026-10-05 施工单 §八）
+   ------------------------------------------------------------------------
+   用户报的：手机上点更新公告里的「下载最新版」，**浏览器下载完就完了** ——
+   老师还得自己去「文件管理」里翻出那个 apk 才装得上。
+
+   apk 的新壳有这条能力（原生下载到私有目录 → FileProvider → 系统安装界面）；
+   **两个 exe 与网页版都没有** ⇒ `canDownloadAndInstall()` 恒 false ⇒
+   调用方（`components/ReleaseGate.tsx`）照旧走原来的 `<a href target="_blank">`，
+   **一个字都不变**（网页版与两个 exe 的那条路是刻意留着的）。
+
+   ⚠️ 三条物理边界（谁也别指望"自动装好"）：
+     · Android **不许静默安装** ⇒ 最多弹到系统安装界面，老师仍要点两下；
+     · Android 8+ 要用户对这个来源**单独授权**「安装未知应用」⇒ 没授权时回
+       `needPermission:true`，由调用方**说一句人话**并引导去设置（§三.5：不许静默失败）；
+     · **真机未验**（本机没有安卓设备）—— 这段只做过静态自检，真机验收只能由用户做。
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * 这一支壳**带**"下载完调起安装器"吗？（apk 新壳 true；网页版 / 两个 exe / 老 apk false）
+ *
+ * ⚠️ 判据一律是"**桥接对象上这个方法在不在**"，不是"有没有 Capacitor" ——
+ *    与 `saveBlob` 那一段同一个理由（见本文件头）。
+ */
+export function canDownloadAndInstall(): boolean {
+  return typeof shell()?.downloadAndInstall === 'function'
+}
+
+/**
+ * 让壳把安装包下下来并**调起系统安装界面**。
+ *
+ * 拿不到这个方法（网页版 / 两个 exe / 老 apk）→ `{ ok:false, unsupported:true }`，
+ * 调用方据此**保持原来的行为**（把那个 https 链接交给浏览器）。
+ */
+export async function downloadAndInstall(url: string): Promise<ShellInstallResult> {
+  const s = shell()
+  if (!s?.downloadAndInstall) return { ok: false, unsupported: true }
+
+  /*
+   * ⚠️ 这里**不许把失败咽掉**：老师点完什么都不发生 = 这一轮要修的那个毛病本身。
+   *    `why` 拿不到就给一句能给人看的话（空字符串会被界面当成"没话说"）。
+   */
+  try {
+    const r = await s.downloadAndInstall(url)
+    if (r?.ok === true) return { ok: true }
+    return {
+      ok: false,
+      needPermission: r?.needPermission === true,
+      why: r?.why || '没下下来。',
+    }
+  } catch (e) {
+    return {
+      ok: false,
+      why: e && typeof e === 'object' && 'message' in e ? String((e as { message: unknown }).message) : '没下下来。',
+    }
+  }
+}
+
+/** 打开「安装未知应用」那一页（没授权时引导老师去开；拿不到这个方法就回 false） */
+export async function openInstallPermissionSettings(): Promise<boolean> {
+  const s = shell()
+  if (!s?.openInstallPermissionSettings) return false
+  try {
+    return (await s.openInstallPermissionSettings()) === true
+  } catch {
+    return false
   }
 }

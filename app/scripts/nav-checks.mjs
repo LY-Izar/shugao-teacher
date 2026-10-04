@@ -7136,6 +7136,381 @@ return { toMinutes, REMIND_BEFORE, dueRemindersWithSnooze, snoozeMinuteOf, snooz
   }
 }
 
+/* ============================================================
+   第二十六节 · A21：应用内更新 ——「下载完调起系统安装器」（2026-10-05 施工单 §八）
+   ------------------------------------------------------------
+   用户报的：手机上点更新公告里的「下载最新版」，**浏览器下载完就完了** ——
+   老师还得自己去「文件管理」里翻出那个 apk 才装得上。
+   ⇒ 教师端 apk 要：manifest 加 `REQUEST_INSTALL_PACKAGES`（不加永远弹不出安装界面）+
+   FileProvider（Android 7+ 只能给 content 地址）、原生方法 `downloadAndInstall`
+   （下到应用私有目录 → 起系统安装界面）、桥接层按现有约定暴露它；
+   网页侧 `components/ReleaseGate.tsx` **能拿到就走壳、拿不到就保持现在的行为**
+   （那颗 `<a href target="_blank">` 照旧 ⇒ 网页版与两个 exe 一个字都不变）。
+
+   🔴 三条**物理边界**（这一节不假装能验它们）：
+     · Android 不许静默安装（除非设备管理员/系统应用）⇒ 最多弹到系统安装界面，老师仍要点两下；
+     · Android 8+ 要用户对这个来源单独授权「安装未知应用」⇒ 没授权时原生回
+       `needPermission:true`，网页侧说一句人话 + 引导去系统设置（**不许静默**）；
+     · 🔴 **真机未验** —— 本机没有安卓设备，这一节全是**静态**判据。
+       真机验收只能由用户做（见本节末尾那条"怎么验"）。
+
+   ⚠️ 壳那一侧不在本仓库（隔壁打包工程），所以照 `shots.mjs:8634` 的先例钉**绝对路径**，
+      并且**找不到就是红**（静默跳过 = 这一节变成永远为绿的摆设）。
+   ============================================================ */
+section('第二十六节 · A21：应用内更新（下载完调起安装器）—— manifest / FileProvider / 原生方法 / 网页退回分支')
+
+{
+  /** 剥注释（照 A19/A20 的写法）—— 判据只许看**真代码**（注释里写"不许用某个东西"不算命中） */
+  const strip = (s) =>
+    String(s)
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/(^|[^:'"`\w])\/\/[^\n]*/gm, '$1')
+  /** XML 的注释是 `<!-- -->`（与 JS 那种块注释写法不同）⇒ 单独剥一层；文件路径那一类判据两层都剥 */
+  const stripXml = (s) => String(s).replace(/<!--[\s\S]*?-->/g, '')
+  const stripAll = (s) => strip(stripXml(s))
+
+  /** 🔴 反向对照的前置：目标串必须**恰好出现一次**再替换（`AGENTS.md` §三.2） */
+  const once = (t, s) => t.split(s).length - 1
+  const oneEdit = (t, from, to) =>
+    once(t, from) === 1 ? { ok: true, n: 1, text: t.replace(from, to) } : { ok: false, n: once(t, from), text: t }
+
+  /* ---------------- 读壳那一侧（本仓库之外） ---------------- */
+  const PACK = 'C:\\Users\\Administrator\\Desktop\\树高教务通打包'
+  const MANIFEST_REL = '_src/android/app/src/main/AndroidManifest.xml'
+  const PATHS_REL = '_src/android/app/src/main/res/xml/file_paths.xml'
+  const PLUGIN_REL = '_src/android/app/src/main/java/com/shugao/jiaowu/YlxbNativePlugin.java'
+  const BRIDGE_REL = '_src/shell-bridge-apk.js'
+  const JAVA_DIR = join(PACK, '_src/android/app/src/main/java/com/shugao/jiaowu')
+  const shellRead = (rel) => {
+    const p = join(PACK, rel)
+    return existsSync(p) ? readFileSync(p, 'utf8') : ''
+  }
+  const missing = [MANIFEST_REL, PATHS_REL, PLUGIN_REL, BRIDGE_REL].filter((r) => !existsSync(join(PACK, r)))
+  check(
+    missing.length === 0,
+    'A21 ① 壳那四个源文件找得到（打包工程 `树高教务通打包`）—— **找不到就是红**，绝不许静默跳过这一节',
+    missing.length ? `缺 ${missing.length} 个：${missing.join(' · ')}` : `都在 ${PACK}`,
+    '（缺文件时下面每一条都会红：判据读的是空串 —— 这正是"门禁自己也要能红"）',
+  )
+
+  const MANIFEST = stripXml(shellRead(MANIFEST_REL))
+  const PATHS = stripXml(shellRead(PATHS_REL))
+  const PLUGIN = strip(shellRead(PLUGIN_REL))
+  const BRIDGE = strip(shellRead(BRIDGE_REL))
+  const FILEOUT = strip(readApp('src/lib/fileOut.ts'))
+  const GATE = strip(readApp('src/components/ReleaseGate.tsx'))
+
+  /* ---------------- ② manifest：权限 + FileProvider 四件套 ---------------- */
+  const PERM_RE = /<uses-permission android:name="android\.permission\.REQUEST_INSTALL_PACKAGES"\s*\/>/
+  check(
+    PERM_RE.test(MANIFEST),
+    '🔴 A21 ② manifest 里有 `REQUEST_INSTALL_PACKAGES`（**不加这一条，系统安装界面永远弹不出来**）',
+    PERM_RE.test(MANIFEST) ? '在' : '不在',
+  )
+  {
+    /* 🧪 反向对照：把那一行删掉 ⇒ ② 当场红 */
+    const cut = oneEdit(MANIFEST, '<uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />', '')
+    check(
+      cut.ok && !PERM_RE.test(cut.text),
+      '🧪 A21 ② 反向对照：把 `REQUEST_INSTALL_PACKAGES` 那一行删掉（内存副本）⇒ ② 当场红（证明它真的在数那一行，不是恒真）',
+      `目标出现 ${cut.n} 处（须恰好 1）· 删掉后判据=${PERM_RE.test(cut.text)}`,
+    )
+  }
+
+  /** FileProvider 四件套（少任何一件，`getUriForFile` 都会在手机上炸 / 或者压根没配上） */
+  const FP_FACTS = [
+    'androidx.core.content.FileProvider',
+    'android:authorities="${applicationId}.fileprovider"',
+    'android:grantUriPermissions="true"',
+    'android:name="android.support.FILE_PROVIDER_PATHS"',
+    'android:resource="@xml/file_paths"',
+  ]
+  const fpOk = (s) => FP_FACTS.every((x) => s.includes(x))
+  check(
+    fpOk(MANIFEST),
+    '🔴 A21 ② manifest 里 FileProvider 四件套齐（`androidx.core.content.FileProvider` · authorities = `${applicationId}.fileprovider` · `grantUriPermissions` · `FILE_PROVIDER_PATHS` → `@xml/file_paths`）',
+    FP_FACTS.map((x) => `${MANIFEST.includes(x) ? '✔' : '✖'}${x}`).join(' · '),
+  )
+  {
+    /* 🧪 反向对照：把 `grantUriPermissions` 翻成 false ⇒ 同一条判据当场红 */
+    const cut = oneEdit(MANIFEST, 'android:grantUriPermissions="true"', 'android:grantUriPermissions="false"')
+    check(
+      cut.ok && !fpOk(cut.text),
+      '🧪 A21 ② 反向对照：把 `grantUriPermissions` 翻成 `"false"`（副本）⇒ 四件套那一条当场红（少一件就传不出 content 地址）',
+      `目标出现 ${cut.n} 处（须恰好 1）· 改完判据=${fpOk(cut.text)}`,
+    )
+  }
+
+  /* ---------------- ③ file_paths.xml：下载目录必须**配过** ---------------- */
+  const PATHS_RE = /<files-path name="update_apk" path="updates\/" \/>/
+  const JAVA_DIR_RE = /new File\(ctx\.getFilesDir\(\), "updates"\)/
+  check(
+    PATHS_RE.test(PATHS) && JAVA_DIR_RE.test(PLUGIN),
+    '🔴 A21 ③ `file_paths.xml` 给**下载目录**配了一条 `files-path`，而且与原生落盘的那个目录**是同一个**（少这一条 = `Failed to find configured root`，安装界面弹不出来）',
+    `file_paths 里那一条=${PATHS_RE.test(PATHS)} · 原生落在 filesDir/updates=${JAVA_DIR_RE.test(PLUGIN)}`,
+  )
+  {
+    /* 🧪 反向对照：把那条 files-path 删掉 ⇒ ③ 当场红 */
+    const cut = oneEdit(PATHS, '<files-path name="update_apk" path="updates/" />', '')
+    check(
+      cut.ok && !PATHS_RE.test(cut.text),
+      '🧪 A21 ③ 反向对照：把那条 `files-path` 删掉（副本）⇒ ③ 当场红（证明它真的在读那份 xml，不是恒真）',
+      `目标出现 ${cut.n} 处（须恰好 1）· 删掉后判据=${PATHS_RE.test(cut.text)}`,
+    )
+  }
+
+  /* ---------------- ④ 原生方法：下载 → FileProvider → 系统安装界面 ---------------- */
+  const METHOD_RE = /@PluginMethod\s+public void downloadAndInstall\(PluginCall call\)/
+  check(
+    METHOD_RE.test(PLUGIN) && /@CapacitorPlugin\(name = "ShugaoNative"\)/.test(PLUGIN),
+    '🔴 A21 ④ 原生插件里有 `@PluginMethod downloadAndInstall(PluginCall)`（挂在 `@CapacitorPlugin(name = "ShugaoNative")` 上 —— 桥接层按这个名字调）',
+    `方法在=${METHOD_RE.test(PLUGIN)} · 插件名对=${/@CapacitorPlugin\(name = "ShugaoNative"\)/.test(PLUGIN)}`,
+  )
+  const URI_RE = /FileProvider\.getUriForFile\(ctx, ctx\.getPackageName\(\) \+ "\.fileprovider", apk\)/
+  check(
+    URI_RE.test(PLUGIN),
+    '🔴 A21 ④ 交给系统安装器的是 **FileProvider 的 content 地址**，authorities 与 manifest 那一条拼法一致（不许把文件路径直接给系统）',
+    `实测 ${URI_RE.test(PLUGIN)}`,
+  )
+  {
+    /* 🧪 反向对照：换成"直接给文件路径"那种坏法 ⇒ 同一条判据当场红 */
+    const cut = oneEdit(PLUGIN, 'FileProvider.getUriForFile(ctx, ctx.getPackageName() + ".fileprovider", apk)', 'Uri.fromFile(apk)')
+    check(
+      cut.ok && !URI_RE.test(cut.text) && /Uri\.fromFile\(apk\)/.test(cut.text),
+      '🧪 A21 ④ 反向对照：把 `FileProvider.getUriForFile(...)` 换成 `Uri.fromFile(apk)`（= 那个坏法）⇒ 当场红',
+      `目标出现 ${cut.n} 处（须恰好 1）· 改完判据=${URI_RE.test(cut.text)}`,
+    )
+  }
+  const INTENT_RE = /new Intent\(Intent\.ACTION_VIEW\)/
+  check(
+    INTENT_RE.test(PLUGIN) &&
+      /setDataAndType\(uri, "application\/vnd\.android\.package-archive"\)/.test(PLUGIN) &&
+      /FLAG_GRANT_READ_URI_PERMISSION/.test(PLUGIN),
+    '🔴 A21 ④ 起的是安装意图：`ACTION_VIEW` + MIME `application/vnd.android.package-archive` + `FLAG_GRANT_READ_URI_PERMISSION`（少了最后那个标志，安装器读不到那个 content 地址）',
+    `ACTION_VIEW=${INTENT_RE.test(PLUGIN)} · MIME=${/setDataAndType\(uri, "application\/vnd\.android\.package-archive"\)/.test(PLUGIN)} · 授权标志=${/FLAG_GRANT_READ_URI_PERMISSION/.test(PLUGIN)}`,
+  )
+  check(
+    /https:\/\//.test(shellRead(PLUGIN_REL)) && /!url\.startsWith\("https:\/\/"\)/.test(PLUGIN),
+    'A21 ④ 原生侧也只收 `https` 地址（与 `lib/release.ts` 的安全口径同源，`http:` / 别的都当场回绝）',
+    `实测 ${/!url\.startsWith\("https:\/\/"\)/.test(PLUGIN)}`,
+  )
+
+  /* ---------------- ⑤ 没授权 ≠ 静默：如实回 needPermission + 引导去设置 ---------------- */
+  check(
+    /canRequestPackageInstalls\(\)/.test(PLUGIN) && /\.put\("needPermission", true\)/.test(PLUGIN),
+    '🔴 A21 ⑤ Android 8+ 没授权时**如实回** `needPermission: true`（不许假装在装、也不许静默失败）',
+    `查权限=${/canRequestPackageInstalls\(\)/.test(PLUGIN)} · 回 needPermission=${/\.put\("needPermission", true\)/.test(PLUGIN)}`,
+  )
+  {
+    /* 🧪 反向对照：把权限那一问删掉 ⇒ ⑤ 当场红（那正是"没授权也照样往下走"的坏法） */
+    const cut = oneEdit(PLUGIN, '!getContext().getPackageManager().canRequestPackageInstalls()', 'false')
+    check(
+      cut.ok && !/canRequestPackageInstalls\(\)/.test(cut.text),
+      '🧪 A21 ⑤ 反向对照：把 `canRequestPackageInstalls()` 那一问拿掉（副本）⇒ ⑤ 当场红（没授权也会往下走 = 静默失败）',
+      `目标出现 ${cut.n} 处（须恰好 1）· 改完判据=${/canRequestPackageInstalls\(\)/.test(cut.text)}`,
+    )
+  }
+  const SETTINGS_RE = /Settings\.ACTION_MANAGE_UNKNOWN_APP_SOURCES/
+  check(
+    SETTINGS_RE.test(PLUGIN) && /public void openInstallPermissionSettings\(PluginCall call\)/.test(PLUGIN),
+    '🔴 A21 ⑤ 没授权时**有**引导去系统设置那条路（`ACTION_MANAGE_UNKNOWN_APP_SOURCES` + 插件方法 `openInstallPermissionSettings`，跳不过去就退到应用详情页）',
+    `设置页=${SETTINGS_RE.test(PLUGIN)} · 方法在=${/public void openInstallPermissionSettings\(PluginCall call\)/.test(PLUGIN)}`,
+  )
+  {
+    /* 🧪 反向对照：把设置页那一段删掉 ⇒ ⑤ 那条当场红 */
+    const cut = oneEdit(PLUGIN, 'Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES', 'Settings.ACTION_SETTINGS')
+    check(
+      cut.ok && !SETTINGS_RE.test(cut.text),
+      '🧪 A21 ⑤ 反向对照：把 `ACTION_MANAGE_UNKNOWN_APP_SOURCES` 换成随便一个设置页（副本）⇒ 当场红（引导必须落到**那一页**，否则老师找不到开关）',
+      `目标出现 ${cut.n} 处（须恰好 1）· 改完判据=${SETTINGS_RE.test(cut.text)}`,
+    )
+  }
+
+  /* ---------------- ⑥ 桥接层：按现有约定接到 `window.__shell_out` ---------------- */
+  const BR_RE = /downloadAndInstall: function \(url\) \{/
+  check(
+    BR_RE.test(BRIDGE) && /N\.downloadAndInstall\(\{ url:/.test(BRIDGE),
+    '🔴 A21 ⑥ 桥接层（`_src/shell-bridge-apk.js`）把 `downloadAndInstall` 接到 `ShugaoNative` 上（与 `notify` 同一个口；老壳没有这个方法就回 `unsupported`）',
+    `挂了方法=${BR_RE.test(BRIDGE)} · 真的转给原生=${/N\.downloadAndInstall\(\{ url:/.test(BRIDGE)}`,
+  )
+  check(
+    /openInstallPermissionSettings: function \(\) \{/.test(BRIDGE) && /N\.openInstallPermissionSettings\(\)/.test(BRIDGE),
+    'A21 ⑥ 桥接层也放了 `openInstallPermissionSettings`（没授权时网页侧要引导去设置，这条得能通到原生）',
+    `挂了方法=${/openInstallPermissionSettings: function \(\) \{/.test(BRIDGE)} · 转给原生=${/N\.openInstallPermissionSettings\(\)/.test(BRIDGE)}`,
+  )
+  {
+    /* 🧪 反向对照：把桥接那一行删掉 ⇒ ⑥ 当场红 */
+    const cut = oneEdit(BRIDGE, 'downloadAndInstall: function (url) {', 'downloadAndInstallRenamed: function (url) {')
+    check(
+      cut.ok && !BR_RE.test(cut.text),
+      '🧪 A21 ⑥ 反向对照：把桥接那个方法**改名**（副本）⇒ ⑥ 当场红 —— 名字是两侧约定，改了原生就白写',
+      `目标出现 ${cut.n} 处（须恰好 1）· 改完判据=${BR_RE.test(cut.text)}`,
+    )
+  }
+
+  /* ---------------- ⑦ `file://` 零命中（Android 7+ 给系统文件路径 = 当场炸） ---------------- */
+  const javaFiles = existsSync(JAVA_DIR) ? readdirSync(JAVA_DIR).filter((f) => f.endsWith('.java')) : []
+  const shellScanned = [
+    ['AndroidManifest.xml', shellRead(MANIFEST_REL)],
+    ['file_paths.xml', shellRead(PATHS_REL)],
+    ...javaFiles.map((f) => [f, readFileSync(join(JAVA_DIR, f), 'utf8')]),
+    ['shell-bridge-apk.js', shellRead(BRIDGE_REL)],
+  ]
+  const fileHits = shellScanned.filter(([, t]) => /file:\/\//.test(stripAll(t))).map(([n]) => n)
+  check(
+    fileHits.length === 0,
+    `🔴 A21 ⑦ 壳侧**一个「file 路径地址」都没有**（Android 7+ 把文件路径交给系统会当场 \`FileUriExposedException\`，装不上）—— 扫了 ${shellScanned.length} 份`,
+    fileHits.length ? `命中：${fileHits.join(' · ')}` : '零命中',
+  )
+  {
+    /* 🧪 反向对照：往 manifest 副本里塞一个 `file://` ⇒ 同一条判据当场红 */
+    const poisoned = `${MANIFEST}\n<data android:host="file://x" />`
+    check(
+      /file:\/\//.test(stripAll(poisoned)),
+      '🧪 A21 ⑦ 反向对照：往 manifest 副本里塞一句含 `file://` 的东西 ⇒ 同一条判据当场红（证明它真在扫，不是"什么都搜不到"）',
+      `副本命中=${/file:\/\//.test(stripAll(poisoned))}`,
+    )
+  }
+
+  /* ---------------- ⑧ 网页侧：能拿到走壳 · 拿不到保持现在的行为 ---------------- */
+  const CAN_RE = /export function canDownloadAndInstall\(\): boolean \{/
+  check(
+    CAN_RE.test(FILEOUT) && /typeof shell\(\)\?\.downloadAndInstall === 'function'/.test(FILEOUT),
+    '🔴 A21 ⑧ 适配层（`src/lib/fileOut.ts`）有 `canDownloadAndInstall()`，判据是"**桥接对象上这个方法在不在**"（不是"有没有 Capacitor"）',
+    `函数在=${CAN_RE.test(FILEOUT)} · 判据=${/typeof shell\(\)\?\.downloadAndInstall === 'function'/.test(FILEOUT)}`,
+  )
+  const WRAP_RE = /export async function downloadAndInstall\(url: string\): Promise<ShellInstallResult> \{/
+  const UNSUP_RE = /if \(!s\?\.downloadAndInstall\) return \{ ok: false, unsupported: true \}/
+  check(
+    WRAP_RE.test(FILEOUT) && UNSUP_RE.test(FILEOUT),
+    'A21 ⑧ `downloadAndInstall()` 拿不到桥接时回 `unsupported`（**不许假装成功** —— 那正是"点了没反应"的来源）',
+    `封装在=${WRAP_RE.test(FILEOUT)} · 没桥接时如实回=${UNSUP_RE.test(FILEOUT)}`,
+  )
+  {
+    /* 🧪 反向对照：把"没桥接就如实回"那一句删掉 ⇒ 同一条判据当场红 */
+    const cut = oneEdit(FILEOUT, "if (!s?.downloadAndInstall) return { ok: false, unsupported: true }", '')
+    check(
+      cut.ok && !UNSUP_RE.test(cut.text),
+      '🧪 A21 ⑧ 反向对照：把"拿不到桥接就如实回 unsupported"那一句删掉（副本）⇒ 当场红',
+      `目标出现 ${cut.n} 处（须恰好 1）· 删掉后判据=${UNSUP_RE.test(cut.text)}`,
+    )
+  }
+
+  /* ---------------- ⑨ ReleaseGate：调它 **而且**有退回分支 ---------------- */
+  const GATE_IMPORT_RE = /import \{[^}]*canDownloadAndInstall[^}]*\} from '\.\.\/lib\/fileOut'/
+  const FALLBACK_RE = /if \(!canDownloadAndInstall\(\)\) return/
+  check(
+    GATE_IMPORT_RE.test(GATE) && FALLBACK_RE.test(GATE),
+    '🔴 A21 ⑨ 公告那颗「下载最新版」**调**这个适配层，而且**第一句就是退回分支**：拿不到桥接立刻 return ⇒ 还是原来那颗 `<a href target="_blank">`（网页版与两个 exe 一个字不变）',
+    `从适配层取=${GATE_IMPORT_RE.test(GATE)} · 退回分支=${FALLBACK_RE.test(GATE)}`,
+  )
+  {
+    /* 🧪 反向对照：把退回分支那一句删掉 ⇒ ⑨ 当场红（那样 apk 以外也会被 preventDefault 拦住 = 网页版行为被改） */
+    const cut = oneEdit(GATE, 'if (!canDownloadAndInstall()) return', '')
+    check(
+      cut.ok && !FALLBACK_RE.test(cut.text),
+      '🧪 A21 ⑨ 反向对照：把退回分支那一句删掉（副本）⇒ ⑨ 当场红 —— 证明"网页版与两个 exe 不变"这件事真的被钉着',
+      `目标出现 ${cut.n} 处（须恰好 1）· 删掉后判据=${FALLBACK_RE.test(cut.text)}`,
+    )
+  }
+  check(
+    /e\.preventDefault\(\)/.test(GATE) && /const r = await downloadAndInstall\(view\.url\)/.test(GATE),
+    'A21 ⑨ 走壳那条路是"先拦住默认跳转、再等壳回话"（**顺序反了**就等于既走壳又开浏览器）',
+    `拦住默认跳转=${/e\.preventDefault\(\)/.test(GATE)} · 调适配层=${/const r = await downloadAndInstall\(view\.url\)/.test(GATE)}`,
+  )
+  check(
+    /if \(r\.needPermission\) \{[\s\S]{0,200}setInstallHint\(INSTALL_HINT_PERM\)[\s\S]{0,200}await openInstallPermissionSettings\(\)/.test(GATE),
+    '🔴 A21 ⑨ 没授权那一支：**说一句人话**（上屏）+ 引导去系统设置（§三.5：不可写的路径要显式报错，不许静默）',
+    `实测 ${/if \(r\.needPermission\) \{[\s\S]{0,200}setInstallHint\(INSTALL_HINT_PERM\)[\s\S]{0,200}await openInstallPermissionSettings\(\)/.test(GATE)}`,
+  )
+  check(
+    /fallbackClick\.current = true[\s\S]{0,200}downloadAnchor\.current\?\.click\(\)/.test(GATE),
+    'A21 ⑨ 别的失败那一支：**退回当前行为**（把那个 https 链接交给浏览器）并且明说已经退了（`已改用浏览器下载。`）',
+    `实测 ${/fallbackClick\.current = true[\s\S]{0,200}downloadAnchor\.current\?\.click\(\)/.test(GATE)}`,
+  )
+  {
+    /*
+     * 🧪 反向对照：把"退回浏览器"那一支**整段**换掉（改成什么都不做）⇒ 上面那条当场红。
+     *    这正是施工单点名的坏法：「点了没反应」。
+     */
+    const click = 'downloadAnchor.current?.click()'
+    const cut = oneEdit(GATE, click, 'void 0')
+    check(
+      cut.ok && !/downloadAnchor\.current\?\.click\(\)/.test(cut.text),
+      '🧪 A21 ⑨ 反向对照：把"退回浏览器"那一次点击换成 `void 0`（副本）⇒ 当场红（那就是"点了没反应"的坏法）',
+      `目标出现 ${cut.n} 处（须恰好 1）· 改完判据=${/downloadAnchor\.current\?\.click\(\)/.test(cut.text)}`,
+    )
+  }
+  /* 🔒 退回分支本身就是**原来那颗 `<a>`**：href / target / rel 一个字没改（施工单 §六 的安全口径） */
+  const ANCHOR_FACTS = ['href={view.url}', 'target="_blank"', 'rel="noreferrer"', 'data-release-download']
+  check(
+    ANCHOR_FACTS.every((x) => GATE.includes(x)),
+    'A21 ⑨ 退回分支 = 原来那颗 `<a href={view.url} target="_blank" rel="noreferrer" data-release-download>`（四个属性一个都没动，只多挂了一个 onClick）',
+    ANCHOR_FACTS.map((x) => `${GATE.includes(x) ? '✔' : '✖'}${x}`).join(' · '),
+  )
+
+  /* ---------------- ⑩ 桥接只在白名单的三个适配层里出现 ---------------- */
+  const walkTs = (dir, out = []) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, e.name)
+      if (e.isDirectory()) walkTs(p, out)
+      else if (/\.tsx?$/.test(e.name)) out.push(p)
+    }
+    return out
+  }
+  const BRIDGE_FILES = ['src/lib/classroomShell.ts', 'src/lib/fileOut.ts', 'src/lib/notify.ts']
+  const srcEntries = walkTs(join(APP, 'src')).map((f) => ({
+    rel: f.slice(APP.length + 1).replace(/\\/g, '/'),
+    text: readFileSync(f, 'utf8'),
+  }))
+  const bridgeReaders = (entries) => entries.filter((e) => /__shell_out/.test(strip(e.text))).map((e) => e.rel)
+  eqSet(
+    '🔴 A21 ⑩ 全仓 `src/` 里读 `window.__shell_out` 的文件 ↔ 白名单（`_tools/preflight.mjs:114` 那三个适配层；多一个文件就红 —— 剥注释之后数）',
+    bridgeReaders(srcEntries),
+    BRIDGE_FILES,
+  )
+  {
+    /* 🧪 反向对照：往一个**非白名单**文件里塞一句 ⇒ 同一个集合当场多一项 */
+    const poisoned = srcEntries.map((e) =>
+      e.rel === 'src/lib/apiBase.ts' ? { ...e, text: `${e.text}\nconst _peek = window.__shell_out\n` } : e,
+    )
+    const got = bridgeReaders(poisoned)
+    check(
+      got.length === BRIDGE_FILES.length + 1 && got.includes('src/lib/apiBase.ts'),
+      '🧪 A21 ⑩ 反向对照：往 `src/lib/apiBase.ts` 里塞一句 `window.__shell_out`（内存副本）⇒ 白名单集合当场多出它（证明这一条真在数文件，不是恒真）',
+      `改完 ${got.length} 份：${got.join(' · ')}`,
+    )
+  }
+
+  /*
+   * ✅ **怎么真机验**（本机没有安卓设备 ⇒ 这一节全是静态判据，**没有一条**是真机验过的）：
+   *    ① 出一版新 apk（`_tools/package-all.mjs`）装到老师手机上；
+   *    ② 进 /admin 的「版本更新」卡把版本号抬高一点并发布 ⇒ 手机上弹更新公告；
+   *    ③ 点「下载最新版」：先弹系统"允许来自此来源的应用"（第一次）⇒ 回来再点一次
+   *       ⇒ 应弹出**系统安装界面**（而不是只下载完就没动静）；
+   *    ④ 反向：在系统设置里把那个开关关掉，再点 ⇒ 屏上应出现那句人话并跳到设置页（不许没反应）。
+   */
+  {
+    /*
+     * 🔴 这一条**故意用原始文本（不剥注释）**：上面每一条判据都必须剥注释（"注释里写不许用 X"不算），
+     *    而"照实写着真机未验"这件事**只能**在注释里 —— 两种口径各用各的文本，别混。
+     */
+    const RAW_SIDES = [
+      ['YlxbNativePlugin.java', shellRead(PLUGIN_REL)],
+      ['shell-bridge-apk.js', shellRead(BRIDGE_REL)],
+      ['src/lib/fileOut.ts', readApp('src/lib/fileOut.ts')],
+      ['src/components/ReleaseGate.tsx', readApp('src/components/ReleaseGate.tsx')],
+    ]
+    const said = RAW_SIDES.filter(([, t]) => /真机未验/.test(t)).map(([n]) => n)
+    const silent = RAW_SIDES.filter(([, t]) => !/真机未验/.test(t)).map(([n]) => n)
+    check(
+      silent.length === 0,
+      '🔴 A21 ⑪ 两侧四份源码的**注释**里都照实写着"真机未验"（本机没有安卓设备，别假装验过）',
+      silent.length ? `没写：${silent.join(' · ')}｜写了：${said.join(' · ')}` : `四份都写了：${said.join(' · ')}`,
+    )
+  }
+}
+
 /* ---------------- 结果 ---------------- */
 console.log(`\n================ 结果 ================`)
 
