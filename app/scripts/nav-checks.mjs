@@ -6785,6 +6785,353 @@ section('第二十五节 · A19：备份引导档四条事实 + ⑥ 档案解密
   }
 }
 
+/* ============================================================
+   第二十四节之二 · A20：推迟某一节课的**提醒**（2026-10-04，施工单-日程延后.md）
+   ------------------------------------------------------------
+   🔴 这一节要钉的是"**推迟只挪提醒，不挪课表**"那件事的三条：
+     ① 判据本身：`dueRemindersWithSnooze` 与原 `dueReminders` **同一个窗口**，
+        推迟过的那几条只认推迟时刻 —— 两处口径不同会在两个时刻各响一次；
+     ② 落库那侧写的是**新表** `schedule_snoozes`，一个字都不碰 `schedule_items`
+        （推迟污染每周重复的课表 = 偷偷改课表）；
+     ③ 真值源只有**一份**（store）—— 提醒的定时器与界面按钮都读写它。
+
+   ⚠️ 判据一律**先剥注释**：这一批的"为什么"大量正当写在注释里
+      （尤其 ② 那段"不是改课表"）—— 不剥的话"源码里写了那句话"恒绿。
+      反向对照 B 专门治这个：把那句话挪进注释，同一个判据必须假。
+   ============================================================ */
+section('第二十四节之二 · A20：推迟某一节课的**提醒**（不挪课表）')
+
+{
+  /** 剥注释（照 A19 那一节的写法）—— 判据只许看**真代码** */
+  const strip = (s) =>
+    String(s)
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/(^|[^:'"`\w])\/\/[^\n]*/gm, '$1')
+
+  const SCHED = strip(readApp('src/lib/schedule.ts'))
+  const BTN = strip(readApp('src/components/SnoozeButton.tsx'))
+  const STORE = strip(readApp('src/data/store.ts'))
+  const REMOTE = strip(readApp('src/data/remote.ts'))
+  const HOOK = strip(readApp('src/hooks/useScheduleReminder.ts'))
+  // ⚠️ `schema.sql` 在**仓库根**不在 app/ 下 —— 走 `readRepo` 而不是 `readApp`
+//    （用 readApp 会 ENOENT，而那是在第 6816 行抛的、看起来像"我的判据炸了"）
+const SQL = readRepo('supabase/schema.sql')
+
+  /* ---------------- ① 纯函数：推迟时刻换判，且窗口与原来同一个 ---------------- */
+  /** 把那几个纯函数原样抠出来求值（剥类型那套路照 A18，不另抄一份） */
+  const loadS = (mutate = (_b, _must) => {}) => {
+    const raw = readApp('src/lib/schedule.ts')
+    const from = raw.indexOf('export function toMinutes')
+    const to = raw.lastIndexOf('}')
+    const blocks = []
+    for (const re of [
+      // ⚠️ 这三个是**依赖**，不是被测对象：`dueRemindersWithSnooze` 体内用了
+      //    `nowMinutes` / `itemsForDate`，不抠进来求值就 `ReferenceError`
+      //    （报出来看不出"是我少抠了依赖"）。
+      /^export function nowMinutes[\s\S]*?^\}/gm,
+      /^export function weekdayOf[\s\S]*?^\}/gm,
+      /^export function itemsOfDay[\s\S]*?^\}/gm,
+      /^export function itemsForDate[\s\S]*?^\}/gm,
+      /^export function toMinutes[\s\S]*?^\}/gm,
+      /^export const REMIND_BEFORE[^\n]*\n/gm,
+      // ⚠️ 这三个函数里，**参数类型与返回类型要一并抠到** ——
+      //    `dueRemindersWithSnooze` 的签名跨行（参数各占一行），
+      //    而 `snoozeMinuteOf` / `snoozeText` 是单行但带返回类型。
+      //    抠不到返回类型 ⇒ `new Function` 求值时把它当成了别的语法，
+      //    报出来是 `is not a function`，**看不出是抠漏了**（锚点自证就是防这个）。
+      /^export function dueRemindersWithSnooze\([\s\S]*?\n\):[^{]*\{[\s\S]*?^\}/gm,
+      /^export function snoozeMinuteOf[^{]*\{[\s\S]*?^\}/gm,
+      /^export function snoozeText[^{]*\{[\s\S]*?^\}/gm,
+    ]) {
+      const m = raw.slice(from, to + 1).match(re)
+      if (m) for (const x of m) blocks.push(x)
+    }
+    const need = ['toMinutes', 'REMIND_BEFORE', 'dueRemindersWithSnooze', 'snoozeMinuteOf', 'snoozeText']
+    const missing = need.filter((k) => !blocks.some((b) => b.includes(k)))
+    if (missing.length) throw new Error(`抠漏了 ${missing.join('/')}`)
+    let body = blocks.join('\n').replace(/^import .*$/gm, '')
+    /*
+     * 剥签名上的类型 —— **逐行**处理，因为签名可能跨多行
+     * （`dueRemindersWithSnooze` 三个参数各占一行）。
+     *
+     * 🔴🔴 这一段坏过**四次**，四次报出来的错都指不到真因：
+     *   ① `[^{\n]*` —— 不容许类型里换行 ⇒ 一个都匹配不上（报「那不是个函数」）；
+     *   ② `[\s\S]*?` —— 一路跨到**下一个函数**的 `{`；
+     *   ③ `[^{]*?` —— `\(` 匹配到**体内**的 `(`（`split(':')` 那个），
+     *      从 `toMinutes` 就一路吞到下一处 `)`；
+     *   ④ 只改 `export function`、漏了 `export const` ⇒ 函数体里留下 `export`
+     *      （报 `Unexpected token 'export'`）。
+     * ✅ 现在按行扫：见到 `function 名字(` 就把签名**整段**收进来（可能跨行），
+     *    参数名取每个逗号段冒号**之前**那半，输出成单行签名。
+     *    —— 不靠正则猜边界，所以上面四种坏法都不会再出现。
+     */
+    {
+      const out = []
+      for (let i = 0; i < body.split('\n').length; i++) {
+        const line = body.split('\n')[i]
+        const fn = /^(\s*)export function (\w+)\s*\(/.exec(line)
+        if (!fn) {
+          out.push(line)
+          continue
+        }
+        let sig = line
+        while (!/\)\s*:?[^\n]*\{\s*$/.test(sig) && i + 1 < body.split('\n').length) {
+          i++
+          sig += '\n' + body.split('\n')[i]
+        }
+        // ⚠️🔴 收参数区**不能**用 `lastIndexOf(')')` ——
+        //   `d = new Date()` 里那个 `)` 在**默认值之后**，取到它就把参数区切得**过了头**
+        //   （第五次坏法：`Readonly<Record<string, number>>` 的 `<>` 被切出来留在原地，
+        //   求值报 `Unexpected token '>>'` —— 又一个指不到真因的错）。
+        // ✅ 按**括号配平**收：从 `(` 起，每遇 `(` 加一、每遇 `)` 减一，回到 0 那个才是收尾。
+        let open = sig.indexOf('(')
+        let depth = 0
+        let close = -1
+        // ⚠️ 尖括号也要算进去（第六次坏法）：`Readonly<Record<string, number>>`
+        //   里的 `>` 会让"见到 `)` 就收尾"的判断**提前触发** ——
+        //   不成对计 `>` 的话参数区被切成 `schedule, snoozed, number>>`，
+        //   求值报 `Unexpected token '>>'`（还是指不到真因）。
+        let angle = 0
+        for (let k = open; k < sig.length; k++) {
+          const c = sig[k]
+          if (c === '<') angle++
+          else if (c === '>') angle--
+          else if (c === '(' && angle === 0) depth++
+          else if (c === ')' && angle === 0) {
+            depth--
+            if (depth === 0) {
+              close = k
+              break
+            }
+          }
+        }
+        if (close < 0) throw new Error(`抠 ${fn[2]} 的参数区失败（括号不配平）`)
+        // 🔴 参数区**不能**用 `split(',')` —— 泛型里有逗号：
+        //   `Readonly<Record<string, number>>` 会被切成 `Readonly<Record<string` /
+        //   ` number>>` 两段 ⇒ 拼回去还是 `>>`，求值报 `Unexpected token '>>'`（第七次坏法）。
+        // ✅ 按**顶层逗号**切：`<`、`(`、`[` 里的逗号不算。
+        const rawParams = sig.slice(open + 1, close)
+        const parts = []
+        let buf = ''
+        let nest = 0
+        for (const c of rawParams) {
+          if (c === '<' || c === '(' || c === '[' || c === '{') nest++
+          else if (c === '>' || c === ')' || c === ']' || c === '}') nest--
+          if (c === ',' && nest === 0) {
+            parts.push(buf)
+            buf = ''
+            continue
+          }
+          buf += c
+        }
+        parts.push(buf)
+        const params = parts.map((one) => one.split(':')[0].trim()).filter(Boolean)
+        out.push(`${fn[1]}export function ${fn[2]}(${params.join(', ')}) {`)
+      }
+      body = out.join('\n')
+    }
+      // 局部变量的类型注解（`const out: DayGap[] = []`）
+      body = body.replace(/(:\s*(?:readonly\s+)?[A-Za-z_$][\w$[\]]*(?:\[\])*(?:\s*\|\s*[A-Za-z_$][\w$[\]]*(?:\[\])*)*)\s*(?==)/g, '')
+    // ⚠️ `export` 的统一剥离**必须排在上面那个逐行改写之后**：
+    //    那个改写只处理 `export function`，`export const REMIND_BEFORE` 那行还带着
+    //    export ⇒ `new Function` 的函数体里 export 是语法错误
+    //    （报出来是 `Unexpected token 'export'`，看不出是剥漏了）。
+    body = body.replace(/^(\s*)export\s+/gm, '$1').replace(/\sas\s+const/g, '')
+    const mustReplaceOnce = (needle, replacement) => {
+      const n = body.split(needle).length - 1
+      if (n !== 1) throw new Error(`变异目标出现 ${n} 处（必须恰好 1 处）：${JSON.stringify(needle.slice(0, 50))}`)
+      body = body.replace(needle, replacement)
+    }
+    mutate(body, mustReplaceOnce)
+    // eslint-disable-next-line no-new-func
+    return new Function(`${body}
+return { toMinutes, REMIND_BEFORE, dueRemindersWithSnooze, snoozeMinuteOf, snoozeText };`)()
+  }
+
+  const it = (id, start, end) => ({ id, weekday: 1, start, end, title: `T${id}`, kind: 'class', notify: true, scope: 'mine' })
+
+  let S = {}
+  let sErr = ''
+  try {
+    S = loadS()
+  } catch (e) {
+    sErr = e instanceof Error ? e.message : String(e)
+  }
+  check(
+    !sErr && typeof S.dueRemindersWithSnooze === 'function' && typeof S.snoozeMinuteOf === 'function',
+    'A20 锚点自证：抠出来的**就是**那几个纯函数（否则下面全是空转）',
+    sErr ? `求值失败：${sErr}` : `typeof = ${typeof S.dueRemindersWithSnooze}/${typeof S.snoozeMinuteOf}`,
+  )
+
+  // 08:00 的课 ⇒ 原提醒在 07:50（课前 10 分钟）
+  const day = [it('a', '08:00', '08:45')]
+  const at = (hhmm) => {
+    const [h, m] = hhmm.split(':').map(Number)
+    const d = new Date(2026, 0, 5, h, m)
+    return d
+  }
+  {
+    const d = at('07:50')
+    check(
+      S.dueRemindersWithSnooze(day, {}, d).map((x) => x.id).join() === 'a',
+      'A20 ① 没推迟过的那条：课前 10 分钟（07:50）照常进窗口',
+      `实测 ${JSON.stringify(S.dueRemindersWithSnooze(day, {}, d).map((x) => x.id))}`,
+    )
+    // 推迟到 08:00 ⇒ 07:50 **不该**再响（否则两个时刻各响一次）
+    const moved = { a: 480 }
+    check(
+      S.dueRemindersWithSnooze(day, moved, d).length === 0 &&
+        S.dueRemindersWithSnooze(day, moved, at('08:00')).map((x) => x.id).join() === 'a',
+      'A20 ① 推迟到 08:00 ⇒ 原时刻 07:50 **不再响**、只在新时刻 08:00 响（同一个窗口，不多不少）',
+      `07:50 得到 ${S.dueRemindersWithSnooze(day, moved, d).length} 条 · 08:00 得到 ${JSON.stringify(S.dueRemindersWithSnooze(day, moved, at('08:00')).map((x) => x.id))}`,
+    )
+    // 推迟到已经过去的分钟 ⇒ 今天不再响（不能让一条过期的推迟把课永远卡住）
+    const past = { a: 400 } // 06:40，早过了
+    check(
+      S.dueRemindersWithSnooze(day, past, d).length === 0 && S.dueRemindersWithSnooze(day, past, at('23:00')).length === 0,
+      'A20 ① 推迟到**已经过去**的分钟 ⇒ 今天一整天都不响它（否则那条记录会把课永久卡住）',
+      `07:50 得到 ${S.dueRemindersWithSnooze(day, past, d).length} 条 · 23:00 得到 ${S.dueRemindersWithSnooze(day, past, at('23:00')).length} 条`,
+    )
+  }
+  {
+    // 累加语义：10:00 → 10:10 → 10:20，不是"永远 10:10"
+    const base = S.snoozeMinuteOf('08:00', undefined, 10)
+    const twice = S.snoozeMinuteOf('08:00', base, 10)
+    check(
+      base === 480 && twice === 490,
+      'A20 ① 「晚 N 分钟」是**累加**：08:00 那节课的提醒 07:50→08:00→08:10（不是"永远 08:00"）',
+      `首次 ${base} · 再晚一次 ${twice}`,
+    )
+    /*
+     * 🔴 只钉**上界**，因为下界在真实路径上**触发不了**：
+     *   `current` 永远是合法分钟数（非负）、基点也是非负，`+ delayMinutes` 又只增
+     *   ⇒ `Math.max(0, …)` 那半边在正常路径上恒等于原值。
+     *   我前两版分别拿 `00:10` 晚 10 / 晚 200 去撞下界，两次都没撞到
+     *   ⇒ 那是一条**恒绿却没在判任何东西**的断言（假绿，§三.2 那一类）。
+     *   ⇒ 现在只钉上界：23:55 那节课晚 200 分钟 = 1635，不钳位会被库的
+     *      `check (remind_minute between 0 and 1440)` 挡下 ⇒ 按钮"点了没反应"。
+     */
+    const late = S.snoozeMinuteOf('23:55', undefined, 200)
+    check(
+      late === 1440,
+      'A20 ① 结果**钳在 1440 以内**（23:55 那节课再晚 200 分钟 = 1635，不钳位会被库的 check 挡下 ⇒ 按钮"点了没反应"）',
+      `实测 ${late}（期望 1440）`,
+    )
+    // 下界钳位仍**保留**在源码里（防的是"将来有人允许负的 current"），但这里不断言它 ——
+    // 断言一个触发不了的分支，就是拿一条恒绿的断言占位。
+    check(
+      /Math\.max\(0,\s*Math\.min\(1440,/.test(strip(readApp('src/lib/schedule.ts'))),
+      'A20 ① 两道钳位**都在源码里**（下界那半边当前触发不了，但它挡的是"将来有人传个负值过来"）',
+      `实测 ${/Math\.max\(0,\s*Math\.min\(1440,/.test(strip(readApp('src/lib/schedule.ts')))}`,
+    )
+  }
+  /* 反向对照①：把"只认推迟时刻"那行去掉 ⇒ 07:50 那条立刻又回来（证明那两行真在判） */
+  {
+    let B = {}
+    let err = ''
+    try {
+      B = loadS((_b, must) => must('const moved = snoozed[it.id]', 'const moved = undefined'))
+    } catch (e) {
+      err = e instanceof Error ? e.message : String(e)
+    }
+    check(err === '', '🧪 A20 ① 反向对照：变异目标**恰好一处**（注释里那份不算）', err ? `抛错：${err}` : '变异成功')
+    check(
+      B.dueRemindersWithSnooze?.(day, { a: 480 }, at('07:50')).map((x) => x.id).join() === 'a',
+      '🧪 A20 ① 反向对照：让推迟**不起作用** ⇒ 推迟过的那条在原时刻 07:50 又响了（证明"只认推迟时刻"真在判）',
+      `实测 ${JSON.stringify(B.dueRemindersWithSnooze?.(day, { a: 480 }, at('07:50')).map((x) => x.id))}（期望 a，即"两个时刻都响"的坏状态）`,
+    )
+  }
+
+  /* ---------------- ② 推迟只挪提醒，不挪课表 ---------------- */
+  check(
+    /from\('schedule_snoozes'\)/.test(REMOTE) && !/from\('schedule_items'\)[\s\S]{0,120}snooze/.test(REMOTE),
+    'A20 ② 推迟那侧写的是 **`schedule_snoozes`**，一个字都没碰 `schedule_items`（推迟污染每周重复的课表 = 偷偷改课表）',
+    `写到 schedule_snoozes=${/from\('schedule_snoozes'\)/.test(REMOTE)} · 有没有去写 schedule_items=${/from\('schedule_items'\)[\s\S]{0,120}snooze/.test(REMOTE)}`,
+  )
+  check(
+    /unique\s*\(\s*teacher_id\s*,\s*on_date\s*,\s*schedule_item_id\s*\)/.test(SQL),
+    'A20 ② 表上一条 **unique(teacher_id, on_date, schedule_item_id)** —— 连点两次「晚 10 分」在原来那条上累加，不会摆出两个推迟时刻',
+    `实测 ${/unique\s*\(\s*teacher_id\s*,\s*on_date\s*,\s*schedule_item_id\s*\)/.test(SQL)}`,
+  )
+  check(
+    /alter table schedule_snoozes enable row level security/i.test(SQL) && /create policy schedule_snoozes_own/i.test(SQL),
+    'A20 ② 🔴 `enable row level security` **和** `create policy` 都在 —— 少了前一句，策略一条也不生效（PostgREST 直接放行全表，而这表**看着**有策略）',
+    `enable=${/alter table schedule_snoozes enable row level security/i.test(SQL)} · policy=${/create policy schedule_snoozes_own/i.test(SQL)}`,
+  )
+  check(
+    /not is_classroom_account\(\)/.test(strip(SQL)) && /on_date\s+date/.test(SQL),
+    'A20 ② RLS 与 `schedule_mine_write` 同一条理由**不许教室端账号**；`on_date` 是 **date** 而不是 weekday（用 weekday 就变成"每周三都晚 10 分"，那是改课表）',
+    `排除教室端=${/not is_classroom_account\(\)/.test(strip(SQL))} · on_date 是 date=${/on_date\s+date/.test(SQL)}`,
+  )
+  /* 反向对照②：把 enable 那一行删掉（副本）⇒ 第 ③ 条立刻失据 */
+  {
+    const noEnable = SQL.replace(/alter table schedule_snoozes enable row level security;?/i, '/* 忘了 */')
+    check(
+      noEnable !== SQL && !/alter table schedule_snoozes enable row level security/i.test(noEnable),
+      '🧪 A20 ② 反向对照：把那一句**删掉**（副本）⇒"两条都在"当场假（证明这一句真在判，不是摆设）',
+      `副本真的被改过=${noEnable !== SQL}`,
+    )
+  }
+
+  /* ---------------- ③ 真值源只有一份 ---------------- */
+  const storeReads = (HOOK.match(/scheduleSnoozes/g) ?? []).length
+  check(
+    /useStore\(\(s\) => s\.scheduleSnoozes\)/.test(HOOK),
+    'A20 ③ 提醒侧（定时器）读的是 **store 那一份**，不是组件自己的 useState',
+    `实测 ${/useStore\(\(s\) => s\.scheduleSnoozes\)/.test(HOOK)}`,
+  )
+  check(
+    /useState<Record<string, number>>/.test(HOOK) === false,
+    'A20 ③ 那一侧**没有**第二份 useState（两份就是"按钮显示已推迟、提醒照旧响"）',
+    `仍有 useState<Record<string, number>> = ${/useState<Record<string, number>>/.test(HOOK)}`,
+  )
+  check(
+    /\[schedule, classes, push, snoozes\]/.test(HOOK),
+    'A20 ③ 定时器那个 effect 的依赖里**带上 `snoozes`** —— 漏了它就会"点了晚 10 分钟，下一次 tick 仍按课前 10 分钟判"',
+    `实测 ${/\[schedule, classes, push, snoozes\]/.test(HOOK)}`,
+  )
+  check(
+    /scheduleSnoozes: \{\} as Record<string, number>/.test(STORE),
+    'A20 ③ store 里两个初值都在（演示模式 + 后端模式）—— `persist` 反序列化出来的老缓存里没这一条，`undefined` 会读成"报错"而不是"没推迟"',
+    `实测 ${/scheduleSnoozes: \{\} as Record<string, number>/.test(STORE)}（出现 ${(STORE.match(/scheduleSnoozes: \{\} as Record<string, number>/g) ?? []).length} 处）`,
+  )
+  /* 反向对照③：把依赖里的 snoozes 去掉 ⇒ 第 ③ 条立刻假 */
+  {
+    const noDep = HOOK.replace('[schedule, classes, push, snoozes]', '[schedule, classes, push]')
+    check(
+      noDep !== HOOK && !/\[schedule, classes, push, snoozes\]/.test(noDep),
+      '🧪 A20 ③ 反向对照：把 `snoozes` 从依赖里去掉（副本）⇒ 上面那条当场假（证明它在读真源码）',
+      `副本真的被改过=${noDep !== HOOK}`,
+    )
+  }
+
+  /* ---------------- ④ 老库没那张表 / 落库失败 ---------------- */
+  check(
+    /ensureSnoozeTable/.test(BTN) && /return null/.test(BTN),
+    'A20 ④ 老库没那张表时按钮**收起**（不是点了报错），而且 `notify:false` 的课也不摆 —— 没提醒可推迟',
+    `探表=${/ensureSnoozeTable/.test(BTN)} · notify 判据=${/if \(!notify\) return null/.test(BTN)}`,
+  )
+  check(
+    /if \(!sb\) return true/.test(REMOTE) && /return true \/\/ 探不到 ≠ 没有/.test(readApp('src/data/remote.ts')),
+    'A20 ④ 探表判据**只认"表不在"**，网络抖动按"在"处理（否则一次网抖就骗用户说"这功能没有"）',
+    `实测 ${/if \(!sb\) return true/.test(REMOTE)}`,
+  )
+  check(
+    /set\(\{ scheduleSnoozes: prev \}\)/.test(STORE) && /throw e/.test(STORE),
+    'A20 ④ 落库失败**把内存改回去并抛错** —— 不报错但就是不对（按钮说推迟成功、库里没有、明天没人提醒）',
+    `改回去=${/set\(\{ scheduleSnoozes: prev \}\)/.test(STORE)} · 抛出=${/throw e/.test(STORE)}`,
+  )
+  /* 反向对照④：把「改回去」那一行去掉 ⇒ 内存与库就此永久不一致 */
+  {
+    const noRollback = STORE.replace('set({ scheduleSnoozes: prev })', '/* 忘了改回去 */')
+    check(
+      noRollback !== STORE && !/set\(\{ scheduleSnoozes: prev \}\)/.test(noRollback),
+      '🧪 A20 ④ 反向对照：落库失败时**不**改回去（副本）⇒ 上面那条当场假（证明那一行真在判）',
+      `副本真的被改过=${noRollback !== STORE}`,
+    )
+  }
+}
+
 /* ---------------- 结果 ---------------- */
 console.log(`\n================ 结果 ================`)
 
