@@ -1,11 +1,26 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { useStore, useToast } from '../data/store'
 import { loadSnoozes } from '../data/remote'
-import { notifyAsync, readNotifyPermission } from '../lib/notify'
-import { REMIND_BEFORE, dueRemindersWithSnooze } from '../lib/schedule'
+import {
+  notifyAsync,
+  readNotifyPermission,
+  nativeReminderPlan,
+  scheduleNativeReminders,
+} from '../lib/notify'
+import { REMIND_BEFORE, dueRemindersWithSnooze, toMinutes, weekdayOf } from '../lib/schedule'
 import { beijingNow, dayKind, ymdOf } from '../lib/holiday'
 
 const SEEN_KEY = 'shugao.remind.seen'
+
+/**
+ * 交给系统排程时**往后算几天**。
+ *
+ * 🔴 这个数不是"越多越好"：每一条都会在系统里留一个精确闹钟
+ *    （`AlarmManager.setExactAndAllowWhileIdle`，部分 ROM 对单个应用有配额），
+ *    而**每次页面重新可见都会重排一遍**。3 天 = 老师手机上永远有"今天 / 明天 / 后天"
+ *    三天的提醒 —— 只要他每三天开一次应用就够（而老师是每天在用的）。
+ */
+const NATIVE_PLAN_DAYS = 3
 
 type Seen = Record<string, true>
 
@@ -51,6 +66,93 @@ export function useScheduleReminder() {
    */
   const snoozes = useStore((s) => s.scheduleSnoozes)
   const setScheduleSnooze = useStore((s) => s.setScheduleSnooze)
+
+  /*
+   * 「系统排不了」这句话**一次会话只说一次**。
+   * ⚠️ 用 `useRef` 而不是 `useState`：它不是**要画出来的东西**，只防刷屏 ——
+   *    放成 state 就得进 effect 依赖 ⇒ 每次说完话 effect 重跑 ⇒ 又排一遍闹钟。
+   */
+  const warnedNoNative = useRef(false)
+
+  /*
+   * 🔴🔴 把提醒**交给系统排程**（2026-10-05，真机反馈「装上了、权限也过了，就是收不到通知」）。
+   *
+   * 改之前：整条提醒只有**应用内那一个 `setInterval(60s)`**（本文件末尾那个 effect）。
+   *   应用一退到后台 / 锁屏 / 被杀，WebView 的定时器就冻结 ⇒ 一个提醒都不会响。
+   *   而"权限那一步走通了"只说明**能发**，不说明**有人去发** —— 两件事。
+   *
+   * 现在：把"今天 / 明天 / 后天"要响的提醒算成一张单子交给壳
+   *   （apk → `ShugaoNative.scheduleAlarms` → `AlarmManager` 精确闹钟 + 开机重排，
+   *    原生那三个类是 2026-10-02 就写好的；断的一直是"网页侧没人调它"）。
+   *   ⇒ 应用**关着也能响**。页内那个定时器**照旧保留当兜底**（前台更即时，且失败时有人知道）。
+   *
+   * ⚠️ 网页版 / exe：`window.__shell_out` 没有这个方法 ⇒ `scheduleNativeReminders()` 恒 `false`
+   *   ⇒ 这条 effect **什么都不做**（行为一字不变）。
+   *
+   * 🔴 **真机未验**：本机没有安卓设备 —— 这条链只有静态判据（`nav-checks` 第二十七节）。
+   *    真机验收：停在日程页 ⇒ 划掉应用 ⇒ 到课前 10 分钟应收到系统通知。
+   */
+  useEffect(() => {
+    if (schedule.length === 0) return
+
+    let alive = true
+    const arm = async () => {
+      const now = beijingNow()
+      const days: Array<{ ymd: string; items: Array<{ id: string; title: string; body: string; minute: number }> }> =
+        []
+      for (let i = 0; i < NATIVE_PLAN_DAYS; i++) {
+        const d = new Date(now.getTime())
+        d.setDate(d.getDate() + i)
+        const ymd = ymdOf(d)
+        // 法定假期不上课 ⇒ 那一天不排闹钟（调休上班日照旧排 —— 那天确实要上课）
+        if (dayKind(ymd) === 'holiday') continue
+        const wd = weekdayOf(d)
+        const items = schedule
+          .filter((s) => s.scope !== 'class' && s.notify && s.weekday === wd)
+          .map((s) => {
+            const moved = snoozes[s.id]
+            const minute = moved === undefined ? toMinutes(s.start) - REMIND_BEFORE : moved
+            const className = classes.find((c) => c.id === s.classId)?.name
+            return {
+              id: s.id,
+              title: `${REMIND_BEFORE} 分钟后上课`,
+              body: [s.title, className, s.room, `${s.start} 开始`].filter(Boolean).join(' · '),
+              minute,
+            }
+          })
+        if (items.length) days.push({ ymd, items })
+      }
+
+      const ok = await scheduleNativeReminders(nativeReminderPlan(days, now))
+      if (!alive) return
+      if (!ok) {
+        /*
+         * 🔴 没排上就**说出来**（§三.5：不可写的路径要显式报错，不许静默）——
+         *    这正是"收不到通知而界面上看不出任何异常"的那个形态。
+         */
+        console.warn('[remind] 系统排程不可用，本次会话的提醒只能靠页内那一条')
+        if (!warnedNoNative.current) {
+          warnedNoNative.current = true
+          push({
+            text: '提醒改在应用内显示。关掉应用就收不到了。',
+            tone: 'warn',
+            desc: '换一版应用可以收到系统通知。',
+          })
+        }
+      }
+    }
+
+    void arm()
+    // 回到前台就重排一次：老师可能刚在系统设置里把通知/精确闹钟打开
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void arm()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      alive = false
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [schedule, classes, snoozes, push])
 
   // 每天取一次当天那组（跨零点自动换组 —— `ymdOf` 变了 key 就变）
   const dayKey = ymdOf(beijingNow())

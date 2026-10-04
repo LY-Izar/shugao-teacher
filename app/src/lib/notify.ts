@@ -40,10 +40,42 @@ interface ShellNotifyBridge {
   /** apk 有；exe 没有 */
   openNotificationSettings?(): Promise<boolean>
   /**
+   * 🆕 **把到点提醒交给系统排程**（2026-10-05 加；只有 apk 有，exe 没有）。
+   *
+   * 🔴 为什么非有不可：见本文件末尾「为什么必须交给系统排程」。
+   * 这一支在 apk 里落到原生 `ShugaoNative.scheduleAlarms` → `AlarmManager`
+   * （`setExactAndAllowWhileIdle` + `SharedPreferences` 持久化 + 开机重排）。
+   * @returns `true` = 系统真的收下了这批闹钟；`false` = 没接上，调用方**必须**保留页内那一条兜底
+   */
+  scheduleAlarms?(alarms: Array<ShellAlarm>): Promise<boolean>
+  /** 🆕 这个壳能不能排**精确**闹钟（Android 12+ 要在设置里开；回 `null` = 不知道） */
+  canScheduleExact?(): Promise<boolean | null>
+  /**
    * ⚠️ 这里**故意没有** `platform` 字段：通知这一层不读它。
    * 读它的是 `lib/classroomShell.ts` 的 `shellPlatform()` ——
    * 留一份在两处正是"声明了没人用"（本项目为此栽过四次）。
    */
+}
+
+/**
+ * 要交给系统的那一条闹钟（`fileOut.ts` 那种"只传数据、不传行为"的形状）。
+ *
+ * 🔴 **`id` 的硬边界**：Android 的 `NotificationManager.notify(int, …)` 收的是 **Java int**，
+ *    Capacitor 的本地通知插件对它有一句死判据 ——
+ *    `LocalNotification.java:227-231`：`id > Integer.MAX_VALUE` 直接 `reject("The identifier should be a Java int")`。
+ *    ⇒ **`id` 必须是 1 … 2147483647 的整数**（0 也不给：通知 id 0 与"没有 id"在别处同义）。
+ */
+export interface ShellAlarm {
+  /** 1 … 2147483647（Java int；越界不是"响不响"的问题，是**当场被原生回绝**） */
+  id: number
+  /** 到点时刻：Unix 毫秒（`fireAt`） */
+  fireAt: number
+  title: string
+  body: string
+  /** 通知渠道 id（原生 `YlxbNativePlugin.CHANNEL_*`；给空串走"一般通知"） */
+  channel?: string
+  /** 点通知时带给页面的深链（`shugao://…`） */
+  payload?: string
 }
 
 /** 桥接层在不在。与 `fileOut.ts` 用**同一个对象**（`window.__shell_out`）。 */
@@ -236,6 +268,8 @@ export async function notifyAsync(title: string, body: string): Promise<boolean>
     }
   }
 
+  // ⚠️ 下面的网页分支逐字不变（`window.__shell_out` 不存在 ⇒ 一路落在这一支）
+
   if (ch === 'unsupported' || Notification.permission !== 'granted') return false
   try {
     const n = new Notification(title, { body, tag: title + body, lang: 'zh-CN' })
@@ -245,6 +279,146 @@ export async function notifyAsync(title: string, body: string): Promise<boolean>
     return false
   }
 }
+
+/* ============================================================
+   🆕 2026-10-05：**把提醒交给系统排程**（真机反馈「装上了、权限也过了，就是收不到通知」）
+   ------------------------------------------------------------
+   这一节只做三件事：**算 id / 算时刻 / 转交给桥接层**。
+   它**不认识**课表，也不认识 React —— 所以它能在门禁里单独被量（`nav-checks.mjs` 第二十七节）。
+
+   🔴 **为什么必须交给系统排程**（两个各能单独致命的原因）：
+     ① 原来整条提醒靠**应用内的 `window.setInterval(60s)`**（`useScheduleReminder.ts` 末尾那个 effect）
+        —— 应用一退到后台 / 锁屏 / 被杀，WebView 的定时器就冻结 ⇒ 一个提醒都不会响；
+     ② 原来即使那一分钟正好在跑，`notify()` 也是拿 Capacitor 本地通知发**当下这一条**
+        （没有 `at`）⇒ 同样的：只在"那一分钟应用正开着"时才有用。
+     而原生那一侧**三天前就写好了**（精确闹钟 + 到点通知 + 开机重排），
+     断的只是"**网页侧没人调它**" —— 桥接层一个口都没暴露。
+
+   🔴 **id 必须落在 Java int 里**（见 `ShellAlarm.id` 的注释）：原生
+      `LocalNotification.java:227-231` 对 `id > Integer.MAX_VALUE` 是**当场 `reject`**，
+      而桥接层把它 `catch` 成 `false` ⇒ 界面上只会看到页内那条兜底，系统通知一条都没有。
+      ⚠️ **旧式 `Date.now() % 2000000000 + 1` 实测并没有越界**（上界 1 999 999 999）——
+      这一条是**契约防线**，不是本次现象的根因（根因见上面 ①②）。
+   ============================================================ */
+
+/** id 的上界：**`Integer.MAX_VALUE` 减 1**（留一格余量，且**不给 0** —— 0 与"没有 id"在别处同义） */
+export const ALARM_ID_MAX = 2147483646
+
+/** `yyyy-mm-dd` → 一个稳定的天数序号（`Date.UTC` 解析，避免时区把它挪一天） */
+function epochDayOf(ymd: string): number {
+  const [y, m, d] = ymd.split('-').map(Number)
+  const t = Date.UTC(y || 1970, (m || 1) - 1, d || 1)
+  return Number.isFinite(t) ? Math.floor(t / 86_400_000) : 0
+}
+
+/**
+ * 一条提醒的**稳定**通知 id —— 同一天同一条日程每天都算出同一个数。
+ *
+ * 🔴 稳定是硬要求：原生 `YlxbAlarms.scheduleAll` 是「**先按 id 取消旧的、再注册新的**」
+ *    （`YlxbAlarms.java:80-88`）⇒ id 每次都变的话，重排就会**不停堆**旧闹钟。
+ * @returns 1 … `ALARM_ID_MAX`
+ */
+export function alarmIdOf(day: number, seq: number): number {
+  const id = ((Math.trunc(day) * 97 + Math.trunc(seq)) % ALARM_ID_MAX + ALARM_ID_MAX) % ALARM_ID_MAX
+  return id + 1
+}
+
+/**
+ * 提醒到点的**时刻**（Unix 毫秒）。
+ *
+ * `minute` 是"当天的第几分钟"（`0…1440`）—— **1440 = 次日 00:00**，
+ * `Date` 的字段溢出会自己进位，所以不用特判。
+ */
+export function alarmFireAt(base: Date, dayOffset: number, minute: number): number {
+  const d = new Date(base.getTime())
+  d.setDate(d.getDate() + Math.trunc(dayOffset))
+  d.setHours(0, 0, 0, 0)
+  d.setMinutes(Math.trunc(minute))
+  return d.getTime()
+}
+
+/** 交给系统的那一张单子里的一条（`items` 是**已经算好**的那天那几条课） */
+export interface NativePlanItem {
+  /** 课表条目 id（`schedule_snoozes` 的键，也是 payload 深链的载荷） */
+  id: string
+  /** 标题（`10 分钟后上课` 那句） */
+  title: string
+  /** 正文（班级 · 地点 · 开始时间） */
+  body: string
+  /** 这一条**当天**该响的第几分钟 */
+  minute: number
+}
+
+/**
+ * 把"今天起 `days` 天要响的提醒"算成一张交给系统的单子。
+ *
+ * ⚠️ 输入是**每一天各自那几条**（`days[i] = ` 第 i 天要响的），
+ *    而不是整张课表 —— 因为"几点响"要经过推迟记录（`scheduleSnoozes`）、
+ *    周一顺延、法定假期三道判断，那三道都在调用方（`useScheduleReminder` / `lib/schedule`）已经做过。
+ * 🔴 `now` 之前的那些**不算**（过期的闹钟交给系统只会立刻响一下，那是打扰）。
+ */
+export function nativeReminderPlan(
+  days: Array<{ ymd: string; items: readonly NativePlanItem[] }>,
+  now: Date,
+): ShellAlarm[] {
+  const t0 = now.getTime()
+  const out: ShellAlarm[] = []
+  days.forEach((day, i) => {
+    const epochDay = epochDayOf(day.ymd)
+    for (const it of day.items) {
+      const fireAt = alarmFireAt(now, i, it.minute)
+      if (fireAt <= t0) continue
+      out.push({
+        id: alarmIdOf(epochDay, out.length),
+        fireAt,
+        title: it.title,
+        body: it.body,
+        channel: 'shugao_general',
+        payload: `shugao://notify/${encodeURIComponent(it.id)}`,
+      })
+    }
+  })
+  return out
+}
+
+/**
+ * 把这张单子交给壳去排程（网页版 / exe ⇒ `false`，**一个字都不做**）。
+ *
+ * @returns `true` = 系统真的收下了（**此后应用关着也会响**）；
+ *          `false` = 没这条路（调用方必须保留页内那一条兜底，**不许假装成功**）
+ *
+ * 🔴 **真机未验**：本机没有安卓设备 —— 这一条只做过静态自检（`tsc` + `nav-checks` 第二十七节）。
+ *    真机验收只能由用户在手机上做：打开应用停在日程页 ⇒ 划掉应用 ⇒ 到课前 10 分钟应收到通知。
+ */
+export async function scheduleNativeReminders(alarms: readonly ShellAlarm[]): Promise<boolean> {
+  const s = shell()
+  if (typeof s?.scheduleAlarms !== 'function') return false
+  if (alarms.length === 0) return false
+  try {
+    return (await s.scheduleAlarms([...alarms])) === true
+  } catch {
+    return false
+  }
+}
+
+/** 这个壳能不能排**精确**闹钟（Android 12+ 要在设置里开）—— 没这条路的壳回 `null`（**不知道**，不是"不能"） */
+export async function canScheduleExactNative(): Promise<boolean | null> {
+  const s = shell()
+  if (typeof s?.canScheduleExact !== 'function') return null
+  try {
+    const v = await s.canScheduleExact()
+    return typeof v === 'boolean' ? v : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 网页那一支的"到点"路径 —— 逐字保留原来的行为。
+ *
+ * ⚠️ 上面新增的三个导出**都不碰它**：`window.__shell_out` 不存在 ⇒
+ *    `scheduleNativeReminders()` 恒 `false`（不会多排一条闹钟），这条路一字不变。
+ */
 
 /**
  * 🔴 `platform` 已经搬到 `lib/classroomShell.ts` 的 `shellPlatform()`（2026-10-04）。
