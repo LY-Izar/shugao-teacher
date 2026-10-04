@@ -4,6 +4,7 @@ import { loadSnoozes } from '../data/remote'
 import {
   notifyAsync,
   readNotifyPermission,
+  shellCanScheduleAlarms,
   nativeReminderPlan,
   scheduleNativeReminders,
 } from '../lib/notify'
@@ -86,14 +87,27 @@ export function useScheduleReminder() {
    *    原生那三个类是 2026-10-02 就写好的；断的一直是"网页侧没人调它"）。
    *   ⇒ 应用**关着也能响**。页内那个定时器**照旧保留当兜底**（前台更即时，且失败时有人知道）。
    *
-   * ⚠️ 网页版 / exe：`window.__shell_out` 没有这个方法 ⇒ `scheduleNativeReminders()` 恒 `false`
-   *   ⇒ 这条 effect **什么都不做**（行为一字不变）。
+   * ⚠️ 网页版 / exe：`window.__shell_out` 没有这个方法 ⇒ 下面**第一句**就把这条
+   *   effect 挡掉（连监听都不挂）⇒ 这条链**什么都不做**（行为一字不变）。
    *
    * 🔴 **真机未验**：本机没有安卓设备 —— 这条链只有静态判据（`nav-checks` 第二十七节）。
    *    真机验收：停在日程页 ⇒ 划掉应用 ⇒ 到课前 10 分钟应收到系统通知。
    */
   useEffect(() => {
     if (schedule.length === 0) return
+
+    /*
+     * 🔴🔴 **先问"这个壳有没有原生排程这个能力"**（`scheduleAlarms` 在不在）——
+     *   没有能力就**直接退出**：网页版与两个 exe 上**一个字都不新增**（不进 DOM、不弹提示）。
+     *
+     *   为什么不能"试一下、失败就提示"：`scheduleNativeReminders()` 在没有这条路时
+     *   **恒返 `false`** ⇒ 那句「提醒改在应用内显示。关掉应用就收不到了。」会在
+     *   **每一个登录后的页面上平白弹一次**。而它对这两种壳本来就是**噪音**：
+     *   网页版关掉页面本来就收不到（无需提醒），两个 exe 也从来没有原生排程。
+     *
+     *   ⇒ 只有**壳里确实有这个能力、但这次没排上 / 被系统拒**，才轮到下面那句人话。
+     */
+    if (!shellCanScheduleAlarms()) return
 
     let alive = true
     const arm = async () => {

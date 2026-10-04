@@ -7874,6 +7874,89 @@ section('第二十七节 · A22：到点提醒交给系统排程（桥接层 / �
     )
   }
 
+  /* ---------------- ⑨–⑪ **先问"这个壳有没有这个能力"，再谈成败**（2026-10-05 文档轮抓到的真 bug） ----------------
+   *
+   * 🔴 改之前：那句提示的判据是「**尝试后失败** ⇒ 提示」（`if (!ok)`）——
+   *    而 `scheduleNativeReminders()` 在**网页版与两个 exe** 上恒返 `false`
+   *    （exe 的 `_src/desktop/preload.js` 没有暴露 `scheduleAlarms`，网页版连 `__shell_out` 都没有）
+   *    ⇒ 那句「提醒改在应用内显示。关掉应用就收不到了。」由 `AppShell`（**无条件挂载**）承载，
+   *      在**每一个登录后的页面上平白弹一次** ✗。
+   *    🔴 而它只对 **apk 壳**成立：网页版关掉页面本来就收不到（无需提醒）、两个 exe 也从来没有原生排程。
+   * ✅ 现在：**先问能力**（`shellCanScheduleAlarms()`）—— 没有能力就**直接不进任何提示分支**；
+   *    有能力的壳里，"没排上 / 被系统拒"照旧说那句人话（⑦ 一字未动）。
+   */
+  const CAP_SIG = /export function shellCanScheduleAlarms\(\): boolean \{([\s\S]*?)\n\}/
+  /** 抠出能力判据的**函数体**（抠不出来 ⇒ 空串 ⇒ 下面的判据当场红，不会空转） */
+  const capBodyOf = (t) => t.match(CAP_SIG)?.[1] ?? ''
+  /** 把函数体**真的跑一遍**（三种壳的假 `shell()`）—— 这是行为判据，不是文字判据 */
+  const runCap = (body) => {
+    try {
+      const f = new Function('shell', body)
+      return {
+        web: f(() => null),
+        exe: f(() => ({})),
+        apk: f(() => ({ scheduleAlarms: () => Promise.resolve(true) })),
+        err: '',
+      }
+    } catch (e) {
+      return { web: null, exe: null, apk: null, err: String(e?.message ?? e) }
+    }
+  }
+  const CAP_OK = (r) => r.err === '' && r.web === false && r.exe === false && r.apk === true
+
+  check(
+    /typeof s\?\.scheduleAlarms === 'function'/.test(capBodyOf(NOTIFY)),
+    '🔴 A22 ⑨ `notify.ts` 有了"**这个壳有没有原生排程这个能力**"的判据（`shellCanScheduleAlarms()`：问 `__shell_out` 上 `scheduleAlarms` 在不在）—— 不是"有没有 Capacitor"、也不是"试一下成不成"',
+    capBodyOf(NOTIFY)
+      ? `判据体=${JSON.stringify(capBodyOf(NOTIFY).trim().split('\n').join(' '))}`
+      : '🔴 抠不出 `shellCanScheduleAlarms()` 的函数体（形状变了 ⇒ 这一条当场红）',
+  )
+  {
+    const r = runCap(capBodyOf(NOTIFY))
+    check(
+      CAP_OK(r),
+      '🔴 A22 ⑩ 三种壳上跑同一条判据：网页版（没有 `__shell_out`）= `false` · **exe 的 preload**（有 `__shell_out`、没有 `scheduleAlarms`）= `false` · apk 桥接层 = `true` ⇒ "没有能力"与"有能力但没排上"**从结构上**分得开',
+      r.err ? `🔴 跑不起来：${r.err}` : `网页版=${r.web} · exe=${r.exe} · apk=${r.apk}`,
+    )
+    /* 🧪 反向对照：把能力判据反过来问（内存副本）⇒ 上面那条当场红（读数整个翻过来） */
+    const cut = oneEdit2(NOTIFY, "typeof s?.scheduleAlarms === 'function'", "typeof s?.scheduleAlarms !== 'function'")
+    const rc = cut.ok
+      ? runCap(capBodyOf(cut.text))
+      : { web: null, exe: null, apk: null, err: `替换失败：目标出现 ${cut.n} 处（须恰好 1）` }
+    check(
+      cut.ok && rc.err === '' && !CAP_OK(rc),
+      '🧪 A22 ⑩ 反向对照：把能力判据改成"**没有**这个方法才算有能力"（内存副本）⇒ 上面那条当场假 —— 证明它咬的是**问对了没有**，不是这几个名字在不在',
+      cut.ok
+        ? `目标出现 ${cut.n} 处（须恰好 1）· 改完读数：网页版=${rc.web} · exe=${rc.exe} · apk=${rc.apk}`
+        : `目标出现 ${cut.n} 处（须恰好 1）—— 宁可报错，也不假绿`,
+    )
+  }
+  {
+    /** 那句提示的前后顺序（`NOTIFY` / `HOOK` 都已经是**剥过注释**的真代码） */
+    const gateOrder = (t) => {
+      const at = (s) => t.indexOf(s)
+      const g = at('if (!shellCanScheduleAlarms()) return')
+      const c = at('const ok = await scheduleNativeReminders(nativeReminderPlan(days, now))')
+      const p = at("text: '提醒改在应用内显示。关掉应用就收不到了。'")
+      return { g, c, p, n: once2(t, '提醒改在应用内显示'), ok: g >= 0 && c > g && p > c && once2(t, '提醒改在应用内显示') === 1 }
+    }
+    const o = gateOrder(HOOK)
+    const IMPORTED = /shellCanScheduleAlarms,[\s\S]{0,80}\} from '\.\.\/lib\/notify'/.test(HOOK)
+    check(
+      o.ok && IMPORTED,
+      '🔴 A22 ⑪ 提示的触发条件**先判"这个壳有没有这个能力"**：`if (!shellCanScheduleAlarms()) return` 排在"排单子"和那句人话**之前** ⇒ 网页版 / 两个 exe **连提示分支都进不去**（而不是"尝试后失败 ⇒ 提示"）；判据从 `lib/notify` 那一个口导入（不在页面里另抄一遍）',
+      `能力门@${o.g} · 排单子@${o.c} · 那句人话@${o.p}（须 门 < 排 < 说）· 那句话在真代码里 ${o.n} 处（须恰好 1）· 从 notify 导入=${IMPORTED}`,
+    )
+    /* 🧪 反向对照：把"先判能力"短路掉 = 改之前"直接判失败就提示"的形状 ⇒ ⑪ 当场红 */
+    const cut = oneEdit2(HOOK, 'if (!shellCanScheduleAlarms()) return', 'if (false) return')
+    const o2 = cut.ok ? gateOrder(cut.text) : { g: -1, c: -1, p: -1, n: -1, ok: true }
+    check(
+      cut.ok && !o2.ok,
+      '🧪 A22 ⑪ 反向对照：把"先判能力"那一句短路成 `if (false) return`（内存副本 = 改之前"没排上就提示"的形状）⇒ ⑪ 当场红（那句话又变成网页版也会弹）',
+      `目标出现 ${cut.n} 处（须恰好 1）· 改完能力门@${o2.g} · 判据=${o2.ok}`,
+    )
+  }
+
   /*
    * ✅ **怎么真机验**（本机没有安卓设备 ⇒ 这一节全是静态判据，**没有一条**是真机验过的）：
    *    ① 出一版新 apk（`_tools/package-all.mjs`）装到老师手机上；

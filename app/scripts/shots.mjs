@@ -1000,6 +1000,64 @@ await withLock(async () => {
       })
       await shot(page, '01 登录页', '01-login')
 
+      /*
+       * 🔴🔴 A22 ⑨（真浏览器 · 网页版）：那句「提醒改在应用内显示。关掉应用就收不到了。」
+       *   **一个字都不许出现**（2026-10-05 文档轮抓到的真 bug）。
+       *
+       * 改之前：那句提示的判据是「**尝试后失败** ⇒ 提示」，而 `scheduleNativeReminders()`
+       *   在网页版与两个 exe 上恒返 `false`（那两种壳根本没有 `scheduleAlarms` 这条路）
+       *   ⇒ 它在 `AppShell`（**无条件挂载**）上，每个登录后的页面都平白弹一次。
+       *   而它对网页版是**噪音**：关掉页面本来就收不到，不需要提醒。
+       *
+       * ⚠️ 轮询必须**从导航开始**：那句提示是 2.6 秒的浮层
+       *   （`store.ts` 的 `push` → `setTimeout(dismiss, 2600)`），等 `networkidle` 再读，
+       *   读到的只会是"已经消失了" ⇒ 这条判据就成了恒绿的摆设。
+       * ✅ 同一个运行里还有**另一半**（注入 `__shell_out.scheduleAlarms` = apk 壳有能力但没排上
+       *   ⇒ 那句话**必须出现**）：既证明上面那条不是恒绿，又钉住"有能力的壳排不上要说"没被改坏。
+       */
+      await step('01b 网页版不说「关掉应用就收不到」（A22 ⑨）', async () => {
+        /** @returns 那句话在导航后第几毫秒出现（`-1` = 8 秒内一次都没有） */
+        const probe = async (withShell) => {
+          const p = await ctx.newPage()
+          if (withShell) {
+            await p.addInitScript(() => {
+              window.__shell_out = { scheduleAlarms: () => Promise.resolve(false) }
+            })
+          }
+          p.on('pageerror', (e) => errors.push(`PAGEERROR ${p.url()} :: ${e.message}`))
+          const t0 = Date.now()
+          const nav = p.goto(`${BASE}/`, { waitUntil: 'networkidle' })
+          let hitAt = -1
+          while (Date.now() - t0 < 8000) {
+            const hit = await p
+              .evaluate(() => String(document.body.innerText ?? '').includes('关掉应用就收不到了'))
+              .catch(() => false)
+            if (hit) {
+              hitAt = Date.now() - t0
+              break
+            }
+            await p.waitForTimeout(120)
+          }
+          await nav
+          await p.close()
+          return hitAt
+        }
+        const web = await probe(false)
+        check(
+          web === -1,
+          '🔴 A22 ⑨（真浏览器 · 网页版）「提醒改在应用内显示。关掉应用就收不到了。」**一个字都不许出现** —— 网页版没有原生排程这条路，"关掉应用收不到"对它是噪音（关掉页面本来就收不到）',
+          web === -1 ? '导航后 8 秒内 0 次命中（每隔 120ms 读一次屏）' : `🔴 导航后 ${web}ms 就出现在屏上`,
+        )
+        const apk = await probe(true)
+        check(
+          apk >= 0,
+          '🧪 A22 ⑨ 反向对照（同一次运行的另一半）：同一个页面注入 `__shell_out.scheduleAlarms`（= apk 壳**有这个能力**、这次返回 `false`）⇒ 那句话**当场出现** —— 证明上面那条不是恒绿的摆设，而且"有能力的壳排不上要说"照旧保留（⑦ 的行为）',
+          apk >= 0
+            ? `导航后 ${apk}ms 出现在屏上`
+            : '🔴 8 秒内一次都没出现 —— apk 壳上也不说了，那是把 ⑦ 的行为改坏了',
+        )
+      })
+
       await goto(page, '02 工作台', '/', {
         markers: ['今日待办', '快捷操作'],
         date: D0919,

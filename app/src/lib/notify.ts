@@ -382,10 +382,32 @@ export function nativeReminderPlan(
 }
 
 /**
+ * 这个壳**有没有**原生排程这个能力（`scheduleAlarms` 在不在）。
+ *
+ * 🔴 **先问能力、再谈成败** —— 这两件事必须分开：
+ *    · 网页版（`window.__shell_out` 不存在）与两个 exe（`_src/desktop/preload.js`
+ *      只暴露文件那几个口）**都没有**这个方法 ⇒ 它们本来就没有原生排程；
+ *    · 对它们说"关掉应用就收不到"是**噪音**（网页版关掉页面本来就收不到，无需提醒）。
+ *
+ * ⇒ 调用方拿到 `false` 时必须**直接不进任何提示分支**，
+ *   而不是"试一下、`scheduleNativeReminders()` 失败就提示"（那正是这句话
+ *   在网页版与两个 exe 上平白弹出来的原因）。
+ *
+ * @returns `true` = 这个壳能排（这次排得成不成功是另一回事，见 `scheduleNativeReminders()`）
+ */
+export function shellCanScheduleAlarms(): boolean {
+  const s = shell()
+  return typeof s?.scheduleAlarms === 'function'
+}
+
+/**
  * 把这张单子交给壳去排程（网页版 / exe ⇒ `false`，**一个字都不做**）。
  *
+ * ⚠️ 这个 `false` 同时覆盖"没这条路"和"有路但没排上"两种情形 ⇒ **不能**拿它当
+ *    "要不要提示用户"的判据：提示前必须先用 `shellCanScheduleAlarms()` 问一句能力。
+ *
  * @returns `true` = 系统真的收下了（**此后应用关着也会响**）；
- *          `false` = 没这条路（调用方必须保留页内那一条兜底，**不许假装成功**）
+ *          `false` = 没排上（调用方必须保留页内那一条兜底，**不许假装成功**）
  *
  * 🔴 **真机未验**：本机没有安卓设备 —— 这一条只做过静态自检（`tsc` + `nav-checks` 第二十七节）。
  *    真机验收只能由用户在手机上做：打开应用停在日程页 ⇒ 划掉应用 ⇒ 到课前 10 分钟应收到通知。
