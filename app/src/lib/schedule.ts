@@ -91,12 +91,55 @@ export function dayState(schedule: ScheduleItem[], d = new Date(), weekday?: num
 export const REMIND_BEFORE = 10
 
 export function dueReminders(schedule: ScheduleItem[], d = new Date()): ScheduleItem[] {
+  return dueRemindersWithSnooze(schedule, {}, d)
+}
+
+/**
+ * 推迟过的那几条：提醒时间不看"课前 10 分钟"，看**推迟到的那一分钟**。
+ *
+ * 🔴 推迟只改**提醒**，不改课表 —— 课还在原时间上（那才是真出事）。
+ * ⚠️ 判定窗口与 `dueReminders` **同一个**（±1 分钟，躲定时器抖动）：
+ *    两处口径不一样的话，同一条课会在两个时刻各响一次。
+ *
+ * @param snoozed 课表条目 id → 推迟到当天第几分钟（`schedule_snoozes.remind_minute`）
+ */
+export function dueRemindersWithSnooze(
+  schedule: ScheduleItem[],
+  snoozed: Readonly<Record<string, number>>,
+  d = new Date(),
+): ScheduleItem[] {
   const m = nowMinutes(d)
   return itemsForDate(schedule, d).filter((it) => {
     if (!it.notify) return false
-    const diff = toMinutes(it.start) - m
-    return diff >= REMIND_BEFORE - 1 && diff <= REMIND_BEFORE + 1
+    /* 有推迟记录 ⇒ 只认那个时刻；推迟到已经过去的分钟 ⇒ 今天不再响它 */
+    const moved = snoozed[it.id]
+    const target = moved === undefined ? toMinutes(it.start) - REMIND_BEFORE : moved
+    return target - m >= -1 && target - m <= 1
   })
+}
+
+/**
+ * 「晚 N 分钟」推到几点 —— **累加**语义。
+ *
+ * @param start       这节课的 'HH:MM' 开始时间
+ * @param current     已经推迟到第几分钟（`undefined` = 还没推迟过）
+ * @param delayMinutes 再往后推多少
+ *
+ * ⚠️ 基点是「**课前 10 分钟**」，不是「课开始」——
+ *    晚 10 分钟 = 提醒晚响 10 分钟，不是课晚 10 分钟（那是调课，另一条路）。
+ * 🔴 结果**钳在 [0, 1440]**：一节课被连点很多次也不会推出一天之外
+ *    （`1440` = 24:00，写进库被 check 约束挡住 ⇒ 按钮看着点了没反应）。
+ */
+export function snoozeMinuteOf(start: string, current: number | undefined, delayMinutes: number): number {
+  const base = current ?? toMinutes(start) - REMIND_BEFORE
+  return Math.max(0, Math.min(1440, base + delayMinutes))
+}
+
+/** 把「现在几点」说成人话（推迟到的那一刻显示在按钮上） */
+export function snoozeText(minute: number): string {
+  const h = Math.floor(minute / 60)
+  const m = minute % 60
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`
 }
 
 export function normalizeTime(v: string, fallback: string): string {

@@ -2131,6 +2131,112 @@ export const saveSchedules = (list: ScheduleItem[], teacherId: string) =>
 export const deleteSchedule = (id: string) => remove('schedule_items', id)
 
 /* ============================================================
+   推迟某一节课的**提醒**（2026-10-04 · 施工单-日程延后.md）
+   ------------------------------------------------------------
+   🔴 它推迟的是提醒，**不是课表** —— 所以这里写的是另一张表
+      （`schedule_snoozes`），一个字都不碰 `schedule_items`。
+      推迟完那节课仍在原时间上；真要改课表走 `apply_perm_schedule_change()`。
+
+   🔴 **探表**（照 `ensureExamTables()` / `ensureNoticeTables()` 那一套）：
+      用户还没跑 schema 那一段时，表不在 ⇒ 这两件事**静默降级**，
+      「晚 10 分钟」按钮显示"不支持"而不是点了报错。
+      ⚠️ 判据只认「表不在」；网络抖动一律当作"在"（宁可少一个按钮，
+         也不要因为网抖就骗用户说"这功能没有"）。
+   ============================================================ */
+
+let snoozeTblChecked: Promise<boolean> | null = null
+
+/**
+ * 这张表在不在？（只探一次；老库没有就回 false，界面据此收起按钮）
+ *
+ * ⚠️ 用 `getSupabase()` 而不是别的：未登录时它回 null，
+ *    这时**按"有这张表"处理**（按钮照摆，只是点了什么也不做）
+ *    —— 未登录的人根本进不来日程页，不该在这里弹"功能不支持"。
+ */
+export const ensureSnoozeTable = (): Promise<boolean> => {
+  if (snoozeTblChecked) return snoozeTblChecked
+  snoozeTblChecked = (async () => {
+    let sb: ReturnType<typeof getSupabase>
+    try {
+      sb = getSupabase()
+    } catch {
+      return true
+    }
+    if (!sb) return true
+    try {
+      // `select('*')` 不假设任何一列存在（§三.3）
+      const { error } = await sb.from('schedule_snoozes').select('*').limit(1)
+      return !error
+    } catch {
+      return true // 探不到 ≠ 没有（网络抖动不算"表不存在"）
+    }
+  })()
+  return snoozeTblChecked
+}
+
+/** 今天这一天的推迟记录 → `{ [scheduleItemId]: 当天第几分钟 }` */
+export const loadSnoozes = async (onDate: string): Promise<Record<string, number>> => {
+  let sb: ReturnType<typeof getSupabase>
+  try {
+    sb = getSupabase()
+  } catch {
+    return {}
+  }
+  if (!sb) return {}
+  if (!(await ensureSnoozeTable())) return {}
+  const { data, error } = await sb
+    .from('schedule_snoozes')
+    .select('schedule_item_id, remind_minute')
+    .eq('on_date', onDate)
+  if (error || !data) return {} // 读不到就按"没推迟过"——提醒照常响，宁可早响不可不响
+  return Object.fromEntries(
+    (data as { schedule_item_id: string; remind_minute: number }[]).map((r) => [
+      r.schedule_item_id,
+      r.remind_minute,
+    ]),
+  )
+}
+
+/**
+ * 把某一节课的提醒推到 `minute`（当天第几分钟）。
+ *
+ * ⚠️ 这里**不能用**文件里那个 `upsert()` helper —— 它硬编码 `onConflict: 'id'`，
+ *    而本表的冲突键是 `(teacher_id, on_date, schedule_item_id)`。
+ *    用 `'id'` 的话每次都会当成插入新行 ⇒ 连点两次就多出一条，
+ *    界面上同一节课摆两个推迟时刻。
+ * 🔴 失败**抛错**（不吞）：按钮点了没生效必须有人知道。
+ */
+export const snoozeScheduleReminder = async (
+  scheduleItemId: string,
+  onDate: string,
+  minute: number,
+): Promise<void> => {
+  const sb = getSupabase()
+  if (!sb) return
+  const {
+    data: { user },
+  } = await sb.auth.getUser()
+  if (!user) return
+  const { error } = await sb.from('schedule_snoozes').upsert(
+    { teacher_id: user.id, on_date: onDate, schedule_item_id: scheduleItemId, remind_minute: minute },
+    { onConflict: 'teacher_id,on_date,schedule_item_id' },
+  )
+  if (error) throw new Error(error.message)
+}
+
+/** 撤销推迟（回到"课前 10 分钟"）—— 界面上是「恢复」 */
+export const clearScheduleSnooze = async (scheduleItemId: string, onDate: string): Promise<void> => {
+  const sb = getSupabase()
+  if (!sb) return
+  const { error } = await sb
+    .from('schedule_snoozes')
+    .delete()
+    .eq('on_date', onDate)
+    .eq('schedule_item_id', scheduleItemId)
+  if (error) throw new Error(error.message)
+}
+
+/* ============================================================
    🆕 2026-10-12 · 「课程管理」（`schema.sql` §38）—— 前端这一层只做两件事
    ------------------------------------------------------------
    ① `ensureScheduleAdminTables()`：**§38 那两张新表在不在线上库里**。

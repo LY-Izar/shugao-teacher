@@ -1,7 +1,8 @@
 import { useEffect } from 'react'
 import { useStore, useToast } from '../data/store'
+import { loadSnoozes } from '../data/remote'
 import { notifyAsync, readNotifyPermission } from '../lib/notify'
-import { REMIND_BEFORE, dueReminders } from '../lib/schedule'
+import { REMIND_BEFORE, dueRemindersWithSnooze } from '../lib/schedule'
 import { beijingNow, dayKind, ymdOf } from '../lib/holiday'
 
 const SEEN_KEY = 'shugao.remind.seen'
@@ -43,6 +44,31 @@ export function useScheduleReminder() {
   const classes = useStore((s) => s.classes)
   const push = useToast((s) => s.push)
 
+  /*
+   * 🔴 推迟记录读的是 **store 里的那一份**（不是组件自己的 useState）：
+   *    日程页的「晚 10 分钟」按钮写的是 store，读取方若是另一个 useState
+   *    ⇒ 两个真值源 ⇒ 按钮显示"已推迟到 10:20"、提醒还在 10:00 响。
+   */
+  const snoozes = useStore((s) => s.scheduleSnoozes)
+  const setScheduleSnooze = useStore((s) => s.setScheduleSnooze)
+
+  // 每天取一次当天那组（跨零点自动换组 —— `ymdOf` 变了 key 就变）
+  const dayKey = ymdOf(beijingNow())
+  useEffect(() => {
+    let alive = true
+    void loadSnoozes(dayKey).then((loaded) => {
+      if (!alive || Object.keys(loaded).length === 0) return
+      // 只在有东西时写回（否则一次网络抖动就把本地的推迟记录清空）
+      const cur = useStore.getState().scheduleSnoozes
+      const merged = { ...cur, ...loaded }
+      if (JSON.stringify(merged) === JSON.stringify(cur)) return
+      useStore.setState({ scheduleSnoozes: merged })
+    })
+    return () => {
+      alive = false
+    }
+  }, [dayKey, setScheduleSnooze])
+
   useEffect(() => {
     if (schedule.length === 0) return
 
@@ -66,8 +92,9 @@ export function useScheduleReminder() {
       if (dayKind(today) === 'holiday') return
 
       // 只提醒教师自己的课；班级课表里别的科目不归他管
-      const due = dueReminders(
+      const due = dueRemindersWithSnooze(
         schedule.filter((s) => s.scope !== 'class'),
+        snoozes,
         now,
       )
       if (due.length === 0) return
@@ -117,5 +144,7 @@ export function useScheduleReminder() {
     void tick()
     const t = window.setInterval(() => void tick(), 60_000)
     return () => window.clearInterval(t)
-  }, [schedule, classes, push])
+    // 🔴 `snoozes` 在依赖里：推迟/恢复之后**下一分钟的那次 tick** 必须按新时刻判，
+    //    漏了它就会出现"我明明点了晚 10 分钟，它还是按课前 10 分钟又响了一遍"。
+  }, [schedule, classes, push, snoozes])
 }

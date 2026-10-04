@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { createJSONStorage, persist, type StateStorage } from 'zustand/middleware'
 import { isRemote } from '../lib/supabase'
+import { beijingNow, ymdOf } from '../lib/holiday'
 import { HEARTBEAT_MS, emit, subscribe } from '../lib/realtime'
 import { normalizePaperName } from '../lib/examPaper'
 import { clampQuestionCount } from '../lib/assignments'
@@ -153,6 +154,19 @@ type State = {
   calls: CallRecord[]
   /* ---- 课表 ---- */
   schedule: ScheduleItem[]
+  /**
+   * 🆕 2026-10-04「推迟提醒」：课表条目 id → 当天第几分钟。
+   *
+   * 🔴 它推迟的是**提醒**，不是课表 —— 课还在原时间上。
+   * ⚠️ 放 store 而不是组件各自的 useState：`useScheduleReminder`（定时器那一侧）
+   *    与日程页的「晚 10 分钟」按钮**都要读写它**，各开一份 useState 就是两个真值源
+   *    ⇒ 按钮显示"已推迟到 10:20"、提醒却还在 10:00 响。
+   * 🔴 这一组只对**北京时间当天**有效（跨零点整组换掉）——
+   *    留着昨天的记录会让今天的课被昨天的推迟时刻卡住。
+   */
+  scheduleSnoozes: Record<string, number>
+  /** 按当天时刻写一条推迟；传 `null` = 撤销（回到"课前 10 分钟"） */
+  setScheduleSnooze: (itemId: string, minute: number | null) => void
   /**
    * 🆕 2026-10-12「课程管理」：**临时调课**那一条路（`schema.sql` §38.1）。
    *
@@ -647,6 +661,8 @@ function freshDemo() {
     classrooms: makeClassrooms(classes),
     calls: [] as CallRecord[],
     schedule: makeDemoSchedule(classes),
+    /* 🆕 推迟提醒：本地演示模式没有 `schedule_snoozes` 表 —— 先落在内存里（刷新即回初始） */
+    scheduleSnoozes: {} as Record<string, number>,
     /* 本地演示模式没有 §38 那两张表可写 —— 临时调课先落在内存里（刷新即回初始） */
     tempScheduleChanges: [] as TempScheduleChange[],
     exams: examDemo.exams,
@@ -751,6 +767,10 @@ export const useStore = create<State>()(
     (set, get) => ({
       teacher: null,
       ...initialState(),
+      /* 🆕 推迟提醒：默认空（演示模式的初值在 `initialState()` 里给的是 `{}`，
+         这里再给一次是为了**后端模式**也有确定初值 —— 否则 `persist` 反序列化出来的
+         老缓存里没这一条，`undefined` 会在 `dueRemindersWithSnooze` 里读成"报错"而不是"没推迟"）。*/
+      scheduleSnoozes: {} as Record<string, number>,
       lastSeenAt: 0,
       streakDays: 1,
       userId: null,
@@ -1802,8 +1822,50 @@ export const useStore = create<State>()(
       },
 
       removeSchedule: (id) => {
-        set((s) => ({ isDemo: false, schedule: s.schedule.filter((x) => x.id !== id) }))
+        set((s) => {
+          const snoozes = { ...s.scheduleSnoozes }
+          delete snoozes[id]
+          return {
+            isDemo: false,
+            schedule: s.schedule.filter((x) => x.id !== id),
+            // 课被删了，它那条推迟记录也**从内存里带走**（库那侧是 `on delete cascade`，
+            // 不该出现一条指向空课的记录 ⇒ 提醒那侧再也找不到可挂靠的那一节）。
+            scheduleSnoozes: snoozes,
+          }
+        })
         void remote.deleteSchedule(id)
+      },
+
+      /*
+       * 🆕 2026-10-04「推迟提醒」—— 只挪**提醒**，不动课表。
+       *
+       * 🔴 内存与库**同时**写，且落库**不吞错**：
+       *    吞了的话就是"按钮显示推迟成功、明天没提醒也没人知道"——
+       *    那正是 §五「不报错但就是不对」那一类。
+       *    失败时把内存改回去，并抛出让界面弹一句"没存上"。
+       * ⚠️ 本地演示模式（`isDemo`）不落库：没有那张表，点了只是内存里生效。
+       */
+      setScheduleSnooze: (itemId, minute) => {
+        const prev = useStore.getState().scheduleSnoozes
+        const next = { ...prev }
+        if (minute === null) delete next[itemId]
+        else next[itemId] = minute
+        set({ scheduleSnoozes: next })
+        if (useStore.getState().isDemo) return
+        const day = ymdOf(beijingNow())
+        const p =
+          minute === null
+            ? remote.clearScheduleSnooze(itemId, day)
+            : remote.snoozeScheduleReminder(itemId, day, minute)
+        // 🔴 失败**改回去**并把错误抛给调用方（界面上那句"没存上"靠它）。
+        //    不这么做的后果：按钮显示"已推迟到 10:20"、库里没有 —— 而明天没人提醒也没人知道。
+        void p.then(
+          () => {},
+          (e: unknown) => {
+            set({ scheduleSnoozes: prev })
+            throw e
+          },
+        )
       },
 
       /*

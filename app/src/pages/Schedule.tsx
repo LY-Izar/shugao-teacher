@@ -12,6 +12,7 @@ import {
 } from '../components/icons'
 import { ScheduleBatch } from '../components/ScheduleBatch'
 import ScheduleDayAxis from '../components/ScheduleDayAxis'
+import SnoozeButton from '../components/SnoozeButton'
 import { Button, PageHead, Panel, Sect, Sheet, Tag } from '../components/ui'
 import { useStore, useToast } from '../data/store'
 import { loadClassMembers, loadClassSubjects } from '../data/remote'
@@ -26,6 +27,7 @@ import {
   durationText,
   itemsOfDay,
   normalizeTime,
+  nowMinutes,
   toMinutes,
   weekdayOf,
 } from '../lib/schedule'
@@ -322,10 +324,44 @@ const [perm, setPerm] = useState<
                 </span>
               </div>
             ) : (
-              /* 真实时间轴：按真实分钟铺位，看得出每节多长、中间空闲多久、哪两节撞了 */
-              <div className="p-3">
-                <ScheduleDayAxis items={state.items} classNameOf={className} onPick={startEdit} />
-              </div>
+              <>
+                {/* 真实时间轴：按真实分钟铺位，看得出每节多长、中间空闲多久、哪两节撞了 */}
+                <div className="p-3">
+                  <ScheduleDayAxis items={state.items} classNameOf={className} onPick={startEdit} />
+                </div>
+                {/*
+                 * 🆕 推迟提醒：每节课一行「晚 10 分 / 晚 20 分」（或已推迟时的「再晚 / 恢复」）。
+                 *
+                 * ⚠️ 只给**今天剩下的**那几节摆 —— 已经过去的课不需要推迟
+                 *    （点"晚 10 分钟"在已过去的课上没有意义，那是一条永远不会被读的记录）。
+                 */}
+                <div
+                  className="flex flex-col gap-1.5 px-3 pb-3"
+                  style={{ borderTop: '1px solid var(--color-line)', paddingTop: 10 }}
+                >
+                  <span style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
+                    提醒时间 · 只挪提醒，课还是原来的时间
+                  </span>
+                  {state.items
+                    .filter((it) => toMinutes(it.end) > nowMinutes())
+                    .map((it) => (
+                      <div key={it.id} className="flex items-center gap-2">
+                        <span className="num shrink-0" style={{ width: 74, fontSize: 12 }}>
+                          {it.start}–{it.end}
+                        </span>
+                        <span className="min-w-0 flex-1 truncate" style={{ fontSize: 12.5 }}>
+                          {it.title}
+                        </span>
+                        <SnoozeButton itemId={it.id} start={it.start} notify={it.notify} />
+                      </div>
+                    ))}
+                  {state.items.filter((it) => toMinutes(it.end) > nowMinutes()).length === 0 ? (
+                    <span style={{ fontSize: 11.5, color: 'var(--color-ink4)' }}>
+                      今天的课都上完了
+                    </span>
+                  ) : null}
+                </div>
+              </>
             )}
           </Panel>
         </div>

@@ -2753,6 +2753,53 @@ create policy schedule_class_write on schedule_items for all to authenticated
   using (scope = 'class' and can_manage_class(class_id))
   with check (scope = 'class' and can_manage_class(class_id));
 
+-- ---- schedule_snoozes：某一节课的**提醒**推迟到什么时候（2026-10-04）
+--
+--  🔴 它推迟的是**提醒**，不是课表 —— 课还在那个时间上，只是"上课前 10 分钟"那条
+--     提醒被人手动往后挪了。所以它**不改 `schedule_items`**，只记"这一天的这一条，
+--     提醒挪到几点"。这样推迟不会污染每周重复的课表（那才是真出事）。
+--
+--  🔴 一节课**只留一条**推迟记录（唯一约束）：连点两次「晚 10 分钟」应该是
+--     在原来那条上**累加**，而不是多出一行让界面上摆两个。
+--     —— 界面上那条"晚 10 分钟"本来就是累加语义（挪到现在 +10 分钟）。
+--
+--  🔴 `on_date` 是**日期**而不是 weekday：推迟只对"某一天那一次"成立。
+--     用 weekday 会变成"每周三都推迟 10 分钟"，那是另一种东西（不是推迟，是改课表）。
+create table if not exists schedule_snoozes (
+  id                uuid primary key default gen_random_uuid(),
+  teacher_id        uuid not null references teachers (id) on delete cascade,
+  on_date           date not null,
+  schedule_item_id  uuid not null references schedule_items (id) on delete cascade,
+  -- 推迟到的**当天时刻**（分钟）。存绝对时刻而不存"延后多少分钟"：
+  --   存增量的话，改一次课表/过一天，"晚 10 分钟"会在反复改课表后越挪越远。
+  remind_minute     int not null check (remind_minute between 0 and 1440),
+  created_at        timestamptz not null default now(),
+  unique (teacher_id, on_date, schedule_item_id)
+);
+
+comment on table public.schedule_snoozes is
+  '某一节课的上课前提醒推迟到当天第几分钟（只影响提醒，不改课表；一节课一条，靠唯一约束）';
+
+-- 🔴🔴 **开 RLS 这一句不能少**（2026-10-04 `rls-checks` §14 当场抓出来）：
+--   上一版只写了 `create policy`，忘了 `enable row level security` ⇒
+--   **policy 一条也不会生效**，PostgREST 直接放行全表 —— 谁登录了都能读写所有人的推迟记录。
+--   忘了这一句的表**看起来有策略**，实际上等于没有策略；
+--   而 `rls-checks` §14 正是"public 下每张表都得开了 RLS"那条自检，它一次就抓到。
+alter table schedule_snoozes enable row level security;
+
+-- 索引：提醒侧每次只查"今天 + 我名下"那几条
+create index if not exists schedule_snoozes_teacher_date_idx
+  on schedule_snoozes (teacher_id, on_date);
+
+-- 读/写：只有本人（`auth.uid()`），且**不许教室端账号**（与 `schedule_mine_write` 同一条理由：
+-- 教室端是大屏上的固定账号，不该有自己的提醒记录）。
+-- 🔴 `on delete cascade` 已经保证课表那一行被删时记录跟着走 —— 所以界面上
+--    不需要"课被删了要不要清推迟"这层逻辑，也不会出现一条指向空课的记录。
+drop policy if exists schedule_snoozes_own on schedule_snoozes;
+create policy schedule_snoozes_own on schedule_snoozes for all to authenticated
+  using (teacher_id = auth.uid() and not is_classroom_account())
+  with check (teacher_id = auth.uid() and not is_classroom_account());
+
 -- ---- classrooms：设备行（在线状态 / 心跳）----
 --  读：classrooms_visible（§11）。`classrooms_own` 是旧策略，16.4 删。
 --  ⚠️ `classrooms_heartbeat`（§11.1，教室端按 class_id 更新自己那一行）**保留**：
