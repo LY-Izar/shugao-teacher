@@ -33,6 +33,11 @@
  *     `https://localhost`）加载的是打进包里的网页产物，**相对路径**的 `/api/*` 会被壳
  *     自己的本地服务器接走（回 `200 + index.html`）⇒ 维护模式读不到、面板误报"未配置"。
  *     一律走 `src/lib/apiBase.ts` 的 `apiUrl()`；跨域预检在 `functions/api/_middleware.ts`。
+ *     🆕 **D17（2026-10-04）：产物面向老设备的底线** —— 用户报"安卓较低版本上 UI 不能正常
+ *     显示"，根因是**产物基线**：① Tailwind v4 把全部样式放进 `@layer`（底线 Chrome 99），
+ *     更老的 WebView **不认识 `@layer`、连块带规则一起丢掉** ⇒ 页面完全没样式；
+ *     ② 不写 `build.target` 时产出 `?.`/`??`（Chrome 80+）⇒ 更老的 WebView **解析失败** ⇒ 白屏。
+ *     判据：产物 CSS 里 `@layer` 必须为 0；`vite.config.ts` 必须钉着 `target: 'es2015'` + 摊平插件。
  *   · 编码（D8）：全仓文本文件的无 BOM / 严格 UTF-8 / 中文没被 mojibake，
  *     外加**不可见字符 / 全角标点混进代码** ——
  *     这个项目**反复栽在编码上**（BOM 出过构建失败、上一轮又出双重编码乱码），
@@ -4213,6 +4218,60 @@ section('第十八节 · D16：站内接口只有一个基址（`apiUrl` · 壳�
   )
 }
 
+/* ============================================================
+   第十九节 · D17：产物面向**老设备**的底线（2026-10-04）
+   ------------------------------------------------------------
+   用户报「安卓较低版本的设备上 UI 不能正常显示」。根因不在页面，在**产物基线**：
+     · CSS：Tailwind v4 把**全部**样式放进 `@layer theme/base/components/utilities`，
+       而 `@layer` 的底线是 **Chrome 99 / Android WebView 99**（2022-03）。更老的 WebView
+       **不认识 `@layer`，会把整块连同里面的规则一起丢掉** ⇒ 页面等于完全没有样式。
+       → `vite.config.ts` 的 `shugaoCssCompat()` 在**产物**上把层摊平（顺序不变）。
+     · JS：不写 `build.target` 时，产物里是 `?.`（59 处）与 `??`（91 处）—— **Chrome 80+**
+       才认的语法 ⇒ 更老的 WebView **整个 bundle 解析失败**（白屏）。
+       → 现在钉死 `build.target: 'es2015'`（Chrome 49+，覆盖 minSdk 23 那一档）。
+   ⚠️ 判据**只认 `@layer`**：`?.` 不能当判据 —— 产物里 `i?.42:1` 其实是三元
+      `i ? .42 : 1`（minify 把空格去掉了），grep 会**误报**（这一轮实测踩到）。
+   ============================================================ */
+
+section('第十九节 · D17：产物面向老设备的底线（`@layer` 摊平 · `target: es2015`）')
+
+{
+  const DIST = join(APP, 'dist', 'assets')
+  const cssFiles = existsSync(DIST) ? readdirSync(DIST).filter((f) => f.endsWith('.css')) : []
+  check(
+    cssFiles.length > 0,
+    'D17 前置：`dist/assets/*.css` 在（先 `npm run build`）—— 这一条不许静默跳过',
+    cssFiles.length ? `${cssFiles.length} 个 css：${cssFiles.slice(0, 3).join('、')}` : '没有产物',
+  )
+  if (cssFiles.length) {
+    const css = cssFiles.map((f) => readFileSync(join(DIST, f), 'utf8')).join('\n')
+    const hit = (re) => (css.match(re) || []).length
+    const layers = hit(/@layer[\s{]/g)
+    check(
+      layers === 0,
+      '🔴 D17 ① 产物 CSS 里**没有 `@layer`**（Tailwind v4 默认全在层里；老 WebView 会把整块丢掉 ⇒ 页面没样式）',
+      `@layer ${layers} 处 · @property ${hit(/@property/g)} · :is( ${hit(/:is\(/g)} · color-mix( ${hit(/color-mix\(/g)}`,
+      '反向对照：把 `vite.config.ts` 的 `shugaoCssCompat()` 从 plugins 里去掉 → 这条当场红',
+    )
+    /* 🧪 反向对照：同一段判据喂一段**带层**的 CSS，必须当场命中 */
+    const sample = '@layer utilities{.a{color:red}}'
+    check(
+      (sample.match(/@layer[\s{]/g) || []).length === 1 && layers === 0,
+      '🧪 D17 反向对照：喂一段 `@layer utilities{…}` 给同一条判据 → 当场命中（证明 ① 在真扫产物）',
+      `样例命中 ${(sample.match(/@layer[\s{]/g) || []).length} 处 · 产物命中 ${layers} 处`,
+    )
+  }
+  const viteSrc = readApp('vite.config.ts')
+  const hasTarget = /target:\s*'es2015'/.test(viteSrc)
+  const hasPlugin = /shugaoCssCompat\(\)/.test(viteSrc)
+  check(
+    hasTarget && hasPlugin,
+    "🔴 D17 ② `vite.config.ts` 里钉着两条底线：`build.target: 'es2015'` + 产物 CSS 摊平插件",
+    `target 在 = ${hasTarget} · 插件挂在 plugins 里 = ${hasPlugin}`,
+    "这两条是**意图锚点**（真读数由构建时的 esbuild 与 ① 的产物扫描保证）—— `?.` 那种 grep 会误报，见本节注释",
+  )
+}
+
 /* ---------------- 结果 ---------------- */
 console.log(`\n================ 结果 ================`)
 console.log(`  断言：通过 ${passed} 条，失败 ${failures.length} 条`)
@@ -4221,6 +4280,6 @@ if (failures.length) {
   console.log('\n  ⛔ 有断言没过（上面每一条都写了实测值）')
   process.exitCode = 1
 } else {
-  console.log('  全部通过 ✅（纯函数 A1–A10 / 静态 D1–D7 · D9 · D10 · D11 · D12 · D13 · D14 · D15 · D16 / 编码 + 不可见字符 D8）')
+  console.log('  全部通过 ✅（纯函数 A1–A10 / 静态 D1–D7 · D9 · D10 · D11 · D12 · D13 · D14 · D15 · D16 · D17 / 编码 + 不可见字符 D8）')
 }
 }, { script: 'nav-checks.mjs' })
