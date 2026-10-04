@@ -6808,7 +6808,9 @@ section('第二十四节之二 · A20：推迟某一节课的**提醒**（不挪
       .replace(/\/\*[\s\S]*?\*\//g, '')
       .replace(/(^|[^:'"`\w])\/\/[^\n]*/gm, '$1')
 
-  const SCHED = strip(readApp('src/lib/schedule.ts'))
+  /* ⚠️ `_SCHED`（不是 `SCHED`）：A18 那一节已经有一个 `SCHED` 在用，这一节只是留着备查 ⇒
+     声明未使用会被 `oxlint` 的 no-unused-vars 抓到（仓库的线是 0 warnings ✗）。 */
+  const _SCHED = strip(readApp('src/lib/schedule.ts'))
   const BTN = strip(readApp('src/components/SnoozeButton.tsx'))
   const STORE = strip(readApp('src/data/store.ts'))
   const REMOTE = strip(readApp('src/data/remote.ts'))
@@ -7074,7 +7076,9 @@ return { toMinutes, REMIND_BEFORE, dueRemindersWithSnooze, snoozeMinuteOf, snooz
   }
 
   /* ---------------- ③ 真值源只有一份 ---------------- */
-  const storeReads = (HOOK.match(/scheduleSnoozes/g) ?? []).length
+  /* ⚠️ 同一个道理：这一行原来叫 `storeReads`，但下面的 check 是直接对 `HOOK` 做正则判的
+     ⇒ 它没被用到 ⇒ 会被 no-unused-vars 抓（改成 `_` 前缀保留"这里数过一次"这个信息）。 */
+  const _storeReads = (HOOK.match(/scheduleSnoozes/g) ?? []).length
   check(
     /useStore\(\(s\) => s\.scheduleSnoozes\)/.test(HOOK),
     'A20 ③ 提醒侧（定时器）读的是 **store 那一份**，不是组件自己的 useState',

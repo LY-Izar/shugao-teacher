@@ -14409,6 +14409,56 @@ await withLock(async () => {
         '反向对照：🧪 对照 F（把 `if (items.length === 0) return null` 从 Settings 副本里删掉 → 同一条判据当场判假）',
       )
 
+      /* 🔴 S25 ⑩：**更新日志的每一条都不许有破折号与括号补充**（2026-10-04 用户定的长期标准）
+         ------------------------------------------------------------
+         用户原话：「更新日志里面就不要写破折号，括号里面的东西了……**全部都是，以后都是这种标准**」。
+         ⇒ 判据：`changelog.ts` **每一个条目**（含带 `only` 的对象式条目，取它的 `text`）
+            都不含 `——`、不含全角 `（）`、也不含半角 `()`。
+         ⚠️ **注释不算** —— 文件头那段纪律里就写着"不许用破折号"这件事本身，
+            整份源码直接扫的话**这条判据自己先红**（"核对工具扫错了地方"这一类坑）。
+            ⇒ 两道保险：① 先 `noComment()` 把那两段块注释剥掉；② 只从 `items: […]` 区间里取条目。
+         ⚠️ 反向对照**不许只 `replace` 第一处**（§三.2）：下面先数出现次数，不是 1 就当场抛错。 */
+      const logNoComment = noComment(logSrc)
+      /** 取条目：纯文本式（6 空格 + 引号）与对象式（8 空格 `text:`）两种都算，**只认 `items:` 区间** */
+      const itemsInLog = (src) => {
+        const out = []
+        for (const seg of src.matchAll(/items:\s*\[([\s\S]*?)\n\s{4}\],/g)) {
+          for (const m of seg[1].matchAll(/^\s{6}'((?:[^'\\]|\\.)*)'/gm)) out.push(m[1])
+          for (const m of seg[1].matchAll(/^\s{8}text:\s*'((?:[^'\\]|\\.)*)'/gm)) out.push(m[1])
+        }
+        return out
+      }
+      /** 判据本体：返回"脏"的条目（空数组 = 全干净）。反向对照喂的是**同一个**它。 */
+      const dirtyLogItems = (src) => itemsInLog(src).filter((s) => s.includes('——') || /[（）()]/.test(s))
+      const logItems = itemsInLog(logNoComment)
+      const logDirty = dirtyLogItems(logNoComment)
+      check(
+        logItems.length >= 30 && logDirty.length === 0,
+        '🔴 S25 ⑩ §七 文案纪律：`changelog.ts` **每一个条目**都不含破折号 `——`、不含括号补充（全角 `（）` 与半角 `()` 都不许）',
+        `解析到 ${logItems.length} 条 · 含破折号或括号 ${logDirty.length} 条${logDirty.length ? `（${logDirty.slice(0, 3).map((s) => JSON.stringify(s.slice(0, 24))).join(' / ')}）` : ''}`,
+        '反向对照：🧪 S25 ⑩（往某一条里塞回一个 `——` 或一对 `（）` ⇒ 同一条判据当场判假）',
+      )
+      /* 🧪 反向对照：在**内存副本**里塞回去 ⇒ 同一条判据当场判假（⑩ 不是恒真的摆设） */
+      const poisonItem = logItems.find((s) => s.includes('教室大屏「置顶小窗」')) ?? logItems[0] ?? ''
+      /** 先数出现次数，不是 1 就抛 —— 宁可报错也不假绿（"改的是注释/别人的那一处"） */
+      const replaceOnce = (src, target, to) => {
+        const n = src.split(target).length - 1
+        if (n !== 1) throw new Error(`S25 ⑩ 反向对照：锚点出现 ${n} 次（要求恰好 1 次）—— 宁可报错也不假绿`)
+        return src.replace(target, to)
+      }
+      const poisonDash = poisonItem ? replaceOnce(logNoComment, poisonItem, `${poisonItem}——补一句`) : logNoComment
+      const poisonParen = poisonItem ? replaceOnce(logNoComment, poisonItem, `${poisonItem}（补一句）`) : logNoComment
+      check(
+        logDirty.length === 0 &&
+          logItems.length >= 30 &&
+          dirtyLogItems(poisonDash).length === 1 &&
+          dirtyLogItems(poisonParen).length === 1 &&
+          poisonDash !== logNoComment &&
+          poisonParen !== logNoComment,
+        '🧪 S25 ⑩ 反向对照：往某一条里塞回一个 `——` ／ 一对 `（）` ⇒ **同一条判据**当场判假（⑩ 不是恒真的摆设）',
+        `原=${logDirty.length} 条 · 塞破折号后=${dirtyLogItems(poisonDash).length} 条 · 塞括号后=${dirtyLogItems(poisonParen).length} 条 · 锚点=${JSON.stringify(poisonItem.slice(0, 18))}`,
+      )
+
       /* ---------- 🧪 反向对照（**实测跑红**，见 §S25 报告） ---------- */
       /* A：同一个 sourceCheck，只把 version.ts 的号改掉 → "三处一致"必须判假 */
       const sourceCheckVer = (verSrcIn, pkgVer) => {
