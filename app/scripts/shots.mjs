@@ -1428,8 +1428,14 @@ await withLock(async () => {
         },
       })
 
+      /*
+       * ⚠️ 期望值 2026-10-04 变了：这一页原来有一整张「教室端」卡（地址 + 复制 +
+       *    在新标签页打开），用户当天说「图二的教室端入口也没什么用了」⇒ 整卡删掉。
+       *    所以标记里的 `教室端` 跟着撤掉（这一屏默认没有 `?rel=`，下载按钮一颗都不摆，
+       *    那个词在这一页上也不再出现）。`备份与恢复` / `关于` 两张卡都还在。
+       */
       await goto(page, '09 设置页', '/settings', {
-        markers: ['账号 · 数据 · 关于', '备份与恢复', '教室端', '关于'],
+        markers: ['账号 · 数据 · 关于', '备份与恢复', '关于'],
       })
       await shot(page, '09 设置页', '09-settings', { full: true })
 
@@ -7537,15 +7543,37 @@ await withLock(async () => {
           `读到「${tags.setting}」`,
         )
         /*
-         * 反向对照：同一页「关于」里那行**「学段学科」仍然是学科**（那一行要的就是学科）。
-         * 少了这一条，把整页的"学科"都换成身份也能绿。
+         * ⚠️ **期望值 2026-10-04 变了**：这一条原来是「关于」里那行**「学段学科」照旧写学科**
+         *    （反向对照：少了它，把整页的"学科"都换成身份也能绿）。
+         *    用户当天点名把那两行删了 ——「把学科学段和存储位置删了」⇒ 那两个词**必须不在**上屏，
+         *    于是这条改成钉**删除本身**（`学段学科` + `存储` 那一行的值）。
+         *    ⚠️ "学科"这件事本身照旧存在：身份卡那张 Sheet 的主学科还在（见 S26），
+         *       删的只是「关于」里那一行显示。
+         *    🧪 反向对照：把那一行塞回**源码副本**（内存里，不动磁盘）⇒ 同一条判据当场判假。
          */
         const body = await bodyText(idPage)
+        const goneAboutRows = (s) =>
+          !s.includes('学段学科') &&
+          !s.includes('本机浏览器 · 未连云端') &&
+          !s.includes('云端 · 手机与教室端共用一份')
         check(
-          body.includes('学段学科') && body.includes('高中 · 物理'),
-          `${SID}：设置页「关于 · 学段学科」照旧写学科（那一行与身份无关，不许跟着改）`,
-          short(body.match(/.{0,20}学段学科.{0,30}/)?.[0] ?? body, 120),
+          goneAboutRows(body),
+          `${SID}：设置页「关于」里那两行（学段学科 / 存储）**按用户 2026-10-04 的要求删了** —— 期望值变了，不是这一页坏了`,
+          `学段学科=${body.includes('学段学科')} · 存储那一行=${body.includes('本机浏览器 · 未连云端') || body.includes('云端 · 手机与教室端共用一份')} · 屏上还有「高中 · 物理」吗=${body.includes('高中 · 物理')}`,
+          '反向对照：下面那条（把「学段学科」那一行塞回源码副本 ⇒ 判据当场假）',
         )
+        {
+          const setSrc = readFileSync(join(HERE, '..', 'src', 'pages', 'Settings.tsx'), 'utf8')
+          const rowBack = setSrc.replace(
+            '<KV k="版本"',
+            '<KV k="学段学科" v="高中 · 物理" />\n            <KV k="版本"',
+          )
+          check(
+            rowBack !== setSrc && !goneAboutRows(rowBack),
+            `🧪 ${SID} 反向对照：把「学段学科」那一行塞回**源码副本**（内存里，不动磁盘）⇒ 上面那条"那两个词都不在"当场不成立（证明它咬的是那两行本身）`,
+            `副本真被改过=${rowBack !== setSrc} · 塞回去之后判据=${goneAboutRows(rowBack)}`,
+          )
+        }
 
         /*
          * 🔴 手机上（414px）设置页身份卡那一行 —— 这一轮布局上的**第二个现场**。
@@ -9990,6 +10018,114 @@ await withLock(async () => {
           `在身份卡里=${logout.inIdentityCard} · 退出登录=${logout.iLogout} < 备份与恢复=${logout.iBackup} < 更新日志=${logout.iLog}`,
         )
         await shot(annPage, S2, '103-settings-feedback', { full: true })
+      })
+
+      /* ================================================================
+         ⑦b · 🆕 2026-10-04「我的 → 关于」那三颗下载按钮（用户当天「我的」页第 ① 条）
+         ----------------------------------------------------------------
+         用户原话：「把学科学段和存储位置删了，放三个按钮，分别是下载教师端（安卓）
+         下载教师端（Windows）下载教室端（Windows）……按钮就绑定面板里面我填的网址就好了」。
+         🔴 链接来自**面板里填的那两行**（`/api/status` 的 `release` 块），而这一节跑的是
+            本地演示模式（没有服务端）⇒ 用 DEV 钩子把"面板填了哪几个"造出来：
+              · 不带 `?rel=`        ⇒ 那一档没在发公告 ⇒ **一颗都不摆**（不是死按钮）；
+              · `?urls=apk`         ⇒ 只有「下载教师端（安卓）」那一颗；
+              · `?urls=exe`         ⇒ 只有「下载教师端（Windows）」那一颗；
+              · `?urls=both`（默认）⇒ 教师端两颗都在；
+              · `&slot=classroom`   ⇒ 教室端那颗**只看 `url_exe`**（apk 也填了，但一体机只给 exe）。
+            四种组合（都没填 / 只填 apk / 只填 exe / 两个都填）逐个走一遍。
+         ⚠️ 这一节**一张图都不出**（判据在 DOM 上；加图要动 `EXPECTED_FILES`，那是集合相等）。
+         ⚠️ 不写版本号字面量：`?rel=` 那个号**从 `APP_VERSION` 推**（末位 +1，比本机新一档）。
+         ================================================================ */
+      await step(`${S2} · ⑦b 「关于」三颗下载按钮（面板填了哪几个就摆哪几颗）`, async () => {
+        const { APP_VERSION: AV7b } = await import('../src/lib/version.ts')
+        const REL_UP7b = (() => {
+          const p = AV7b.split('.').map(Number)
+          p[p.length - 1] += 1
+          return p.join('.')
+        })()
+        /**
+         * 这一屏上的下载按钮（**按稳定标识数，不按文案**）。
+         * ⚠️ 公告浮层那颗「下载最新版」是 `[data-release-download]`，与这里的选择器不重叠。
+         */
+        const readDl = (p) =>
+          p.evaluate(() =>
+            [...document.querySelectorAll('[data-download-slot]')].map((a) => ({
+              key: a.getAttribute('data-download-slot'),
+              label: String(a.textContent ?? '').replace(/\s+/g, ' ').trim(),
+              href: a.getAttribute('href'),
+              newTab: a.getAttribute('target') === '_blank' && a.getAttribute('rel') === 'noreferrer',
+            })),
+          )
+        /**
+         * 这一屏"像样"吗：**恰好**是期望的那几颗（顺序也对）· 每一颗都点得出去
+         * （`href` 是 https + 新标签 + `noreferrer`）· 没有空文案。
+         */
+        const dlOk = (list, wantKeys) =>
+          list.length === wantKeys.length &&
+          list.map((d) => d.key).join(',') === wantKeys.join(',') &&
+          list.every((d) => String(d.href ?? '').startsWith('https://') && d.label && d.newTab)
+        const openSettings = async (q) => {
+          await annPage.goto(`${BASE}/settings?roles=${ANN_ROLES}${q}`, { waitUntil: 'networkidle' })
+          await annPage.waitForTimeout(700)
+          return readDl(annPage)
+        }
+
+        /* ---- 组合一：面板里一个地址都没填（这一档也没在发公告）⇒ 一颗都不摆 ---- */
+        const D0 = await openSettings('')
+        check(
+          dlOk(D0, []),
+          `🔴 ${S2} ①「关于」下载按钮：面板里**一个地址都没填**（这一档也没在发公告）⇒ **一颗都不摆** —— 点了没反应的死按钮比少一颗按钮糟得多`,
+          `摆了 ${D0.length} 颗：${JSON.stringify(D0.map((d) => d.key))}`,
+        )
+
+        /* ---- 组合二：只填了安卓那个地址 ⇒ 只摆「下载教师端（安卓）」 ---- */
+        const D1 = await openSettings(`&rel=${REL_UP7b}&urls=apk`)
+        check(
+          dlOk(D1, ['teacher-apk']) && D1[0]?.label === '下载教师端（安卓）',
+          `🔴 ${S2} ①：面板里**只填了安卓**那个地址 ⇒ 屏上只有「下载教师端（安卓）」那一颗（教室端那颗更不许出现 —— 它那一档没在发公告）`,
+          JSON.stringify(D1.map((d) => [d.key, d.href])),
+        )
+
+        /* ---- 组合三：只填了 Windows 那个地址 ⇒ 只摆「下载教师端（Windows）」 ---- */
+        const D2 = await openSettings(`&rel=${REL_UP7b}&urls=exe`)
+        check(
+          dlOk(D2, ['teacher-exe']) && D2[0]?.label === '下载教师端（Windows）',
+          `🔴 ${S2} ①：面板里**只填了 Windows** 那个地址 ⇒ 屏上只有「下载教师端（Windows）」那一颗`,
+          JSON.stringify(D2.map((d) => [d.key, d.href])),
+        )
+
+        /* ---- 组合四：两个都填 ⇒ 教师端两颗都在，链接就是面板里那两条 ---- */
+        const D3 = await openSettings(`&rel=${REL_UP7b}`)
+        check(
+          dlOk(D3, ['teacher-apk', 'teacher-exe']) &&
+            D3.every((d) => d.href === 'https://example.com/update') &&
+            D3.map((d) => d.label).join(' · ') === '下载教师端（安卓） · 下载教师端（Windows）',
+          `🔴 ${S2} ①：两个都填 ⇒ 教师端两颗都在（文案就是用户点名的那两句、href 就是面板那一档里的两条）`,
+          D3.map((d) => `${d.label}=${d.href}`).join(' · '),
+        )
+
+        /* ---- 教室端那一档：**只看 `url_exe`**（apk 那一列对它没意义） ---- */
+        const D4 = await openSettings(`&rel=${REL_UP7b}&slot=classroom`)
+        check(
+          dlOk(D4, ['classroom-exe']) && D4[0]?.label === '下载教室端（Windows）',
+          `🔴 ${S2} ①：教室端那一档**两个地址都填了**，而屏上只有「下载教室端（Windows）」一颗 —— 教室那块屏是一体机`,
+          JSON.stringify(D4.map((d) => [d.key, d.href])),
+        )
+
+        /* 🧪 反向对照：往这一屏塞一颗 `http://` 的假按钮（点了也装不上）⇒ 同一套判据当场判假 */
+        await annPage.evaluate(() => {
+          const a = document.createElement('a')
+          a.setAttribute('data-download-slot', 'fake-dead')
+          a.setAttribute('href', 'http://example.com/x.apk')
+          a.textContent = '下载教师端（安卓）'
+          document.body.appendChild(a)
+        })
+        const D5 = await readDl(annPage)
+        check(
+          !dlOk(D5, ['classroom-exe']),
+          `🧪 ${S2} ① 反向对照：往这一屏塞一颗 \`http://\` 的假按钮（点了也装不上）⇒ 同一套判据当场判假（证明它真的在数按钮、真的在验 https）`,
+          `塞过之后读到 ${D5.length} 颗 · 判据=${dlOk(D5, ['classroom-exe'])}`,
+        )
       })
 
       /* ================= S21：🆕 教师档案（家庭住址 · 电话号码 · 邮箱）=================
@@ -13356,6 +13492,15 @@ await withLock(async () => {
       const importRaw = readSrc('src/pages/ImportPhoto.tsx')
       const importSrc = noComment(importRaw)
       const settingsSrc = noComment(readSrc('src/pages/Settings.tsx'))
+      /*
+       * 🔴 **期望值 2026-10-04 变了（只换锚点，判据一个字没放宽）**：
+       *    「备份到云端」那一颗原来在「我的 → 备份与恢复」里，用户当天取舍后
+       *    （「保留第一个和第四个按钮就好了」＋「至于全平台的备份，仅在超管面板里面留就好了」）
+       *    它从那一屏撤下 —— 而**实现与 StatusMark 终态接线原样搬到了**
+       *    `components/BackupExtraActions.tsx`（入口撤、实现留，超管面板那一路来接）。
+       *    所以 ② / ③ 两条读这一份源码：判的是**同一段代码**，不是放宽。
+       */
+      const extraSrc = noComment(readSrc('src/components/BackupExtraActions.tsx'))
       const verSrc = noComment(readSrc('src/lib/version.ts'))
       const pkgRaw = readSrc('package.json')
       const pkg = JSON.parse(pkgRaw)
@@ -13461,48 +13606,70 @@ await withLock(async () => {
         '🔴 S25 ①「识别失败」：红叉是**字面量 `failed`** 的一颗（`strike={false}`），挂在 `ocrErr` 那块提示里 —— 失败时红叉与原因同时在屏上，不会一闪就没',
         `failed 字面量 ${failMarks.length} 颗 · strike=${failMarks.map((a) => a.strike).join('/')}`,
       )
-      /* 「备份到云端」那一颗：`status` 是 state，终态由**真结果**决定 */
+      /* 「备份到云端」那一颗：`status` 是 state，终态由**真结果**决定
+         ⚠️ 2026-10-04：锚点从 `settingsSrc` 换成 `extraSrc`（那一颗从「我的」撤下、
+            实现搬到 `components/BackupExtraActions.tsx`）—— **判据本身一个字没改**。 */
       const backupVar = (() => {
-        const hit = markArgs(settingsSrc).find((a) => 'label' in a)
+        const hit = markArgs(extraSrc).find((a) => 'label' in a)
         return hit ? asVar(hit.status) : null
       })()
-      const okIdx = settingsSrc.indexOf('res.ok ?')
-      const doneIdx = backupVar ? settingsSrc.indexOf(`'done'`) : -1
+      const okIdx = extraSrc.indexOf('res.ok ?')
+      const doneIdx = backupVar ? extraSrc.indexOf(`'done'`) : -1
       check(
         backupVar !== null &&
-          writesTo(settingsSrc, backupVar, 'running') &&
-          writesTo(settingsSrc, backupVar, 'done') &&
-          writesTo(settingsSrc, backupVar, 'failed') &&
-          /set[A-Za-z]+\(res\.ok\s*\?\s*'done'\s*:\s*'failed'\)/.test(settingsSrc) &&
+          writesTo(extraSrc, backupVar, 'running') &&
+          writesTo(extraSrc, backupVar, 'done') &&
+          writesTo(extraSrc, backupVar, 'failed') &&
+          /set[A-Za-z]+\(res\.ok\s*\?\s*'done'\s*:\s*'failed'\)/.test(extraSrc) &&
           okIdx > 0 &&
           doneIdx > okIdx,
-        '🔴 S25 ②「备份到云端」：`running` → `done` **由 `res.ok` 决定**（不是"忙完了就当成功"）· 失败 → `failed` 停住',
-        `status={${backupVar}} · res.ok 在第 ${okIdx} 字符 · done/failed 三目 ${/set[A-Za-z]+\(res\.ok\s*\?\s*'done'\s*:\s*'failed'\)/.test(settingsSrc) ? '在' : '不在'}`,
-        '反向对照：把那一行改成 `setBackupMark(\'done\')`（不看 res.ok）→ 这一条当场判假',
+        '🔴 S25 ②「备份到云端」：`running` → `done` **由 `res.ok` 决定**（不是"忙完了就当成功"）· 失败 → `failed` 停住（这颗按用户 2026-10-04 的取舍已从「我的」撤下，锚点＝它现在住的那份文件）',
+        `status={${backupVar}} · res.ok 在第 ${okIdx} 字符 · done/failed 三目 ${/set[A-Za-z]+\(res\.ok\s*\?\s*'done'\s*:\s*'failed'\)/.test(extraSrc) ? '在' : '不在'}`,
+        '反向对照：把那一行改成 `setBackupMark(\'done\')`（不看 res.ok）→ 这一条当场判假（A16 ③附 那条就是它）',
       )
       /* `bkNotifyBusy` 只管"按钮禁用"，**不许**再拿它推状态（原来就是这么写的） */
       check(
-        !/status=\{[^}]*bkNotifyBusy[^}]*\}/.test(settingsSrc),
+        !/status=\{[^}]*bkNotifyBusy[^}]*\}/.test(extraSrc),
         '🔴 S25 ②：状态**不再从** `bkNotifyBusy` 推 —— 那个布尔量只说"忙不忙"，说不出"成了还是没成"（绿勾/红叉的信息全在后者）',
-        `status 里引用 bkNotifyBusy 的落点 = ${(settingsSrc.match(/status=\{[^}]*bkNotifyBusy[^}]*\}/g) ?? []).length} 处`,
+        `status 里引用 bkNotifyBusy 的落点 = ${(extraSrc.match(/status=\{[^}]*bkNotifyBusy[^}]*\}/g) ?? []).length} 处`,
+      )
+      /* 🔴 S25 ②附（2026-10-04 新增）：那**两颗**真的**不在「我的」页了** ——
+         "删除也是被钉住的"那一面（用户当天三处改动里的第 ③ 条）。 */
+      const extraEntryGone = (s) =>
+        !s.includes('data-backup-notify') && !s.includes('data-backup-seal') && !s.includes('notifyBackupDone')
+      check(
+        extraEntryGone(settingsSrc),
+        '🔴 S25 ②附：「备份到云端」与「导出档案备份（加密）」这两颗**不在「我的」页了**（用户 2026-10-04 取舍：全平台那一层只在超管面板里留）—— 实现没删，只撤了入口',
+        `data-backup-notify=${settingsSrc.includes('data-backup-notify')} · data-backup-seal=${settingsSrc.includes('data-backup-seal')} · notifyBackupDone=${settingsSrc.includes('notifyBackupDone')}`,
+      )
+      /* 🧪 反向对照：把那一颗塞回 `Settings` 的**源码副本**（内存里）⇒ 上面那条当场假 */
+      const entryBack = settingsSrc.replace(
+        '                从备份文件恢复',
+        '                <Button block data-backup-notify>备份到云端</Button>\n                从备份文件恢复',
+      )
+      check(
+        entryBack !== settingsSrc && !extraEntryGone(entryBack),
+        '🧪 S25 ②附 反向对照：把「备份到云端」那一颗塞回 `Settings` 源码副本 ⇒ 同一条判据当场假（"不在这一屏了"真的被判）',
+        `副本真被改过=${entryBack !== settingsSrc} · 塞回去之后判据=${extraEntryGone(entryBack)}`,
       )
 
       /* ---------- ② 停留时长：一个常量，不是三处硬编 ---------- */
       const constDecl = markSrc.match(/export const STATUS_MARK_HOLD_MS\s*=\s*(\d+)/)
       const importUse = (importSrc.match(/STATUS_MARK_HOLD_MS/g) ?? []).length
-      const settingsUse = (settingsSrc.match(/STATUS_MARK_HOLD_MS/g) ?? []).length
+      /* ⚠️ 第二个落点 2026-10-04 从 `Settings.tsx` 换成了 `BackupExtraActions.tsx`（见 ② 上面那段） */
+      const extraUse = (extraSrc.match(/STATUS_MARK_HOLD_MS/g) ?? []).length
       const rawLiterals = [
         ...(importSrc.match(/\b1200\b/g) ?? []),
-        ...(settingsSrc.match(/\b1200\b/g) ?? []),
+        ...(extraSrc.match(/\b1200\b/g) ?? []),
       ]
       check(
         constDecl !== null &&
           Number(constDecl[1]) > 0 &&
           importUse >= 2 &&
-          settingsUse >= 2 &&
+          extraUse >= 2 &&
           rawLiterals.length === 0,
-        '🔴 S25 ③ 停留时长是**一个导出常量**（`STATUS_MARK_HOLD_MS`）—— 两个落点都 import 它，两个页面里 `1200` 这个字面量一处都没有',
-        `常量=${constDecl ? constDecl[1] : '（没有）'} · 引用数 ImportPhoto ${importUse} / Settings ${settingsUse} · 硬编 1200 = ${rawLiterals.length} 处`,
+        '🔴 S25 ③ 停留时长是**一个导出常量**（`STATUS_MARK_HOLD_MS`）—— 两个落点都 import 它，两处代码里 `1200` 这个字面量一处都没有',
+        `常量=${constDecl ? constDecl[1] : '（没有）'} · 引用数 ImportPhoto ${importUse} / BackupExtraActions ${extraUse} · 硬编 1200 = ${rawLiterals.length} 处`,
         '反向对照：把 ImportPhoto 里那处 `await finishScan()` 换回 `setStage(\'review\')`（= 不等）→ 第 ④ 条当场判假',
       )
       /* 时长必须**真的被 await**（只声明常量、不等一下 = 勾根本来不及被看见） */

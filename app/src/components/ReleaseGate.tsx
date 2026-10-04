@@ -30,7 +30,7 @@ import type React from 'react'
 import { useState } from 'react'
 import { useLocation } from 'react-router-dom'
 import type { MaintenanceStatus } from '../lib/maintenance'
-import { useRelease, type ReleaseView } from '../lib/useRelease'
+import { ReleaseSlotsContext, useRelease, type ReleaseView } from '../lib/useRelease'
 import {
   RELEASE_BTN_DOWNLOAD,
   RELEASE_BTN_LATER,
@@ -63,17 +63,27 @@ export function ReleaseGate({
    */
   const [closedVersion, setClosedVersion] = useState('')
 
+  /**
+   * 🔴 把**这一次取数**的两档链接交给下面那些页（「我的 → 关于」那三颗下载按钮要用）。
+   *    `value` 就是手上这个 `status.release` —— **不新发请求、不开第二个轮询**；
+   *    读它的是 `lib/useRelease.ts` 的 `useReleaseSlots()`（`nav-checks` D18 钉着这一条）。
+   * ⚠️ 每一条 `children` 出口都要包上：少包一条，那一条路上的页面就一颗按钮都摆不出来。
+   */
+  const withSlots = (kids: React.ReactNode) => (
+    <ReleaseSlotsContext.Provider value={status.release}>{kids}</ReleaseSlotsContext.Provider>
+  )
+
   /* 维护中：那一屏已经在管了（`/classroom` 自己渲染它），这里不叠第二层整屏 */
-  if (status.enabled) return <>{children}</>
+  if (status.enabled) return withSlots(children)
 
   const exempt = (RELEASE_EXEMPT_PATHS as readonly string[]).includes(loc.pathname)
-  if (exempt) return <>{children}</>
+  if (exempt) return withSlots(children)
 
   /* 🔴 提示的判据只有这一条：服务端发了公告 **而且**我这一版比它旧 */
-  if (view.check !== 'behind' || !view.notice) return <>{children}</>
+  if (view.check !== 'behind' || !view.notice) return withSlots(children)
 
   const notice = view.notice
-  if (view.canClose && closedVersion === notice.version) return <>{children}</>
+  if (view.canClose && closedVersion === notice.version) return withSlots(children)
 
   /**
    * 🔴 **什么时候保留 children**（两个理由，都不是"顺手"）：
@@ -88,7 +98,7 @@ export function ReleaseGate({
 
   return (
     <>
-      {keepChildren ? children : null}
+      {keepChildren ? withSlots(children) : null}
       <ReleaseScreen view={view} onLater={() => setClosedVersion(notice.version)} />
     </>
   )

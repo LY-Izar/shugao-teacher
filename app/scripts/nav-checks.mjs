@@ -43,6 +43,12 @@
  *     而**网页版照旧走 Document PiP**。分支顺序因此定死：**壳原生 → Document PiP → no-api**；
  *     A 半钉 `shellPipAvailable()` 的严格取值与这个顺序（壳在时 `requestWindow` 一次都不许调），
  *     B 半钉 `Classroom.tsx` 里"题号一变就推数据"那一处的字段/依赖/**位置**，各带反向对照。
+ *     🆕 **A16（2026-10-04）：「我的」页那三处取舍 ——「删除也是被钉住的」** ——
+ *     用户当天点名删掉的东西（「关于」里的学段学科 / 存储两行、「教室端」整卡、
+ *     「备份与恢复」里的加密导出 / 备份到云端 / 下面那段说明）**在源码里必须真的没有**，
+ *     而换上去的三颗下载按钮要接 `releaseDownloads(useReleaseSlots())`；
+ *     撤下的那两颗的**实现**另存于 `components/BackupExtraActions.tsx`（入口撤、实现留）。
+ *     ⚠️ 判据一律**先剥注释**（"为什么删"就写在注释里，不剥会被自己骗过）。
  *   · 静态（D1–D7 / D9 / D10）：路由 ↔ 登记表 ↔ 本文档矩阵三方咬合；入口判据不许各写一套；
  *     谁在读 `myRoles` / `ROLE_NAME` 要有白名单；`PIN_KEYS` 不许脱队；
  *     生产构建里测试钩子不许出现；
@@ -2075,6 +2081,13 @@ section('第十一节 · D7：dist 产物里没有 `?as=` / `?kind=` / `?maint=`
        *    它**不会**命中 `get('rel')`（那个 needle 是"读查询参数"的形状，不是属性名）。
        */
       ["get('rel')", '`?rel=` 的读取'],
+      /*
+       * 🆕 2026-10-04（用户「我的」页第 ① 条的同一天）：第六个钩子参数 `?urls=apk|exe`
+       * —— 让"面板里两个地址只填了其中一个"这件事在门禁里**造得出来**
+       * （否则"没填的不摆死按钮"只能靠纯函数验，屏上那一半永远测不到）。
+       * 它与 `rel` 同生共死（同一个 DEV 分支里），生产构建里一起被摇掉。
+       */
+      ["get('urls')", '`?urls=` 的读取'],
       ['devInjectedRoles', '钩子函数名'],
       ['devInjectedAccountKind', '钩子函数名'],
       ['devInjectedSyncError', '钩子函数名'],
@@ -4632,6 +4645,136 @@ section('第二十节 · A12：版本更新公告（共享区逐字节相同 · 
       })
       eq('A12：干净的表单 → ok:true（上面那条 R4 不是"一律拒绝"）', good.ok, true)
     }
+
+    /* ②-8 🆕 2026-10-04：「我的 → 关于」那三颗下载按钮（用户「我的」页三处改动的第 ① 条）
+       ------------------------------------------------------------
+       用户原话：「把学科学段和存储位置删了，放三个按钮，分别是下载教师端（安卓）
+       下载教师端（Windows）下载教室端（Windows）……按钮就绑定面板里面我填的网址就好了」。
+       🔴 三条要钉的，每条都能红：
+         · **绑的是哪一列**：教师端两颗各看自己那一列（`urlApk` / `urlExe`），
+           教室端那颗只看 `urlExe`（那块屏是一体机）—— 与 `pickReleaseUrl` 的分端口径同源；
+         · **没填就不出现**：四种组合（都没填 / 只填 apk / 只填 exe / 两个都填）逐个数 ——
+           点了没反应的死按钮比屏上少一颗按钮糟得多；
+         · **只认 https**：`http://` 与 `javascript:` 一律不算（与面板那侧 R5 同一个判据）。
+       ⚠️ 屏上那一半（真 DOM 上按钮的文案与 href）在 `shots.mjs`；这里钉的是**同一个纯函数**
+          （`Settings.tsx` 调的就是它，接线见 D18）。
+    */
+    {
+      const slotsOf = (t, c) => ({ teacher: t, classroom: c, read: 'ok', reason: '' })
+      const noticeOf = (apk, exe) => ({ version: '1.1.2', force: false, note: '', urlApk: apk, urlExe: exe })
+      const keys = (l) => l.map((d) => d.key)
+      const A = 'https://dl.example.com/teacher.apk'
+      const E = 'https://dl.example.com/teacher.exe'
+      const C = 'https://dl.example.com/classroom.exe'
+
+      /* ---- 四种组合逐个（"没填就不出现"那一条） ---- */
+      eqSet('🔴 A12：教师端**只填了安卓**那个地址 ⇒ 只有「下载教师端（安卓）」那一颗', keys(rel.releaseDownloads(slotsOf(noticeOf(A, ''), null))), ['teacher-apk'])
+      eqSet('🔴 A12：教师端**只填了 Windows** 那个地址 ⇒ 只有「下载教师端（Windows）」那一颗', keys(rel.releaseDownloads(slotsOf(noticeOf('', E), null))), ['teacher-exe'])
+      eqSet('🔴 A12：两个都填 ⇒ 两颗都在（仍然不摆教室端那颗 —— 那一档没在发公告）', keys(rel.releaseDownloads(slotsOf(noticeOf(A, E), null))), ['teacher-apk', 'teacher-exe'])
+      eqSet('🔴 A12：**一个都没填**（含那一档没在发公告 = `null`）⇒ 一颗都不摆', keys(rel.releaseDownloads(slotsOf(noticeOf('', ''), null))), [])
+
+      /* ---- 教室端那颗只看 exe ---- */
+      const clsOnly = rel.releaseDownloads(slotsOf(null, noticeOf(A, C)))
+      eqSet('🔴 A12：教室端**只看 `url_exe`**（`url_apk` 填了也不摆那一颗）', keys(clsOnly), ['classroom-exe'])
+      eq('A12：教室端那颗用的就是 `release.classroom.url_exe`', clsOnly[0]?.url, C)
+
+      /* ---- 三颗一起：顺序 + 绑定 + 措辞 ---- */
+      const three = rel.releaseDownloads(slotsOf(noticeOf(A, E), noticeOf('', C)))
+      eqSet('🔴 A12：两档都填时三颗的 key（就是用户点名的那三种）', keys(three), ['teacher-apk', 'teacher-exe', 'classroom-exe'])
+      eq(
+        '🔴 A12：三颗各绑**自己那一列**（教师 apk / 教师 exe / 教室 exe），顺序也是摆的顺序',
+        three.map((d) => d.url).join(' · '),
+        `${A} · ${E} · ${C}`,
+      )
+      eq(
+        '🔴 A12：三句措辞就是用户点名的那三句（页面里不再各抄一份）',
+        three.map((d) => d.label).join(' · '),
+        '下载教师端（安卓） · 下载教师端（Windows） · 下载教室端（Windows）',
+      )
+
+      /* ---- 只认 https ---- */
+      eqSet(
+        '🔴 A12：`http://` 与 `javascript:` 一律不算（三颗一颗都不摆 —— 面板 R5 走的是同一个判据）',
+        keys(rel.releaseDownloads(slotsOf(noticeOf('http://a/x.apk', 'javascript:alert(1)'), noticeOf('', '')))),
+        [],
+      )
+
+      /* 🧪 反向对照 A：把 `isReleaseUrl` 那道滤网从**源码副本**里去掉
+         （副本写在 gitignore 的 `.tmp-gates/`，finally 里删）⇒「没填就不出现」当场假 */
+      const REL_SRC = uiSrc
+      const REL_TMP_A = join(APP, '.tmp-gates', `release-nofilter-${process.pid}.ts`)
+      const noFilter = REL_SRC.replace('return rows.filter((r) => isReleaseUrl(r.url))', 'return rows')
+      let badA = null
+      try {
+        mkdirSync(dirname(REL_TMP_A), { recursive: true })
+        writeFileSync(REL_TMP_A, noFilter)
+        const mod = await import(pathToFileURL(REL_TMP_A).href)
+        badA = mod.releaseDownloads(slotsOf(noticeOf('', ''), null)).length
+      } catch (e) {
+        badA = `副本没跑起来：${e?.message ?? e}`
+      } finally {
+        rmSync(REL_TMP_A, { force: true })
+      }
+      check(
+        noFilter !== REL_SRC && badA === 3,
+        '🧪 A12 ②-8 反向对照 A：把滤网去掉（源码副本，`.tmp-gates/` 里，finally 删）⇒ **三颗全摆出来**，「没填就不出现」当场假',
+        `源码真被改过=${noFilter !== REL_SRC} · 去掉滤网后摆了 ${badA} 颗`,
+      )
+
+      /* 🧪 反向对照 B：把教师端两颗的**列**对调（apk ↔ exe）⇒「各绑自己那一列」当场假 */
+      const REL_TMP_B = join(APP, '.tmp-gates', `release-swap-${process.pid}.ts`)
+      const swapped = REL_SRC.replace(
+        "{ key: 'teacher-apk', label: DL_TEACHER_APK, url: slots.teacher?.urlApk ?? '' },\n    { key: 'teacher-exe', label: DL_TEACHER_EXE, url: slots.teacher?.urlExe ?? '' },",
+        "{ key: 'teacher-apk', label: DL_TEACHER_APK, url: slots.teacher?.urlExe ?? '' },\n    { key: 'teacher-exe', label: DL_TEACHER_EXE, url: slots.teacher?.urlApk ?? '' },",
+      )
+      let badB = null
+      try {
+        mkdirSync(dirname(REL_TMP_B), { recursive: true })
+        writeFileSync(REL_TMP_B, swapped)
+        const mod = await import(pathToFileURL(REL_TMP_B).href)
+        badB = mod.releaseDownloads(slotsOf(noticeOf(A, E), null)).map((d) => d.url)
+      } catch (e) {
+        badB = `副本没跑起来：${e?.message ?? e}`
+      } finally {
+        rmSync(REL_TMP_B, { force: true })
+      }
+      check(
+        swapped !== REL_SRC && Array.isArray(badB) && badB[0] === E && badB[1] === A,
+        '🧪 A12 ②-8 反向对照 B：把教师端两颗的列**对调**（apk ↔ exe，源码副本）⇒ 绑定判据当场假（证明它看的是"哪一列"，不是"有没有两颗"）',
+        `源码真被改过=${swapped !== REL_SRC} · 对调后读到 ${JSON.stringify(badB)}`,
+      )
+    }
+
+    /* ②-9 🔴 「那一档公告撤下 ⇒「关于」那几颗也一起消失」是**接口口径**，不是这一屏的 bug
+       ------------------------------------------------------------
+       `releaseFromRow()` 只在 `enabled === true` 时才认那一行（没发布的档回 `null`，
+       免得把草稿漏出去）⇒ 面板把那一档「撤下」之后 `/api/status` 就不给
+       `url_apk` / `url_exe` ⇒ 那几颗跟着不摆（地址仍留在库里当下次预填）。
+       ⚠️ 这一条**反直觉**（撤下只是为了不再打扰老师），所以要显式钉住它的来源 ——
+          别让后来的人把它当 bug"修"成"撤下也照样给链接"（那等于把草稿漏出去）。
+    */
+    {
+      const row = { enabled: false, version: '1.1.2', force: false, message: '', url_apk: 'https://a/x.apk', url_exe: 'https://a/x.exe' }
+      eq('🔴 A12：`enabled:false`（公告撤下）⇒ `releaseFromRow` 回 null（服务端不给这几个字段）', rel.releaseFromRow(row), null)
+      eq(
+        '🔴 A12：所以那一档撤下时「关于」那几颗**跟着不摆**（口径如此，不是漏做）',
+        rel.releaseDownloads(rel.releaseSlotsFromStatus({ read: 'ok', teacher: row, classroom: null })).length,
+        0,
+      )
+      check(
+        rel.releaseFromRow({ ...row, enabled: true }) !== null,
+        'A12 自证：同一个行把 `enabled` 翻成 true 就**读得到**（上一条不是"这个函数恒回 null"）',
+        `enabled:true → urlExe=${rel.releaseFromRow({ ...row, enabled: true })?.urlExe ?? '(null)'}`,
+      )
+      /* 🧪 反向对照 C：只翻 `enabled` 那一位，同一套判据必须从 0 颗变 2 颗 */
+      const onSlots = rel.releaseSlotsFromStatus({ read: 'ok', teacher: { ...row, enabled: true }, classroom: null })
+      const offSlots = rel.releaseSlotsFromStatus({ read: 'ok', teacher: row, classroom: null })
+      check(
+        rel.releaseDownloads(offSlots).length === 0 && rel.releaseDownloads(onSlots).length === 2,
+        '🧪 A12 ②-9 反向对照 C：只把那一行的 `enabled` 从 false 翻成 true ⇒ 同一套判据 0 颗 → 2 颗（证明"撤下 ⇒ 收起"量的是那个开关本身）',
+        `enabled:false → ${rel.releaseDownloads(offSlots).length} 颗 · enabled:true → ${rel.releaseDownloads(onSlots).length} 颗`,
+      )
+    }
   }
 
   /* ---- ③ 契约：key 与列名（施工单 §三）---- */
@@ -4737,6 +4880,49 @@ section('第二十节之二 · D18：两档公告跟着同一次 /api/status 回
     umCode.includes('setInterval') && umCode.includes('setTimeout'),
     '🧪 D18 反向对照：同样的判据喂 `useMaintenance.ts` → `setInterval` / `setTimeout` **都命中**（证明上面那几条不是"什么都搜不到"）',
     `setInterval=${umCode.includes('setInterval')} · setTimeout=${umCode.includes('setTimeout')}`,
+  )
+
+  /* ---- 🆕 2026-10-04：「我的 → 关于」那三颗下载按钮读的是**同一次取数**（不是第二个轮询）----
+     用户当天第 ① 条要求那三颗按钮"绑定面板里面我填的网址"（= `/api/status` 的 `release` 块），
+     而这一页**不许**自己再取一次（施工单原话「不许再开一个轮询」）。
+     落地办法：`ReleaseGate` 用 React context 把 `status.release`（就是 `MaintenanceGate`
+     那唯一一次 `useMaintenanceStatus()` 的结果）往下传，`Settings.tsx` 用 `useReleaseSlots()` 读。
+     🔴 四条一起才成立（缺一条就是"看着能用、其实又开了一个轮询"）：
+        · Provider 在 `ReleaseGate` 里、`value` 就是 `status.release`；
+        · 默认值是 `RELEASE_SLOTS_UNKNOWN`（没有 Provider ⇒ 一颗按钮都摆不出来，不是死按钮）；
+        · 「我的」页**没有** `useMaintenanceStatus` / `fetch(` / `setInterval` 这些第二次取数的入口；
+        · 而它确实读的是 `useReleaseSlots()`（自证：上一条不是"那一页什么都没写"）。
+  */
+  const urCode = strip(readApp('src/lib/useRelease.ts'))
+  const rgCode = strip(readApp('src/components/ReleaseGate.tsx'))
+  const setCode = strip(readApp('src/pages/Settings.tsx'))
+  check(
+    rgCode.includes('ReleaseSlotsContext.Provider value={status.release}'),
+    '🔴 D18：三颗下载按钮的链接来自**同一个 Provider** —— `ReleaseGate.tsx` 里 `ReleaseSlotsContext.Provider value={status.release}`（那个 `status` 就是维护那一次取数的结果）',
+    `ReleaseGate 里的 Provider=${rgCode.includes('ReleaseSlotsContext.Provider value={status.release}')}`,
+    '把 `value` 换成自己算一份 / 换到别处去取 = 第二个轮询',
+  )
+  check(
+    /createContext<ReleaseSlots>\(RELEASE_SLOTS_UNKNOWN\)/.test(urCode),
+    '🔴 D18：`ReleaseSlotsContext` 的默认值是 `RELEASE_SLOTS_UNKNOWN`（**没有 Provider 时一颗按钮都摆不出来**，而不是摆一颗点了没反应的死按钮）',
+    `默认值那一行=${/createContext<ReleaseSlots>\(RELEASE_SLOTS_UNKNOWN\)/.test(urCode)}`,
+  )
+  const noSecondPoll = (s) =>
+    s.includes('useReleaseSlots()') &&
+    !s.includes('useMaintenanceStatus') &&
+    !s.includes('fetch(') &&
+    !s.includes('setInterval')
+  check(
+    noSecondPoll(setCode),
+    '🔴 D18：「我的」页读链接走 `useReleaseSlots()`，而且那一页里**没有** `useMaintenanceStatus` / `fetch(` / `setInterval`（第二次取数的入口一个都不许有）',
+    `useReleaseSlots=${setCode.includes('useReleaseSlots()')} · useMaintenanceStatus=${setCode.includes('useMaintenanceStatus')} · fetch(=${setCode.includes('fetch(')} · setInterval=${setCode.includes('setInterval')}`,
+  )
+  /* 🧪 反向对照：把 `useMaintenanceStatus()` 塞进「我的」页的**源码副本**（不动磁盘）⇒ 上面那条当场假 */
+  const setPolling = setCode.replace('  const downloads = releaseDownloads(', '  const dup = useMaintenanceStatus()\n  const downloads = releaseDownloads(')
+  check(
+    setPolling !== setCode && !noSecondPoll(setPolling),
+    '🧪 D18 反向对照：往「我的」页的副本里塞一句 `useMaintenanceStatus()` ⇒ 同一条判据当场假（证明它真的在数"有没有第二个取数入口"）',
+    `副本真被改过=${setPolling !== setCode} · 塞进去之后判据=${noSecondPoll(setPolling)}`,
   )
 
   /* ---- 闸门挂在 MaintenanceGate **里面**（共用同一次取数）---- */
@@ -4970,6 +5156,122 @@ section('第二十节之三 · A13：输入法组字镜像（捕获阶段补派�
   } finally {
     putBack()
   }
+}
+
+/* ============================================================
+   第二十节之四 · 🆕 A16：「我的」页 2026-10-04 的三处取舍 —— **删除也是被钉住的**
+   ------------------------------------------------------------
+   用户当天对「我的」页提的三条（原话抄在 `Settings.tsx` 每一处的注释里）：
+     ①「关于」：删掉「学段学科」「存储」两行，换成三颗下载按钮
+        （教师端 安卓 / 教师端 Windows / 教室端 Windows，链接 = 面板里填的那两行）；
+     ②「教室端」那张卡**整卡删掉**（教室端现在有自己的程序，1.1.2 起还有原生置顶小窗）；
+     ③「备份与恢复」：只留「导出备份文件」与「从备份文件恢复」，**下面那段说明也删掉** ——
+        撤下的两颗（加密档案导出 / 备份到云端）属于全平台那一层，只在超管面板里留，
+        所以**实现没删、只把入口从这一屏撤下**（搬去 `components/BackupExtraActions.tsx`）。
+   🔴 这一节钉的是**源码这一侧**（"删掉了"本身就是判据）；屏上那一侧（真 DOM 上的
+      文案与 href、以及"面板没填就不出现"）在 `shots.mjs`。
+   ⚠️ 一律**先剥注释**再判：这三处的中文在注释里**正当地**出现（写着"为什么删"），
+      不剥的话"代码里没有这句话"会被注释骗过 ⇒ 判据恒绿（§三.2 那一类）。
+   ⚠️ 每条都带一条**就地改坏**的反向对照（在内存里的源码副本上做，不动磁盘）。
+   ============================================================ */
+
+section('第二十节之四 · A16：「我的」页三处取舍（删除也是被钉住的）')
+
+{
+  /** 剥注释（行尾 `//` 与块注释）—— 判据只许看**真代码** */
+  const strip = (s) =>
+    String(s)
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/(^|[^:'"`\w])\/\/[^\n]*/gm, '$1')
+  const SET = strip(readApp('src/pages/Settings.tsx'))
+  const EXTRA = strip(readApp('src/components/BackupExtraActions.tsx'))
+
+  /* ---------------- ① 「关于」：两行删了、三颗按钮接上了 ---------------- */
+  const aboutOk = (s) =>
+    !s.includes('学段学科') &&
+    !s.includes('k="存储"') &&
+    !s.includes('connectionMode') &&
+    s.includes('releaseDownloads(useReleaseSlots())') &&
+    s.includes('data-download-slot={d.key}')
+  check(
+    aboutOk(SET),
+    '🔴 A16 ①「关于」：`学段学科` / `存储` 两行**都删了**，而三颗下载按钮接的是 `releaseDownloads(useReleaseSlots())`（同一个纯函数 · 同一份取数）',
+    `学段学科=${SET.includes('学段学科')} · 存储行=${SET.includes('k="存储"')} · connectionMode=${SET.includes('connectionMode')} · 下载接线=${SET.includes('releaseDownloads(useReleaseSlots())')}`,
+    '反向对照：下面那条（把「学段学科」那一行塞回副本 ⇒ 本条当场假）',
+  )
+  const setBackRow = SET.replace(
+    '            <KV k="版本"',
+    '            <KV k="学段学科" v="高中 · 物理" />\n            <KV k="版本"',
+  )
+  check(
+    setBackRow !== SET && !aboutOk(setBackRow),
+    '🧪 A16 ① 反向对照：把「学段学科」那一行塞回**副本**（不动磁盘）⇒ 同一条判据当场假',
+    `副本真被改过=${setBackRow !== SET} · 塞回去之后判据=${aboutOk(setBackRow)}`,
+  )
+
+  /* ---------------- ② 「教室端」整卡 ---------------- */
+  const roomOk = (s) =>
+    !s.includes('<Sect>教室端</Sect>') &&
+    !s.includes('在新标签页打开教室端') &&
+    !s.includes('已复制教室端地址') &&
+    !s.includes("window.open('/classroom'")
+  check(
+    roomOk(SET),
+    '🔴 A16 ②「教室端」那张卡**整卡删了**：没有小标题 · 没有「复制」· 没有「在新标签页打开教室端」· 也没有 `window.open(\'/classroom\')`',
+    `小标题=${SET.includes('<Sect>教室端</Sect>')} · 新标签页=${SET.includes('在新标签页打开教室端')} · 已复制=${SET.includes('已复制教室端地址')} · window.open=${SET.includes("window.open('/classroom'")}`,
+  )
+  const roomBack = SET.replace(
+    '        <div className="mb-4">\n          <Sect>关于</Sect>',
+    '        <div className="mb-4">\n          <Sect>教室端</Sect>\n        </div>\n        <div className="mb-4">\n          <Sect>关于</Sect>',
+  )
+  check(
+    roomBack !== SET && !roomOk(roomBack),
+    '🧪 A16 ② 反向对照：把「教室端」那张卡的小标题塞回副本 ⇒ 同一条判据当场假（这张卡真的被钉着，不是"文件里恰好没有"）',
+    `副本真被改过=${roomBack !== SET} · 塞回去之后判据=${roomOk(roomBack)}`,
+  )
+
+  /* ---------------- ③ 「备份与恢复」：只留第一、第四颗 + 那段说明没了 ---------------- */
+  const bkOk = (s) =>
+    s.includes('导出备份文件') &&
+    s.includes('从备份文件恢复') &&
+    !s.includes('导出档案备份（加密）') &&
+    !s.includes('data-backup-seal') &&
+    !s.includes('data-backup-notify') &&
+    !s.includes('notifyBackupDone') &&
+    !s.includes('云端是主副本')
+  check(
+    bkOk(SET),
+    '🔴 A16 ③「备份与恢复」：只留「导出备份文件」与「从备份文件恢复」；撤下的两颗（加密档案导出 / 备份到云端）连调用点都没有了，**下面那段说明也删了**',
+    `导出=${SET.includes('导出备份文件')} · 恢复=${SET.includes('从备份文件恢复')} · 加密那颗=${SET.includes('data-backup-seal')} · 云端那颗=${SET.includes('data-backup-notify')} · 说明段=${SET.includes('云端是主副本')}`,
+  )
+  const bkBack = SET.replace(
+    '                从备份文件恢复',
+    '                <Button block data-backup-notify>备份到云端</Button>\n                从备份文件恢复',
+  )
+  check(
+    bkBack !== SET && !bkOk(bkBack),
+    '🧪 A16 ③ 反向对照：把「备份到云端」那一颗塞回副本 ⇒ 同一条判据当场假（"删掉了"这件事真的被钉着）',
+    `副本真被改过=${bkBack !== SET} · 塞回去之后判据=${bkOk(bkBack)}`,
+  )
+
+  /* ---- ③附：撤下的那两颗**实现没跟着丢**（用户口径：只把入口从这一屏去掉） ---- */
+  const keepsSubstance = (s) =>
+    s.includes('data-backup-seal') &&
+    s.includes('data-backup-notify') &&
+    /set[A-Za-z]+\(res\.ok\s*\?\s*'done'\s*:\s*'failed'\)/.test(s) &&
+    s.includes('sealForAdmin') &&
+    s.includes('notifyBackupDone')
+  check(
+    keepsSubstance(EXTRA),
+    '🔴 A16 ③附：撤下的那两颗的**实现与终态接线都还在**（`components/BackupExtraActions.tsx`）—— 用户口径是"只把入口从这一屏去掉"，不是删实现（超管面板那一路直接摆它，别写第二份）',
+    `seal=${EXTRA.includes('data-backup-seal')} · notify=${EXTRA.includes('data-backup-notify')} · res.ok 三目=${/set[A-Za-z]+\(res\.ok\s*\?\s*'done'\s*:\s*'failed'\)/.test(EXTRA)}`,
+  )
+  const extraGutted = EXTRA.replace("setBackupMark(res.ok ? 'done' : 'failed')", "setBackupMark('done')")
+  check(
+    extraGutted !== EXTRA && !keepsSubstance(extraGutted),
+    '🧪 A16 ③附 反向对照：把那一句改回"忙完就当成功"（副本）⇒ 终态判据当场假',
+    `副本真被改过=${extraGutted !== EXTRA} · 改坏之后判据=${keepsSubstance(extraGutted)}`,
+  )
 }
 
 /* ============================================================
@@ -5587,6 +5889,6 @@ if (failures.length) {
   console.log('\n  ⛔ 有断言没过（上面每一条都写了实测值）')
   process.exitCode = 1
 } else {
-  console.log('  全部通过 ✅（纯函数 A1–A15 / 静态 D1–D7 · D9 · D10 · D11 · D12 · D13 · D14 · D15 · D16 · D17 · D18 / 编码 + 不可见字符 D8）')
+  console.log('  全部通过 ✅（纯函数 A1–A16 / 静态 D1–D7 · D9 · D10 · D11 · D12 · D13 · D14 · D15 · D16 · D17 · D18 / 编码 + 不可见字符 D8）')
 }
 }, { script: 'nav-checks.mjs' })

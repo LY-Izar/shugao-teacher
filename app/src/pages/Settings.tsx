@@ -8,20 +8,16 @@ import {
   IconChevronRight,
   IconDownload,
   IconLogout,
-  IconLock,
   IconPencil,
-  IconSend,
   IconSliders,
   IconSwap,
   IconUpload,
-  IconWifi,
 } from '../components/icons'
 import { Button, KV, PageHead, Panel, Sect, Sheet, Tag } from '../components/ui'
 import { Emblem } from '../components/Emblem'
-import { StatusMark, STATUS_MARK_HOLD_MS, type StatusMarkStatus } from '../components/StatusMark'
 import { activeStudents, useStore, useToast } from '../data/store'
 import { signOutEverywhere } from '../hooks/useAuthBootstrap'
-import { connectionMode, getSupabase, isRemote } from '../lib/supabase'
+import { getSupabase, isRemote } from '../lib/supabase'
 import {
   deviceRole,
   deviceRoleAt,
@@ -32,18 +28,20 @@ import { APP_VERSION } from '../lib/version'
 import { CHANGELOG } from '../lib/changelog'
 // 文案按端分支用的**唯一信号**（`only: 'desktop' | 'mobile'` 那套的判据）
 import { shellPlatform } from '../lib/classroomShell'
-// 判据用得到的另一路：`__shell_out` 在不在（见「教室端」那块的注释）
-import { inShell } from '../lib/fileOut'
+// 🔴 「关于」那三颗下载按钮：链接来自**面板里填的那两行**，而读数沿用的是
+//    `MaintenanceGate` → `ReleaseGate` 那**同一次** `/api/status`（见 `useReleaseSlots` 的注释）。
+//    ⚠️ 这一页**没有**第二个轮询、也没有第二处 `fetch('/api/status')`（nav-checks D18 钉着）。
+import { releaseDownloads } from '../lib/release'
+import { useReleaseSlots } from '../lib/useRelease'
 import {
   backupSummary,
   downloadJson,
-  notifyBackupDone,
   pushBackupToCloud,
   readJsonFile,
   splitExport,
   validateBackup,
 } from '../lib/backup'
-import { isAdminSealed, sealForAdmin } from '../lib/backupCrypto'
+import { isAdminSealed } from '../lib/backupCrypto'
 import { REMIND_BEFORE, itemsForDate } from '../lib/schedule'
 // 只用到时间工具：节假日「数据来源」面板已删（见 功能设计与不变量.md §十七 17.2），
 // 判定函数（isRestDay / dayKind / holidayOn / nextHoliday）仍在别处使用，没有动。
@@ -71,18 +69,13 @@ import {
   type SubjectCode,
 } from '../lib/subjects'
 
-/**
- * 「备份到云端」那颗状态标记四档各自的文案（见下面 `backupMark` 那处注释）。
- * ⚠️ `done` / `failed` **必须与 `pending` / `running` 不同** —— 否则同一句话
- *    会配着绿勾（或红叉）显示，一句文案说了两件事。
+/*
+ * 这里原来有 `BACKUP_MARK_LABEL`（「备份到云端」那颗状态标记的四档文案）与它的
+ * `backupMark` / `bkNotifyBusy` / `backupMarkTimer` 三个 state。
+ * 2026-10-04 用户取舍：那一颗按钮从这一屏撤下（全平台那一层的备份只在超管面板里留）
+ * ⇒ 文案、状态、终态接线**原样搬到 `components/BackupExtraActions.tsx`**（那边还有人要用），
+ * 这一屏只是不再渲染它。别在这里重新长回来。
  */
-const BACKUP_MARK_LABEL: Record<StatusMarkStatus, string> = {
-  pending: '备份到云端',
-  running: '正在备份…',
-  done: '备份成功',
-  failed: '备份失败',
-  cancelled: '已取消',
-}
 
 /**
  * 「改密码」那三个格的前置校验：三个空串 → **一句人话**，或 null（可以往下走）。
@@ -128,7 +121,15 @@ export default function Settings() {
   const bkRef = useRef<HTMLInputElement>(null)
   const navigate = useNavigate()
   const push = useToast((s) => s.push)
-  const mode = connectionMode()
+  /**
+   * 「关于」里那三颗下载按钮（`releaseDownloads()` 已经把**空串 / 非 https** 的都滤掉
+   * ⇒ 面板没填的那一档，屏上就没有那一颗）。
+   * 🔴 这份读数是 `MaintenanceGate` → `ReleaseGate` 那**同一次** `/api/status`
+   *    经 context 传下来的（`useReleaseSlots()`）—— 这一页**没有第二个轮询**，
+   *    也没有第二处 `fetch('/api/status')`（`nav-checks` 的 D18 钉着）。
+   * ⚠️ 那一档**公告撤下**时服务端不给这几个字段 ⇒ 这几颗一起消失（地址仍在库里当下次预填）。
+   */
+  const downloads = releaseDownloads(useReleaseSlots())
 
   /* 🆕 反馈（2026-09-29 管理台第二期）—— 状态都在这一页里，不落 store（它是一次性的表单） */
   const [fbBody, setFbBody] = useState('')
@@ -138,20 +139,8 @@ export default function Settings() {
   const [fbErr, setFbErr] = useState('')
   const [fbRows, setFbRows] = useState<MyFeedback[]>([])
   const [fbLoadErr, setFbLoadErr] = useState('')
-  /** 🆕 备份通知（邮件）正在发 */
-  const [bkNotifyBusy, setBkNotifyBusy] = useState(false)
-  /**
-   * 「备份到云端」那颗状态标记的**四档**（`pending` → `running` → `done` / `failed`）。
-   *
-   * 🔴 为什么不能从 `bkNotifyBusy` 推：那个布尔量只说"忙不忙"，
-   * **说不出"成了还是没成"** —— 而绿勾与红叉恰恰是这一档的全部信息量。
-   * 所以终态由**真的结果**（`res.ok`）决定，不是"忙完了就当成功"。
-   * （StatusMark 自己不会结束：原版组件里没有任何定时器，`running` 会一直转，见组件文件头。）
-   */
-  const [backupMark, setBackupMark] = useState<StatusMarkStatus>('pending')
-  /** 终态那 1.2 秒的计时器：离开这一页就别再 setState */
-  const backupMarkTimer = useRef(0)
-  useEffect(() => () => window.clearTimeout(backupMarkTimer.current), [])
+  /* 「备份到云端」那颗的 `bkNotifyBusy` / `backupMark` / `backupMarkTimer` 已随那颗粒按钮
+     一起搬去 `components/BackupExtraActions.tsx`（见文件上方那段注释）。 */
 
   /**
    * 「我提过的」：进页面读一次。
@@ -689,158 +678,22 @@ export default function Settings() {
                 导出备份文件
               </Button>
               {/*
-                🆕 2026-10-03：**档案那份单独导出、用超管的公钥封起来**
-                  （用户原话："人人可点，但是能不能加密？就是只有找超管才能解开"）。
+                2026-10-04 用户取舍（原话：「保留第一个和第四个按钮就好了，把下面的说明也删除了」
+                ＋「至于全平台的备份，仅在超管面板里面留就好了」）⇒ 这里原来那两颗
+                「导出档案备份（加密）」与「备份到云端」**从这一屏撤下**：
 
-                ⚠️ 为什么不能"顺手一起导"：明文文件是可以被转发、被丢进网盘、被留在
-                   下载目录里的，而这两张表是**家长电话 + 家庭住址 + 老师住址**。
-                ⚠️ 加密失败（设备不是安全上下文 / 没有 WebCrypto）**必须说出来**，
-                   `sealForAdmin` 是 fail-closed 的 —— 绝不静默退回明文。
-                ⚠️ 顺序：两次下载**必须顺序 await**（壳里是两次"另存为"模态，见 fileOut.ts 文件头）。
+                  · 它们属于**全平台那一层**，只在超管面板里留（那一路还没接线 ——
+                    别以为这里漏做了，也别在这儿重新长回来）；
+                  · 实现与注释**原样留在** `components/BackupExtraActions.tsx`
+                    （加密封存、发信留痕、StatusMark 那套终态接线都在那一份里；
+                    `shots` 的 S25 ②/③ 仍然钉着它，只是换了锚点）；
+                  · 🔴 超管面板那边**直接摆 `<BackupExtraActions />`**，
+                    别在旁边再写第二份（同一个东西两套实现，这仓库栽过）。
               */}
-              <Button
-                block
-                icon={<IconLock size={16} />}
-                data-backup-seal
-                onClick={async () => {
-                  const r = await splitExport(useStore.getState())
-                  const nStu = r.profiles.studentProfiles.length
-                  const nTea = r.profiles.teacherProfiles.length
-                  if (!nStu && !nTea) {
-                    push({
-                      text: '没有可加密的档案',
-                      tone: 'warn',
-                      ...(r.issues.length
-                        ? { desc: r.issues[0] }
-                        : { desc: '这台设备读不到学生 / 教师档案（教室端账号读不到档案，这是正常的）' }),
-                    })
-                    return
-                  }
-                  try {
-                    const sealed = await sealForAdmin(r.profiles)
-                    /* 🔴 同「导出备份文件」：**拿到结果再说"已导出"**（2026-10-04）。
-                       apk 上存不下去时，这里原来照样报 ok —— 而这份是**档案**，
-                       老师以为封存好了就不再管，损失更难补。 */
-                    const saved = await downloadJson(sealed, `树高备份-档案-加密-${ymdOf(beijingNow())}.json`)
-                    if (saved === 'failed') {
-                      push({
-                        text: '档案文件没保存下来',
-                        tone: 'bad',
-                        desc: '这台设备存不了文件，换个方式导出（或到别的设备上导）。',
-                      })
-                      return
-                    }
-                    if (saved === 'cancelled') {
-                      push({ text: '已取消保存', tone: 'warn' })
-                      return
-                    }
-                    push({
-                      text: `已导出加密档案：学生 ${nStu} 条 / 教师 ${nTea} 条`,
-                      tone: 'ok',
-                      desc: '这份文件只有超管的私钥能解开；换设备时先恢复业务数据那份，档案仍从云端回来',
-                    })
-                  } catch (e) {
-                    push({
-                      text: '档案没能加密导出',
-                      tone: 'bad',
-                      desc: e instanceof Error ? e.message : String(e),
-                    })
-                  }
-                }}
-              >
-                导出档案备份（加密）
-              </Button>
-              {/*
-                🆕 2026-09-29 管理台第二期：「**毕业备份**」那条链的落点
-                   —— 备份 → 发信 → **发不出去就不许删**。
-
-                ⚠️ 为什么要有这个按钮：备份通知邮件是"毕业归档 / 换账号搬数据"这类
-                   一次性动作的留痕。没有它，那条链只有在真出毕业那件事时才第一次运行
-                   —— 而它没跑通过的东西，不该压在一次不可逆的操作上。
-                ⚠️ 发信失败时**必须显式说"先别删那份文件"**（这就是"不许删"的落地）。
-              */}
-              <Button
-                block
-                icon={<IconSend size={16} />}
-                disabled={bkNotifyBusy}
-                data-backup-notify
-                onClick={async () => {
-                  /*
-                   * 与「导出备份文件」同一个入口。
-                   * 🔴 2026-10-03：档案**不在这一份里**（`splitExport().plain` 两张表是空的）。
-                   *    这里之所以仍然读档案，只为了"读不到就说出来"，而不是为了把它写进明文文件。
-                   */
-                  const r = await splitExport(useStore.getState())
-                  /*
-                   * 🔴🔴 **存没存下来要先知道，再决定邮件和提示怎么说**（2026-10-04）
-                   *   旧版是 `downloadJson(...)` 后**无条件**走下面两句，而那两句里有一句是
-                   *   **发进邮箱的**「本机备份已导出」—— 那是**留痕**，假的比屏上的更难撤回。
-                   *   老师收到邮件就以为本机有那份文件了 ⇒ 需要恢复那天才发现没有。
-                   */
-                  const saved = await downloadJson(r.plain, `树高备份-${ymdOf(beijingNow())}.json`)
-                  setBkNotifyBusy(true)
-                  window.clearTimeout(backupMarkTimer.current)
-                  setBackupMark('running')
-                  if (saved === 'failed') {
-                    setBkNotifyBusy(false)
-                    setBackupMark('failed')
-                    push({
-                      text: '文件没能保存下来',
-                      tone: 'bad',
-                      desc: '这台设备存不了文件，先别往云端备份 —— 换个方式导出再试。',
-                    })
-                    return
-                  }
-                  const res = await notifyBackupDone(`本机备份已导出：${backupSummary(r.plain)}`, `文件：树高备份-${ymdOf(beijingNow())}.json`)
-                  setBkNotifyBusy(false)
-                  /* 🔴 终态取**真结果**：`res.ok` 是绿勾、否则红叉（红叉停住不回到 `pending`） */
-                  setBackupMark(res.ok ? 'done' : 'failed')
-                  if (res.ok) {
-                    push({
-                      text: '备份已存到云端',
-                      tone: 'ok',
-                      ...(r.issues.length ? { desc: `档案没能读到（${r.issues[0]}）—— 业务数据这份是全的` } : {}),
-                    })
-                    /* ✅ 绿勾亮满 `STATUS_MARK_HOLD_MS` 再回到常态（时长只有共享常量那一处） */
-                    backupMarkTimer.current = window.setTimeout(
-                      () => setBackupMark('pending'),
-                      STATUS_MARK_HOLD_MS,
-                    )
-                  } else {
-                    /* 🔴 **不发假成功**：没存上就说没存上，并把"不许删"讲清楚 */
-                    push({
-                      text: '备份已导出，但没能存到云端',
-                      tone: 'warn',
-                      desc: `${res.message}，没存上就先别删刚才那份备份文件`,
-                    })
-                  }
-                }}
-              >
-                {/* StatusMark 是**替换**那句 `{busy ? '正在备份…' : '备份到云端'}` —— 这一处是
-                    全站最长的等待（导出整库 + 上传，秒级到十秒级），原来十秒里屏幕上没有任何
-                    "还活着"的迹象。`cancelled` 那一档**不给 `--color-bad`**（照原版）。
-                    ⚠️ 文案按四档给全（`done` / `failed` 各自不同），否则"正在备份…"会
-                       配着绿勾/红叉显示，等于一句话说两件事。 */}
-                <StatusMark
-                  status={backupMark}
-                  size={16}
-                  label={BACKUP_MARK_LABEL[backupMark]}
-                  /* 🔴 `strike={false}`：平台气质偏克制，那个删除线表达的是"作废"，
-                     而这两处说的都是"跑完了" —— 见组件文件头。 */
-                  strike={false}
-                  style={{ justifyContent: 'center' }}
-                />
-              </Button>
               <Button block icon={<IconUpload size={16} />} onClick={() => bkRef.current?.click()}>
                 从备份文件恢复
               </Button>
             </div>
-            <p style={{ fontSize: 11.5, color: 'var(--color-ink3)', marginTop: 10, lineHeight: 1.7 }}>
-              云端是主副本，这份备份是<b>额外</b>一道保险 —— 换账号、换设备时把数据搬过去。
-              <br />
-              学生档案 / 教师档案（家长电话、住址）<b>不在上面那份文件里</b>：它们单独导出、
-              用超管的公钥加密，只有超管能解开。
-            </p>
           </Panel>
         </div>
 
@@ -863,92 +716,24 @@ export default function Settings() {
           （见 功能设计与不变量.md §十七 17.3）。
         */}
 
-        {/* 教室端
-            🔴🔴 2026-10-04 按端分开（扫「exe 与 apk 文案有没有分开」扫出来的三处）。
+        {/*
+          这里原来有一整张「教室端」卡（一句"在教室一体机上用 Edge / Chrome 打开下面这个
+          地址…" + `${origin}/classroom` + 「复制」+「在新标签页打开教室端」）。
+          2026-10-04 按用户要求**整卡删掉**（原话：「图二的教室端入口也没什么用了」）。
 
-            病根：这三样原来**两端逐字同文案**，而壳里它们给不出能用的东西 ——
-              · 地址 = `${window.location.origin}/classroom`
-                · exe origin = `app://-`（`_src/desktop/app-protocol.mjs:11`）
-                · apk origin = `https://localhost`（同文件 `:10`）
-                ⇒ **复制出来谁也打不开**，而上一行还写着「在教室一体机上用
-                  Edge / Chrome 打开下面这个地址」—— 一条**执行不了的指示**。
-              · 「在新标签页打开教室端」`window.open('/classroom','_blank')`
-                · exe：`main-teacher.js:182` 的 `setWindowOpenHandler`
-                  **对所有 url 一律 `return {action:'deny'}`**（非 http 的连
-                  `shell.openExternal` 都不走）⇒ **点了什么都不发生**
-                · apk：WebView 没有标签页这个概念（⚠️ 这半句是**推断**，
-                  没有真机实测；但"壳里没有标签"是架构事实，不是行为猜测）
-            ⇒ 壳里**三样一起收掉**，只留一句站得住的话。
+          为什么它确实没用了：教室端现在**有自己的程序**，而且从 1.1.2 起那个 exe 里
+          有**原生置顶小窗**（`shell-ipc.mjs` 的 `registerPip` + 网页侧 `classroomShell.ts`
+          那三档适配）—— 教室里那台机器按装好的程序走就行，
+          「浏览器打开一个地址 + 点一次启动置顶小窗」这条路线已经用不上了。
 
-            ⚠️ 判据用 `inShell()`（`__shell_out` 在不在）**而不是** `shellPlatform()`：
-               老 apk（补 `platform` 之前打的那批）`shellPlatform()` 回 `null`
-               ⇒ 按网页分支走 ⇒ **又会把 `https://localhost` 摆出来给人抄** ✗。
-               `inShell()` 对新老壳都成立 ⇒ 这一块不受"老包"影响。
+          顺带记一笔删掉的原因（原来那些判据是为它写的，别以为是漏做了又加回来）：
+            · exe 的 origin 是 `app://-`、apk 是 `https://localhost`
+              ⇒ 那个地址**复制出来谁也打不开**；
+            · 壳里 `window.open` 一律被 `setWindowOpenHandler` deny ⇒「在新标签页打开」
+              **点了什么都不发生**。
+          ⇒ 曾经靠 `inShell()` 分端遮掩这两种情况；现在整张卡不要了，`inShell` 的 import
+            也跟着撤了（`fileOut.ts` 本身照旧有用，别删）。
         */}
-        <div className="mb-4">
-          <Sect>教室端</Sect>
-          <Panel bodyClass="p-3">
-            <div
-              className="mb-3 flex items-start gap-2.5"
-              style={{ fontSize: 12.5, color: 'var(--color-ink2)', lineHeight: 1.7 }}
-            >
-              <IconWifi size={15} />
-              <span>
-                {inShell() ? (
-                  /* 壳里：不说地址、不提新标签页 —— 这句不承诺任何一件
-                     本机做不到的事（置顶小窗那半句也是网页版才有的动作）。 */
-                  <>教室端装在教室一体机上，在那台机器上打开那个程序就行。</>
-                ) : (
-                  <>
-                    在教室一体机上用 <b>Edge / Chrome</b> 打开下面这个地址，点一次「启动置顶小窗」即可。
-                    小窗会浮在全屏的新教育平台之上，显示当前题号与正确率。
-                  </>
-                )}
-              </span>
-            </div>
-            {!inShell() && (
-              <>
-                <div
-                  className="flex items-center gap-2 p-3"
-                  style={{
-                    background: 'var(--color-surface2)',
-                    border: '1px solid var(--color-line)',
-                    borderRadius: 4,
-                  }}
-                >
-                  <code
-                    className="flex-1 truncate"
-                    style={{ fontSize: 12.5, fontFamily: 'var(--font-mono)', color: 'var(--color-ink2)' }}
-                  >
-                    {typeof window !== 'undefined'
-                      ? `${window.location.origin}/classroom`
-                      : '/classroom'}
-                  </code>
-                  <Button
-                    size="sm"
-                    onClick={() => {
-                      const url = `${window.location.origin}/classroom`
-                      void navigator.clipboard?.writeText(url)
-                      push({ text: '已复制教室端地址', tone: 'ok' })
-                    }}
-                  >
-                    复制
-                  </Button>
-                </div>
-                <div className="mt-2.5 flex items-center gap-2">
-                  <Button
-                    size="sm"
-                    block
-                    icon={<IconChevronRight size={14} />}
-                    onClick={() => window.open('/classroom', '_blank')}
-                  >
-                    在新标签页打开教室端
-                  </Button>
-                </div>
-              </>
-            )}
-          </Panel>
-        </div>
 
         {/* 本机角色：教室端 / 教师端 —— 复原入口 */}
         <div className="mb-4">
@@ -1030,17 +815,47 @@ export default function Settings() {
              别因为这里空了就把 lib/holiday.ts 当成死代码删掉。
         */}
 
-        {/* 关于 */}
+        {/* 关于
+            2026-10-04 用户对这张卡的两处改动（原话）：
+              ·「把学科学段和存储位置删了」 ⇒ 原来那两行（学段学科 / 存储）删掉。
+                  ⚠️ 删的只是**这一处的显示**：`teacherPrimarySubjectCode` 这页别处
+                  （「我的身份」那张 Sheet 的主学科）照旧在用；而 `connectionMode()`
+                  只有那一行读过，所以它的 import 也一起撤了。
+              ·「放三个按钮，分别是下载教师端（安卓）下载教师端（Windows）
+                 下载教室端（Windows）……按钮就绑定面板里面我填的网址就好了」
+                ⇒ 三颗按钮接的是**面板里填的那两行**（`/api/status` 的 `release` 块），
+                   读数沿用的是维护那**同一次**取数（`useReleaseSlots()`，没有第二个轮询）。
+                  🔴 **哪一档没填地址，那一颗就不出现**（`releaseDownloads()` 已经把空串 /
+                      非 https 的滤掉了）—— 点了没反应的死按钮比少一颗按钮糟得多。
+                  ⚠️ 反直觉的那一条：那一档**公告撤下**（`enabled=false`）时服务端就不给
+                      这几个字段 ⇒ 这几颗按钮会跟着消失。地址仍留在库里当下次预填。
+        */}
         <div className="mb-4">
           <Sect>关于</Sect>
           <Panel bodyClass="px-4 py-2">
             <KV k="平台" v="树高教务通" />
             <KV k="版本" v={<span className="num">v{APP_VERSION}</span>} />
-            <KV k="学段学科" v={`高中 · ${subjectName(teacherPrimarySubjectCode(teacher))}`} />
-            <KV
-              k="存储"
-              v={mode === 'remote' ? '云端 · 手机与教室端共用一份' : '本机浏览器 · 未连云端'}
-            />
+            {downloads.length > 0 ? (
+              <div className="flex flex-col gap-2 pt-2.5 pb-1">
+                {downloads.map((d) => (
+                  /* 🔒 与公告里那颗「下载最新版」同一套做法：只显示不执行
+                     （`target="_blank"` + `rel="noreferrer"`；href 一定是 https —— 见
+                     `releaseDownloads()` 里的 `isReleaseUrl`）。 */
+                  <a
+                    key={d.key}
+                    className="btn"
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}
+                    href={d.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    data-download-slot={d.key}
+                  >
+                    <IconDownload size={16} />
+                    {d.label}
+                  </a>
+                ))}
+              </div>
+            ) : null}
           </Panel>
         </div>
 

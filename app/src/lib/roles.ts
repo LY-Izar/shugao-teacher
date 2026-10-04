@@ -833,8 +833,8 @@ export function devInjectedMaintenance(search: string): string | null {
 }
 
 /**
- * 🧪 DEV-only 测试钩子：`?rel=1.1.1[&force=1][&slot=classroom]` 把「版本更新公告」
- * **装成发着**（**生产构建里被编译掉**）。
+ * 🧪 DEV-only 测试钩子：`?rel=1.1.1[&force=1][&slot=classroom][&urls=apk|exe]`
+ * 把「版本更新公告」**装成发着**（**生产构建里被编译掉**）。
  *
  * 为什么必须有它（2026-10-04，与 `?maint=` 同一条理由）：公告是**服务端**给的
  * （`GET /api/status` 的 `release` 块），而 `shots.mjs` 跑的是**本地演示模式**
@@ -843,28 +843,38 @@ export function devInjectedMaintenance(search: string): string | null {
  *
  * ⚠️ 三条边界与 `devInjectedMaintenance()` **逐字相同**：
  *   ① 只在 `import.meta.env.DEV` 生效（`nav-checks.mjs` 的 D7 读 dist 核对
- *      `rel` 这个查询参数与函数名一次都没出现）；
+ *      `rel` / `urls` 这两个查询参数与函数名一次都没出现）；
  *   ② 它只影响**渲染**（`useMaintenanceStatus` 那一处），**一个字都不写数据库**、
  *      也不碰任何数据；
  *   ③ 空值 / 形状不对（`?rel=` / `?rel=1.1`）当作"没有这个钩子" —— 否则那些断言
  *      会在忘记写参数时**静默通过**（假通过）。
  *
  * ⚠️ 版本号默认 `1.1.1`（`?rel=1` 就是它）—— 必须比 `APP_VERSION` 新，否则不提示。
- * ⚠️ 链接是**占位**（`example.com`，RFC 2606 保留域名）：只为让「下载最新版」这个按钮
- *    真的出现。**截图里不许出现真域名**。
+ * ⚠️ 链接是**占位**（`example.com`，RFC 2606 保留域名）：只为让「下载最新版」与
+ *    「我的 → 关于」那三颗下载按钮真的出现。**截图里不许出现真域名**。
+ * 🆕 `?urls=apk` / `?urls=exe` = **只填一半**（2026-10-04 加）：面板里两个地址只填了
+ *    一个时，屏上只能出现对应的那一颗 —— 门禁靠它验"三档各判各的、没填的不摆死按钮"。
  */
 export function devInjectedRelease(
   search: string,
-): { version: string; force: boolean; slot: 'teacher' | 'classroom' } | null {
+): {
+  version: string
+  force: boolean
+  slot: 'teacher' | 'classroom'
+  /** 两个地址填哪几个（`both` = 面板里两个都填了） */
+  urls: 'both' | 'apk' | 'exe'
+} | null {
   if (!(import.meta.env.DEV && search)) return null
   const q = new URLSearchParams(search)
   const raw = q.get('rel')
   if (!raw) return null
   const version = raw === '1' ? '1.1.1' : raw
   if (!/^\d+\.\d+\.\d+$/.test(version)) return null
+  const urls = q.get('urls')
   return {
     version,
     force: q.get('force') === '1',
     slot: q.get('slot') === 'classroom' ? 'classroom' : 'teacher',
+    urls: urls === 'apk' || urls === 'exe' ? urls : 'both',
   }
 }

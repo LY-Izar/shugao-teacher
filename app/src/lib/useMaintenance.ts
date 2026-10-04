@@ -52,9 +52,11 @@ function devForced(): MaintenanceStatus | null {
       version: rel.version,
       force: rel.force,
       note: releaseDefaultNote(rel.version, rel.force),
-      /* 占位链接：只为让「下载最新版」这个按钮真的出现（截图里不许出现真域名） */
-      urlApk: 'https://example.com/update',
-      urlExe: 'https://example.com/update',
+      /* 占位链接：只为让「下载最新版」与「我的 → 关于」那几颗按钮真的出现
+         （截图里不许出现真域名）。`?urls=apk` / `?urls=exe` 让它**只填一半** ——
+         门禁靠它验"面板只填了其中一个时，屏上只摆对应的那一颗"。 */
+      urlApk: rel.urls === 'exe' ? '' : 'https://example.com/update',
+      urlExe: rel.urls === 'apk' ? '' : 'https://example.com/update',
     }
     slots = {
       teacher: rel.slot === 'teacher' ? notice : null,

@@ -363,3 +363,56 @@ export function releaseCheck(
   if (c === null) return 'notnew'
   return c < 0 ? 'behind' : 'uptodate'
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   「我的 → 关于」那三颗下载按钮（2026-10-04，用户当天点名的三处改动之一）
+   ------------------------------------------------------------
+   用户原话：「把学科学段和存储位置删了，放三个按钮，分别是下载教师端（安卓）
+   下载教师端（Windows）下载教室端（Windows）……按钮就绑定面板里面我填的网址就好了」。
+
+   🔴 **链接一个字都不写死**：就是面板里那两行（`/api/status` 的 `release` 块）——
+        · 教师端那两颗 → `release.teacher.url_apk` / `release.teacher.url_exe`
+        · 教室端那颗   → `release.classroom.url_exe`（教室那块屏是一体机，只给 exe）
+      ⚠️ 取数**复用维护那一次 `/api/status`**：这一屏**不发第二个请求、也不开第二个轮询**
+         （同一份读数经 `useRelease.ts` 的 `useReleaseSlots()` 传下来）。
+
+   🔴 **面板里没填地址 ⇒ 那一颗不出现**（返回的数组里就没有它）：
+      三档**各判各的** —— 老师点了一颗没反应的按钮，比屏上少一颗按钮糟得多。
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/** 三颗按钮的固定措辞（用户点名写死的那三句；页面里别再各抄一份） */
+export const DL_TEACHER_APK = '下载教师端（安卓）'
+export const DL_TEACHER_EXE = '下载教师端（Windows）'
+export const DL_CLASSROOM_EXE = '下载教室端（Windows）'
+
+/**
+ * 三颗按钮的稳定标识 —— 渲染成 `data-download-slot`。
+ * 🔴 门禁按它数按钮 / 认是哪一颗（**不按文案**：文案是给老师看的，改一个字不该动判据）。
+ */
+export type ReleaseDownloadKey = 'teacher-apk' | 'teacher-exe' | 'classroom-exe'
+
+export type ReleaseDownload = {
+  key: ReleaseDownloadKey
+  label: string
+  /** 面板里填的那个地址（出来的一定过了 `isReleaseUrl`） */
+  url: string
+}
+
+/**
+ * 面板里填的地址 → 这一屏该摆哪几颗按钮（**数组顺序就是屏上的顺序**）。
+ *
+ * ⚠️ 三档**各判各的**：教师端那两颗各看自己那一列，教室端那颗只看 `url_exe`
+ *    （与 `pickReleaseUrl` 的分端口径同源：拿错了那个根本装不上）。
+ * 🔴 过滤用的是**同一个** `isReleaseUrl()`（只认 `https://`）——
+ *    面板那侧的校验（R5）也走它，所以不存在"面板收了、屏上不认"的第二种口径。
+ * ⚠️ 那一档**没在发公告**时 `slots` 对应的一项是 `null`（`releaseFromRow` 的既有口径）
+ *    ⇒ 那几颗一起不摆，而不是摆一颗点不动的。
+ */
+export function releaseDownloads(slots: ReleaseSlots): ReleaseDownload[] {
+  const rows: ReleaseDownload[] = [
+    { key: 'teacher-apk', label: DL_TEACHER_APK, url: slots.teacher?.urlApk ?? '' },
+    { key: 'teacher-exe', label: DL_TEACHER_EXE, url: slots.teacher?.urlExe ?? '' },
+    { key: 'classroom-exe', label: DL_CLASSROOM_EXE, url: slots.classroom?.urlExe ?? '' },
+  ]
+  return rows.filter((r) => isReleaseUrl(r.url))
+}
