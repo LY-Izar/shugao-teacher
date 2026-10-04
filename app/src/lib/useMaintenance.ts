@@ -45,9 +45,13 @@ function devForced(): MaintenanceStatus | null {
   const rel = devInjectedRelease(search)
   if (msg === null && rel === null) return null
 
-  /* 🧪 公告是**线上一档的形状**（列名）—— 与真服务端那一份走同一个 `releaseFromRow` */
+  /* 🧪 公告是**线上一档的形状**（列名）—— 与真服务端那一份走同一个 `releaseFromRow`
+     🔴 `?urls=` 造出来的地址**同时**进 `downloads` 那一层（2026-10-04 起，那三层读数
+        的分工与真服务端一致：公告那一层看 `enabled`，地址这一层不看）。 */
   let slots: ReleaseSlots = RELEASE_SLOTS_UNKNOWN
   if (rel) {
+    const apk = rel.urls === 'exe' ? '' : 'https://example.com/update'
+    const exe = rel.urls === 'apk' ? '' : 'https://example.com/update'
     const notice: Release = {
       version: rel.version,
       force: rel.force,
@@ -55,14 +59,25 @@ function devForced(): MaintenanceStatus | null {
       /* 占位链接：只为让「下载最新版」与「我的 → 关于」那几颗按钮真的出现
          （截图里不许出现真域名）。`?urls=apk` / `?urls=exe` 让它**只填一半** ——
          门禁靠它验"面板只填了其中一个时，屏上只摆对应的那一颗"。 */
-      urlApk: rel.urls === 'exe' ? '' : 'https://example.com/update',
-      urlExe: rel.urls === 'apk' ? '' : 'https://example.com/update',
+      urlApk: apk,
+      urlExe: exe,
     }
+    /* 🔴 `rel_off=1`（这一档公告已撤下）时**公告那一层是 null**，而
+       `downloads` 那一层照旧有地址 —— 与真服务端 `/api/status` 的分工逐字一致
+       （用户 2026-10-04 拍板：「公告撤下了，下载也照样能用」）。
+       ⚠️ `downloads` 只填**这一屏那一档**（`?slot=classroom` 才填教室端）——
+          真服务端是两档各一行、各自独立；这里造"教师端那一屏"时把教室端也填上，
+          屏上就会冒出一颗教室里那台一体机才该有的按钮（门禁 ⑦b 组合二/三 当场红过）。 */
+    const EMPTY_DL = { url_apk: '', url_exe: '' }
     slots = {
-      teacher: rel.slot === 'teacher' ? notice : null,
-      classroom: rel.slot === 'classroom' ? notice : null,
+      teacher: rel.live && rel.slot === 'teacher' ? notice : null,
+      classroom: rel.live && rel.slot === 'classroom' ? notice : null,
       read: 'ok',
       reason: '',
+      downloads: {
+        teacher: rel.slot === 'teacher' ? { url_apk: apk, url_exe: exe } : EMPTY_DL,
+        classroom: rel.slot === 'classroom' ? { url_apk: apk, url_exe: exe } : EMPTY_DL,
+      },
     }
   }
 

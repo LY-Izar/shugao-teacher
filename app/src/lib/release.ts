@@ -259,6 +259,62 @@ export function releaseFormFromBody(body: Record<string, unknown>): ReleaseForm 
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+   🔴🔴 下载地址 —— **与公告那一道闸门分开**（2026-10-04 用户拍板）
+   ------------------------------------------------------------
+   用户原话：「公告撤下了，下载也照样能用」。
+
+   🔴 **一种语义**：这一块答的是"面板里那两个地址填了什么"，**不问**这一档
+      是不是正在发公告。`enabled=false`（撤下）时库里那两列照旧留着
+      （撤下**只写 `enabled`**，其余字段留作下次预填）⇒ 这一块照样给得出来。
+   🔴 **公告正文仍然守闸门**：`version` / `force` / `message` 一律由
+      `releaseFromRow()` 那一道判据决定出不出（未发布的草稿一个字都不外露）——
+      这两个函数**各管各的**，别把它们合成一个。
+   🔴 字段名与数据库列名**逐字相同**（`url_apk` / `url_exe`）——
+      与公告那一份同一条理由：只有一种解析。
+   ⚠️ 空串 = 面板里那一行没填 ⇒ 调用方**不摆**那一颗按钮（不是摆一颗点不动的）。
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/** 某一端的两个下载地址（面板里那两行，**不看是否在发公告**） */
+export type ReleaseDownloads = {
+  /** 手机（安卓）那一颗；空串 = 没填 */
+  url_apk: string
+  /** Windows 那一颗；空串 = 没填 */
+  url_exe: string
+}
+
+/** 两端的下载地址（`/api/status` 的 `release.downloads`） */
+export type PublicDownloads = {
+  teacher: ReleaseDownloads
+  classroom: ReleaseDownloads
+}
+
+/** 没填任何地址的那一份（调用方拿它当"摆不出按钮"的默认值） */
+export const RELEASE_DOWNLOADS_EMPTY: ReleaseDownloads = { url_apk: '', url_exe: '' }
+
+export const PUBLIC_DOWNLOADS_EMPTY: PublicDownloads = {
+  teacher: RELEASE_DOWNLOADS_EMPTY,
+  classroom: RELEASE_DOWNLOADS_EMPTY,
+}
+
+/**
+ * 一行 → 这一端的下载地址（**`enabled` 是真是假都给**）。
+ *
+ * 🔴 与 `releaseFromRow()` 的唯一区别就是这里**没有** `enabled !== true → null`
+ *    那一条 —— 那一条管的是"公告弹不弹"，不该管"下载能不能用"。
+ * ⚠️ 它**不判**链接形状（`isReleaseUrl` 在客户端那一份里过滤）——
+ *    面板写入那一路已经校验过了（R5），这里再判一次就是第二种口径。
+ */
+export function releaseDownloadsFromRow(
+  row: Record<string, unknown> | undefined,
+): ReleaseDownloads {
+  if (!row) return RELEASE_DOWNLOADS_EMPTY
+  return {
+    url_apk: String(row.url_apk ?? '').trim(),
+    url_exe: String(row.url_exe ?? '').trim(),
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
    🔴🔴 共享区 —— 结束（下面这些是**前端专用**的）
    ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -276,6 +332,14 @@ export type ReleaseSlots = {
   read: ReleaseRead
   /** 读不到时的原文（面板上要显示） */
   reason: string
+  /**
+   * 🆕 两端的下载地址（2026-10-04 用户拍板：「公告撤下了，下载也照样能用」）。
+   * 🔴 它**单独一层**、与上面那两档公告**各管各的**：公告撤下（`enabled=false`）
+   *    时上面那两档回 `null`，而这一块**照样是面板里填着的那两个地址**。
+   * ⚠️ `read === 'failed' / 'missing'` 时是 `PUBLIC_DOWNLOADS_EMPTY`（两档全空串）
+   *    ⇒ 读不到就摆不出按钮，**不会**摆出死按钮。
+   */
+  downloads: PublicDownloads
 }
 
 export const RELEASE_SLOTS_UNKNOWN: ReleaseSlots = {
@@ -283,6 +347,28 @@ export const RELEASE_SLOTS_UNKNOWN: ReleaseSlots = {
   classroom: null,
   read: 'missing',
   reason: '',
+  downloads: PUBLIC_DOWNLOADS_EMPTY,
+}
+
+/**
+ * 服务端 `release.downloads` 那一块 → 两端的下载地址（2026-10-04）。
+ *
+ * 🔴 用的是**共享区里的同一个** `releaseDownloadsFromRow()`（列名 ↔ 字段名逐字一致）
+ *    —— 不存在"第二种解析"。
+ * 🔴 **它不看 `enabled`**：公告撤下时 `teacher` / `classroom` 是 `null`，
+ *    而这里的地址**照旧给得出来**（用户拍板那一条）。
+ * ⚠️ 这一块**不在回话里**（旧版服务端 / 没部署到这一版）⇒ 回空的那一份
+ *    ⇒ 屏上摆不出按钮，而不是摆一颗点不动的（与 `read:'missing'` 同一条纪律）。
+ * ⚠️ **只认这两个键**：别的键一律不读（多读一个键就是一条新的泄露面）。
+ */
+export function publicDownloadsFromStatus(raw: unknown): PublicDownloads {
+  if (!raw || typeof raw !== 'object') return PUBLIC_DOWNLOADS_EMPTY
+  const o = raw as Record<string, unknown>
+  const asRow = (v: unknown) => (v && typeof v === 'object' ? (v as Record<string, unknown>) : undefined)
+  return {
+    teacher: releaseDownloadsFromRow(asRow(o.teacher)),
+    classroom: releaseDownloadsFromRow(asRow(o.classroom)),
+  }
 }
 
 /**
@@ -307,6 +393,9 @@ export function releaseSlotsFromStatus(raw: unknown): ReleaseSlots {
     classroom: releaseFromRow(asRow(o.classroom)),
     read: o.read === 'failed' ? 'failed' : 'ok',
     reason: typeof o.reason === 'string' ? o.reason : '',
+    /* 🔴 公告那一层按 `enabled` 走（上面两行），**地址这一层不走**（这一行）——
+       2026-10-04「公告撤下了，下载也照样能用」就是这两行之间的分工。 */
+    downloads: publicDownloadsFromStatus(o.downloads),
   }
 }
 
@@ -405,14 +494,20 @@ export type ReleaseDownload = {
  *    （与 `pickReleaseUrl` 的分端口径同源：拿错了那个根本装不上）。
  * 🔴 过滤用的是**同一个** `isReleaseUrl()`（只认 `https://`）——
  *    面板那侧的校验（R5）也走它，所以不存在"面板收了、屏上不认"的第二种口径。
- * ⚠️ 那一档**没在发公告**时 `slots` 对应的一项是 `null`（`releaseFromRow` 的既有口径）
- *    ⇒ 那几颗一起不摆，而不是摆一颗点不动的。
+ * 🔴 **2026-10-04 起不再读公告那一层**（期望值**故意**变了）：
+ *    从前读的是 `slots.teacher / slots.classroom`，而那两个在"撤下"时是 `null`
+ *    ⇒ 三颗按钮跟着公告一起消失（用户原话：「公告撤下了，下载也照样能用」）。
+ *    现在读的是 `slots.downloads`（服务端 `release.downloads` 子块，
+ *    **不看 `enabled`**）⇒ 按钮**不随公告状态消失**。
+ *    ⚠️ 原来那条"没在发公告 ⇒ 一项 `null` ⇒ 那几颗一起不摆"的口径**只对公告那一层**
+ *       还成立；按钮这一层改成"面板里那一行空不空"**唯一**说了算（下一句那个 filter）。
+ * ⚠️ 面板里那一行没填 ⇒ 空串 ⇒ 那一颗不出现（返回的数组里就没有它）。
  */
 export function releaseDownloads(slots: ReleaseSlots): ReleaseDownload[] {
   const rows: ReleaseDownload[] = [
-    { key: 'teacher-apk', label: DL_TEACHER_APK, url: slots.teacher?.urlApk ?? '' },
-    { key: 'teacher-exe', label: DL_TEACHER_EXE, url: slots.teacher?.urlExe ?? '' },
-    { key: 'classroom-exe', label: DL_CLASSROOM_EXE, url: slots.classroom?.urlExe ?? '' },
+    { key: 'teacher-apk', label: DL_TEACHER_APK, url: slots.downloads.teacher.url_apk },
+    { key: 'teacher-exe', label: DL_TEACHER_EXE, url: slots.downloads.teacher.url_exe },
+    { key: 'classroom-exe', label: DL_CLASSROOM_EXE, url: slots.downloads.classroom.url_exe },
   ]
   return rows.filter((r) => isReleaseUrl(r.url))
 }

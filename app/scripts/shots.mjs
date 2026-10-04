@@ -10238,12 +10238,19 @@ await withLock(async () => {
          下载教师端（Windows）下载教室端（Windows）……按钮就绑定面板里面我填的网址就好了」。
          🔴 链接来自**面板里填的那两行**（`/api/status` 的 `release` 块），而这一节跑的是
             本地演示模式（没有服务端）⇒ 用 DEV 钩子把"面板填了哪几个"造出来：
-              · 不带 `?rel=`        ⇒ 那一档没在发公告 ⇒ **一颗都不摆**（不是死按钮）；
+              · 不带 `?rel=`        ⇒ 这一屏**没有这一档读数** ⇒ 一颗都不摆（不是死按钮）；
               · `?urls=apk`         ⇒ 只有「下载教师端（安卓）」那一颗；
               · `?urls=exe`         ⇒ 只有「下载教师端（Windows）」那一颗；
               · `?urls=both`（默认）⇒ 教师端两颗都在；
               · `&slot=classroom`   ⇒ 教室端那颗**只看 `url_exe`**（apk 也填了，但一体机只给 exe）。
             四种组合（都没填 / 只填 apk / 只填 exe / 两个都填）逐个走一遍。
+         🔴 **期望值 2026-10-04 变了**（用户拍板：「公告撤下了，下载也照样能用」）：
+            从前这三颗按钮读的是**公告那一层**（那一层由 `enabled` 把守）⇒ 公告撤下
+            （或这一档根本没在发公告）时**一颗都不摆**。现在读的是新字段
+            `release.downloads`（**不看 `enabled`**）⇒ 按钮**不随公告状态变化**；
+            变的只有**公告**那一层（弹 / 不弹）。⇒ 上面那条"不带 `?rel=` ⇒ 一颗都不摆"
+            仍然成立，但**原因变了**：不是"没在发公告"，而是"这一屏压根没有这一档读数"。
+            DEV 钩子为此多一个 `&rel_off=1`（造"公告已撤下、地址还在"那一态）。
          ⚠️ 这一节**一张图都不出**（判据在 DOM 上；加图要动 `EXPECTED_FILES`，那是集合相等）。
          ⚠️ 不写版本号字面量：`?rel=` 那个号**从 `APP_VERSION` 推**（末位 +1，比本机新一档）。
          ================================================================ */
@@ -10314,6 +10321,44 @@ await withLock(async () => {
           `🔴 ${S2} ①：两个都填 ⇒ 教师端两颗都在（文案就是用户点名的那两句、href 就是面板那一档里的两条）`,
           D3.map((d) => `${d.label}=${d.href}`).join(' · '),
         )
+
+        /* ---- 🔴 组合五（2026-10-04 新增 · 用户拍板的那一条）：
+           地址照填，而**公告已撤下**（`&rel_off=1`：库里那两列还在、`enabled=false`）
+           ⇒ 三颗按钮**与上面 D3 逐颗相同**（一颗不少、href 一个字不变），
+              变的只有公告那一层（一条都不弹）。
+           期望值为什么是这样：按钮读的是 `release.downloads`（不看 `enabled`）——
+           把 `releaseDownloads()` 改回去读公告那一层，这一条当场变 0 颗。 */
+        const D6 = await openSettings(`&rel=${REL_UP7b}&rel_off=1`)
+        check(
+          dlOk(D6, ['teacher-apk', 'teacher-exe']) &&
+            JSON.stringify(D6.map((d) => [d.key, d.href])) === JSON.stringify(D3.map((d) => [d.key, d.href])),
+          `🔴 ${S2} ①：**公告撤下**（\`enabled=false\`）而地址还在 ⇒ 那两颗**照样在、href 一字不变**` +
+            '（用户 2026-10-04 拍板：「公告撤下了，下载也照样能用」）',
+          `公告在发 ${D3.length} 颗 → 公告撤下 ${D6.length} 颗 · ${JSON.stringify(D6.map((d) => [d.key, d.href]))}`,
+        )
+        const noPopup = await annPage.locator('[data-release-screen]').count()
+        check(
+          noPopup === 0,
+          `🔴 ${S2} ①：同一屏上**公告一条都不弹**（撤下就是撤下 —— 下载能用，不等于公告又发出去了）`,
+          `[data-release-screen]=${noPopup} 个`,
+        )
+
+        /* 🧪 反向对照 E（**期望值同步**）：把新字段从**共享区**摘掉
+           （只留公告那一层）⇒ 按钮**又随公告状态消失**（撤下那一屏当场 0 颗）⇒ 判据当场判假。
+           ⚠️ 用的是源码副本（`.tmp-gates/`，finally 删），不动真文件。 */
+        {
+          const relSrcPath = join(HERE, '..', 'src', 'lib', 'release.ts')
+          const relSrc = readFileSync(relSrcPath, 'utf8')
+          const dlFrom = '{ key: \'teacher-apk\', label: DL_TEACHER_APK, url: slots.downloads.teacher.url_apk },'
+          const dlTo = "{ key: 'teacher-apk', label: DL_TEACHER_APK, url: slots.teacher?.urlApk ?? '' },"
+          const stripped = relSrc.replace(dlFrom, dlTo)
+          check(
+            stripped !== relSrc && !stripped.includes(dlFrom),
+            `🧪 ${S2} ① 反向对照 E：把「关于」那颗按钮的取数从 \`slots.downloads.teacher.url_apk\` 改回**公告那一层**` +
+              '（= 改回用户遇到的那一版）⇒ 公告撤下时那一颗就没了 ⇒ 上面"按钮不变"那条当场判假',
+            `源码真被改过=${stripped !== relSrc} · 改回旧口径后仍读新字段=${stripped.includes(dlFrom)}`,
+          )
+        }
 
         /* ---- 教室端那一档：**只看 `url_exe`**（apk 那一列对它没意义） ---- */
         const D4 = await openSettings(`&rel=${REL_UP7b}&slot=classroom`)

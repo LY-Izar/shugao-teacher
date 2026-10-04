@@ -260,6 +260,62 @@ export function releaseFormFromBody(body: Record<string, unknown>): ReleaseForm 
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+   🔴🔴 下载地址 —— **与公告那一道闸门分开**（2026-10-04 用户拍板）
+   ------------------------------------------------------------
+   用户原话：「公告撤下了，下载也照样能用」。
+
+   🔴 **一种语义**：这一块答的是"面板里那两个地址填了什么"，**不问**这一档
+      是不是正在发公告。`enabled=false`（撤下）时库里那两列照旧留着
+      （撤下**只写 `enabled`**，其余字段留作下次预填）⇒ 这一块照样给得出来。
+   🔴 **公告正文仍然守闸门**：`version` / `force` / `message` 一律由
+      `releaseFromRow()` 那一道判据决定出不出（未发布的草稿一个字都不外露）——
+      这两个函数**各管各的**，别把它们合成一个。
+   🔴 字段名与数据库列名**逐字相同**（`url_apk` / `url_exe`）——
+      与公告那一份同一条理由：只有一种解析。
+   ⚠️ 空串 = 面板里那一行没填 ⇒ 调用方**不摆**那一颗按钮（不是摆一颗点不动的）。
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/** 某一端的两个下载地址（面板里那两行，**不看是否在发公告**） */
+export type ReleaseDownloads = {
+  /** 手机（安卓）那一颗；空串 = 没填 */
+  url_apk: string
+  /** Windows 那一颗；空串 = 没填 */
+  url_exe: string
+}
+
+/** 两端的下载地址（`/api/status` 的 `release.downloads`） */
+export type PublicDownloads = {
+  teacher: ReleaseDownloads
+  classroom: ReleaseDownloads
+}
+
+/** 没填任何地址的那一份（调用方拿它当"摆不出按钮"的默认值） */
+export const RELEASE_DOWNLOADS_EMPTY: ReleaseDownloads = { url_apk: '', url_exe: '' }
+
+export const PUBLIC_DOWNLOADS_EMPTY: PublicDownloads = {
+  teacher: RELEASE_DOWNLOADS_EMPTY,
+  classroom: RELEASE_DOWNLOADS_EMPTY,
+}
+
+/**
+ * 一行 → 这一端的下载地址（**`enabled` 是真是假都给**）。
+ *
+ * 🔴 与 `releaseFromRow()` 的唯一区别就是这里**没有** `enabled !== true → null`
+ *    那一条 —— 那一条管的是"公告弹不弹"，不该管"下载能不能用"。
+ * ⚠️ 它**不判**链接形状（`isReleaseUrl` 在客户端那一份里过滤）——
+ *    面板写入那一路已经校验过了（R5），这里再判一次就是第二种口径。
+ */
+export function releaseDownloadsFromRow(
+  row: Record<string, unknown> | undefined,
+): ReleaseDownloads {
+  if (!row) return RELEASE_DOWNLOADS_EMPTY
+  return {
+    url_apk: String(row.url_apk ?? '').trim(),
+    url_exe: String(row.url_exe ?? '').trim(),
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
    🔴🔴 共享区 —— 结束（下面这些是**服务端专用**的）
    ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -320,11 +376,34 @@ export function publicReleaseRow(
   }
 }
 
+/**
+ * 一行 → 挂进 `release` 块的 **`downloads` 子块**（2026-10-04）。
+ *
+ * 🔴 **它与上面那个 `null` 无关**：`publicReleaseRow()` 回 `null`（撤下 / 版本号写坏）
+ *    时，这一块**照样要把库里存着的地址给出去**。
+ * 🔴 字段名与列名逐字相同（`url_apk` / `url_exe`）⇒ 客户端用**同一个**
+ *    `releaseDownloadsFromRow()` 解析（`nav-checks` 的契约断言也钉它）。
+ * ⚠️ **这一块里只有地址**：`version` / `force` / `message` 一个字都不许混进来 ——
+ *    否则"未发布的草稿不外露"那条口径就被这一块绕过去了。
+ */
+export function publicDownloadsBlock(
+  row: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  const d = releaseDownloadsFromRow(row)
+  return { url_apk: d.url_apk, url_exe: d.url_exe }
+}
+
 export type PublicReleases = {
   read: 'ok' | 'failed'
   reason: string
   teacher: Record<string, unknown> | null
   classroom: Record<string, unknown> | null
+  /**
+   * 🆕 两端的下载地址（`GET /api/status` 的 `release.downloads`）。
+   * 🔴 **读库成功就给**，与"这一档是不是在发公告"无关 —— 用户
+   *    2026-10-04 拍板的那一条就落在这个字段上（公告撤下不影响下载）。
+   */
+  downloads: PublicDownloads
 }
 
 /** 第 23 段 §23.2.1 还没跑时要说的那句话（列与种子行都在那一段里） */
@@ -350,20 +429,30 @@ export async function loadPublicReleases(env: Env): Promise<PublicReleases> {
       return {
         teacher: null,
         classroom: null,
+        downloads: PUBLIC_DOWNLOADS_EMPTY,
         read: 'failed',
         reason: isMissing(bad) ? NEED_RELEASE_SQL : `读版本公告失败：${bad.text.slice(0, 200)}`,
       }
     }
+    const tRow = pickReleaseRow(t.rows, 'teacher')
+    const cRow = pickReleaseRow(c.rows, 'classroom')
     return {
       read: 'ok',
       reason: '',
-      teacher: publicReleaseRow(pickReleaseRow(t.rows, 'teacher')),
-      classroom: publicReleaseRow(pickReleaseRow(c.rows, 'classroom')),
+      teacher: publicReleaseRow(tRow),
+      classroom: publicReleaseRow(cRow),
+      /* 🔴 **读得到库就给地址**（哪怕两档都没在发公告）—— 这一行就是
+         「公告撤下了，下载也照样能用」那一条的落点。 */
+      downloads: {
+        teacher: releaseDownloadsFromRow(tRow),
+        classroom: releaseDownloadsFromRow(cRow),
+      },
     }
   } catch (e) {
     return {
       teacher: null,
       classroom: null,
+      downloads: PUBLIC_DOWNLOADS_EMPTY,
       read: 'failed',
       reason: `读版本公告失败（连不上数据库）：${e instanceof Error ? e.message : String(e)}`,
     }

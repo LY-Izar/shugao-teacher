@@ -2616,6 +2616,106 @@ await withLock(async () => {
       )
     }
 
+    /* ②c 🆕 2026-10-04 · **下载地址与公告那一档分开**（用户拍板：「公告撤下了，下载也照样能用」）
+     *
+     * 🔴 **期望值为什么是这样**：从前两档的 `url_apk` / `url_exe` 只挂在公告那一份里，
+     *    而公告那一份在"撤下 / 版本号写坏"时是 `null` ⇒ 那两个地址跟着一起没了
+     *    ⇒「我的 → 关于」那三颗下载按钮**随公告状态一起消失**。
+     *    现在多一个**明确命名的子字段** `release.downloads.{teacher,classroom}.{url_apk,url_exe}`，
+     *    它答的只有一件事：**面板里那两个地址填了什么**（不看 `enabled`）。
+     * 🔴 **公告那一层一个字没松**：`version` / `force` / `message` 仍然由
+     *    `releaseFromRow()` 那一道判据决定出不出（上面 ①「未发布 → 两档都是 null」照旧）。
+     */
+    {
+      /* ---- 四种填法 × 公告在发（`enabled=true`）---- */
+      const COMBOS = [
+        ['都没填', '', ''],
+        ['只填 apk', 'https://a/x.apk', ''],
+        ['只填 exe', '', 'https://a/x.exe'],
+        ['都填', 'https://a/x.apk', 'https://a/x.exe'],
+      ]
+      for (const [name, apk, exe] of COMBOS) {
+        tableRows.set('site_state', [
+          releaseRow('teacher', { enabled: true, version: '1.1.1', url_apk: apk, url_exe: exe }),
+        ])
+        const body = await (await call(STATUS, '/api/status', null, AUTH, ENV, 'GET')).json()
+        eq(
+          `🔴 ②c 公告在发 · ${name} → \`release.downloads.teacher\` 如实回那两个地址`,
+          [body.release?.downloads?.teacher?.url_apk, body.release?.downloads?.teacher?.url_exe],
+          [apk, exe],
+        )
+        eq(
+          `🔴 ②c 公告在发 · ${name} → 公告那一份**同时**在（这一档本来就在发，两种读法都该有）`,
+          [body.release?.teacher?.version, body.release?.teacher?.url_apk, body.release?.teacher?.url_exe],
+          ['1.1.1', apk, exe],
+        )
+      }
+
+      /* ---- 同样四种填法 × **公告已撤下**（`enabled=false`）---- */
+      for (const [name, apk, exe] of COMBOS) {
+        tableRows.set('site_state', [
+          releaseRow('teacher', { enabled: false, version: '1.1.1', url_apk: apk, url_exe: exe }),
+        ])
+        const body = await (await call(STATUS, '/api/status', null, AUTH, ENV, 'GET')).json()
+        eq(
+          `🔴 ②c **公告撤下** · ${name} → \`release.downloads.teacher\` **照样**回那两个地址` +
+            '（这就是用户要的那一条：下载不随公告消失）',
+          [body.release?.downloads?.teacher?.url_apk, body.release?.downloads?.teacher?.url_exe],
+          [apk, exe],
+        )
+        /* 🔴 反向那一半：**撤下就是撤下** —— 公告正文 / 版本号一个字都不许出去 */
+        eq(
+          `🔴 ②c **公告撤下** · ${name} → 公告那一份仍是 \`null\`（草稿不外泄的口径一个字没松）`,
+          body.release?.teacher,
+          null,
+        )
+        const raw = JSON.stringify(body.release ?? {})
+        ok(
+          `🔴 ②c **公告撤下** · ${name} → 整块 \`release\` 里既没有版本号也没有正文` +
+            '（证明"给地址"没顺手把草稿也带出去）',
+          !raw.includes('1.1.1') && !raw.includes('已发布'),
+          raw.slice(0, 160),
+        )
+      }
+
+      /* 教室端那一档也要有（只有 exe 那一颗，apk 填了也不该出现在教室端按钮上） */
+      tableRows.set('site_state', [
+        releaseRow('classroom', {
+          enabled: false,
+          version: '1.1.1',
+          url_apk: 'https://a/x.apk',
+          url_exe: 'https://a/x.exe',
+        }),
+      ])
+      const cls = await (await call(STATUS, '/api/status', null, AUTH, ENV, 'GET')).json()
+      eq(
+        '🔴 ②c 撤下 · 教室端那一块也照样给地址（两块各判各的，与教师端同一条口径）',
+        [cls.release?.downloads?.classroom?.url_apk, cls.release?.downloads?.classroom?.url_exe],
+        ['https://a/x.apk', 'https://a/x.exe'],
+      )
+      eq('🔴 ②c 撤下 · 而教室端**公告**那一份仍然是 `null`', cls.release?.classroom, null)
+
+      /* 🧪 反向对照 A：把共享区新加的那一位从服务端**删掉** ⇒ 同一条判据当场判假 */
+      const relLibSrc = readFileSync(resolvePath(APP, 'functions/api/_lib/release.ts'), 'utf8')
+      const dlLine =
+        /downloads:\s*\{\s*teacher:\s*releaseDownloadsFromRow\(tRow\),\s*classroom:\s*releaseDownloadsFromRow\(cRow\),?\s*\}/
+      ok(
+        '🧪 ②c 反向对照：服务端那一行 `downloads: { teacher: …, classroom: … }` **真的在**，' +
+          '把它摘掉之后同一条"地址还在"的判据**不成立**（它不是恒真）',
+        dlLine.test(relLibSrc) && !dlLine.test(relLibSrc.replace(dlLine, '')),
+        `原文命中=${dlLine.test(relLibSrc)} · 摘掉后命中=${dlLine.test(relLibSrc.replace(dlLine, ''))}`,
+      )
+
+      /* 🧪 反向对照 B：把"不看 enabled"那一层换回**旧口径**（读公告那一层）⇒ 当场判假 */
+      ok(
+        '🧪 ②c 反向对照：旧口径（公告那一层 `publicReleaseRow(tRow)`，撤下即 `null`）' +
+          '**给不出地址** ⇒ 用户点名的那条 bug 换回去会当场红',
+        relLibSrc.includes('publicReleaseRow(tRow)') &&
+          !relLibSrc.includes('publicReleaseRow(tRow).url_apk'),
+        '旧口径是「公告那一层」，撤下时回 null —— 地址只能从 downloads 那一层拿',
+      )
+    }
+
     /* ③ 强制那一档：另一句默认正文（反向对照：证明 ② 那句不是"写死的一句"） */
     {
       tableRows.set('site_state', [
@@ -4418,7 +4518,16 @@ function sourceFileHealth(rel) {
     ok("🔴 那一格的标签写着「超级管理员」（用户点名的就是这一格）", admin.includes("label: '超级管理员'"))
     ok(
       '🔴 它的颜色进了 `allTones`（0 个 super 必须在"概览那句话"里说出口，不能只躺在磁贴里）',
-      /const toneSuper: Tone = superJudge\.tone/.test(admin) && /allTones = \[[^\]]*toneSuper\]/.test(admin),
+      /*
+       * ⚠️ 2026-10-04 改过一次（**收紧意图、去掉位置巧合**）：原来是
+       *   `/allTones = \[[^\]]*toneSuper\]/` —— 那要求 `toneSuper` **紧挨着 `]`**，
+       *   也就是"它必须是数组的最后一个元素"。那从来不是判据，只是当时写代码的顺序巧合；
+       *   概览那次重写在它后面又加了 `toneRelease` ⇒ 判据当场红，而**语义一点没变**
+       *   （`toneSuper` 仍然在 `allTones` 里、仍然参与汇总、仍然会让"0 个 super"被说出口）。
+       *   ⇒ 改成"**必须在数组里**、不限定位置"（同样能红：把 `toneSuper` 从数组里摘掉立刻红）。
+       */
+      /const toneSuper: Tone = superJudge\.tone/.test(admin) &&
+        /allTones = \[[^\]]*\btoneSuper\b[^\]]*\]/.test(admin),
     )
     ok(
       "🔴 读它用的是 `select('*')`（**不是 `select('id')`** —— 本项目在这上面踩过两次）",

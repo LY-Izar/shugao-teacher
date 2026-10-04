@@ -854,6 +854,12 @@ export function devInjectedMaintenance(search: string): string | null {
  *    「我的 → 关于」那三颗下载按钮真的出现。**截图里不许出现真域名**。
  * 🆕 `?urls=apk` / `?urls=exe` = **只填一半**（2026-10-04 加）：面板里两个地址只填了
  *    一个时，屏上只能出现对应的那一颗 —— 门禁靠它验"三档各判各的、没填的不摆死按钮"。
+ * 🆕 `?rel_off=1` = **这一档公告已撤下**（`enabled=false`），而面板里那两个地址**照旧留着**
+ *    （2026-10-04 用户拍板：「公告撤下了，下载也照样能用」）。
+ *    ⚠️ 它与"不带 `?rel=`"是**两件事**，别混：
+ *       · 不带 `?rel=`  ⇒ 这一屏**根本没有这一档读数** ⇒ 地址也拿不到 ⇒ 一颗按钮都不摆；
+ *       · `?rel=…&rel_off=1` ⇒ 读数是有的（`read:'ok'`）、地址也有，只是**公告不发**。
+ *    门禁靠它验"翻 `enabled` ⇒ 按钮不变、公告有/无改变"。
  */
 export function devInjectedRelease(
   search: string,
@@ -863,6 +869,8 @@ export function devInjectedRelease(
   slot: 'teacher' | 'classroom'
   /** 两个地址填哪几个（`both` = 面板里两个都填了） */
   urls: 'both' | 'apk' | 'exe'
+  /** 这一档**在发公告**吗（`false` = 已撤下：地址照给、公告不弹） */
+  live: boolean
 } | null {
   if (!(import.meta.env.DEV && search)) return null
   const q = new URLSearchParams(search)
@@ -876,5 +884,6 @@ export function devInjectedRelease(
     force: q.get('force') === '1',
     slot: q.get('slot') === 'classroom' ? 'classroom' : 'teacher',
     urls: urls === 'apk' || urls === 'exe' ? urls : 'both',
+    live: q.get('rel_off') !== '1',
   }
 }
