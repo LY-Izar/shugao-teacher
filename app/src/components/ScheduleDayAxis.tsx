@@ -209,7 +209,7 @@ export default function ScheduleDayAxis({
               top: -8,
               fontSize: 10.5,
               fontWeight: 700,
-              color: 'var(--color-accent)',
+              color: 'var(--color-accenttext)',
             }}
           >
             现在

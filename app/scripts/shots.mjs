@@ -6928,11 +6928,34 @@ await withLock(async () => {
           `${S63}：GradePromote 那句改成「先做一次备份，这里才放行。」（原先写着"发出去"）`,
           gradePromote.includes('先把备份发出去') ? '旧文案还在' : '已改',
         )
+        /*
+         * 🔴 **期望值为什么变了（2026-10-04，别改回去）**：这条链上**从头到尾没有"云端"** ——
+         *    那颗按钮已经如实改名成「导出本机备份并发一封通知邮件」（它不上传任何文件，
+         *    只导本机明文 JSON + 让 `/api/mail {action:'backup'}` 发一封通知邮件），
+         *    而走到这一句时**文件已经落到本机了**、失败的只有那封邮件。
+         *    旧的兜底文案「备份通知没能存到云端」把一次"信没发出去"说成了一次不存在的上传 ⇒
+         *    按 AGENTS.md 七（文案纪律）改成如实的那一句。
+         * ⚠️ 反向对照在下面：同一条判据喂回旧文案 ⇒ 当场判假。
+         */
+        const bkFallbackOk = (s) =>
+          s.includes('导出完成，但通知邮件没能发出') && !s.includes('备份通知没能存到云端')
         check(
-          backupLib.includes('备份通知没能存到云端') && !backupLib.includes('备份通知没发出去'),
-          `${S63}：\`lib/backup.ts\` 的兜底文案改成「备份通知没能存到云端」（它会进「我的」的 toast）`,
-          backupLib.includes('备份通知没发出去') ? '旧文案还在' : '已改',
+          bkFallbackOk(backupLib),
+          `${S63}：\`lib/backup.ts\` 的兜底文案改成「导出完成，但通知邮件没能发出」（它会进「我的」的 toast）`,
+          backupLib.includes('备份通知没能存到云端') ? '旧文案还在' : '已改',
         )
+        {
+          /* 🧪 反向对照：把那一句换回旧文案（内存里的副本，不动磁盘）⇒ 同一条判据当场假 */
+          const bkBack = backupLib.replace(
+            '导出完成，但通知邮件没能发出',
+            '备份通知没能存到云端',
+          )
+          check(
+            bkBack !== backupLib && !bkFallbackOk(bkBack),
+            '🧪 S63 反向对照：把 `lib/backup.ts` 那一句换回「备份通知没能存到云端」（**内存里的副本**）⇒ 同一条判据当场判假（证明它咬的是那一句本身，不是恒真）',
+            `副本真被改过=${bkBack !== backupLib} · 改回去之后判据=${bkFallbackOk(bkBack)}`,
+          )
+        }
         check(
           promoteApi.includes('没有存成功') && !promoteApi.includes('**没有发出去**'),
           `${S63}：\`/api/grade-promote\` 那句改成「没有存成功」（不再说"发出去"）`,
@@ -7925,6 +7948,223 @@ await withLock(async () => {
           g2.includes('服务端回话'),
           `${SAD}：拿不到的时候要说清**为什么**（"服务端回话"那一行是无条件的）`,
           g2.includes('服务端回话') ? '在' : short(g2, 220),
+        )
+
+        /*
+         * ============================================================
+         * 🆕 2026-10-04 · A19：③ 卡的**备份引导档** + ⑥ 卡的**钥匙口径**
+         * ============================================================
+         * 上一轮（`16ca7d4`）把这两件事做完了，但当时不许碰门禁 ⇒ **没有判据看着它们**。
+         * 这一节把它们钉住（任务单 A 的四条事实 + B2 的 ⑥ 卡口径）。
+         *
+         * 🔴 每条判据都写成**同一个纯函数**，紧接着喂一份"改坏的东西" ⇒ 必须当场判假
+         *    （`AGENTS.md` 三·2：每条新断言都要有反向对照，**对照本身也要能红**）：
+         *    · 文本类（四条事实 / 按钮名 / 无"备份到云端"）→ 改坏**内存里的屏上文本副本**；
+         *    · DOM 类（输入控件 / 钥匙口）→ 往**真 DOM** 里临时插一个坏控件，扫完立刻撤掉。
+         * ⚠️ 文本一律取**两张卡都点开**那一屏（`wide`）—— 那是最宽的状态，
+         *    "整页没有"这种话只有在最宽的状态下说才算数。
+         * ============================================================
+         */
+
+        /* ---- ① ③ 卡明细里**0 个输入控件**（面板不收钥匙：整库口令与档案私钥留在超管手上） ---- */
+        const G2_SEL = '[data-admin-detail="③ 备份（G2）"]'
+        const SEAL_TITLE = '⑥ 档案解密（只有超管能开）'
+        const SEL_SEAL = `[data-admin-detail="${SEAL_TITLE}"]`
+        /**
+         * 🔴 反向对照的前置：目标串必须**恰好出现一次**再替换
+         *    （`String.replace` 只换第一处 —— 换到"注释 / 别处那一份"上就是**假绿**；
+         *     `AGENTS.md` 三·2 2026-10-04 加的纪律）。出现 0 处或 2 处 ⇒ **这条对照自己红**。
+         */
+        const once = (t, s) => t.split(s).length - 1
+        const oneEdit = (t, from, to) =>
+          once(t, from) === 1
+            ? { ok: true, n: 1, text: t.replace(from, to) }
+            : { ok: false, n: once(t, from), text: t }
+        const scanControls = (sel) =>
+          adPage.evaluate((s) => {
+            const box = document.querySelector(s)
+            const q = (x) => (box ? box.querySelectorAll(x).length : -1)
+            return {
+              boxInDom: !!box,
+              inputs: q('input'),
+              textareas: q('textarea'),
+              selects: q('select'),
+              files: q('input[type="file"]'),
+            }
+          }, sel)
+        const noControlsOk = (r) =>
+          r.boxInDom && r.inputs === 0 && r.textareas === 0 && r.selects === 0 && r.files === 0
+        const g2Scan = await scanControls(G2_SEL)
+        check(
+          noControlsOk(g2Scan),
+          `${SAD}：🔴 ③ 卡的明细里**一个输入控件都没有**（input / textarea / select / type=file 全 0）—— 整库口令与档案私钥都留在超管手上，面板只读状态`,
+          `input=${g2Scan.inputs} · textarea=${g2Scan.textareas} · select=${g2Scan.selects} · type=file=${g2Scan.files}`,
+        )
+        {
+          /* 🧪 反向对照（**真 DOM**）：临时往 ③ 的明细里插一个密码框 ⇒ 同一个扫描函数当场读到 1，扫完立刻撤掉 */
+          await adPage.evaluate((s) => {
+            const box = document.querySelector(s)
+            if (!box) return
+            const i = document.createElement('input')
+            i.type = 'password'
+            i.id = 'a19-rev-g2'
+            box.appendChild(i)
+          }, G2_SEL)
+          const g2Bad = await scanControls(G2_SEL)
+          await adPage.evaluate(() => document.getElementById('a19-rev-g2')?.remove())
+          const g2Back = await scanControls(G2_SEL)
+          check(
+            g2Bad.boxInDom && g2Bad.inputs === 1 && !noControlsOk(g2Bad),
+            '🧪 A19 ① 反向对照（真 DOM）：往 ③ 的明细里临时插一个密码框 ⇒ 同一个扫描函数**当场读到 1**（证明它真在数真控件，不是恒真；插完已撤掉）',
+            `插进去 input=${g2Bad.inputs}（须恰好 1 · 判据=${noControlsOk(g2Bad)}）· 撤掉后 input=${g2Back.inputs}`,
+          )
+        }
+
+        /* ---- ② ⑥ 卡：**折叠时不进 DOM**（不是一个藏起来的 input） ---- */
+        const scanKeys = () =>
+          adPage.evaluate((s) => {
+            const seal = document.querySelector(s)
+            /*
+             * "钥匙口"的口径（**只数这个**）：① `type=password`；或 ② 占位符 / 无障碍名 / name / id
+             * 里出现 私钥 / PRIVATE KEY / 口令 / PASSPHRASE / BACKUP_ENCRYPTION。
+             * ⚠️ 唯一的例外是**登录卡那个账号密码**（`autocomplete="current-password"`，面板第一期就有，
+             *    与备份/解密钥匙无关）—— 只排它一个，别的 `type=password` 一律算钥匙口。
+             * ⚠️ 这条扫描的已知边界：一个**没有任何标记**的空白文本框抓不到（那一路由下面
+             *    `nav-checks` 的静态判据兜：③ 卡源码区间内不许出现 `<input` / `<textarea`）。
+             */
+            const isLoginPwd = (el) => el.getAttribute('autocomplete') === 'current-password'
+            const mark = (el) =>
+              [
+                el.getAttribute('placeholder'),
+                el.getAttribute('aria-label'),
+                el.getAttribute('name'),
+                el.getAttribute('id'),
+              ]
+                .filter(Boolean)
+                .join(' ')
+            const isKeyish = (el) =>
+              el.getAttribute('type') === 'password' ||
+              /私钥|PRIVATE KEY|口令|PASSPHRASE|BACKUP_ENCRYPTION/i.test(mark(el))
+            const all = [...document.querySelectorAll('input, textarea')].filter(
+              (el) => isKeyish(el) && !isLoginPwd(el),
+            )
+            const inside = all.filter((el) => seal && seal.contains(el))
+            return {
+              sealInDom: !!seal,
+              keyTotal: all.length,
+              inSeal: inside.length,
+              outside: all.filter((el) => !(seal && seal.contains(el))).length,
+            }
+          }, SEL_SEAL)
+        const sealCollapsedOk = (r) => r.sealInDom === false && r.keyTotal === 0
+        const sealCollapsed = await scanKeys()
+        check(
+          sealCollapsedOk(sealCollapsed),
+          `${SAD}：🔴 ⑥「档案解密」**折叠时不进 DOM**（\`{open && children}\` ⇒ 私钥输入框在折叠态**连节点都没有**，不是一个藏起来的 input）`,
+          `⑥ 明细在 DOM=${sealCollapsed.sealInDom} · 钥匙口总数=${sealCollapsed.keyTotal}`,
+        )
+
+        /* ---- ③ 展开 ⑥：全屏**只此一个**钥匙口，且**只在这一张卡里** ---- */
+        await adPage.locator(`[data-admin-toggle="${SEAL_TITLE}"]`).click()
+        await adPage.waitForTimeout(250)
+        const sealOpen = await scanKeys()
+        const sealExpandedOk = (r) => r.sealInDom === true && r.inSeal === 1 && r.outside === 0
+        check(
+          sealExpandedOk(sealOpen),
+          `${SAD}：🔴 展开之后**全屏只有这一个钥匙口**（就是这张卡里的私钥框），而且它**只在这一张卡里** —— 别处（含 ③ 备份卡）一个都没有`,
+          `⑥ 在 DOM=${sealOpen.sealInDom} · 卡内=${sealOpen.inSeal} · 卡外=${sealOpen.outside} · 总数=${sealOpen.keyTotal}`,
+        )
+        {
+          /* 🧪 反向对照（**真 DOM**）：往**页面别处**临时塞一个钥匙形状的输入口 ⇒ `outside` 当场从 0 变 1，同一条判据判假 */
+          await adPage.evaluate(() => {
+            const i = document.createElement('input')
+            i.type = 'password'
+            i.id = 'a19-rev-key'
+            i.setAttribute('placeholder', '把整库口令粘进来')
+            document.body.appendChild(i)
+          })
+          const leaky = await scanKeys()
+          await adPage.evaluate(() => document.getElementById('a19-rev-key')?.remove())
+          const leakyBack = await scanKeys()
+          check(
+            leaky.outside === 1 && !sealExpandedOk(leaky),
+            '🧪 A19 ③ 反向对照（真 DOM）：往**页面别处**临时塞一个钥匙形状的输入口 ⇒ `outside` **当场从 0 变 1**、同一条判据判假（证明"别处一律不许"真的在数；塞完已撤掉）',
+            `塞进去 outside=${leaky.outside}（须恰好 1 · 判据=${sealExpandedOk(leaky)}）· 撤掉后 outside=${leakyBack.outside}`,
+          )
+        }
+
+        /* ---- ④ 文本那一半：四条事实照实 + 按钮名逐字 + 整页无"备份到云端" ---- */
+        const wide = (await pageInfo(adPage)).body
+        const GUIDE_FACTS = [
+          /* ① 每天北京 02:30 跑 `pg_dump → gzip → AES-256 → R2` */
+          ['02:30', 'pg_dump', 'gzip', 'AES-256'],
+          /* ② R2 短期开不了 ⇒ **今天真正的备份在 GitHub Actions 的 Artifact**（保留 30 天 · 要登录） */
+          ['短期开通不了', 'GitHub Actions', '保留 30 天', '登录 GitHub 才能下载'],
+          /* ③ 拉回＝打包机双击那个 `.cmd`（落到哪个目录 / 只留 30 份 / 不解密） */
+          ['_tools\\拉取整库备份.cmd', '树高教务通打包\\整库备份\\', '只留最近 30 份', '不解密'],
+          /* ④ 🔴 不可逆操作先留退路：恢复前先在打包机导一份当前库 */
+          ['恢复前先在打包机导一份当前库'],
+          /* ⑤ 钥匙在超管手上、面板只读不收 */
+          ['不收口令、不收私钥', 'BACKUP_ENCRYPTION_PASSPHRASE'],
+        ]
+        const guideOk = (t) => GUIDE_FACTS.every((g) => g.every((s) => t.includes(s)))
+        check(
+          guideOk(wide),
+          `${SAD}：🔴 ③ 的引导档**照实**写清五件事（北京 02:30 那条链 · R2 开不了⇒真备份在 GitHub Actions 的 Artifact 保留 30 天且要登录 · 打包机双击那个 .cmd · **恢复前先导一份当前库** · 钥匙在超管手上）`,
+          GUIDE_FACTS.map((g, i) => `第${i + 1}组 ${g.filter((s) => wide.includes(s)).length}/${g.length}`).join(' · '),
+        )
+        {
+          /* 🧪 反向对照：把"恢复前先在打包机导一份当前库"从**内存里的屏上文本副本**抠掉 ⇒ 同一条判据当场假 */
+          const cut = oneEdit(wide, '恢复前先在打包机导一份当前库', '（先干再说）')
+          check(
+            cut.ok && !guideOk(cut.text),
+            '🧪 A19 ④ 反向对照：把「恢复前先在打包机导一份当前库」从**内存里的屏上文本副本**抠掉 ⇒ 同一条判据当场判假（证明这五组事实真的逐字被判，不是恒真）',
+            `目标在屏上出现 ${cut.n} 处（须恰好 1）· 抠掉之后判据=${guideOk(cut.text)}`,
+          )
+        }
+        const honestBtnOk = (t) => t.includes('导出本机备份并发一封通知邮件')
+        check(
+          honestBtnOk(wide),
+          `${SAD}：🔴 那颗按钮**逐字**叫「导出本机备份并发一封通知邮件」（它不上传任何文件 ⇒ 名字里不许出现"云端"）`,
+          wide.includes('导出本机备份并发一封通知邮件')
+            ? '逐字在'
+            : short(wide.match(/.{0,20}导出.{0,40}/)?.[0] ?? '', 120),
+        )
+        {
+          /* 🧪 反向对照：把按钮名换回旧名「备份到云端」（内存副本）⇒ 同一条判据当场假 */
+          const renamed = oneEdit(wide, '导出本机备份并发一封通知邮件', '备份到云端')
+          check(
+            renamed.ok && !honestBtnOk(renamed.text),
+            '🧪 A19 ④ 反向对照：把按钮名换回旧名「备份到云端」（**内存里的屏上文本副本**）⇒ 同一条判据当场判假',
+            `目标在屏上出现 ${renamed.n} 处（须恰好 1）· 换回旧名之后判据=${honestBtnOk(renamed.text)}`,
+          )
+        }
+        const noCloudOk = (t) => !t.includes('备份到云端')
+        check(
+          noCloudOk(wide),
+          `${SAD}：🔴 **整页没有「备份到云端」这四个字**（旧名彻底退场，连一处都不许留）—— 在"③ 与 ⑥ 都点开"这一屏上判`,
+          wide.includes('备份到云端')
+            ? short(wide.match(/.{0,16}备份到云端.{0,16}/)?.[0] ?? '', 90)
+            : '（一个字都没有）',
+        )
+        {
+          /* 🧪 反向对照：往**内存副本**里塞一颗叫「备份到云端」的按钮 ⇒ 同一条判据当场假 */
+          const injected = `${wide} <button>备份到云端</button>`
+          check(
+            injected.length > wide.length && !noCloudOk(injected),
+            '🧪 A19 ④ 反向对照：往**内存里的屏上文本副本**塞一颗叫「备份到云端」的按钮 ⇒ 同一条判据当场判假（证明它扫的是真文本）',
+            `塞进去之后判据=${noCloudOk(injected)}（期望 false）`,
+          )
+        }
+
+        /* ---- ⑤ 收起 ⑥：私钥框**又整个从 DOM 里消失**（"折叠不进 DOM"的另一半，与 ② 构成两侧证据） ---- */
+        await adPage.locator(`[data-admin-toggle="${SEAL_TITLE}"]`).click()
+        await adPage.waitForTimeout(250)
+        const sealClosed = await scanKeys()
+        check(
+          sealClosed.sealInDom === false && sealClosed.keyTotal === 0 && sealCollapsedOk(sealClosed),
+          `${SAD}：🧪 A19 ⑤ 再点一次「收起」⇒ 私钥框**又整个从 DOM 里消失**（\`keyTotal\` 回到 0）—— 与 ② 一起把"折叠态不进 DOM"钉成两侧证据`,
+          `⑥ 明细在 DOM=${sealClosed.sealInDom} · 钥匙口总数=${sealClosed.keyTotal}`,
         )
 
         /* --- C1：**段清单跟着 schema.sql 走**（§35/§36/§37 也必须在），
@@ -12214,7 +12454,7 @@ await withLock(async () => {
               那个 px 边界**真的漏了东西**：`Admin.tsx` 里那个 `<summary>`（11.5px **借父级字号**，
               静态 grep 看不见 `fontSize`）与 13~13.5px 那几处。
               这一版按用户拍板**不再留 px 边界**：判据 = 全仓 `color:` 前景色的两半之和：
-                 · `var(--color-accenttext)` = **25 处**
+                 · `var(--color-accenttext)` = **26 处**（2026-10-04 由 25 增至 26：日程表「今天」轴的「现在」标签）
                  · `var(--color-accent)`   = **0 处**
            🔴 **为什么从 29 变成 25（2026-10-10 徽标轮）—— 不是为了让门禁变绿**：
               少掉的那 4 处（`AppShell.tsx` ×2 · `Login.tsx` ×1 · `Classroom.tsx` ×1）**不是小字**，
@@ -12239,10 +12479,10 @@ await withLock(async () => {
           if (n) perNext.push(`${f.split('/').pop()}=${n}`)
         }
         check(
-          textSites.next === 25 && textSites.old === 0,
-          '🔴 F6-H（**不再留 px 边界**）：全仓 `color:` 前景色 —— 用 `accenttext` 的**恰好 25 处**、还用 `accent` 的**恰好 0 处**（29 → 25 那 4 处是"给矢量图标上色"的容器，徽标轮换成校徽位图时整条删掉 —— 理由见上面那段注释）',
+          textSites.next === 26 && textSites.old === 0,
+          '🔴 F6-H（**不再留 px 边界**）：全仓 `color:` 前景色 —— 用 `accenttext` 的**恰好 26 处**、还用 `accent` 的**恰好 0 处**（29 → 25 那 4 处是"给矢量图标上色"的容器，徽标轮换成校徽位图时整条删掉 —— 理由见上面那段注释；**25 → 26 是 2026-10-04**：日程表「今天」时间轴上那个 10.5px 的「现在」标签原本写成 `color: var(--color-accent)` —— 那**违反口径**（前景色一律走 `accenttext`），改成 `accenttext` 之后它是第 26 个合法站点。**变的是分母，不是口径**：`accent` 仍是 0 处）',
           `accenttext=${textSites.next} 处（${perNext.join(' · ')}）· accent=${textSites.old} 处`,
-          '反向对照：把其中任一处改回 `var(--color-accent)` → 两个数就不再是 25 / 0，必红',
+          '反向对照：把其中任一处改回 `var(--color-accent)` → 两个数就不再是 26 / 0，必红',
         )
 
         /* 🔴 四套 × 那批小字（= accenttext）× **它们真正会落的那几种底**，逐个算 WCAG。

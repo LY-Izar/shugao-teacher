@@ -6498,6 +6498,293 @@ return { toMinutes, AXIS_PAD_MIN, GAP_MIN_MINUTES, dayRange, dayGaps, overlapGro
   }
 }
 
+/* ============================================================
+   🆕 2026-10-04 · A19：超管面板的**备份引导档** + ⑥「档案解密」的钥匙口径（**源码侧**）
+   ============================================================
+   上一轮（`16ca7d4`）把这两件事做完时**不许碰门禁** ⇒ 当时没有任何判据看着它们。
+   这一节钉住**源码这一侧**（真 DOM 那一侧在 `shots.mjs` 的 `SAD` 那一节，两处互补）：
+     ① ③ 卡引导档的**五组事实**（照实写，一个字都不许少）；
+     ② 那颗按钮的**如实名字**（`BACKUP_MARK_LABEL.pending` 就是按钮名）+ 两处源码里都没有「备份到云端」；
+     ③ 那一整块**只有一份实现**（`<BackupExtraActions />` 只摆一次 —— 不许写第二份）；
+     ④ ③ 卡那段源码里**一个输入控件都没有**（面板不收整库口令 / 档案私钥）；
+     ⑤ ⑥ 卡是**全仓唯一**出现私钥输入框的地方，而且卡里**没有任何把它带出去的调用**；
+     ⑥ `lib/backup.ts` 的兜底文案已经改成如实的那一句（不再说"没能存到云端"）。
+   ⚠️ 一律**先剥注释**再判：这五组事实的"为什么"正当地写在注释里（③ 卡上面那一段注释
+      逐条复述了它们）—— 不剥的话"照实写在屏上"会被注释骗过 ⇒ 判据恒绿（§三.2 那一类）。
+      反向对照 B 就是专门治这个的：把那一句**挪进注释** ⇒ 同一个判据必须假。
+   ⚠️ 每条都带一条**在内存里的源码副本上就地改坏**的反向对照（不动磁盘）。
+   ============================================================ */
+
+section('第二十五节 · A19：备份引导档四条事实 + ⑥ 档案解密的钥匙口径（源码侧）')
+
+{
+  /** 剥注释（块注释 + 行注释）—— 判据只许看**真代码**（照 A16 / A17 的写法） */
+  const strip = (s) =>
+    String(s)
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/(^|[^:'"`\w])\/\/[^\n]*/gm, '$1')
+  const RAW_ADMIN = readApp('src/pages/Admin.tsx')
+  const ADMIN = strip(RAW_ADMIN)
+  const EXTRA = strip(readApp('src/components/BackupExtraActions.tsx'))
+  const CRYPTO = strip(readApp('src/lib/backupCrypto.ts'))
+  const BACKUP = strip(readApp('src/lib/backup.ts'))
+
+  /** 按起止标记切一段源码（**找不到起点就回空串** ⇒ 判据当场假，绝不静默放过） */
+  const region = (s, from, to) => {
+    const a = s.indexOf(from)
+    if (a < 0) return ''
+    const b = s.indexOf(to, a + from.length)
+    return b < 0 ? s.slice(a) : s.slice(a, b)
+  }
+  /**
+   * 🔴 反向对照的前置：目标串必须**恰好出现一次**再替换
+   *    （`String.replace` 只换**第一处** —— 而目标串经常在注释里也有一份、且排在真代码前面
+   *     ⇒ 改的是注释、判据纹丝不动 ⇒ 对照假绿。`AGENTS.md` 三·2 2026-10-04 加的纪律。）
+   *    出现 0 处或 2 处 ⇒ `ok=false` ⇒ **这条对照自己红**，绝不静默通过。
+   */
+  const once = (t, s) => t.split(s).length - 1
+  const oneEdit = (t, from, to) =>
+    once(t, from) === 1
+      ? { ok: true, n: 1, text: t.replace(from, to) }
+      : { ok: false, n: once(t, from), text: t }
+
+  /* ---------------- ① ③ 卡引导档：五组事实（剥注释后仍在真 JSX 里） ---------------- */
+  const GUIDE_FACTS = [
+    /* ① 每天北京 02:30 跑 `pg_dump → gzip → AES-256 → R2` */
+    ['02:30', 'pg_dump', 'gzip', 'AES-256'],
+    /* ② R2 短期开不了 ⇒ **今天真正的备份在 GitHub Actions 的 Artifact**（保留 30 天 · 要登录） */
+    ['短期开通不了', 'GitHub Actions', '保留 30 天', '登录 GitHub 才能下载'],
+    /* ③ 拉回＝打包机双击那个 `.cmd`（落到哪个目录 / 只留 30 份 / 不解密） */
+    ['_tools\\拉取整库备份.cmd', '树高教务通打包\\整库备份\\', '只留最近 30 份', '不解密'],
+    /* ④ 🔴 不可逆操作先留退路：恢复前先在打包机导一份当前库 */
+    ['恢复前先在打包机导一份当前库'],
+    /* ⑤ 钥匙在超管手上、面板只读不收 */
+    ['不收口令、不收私钥', 'BACKUP_ENCRYPTION_PASSPHRASE'],
+  ]
+  const guideOk = (s) => GUIDE_FACTS.every((g) => g.every((x) => s.includes(x)))
+  check(
+    guideOk(ADMIN),
+    '🔴 A19 ① ③ 卡的引导档**照实**写清五组事实（北京 02:30 那条链 · R2 开不了⇒真备份在 GitHub Actions 的 Artifact 保留 30 天且要登录 · 打包机双击那个 .cmd 落到哪个目录、只留 30 份、不解密 · **恢复前先导一份当前库** · 钥匙在超管手上、面板只读不收）—— **剥注释之后**仍然在',
+    GUIDE_FACTS.map((g, i) => `第${i + 1}组 ${g.filter((x) => ADMIN.includes(x)).length}/${g.length}`).join(' · '),
+  )
+  {
+    /* 🧪 反向对照 A：把「恢复前先在打包机导一份当前库」从副本里抠掉 ⇒ 同一条判据当场假 */
+    const cut = oneEdit(ADMIN, '恢复前先在打包机导一份当前库', '（先干再说）')
+    check(
+      cut.ok && !guideOk(cut.text),
+      '🧪 A19 ① 反向对照 A：把「恢复前先在打包机导一份当前库」从**内存副本**里抠掉 ⇒ 同一条判据当场判假（证明这五组事实真的逐字被判，不是恒真）',
+      `目标在剥注释后的源码里出现 ${cut.n} 处（须恰好 1）· 抠掉之后判据=${guideOk(cut.text)}`,
+    )
+  }
+  {
+    /*
+     * 🧪 反向对照 B（**专治"注释里写了也算"**）：把那一句从 JSX 挪进注释 ——
+     *    JSX 那句换成"先干再说"、再把原句补进一段注释里 ⇒ **同一个判据（先剥注释）必须假**。
+     *    没有这一条，"剥注释"这件事本身就没被钉住（写注释也能骗绿）。
+     */
+    const cutJsx = oneEdit(RAW_ADMIN, '<b>恢复前先在打包机导一份当前库</b>', '<b>先干再说</b>')
+    const moved = `${cutJsx.text}\n/* 恢复前先在打包机导一份当前库 */\n`
+    check(
+      cutJsx.ok && !guideOk(strip(moved)),
+      '🧪 A19 ① 反向对照 B：把那一句**挪进注释**（JSX 换成"先干再说"、注释里补回原句）⇒ 同一个判据当场判假 —— 证明"注释里写了"不算数，判据看的是真 JSX',
+      `目标在**原始文件**里出现 ${cutJsx.n} 处（须恰好 1）· 副本剥注释后判据=${guideOk(strip(moved))}（期望 false）`,
+    )
+  }
+
+  /* ---------------- ② 如实按钮名 + 两处源码里都没有「备份到云端」 ---------------- */
+  /** 取出 `BACKUP_MARK_LABEL` 那张表（四档文案都在里面） */
+  const markTable = (s) => region(s, 'const BACKUP_MARK_LABEL', '}')
+  const honestBtnOk = (blk) =>
+    /pending:\s*'导出本机备份并发一封通知邮件'/.test(blk) && !blk.includes('云端')
+  check(
+    honestBtnOk(markTable(EXTRA)),
+    '🔴 A19 ② 那颗按钮的名字 = `BACKUP_MARK_LABEL.pending`，**逐字**是「导出本机备份并发一封通知邮件」，而且四档文案里**一个"云端"都没有**（它不上传任何文件：只导本机明文 JSON + 发一封通知邮件）',
+    `pending 逐字在=${/pending:\s*'导出本机备份并发一封通知邮件'/.test(markTable(EXTRA))} · 四档里出现"云端"=${markTable(EXTRA).includes('云端')}`,
+  )
+  {
+    /* 🧪 反向对照 A：把 `pending` 那一档换回旧名「备份到云端」（内存副本）⇒ 同一条判据当场假 */
+    const old = oneEdit(EXTRA, "pending: '导出本机备份并发一封通知邮件'", "pending: '备份到云端'")
+    check(
+      old.ok && !honestBtnOk(markTable(old.text)),
+      '🧪 A19 ② 反向对照 A：把 `pending` 那一档换回旧名「备份到云端」（**内存副本**）⇒ 同一条判据当场判假',
+      `目标出现 ${old.n} 处（须恰好 1）· 换回旧名之后判据=${honestBtnOk(markTable(old.text))}`,
+    )
+  }
+  const noCloudOk = (s) => !s.includes('备份到云端')
+  check(
+    noCloudOk(ADMIN) && noCloudOk(EXTRA),
+    '🔴 A19 ② 「备份到云端」这个名字在**这两份源码的真代码里**一处都不剩（注释里那句历史说明不算 —— 已经被剥掉）',
+    `Admin.tsx=${ADMIN.includes('备份到云端')} · BackupExtraActions.tsx=${EXTRA.includes('备份到云端')}`,
+  )
+  {
+    /* 🧪 反向对照 B：往副本里塞回一颗叫「备份到云端」的按钮 ⇒ 同一条判据当场假 */
+    const injected = oneEdit(
+      EXTRA,
+      '<div className="flex flex-col gap-2">',
+      '<Button block>备份到云端</Button>\n<div className="flex flex-col gap-2">',
+    )
+    check(
+      injected.ok && !noCloudOk(injected.text),
+      '🧪 A19 ② 反向对照 B：往副本里塞回一颗叫「备份到云端」的按钮 ⇒ 同一条判据当场判假（证明它扫的是真代码）',
+      `目标出现 ${injected.n} 处（须恰好 1）· 塞回旧名之后判据=${noCloudOk(injected.text)}`,
+    )
+  }
+
+  /* ---------------- ③ 那一整块**只有一份实现** ---------------- */
+  const oneImplOk = (s) =>
+    (s.match(/<BackupExtraActions\s*\/>/g) ?? []).length === 1 &&
+    (s.match(/components\/BackupExtraActions'/g) ?? []).length === 1
+  check(
+    oneImplOk(ADMIN),
+    '🔴 A19 ③ 那一整块在面板里**只摆一次**（`<BackupExtraActions />` 1 处 · import 1 处）—— 用户口径：搬进来，**不许写第二份**',
+    `用到=${(ADMIN.match(/<BackupExtraActions\s*\/>/g) ?? []).length} 处 · import=${(ADMIN.match(/components\/BackupExtraActions'/g) ?? []).length} 处`,
+  )
+  {
+    /* 🧪 反向对照：把那一块**再摆一份**（内存副本）⇒ "只有一份"当场假 */
+    const twice = oneEdit(ADMIN, '<BackupExtraActions />', '<BackupExtraActions />\n<BackupExtraActions />')
+    check(
+      twice.ok && !oneImplOk(twice.text),
+      '🧪 A19 ③ 反向对照：把 `<BackupExtraActions />` **再摆一份**（内存副本）⇒ 同一条判据当场判假',
+      `目标出现 ${twice.n} 处（须恰好 1）· 副本里用到 ${(twice.text.match(/<BackupExtraActions\s*\/>/g) ?? []).length} 处`,
+    )
+  }
+
+  /* ---------------- ④ ③ 卡那段源码里 0 个输入控件 ---------------- */
+  const G2_REGION = region(ADMIN, 'title="③ 备份（G2）"', '</Card>')
+  /** 区间里不许有输入控件；`<Card` 计数必须为 0（= 区间边界切对了，没多切进下一张卡） */
+  const noControlsOk = (r) =>
+    r.length > 0 &&
+    (r.match(/<Card\b/g) ?? []).length === 0 &&
+    !/<\s*(input|textarea|select)\b/.test(r) &&
+    !/type="file"/.test(r)
+  check(
+    noControlsOk(G2_REGION),
+    '🔴 A19 ④ ③ 卡那段源码里**一个输入控件都没有**（`<input` / `<textarea` / `<select` / `type="file"` 全 0）—— 整库口令（`BACKUP_ENCRYPTION_PASSPHRASE`）与档案私钥都留在超管手上，面板只读状态',
+    `区间 ${G2_REGION.length} 字符 · 区间里还有 \`<Card\`=${(G2_REGION.match(/<Card\b/g) ?? []).length} 处（该 0）`,
+  )
+  {
+    /* 🧪 反向对照：往那段区间里塞一个密码框（内存副本）⇒ 同一条判据当场假 */
+    const withBox = oneEdit(
+      G2_REGION,
+      '<SubHead>本机导出与通知（全平台那一层）</SubHead>',
+      '<SubHead>本机导出与通知（全平台那一层）</SubHead>\n<input type="password" placeholder="整库口令" />',
+    )
+    check(
+      withBox.ok && !noControlsOk(withBox.text),
+      '🧪 A19 ④ 反向对照：往 ③ 卡那段区间里塞一个密码框（**内存副本**）⇒ 同一条判据当场判假（证明那段区间真的在判、不是恒真）',
+      `目标出现 ${withBox.n} 处（须恰好 1）· 塞进去之后判据=${noControlsOk(withBox.text)}`,
+    )
+  }
+
+  /* ---------------- ⑤ ⑥ 卡：私钥输入框**全仓唯一**，且卡里没有把它带出去的路 ---------------- */
+  /** 全仓 `src/` 扫一遍（"别处一律不许"必须全仓扫，只看面板那一份是不够的） */
+  const walkSrc = (dir, out = []) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, e.name)
+      if (e.isDirectory()) walkSrc(p, out)
+      else if (/\.tsx?$/.test(e.name)) out.push(p)
+    }
+    return out
+  }
+  /**
+   * 🔴 私钥输入口的**机器可读标记**：`BEGIN PRIVATE KEY`（就是那个 textarea 的占位符开头）。
+   *    别拿 `type="password"` 当标记 —— 全仓有 6 处正经的**账号密码**框（登录 / 改密码 /
+   *    维护口令），它们不是这一条要管的东西；这一条管的是"备份 / 解密用的钥匙"。
+   */
+  const KEY_PLACE = /BEGIN PRIVATE KEY/
+  const keyPlaceFiles = (entries) => entries.filter((e) => KEY_PLACE.test(e.code)).map((e) => e.rel)
+  const entries = walkSrc(join(APP, 'src')).map((f) => ({
+    rel: f.slice(APP.length + 1).replace(/\\/g, '/'),
+    code: strip(readFileSync(f, 'utf8')),
+  }))
+  const onlyKeyPlaceOk = (list) => list.length === 1 && list[0] === 'src/pages/Admin.tsx'
+  check(
+    onlyKeyPlaceOk(keyPlaceFiles(entries)),
+    '🔴 A19 ⑤ 全仓 `src/` 里出现**私钥输入标记**（`BEGIN PRIVATE KEY`）的文件**只有 `src/pages/Admin.tsx` 一份** —— 用户口径：只许在 ⑥ 那一张卡里收私钥，别处一律不许',
+    `扫了 ${entries.length} 份 · 命中 ${keyPlaceFiles(entries).length} 份：${keyPlaceFiles(entries).join(' · ') || '（无）'}`,
+  )
+  {
+    /*
+     * 🧪 反向对照：往**同一批 entries** 里塞一份"别处也抄了一个私钥口"的副本
+     *    ⇒ **同一个扫描函数**当场多出一份（照 S22 ① 那两条对照的写法：喂坏数据，不另写口径）。
+     */
+    const dup = [...entries, { rel: 'src/lib/backup.ts', code: "<textarea placeholder={'-----BEGIN PRIVATE KEY-----'} />" }]
+    check(
+      !onlyKeyPlaceOk(keyPlaceFiles(dup)),
+      '🧪 A19 ⑤ 反向对照 A：往同一批 entries 里塞一份"别处也抄了私钥口"（内存副本）⇒ 同一个扫描函数当场多出一份、判据判假（证明"全仓只有一份"真的在数）',
+      `塞进去之后命中 ${keyPlaceFiles(dup).length} 份：${keyPlaceFiles(dup).join(' · ')}`,
+    )
+  }
+  const SEAL_REGION = region(ADMIN, 'function SealDecryptCard()', 'function PanelLogin(')
+  const sealCardOk = (s, r) =>
+    r.length > 0 &&
+    r.includes('openAdminSealed') &&
+    (r.match(/BEGIN PRIVATE KEY/g) ?? []).length === 1 &&
+    (s.match(/BEGIN PRIVATE KEY/g) ?? []).length === 1 &&
+    !/\bfetch\s*\(|postApi\s*\(|apiUrl\s*\(|supabase|localStorage|sessionStorage|indexedDB|sendBeacon|XMLHttpRequest/.test(r)
+  check(
+    sealCardOk(ADMIN, SEAL_REGION),
+    '🔴 A19 ⑤ ⑥ 卡**自己**也守得住：私钥输入框就在这张卡里（全文件只此 1 处）、解的是 `openAdminSealed`，而卡里**没有任何把它带出去的调用**（没有 `fetch(` / `postApi(` / `apiUrl(` / `supabase` / `localStorage` / `indexedDB` …）',
+    `区间 ${SEAL_REGION.length} 字符 · BEGIN PRIVATE KEY（卡内/全文件）=${(SEAL_REGION.match(/BEGIN PRIVATE KEY/g) ?? []).length}/${(ADMIN.match(/BEGIN PRIVATE KEY/g) ?? []).length} · 带出去的调用=${/\bfetch\s*\(|postApi\s*\(|apiUrl\s*\(|supabase|localStorage|sessionStorage|indexedDB|sendBeacon|XMLHttpRequest/.test(SEAL_REGION)}`,
+  )
+  {
+    /* 🧪 反向对照 B：往那张卡的副本里塞一句"把私钥 POST 出去" ⇒ 同一条判据当场假 */
+    const leaky = oneEdit(
+      SEAL_REGION,
+      'await openAdminSealed(doc, pem)',
+      "await fetch('/api/leak', { method: 'POST', body: pem })\n      await openAdminSealed(doc, pem)",
+    )
+    check(
+      leaky.ok && !sealCardOk(leaky.text, leaky.text),
+      '🧪 A19 ⑤ 反向对照 B：往那张卡的副本里塞一句 `fetch(\'/api/leak\', { body: pem })` ⇒ 同一条判据当场判假（证明"钥匙不外送"真的在被判）',
+      `目标出现 ${leaky.n} 处（须恰好 1）· 塞进去之后判据=${sealCardOk(leaky.text, leaky.text)}`,
+    )
+  }
+  /**
+   * 🔴 ⑤b 解钥匙的那份实现是**纯前端 WebCrypto**：整份 `lib/backupCrypto.ts` 里
+   *    一个网络 / 存储调用都没有 ⇒ 私钥那条路只有内存（与 ⑥ 卡上那句话对上）。
+   */
+  const cryptoPureOk = (s) =>
+    s.includes('globalThis.crypto') &&
+    s.includes('openAdminSealed') &&
+    !/\bfetch\s*\(|postApi\s*\(|apiUrl\s*\(|supabase|localStorage|sessionStorage|indexedDB|sendBeacon|XMLHttpRequest/.test(s)
+  check(
+    cryptoPureOk(CRYPTO),
+    '🔴 A19 ⑤b `lib/backupCrypto.ts` 整份里**没有任何网络 / 存储调用**（`openAdminSealed` 走 `globalThis.crypto`，纯 WebCrypto）—— 私钥只在那一次解密的内存里过一遍',
+    `globalThis.crypto=${CRYPTO.includes('globalThis.crypto')} · openAdminSealed=${CRYPTO.includes('openAdminSealed')} · 网络/存储调用=${/\bfetch\s*\(|postApi\s*\(|apiUrl\s*\(|supabase|localStorage|sessionStorage|indexedDB|sendBeacon|XMLHttpRequest/.test(CRYPTO)}`,
+  )
+  {
+    /* 🧪 反向对照：往 `backupCrypto.ts` 副本里塞一句 `fetch(` ⇒ 同一条判据当场假 */
+    const wired = oneEdit(
+      CRYPTO,
+      'export async function openAdminSealed(',
+      "await fetch('/api/sealed')\nexport async function openAdminSealed(",
+    )
+    check(
+      wired.ok && !cryptoPureOk(wired.text),
+      '🧪 A19 ⑤b 反向对照：往 `lib/backupCrypto.ts` 副本里塞一句 `fetch(` ⇒ 同一条判据当场判假（"纯前端"这件事真的被判着）',
+      `目标出现 ${wired.n} 处（须恰好 1）· 塞进去之后判据=${cryptoPureOk(wired.text)}`,
+    )
+  }
+
+  /* ---------------- ⑥ `lib/backup.ts` 的兜底文案如实 ---------------- */
+  const fallbackOk = (s) => s.includes('导出完成，但通知邮件没能发出') && !s.includes('没能存到云端')
+  check(
+    fallbackOk(BACKUP),
+    '🔴 A19 ⑥ `lib/backup.ts` 的兜底文案如实：**导出已经完成**、失败的只有那封通知邮件（旧文案「备份通知没能存到云端」把一次"信没发出去"说成了一次不存在的上传 —— 与改名的口径不一致）',
+    `新文案在=${BACKUP.includes('导出完成，但通知邮件没能发出')} · 旧文案还在=${BACKUP.includes('没能存到云端')}`,
+  )
+  {
+    /* 🧪 反向对照：把那一句换回旧文案（内存副本）⇒ 同一条判据当场假 */
+    const old = oneEdit(BACKUP, '导出完成，但通知邮件没能发出', '备份通知没能存到云端')
+    check(
+      old.ok && !fallbackOk(old.text),
+      '🧪 A19 ⑥ 反向对照：把那一句换回「备份通知没能存到云端」（**内存副本**）⇒ 同一条判据当场判假',
+      `目标出现 ${old.n} 处（须恰好 1）· 换回去之后判据=${fallbackOk(old.text)}`,
+    )
+  }
+}
+
 /* ---------------- 结果 ---------------- */
 console.log(`\n================ 结果 ================`)
 

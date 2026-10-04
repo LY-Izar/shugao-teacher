@@ -782,7 +782,7 @@ export async function notifyBackupDone(
     summary: summary.slice(0, 200),
     detail: detail.slice(0, 400),
   })
-  if (!r.ok) return { ok: false, message: apiMessage(r, '备份通知没能存到云端') }
+  if (!r.ok) return { ok: false, message: apiMessage(r, '导出完成，但通知邮件没能发出') }
   return { ok: true }
 }
 
