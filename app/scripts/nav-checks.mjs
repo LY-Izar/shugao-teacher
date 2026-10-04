@@ -5500,7 +5500,7 @@ section('第二十二节 · A15：教室端原生置顶小窗（壳原生 → Do
     /** 那一屏的四个字段（**一个字段一种语义**，施工单 §二.3） */
     const PIP_KEYS = ['className', 'seq', 'total', 'ratePct', 'missing']
     /** 依赖：`pipNative`（只在小窗开着时推）+ 会变的三个量（题号 / 正确率 / 未交人数） */
-    const PIP_DEP_KEYS = ['pipNative', 'seq', 'cur?.rate', 'collect?.missing']
+    const PIP_DEP_KEYS = ['pipNative', 'seq', 'cur', 'collect?.missing']
     const pushWiredRight = (s) => {
       const e = pushEffect(s)
       return (
@@ -5525,7 +5525,7 @@ section('第二十二节 · A15：教室端原生置顶小窗（壳原生 → Do
     )
     check(
       pushAfterCur(CLS_RAW),
-      '🔴 A15 ③ 而且那一处**在 `const cur = stats?.questions[seq - 1]` 之后** —— 依赖数组里的 `cur?.rate` 是渲染期求值的，放前面撞 TDZ 会**整页崩**（不是静默）',
+      '🔴 A15 ③ 而且那一处**在 `const cur = stats?.questions[seq - 1]` 之后** —— 依赖数组里的 `cur` 是渲染期求值的，放前面撞 TDZ 会**整页崩**（不是静默）',
       `cur @${CLS_RAW.indexOf(CUR_DECL)} · 推数据 @${pushEffect(CLS_RAW)?.i ?? -1}`,
     )
 
@@ -5546,7 +5546,7 @@ section('第二十二节 · A15：教室端原生置顶小窗（壳原生 → Do
     }
     let clsBroken = null
     try {
-      const noSeq = CLS_RAW.replace('[pipNative, klass?.name, seq, cur?.rate,', '[pipNative, klass?.name, cur?.rate,')
+      const noSeq = CLS_RAW.replace('[pipNative, klass?.name, seq, cur,', '[pipNative, klass?.name, cur,')
       const moved = moveBeforeCur(CLS_RAW)
       mkdirSync(dirname(TMP_CLS), { recursive: true })
       writeFileSync(TMP_CLS, noSeq)

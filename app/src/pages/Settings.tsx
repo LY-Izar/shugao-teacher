@@ -1157,43 +1157,47 @@ export default function Settings() {
               这一页只负责渲染 —— 以前它把整份日志硬编码在这儿，
               结果「关于」写着 v0.9.0、这份日志停在 0.8.0，同一页自己跟自己打架。
             */}
-            {CHANGELOG.map((log) => (
-              <div key={log.v} className="mb-3 last:mb-0">
-                <div className="flex items-baseline gap-2">
-                  <span className="num" style={{ fontSize: 12.5, fontWeight: 700 }}>
-                    v{log.v}
-                  </span>
-                  <span style={{ fontSize: 11.5, color: 'var(--color-ink4)' }}>{log.at}</span>
+            {CHANGELOG.map((log) => {
+              /*
+                🔴 按端过滤后**一条都不剩**的版本段直接跳过（2026-10-04 修）：
+                v1.1.2 那一段两条都标着 `only: 'desktop'`，于是在手机/网页版上会渲染出
+                「v1.1.2 10月4日」下面**空空如也**的一屏 —— 看起来像坏了。
+                判据：`shots` 的「更新日志」那一节要求**每一段至少 1 条**。
+                ⚠️ 别把过滤规则搬到这里改：`only` 的两档含义只有 `lib/changelog.ts` 一个定义处。
+              */
+              const p = shellPlatform()
+              const items = log.items.filter((it) => {
+                if (typeof it === 'string' || !it.only) return true
+                return it.only === 'desktop' ? p === 'electron' : p !== 'electron'
+              })
+              if (items.length === 0) return null
+              return (
+                <div key={log.v} className="mb-3 last:mb-0">
+                  <div className="flex items-baseline gap-2">
+                    <span className="num" style={{ fontSize: 12.5, fontWeight: 700 }}>
+                      v{log.v}
+                    </span>
+                    <span style={{ fontSize: 11.5, color: 'var(--color-ink4)' }}>{log.at}</span>
+                  </div>
+                  <ul
+                    style={{
+                      fontSize: 12.5,
+                      color: 'var(--color-ink2)',
+                      lineHeight: 1.9,
+                      paddingLeft: 16,
+                      listStyle: 'disc',
+                      marginTop: 2,
+                    }}
+                  >
+                    {items
+                      .map((it) => (typeof it === 'string' ? it : it.text))
+                      .map((t) => (
+                        <li key={t}>{t}</li>
+                      ))}
+                  </ul>
                 </div>
-                <ul
-                  style={{
-                    fontSize: 12.5,
-                    color: 'var(--color-ink2)',
-                    lineHeight: 1.9,
-                    paddingLeft: 16,
-                    listStyle: 'disc',
-                    marginTop: 2,
-                  }}
-                >
-                  {/*
-                    按端过滤（2026-10-04）：`only` 的两档准确含义写在
-                    `lib/changelog.ts` 的 `ChangeLogItem` 注释里 —— 那是**唯一**定义处，
-                    这里只负责照着执行，别在这儿改判据。
-                    ⚠️ 不带 `only` 的条目**两端都显示**（默认值，不许动成"默认隐藏"）。
-                  */}
-                  {log.items
-                    .filter((it) => {
-                      if (typeof it === 'string' || !it.only) return true
-                      const p = shellPlatform()
-                      return it.only === 'desktop' ? p === 'electron' : p !== 'electron'
-                    })
-                    .map((it) => (typeof it === 'string' ? it : it.text))
-                    .map((t) => (
-                      <li key={t}>{t}</li>
-                    ))}
-                </ul>
-              </div>
-            ))}
+              )
+            })}
           </Panel>
         </div>
       </Page>

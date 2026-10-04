@@ -13704,6 +13704,41 @@ await withLock(async () => {
         `真源标=${onlyTag} · 去标后=${onlyUntagged ?? 'null'} · 网页 ${changelogVisible(null, onlyTag)} → ${changelogVisible(null, onlyUntagged)} · 源码真被改过=${logUntagged !== logSrc}`,
       )
 
+      /* 🔴 S25 ⑨：**渲染不留空段**（2026-10-04）
+         ------------------------------------------------------------
+         v1.1.2 那一段两条都标着 `only: 'desktop'` ⇒ 在手机（apk）与网页版上
+         「v1.1.2 · 10月4日」下面**空空如也** —— 看起来像坏了（而它其实只是"这一版没你的事"）。
+         判据要钉**两件事**：
+           ① `Settings.tsx` **渲染前**按端过滤，过滤后为空 **`return null`**（跳过那一段）；
+           ② 数据侧：**每一段至少 1 条**（真有"整段没条目"的就是数据写坏了）。
+         ⚠️ ①必须由**真代码**满足 —— `settingsSrc` 是剔过注释的那份，
+            光在注释里写 `return null` 骗不过它。 */
+      const skipsEmpty =
+        /log\.items[\s\S]{0,600}?\.filter\(/.test(settingsSrc) &&
+        /items\.length === 0\)\s*return null/.test(settingsSrc)
+      /** 每段的条目数：条目行以 `{`（对象式）或 `'`（纯文本）开头。 */
+      const logEntries = logSrc.split(/\n\s*\{\s*\n\s*v: '/).slice(1)
+      const itemsOf = (seg) => {
+        const m = /items: \[([\s\S]*?)\n\s*\],/.exec(seg)
+        return m ? (m[1].match(/^\s*(?:\{|')/gm) ?? []).length : 0
+      }
+      const emptyEntries = logEntries.map(itemsOf).filter((n) => n < 1).length
+      /* 🧪 对照 F：把"跳过空段"那一行从**源码副本**里删掉 ⇒ ① 必须当场判假 */
+      const guardRe = /\s*if \(items\.length === 0\) return null/
+      const settingsNoGuard = settingsSrc.replace(guardRe, '')
+      const skipsEmptyWithoutGuard =
+        /log\.items[\s\S]{0,600}?\.filter\(/.test(settingsNoGuard) &&
+        /items\.length === 0\)\s*return null/.test(settingsNoGuard)
+      check(
+        skipsEmpty &&
+          !skipsEmptyWithoutGuard &&
+          logEntries.length >= 3 &&
+          emptyEntries === 0,
+        '🔴 S25 ⑨ 渲染不留空段：`Settings.tsx` **渲染前**按端过滤、过滤后为空 `return null`（手机/网页版不再出现"只有版本号、下面空着"的一段）· 且每一段至少 1 条',
+        `跳空段=${skipsEmpty} · 解析到 ${logEntries.length} 段（条目数 ${logEntries.map(itemsOf).join('/')}）· 空段=${emptyEntries} · 源码副本真被改过=${settingsNoGuard !== settingsSrc}`,
+        '反向对照：🧪 对照 F（把 `if (items.length === 0) return null` 从 Settings 副本里删掉 → 同一条判据当场判假）',
+      )
+
       /* ---------- 🧪 反向对照（**实测跑红**，见 §S25 报告） ---------- */
       /* A：同一个 sourceCheck，只把 version.ts 的号改掉 → "三处一致"必须判假 */
       const sourceCheckVer = (verSrcIn, pkgVer) => {

@@ -1112,8 +1112,10 @@ export default function Classroom() {
    *    那三个会变的量 —— **题号一变就必须有新数据过去**（门禁 `nav-checks` 钉着这一处）。
    * ⚠️ 只在**壳原生**那条路上推：Document PiP 走的是 portal，React 自己会更新，推了也没人收。
    * ⚠️ 每次 `pipData` 壳都重建那一屏（每节课几次，代价可忽略），而且**壳不做任何计算**。
-   * 🔴 这个 effect **必须放在 `cur` 声明之后**：依赖数组里的 `cur?.rate` 是在渲染期求值的，
+   * 🔴 这个 effect **必须放在 `cur` 声明之后**：依赖数组里的 `cur` 是在渲染期求值的，
    *    放前面会撞上 TDZ（`Cannot access 'cur' before initialization`）—— 那是整页崩，不是静默。
+   * ⚠️ 依赖数组写 `cur` 本身（别只写 `cur?.rate`）：函数体里 `cur ? seq : 0` 也读了它 ——
+   *    只写 `cur?.rate` 会被 `react-hooks(exhaustive-deps)` 抓（2026-10-04 实测 1 条 warning）。
    */
   useEffect(() => {
     if (!pipNative) return
@@ -1125,7 +1127,7 @@ export default function Classroom() {
       ratePct: Math.round((cur?.rate ?? 0) * 100),
       missing: collect?.missing ?? 0,
     })
-  }, [pipNative, klass?.name, seq, cur?.rate, stats?.questions.length, collect?.missing])
+  }, [pipNative, klass?.name, seq, cur, stats?.questions.length, collect?.missing])
 
   /* ============================================================
      🆕 维护模式（2026-09-29 管理台第二期）—— 教室端**自己**渲染维护画面
