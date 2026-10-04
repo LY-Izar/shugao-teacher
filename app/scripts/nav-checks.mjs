@@ -36,6 +36,13 @@
  *     ⇒ 壳用 preload 声明（`autoplayAllowed: true` / `documentPip: false`），网页只认**严格值**。
  *     A 半打纯函数行为（`pipSupported` / `openPip` 的三态、`requestWindow` 一次都没调），
  *     B 半钉 `Classroom.tsx` 的**按端分支位置**（不是"这两句话在不在"），每条带反向对照。
+ *     🆕 **A15（2026-10-04 教室端**原生**置顶小窗）：壳自己那条路** ——
+ *     真壳实测：`documentPictureInPicture` 这个**对象在**，而 `requestWindow()` 必抛
+ *     `InvalidStateError: … no window` ⇒ **Electron 没实现"创建那个 PiP 窗口"那一层**
+ *     ⇒ 两个 exe 改走壳的 `BrowserWindow({ alwaysOnTop: true })`（`__shell_out.pip`），
+ *     而**网页版照旧走 Document PiP**。分支顺序因此定死：**壳原生 → Document PiP → no-api**；
+ *     A 半钉 `shellPipAvailable()` 的严格取值与这个顺序（壳在时 `requestWindow` 一次都不许调），
+ *     B 半钉 `Classroom.tsx` 里"题号一变就推数据"那一处的字段/依赖/**位置**，各带反向对照。
  *   · 静态（D1–D7 / D9 / D10）：路由 ↔ 登记表 ↔ 本文档矩阵三方咬合；入口判据不许各写一套；
  *     谁在读 `myRoles` / `ROLE_NAME` 要有白名单；`PIN_KEYS` 不许脱队；
  *     生产构建里测试钩子不许出现；
@@ -5257,6 +5264,320 @@ section('第二十一节 · A14：壳声明 ↔ 网页判据（置顶小窗 / �
   )
 }
 
+/* ============================================================
+   第二十二节 · A15：教室端**原生**置顶小窗（壳原生 → Document PiP → no-api）—— 2026-10-04
+   ------------------------------------------------------------
+   施工单 `施工单-教室端原生置顶小窗.md`。已量到的事实（真壳 · Electron 33 / Chromium 130）：
+     · `typeof window.documentPictureInPicture === 'object'` —— **API 对象在**；
+     · `requestWindow()` 真手势与 CDP `userGesture:true` **两条路都抛**
+       `InvalidStateError: … Internal error: no window`
+       ⇒ **Electron 没实现"创建那个 PiP 窗口"那一层**（那是 Chrome 浏览器层做的）。
+   ⇒ 两个 exe 改走**壳自己的** `BrowserWindow({ alwaysOnTop: true })`（`preload` 的
+     `__shell_out.pip`），而**网页版照旧走 Document PiP**（那条路在浏览器里是真的能用，
+     不许因为这次改动把它改掉）。
+
+   这一节钉三样，**每一样都配一条真能红的反向对照**（副本写在 gitignore 的 `.tmp-gates/`，
+   `finally` 里删 —— 照 A13 ⑥ 的写法；改的是副本，仓库里的真文件一个字节都不动）：
+     ① `shellPipAvailable()` 的**严格取值**（`pip` 在且是**对象**才算）+ 壳优先的 `pipSupported()`；
+     ② `openPip()` 的**分支顺序**：壳那条路在时 `requestWindow` **一次都不许被调用**
+        （试了就是一屏"没打开"的红字，老师白按一次）；没有壳时走的还是 Document PiP 那条老路；
+        壳侧没建出窗口是 `failed`、两条都没有才是 `no-api`（两档在屏上是两句不同的话）；
+     ③ `Classroom.tsx` 里"**题号一变就推数据**"那一处的**存在性 / 字段 / 位置**：
+        推的那一屏必须有那四个字段（班级 / 题号 / 正确率 / 未交人数），
+        依赖数组里必须有 `seq`，而且那个 effect **必须在 `const cur = …` 之后**
+        （依赖数组是在渲染期求值的，放前面会撞 TDZ ⇒ **整页崩**，不是静默）。
+
+   ⚠️ **真壳那一半**（窗口数 1→2 / 新窗口 `isAlwaysOnTop()` / 小窗里没有 preload /
+      教师端 `pip === undefined` 那条反向）只能在**出包之后**由 `_tools/verify-exe.mjs` 量；
+      本节量的是"网页这一半"，两条合起来才是完整的一条链。
+   ============================================================ */
+section('第二十二节 · A15：教室端原生置顶小窗（壳原生 → Document PiP → no-api）')
+
+{
+  const { shellPipAvailable } = await import('../src/lib/classroomShell.ts')
+  const pip = await import('../src/lib/pip.ts')
+
+  /* 假 `window` 用完**还回去**（这一节之后还得在干净的 Node 环境里跑）—— 照 A14 的写法 */
+  const SAVED_G = new Map()
+  const putG = (k, v) => {
+    if (!SAVED_G.has(k)) SAVED_G.set(k, Object.getOwnPropertyDescriptor(globalThis, k))
+    if (v === undefined) delete globalThis[k]
+    else globalThis[k] = v
+  }
+  const putBackG = () => {
+    for (const [k, d] of SAVED_G) {
+      if (d) Object.defineProperty(globalThis, k, d)
+      else delete globalThis[k]
+    }
+    SAVED_G.clear()
+  }
+  /** 装一个假页面：`shell = null` ⇒ **网页版**（压根没有 `__shell_out`）；`dpip = undefined` ⇒ 没有那个 API */
+  const page = (shell, dpip) => {
+    const w = {}
+    if (shell !== null) w.__shell_out = shell
+    if (dpip !== undefined) w.documentPictureInPicture = dpip
+    putG('window', w)
+    return w
+  }
+  /** 壳摆出来的完整四个口（`preload.js` 的 `shellOut.pip`）—— `open` 照真壳回 `{ok:true}` */
+  const FULL = { open: async () => ({ ok: true, reused: false }), data() {}, close() {}, onPipClosed() {} }
+
+  const TMP_LOOSE = join(APP, '.tmp-gates', `classroomShell-loose-${process.pid}.ts`)
+  const TMP_PIP = join(APP, '.tmp-gates', `pip-shellsecond-${process.pid}.ts`)
+  const TMP_CLS = join(APP, '.tmp-gates', `Classroom-pip-${process.pid}.tsx`)
+
+  try {
+    /* ---- ① `shellPipAvailable()`：**只认"pip 在且是对象"**（两个方向都钉） ---- */
+    for (const [shell, want, why] of [
+      [{ pip: FULL }, true, '教室端 exe：四个口都摆出来了'],
+      [{ pip: {} }, true, '只要 `pip` 是**对象**就算"有这条路"（四个口能不能用由 ② 的行为断言管）'],
+      [{ pip: undefined }, false, '字段在但值是 undefined（老壳/写坏了）—— 不算'],
+      [{ pip: null }, false, '`null` 不是对象'],
+      [{ pip: 'open' }, false, '只认对象 —— **字符串不算**'],
+      [{ pip: 0 }, false, '只认对象 —— **数字不算**'],
+      [{}, false, '老壳 / 教师端 exe：压根没有这个字段（施工单 §二.1：教师端不摆入口）'],
+      [null, false, '网页版：压根没有 `__shell_out`'],
+    ]) {
+      page(shell, undefined)
+      const got = shellPipAvailable()
+      check(got === want, `🔴 A15 ① \`shellPipAvailable()\` = ${want}（${why}）`, `得到 ${got}`, `期望 ${want}`)
+    }
+
+    /*
+     * 🧪 ① 的反向对照：**把严格取值改宽**（`return p ?? null` = "字段在就算"）就写成
+     *    `.tmp-gates/` 里的副本，再拿**同一条判据**去量它 —— 字符串与数字那两档必须当场红。
+     */
+    let loose = null
+    try {
+      const src = readApp('src/lib/classroomShell.ts')
+      const broken = src.replace(
+        "return typeof p === 'object' && p !== null ? p : null",
+        'return p ?? null',
+      )
+      mkdirSync(dirname(TMP_LOOSE), { recursive: true })
+      writeFileSync(TMP_LOOSE, broken)
+      const mod = await import(pathToFileURL(TMP_LOOSE).href)
+      const reds = [
+        [{ pip: 'open' }, false],
+        [{ pip: 0 }, false],
+        [{ pip: FULL }, true],
+      ].filter(([sh, want]) => {
+        page(sh, undefined)
+        return mod.shellPipAvailable() !== want
+      })
+      loose = { changed: broken !== src, reds: reds.length }
+    } catch (e) {
+      loose = { err: String(e?.message ?? e) }
+    } finally {
+      rmSync(TMP_LOOSE, { force: true })
+    }
+    check(
+      loose?.changed === true && loose?.reds >= 2,
+      '🧪 A15 ① 反向对照：把严格取值改宽成 `return p ?? null`（副本写在 gitignore 的 `.tmp-gates/`，finally 删）⇒ 同一条判据当场红 **2 档**（字符串 `"open"` / 数字 `0`）—— 证明上面那几条咬的是"是不是对象"，不是"字段在不在"',
+      loose?.err ? `副本没跑起来：${loose.err}` : `副本真的被改过=${loose?.changed} · 判红的档数=${loose?.reds}`,
+    )
+
+    /* ---- ①′ `pipSupported()`：**壳优先**（教室端 exe 两个字段同时为真） ---- */
+    for (const [shell, dpip, want, why] of [
+      [
+        { pip: FULL, documentPip: false },
+        {},
+        true,
+        '教室端 exe：`pip` 在 **而** `documentPip: false`（网页那条路是死的）⇒ 先判壳 ⇒ **支持**（先判 documentPip 就永远判不出原生小窗）',
+      ],
+      [
+        { documentPip: false },
+        {},
+        false,
+        '教师端 exe / 老壳：没有原生小窗 + 壳说网页那条路也不行 ⇒ 不支持（屏上那句"这台机器上开不了"在那儿是**真话**）',
+      ],
+      [null, {}, true, '网页版 + API 在 ⇒ 支持（**网页版行为一字不变**）'],
+      [null, undefined, false, '网页版 + 没有这个 API ⇒ 不支持'],
+    ]) {
+      page(shell, dpip)
+      const got = pip.pipSupported()
+      check(got === want, `🔴 A15 ①′ \`pipSupported()\` = ${want}（${why}）`, `得到 ${got}`, `期望 ${want}`)
+    }
+
+    /* ---- ② `openPip()` 的分支顺序：**壳 → Document PiP → no-api** ---- */
+    let calls = 0
+    page({ pip: FULL }, { requestWindow: async () => { calls++; throw new Error('这一步不该走到这儿') } })
+    const s1 = await pip.openPip()
+    check(
+      s1.ok === true && s1.native === true && s1.win === null && calls === 0,
+      '🔴 A15 ② 壳有原生小窗 ⇒ 走**壳那条路**（`{ok:true, native:true, win:null}`），而且 `requestWindow` **一次都没被调用**（它是死的；试了就是一屏"没打开"的红字，老师白按一次）',
+      `ok=${s1.ok}${s1.ok ? ` · native=${s1.native} · win=${String(s1.win)}` : ` · why=${s1.why}`} · requestWindow 调用 ${calls} 次`,
+      '期望 native=true、win=null 且调用 0 次',
+    )
+
+    /* 没有壳（网页版）⇒ **还是那条老路**，而且 `win` 就是 `requestWindow` 回来的那个窗口 */
+    calls = 0
+    putG('document', { querySelectorAll: () => [], createElement: () => ({ textContent: '' }) })
+    const fakeWin = { document: { createElement: () => ({ textContent: '' }), head: { appendChild() {} } } }
+    page(null, { requestWindow: async () => { calls++; return fakeWin } })
+    const s2 = await pip.openPip()
+    check(
+      s2.ok === true && s2.native === false && s2.win === fakeWin && calls === 1,
+      '🔴 A15 ② **没有壳时（网页版）走的还是 Document PiP 那条老路**：`native:false`、`win` 就是 `requestWindow` 回来的那个窗口（这条路一个字都没被改掉）',
+      `ok=${s2.ok}${s2.ok ? ` · native=${s2.native} · win 是那个窗口=${s2.win === fakeWin}` : ` · why=${s2.why}`} · requestWindow 调用 ${calls} 次`,
+    )
+
+    /* 壳里有原生小窗，可**壳侧没建出来** ⇒ `failed`（不是 `no-api`） */
+    calls = 0
+    page({ pip: { open: async () => ({ ok: false, why: '建窗口失败' }) } }, { requestWindow: async () => { calls++; return fakeWin } })
+    const s3 = await pip.openPip()
+    check(
+      s3.ok === false && s3.why === 'failed' && calls === 0,
+      "🔴 A15 ② 壳侧没建出小窗（`pip.open` 回 `ok:false`）⇒ `{ok:false, why:'failed'}`（**不是** `no-api` —— 这两档在屏上是两句不同的话）",
+      `why=${s3.why} · message=${short(s3.message)} · requestWindow 调用 ${calls} 次`,
+      '期望 why=failed 且不去碰 Document PiP',
+    )
+
+    /* 两条都没有 ⇒ `no-api`（三态里的第一态） */
+    page({}, undefined)
+    const s4 = await pip.openPip()
+    check(
+      s4.ok === false && s4.why === 'no-api',
+      "🔴 A15 ② 壳没有原生小窗、浏览器也没有那个 API ⇒ `{ok:false, why:'no-api'}`（老浏览器 / 教师端 exe 那一支）",
+      `why=${s4.why} · message=${short(s4.message)}`,
+    )
+
+    /*
+     * 🧪 ② 的反向对照：把 `openPip()` 里**壳那条分支拿掉**（`if (shellPipAvailable())` → `if (false)`），
+     *    写成 `.tmp-gates/` 里的副本（顺便把 `./classroomShell` 的 import 指回真文件）——
+     *    同一个假环境（壳有 `pip`、而 `requestWindow` 会抛）必须变成 `failed` 且**真的去调了** `requestWindow`。
+     */
+    let brokenPip = null
+    try {
+      const src = readApp('src/lib/pip.ts')
+      /*
+       * ⚠️ **`replaceAll`**：`from './classroomShell'` 在 pip.ts 里出现**两处**
+       *    （顶上那个 import 块 + 末尾的 `export { … } from`）。只换第一处的话，
+       *    副本里剩下的那一处会被解析成 `.tmp-gates/classroomShell` ⇒ **副本根本跑不起来**
+       *    （2026-10-04 本节第一版就这么红的：反向对照变成"副本没跑起来"，那不是对照成功）。
+       */
+      const broken = src
+        .replaceAll("from './classroomShell'", "from '../src/lib/classroomShell'")
+        .replace('if (shellPipAvailable()) {', 'if (false) { /* 反向对照：壳那条路被拿掉 */')
+      mkdirSync(dirname(TMP_PIP), { recursive: true })
+      writeFileSync(TMP_PIP, broken)
+      const mod = await import(pathToFileURL(TMP_PIP).href)
+      calls = 0
+      page({ pip: FULL }, { requestWindow: async () => { calls++; throw new Error('不该走到这儿') } })
+      const b = await mod.openPip()
+      brokenPip = { changed: broken !== src, ok: b.ok, why: b.ok ? '' : b.why, calls }
+    } catch (e) {
+      brokenPip = { err: String(e?.message ?? e) }
+    } finally {
+      rmSync(TMP_PIP, { force: true })
+    }
+    check(
+      brokenPip?.changed === true && brokenPip?.ok === false && brokenPip?.calls === 1,
+      '🧪 A15 ② 反向对照：把 `openPip()` 里壳那条分支拿掉（`.tmp-gates/` 副本，finally 删）⇒ 同一个假环境当场变成 `failed`，而且 `requestWindow` **被调了一次** —— 证明 ② 那条"一次都没被调用"不是恒真',
+      brokenPip?.err
+        ? `副本没跑起来：${brokenPip.err}`
+        : `副本真的被改过=${brokenPip?.changed} · ok=${brokenPip?.ok} · why=${brokenPip?.why} · requestWindow 调用 ${brokenPip?.calls} 次`,
+    )
+
+    /* ---- ③ `Classroom.tsx`：「题号一变就推数据」那一处 ---- */
+    const CLS_RAW = readApp('src/pages/Classroom.tsx')
+    /**
+     * 取「那一处推数据」：`pushPipScreen(` 往前最近的一个 `useEffect(`，
+     * 往后到配对的那个依赖数组 `],`。三样都取不到就返回 `null`（判据据此去红，
+     * 而不是静默拿到空串 —— A14 的 `between()` 同规矩）。
+     */
+    const pushEffect = (s) => {
+      const i = s.indexOf('pushPipScreen(')
+      if (i < 0) return null
+      const at = s.lastIndexOf('useEffect(', i)
+      if (at < 0) return null
+      const depsAt = s.indexOf('}, [', i)
+      if (depsAt < 0) return null
+      const end = s.indexOf('])', depsAt)
+      if (end < 0) return null
+      return { at, i, end, head: s.slice(at, i), payload: s.slice(i, depsAt), deps: s.slice(depsAt + 4, end) }
+    }
+    /** 那一屏的四个字段（**一个字段一种语义**，施工单 §二.3） */
+    const PIP_KEYS = ['className', 'seq', 'total', 'ratePct', 'missing']
+    /** 依赖：`pipNative`（只在小窗开着时推）+ 会变的三个量（题号 / 正确率 / 未交人数） */
+    const PIP_DEP_KEYS = ['pipNative', 'seq', 'cur?.rate', 'collect?.missing']
+    const pushWiredRight = (s) => {
+      const e = pushEffect(s)
+      return (
+        !!e &&
+        e.head.includes('!pipNative') &&
+        PIP_KEYS.every((k) => e.payload.includes(`${k}:`)) &&
+        PIP_DEP_KEYS.every((k) => e.deps.includes(k))
+      )
+    }
+    const CUR_DECL = 'const cur = stats?.questions[seq - 1]'
+    /** 位置：那个 effect 必须在 `const cur = …` **之后**（依赖数组是渲染期求值的 ⇒ 放前面撞 TDZ） */
+    const pushAfterCur = (s) => {
+      const e = pushEffect(s)
+      const curAt = s.indexOf(CUR_DECL)
+      return !!e && curAt >= 0 && curAt < e.i
+    }
+
+    check(
+      pushWiredRight(CLS_RAW),
+      '🔴 A15 ③ `Classroom.tsx` 里"**题号一变就推数据**"那一处在（`useEffect` + `if (!pipNative) return` + `pushPipScreen`），那一屏带着四个字段（班级 / 题号 / 正确率 / 未交人数），依赖里有 `seq`、`cur?.rate`、`collect?.missing`',
+      `那一处=${!!pushEffect(CLS_RAW)} · 依赖=[${pushEffect(CLS_RAW)?.deps.trim() ?? '-'}]`,
+    )
+    check(
+      pushAfterCur(CLS_RAW),
+      '🔴 A15 ③ 而且那一处**在 `const cur = stats?.questions[seq - 1]` 之后** —— 依赖数组里的 `cur?.rate` 是渲染期求值的，放前面撞 TDZ 会**整页崩**（不是静默）',
+      `cur @${CLS_RAW.indexOf(CUR_DECL)} · 推数据 @${pushEffect(CLS_RAW)?.i ?? -1}`,
+    )
+
+    /*
+     * 🧪 ③ 的两条反向对照（两次就地改坏，都写成 `.tmp-gates/` 的副本、再从磁盘读回来喂同一条判据）：
+     *    A. 依赖数组里**去掉 `seq`** ⇒ "题号一变就推"那条判据必须红；
+     *    B. 把那一段 effect **挪到 `const cur` 之前** ⇒ 位置那条判据必须红（而 A 的判据仍绿，
+     *       证明两条咬的不是同一件事）。
+     */
+    const moveBeforeCur = (s) => {
+      const e = pushEffect(s)
+      if (!e) return s
+      const text = s.slice(e.at, e.end + 2)
+      const rest = s.slice(0, e.at) + s.slice(e.end + 2)
+      const k = rest.indexOf(CUR_DECL)
+      if (k < 0) return rest
+      return `${rest.slice(0, k)}${text}\n\n  ${rest.slice(k)}`
+    }
+    let clsBroken = null
+    try {
+      const noSeq = CLS_RAW.replace('[pipNative, klass?.name, seq, cur?.rate,', '[pipNative, klass?.name, cur?.rate,')
+      const moved = moveBeforeCur(CLS_RAW)
+      mkdirSync(dirname(TMP_CLS), { recursive: true })
+      writeFileSync(TMP_CLS, noSeq)
+      const back1 = readFileSync(TMP_CLS, 'utf8')
+      writeFileSync(TMP_CLS, moved)
+      const back2 = readFileSync(TMP_CLS, 'utf8')
+      clsBroken = {
+        aChanged: back1 !== CLS_RAW,
+        aRed: !pushWiredRight(back1),
+        bChanged: back2 !== CLS_RAW,
+        bRed: !pushAfterCur(back2),
+        bStillWired: pushWiredRight(back2),
+      }
+    } finally {
+      rmSync(TMP_CLS, { force: true })
+    }
+    check(
+      clsBroken?.aChanged === true && clsBroken?.aRed === true,
+      '🧪 A15 ③ 反向对照 A：把依赖数组里的 `seq` 去掉（`.tmp-gates/` 副本，finally 删）⇒ "题号变了就推数据"那条判据当场红',
+      `副本真的被改过=${clsBroken?.aChanged} · 判据红=${clsBroken?.aRed}`,
+    )
+    check(
+      clsBroken?.bChanged === true && clsBroken?.bRed === true && clsBroken?.bStillWired === true,
+      '🧪 A15 ③ 反向对照 B：把那一段 effect 挪到 `const cur` **之前**（会撞 TDZ）⇒ **位置**那条判据当场红，而字段/依赖那条仍绿（证明两条咬的不是同一件事）',
+      `副本真的被改过=${clsBroken?.bChanged} · 位置判据红=${clsBroken?.bRed} · 字段依赖判据仍绿=${clsBroken?.bStillWired}`,
+    )
+  } finally {
+    putBackG()
+  }
+}
+
 /* ---------------- 结果 ---------------- */
 console.log(`\n================ 结果 ================`)
 
@@ -5266,6 +5587,6 @@ if (failures.length) {
   console.log('\n  ⛔ 有断言没过（上面每一条都写了实测值）')
   process.exitCode = 1
 } else {
-  console.log('  全部通过 ✅（纯函数 A1–A14 / 静态 D1–D7 · D9 · D10 · D11 · D12 · D13 · D14 · D15 · D16 · D17 · D18 / 编码 + 不可见字符 D8）')
+  console.log('  全部通过 ✅（纯函数 A1–A15 / 静态 D1–D7 · D9 · D10 · D11 · D12 · D13 · D14 · D15 · D16 · D17 · D18 / 编码 + 不可见字符 D8）')
 }
 }, { script: 'nav-checks.mjs' })

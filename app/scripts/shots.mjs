@@ -2252,6 +2252,27 @@ await withLock(async () => {
           `🔴 ${SR}：dev server 里**没有壳**（\`window.__shell_out\` 不存在）—— 所以这一节量的是**网页版**行为；壳那一侧由 \`_tools/verify-exe.mjs\` 量`,
           `typeof window.__shell_out = ${A.shell} · typeof documentPictureInPicture = ${A.api}`,
         )
+        /*
+         * 🆕 2026-10-04：**没有壳 ⇒ 壳原生那条新路够不着**（施工单 `教室端原生置顶小窗` §三 · shots 那一行）。
+         *
+         * 教室端 exe 上 `__shell_out.pip` 是对象（壳自己开的那个永远置顶的窗口），
+         * 而 dev server 里这个对象**压根不存在** ⇒ `shellPipAvailable()` 恒 false
+         * ⇒ `pipSupported()` / `openPip()` 走的还是 **Document PiP 那条老路**。
+         * ⚠️ 这一条不是"再钉一遍环境"，而是**这次新加的那条分支不许反过来影响网页版**的自证：
+         *    哪天它被写成"网页版也算有原生小窗"，这里当场红（而不是等老师点下去才发现）。
+         */
+        const nativePip = await room.evaluate(() => ({
+          bridge: typeof window.__shell_out,
+          pip: typeof window.__shell_out?.pip,
+          open: typeof window.__shell_out?.pip?.open,
+          onClosed: typeof window.__shell_out?.pip?.onPipClosed,
+        }))
+        check(
+          nativePip.bridge === 'undefined' && nativePip.pip === 'undefined' &&
+            nativePip.open === 'undefined' && nativePip.onClosed === 'undefined',
+          `🔴 ${SR}：**没有壳 ⇒ 壳原生那条路够不着**（\`__shell_out\` / \`__shell_out.pip\` 全读不到）—— 网页版走的还是 Document PiP 那条老路，这次改动在 dev server 里的行为**一字不变**`,
+          `__shell_out=${nativePip.bridge} · pip=${nativePip.pip} · pip.open=${nativePip.open} · pip.onPipClosed=${nativePip.onClosed}`,
+        )
         const apiOn = A.api === 'object'
         check(
           (apiOn && A.unlock === 1 && A.unsupported === 0) ||
@@ -13529,24 +13550,78 @@ await withLock(async () => {
        * 🔴 `at` 也不再钉死 `10月2日` —— 那是**上一版**的发版日，
        *   钉着它等于"只要发版就红"。改成断它**像个日期**（月+日，不是「待定」）。
        */
-      const vHits = [...logSrc.matchAll(/v:\s*'([^']+)'/g)]
-      const mTop = vHits[0]
-      const mNext = vHits[1]
-      const seg = mTop && mNext && mNext.index > mTop.index ? logSrc.slice(mTop.index, mNext.index) : ''
-      /*
+      /* 顶部那一段的截法（**按位置、按带引号的版本号**找）写进下面的 `topOf()` 里 ——
+         反向对照要喂**同一条**判据，所以只能有一处口径。 */
+      /**
        * ⚠️ 条目有**两种写法**，都要数（2026-10-04 v1.1.1 让这条判据红过一次：
        *   它 5 条里有 2 条是 `{ text: '…', only: 'desktop' }`，而这里原来只数 `^\s{6}'`
        *   ⇒ 数到 3 条 < 5 ⇒ 判据红，**而条目一条都不少**。
        *   那是"判据只认一种写法"，不是"顶部那段是占位一行" —— 红的原因又一次在核对工具自己身上。)
        */
-      const itemsPlain = (seg.match(/^\s{6}'/gm) ?? []).length
-      const itemsObj = (seg.match(/^\s{8}text:\s*'/gm) ?? []).length
-      const itemsTop = itemsPlain + itemsObj
-      const atTop = (seg.match(/at:\s*'([^']+)'/) ?? [])[1] ?? null
+      /**
+       * 🔴🔴 **S25 ⑥ 为什么放宽了条数、又收紧了内容**（2026-10-04，1.1.2 发版时改）。
+       *
+       * 它原来是 `itemsTop >= 5` —— 那是 1.1.0 / 1.1.1 那种**成批改动**留下的读数，
+       * 一旦当成硬要求，就等于要求"**每一版至少凑 5 条**"。而 1.1.2 只有 2 条老师能
+       * 感觉到的改动（教室端原生小窗 · 升级不再多出带版本号的旧图标），
+       * 要过这条判据就只能**灌水** —— 而"凑数"正是这一屏最不该发生的事
+       * （它当初从 `Settings.tsx` 里搬出来，就是因为版本号与日志会各写各的）。
+       * ⇒ 判据回到它注释里本来那句话「**真的写了改动，不是占位一行**」：
+       *   · **放宽条数**（`>= 1`，一版一条也算如实）；
+       *   · **收紧每一条**：那句话**本身得像句话**（≥ `MIN_ITEM_CHARS` 个字符）——
+       *     占位（`'待补'` / 空串 / 几个字）一律判红。
+       *   ⚠️ 下面那一段反向对照就是"它还能红"的证明（清空 / 换成占位 ⇒ 当场判假）。
+       */
+      const MIN_ITEM_CHARS = 8
+      const topOf = (src) => {
+        const hits = [...src.matchAll(/v:\s*'([^']+)'/g)]
+        const a = hits[0]
+        const b = hits[1]
+        const body = a && b && b.index > a.index ? src.slice(a.index, b.index) : ''
+        const plain = [...body.matchAll(/^\s{6}'((?:[^'\\]|\\.)*)'/gm)].map((m) => m[1])
+        const obj = [...body.matchAll(/^\s{8}text:\s*'((?:[^'\\]|\\.)*)'/gm)].map((m) => m[1])
+        return {
+          body,
+          plain,
+          obj,
+          items: [...plain, ...obj],
+          at: (body.match(/at:\s*'([^']+)'/) ?? [])[1] ?? null,
+        }
+      }
+      /** 同一条判据（反向对照要喂**它同一份**，不许另写一套口径） */
+      const topWrittenRight = (t) =>
+        t.items.length >= 1 &&
+        t.items.every((s) => s.length >= MIN_ITEM_CHARS) &&
+        t.at !== null &&
+        /^\d{1,2}月\d{1,2}日$/.test(t.at)
+      const T = topOf(logSrc)
+      const shortest = T.items.length ? Math.min(...T.items.map((s) => s.length)) : 0
       check(
-        itemsTop >= 5 && atTop !== null && /^\d{1,2}月\d{1,2}日$/.test(atTop),
-        `🔴 S25 ⑥ 顶部那一段（${top ? top[1] : '?'}）**真的写了改动**（不是占位一行），发版日按"落进仓库的那一天"填`,
-        `条目 ${itemsTop} 条（纯文本 ${itemsPlain} + 带标 ${itemsObj}）· at=${atTop ?? '（没有）'}`,
+        topWrittenRight(T),
+        `🔴 S25 ⑥ 顶部那一段（${top ? top[1] : '?'}）**真的写了改动**（不是占位一行）：≥1 条，且**每一条那句话本身 ≥ ${MIN_ITEM_CHARS} 个字符**；发版日按"落进仓库的那一天"填`,
+        `条目 ${T.items.length} 条（纯文本 ${T.plain.length} + 带标 ${T.obj.length}，最短一条 ${shortest} 字）· at=${T.at ?? '（没有）'}`,
+      )
+      /* 🧪 反向对照：清空条目 / 换成占位一行 ⇒ **同一条判据**当场判假（放宽的是条数，不是"什么都不写也算"） */
+      const emptiedSeg = T.body
+        ? logSrc.replace(T.body, T.body.replace(/^\s{6}'.*$/gm, '').replace(/^\s{8}text:.*$/gm, ''))
+        : logSrc
+      const placeholderSeg = T.body
+        ? logSrc.replace(
+            T.body,
+            T.body
+              .replace(/^(\s{6}')[^']*(')/gm, '$1待补$2')
+              .replace(/^(\s{8}text:\s*')[^']*(')/gm, '$1待补$2'),
+          )
+        : logSrc
+      const emptiedTop = topOf(emptiedSeg)
+      const placeholderTop = topOf(placeholderSeg)
+      check(
+        emptiedSeg !== logSrc &&
+          placeholderSeg !== logSrc &&
+          !topWrittenRight(emptiedTop) &&
+          !topWrittenRight(placeholderTop),
+        "🧪 S25 ⑥ 反向对照：把顶部那一段的条目**清空**（0 条）／**换成占位一行 `'待补'`**（2 个字）⇒ 同一条判据当场判假 —— 证明放宽的是**条数**，不是把「什么都不写」也放行了",
+        `清空后：${emptiedTop.items.length} 条 → 判据 ${topWrittenRight(emptiedTop)} · 占位后：${JSON.stringify(placeholderTop.items)} → 判据 ${topWrittenRight(placeholderTop)}`,
       )
       /* 🔴 §七 的钉子：给老师看的那一屏**不许出现**「内测」「公测」 */
       const banned = ['内' + '测', '公' + '测']

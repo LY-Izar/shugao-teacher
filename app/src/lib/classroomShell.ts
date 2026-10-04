@@ -82,6 +82,52 @@ interface ShellBridge {
    * ⚠️ 只认 `=== false`（显式声明）；`undefined`（老壳 / 网页版）⇒ 不推翻原判断。
    */
   documentPip?: boolean
+  /**
+   * 🆕 壳**自带的原生置顶小窗**（2026-10-04 加）—— 见 `shellPipAvailable()`。
+   * 🔴 **只有教室端 exe 有**（施工单 §二.1：教师端不摆这个入口）⇒ 教师端 exe /
+   *    网页版 / 老壳读到的都是 `undefined`。
+   */
+  pip?: ShellPipBridge
+}
+
+/**
+ * 壳侧那个原生置顶小窗的四个口（`preload.js` 的 `__shell_out.pip`，2026-10-04 加）。
+ *
+ * 🔴 为什么第 ④ 条要新开一条路而不是修 Document PiP：实测（教室端 exe ·
+ *    Electron 33 / Chromium 130）`typeof documentPictureInPicture === 'object'`
+ *    ——**API 对象在**，可真手势与 CDP `userGesture:true` 两条路调 `requestWindow()`
+ *    **都抛** `InvalidStateError: … Internal error: no window`
+ *    ⇒ **Electron 没实现"创建那个 PiP 窗口"那一层**（那是 Chrome 浏览器层做的）。
+ *    ⇒ 两个 exe 改走壳自己那个 `BrowserWindow({ alwaysOnTop: true })`；
+ *      **网页版照旧走 Document PiP**（那条路在浏览器里是真的能用）。
+ */
+interface ShellPipBridge {
+  /** 开小窗（壳侧保证**单例**：已经有就复用/聚焦）。回 `{ok:true, reused}` / `{ok:false, why}` */
+  open(payload?: ShellPipData): Promise<unknown>
+  /** 推一屏数据（one-way）—— 壳照着画，**不做任何计算** */
+  data(payload: ShellPipData): void
+  /** 关小窗（主进程 `win.close()`）⇒ 壳会回一个 `shell:pipClosed` */
+  close(): void
+  /** 小窗被关掉时回调（网页据此复位）；返回注销函数 */
+  onPipClosed(cb: () => void): unknown
+}
+
+/**
+ * 推给小窗的那一屏数据（**字段只有这五个，语义一个字段一种**）。
+ * 🔴 **全部由网页算好**：壳只把它们填进 HTML —— 题号/正确率这种业务量绝不在壳里再算一遍
+ *    （施工单 §二.3：一个字段一种语义；算两遍就一定有分家的那一天）。
+ */
+export interface ShellPipData {
+  /** 班级名 */
+  className: string
+  /** 当前题号（1 起）；**没有可讲评的作业时给 0** */
+  seq: number
+  /** 这份作业的总题数；**0 = 还没有可讲评的作业**（壳据此显示那句空态，不留纯白空窗） */
+  total: number
+  /** 正确率，**0–100 的整数**（网页已经乘好了：壳里少一步换算，就少一处会分家的地方） */
+  ratePct: number
+  /** 未交人数 */
+  missing: number
 }
 
 function bridge(): ShellBridge | null {
@@ -168,6 +214,93 @@ export function shellAutoplayAllowed(): boolean {
  */
 export function shellDocumentPipUnavailable(): boolean {
   return bridge()?.documentPip === false
+}
+
+/* ============================================================================
+   🆕 2026-10-04：**壳自带的原生置顶小窗**（教室端 exe；施工单 §三「网页」那一行）
+   ----------------------------------------------------------------------------
+   分工（和 `documentPip` 那一条正好相反）：
+     · `documentPip: false`  —— 壳说"**网页那条路**在我这儿走不通"（老壳/教室端 exe 都有）；
+     · `pip: {…}`           —— 壳说"**我有自己的一条路**"（**只有教室端 exe 有**）。
+   网页侧的分支顺序因此是：**壳原生 → Document PiP → 都没有（no-api）**。
+   ⚠️ 网页版里 `window.__shell_out` 压根不存在 ⇒ 这四个函数全都走"没有"那一支 ⇒
+      **网页版行为一字不变**（`shots` 那一节钉着这条）。
+   ============================================================================ */
+
+/** 这个接口对象真的在不在 —— **只认"对象"**（`undefined` / 字符串 / 数字一律当没有） */
+function pipBridge(): ShellPipBridge | null {
+  const p = bridge()?.pip
+  return typeof p === 'object' && p !== null ? p : null
+}
+
+/**
+ * 壳里**有没有**原生置顶小窗的能力 —— `pip.ts` 的分支判据、`Classroom.tsx` 也是靠它。
+ *
+ * 🔴 **严格取值**：只认 `__shell_out.pip` **在且是对象**。
+ *    · 教师端 exe / 网页版 / 老壳 ⇒ 读不到这个字段 ⇒ `false`（照旧走网页那条老路）；
+ *    · 老壳里就算以后加了别的字段也不会被误判成"有原生小窗"。
+ * ⚠️ 与 `documentPip` 是**两件事**：那个说"没有网页那条路"，这个说"有壳这条路"。
+ */
+export function shellPipAvailable(): boolean {
+  return pipBridge() !== null
+}
+
+/**
+ * 让壳开一个小窗（**单例**：已经有就复用）。
+ * @returns 真的开出来了（或复用了）才 `true` —— 失败要说实话（不许静默）
+ */
+export async function shellPipOpen(payload?: ShellPipData): Promise<boolean> {
+  const p = pipBridge()
+  if (!p) return false
+  try {
+    const r = await p.open(payload)
+    return !!(r && typeof r === 'object' && (r as { ok?: unknown }).ok === true)
+  } catch (e) {
+    console.error('[shell] pip.open 失败：', e)
+    return false
+  }
+}
+
+/**
+ * 推一屏数据给小窗（**one-way**：壳不会回话）。
+ * ⚠️ 只有小窗开着时才有意义；壳侧没有小窗时它什么都不做（不是错误）。
+ */
+export function shellPipData(payload: ShellPipData): void {
+  const p = pipBridge()
+  if (!p) return
+  try {
+    p.data(payload)
+  } catch (e) {
+    // 🔴 不许静默（硬规矩）：推不过去就说出来，别让屏上那块小窗停在上一条数据上
+    console.error('[shell] pip.data 推不过去：', e)
+  }
+}
+
+/** 关掉壳那个小窗（主页面那颗「小窗已开启」按钮、卸载、维护模式切进来时都走这儿） */
+export function shellPipClose(): void {
+  const p = pipBridge()
+  if (!p) return
+  try {
+    p.close()
+  } catch (e) {
+    console.error('[shell] pip.close 失败：', e)
+  }
+}
+
+/**
+ * 小窗被关掉时的回调（**谁关的都算**：小窗自己那颗 ✕ / 网页侧 `close()` / 系统别的路）。
+ * @returns 注销函数（组件卸载时要调它 —— 不然热更新会叠一堆监听）
+ */
+export function shellPipOnClosed(cb: () => void): () => void {
+  const p = pipBridge()
+  if (!p) return () => {}
+  try {
+    const off = p.onPipClosed(cb)
+    return typeof off === 'function' ? (off as () => void) : () => {}
+  } catch (e) {
+    console.error('[shell] pip.onPipClosed 失败：', e)
+    return () => {}
+  }
 }
 
 /**

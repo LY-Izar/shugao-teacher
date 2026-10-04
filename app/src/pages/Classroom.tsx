@@ -20,7 +20,7 @@ import { useStore, useToast } from '../data/store'
 import { collectStats } from '../lib/assignments'
 import { BAND_META, gradeStats } from '../lib/grading'
 import { isStreamClass } from '../lib/pick'
-import { closePip, openPip, pipSupported } from '../lib/pip'
+import { closePip, onPipClosed, openPip, pipSupported, pushPipScreen } from '../lib/pip'
 import { shellAutoplayAllowed, shellPlatform } from '../lib/classroomShell'
 import { useMaintenanceStatus } from '../lib/useMaintenance'
 import { MaintenanceScreen } from '../components/MaintenanceGate'
@@ -307,6 +307,17 @@ export default function Classroom() {
 
   const [seq, setSeq] = useState(1)
   const [pipWin, setPipWin] = useState<Window | null>(null)
+  /**
+   * 🆕 小窗走的是**壳原生**那条路（教室端 exe）—— 2026-10-04，施工单 `教室端原生置顶小窗`。
+   *
+   * 🔴 为什么不能只用一个 `pipWin`：壳那个窗口是**主进程**建的，网页侧**没有** `Window`
+   *    对象可以拿（拿不到它的 `document`、也没法 `addEventListener`）
+   *    —— 把 `null` 塞进 `pipWin` 就分不清"没开小窗"和"开着壳原生小窗"。
+   * ⚠️ 它只表示"有没有开着"，**内容是网页推过去的**（`pushPipScreen`）。
+   */
+  const [pipNative, setPipNative] = useState(false)
+  /** 两种小窗的**统一问法**：屏上那颗按钮、那几处标记都判它，别各写一套 */
+  const pipOn = pipWin !== null || pipNative
   /**
    * 播报队列 —— 多科老师可能几乎同时叫，**排队依次播，不能互相顶掉**。
    * 当前正在播的就是队首那条。
@@ -1040,8 +1051,8 @@ export default function Classroom() {
     if (!r.ok) {
       /*
        * 🔴 **两种失败要分开说**（2026-10-04 改；原来一律说"需要 Edge / Chrome 116 及以上"）：
-       *   · `no-api`  —— 这台机器上压根没有 Document PiP（老浏览器 / 某些壳）；
-       *   · `failed`  —— API 在，但申请窗口失败（`requestWindow` 抛了）；
+       *   · `no-api`  —— 这台机器上压根没有这个能力（老浏览器 / 教师端 exe / 某些壳）；
+       *   · `failed`  —— 能力在，但窗口没开成（`requestWindow` 抛了 / 壳侧没建出来）；
        *   而**在教室端 exe 里那句"浏览器太老"是假的**：它跑的是 Electron 33（Chromium 130）、
        *   `app://` 也是安全上下文 —— 真因是壳里调不起来。所以按端说人话：
        *   壳里就说"这台机器上开不了 + 看手机/平板"，网页版才提浏览器版本。
@@ -1058,10 +1069,32 @@ export default function Classroom() {
       )
       return
     }
+    /*
+     * 🔴 两条路各回各的（2026-10-04）：
+     *   · 壳原生 —— `win` 是 `null`（窗口在主进程手里）⇒ 只翻一个标记，
+     *     那一屏由下面那个 effect 推过去（**网页推、壳只画**）；
+     *   · Document PiP —— 老路一字没改：接 `pagehide`、把 `win` 交给 portal。
+     */
+    if (r.native) {
+      setPipNative(true)
+      return
+    }
     const w = r.win
+    if (!w) return
     w.addEventListener('pagehide', () => setPipWin(null))
     setPipWin(w)
   }
+
+  /*
+   * 🆕 小窗被关掉 ⇒ 把屏上那颗按钮变回「启动置顶小窗」（2026-10-04，施工单 §二.4）。
+   *
+   * 🔴 **谁关的都算**：小窗自己那颗 ✕ / 网页侧 `closePip()` / 系统别的路 ——
+   *    壳在主进程 `closed` 事件里发 `shell:pipClosed`，这里复位；网页版没有这个口（返回空注销函数）。
+   */
+  useEffect(() => onPipClosed(() => {
+    setPipNative(false)
+    setPipWin(null)
+  }), [])
 
   const nameOf = useCallback(
     // `no` 是**档案键**（迁移后 = 序列号）—— 两条路都要认（见 `lib/keys.ts`）
@@ -1070,6 +1103,29 @@ export default function Classroom() {
   )
 
   const cur = stats?.questions[seq - 1]
+
+  /**
+   * 🆕 把小窗那一屏**推给壳**（2026-10-04，施工单 `教室端原生置顶小窗` §二.3）。
+   *
+   * 🔴 触发条件就是施工单那句话：**班级 / 题号 / 正确率 / 未交人数一变就推**。
+   *    依赖逐个列出来（不是把整个 `cur` 丢进去）：题号 / 正确率 / 未交人数正好是
+   *    那三个会变的量 —— **题号一变就必须有新数据过去**（门禁 `nav-checks` 钉着这一处）。
+   * ⚠️ 只在**壳原生**那条路上推：Document PiP 走的是 portal，React 自己会更新，推了也没人收。
+   * ⚠️ 每次 `pipData` 壳都重建那一屏（每节课几次，代价可忽略），而且**壳不做任何计算**。
+   * 🔴 这个 effect **必须放在 `cur` 声明之后**：依赖数组里的 `cur?.rate` 是在渲染期求值的，
+   *    放前面会撞上 TDZ（`Cannot access 'cur' before initialization`）—— 那是整页崩，不是静默。
+   */
+  useEffect(() => {
+    if (!pipNative) return
+    pushPipScreen({
+      className: klass?.name ?? '',
+      seq: cur ? seq : 0,
+      total: stats?.questions.length ?? 0,
+      // 网页先算好 0–100 的整数再给壳：一个字段一种语义，壳里不再乘一遍
+      ratePct: Math.round((cur?.rate ?? 0) * 100),
+      missing: collect?.missing ?? 0,
+    })
+  }, [pipNative, klass?.name, seq, cur?.rate, stats?.questions.length, collect?.missing])
 
   /* ============================================================
      🆕 维护模式（2026-09-29 管理台第二期）—— 教室端**自己**渲染维护画面
@@ -1094,6 +1150,8 @@ export default function Classroom() {
     /* 立刻清屏上/本页里那些"学生看得见"的东西 */
     stopSpeaking()
     closePip()
+    setPipWin(null)
+    setPipNative(false)
     mutateQueue(() => [])
     setCloudFiles([])
     setLocalFiles([])
@@ -1743,13 +1801,15 @@ export default function Classroom() {
             <span style={{ color: 'var(--color-ink3)' }}>{client?.name ?? '未绑定'}</span>
           </span>
 
-          {pipWin ? (
+          {pipOn ? (
             <Button
               size="sm"
               icon={<IconCheck size={14} />}
               onClick={() => {
+                /* 🔴 两条路都要收干净：关上（壳里那次是主进程关的）+ 本地标记复位 */
                 closePip()
                 setPipWin(null)
+                setPipNative(false)
               }}
             >
               小窗已开启
@@ -2371,7 +2431,7 @@ export default function Classroom() {
                     <h2>当前题目</h2>
                     <span className="flex-1" />
                     <span style={{ fontSize: 11, color: 'var(--color-ink3)' }}>
-                      {pipWin ? '与小窗同步' : ''}
+                      {pipOn ? '与小窗同步' : ''}
                     </span>
                   </div>
                   <div className="p-3">
@@ -2535,7 +2595,7 @@ export default function Classroom() {
                       当前小窗显示：第 {seq} 题
                       {cur ? ` · 错误率 ${Math.round(cur.rate * 100)}%` : ''}
                     </span>
-                    {pipWin ? <Tag tone="ok">小窗已开启</Tag> : null}
+                    {pipOn ? <Tag tone="ok">小窗已开启</Tag> : null}
                   </div>
 
                   {/*
