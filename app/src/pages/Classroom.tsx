@@ -21,6 +21,7 @@ import { collectStats } from '../lib/assignments'
 import { BAND_META, gradeStats } from '../lib/grading'
 import { isStreamClass } from '../lib/pick'
 import { closePip, openPip, pipSupported } from '../lib/pip'
+import { shellAutoplayAllowed, shellPlatform } from '../lib/classroomShell'
 import { useMaintenanceStatus } from '../lib/useMaintenance'
 import { MaintenanceScreen } from '../components/MaintenanceGate'
 import { ranked } from '../lib/wrongbook'
@@ -327,7 +328,16 @@ export default function Classroom() {
   }, [])
   const broadcast = queue[0] ?? null
   const [now, setNow] = useState(() => new Date())
-  const [armed, setArmed] = useState(false)
+  /**
+   * 「声音已经能用了吗」。
+   *
+   * 🔴 初值不是 `false`（2026-10-04 改）：**壳里不需要那一步** ——
+   *    两个 exe 的 `webPreferences` 写了 `autoplayPolicy: 'no-user-gesture-required'`
+   *    （`preload.js` 同步暴露 `autoplayAllowed`），所以教室里那台机器**不该**再看到
+   *    「先解锁声音」那个提示。用户原话：「不支持置顶小窗，为什么还要点一下解锁声音」。
+   * ⚠️ 网页版读不到那个字段 ⇒ `false` ⇒ **照旧显示那一步**，一字不变。
+   */
+  const [armed, setArmed] = useState(() => shellAutoplayAllowed())
   const push = useToast((s) => s.push)
   const rootRef = useRef<HTMLDivElement>(null)
 
@@ -1026,15 +1036,29 @@ export default function Classroom() {
   const startPip = async () => {
     unlockAudio()
     setArmed(true)
-    const w = await openPip()
-    if (!w) {
-      push({
-        text: '当前浏览器不支持置顶小窗',
-        tone: 'warn',
-        desc: '需要 Edge / Chrome 116 及以上版本',
-      })
+    const r = await openPip()
+    if (!r.ok) {
+      /*
+       * 🔴 **两种失败要分开说**（2026-10-04 改；原来一律说"需要 Edge / Chrome 116 及以上"）：
+       *   · `no-api`  —— 这台机器上压根没有 Document PiP（老浏览器 / 某些壳）；
+       *   · `failed`  —— API 在，但申请窗口失败（`requestWindow` 抛了）；
+       *   而**在教室端 exe 里那句"浏览器太老"是假的**：它跑的是 Electron 33（Chromium 130）、
+       *   `app://` 也是安全上下文 —— 真因是壳里调不起来。所以按端说人话：
+       *   壳里就说"这台机器上开不了 + 看手机/平板"，网页版才提浏览器版本。
+       */
+      const inShell = shellPlatform() === 'electron'
+      push(
+        r.why === 'no-api'
+          ? {
+              text: inShell ? '这台机器上开不了置顶小窗' : '当前浏览器不支持置顶小窗',
+              tone: 'warn',
+              desc: inShell ? '讲评时请用手机或平板看题号与正确率' : '需要 Edge / Chrome 116 及以上版本',
+            }
+          : { text: '置顶小窗没打开', tone: 'warn', desc: '再点一次；还不行就用手机或平板看题号与正确率' },
+      )
       return
     }
+    const w = r.win
     w.addEventListener('pagehide', () => setPipWin(null))
     setPipWin(w)
   }
@@ -1744,6 +1768,7 @@ export default function Classroom() {
           {/* 小窗不可用提示 */}
           {!pipSupported() ? (
             <div
+              data-classroom-pip-unsupported
               className="mb-4 flex items-start gap-2.5 p-3.5"
               style={{
                 background: 'var(--color-warnsoft)',
@@ -1755,12 +1780,19 @@ export default function Classroom() {
                 <IconAlert size={17} />
               </span>
               <div style={{ fontSize: 13, color: 'var(--color-warnink)', lineHeight: 1.7 }}>
-                当前浏览器不支持<b>强制置顶小窗</b>（需要 Edge / Chrome 116 及以上）。
-                讲评时请用手机或平板看题号与正确率。
+                {shellPlatform() === 'electron' ? (
+                  <>这台机器上开不了<b>置顶小窗</b>。讲评时请用手机或平板看题号与正确率。</>
+                ) : (
+                  <>
+                    当前浏览器不支持<b>强制置顶小窗</b>（需要 Edge / Chrome 116 及以上）。
+                    讲评时请用手机或平板看题号与正确率。
+                  </>
+                )}
               </div>
             </div>
           ) : !armed ? (
             <div
+              data-classroom-unlock
               className="mb-4 flex flex-wrap items-center gap-3 p-3.5"
               style={{
                 background: 'var(--color-accentsoft)',

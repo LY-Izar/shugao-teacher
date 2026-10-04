@@ -203,7 +203,13 @@ function ReleaseScreen({ view, onLater }: { view: ReleaseView; onLater: () => vo
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-start gap-2.5 p-4">
-          <span style={{ color: 'var(--color-accent)', marginTop: 2 }}>
+          {/*
+            ⚠️ 这个图标**刻意不带 `color`** —— 与同族的维护卡（`MaintenanceGate.tsx:449`
+            的 `<IconAlert size={19} />`）一致：`color:` 前景色在本仓库只许用
+            `--color-accenttext`（`shots` 的 F6-H 是全仓计数：`accent` 必须 0 处），
+            所以这里让它**继承**当前正文色，不为一个装饰性图标多开一处颜色落点。
+          */}
+          <span style={{ marginTop: 2 }}>
             <IconSpark size={19} />
           </span>
           <div className="flex-1">

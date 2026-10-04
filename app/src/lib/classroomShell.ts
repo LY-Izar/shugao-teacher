@@ -72,6 +72,16 @@ interface ShellBridge {
    *   这是刻意的：那个降级路径说的是"这台设备"这类中性话，不会说出假话。
    */
   platform?: string
+  /**
+   * 🆕 壳里**已经免掉了自动播放限制**（2026-10-04 加）—— 见 `shellAutoplayAllowed()`。
+   * ⚠️ 只认 `=== true`：老壳没有这个字段 ⇒ 按"没免"处理（多留一步点击，不会说出假话）。
+   */
+  autoplayAllowed?: boolean
+  /**
+   * 🆕 壳**自己声明**开不了 Document PiP（2026-10-04 加）—— 见 `shellDocumentPipUnavailable()`。
+   * ⚠️ 只认 `=== false`（显式声明）；`undefined`（老壳 / 网页版）⇒ 不推翻原判断。
+   */
+  documentPip?: boolean
 }
 
 function bridge(): ShellBridge | null {
@@ -120,6 +130,44 @@ export type ShellPlatform = 'electron' | 'capacitor' | null
 export function shellPlatform(): ShellPlatform {
   const p = bridge()?.platform
   return p === 'electron' || p === 'capacitor' ? p : null
+}
+
+/**
+ * 壳里是否**已经免掉了自动播放限制** —— 2026-10-04 加。
+ *
+ * 背景（用户当天报的）：「教室端**不支持置顶小窗，为什么还要点一下解锁声音**」。
+ * 浏览器的自动播放政策要求"先有过一次用户手势"才允许出声，所以**网页版**上那一步
+ * （教室端「先解锁声音」那个提示与按钮）是必需的；而**两个 exe 是壳** ——
+ * 壳可以在 `webPreferences` 里直接写 `autoplayPolicy: 'no-user-gesture-required'`
+ * ⇒ 那一步在壳里**根本不必要**。`preload.js` 同步暴露这个字段，网页据此跳过它。
+ *
+ * 🔴 三个地方**成对**：`_src/desktop/main-classroom.js` · `main-teacher.js` 的
+ *    `autoplayPolicy` 与 `preload.js` 的这个字段 —— 改一个必须改另一个，
+ *    否则"提示消失了但声音其实还是出不来"（那比多点一下更糟）。
+ * ⚠️ 网页版、以及没这个字段的老壳 ⇒ `false` ⇒ **照旧显示那一步**，一字不变。
+ */
+export function shellAutoplayAllowed(): boolean {
+  return bridge()?.autoplayAllowed === true
+}
+
+/**
+ * 这个壳**自己说了**它开不了 Document PiP —— 2026-10-04 加。
+ *
+ * 🔴 为什么必须让**壳**来说（而不是让网页去猜）：实测（教室端 exe，Electron 33 / Chromium 130）
+ *      · `typeof window.documentPictureInPicture === 'object'` —— **API 对象在**，
+ *        所以"有没有这个 API"那条判据在壳里**永远是 true**；
+ *      · 真手势（click 监听器里调、那一刻 `userActivation.isActive === true`）与
+ *        CDP 的 `userGesture:true` **两条路都抛同一句**：
+ *        `InvalidStateError: … requestWindow … Internal error: no window`
+ *        ⇒ **Electron 没实现"创建那个 PiP 窗口"那一层**。
+ *    ⇒ 网页侧只靠 `pipSupported()` 会判成"支持"，老师点下去才发现打不开，
+ *      而提示还会甩锅给"浏览器版本太老"（那句话在壳里是**假的**）。
+ *      `preload.js` 因此显式带 `documentPip: false`，让网页**提前**按"这台机器没有"处理。
+ * ⚠️ 只认 `=== false`：老壳没有这个字段 ⇒ `undefined` ⇒ **不推翻** `pipSupported()`
+ *    的原有判断（行为与今天完全一致，不会把好端端的网页版/新浏览器判成不支持）。
+ */
+export function shellDocumentPipUnavailable(): boolean {
+  return bridge()?.documentPip === false
 }
 
 /**
