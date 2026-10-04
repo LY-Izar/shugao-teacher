@@ -5880,6 +5880,494 @@ section('第二十二节 · A15：教室端原生置顶小窗（壳原生 → Do
   }
 }
 
+/* ============================================================
+   第二十三节 · 🆕 A17：「要留意」汇总清单 —— **计数与清单同源**（源码这一侧）
+   ------------------------------------------------------------
+   用户 2026-10-04 原话：「维护面板，能不能我点一下概览里面要留意的，就把所以黄色
+   或者红色状态的全部列出来呀，一个一个找有点麻烦」。
+   屏上那一半（真 DOM：点开、条数、逐字相同、「看这一块」跳转、灰项不进清单）
+   在 `shots.mjs` 的「管理台第二期 ⑨」。**这一节钉的是源码这一侧**：
+
+     ① 全屏只有**一份** `attentionAll`（黄红清单的唯一来源；别处只许引用，不许再建一份）；
+     ② 顶部那个数字就是 `attentionItems`（= 它按黄红过滤后的长度）—— 同一个数组；
+     ③ 每张卡的 `headline` 取自**同一个 `reason` 字段**（`cardReason(…)`），不许各写一份措辞；
+     ④ 兜底：`toneCountsMatch`「两处逐项对上」还在；
+     ⑤ 灰项不许混进清单，只在末尾那行；⑥ 0 项时那句话不留"0 项要留意"。
+
+   🔴 **两处诚实记下的缺口（别为了让判据绿而假装已覆盖）**：
+     · **缺口 A（黄档 / 跨栏）**：本机 dev 没有 `app/.env.local` ⇒ 面板接口（配置 / 备份 /
+       数据库 / 错误 / 反馈 / 版本公告）全部读不到 ⇒ 这些卡一律落在**灰**档。
+       所以真页面上能拿到的黄红项**恰好 1 个**（本地模式那一档，红）。
+       ⇒ **「N 项要留意」（黄档）那句文案、以及"跨栏先切栏再滚"这一支，
+          只能在"静态对齐"上钉**（上面 ② 钉同源、`shots ⑨` 钉每条的栏 = 卡真实所在的栏）；
+          真正驱动它们需要线上服务端或伪造整套接口回话，这一轮没做，也不假装做了。
+     · **缺口 B（超级管理员那一项）**：「0 个 super」**没有单张卡** —— 它的结论只在概览
+       那块磁贴上。所以清单里那一条的"原因"取自**磁贴的 `sub`**，
+       **不是**卡上那句话（`judgeSuperAdminCount().text` 在屏上从来没出现过 ——
+       那是"判据有结论、但没人显示"的历史遗留）。这一条是**已知的口径差**，
+       不是判据漏了。
+
+   ⚠️ 一律**先剥注释**再判（这批注释里正当地写着 `attentionAll` / `cardReason` / `badCount`
+      这些词；不剥的话"别处不再数一遍"会被注释骗过 ⇒ 判据恒绿，正是 §三.2 那一类）。
+   ⚠️ 每条都带一条**在内存里的源码副本上就地改坏**的反向对照（不动磁盘）。
+   ============================================================ */
+
+section('第二十三节 · A17：「要留意」汇总清单 —— 计数与清单同源（源码侧）')
+
+{
+  /** 剥注释（块注释 + 行注释）—— 判据只许看**真代码**（照 A16 的写法） */
+  const strip = (s) =>
+    String(s)
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/(^|[^:'"`\w])\/\/[^\n]*/gm, '$1')
+  const ADMIN = strip(readApp('src/pages/Admin.tsx'))
+
+  /* ---------------- ① 全屏只有一份 `attentionAll` ---------------- */
+  const declCount = (ADMIN.match(/const\s+attentionAll\s*[:=]/g) ?? []).length
+  const refCount = (ADMIN.match(/\battentionAll\b/g) ?? []).length
+  check(
+    declCount === 1 && refCount === 5,
+    '🔴 A17 ① 全屏**只有一份** `attentionAll`（黄红清单的唯一来源）—— 别处只许引用，不许再建一份',
+    `定义 ${declCount} 处 · 出现 ${refCount} 处（1 处定义 + 「badCount」「warnCount」「attentionItems」「cardReason」各引用 1 处 = 5）`,
+  )
+
+  /* 反向对照 A：再建一份同名数组 ⇒ 本条当场假 */
+  const dupArray = ADMIN.replace(
+    'const attentionAll:',
+    "const attentionAllExtra = [{ key: 'x', tone: 'warn' }]\n  const attentionAll:",
+  )
+  const dupCount = (dupArray.match(/const\s+attentionAll/g) ?? []).length
+  check(
+    dupArray !== ADMIN && dupCount === 2,
+    '🧪 A17 ① 反向对照 A：把那份数组**再建一遍**（内存副本）⇒ 「只有一份」当场假',
+    `副本真的被改过=${dupArray !== ADMIN} · 副本里同名声明 ${dupCount} 份`,
+  )
+
+  /* ---------------- ② 顶部那个数字 = `attentionItems.length`（同一个数组） ---------------- */
+  /*
+   * 这一段**不引入任何新名字**：`badCount` / `warnCount` / `attentionItems` 就是
+   * 那份数组（① 已经钉住"只有一份"）按黄红过滤出来的长度 ——
+   *   `items.length` 出现在 `AttentionBar` 里 ⇒ 顶部那个数字就是清单的长度。
+   */
+  const barBody = (() => {
+    const at = ADMIN.indexOf('function AttentionBar')
+    if (at < 0) return ''
+    const end = ADMIN.indexOf('function maintenanceHeadline', at)
+    const whole = end < 0 ? ADMIN.slice(at) : ADMIN.slice(at, end)
+    /* ⚠️ 去掉尾部那段注释（`function maintenanceHeadline` 上面那段注释里正当地写着
+       `badCount` 等词）—— 注释已经剥过，但这里再切掉尾巴更保险 */
+    return whole.slice(0, Math.max(0, whole.length - 200))
+  })()
+  check(
+    barBody.includes('items.length') &&
+      !barBody.includes('badCount') &&
+      !barBody.includes('warnCount') &&
+      !barBody.includes('attentionItems'),
+    '🔴 A17 ② 顶部那个数字取的是 `AttentionBar` 收进来的 **`items.length`** —— 就是清单本身的长度，**不是**在渲染里另数一遍 `allTones`',
+    `AttentionBar 里有 items.length=${barBody.includes('items.length')} · 另数一遍（badCount/warnCount/attentionItems 一个都不该在）=${barBody.includes('badCount') || barBody.includes('warnCount') || barBody.includes('attentionItems')}`,
+  )
+  const itemsExpr = /const\s+attentionItems[^=]*=\s*attentionAll\s*\.\s*filter\(\s*([\s\S]*?)\)\s*\n/.exec(
+    ADMIN,
+  )
+  check(
+    /tone\s*===\s*'bad'/.test(itemsExpr?.[1] ?? '') &&
+      /tone\s*===\s*'warn'/.test(itemsExpr?.[1] ?? '') &&
+      !/unknown/.test(itemsExpr?.[1] ?? ''),
+    '🔴 A17 ② `attentionItems` = 那份数组按 **黄红** 过滤（`bad` + `warn`），**灰不在里面**',
+    short(itemsExpr?.[1] ?? '（没匹配到 `attentionItems` 的赋值）', 120),
+  )
+
+  /* 反向对照 B / C：改坏那两条 ⇒ 同一个"同源"判据当场假 */
+  const countElsewhere = ADMIN.replace(
+    '<span className="num">{items.length}</span>',
+    '<span className="num">{badCount}</span>',
+  )
+  const dupItems = ADMIN.replace(
+    'const attentionItems: AttentionItem[] = attentionAll.filter(',
+    "const attentionItemsOther = allTones.filter((t) => t === 'warn').length\n  const attentionItems: AttentionItem[] = attentionAll.filter(",
+  )
+  check(
+    countElsewhere !== ADMIN && !countElsewhere.includes('{items.length}'),
+    '🧪 A17 ② 反向对照 B：把那颗按钮里的数字**换成别处数出来的一个数**（副本里 `{items.length}` → `{badCount}`）⇒「数字就是清单长度」当场假',
+    `副本真的被改过=${countElsewhere !== ADMIN} · 副本里还有 {items.length}=${countElsewhere.includes('{items.length}')}`,
+  )
+  check(
+    dupItems !== ADMIN && (dupItems.match(/const\s+attentionItems/g) ?? []).length === 2,
+    '🧪 A17 ② 反向对照 C：把清单的来源**再建一份**（副本里加一个从 `allTones` 数出来的同名变量）⇒「同一个数组」当场假',
+    `副本真的被改过=${dupItems !== ADMIN} · 副本里同名声明 ${(dupItems.match(/const\s+attentionItems/g) ?? []).length} 份`,
+  )
+
+  /**
+   * 切出 `attentionAll` **那一段数组字面量**（花括号配对，不看注释）。
+   * 为什么要切：`reason:` 这个词在别处也有（`unknownReason:` 那种字段名），
+   * 整文件数会数成 16 —— 只有这一段里的 `reason:` 才是"每一条都有自己的原因"。
+   */
+  const sliceArrayBlock = () => {
+    const at = ADMIN.indexOf('const attentionAll')
+    if (at < 0) return ''
+    const from = ADMIN.indexOf('= [', at)
+    if (from < 0) return ''
+    let depth = 0
+    for (let i = from + 2; i < ADMIN.length; i++) {
+      const ch = ADMIN[i]
+      if (ch === '[') depth++
+      else if (ch === ']') {
+        depth--
+        if (depth === 0) return ADMIN.slice(from, i + 1)
+      }
+    }
+    return ''
+  }
+  const ARR = sliceArrayBlock()
+
+  /* ---------------- ③ 每张卡的 headline 取自同一个 `reason` 字段 ---------------- */
+  /*
+   * ⚠️ 数字都是**实测过的**（2026-10-04 这一版）：数组里 11 条各有一个 `reason:`；
+   *    能出黄红的 ⑩ 张卡里，8 张用 `cardReason(…)`（维护 / 版本更新那两张走各自的
+   *    共用函数 `maintenanceHeadline` / `releaseHeadline` —— 与清单取的是同一个函数）；
+   *    另有 3 个"既给数组、也给共用函数"的局部常量（`maintReason` / `releaseReason` /
+   *    `superReason`）。所以 11 = 8 + 3 就是**同源**的算术表达。
+   */
+  const reasonFields = (ARR.match(/(^|[\s,{])reason:\s/gm) ?? []).length
+  const cardReasonCalls = (ADMIN.match(/cardReason\(\s*'[a-z]+'\s*\)/g) ?? []).length
+  const sharedReasonConsts = (ADMIN.match(/const\s+(maint|release|super)Reason\s*=/g) ?? []).length
+  check(
+    ARR !== '' && reasonFields === 11 && cardReasonCalls === 8 && sharedReasonConsts === 3,
+    '🔴 A17 ③ 每张卡的 `headline` 都取自**同一个 `reason` 字段**（8 张走 `cardReason(…)`，维护 / 版本更新走各自的共用函数，另有 3 个常量）—— 不许在卡上再写一份措辞',
+    `数组段长度 ${ARR.length} 字符 · 段里 reason: ${reasonFields} 处 · cardReason(…) ${cardReasonCalls} 处 · 共用函数用的局部常量 ${sharedReasonConsts} 个（${reasonFields} = ${cardReasonCalls} + ${sharedReasonConsts}）`,
+  )
+  const cardKeepsCopy = ADMIN.replace(
+    "headline={cardReason('deploy')}",
+    "headline={localMode ? '**本地模式** —— 平台上所有数据其实只在这台浏览器里' : '线上构建标识正常'}",
+  )
+  check(
+    ADMIN.includes("headline={cardReason('deploy')}") &&
+      cardKeepsCopy !== ADMIN &&
+      !cardKeepsCopy.includes("headline={cardReason('deploy')}"),
+    '🧪 A17 ③ 反向对照：把「① 部署与版本」那张卡换回**自己写一份措辞**（副本）⇒ 上面那条当场假（证明它咬的是"卡去取同一个 reason"，不是"有没有 headline"）',
+    `正向能匹配=${ADMIN.includes("headline={cardReason('deploy')}")} · 副本里那句没了=${!cardKeepsCopy.includes("headline={cardReason('deploy')}")}`,
+  )
+
+  /* ---------------- ④ 兜底：`toneCountsMatch` 那类"两处逐项对上"还在 ---------------- */
+  /*
+   * ⚠️ 原来这里的正则写的是 `filter\([^)]*bad[^)]*\)` —— 而真实那一段是
+   *    `allTones.filter((t) => t === 'bad').length`，**箭头函数那个 `)` 就把 `[^)]*` 掐断了**
+   *    ⇒ 判据恒假（第一次跑就是这一条红）。所以改成"允许括号"的写法：
+   *    `filter\(([^;]*?)bad([^;]*?)\)\s*\.\s*length` —— 在分号前把那一小段抓出来。
+   */
+  const matchPair = (tone, countVar) =>
+    new RegExp(
+      `allTones\\s*\\.\\s*filter\\(([^;]*?)${tone}([^;]*?)\\)\\s*\\.\\s*length\\s*===\\s*${countVar}`,
+    ).test(ADMIN)
+  check(
+    /const\s+toneCountsMatch\s*=/.test(ADMIN) && matchPair('bad', 'badCount') && matchPair('warn', 'warnCount'),
+    '🔴 A17 ④ 兜底判据 `toneCountsMatch` 还在：`allTones` 里黄/红的条数必须与 `attentionAll` 数出来的一致（"两处逐项对上"，谁漏补一边就露头）',
+    `toneCountsMatch=${/const\s+toneCountsMatch\s*=/.test(ADMIN)} · bad 那一对=${matchPair('bad', 'badCount')} · warn 那一对=${matchPair('warn', 'warnCount')}`,
+  )
+  const noMatch = ADMIN.replace('const toneCountsMatch =', 'const toneCountsMatchX =')
+  check(
+    noMatch !== ADMIN && !/const\s+toneCountsMatch\s*=/.test(noMatch),
+    '🧪 A17 ④ 反向对照：把那条兜底判据**改掉名字**（副本）⇒ 上面那条当场假（它不是注释、也不是摆设）',
+    `副本真的被改过=${noMatch !== ADMIN}`,
+  )
+
+  /* ---------------- ⑤ 灰项不许混进清单，只在末尾那行 ---------------- */
+  const itemsPredicate = itemsExpr?.[1] ?? ''
+  check(
+    itemsPredicate !== '' && !itemsPredicate.includes('unknown'),
+    '🔴 A17 ⑤ 灰项**不在清单的过滤条件里**（`attentionItems` 的 filter 里没有 `unknown`）—— 它只在末尾那行「另有 N 项无法判断」',
+    short(itemsPredicate, 120),
+  )
+  const withUnknown = ADMIN.replace(
+    "a.tone === 'bad' || a.tone === 'warn',",
+    "a.tone === 'bad' || a.tone === 'warn' || a.tone === 'unknown',",
+  )
+  const brokenPredicate =
+    /const\s+attentionItems[^=]*=\s*attentionAll\s*\.\s*filter\(\s*([\s\S]*?)\)\s*\n/.exec(
+      withUnknown,
+    )?.[1] ?? ''
+  check(
+    withUnknown !== ADMIN && brokenPredicate.includes('unknown'),
+    '🧪 A17 ⑤ 反向对照：往过滤条件里**塞一个 `unknown`**（副本）⇒「灰不在清单里」当场假',
+    `副本真的被改过=${withUnknown !== ADMIN} · 改坏后 filter 里出现 unknown=${brokenPredicate.includes('unknown')}`,
+  )
+  check(
+    ADMIN.includes('另有') && ADMIN.includes('项无法判断') && !ADMIN.includes('0 项要留意'),
+    '🔴 A17 ⑤ 末尾那行写的是「另有 N 项无法判断（拿不到数据，不算"要留意"）」；而源码里**不含** `0 项要留意`（0 项时不留空数字）',
+    `另有=${ADMIN.includes('另有')} · 项无法判断=${ADMIN.includes('项无法判断')} · 出现"0 项要留意"=${ADMIN.includes('0 项要留意')}`,
+  )
+  const noZeroGuard = ADMIN.replace(/\{items\.length > 0 \? \(/g, '{true ? (')
+  const guardHits = (ADMIN.match(/\{items\.length > 0 \? \(/g) ?? []).length
+  check(
+    guardHits === 1 && noZeroGuard !== ADMIN && !/\{items\.length > 0 \? \(/.test(noZeroGuard),
+    '🧪 A17 ⑤ 反向对照：把 `items.length > 0` 那道闸去掉（副本）⇒ "0 项时不留空数字"就失去了实现依据（0 项时那句话只剩前半截，不会出现空数字）',
+    `源码里那道闸 ${guardHits} 处 · 副本真的被改过=${noZeroGuard !== ADMIN}`,
+  )
+
+  /* ---------------- ⑥ 每条都得有 `pane`（跨栏那一支的静态对齐） ---------------- */
+  const paneFields = (ARR.match(/(^|[\s,{])pane:\s*'/gm) ?? []).length
+  const paneMarkers = (ADMIN.match(/data-admin-pane=/g) ?? []).length
+  check(
+    paneFields === reasonFields && paneFields >= 11 && paneMarkers >= 7,
+    '🔴 A17 ⑥ 数组里**每一条都标了 `pane`**（它落在哪一栏），而每个分区都摆了 `data-admin-pane` 标记 —— "跨栏先切栏再滚"只能这样静态对齐（缺口 A）',
+    `段里 pane: ${paneFields} 处 · reason: ${reasonFields} 处（必须相等）· data-admin-pane 标记 ${paneMarkers} 处`,
+  )
+  const dropPane = ADMIN.replace("      pane: 'db',", '')
+  check(
+    dropPane !== ADMIN && (dropPane.match(/(^|[\s,{])pane:\s*'/gm) ?? []).length === paneFields - 1,
+    '🧪 A17 ⑥ 反向对照：把其中一条的 `pane` **删掉**（副本）⇒「每一条都标了 pane」当场假',
+    `副本里 pane: ${(dropPane.match(/(^|[\s,{])pane:\s*'/gm) ?? []).length} 处（原本 ${paneFields} 处）`,
+  )
+  /* ⚠️ 缺口 B 也在这里说清：`super` 那一条的 pane 是 `overview`（磁贴所在栏），不是某张卡所在栏 */
+  check(
+    /key:\s*'super'[\s\S]{0,220}pane:\s*'overview'/.test(ADMIN),
+    '⚠️ A17 ⑥（缺口 B 的落点）「超级管理员」那一条的 `pane` 是 `overview` —— 它**没有卡**，结论只在概览那块磁贴上（口径差见本节开头那段）',
+    'key: super 与 pane: overview 的位置关系',
+  )
+}
+
+/* ============================================================
+   第二十四节 · A18：「今天」时间轴（2026-10-04，施工单-日程今天时间轴.md）
+   ------------------------------------------------------------
+   为什么单开一节：平铺列表看不出三件事 ——
+     ① 每节课**真实占多长**（40 分钟和 90 分钟看起来一样长）
+     ② 中间**空闲多久**（不用自己把上一次的 end 和下一次的 start 减一遍）
+     ③ **哪两节真的撞了**（而且要画成并排，不是叠在一起看不见）
+
+   ⚠️ 判据落在**纯函数**上，不落界面 ——
+      `dayRange` / `dayGaps` / `overlapGroups` 不碰 DOM、不读全局，
+      所以能脱离界面单测；界面上那三处（空闲/时间重叠/现在）另在静态侧钉。
+
+   🔴 这三条与 `applyMondayShift()` 返回的 `conflicts` 是**同一件事两个说法**
+      （那处已经把冲突交给界面提示了）。本节只保证它们判得一致，不新造一套口径。
+   ============================================================ */
+section('第二十四节 · A18：「今天」时间轴 —— 真实时长 / 空闲 / 重叠（纯函数）')
+
+{
+  const SCHED = readApp('src/lib/schedule.ts')
+
+  /**
+   * 把那几个纯函数**原样**抠出来求值，不另抄一份 ——
+   * 抄一份就变成"我抄错了但两边都绿"。
+   *
+   * ⚠️ 两个坑（前面 D13 那节已踩过，这里同一路）：
+   *   ① `export ` 在 `new Function()` 的函数体里是语法错误；
+   *   ② `new Function()` 只吃 JS，而源码是 TS —— 类型注解要剥。
+   *      只剥类型，**逻辑一个字都不动**。
+   */
+  const loadAxis = (mutate = () => {}) => {
+    const from = SCHED.indexOf('export function toMinutes')
+    const to = SCHED.lastIndexOf('}')
+    if (from < 0 || to < 0) throw new Error('抠不出时间轴那一段')
+    const blocks = []
+    for (const re of [
+      /^export function toMinutes[\s\S]*?^\}/gm,
+      /^export const AXIS_PAD_MIN[^\n]*\n/gm,
+      /^export const GAP_MIN_MINUTES[^\n]*\n/gm,
+      /^export function dayRange[\s\S]*?^\}/gm,
+      /^export function dayGaps[\s\S]*?^\}/gm,
+      /^export function overlapGroups[\s\S]*?^\}/gm,
+    ]) {
+      const m = SCHED.slice(from, to + 1).match(re)
+      if (m) for (const x of m) blocks.push(x)
+    }
+    const missing = ['toMinutes', 'AXIS_PAD_MIN', 'GAP_MIN_MINUTES', 'dayRange', 'dayGaps', 'overlapGroups'].filter(
+      (k) => !blocks.some((b) => b.includes(k)),
+    )
+    if (missing.length) throw new Error(`抠漏了 ${missing.join('/')}（改名了这一节得跟着改）`)
+
+    let body = blocks.join('\n').replace(/^import .*$/gm, '')
+    // 剥类型：**只碰函数签名上的那一处**（`(items: readonly ScheduleItem[]): DayRange | null`），
+    // 体和常量一个字都不动 —— 剥多了会把下一行也吃掉，剥少了求值直接 SyntaxError。
+    body = body.replace(
+      /\(([^()]*?)\)\s*:\s*[A-Za-z_$][\w$[\]<>|,.]*(?=\s*\{)/g,
+      (s, params) => `(${params.replace(/:\s*[^,)]+/g, '').trim()})`,
+    )
+    body = body.replace(/^(\s*)export\s+/gm, '$1').replace(/\sas\s+const/g, '')
+    mutate(body) // 反向对照在这里改源码，不是改判据
+    // eslint-disable-next-line no-new-func
+    return new Function(
+      `${body}
+return { toMinutes, AXIS_PAD_MIN, GAP_MIN_MINUTES, dayRange, dayGaps, overlapGroups };`,
+    )()
+  }
+
+  /** 固定一条课（判据不读真库、不看设备时间） */
+  const it = (id, start, end) => ({ id, weekday: 1, start, end, title: `T${id}`, kind: 'class', notify: true, scope: 'mine' })
+
+  let A
+  let loadErr = ''
+  try {
+    A = loadAxis()
+  } catch (e) {
+    A = {}
+    loadErr = e instanceof Error ? e.message : String(e)
+  }
+
+  check(
+    !loadErr && ['dayRange', 'dayGaps', 'overlapGroups'].every((k) => typeof A[k] === 'function'),
+    'A18 锚点自证：抠出来的**就是**那几个纯函数（否则下面全是空转）',
+    loadErr ? `求值失败：${loadErr}` : `typeof = ${['dayRange', 'dayGaps', 'overlapGroups'].map((k) => typeof A[k]).join('/')}`,
+  )
+
+  /* ---------------- ① 边界：上下各留一圈、向整点取整、越界要钳住 ---------------- */
+  check(A.dayRange([]) === null, 'A18 ① 空数组回 `null` —— 界面据此**不渲染轴**（别给一条空轴，那看着像坏了）', `实测 ${JSON.stringify(A.dayRange([]))}`)
+  {
+    const r = A.dayRange([it('a', '08:00', '08:45'), it('b', '10:00', '10:40')])
+    check(
+      r.fromMin === 420 && r.toMin === 720,
+      'A18 ① 上下各留 30 分钟并**向整点取整**（08:00−30=07:30→07:00，10:40+30=11:10→12:00）',
+      `实测 ${JSON.stringify(r)}`,
+    )
+  }
+  {
+    /* 早晚课：减法/加法都要有钳位，否则轴画到容器外（看着像"今天没课"） */
+    const early = A.dayRange([it('a', '07:00', '07:45')])
+    check(early.fromMin === 360, 'A18 ① 早课时 fromMin 落在 06:00，不是 06:30（要整点）', `实测 ${early.fromMin}`)
+    const late = A.dayRange([it('a', '22:30', '23:15')])
+    check(late.toMin === 1440, 'A18 ① 晚课时 toMin 收在 24:00（放行会算出 24:45）', `实测 ${late.toMin}`)
+  }
+  /* 反向对照①：把 padding 换成 600 小时级，两道钳位必须同时被顶出来 */
+  {
+    let B
+    try {
+      B = loadAxis((s) => s.replace('AXIS_PAD_MIN = 30', 'AXIS_PAD_MIN = 600'))
+    } catch {
+      B = {}
+    }
+    const e = B.dayRange?.([it('a', '07:00', '07:45')])
+    const l = B.dayRange?.([it('a', '22:30', '23:15')])
+    check(
+      e?.fromMin === 0 && l?.toMin === 1440,
+      '🧪 A18 ① 反向对照：padding 改到 600 ⇒ fromMin 被夹到 0、toMin 被夹到 1440（证明上面两条钳位真在判，不是摆设）',
+      `早课 fromMin=${e?.fromMin}（期望 0）· 晚课 toMin=${l?.toMin}（期望 1440）`,
+    )
+  }
+
+  /* ---------------- ② 空闲：门槛 10 分钟，且门槛本身可红 ---------------- */
+  check(
+    A.GAP_MIN_MINUTES === 10,
+    'A18 ② 空档门槛 = 10 分钟 —— 5 分钟的接续**不是**空档（那是正常作息，天天报就成了假红）',
+    `实测 ${A.GAP_MIN_MINUTES}`,
+  )
+  {
+    const g = A.dayGaps([it('a', '08:00', '08:45'), it('b', '10:00', '10:40'), it('c', '10:45', '11:30')])
+    check(
+      g.length === 1 && g[0].minutes === 75,
+      'A18 ② 三节课只回**一个**空档：08:45→10:00 = 75 分钟；10:40→10:45 那 5 分钟不算',
+      `实测 ${g.length} 条${g[0] ? ` · 首条 ${g[0].minutes} 分钟` : ''}`,
+    )
+  }
+  {
+    const g = A.dayGaps([it('a', '08:00', '08:45'), it('b', '08:55', '09:40')])
+    check(g.length === 1 && g[0].minutes === 10, 'A18 ② 正好 10 分钟**算**空档（边界含）', `实测 ${JSON.stringify(g)}`)
+  }
+  {
+    const g = A.dayGaps([it('a', '08:00', '08:45'), it('b', '08:45', '09:30')])
+    check(g.length === 0, 'A18 ② 首尾相接（0 分钟）**不算**空档', `实测 ${g.length} 条`)
+  }
+  /* 反向对照②：门槛降到 0 ⇒ 上面那三条"不算"必须同时翻 */
+  {
+    let B
+    try {
+      B = loadAxis((s) => s.replace('GAP_MIN_MINUTES = 10', 'GAP_MIN_MINUTES = 0'))
+    } catch {
+      B = {}
+    }
+    const tight = B.dayGaps?.([it('a', '08:00', '08:45'), it('b', '08:45', '09:30')])
+    const tiny = B.dayGaps?.([it('a', '08:00', '08:45'), it('b', '10:00', '10:40'), it('c', '10:45', '11:30')])
+    check(
+      tight?.length === 1 && tiny?.length === 2,
+      '🧪 A18 ② 反向对照：门槛降到 0 ⇒ 接续与 5 分钟都被报出来（证明上面三条"不算"真在判）',
+      `接续得到 ${tight?.length} 条（期望 1）· 三节课得到 ${tiny?.length} 条（期望 2）`,
+    )
+  }
+
+  /* ---------------- ③ 重叠：首尾相接不算，连压三节合成一组 ---------------- */
+  check(
+    A.overlapGroups([it('a', '08:00', '08:45'), it('b', '08:45', '09:30')]).length === 0,
+    'A18 ③ 首尾相接不算重叠（上一节 08:45 下课，下一节 08:45 上课）',
+    '实测 0 组',
+  )
+  {
+    const ov = A.overlapGroups([it('a', '08:00', '09:00'), it('b', '08:30', '09:30'), it('c', '10:00', '11:00')])
+    check(
+      ov.length === 1 && ov[0].length === 2,
+      'A18 ③ 两条压在一起 = **一组**（界面上并排），第三条独立',
+      `实测 ${ov.length} 组${ov[0] ? ` · 首组 ${ov[0].length} 节` : ''}`,
+    )
+  }
+  {
+    const chain = A.overlapGroups([it('a', '08:00', '09:00'), it('b', '08:30', '09:30'), it('c', '09:15', '10:00')])
+    check(
+      chain.length === 1 && chain[0].length === 3,
+      'A18 ③ **传递**重叠（a 压 b、b 压 c，a 与 c 不直接压）三节合成一组 —— 少一条就并排不开',
+      `实测 ${chain.length} 组${chain[0] ? ` · 首组 ${chain[0].length} 节` : ''}`,
+    )
+  }
+  /* 反向对照③：把严格小于改成小于等于 ⇒ "首尾相接不算"当场假 */
+  {
+    let B
+    try {
+      B = loadAxis((s) => s.replace('if (cur.length && s < curEnd)', 'if (cur.length && s <= curEnd)'))
+    } catch {
+      B = {}
+    }
+    const touching = B.overlapGroups?.([it('a', '08:00', '08:45'), it('b', '08:45', '09:30')])
+    check(
+      touching?.length === 1,
+      '🧪 A18 ③ 反向对照：把 `s < curEnd` 改成 `s <=` ⇒ 首尾相接立刻被报成重叠（证明那条严格小于真在判）',
+      `实测 ${touching?.length} 组（期望 1）`,
+    )
+  }
+
+  /* ---------------- ④ 界面上那三处（不能只靠函数绿） ---------------- */
+  {
+    const AXIS = readApp('src/components/ScheduleDayAxis.tsx')
+    const PAGE = readApp('src/pages/Schedule.tsx')
+    check(
+      AXIS.includes('空闲') && AXIS.includes(`${'{'}g.minutes}{'}'} 分钟`),
+      'A18 ④ 空档那行写的是「空闲 N 分钟」—— 让老师一眼看出**这段时间能安排事**',
+      `含「空闲」=${AXIS.includes('空闲')}`,
+    )
+    check(AXIS.includes('时间重叠'), 'A18 ④ 重叠那行有「时间重叠」标记（叠在一起看不见就等于没报）', `含「时间重叠」=${AXIS.includes('时间重叠')}`)
+    check(
+      AXIS.includes('现在') && AXIS.includes('位置') === false,
+      'A18 ④ 有「现在」这条时刻线 —— 一条时间轴不给"现在在哪"就还得自己心算',
+      `含「现在」=${AXIS.includes('现在')}`,
+    )
+    check(
+      AXIS.includes('if (!range) return null'),
+      'A18 ④ items 空时**早退不渲染轴** —— 钩子顺序也在所有 useMemo 之后（提前早退下一帧就炸）',
+      `含早退=${AXIS.includes('if (!range) return null')}`,
+    )
+    check(
+      /position:\s*'absolute'/.test(AXIS) && AXIS.includes('PX_PER_MIN'),
+      'A18 ④ 按真实分钟铺位（同一比例尺下 40 分钟就该是 80 分钟的一半高）',
+      `绝对定位=${/position:\s*'absolute'/.test(AXIS)} · 比例尺常量=${AXIS.includes('PX_PER_MIN')}`,
+    )
+    check(
+      /<ScheduleDayAxis[\s\S]{0,200}classNameOf/.test(PAGE),
+      'A18 ④「今天」那屏接的是**时间轴**（不是还留在平铺列表上）',
+      'ScheduleDayAxis 在 Schedule.tsx 里被用到=' + /<ScheduleDayAxis/.test(PAGE),
+    )
+    check(
+      !/state\.items\.map\(\(it\) =>[\s\S]{0,80}className="row"/.test(PAGE),
+      'A18 ④ 旧的平铺列表**已经换掉**（留着两套 = 同一个信息出现两次，老师会问"哪个对"）',
+      '仍存在那段列表=' + /state\.items\.map\(\(it\) =>[\s\S]{0,80}className="row"/.test(PAGE),
+    )
+    /* 反向对照④：把「时间重叠」这三个字从组件里抠掉 ⇒ 上面那条当场假 */
+    {
+      const stripped = AXIS.replace('时间重叠', '撞了')
+      check(
+        stripped !== AXIS && !stripped.includes('时间重叠'),
+        '🧪 A18 ④ 反向对照：把「时间重叠」换掉（副本）⇒ 上面那条"有重叠标记"立刻失据（证明它读的是真源码）',
+        `副本真的被改过=${stripped !== AXIS}`,
+      )
+    }
+  }
+}
+
 /* ---------------- 结果 ---------------- */
 console.log(`\n================ 结果 ================`)
 

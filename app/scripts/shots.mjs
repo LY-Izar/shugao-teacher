@@ -9235,6 +9235,217 @@ await withLock(async () => {
         await shot(annPage, S2, '99-admin-feedback', { full: true })
       })
 
+      /* ============================================================
+         🆕 ⑨ 「要留意」汇总清单（2026-10-04 用户点名）
+         ------------------------------------------------------------
+         原话：「维护面板，能不能我点一下概览里面要留意的，就把所以黄色或者红色状态的
+         全部列出来呀，一个一个找有点麻烦」。
+         ⇒ L0 那句话里的「N 项要留意」变成可点的一颗按钮，点开在它下面展开一份清单。
+
+         这一节钉的是**屏上那一半**（源码那一半在 `nav-checks` 第二十三节 · A17）：
+           · 清单条数 **== 顶部那个数字**（同一份数据，不是两处各算一遍）；
+           · 每条 = 状态点（黄/红）+ 哪一块（逐字等于那张卡的标题）+ **卡上那句话**
+             + 「看这一块」；
+           · 🔴 **灰（"量不到"）不许进清单** —— 它只出现在末尾那行「另有 N 项无法判断」；
+           · 0 项时**不许**出现"0 项要留意"（0 项 = 那句话只是一句陈述，没有按钮）；
+           · 「看这一块」点一下**真的滚到**那张卡。
+
+         🔴 **两处诚实记下的缺口（别为了让判据绿而假装已覆盖）**：
+           · **缺口 A（黄档 / 跨栏）**：本机 dev 没有 `app/.env.local` ⇒ 面板接口全读不到
+             ⇒ 能出黄红的项**恰好是 1–2 个红的**（"本地模式"那一档 + 本机演示数据里的
+             档案矛盾）。所以「N 项**要留意**」那句文案、以及"**跨栏**先切栏再滚"这一支
+             **驱动不到** —— 前者在 `nav-checks` ②（同源）上钉，后者在这里
+             用"每一条声明的栏 = 它那张卡真实所在的栏"（`data-admin-pane`）做**静态对齐**。
+             真要驱动它们，得伪造整套 `/api/*` 回话或改 `isRemote` —— 这一轮**没做**，
+             也**不假装做了**。
+           · **缺口 B（「超级管理员」那一条）**：它**没有单张卡** —— "0 个 super"只在概览
+             那块磁贴上。所以清单里那一条的"原因"取自**磁贴的 `sub`**，不是"卡上那句话"
+             （`judgeSuperAdminCount().text` 在屏上从来没出现过）。本轮本地模式下它是灰的、
+             不进清单，所以这一节没量到它；口径差写在 `nav-checks` A17 ⑥ 与本节这一段。
+         ============================================================ */
+      await step(S2, async () => {
+        await annPage.goto(`${BASE}/admin?roles=${ANN_ROLES}`, { waitUntil: 'networkidle' })
+        await annPage.waitForSelector('[data-admin-headline]', { timeout: 15000 })
+        await annPage.waitForTimeout(500)
+
+        /* ---------------- ① 首屏：那句话 + 那颗按钮（收起态不渲染清单） ---------------- */
+        const head0 = await annPage.evaluate(() => {
+          const el = document.querySelector('[data-admin-headline]')
+          const btn = document.querySelector('[data-admin-attention-toggle]')
+          return {
+            text: el ? el.textContent : '',
+            btnText: btn ? btn.textContent : '',
+            btnTag: btn ? btn.tagName : null,
+            aria: btn ? btn.getAttribute('aria-expanded') : null,
+            rows: document.querySelectorAll('[data-admin-attention-row]').length,
+            list: document.querySelectorAll('[data-admin-attention-list]').length,
+            zeroCopy: /0\s*项(要留意|异常)/.test(el ? el.textContent : ''),
+            l0: document.querySelector('[data-admin-l0]')?.getAttribute('data-admin-l0') ?? null,
+          }
+        })
+        const shown0 = Number(/·\s*(\d+)\s*项(异常|要留意)/.exec(head0.text)?.[1] ?? -1)
+        check(
+          head0.btnTag === 'BUTTON' && head0.aria === 'false',
+          `🆕 ${S2} ⑨：那句话里的「N 项…」是**可点的原生 button**（键盘也能触发），初值 aria-expanded=false`,
+          `tag=${head0.btnTag} · aria=${head0.aria} · 按钮文字「${head0.btnText}」`,
+        )
+        check(
+          head0.rows === 0 && head0.list === 0,
+          `🆕 ${S2} ⑨：**收起态不渲染清单**（点开才有 —— 不是"渲染了一个空的"）`,
+          `行 ${head0.rows} 条 · 清单容器 ${head0.list} 个`,
+        )
+        check(
+          !head0.zeroCopy,
+          `🆕 ${S2} ⑨：屏上**不出现"0 项要留意"**（0 项时那句话只是一句陈述，看着不像出错）`,
+          `那句是「${short(head0.text, 60)}」`,
+        )
+
+        /* ---------------- ② 键盘（回车）能展开、再按一次能收起 ---------------- */
+        await annPage.focus('[data-admin-attention-toggle]')
+        await annPage.keyboard.press('Enter')
+        await annPage.waitForTimeout(250)
+        const afterEnter = await annPage.evaluate(
+          () => document.querySelectorAll('[data-admin-attention-row]').length,
+        )
+        await annPage.keyboard.press('Enter')
+        await annPage.waitForTimeout(200)
+        const afterClose = await annPage.evaluate(
+          () => document.querySelectorAll('[data-admin-attention-row]').length,
+        )
+        check(
+          afterEnter > 0 && afterClose === 0,
+          `🆕 ${S2} ⑨：**键盘**（聚焦 + 回车）能展开（${afterEnter} 行），再按一次**收起**（${afterClose} 行）`,
+          `展开 ${afterEnter} 行 · 收起 ${afterClose} 行`,
+        )
+
+        /* ---------------- ③ 点开：🔴 条数 == 顶部那个数字 ---------------- */
+        await annPage.click('[data-admin-attention-toggle]')
+        await annPage.waitForTimeout(300)
+        const L = await annPage.evaluate(() => {
+          const rows = [...document.querySelectorAll('[data-admin-attention-row]')]
+          const unknownEl = document.querySelector('[data-admin-attention-unknown]')
+          return {
+            n: rows.length,
+            tones: rows.map((r) => r.getAttribute('data-attention-tone')),
+            cards: rows.map((r) => r.getAttribute('data-attention-card')),
+            goText: rows.map((r) => (r.textContent ?? '').includes('看这一块')),
+            hasDot: rows.map((r) => r.querySelectorAll('span[aria-hidden]').length > 0),
+            /* 每一条说的那句原因，是否真的在它指向的那张卡上**逐字**出现 */
+            same: rows.map((r) => {
+              const card = r.getAttribute('data-attention-card')
+              const rowText = r.textContent ?? ''
+              const cardEl = document.querySelector(`[data-admin-card="${card}"]`)
+              if (!cardEl) return `no-card:${card}`
+              const reason = rowText.replace(card, '').replace('看这一块', '').trim()
+              return (cardEl.textContent ?? '').includes(reason) ? 'same' : `DIFF:${reason}`
+            }),
+            unknownLine: unknownEl ? (unknownEl.textContent ?? '').trim() : null,
+            aria: document.querySelector('[data-admin-attention-toggle]')?.getAttribute('aria-expanded'),
+          }
+        })
+        check(
+          L.n > 0 && L.n === shown0,
+          `🔴🆕 ${S2} ⑨：展开后**清单条数 == 顶部那个数字**（${L.n} vs ${shown0}）—— 同一份数据算出来的`,
+          `顶部「${short(head0.text, 40)}」· 清单 ${L.n} 行 · tones=[${L.tones.join(',')}] · cards=[${L.cards.join('、')}]`,
+        )
+        check(
+          L.tones.length > 0 && L.tones.every((t) => t === 'bad' || t === 'warn'),
+          `🔴🆕 ${S2} ⑨：清单里**只有黄 / 红**（灰的一个都不许混进来）`,
+          `tones=[${L.tones.join(',')}]`,
+        )
+        check(
+          L.same.every((x) => x === 'same') && L.same.length > 0,
+          `🔴🆕 ${S2} ⑨：每一条的"一句话原因"就是**那张卡上正在显示的那句话**（逐字相同，不是另写一套措辞）`,
+          `${L.same.join(' | ')}`,
+        )
+        check(
+          L.cards.every((c) => c && c !== '') && L.goText.every(Boolean) && L.hasDot.every(Boolean),
+          `🆕 ${S2} ⑨：每条都齐了四样 —— 状态点 / 哪一块（= 卡名）/ 一句话原因 / 「看这一块」`,
+          `卡名=[${L.cards.join('、')}] · 有"看这一块"=${L.goText.every(Boolean)} · 有状态点=${L.hasDot.every(Boolean)}`,
+        )
+
+        /* ---------------- ④ 灰项只出现在末尾那行，而且数得上 ---------------- */
+        const unknownCountOnScreen = await annPage.evaluate(() => {
+          const el = document.querySelector('[data-admin-attention-unknown]')
+          const m = /另有\s*(\d+)\s*项无法判断/.exec(el ? (el.textContent ?? '') : '')
+          return m ? Number(m[1]) : null
+        })
+        check(
+          L.unknownLine === null || (unknownCountOnScreen !== null && unknownCountOnScreen > 0),
+          `🔴🆕 ${S2} ⑨：灰项**不在清单里**，只在末尾另起一行说"另有 N 项无法判断"（N 数得出来）`,
+          L.unknownLine ? `末尾那行：「${short(L.unknownLine, 70)}」· N=${unknownCountOnScreen}` : '（本轮灰项恰好为 0，那行不出现）',
+        )
+        check(
+          L.unknownLine === null || L.unknownLine.includes('不算'),
+          `🆕 ${S2} ⑨：末尾那行明说灰**不算"要留意"**（不让"我没量到"变成"平台上出事了"）`,
+          L.unknownLine ? `「${short(L.unknownLine, 70)}」` : '（本轮灰项恰好为 0）',
+        )
+
+        /* ---------------- ⑤ 「看这一块」真的滚到那张卡 ---------------- */
+        await annPage.evaluate(() => window.scrollTo(0, 0))
+        await annPage.waitForTimeout(200)
+        const JUMP = L.cards[0]
+        await annPage.click(`[data-admin-attention-row][data-attention-card="${JUMP}"]`)
+        await annPage.waitForTimeout(700)
+        const jump = await annPage.evaluate((card) => {
+          const el = document.querySelector(`[data-admin-card="${card}"]`)
+          if (!el) return { found: false, y: null, scrollY: Math.round(window.scrollY) }
+          const r = el.getBoundingClientRect()
+          return { found: true, y: Math.round(r.top), scrollY: Math.round(window.scrollY) }
+        }, JUMP)
+        check(
+          jump.found && jump.scrollY > 0,
+          `🔴🆕 ${S2} ⑨：「看这一块」点一下就**滚到那张卡**（不再是"自己一张张找"）`,
+          `目标「${JUMP}」→ scrollY=${jump.scrollY} · 那张卡距视口顶 ${jump.y}px`,
+        )
+
+        /* ---------------- ⑥ 跨栏那一支：静态对齐（缺口 A） ----------------
+           本轮本地模式下**拿不到跨栏的黄红项**（没有服务端就没有那些卡的颜色），
+           所以这里量的是"静态对齐"：**清单里每一条声明的栏 == 它那张卡（或磁贴）真实
+           所在的栏**。两者一错，"先切栏再滚"那一支就会切到一栏里找不到那张卡。 */
+        const panes = await annPage.evaluate(() => {
+          const all = [...document.querySelectorAll('[data-admin-pane]')].map((d) => ({
+            pane: d.getAttribute('data-admin-pane'),
+            cards: [...d.querySelectorAll('[data-admin-card]')].map((c) =>
+              c.getAttribute('data-admin-card'),
+            ),
+            tiles: [...d.querySelectorAll('[data-admin-tile]')].map((c) =>
+              c.getAttribute('data-admin-tile'),
+            ),
+          }))
+          return {
+            panes: all.length,
+            cardCount: all.reduce((n, p) => n + p.cards.length, 0),
+            deploy: all.find((p) => p.cards.includes('① 部署与版本'))?.pane ?? null,
+            db: all.find((p) => p.cards.includes('数据库使用情况'))?.pane ?? null,
+            maint: all.find((p) => p.cards.includes('维护模式'))?.pane ?? null,
+            errors: all.find((p) => p.cards.includes('前端错误日志'))?.pane ?? null,
+            feedback: all.find((p) => p.cards.includes('用户反馈'))?.pane ?? null,
+            superTile: all.find((p) => p.tiles.includes('super'))?.pane ?? null,
+          }
+        })
+        check(
+          panes.panes === 7 && panes.cardCount >= 10,
+          `🆕 ${S2} ⑨：**每个分区都摆着 data-admin-pane 标记**（${panes.panes} 个）—— "这一条在哪一栏"是**可核对的数据**，不是靠猜`,
+          `${panes.panes} 栏 · 其中 ${panes.cardCount} 张卡`,
+        )
+        check(
+          panes.deploy === 'overview+health' &&
+            panes.db === 'db' &&
+            panes.maint === 'maintenance' &&
+            panes.errors === 'errors' &&
+            panes.feedback === 'feedback' &&
+            panes.superTile === 'overview',
+          `🆕 ${S2} ⑨（缺口 A 的落点）：每一条声明的栏 == 它那张卡真实所在的栏 —— 所以"先切栏再滚"那一支指得准（本轮驱动不到跨栏的黄红项，只能这样静态对齐）`,
+          `部署=${panes.deploy} · 库=${panes.db} · 维护=${panes.maint} · 错误=${panes.errors} · 反馈=${panes.feedback} · super 磁贴=${panes.superTile}`,
+        )
+        /*
+         * ⚠️ 这一节**一张图都不出**（判据全在 DOM 上）。
+         *    加图要动 `EXPECTED_FILES`，而它是**集合相等** —— 那种"顺手加一张"正是
+         *    `AGENTS.md` 说的"改门禁为了绿"。所以这里刻意不截。
+         */
+      })
+
       /* ---------------- ⑥ 维护模式：教师端 / 教室端 / 超管三条行为 ---------------- */
       await step(S2, async () => {
         const ctxM = await browser.newContext({ viewport: { width: 1280, height: 800 }, locale: 'zh-CN' })

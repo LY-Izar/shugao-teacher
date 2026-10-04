@@ -291,7 +291,16 @@ function Card({
 }) {
   const [open, setOpen] = useState(defaultOpen)
   return (
-    <section className="panel mb-3 overflow-hidden" data-tone={tone}>
+    <section
+      className="panel mb-3 overflow-hidden"
+      data-tone={tone}
+      /*
+       * 🆕 2026-10-04：**L0 那句"N 项要留意"展开后每条的「看这一块」按它找卡**。
+       * 用属性找、不用可见文案 —— 与 `data-admin-toggle` 同一条纪律（§18.2）：
+       * 文案改一个字就把断言弄红，那是"测试比产品还脆"。
+       */
+      data-admin-card={title}
+    >
       <div className="flex items-start gap-3 p-3.5">
         <span style={{ paddingTop: 5 }}>
           <Dot tone={tone} />
@@ -413,6 +422,226 @@ function Line({ k, v }: { k: string; v: React.ReactNode }) {
         {v}
       </span>
     </div>
+  )
+}
+
+/* ============================================================
+   🆕 2026-10-04「N 项要留意」点一下 → 全部列出来
+   ------------------------------------------------------------
+   用户原话："维护面板，能不能我点一下概览里面要留意的，就把所以黄色或者红色
+   状态的全部列出来呀，一个一个找有点麻烦"。
+
+   🔴 **只列黄与红**（`attentionItems` 已经滤过）：**灰 = "没结论 / 量不到"，
+      它不是"要留意"**（三态纪律）。灰项只在末尾附一行"另有 N 项" ——
+      混进黄红清单里就是把"我没量到"说成"平台上出事了"。
+   ============================================================ */
+
+/**
+ * 「要留意」清单里的一条。
+ *
+ * 🔴 `reason` **必须与那张卡 `headline` 逐字相同**（同一次计算的值，
+ *    不是"另写一套措辞、另算一遍"）。所以这个数组在渲染处**只建一次**：
+ *    顶部那个数字、这份清单、以及每张卡自己，全都从它取。
+ *
+ * ⚠️ 只有"读不到"的灰项**不进这个数组**（三态纪律）—— 它们另算一行。
+ */
+type AttentionItem = {
+  key: string
+  tone: Tone
+  /** 哪一块 —— 逐字等于下面那张卡的 `title`（也是 `data-admin-card` 的值） */
+  title: string
+  reason: string
+  /** 不在当前这一栏时要先切过去（`null` = 就在当前这栏里） */
+  tab: AdminTab | null
+  /** 这一条的东西在哪一栏（`data-admin-pane` 的值）—— 用于核对"切过去真的找得到" */
+  pane: string
+}
+
+/**
+ * 展开后的**汇总清单**：一行一条，四样东西 —— 状态点 / 哪一块 / 一句话原因 / 「看这一块」。
+ *
+ * 🔴 条数**不由它自己算**：`items` 就是顶部那个数字的来源（同一份数据）。
+ * 🔴 灰项**不在 `items` 里**，只在末尾单独一行 —— 它不算"要留意"。
+ * ⚠️ 一整行就是一颗原生 `button`（键盘 Tab / 回车都能触发），**不是**往 div 上挂 `onClick`。
+ */
+function AttentionList({
+  items,
+  unknownCount,
+  onGo,
+}: {
+  items: readonly AttentionItem[]
+  unknownCount: number
+  onGo: (item: AttentionItem) => void
+}) {
+  return (
+    <div
+      id="admin-attention-list"
+      className="px-3.5 py-2.5"
+      style={{ borderTop: '1px solid var(--color-line)', background: 'var(--color-surface2)' }}
+      data-admin-attention-list
+    >
+      {items.map((item) => (
+        <button
+          key={item.key}
+          type="button"
+          onClick={() => onGo(item)}
+          className="flex w-full flex-wrap items-center gap-x-2 gap-y-1 py-1 text-left"
+          style={{ background: 'transparent', border: 0, padding: 0, cursor: 'pointer' }}
+          data-admin-attention-row
+          data-attention-card={item.title}
+          data-attention-tone={item.tone}
+        >
+          <Dot tone={item.tone} />
+          <span style={{ fontSize: 12.5, fontWeight: 600 }}>{item.title}</span>
+          <span
+            className="min-w-0 flex-1"
+            style={{ fontSize: 12.5, lineHeight: 1.7, color: 'var(--color-ink2)' }}
+          >
+            {item.reason}
+          </span>
+          <span
+            style={{
+              flex: 'none',
+              fontSize: 12.5,
+              fontWeight: 600,
+              /* ⚠️ 同上：不用 `accenttext`（F6-H 钉着恰好 25 处）—— 靠加粗 + 下划线 */
+              color: 'var(--color-ink)',
+              textDecoration: 'underline',
+            }}
+          >
+            看这一块
+          </span>
+        </button>
+      ))}
+      {unknownCount > 0 ? (
+        <div
+          className="pt-1.5"
+          style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.7 }}
+          data-admin-attention-unknown
+        >
+          另有 <span className="num">{unknownCount}</span> 项无法判断（拿不到数据，不算"要留意"）
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+/**
+ * L0 那句话 + 「N 项要留意」那颗按钮 + 展开后的清单 —— **一个整体**。
+ *
+ * 🔴 为什么合成一个组件：那句话里的数字与清单的条数**必须是同一份数据算出来的**。
+ *    摆在一个组件里，`items.length` 就是两者唯一的来源 —— 想让它俩不一致都做不到。
+ * 🔴 0 项时**不产生按钮**（整句只是一句陈述），所以屏上不会出现"0 项要留意"
+ *    那种看着像出错的样子。
+ * 🔴 灰（"量不到"）**不进 `items`**，只在清单末尾附一行 —— 它不算"要留意"。
+ */
+function AttentionBar({
+  toneAll,
+  items,
+  unknownCount,
+  onGo,
+}: {
+  /** 全屏汇总色（与原写法同一个 `worstTone(allTones)`）—— 它决定那句话的前半截 */
+  toneAll: Tone
+  items: readonly AttentionItem[]
+  unknownCount: number
+  onGo: (item: AttentionItem) => void
+}) {
+  const [open, setOpen] = useState(false)
+  /*
+   * 🔴 数字 = `items.length`（**就是清单本身**）。不是另数一遍 `allTones` ——
+   *    那样两个数会各自漂移，而用户点开就是为了核这份清单。
+   * ⚠️ "项异常" / "项要留意"沿用原来那句人话（`toneAll === 'bad' ? … : …`），
+   *    文案一个字没换。
+   */
+  const bad = toneAll === 'bad'
+  return (
+    <>
+      <div style={{ fontSize: 16, fontWeight: 680 }} data-admin-headline>
+        {bad
+          ? '平台有问题 · '
+          : toneAll === 'warn'
+            ? '平台基本正常 · '
+            : toneAll === 'unknown'
+              ? '平台状态无法完全判断 · '
+              : '平台正常 · 没有发现异常'}
+        {items.length > 0 ? (
+          <button
+            type="button"
+            data-admin-attention-toggle
+            aria-expanded={open}
+            aria-controls="admin-attention-list"
+            onClick={() => setOpen((v) => !v)}
+            style={{
+              background: 'transparent',
+              border: 0,
+              padding: 0,
+              font: 'inherit',
+              /*
+               * ⚠️ **不能改成 `--color-accenttext`**：`shots` 的 F6-H 钉着"全仓 `color:`
+               *    前景色用 accenttext 的**恰好 25 处**"（四个主题 × 那批小字的对比度锚点）。
+               *    所以这一颗（以及清单里那行「看这一块」）用**墨色加粗 + 下划线**表达
+               *    "这里能点" —— 可点性靠 `underline` + `cursor: pointer` + 原生 button。
+               */
+              color: 'var(--color-ink)',
+              cursor: 'pointer',
+              textDecoration: 'underline',
+            }}
+          >
+            <span className="num">{items.length}</span>
+            {bad ? ' 项异常' : ' 项要留意'}
+          </button>
+        ) : null}
+      </div>
+      {open && items.length > 0 ? (
+        <AttentionList items={items} unknownCount={unknownCount} onGo={onGo} />
+      ) : null}
+    </>
+  )
+}
+
+/**
+ * 「维护模式」那张卡的 headline —— **提到组件外面**，因为它是**两个地方**共用的那一句话：
+ * 卡自己、以及 L0 展开的「要留意」清单（🔴 逐字同一句，不许另写）。
+ */
+function maintenanceHeadline(state: AdminMaintenanceState | null, error: string): string {
+  if (state === null) return `无法判断 —— 读不到维护状态${error ? `（${error}）` : ''}`
+  if (state.effective) return `🔴 **正在维护中** —— ${state.message || MAINTENANCE_DEFAULT_MESSAGE}`
+  if (state.enabled) return `已定时 / 已到点：${state.text}`
+  return '未开启（全校正常）'
+}
+
+/**
+ * 「版本更新」那张卡的 headline —— **提到组件外面**，因为它是**两个地方**共用的那一句话：
+ * 卡自己、以及 L0 展开的「要留意」清单（🔴 逐字同一句，不许另写）。
+ */
+function releaseHeadline(
+  slots: { teacher: AdminReleaseSlot; classroom: AdminReleaseSlot } | null,
+  error: string,
+): string {
+  const say = (s: AdminReleaseSlot | undefined) =>
+    !s ? '无法判断' : s.enabled && s.live ? `正在发 v${s.version}（${s.force ? '强制' : '选择性'}）` : '没发'
+  if (error) return `无法判断 —— 读不到版本公告${error ? `（${error}）` : ''}`
+  if (!slots) return '无法判断 —— 还没取到'
+  return `教师端：${say(slots.teacher)} · 教室端：${say(slots.classroom)}`
+}
+
+/**
+ * 「版本更新」那张卡的颜色 —— **两个地方共用**（卡自己 + L0 的清单/颜色汇总）。
+ * 🔴 读不到 = 灰（`unknown`）；有公告在生效 = 黄；都没有 = 绿。
+ */
+function releaseTone(
+  slots: { teacher: AdminReleaseSlot; classroom: AdminReleaseSlot } | null,
+  error: string,
+): Tone {
+  if (error || !slots) return 'unknown'
+  return slots.teacher.enabled || slots.classroom.enabled ? 'warn' : 'ok'
+}
+
+/** 「看这一块」要找的那个元素：先按卡找，卡不存在时按磁贴找（"最高管理员"只有磁贴） */
+function cardEl(target: string): Element | null {
+  return document.querySelector(
+    `[data-admin-card="${target}"], [data-admin-tile="${target}"]`,
   )
 }
 
@@ -1274,12 +1503,199 @@ export default function Admin() {
    *    不能只躺在磁贴里（那正是"谁也管不了平台"最容易被漏掉的地方）。
    */
   const toneSuper: Tone = superJudge.tone
+  /*
+   * 🆕 「版本更新」那一张也进颜色汇总：它**有正在生效的公告**时是黄的 ——
+   *    "有版本公告挂着"本来就该出现在概览那句话里（不然只能自己翻到「维护」那一栏）。
+   *    ⚠️ 颜色只由 `releaseTone()` 一处算（卡自己调的是同一个函数，见那里的注释）。
+   */
+  const toneRelease: Tone = releaseTone(rel, relErr)
 
-  const allTones = [toneDeploy, toneConfig, toneSchema, toneData, toneBackup, toneDb, toneErrors, toneFeedback, toneMaint, toneSuper]
+  const allTones = [toneDeploy, toneConfig, toneSchema, toneData, toneBackup, toneDb, toneErrors, toneFeedback, toneMaint, toneSuper, toneRelease]
   const toneAll = worstTone(allTones)
-  const badCount = allTones.filter((t) => t === 'bad').length
-  const warnCount = allTones.filter((t) => t === 'warn').length
+  /*
+   * 🔴 **计数与清单同源**（2026-10-04 用户要求）。
+   *
+   * 以前这两个数是在 L0 那句话里**当场数的**（`allTones.filter(...)`），而"哪几项"
+   * 只能靠人一张卡一张卡翻。现在只留**一份** `attentionAll`：
+   *   · 顶部那个数字 = 从它数出来的（不是另数一遍 `allTones`）；
+   *   · 展开后的清单 = 它自己滤出来的；
+   *   · 每条卡自己的 `headline` = 同一个 `reason`（见下面每张卡的 `headline={…}`）。
+   * ⚠️ 有一项（最高管理员）**没有单张卡**，它的结论只在磁贴 `sub` 上 —— 所以
+   *    `reason` 也逐字取磁贴 `sub` 那一句，`anchor` 指那块磁贴。
+   */
+  /**
+   * ⚠️⚠️ **这些 `xxxReason` 常量必须定义在 `attentionAll` 之前**。
+   * 踩过的坑：写成 `cardReason('deploy')` 那种"查表"调用 → `attentionAll` 初始化到一半时
+   * 去访问 `attentionAll` 自己 ⇒ `ReferenceError: Cannot access 'attentionAll' before initialization`
+   * （TDZ），整屏变成"这一页出了点问题"。所以这里是**普通局部 const**，不是查表。
+   */
+  const deployReason = localMode
+    ? '**本地模式** —— 平台上所有数据其实只在这台浏览器里'
+    : hashMissing
+      ? `${APP_VERSION_LABEL} —— **这是开发态或哈希取不到，线上出现就是构建异常**`
+      : versionDrift
+        ? '代码改了但没人改版本号（两个部署版本号一样、哈希不一样）'
+        : '线上构建标识正常'
+  const configReason =
+    serviceKey.tone === 'bad'
+      ? '`SUPABASE_SERVICE_ROLE_KEY` 未配置 → 建号 / 指派身份那两页会打不开'
+      : r2.text
+  const dataReason = !hydrated
+    ? '数据还没就绪（hydrate 没成功）—— **无法判断**，不是"没有矛盾"'
+    : contradictions.badCount
+      ? `作业档案 ${contradictions.badCount} 份自相矛盾（扫了 ${contradictions.scanned} 份）`
+      : `作业档案 ${contradictions.scanned} 份，内部一致`
+  const maintReason = maintenanceHeadline(maint, maintErr)
+  const releaseReason = releaseHeadline(rel, relErr)
+  /* 这一项（最高管理员）**没有卡** —— 结论只在概览那块磁贴上，所以 `reason` 取的是磁贴那句 */
+  const superReason =
+    superAdmins.readable && superAdmins.count === 0
+      ? '🔴 谁也管不了平台'
+      : superAdmins.readable
+        ? '全平台只留一个'
+        : '无法判断（不是"有 1 个"）'
+
+  const attentionAll: (AttentionItem & { anchor?: string })[] = [
+    {
+      key: 'deploy',
+      tone: toneDeploy,
+      title: '① 部署与版本',
+      reason: deployReason,
+      tab: null,
+      pane: 'overview+health',
+    },
+    {
+      key: 'config',
+      tone: toneConfig,
+      title: '② 配置完整性',
+      reason: configReason,
+      tab: null,
+      pane: 'overview+health',
+    },
+    {
+      key: 'backup',
+      tone: toneBackup,
+      title: '③ 备份（G2）',
+      reason: backup.text,
+      tab: null,
+      pane: 'overview+health',
+    },
+    {
+      key: 'schema',
+      tone: toneSchema,
+      title: '④ 数据库结构漂移（C1）',
+      reason: driftInfo ? driftInfo.text : '正在探测…',
+      tab: null,
+      pane: 'overview+health',
+    },
+    {
+      key: 'data',
+      tone: toneData,
+      title: '⑤ 作业档案内部矛盾（E7）',
+      reason: dataReason,
+      tab: null,
+      pane: 'overview+health',
+    },
+    {
+      key: 'db',
+      tone: toneDb,
+      title: '数据库使用情况',
+      reason: dbJudge.text,
+      tab: 'db',
+      pane: 'db',
+    },
+    {
+      key: 'maint',
+      tone: toneMaint,
+      title: '维护模式',
+      reason: maintReason,
+      tab: 'maintenance',
+      pane: 'maintenance',
+    },
+    {
+      key: 'release',
+      tone: toneRelease,
+      title: '版本更新',
+      reason: releaseReason,
+      tab: 'maintenance',
+      pane: 'maintenance',
+    },
+    {
+      key: 'errors',
+      tone: toneErrors,
+      title: '前端错误日志',
+      reason: errJudge.text,
+      tab: 'errors',
+      pane: 'errors',
+    },
+    {
+      key: 'feedback',
+      tone: toneFeedback,
+      title: '用户反馈',
+      reason: fbJudge.text,
+      tab: 'feedback',
+      pane: 'feedback',
+    },
+    {
+      /* ⚠️ 这一项**没有卡** —— 它的结论只写在概览那块磁贴上（所以 `anchor` 指磁贴） */
+      key: 'super',
+      tone: toneSuper,
+      title: '超级管理员',
+      reason: superReason,
+      tab: null,
+      pane: 'overview',
+      anchor: 'super',
+    },
+  ]
+  const badCount = attentionAll.filter((a) => a.tone === 'bad').length
+  const warnCount = attentionAll.filter((a) => a.tone === 'warn').length
+  const attentionItems: AttentionItem[] = attentionAll.filter(
+    (a) => a.tone === 'bad' || a.tone === 'warn',
+  )
+  /**
+   * 卡上那句 `headline` 就是清单里那一条的 `reason` —— **查一次、用两处**
+   * （🔴 不许在卡上再写一遍措辞：那正是"同一句话被抄成两份、改一处漏一处"的来源）。
+   * ⚠️ 它只能在 `attentionAll` **之后**定义，而且**绝不能**反过来被 `attentionAll` 调用
+   *    （那会踩 TDZ —— 见上面那段说明）。
+   */
+  function cardReason(key: string): string {
+    return attentionAll.find((a) => a.key === key)?.reason ?? ''
+  }
+  /*
+   * 反向对照用的那一句：`attentionAll` 与 `allTones` **必须逐项对上** ——
+   * 谁要是以后只补了 `allTones`（进颜色汇总）却忘了补清单，或者反过来，
+   * 这里就是"计数与清单不再同源"的第一个露头处。
+   */
+  const toneCountsMatch =
+    allTones.filter((t) => t === 'bad').length === badCount &&
+    allTones.filter((t) => t === 'warn').length === warnCount
+  void toneCountsMatch
+  /**
+   * 🔴 **灰（"量不到 / 没结论"）不算"要留意"**（三态纪律）——
+   * 它**只**在清单末尾附一行"另有 N 项无法判断"，绝不混进黄红清单里，
+   * 也不让上面那个数字带上它。
+   */
   const unknownCount = allTones.filter((t) => t === 'unknown').length
+  /**
+   * 「看这一块」要**先切栏、再滚**（那一栏是 `hidden` 不是不渲染，滚的是同一个 DOM）。
+   * 用一个 ref 记下目标：切换 tab 是异步的，等这一帧渲染完（`useEffect`）再滚。
+   */
+  const pendingScroll = useRef<string>('')
+  useEffect(() => {
+    const target = pendingScroll.current
+    if (!target) return
+    pendingScroll.current = ''
+    cardEl(target)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }, [tab])
+  const goToCard = (item: AttentionItem & { anchor?: string }) => {
+    const target = item.anchor ?? item.title
+    if (item.tab && item.tab !== tab) {
+      pendingScroll.current = target
+      setTab(item.tab)
+      return
+    }
+    cardEl(target)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
 
   /* ---------------- 这台设备被标成教室端？ ----------------
    *
@@ -1342,15 +1758,21 @@ export default function Admin() {
           <div className="flex items-center gap-3 p-3.5">
             <Dot tone={toneAll} />
             <div className="min-w-0 flex-1">
-              <div style={{ fontSize: 16, fontWeight: 680 }} data-admin-headline>
-                {toneAll === 'bad'
-                  ? `平台有问题 · ${badCount} 项异常`
-                  : toneAll === 'warn'
-                    ? `平台基本正常 · ${warnCount} 项要留意`
-                    : toneAll === 'unknown'
-                      ? `平台状态无法完全判断 · ${unknownCount} 项拿不到数据`
-                      : '平台正常 · 没有发现异常'}
-              </div>
+              {/*
+                🆕 2026-10-04（用户原话）：「我点一下概览里面要留意的，就把所有黄色或者红色
+                状态的全部列出来呀，一个一个找有点麻烦」——那句话里的「N 项要留意」
+                **整颗是可点的按钮**（原生 `button`：键盘 Tab / 回车都触发），点开在下面
+                展开一份**汇总清单**；再点一次收起。
+
+                🔴 数字与清单**同一份数据**（`AttentionBar` 里就一个 `items.length`）——
+                见那个组件上面那段注释。
+              */}
+              <AttentionBar
+                toneAll={toneAll}
+                items={attentionItems}
+                unknownCount={unknownCount}
+                onGo={goToCard}
+              />
               <div
                 className="mt-0.5"
                 style={{ fontSize: 12, color: 'var(--color-ink3)', lineHeight: 1.7 }}
@@ -1474,14 +1896,15 @@ export default function Admin() {
             </div>
           ) : null}
         </div>
+      </div>
 
-        <div className="mt-3" />
+      <div className="mt-3" />
 
       {/* ============================================================
           「概览」那一栏：**先一排数字磁贴**（仪表盘），下面才是明细。
           用户原话："概览页 = 仪表盘：一排数字磁贴（大数字 + 标签 + 状态色），下面才是明细。"
           ============================================================ */}
-      <div hidden={tab !== 'overview'}>
+      <div hidden={tab !== 'overview'} data-admin-pane="overview">
         <Tiles
           items={[
             {
@@ -1611,7 +2034,7 @@ export default function Admin() {
         拆成两份会变成"同一件事两个渲染入口"，而这两栏要展示的本来就是同一批信息
         —— 概览 = 磁贴 + 这批卡的结论，健康 = 只留这批卡的明细。
       */}
-      <div hidden={tab !== 'overview' && tab !== 'health'}>
+      <div hidden={tab !== 'overview' && tab !== 'health'} data-admin-pane="overview+health">
         {/* ---------------- L1 分诊卡 ---------------- */}
         {server.kind === 'forbidden' ? (
           <Card
@@ -1626,15 +2049,7 @@ export default function Admin() {
         <Card
           tone={toneDeploy}
           title="① 部署与版本"
-          headline={
-            localMode
-              ? '**本地模式** —— 平台上所有数据其实只在这台浏览器里'
-              : hashMissing
-                ? `${APP_VERSION_LABEL} —— **这是开发态或哈希取不到，线上出现就是构建异常**`
-                : versionDrift
-                  ? '代码改了但没人改版本号（两个部署版本号一样、哈希不一样）'
-                  : '线上构建标识正常'
-          }
+          headline={cardReason('deploy')}
           note={`当前版本 ${APP_VERSION_LABEL}`}
         >
           <SubHead>线上跑的是哪一次构建</SubHead>
@@ -1714,11 +2129,7 @@ export default function Admin() {
           tone={toneConfig}
           chipText={toneConfig === 'warn' ? '降级中（已知）' : undefined}
           title="② 配置完整性"
-          headline={
-            serviceKey.tone === 'bad'
-              ? '`SUPABASE_SERVICE_ROLE_KEY` 未配置 → 建号 / 指派身份那两页会打不开'
-              : r2.text
-          }
+          headline={cardReason('config')}
           note={
             server.kind === 'not_configured'
               ? server.message
@@ -1789,7 +2200,7 @@ export default function Admin() {
           tone={toneBackup}
           chipText={toneBackup === 'warn' ? '降级中（已知）' : undefined}
           title="③ 备份（G2）"
-          headline={backup.text}
+          headline={cardReason('backup')}
           note={
             lastRun
               ? `最近一次运行：${lastRun.conclusion ?? '结论未知'} · ${agoText(
@@ -1923,7 +2334,7 @@ export default function Admin() {
         <Card
           tone={toneSchema}
           title="④ 数据库结构漂移（C1）"
-          headline={driftInfo ? driftInfo.text : '正在探测…'}
+          headline={cardReason('schema')}
           note={
             drift
               ? `探测于 ${agoText(drift.at, now)}（刷新即重探）` +
@@ -2140,13 +2551,7 @@ export default function Admin() {
         <Card
           tone={toneData}
           title="⑤ 作业档案内部矛盾（E7）"
-          headline={
-            !hydrated
-              ? '数据还没就绪（hydrate 没成功）—— **无法判断**，不是"没有矛盾"'
-              : contradictions.badCount
-                ? `作业档案 ${contradictions.badCount} 份自相矛盾（扫了 ${contradictions.scanned} 份）`
-                : `作业档案 ${contradictions.scanned} 份，内部一致`
-          }
+          headline={cardReason('data')}
           note="🟢 纯前端计算，**零额外请求**"
           openLabel="看矛盾清单"
         >
@@ -2322,14 +2727,13 @@ export default function Admin() {
           </span>
         </div>
       </div>
-      </div>
 
       {/* ============================================================
           其余六个分区：**一次只显示一个**（`hidden` 而不是条件渲染 ——
           这样"某个分区里的东西被谁不小心挪进另一个分区"这种改动会立刻在
           截图断言里露出来；而条件渲染会让"没渲染"与"渲染了但空"看起来一样）。
           ============================================================ */}
-      <div hidden={tab !== 'db'}>
+      <div hidden={tab !== 'db'} data-admin-pane="db">
         <DbCard
           report={db}
           error={dbErr}
@@ -2337,12 +2741,14 @@ export default function Admin() {
           egressFacts={egressFacts}
           egressJudge={egressJudge}
           now={now}
+          /* 🔴 卡上那句话 = L0 清单里那一条的 `reason`（同一份数据，见 `attentionAll`） */
+          headline={cardReason('db')}
         />
       </div>
-      <div hidden={tab !== 'announce'}>
+      <div hidden={tab !== 'announce'} data-admin-pane="announce">
         <AnnounceCard />
       </div>
-      <div hidden={tab !== 'maintenance'}>
+      <div hidden={tab !== 'maintenance'} data-admin-pane="maintenance">
         <MaintenanceCard
           state={maint}
           error={maintErr}
@@ -2364,7 +2770,7 @@ export default function Admin() {
           busy={opsBusy}
         />
       </div>
-      <div hidden={tab !== 'errors'}>
+      <div hidden={tab !== 'errors'} data-admin-pane="errors">
         <ErrorsCard
           report={errReport}
           error={errErr}
@@ -2372,9 +2778,10 @@ export default function Admin() {
           now={now}
           onReload={reloadOps}
           busy={opsBusy}
+          headline={cardReason('errors')}
         />
       </div>
-      <div hidden={tab !== 'feedback'}>
+      <div hidden={tab !== 'feedback'} data-admin-pane="feedback">
         <FeedbackCard
           report={fbReport}
           error={fbErr}
@@ -2382,6 +2789,7 @@ export default function Admin() {
           now={now}
           onReload={reloadOps}
           busy={opsBusy}
+          headline={cardReason('feedback')}
         />
       </div>
     </AdminFrame>
@@ -3132,6 +3540,7 @@ function DbCard({
   egressFacts,
   egressJudge,
   now,
+  headline,
 }: {
   report: DbReport | null
   error: string
@@ -3139,6 +3548,8 @@ function DbCard({
   egressFacts: EgressFacts
   egressJudge: EgressJudgement
   now: number
+  /** 卡上那句话（🔴 与 L0 清单里那一条**逐字同一句**） */
+  headline: string
 }) {
   const pct = judge.pct
   /**
@@ -3163,7 +3574,7 @@ function DbCard({
     <Card
       tone={judge.tone}
       title="数据库使用情况"
-      headline={judge.text}
+      headline={headline}
       note={
         report === null
           ? `${error || '正在读…'} —— ${quotaNote}`
@@ -3532,15 +3943,7 @@ function MaintenanceCard({
          的 `children` 默认不渲染，于是常态下"二次确认输入框 + 开启按钮"连 DOM 都没有）。 */
       defaultOpen
       title="维护模式"
-      headline={
-        state === null
-          ? `无法判断 —— 读不到维护状态${error ? `（${error}）` : ''}`
-          : state.effective
-            ? `🔴 **正在维护中** —— ${state.message || MAINTENANCE_DEFAULT_MESSAGE}`
-            : state.enabled
-              ? `已定时 / 已到点：${state.text}`
-              : '未开启（全校正常）'
-      }
+      headline={maintenanceHeadline(state, error)}
       note={
         state === null
           ? '⚠️ 读不到**不是**"没在维护"，也**不是**"在维护" —— 这一格永远是灰的'
@@ -3802,23 +4205,18 @@ function ReleaseCard({
   onReload: () => void
   busy: boolean
 }) {
-  const say = (s: AdminReleaseSlot | undefined) =>
-    !s ? '无法判断' : s.enabled && s.live ? `正在发 v${s.version}（${s.force ? '强制' : '选择性'}）` : '没发'
-  const anyOn = Boolean(slots && (slots.teacher.enabled || slots.classroom.enabled))
-  const tone: Tone = error || !slots ? 'unknown' : anyOn ? 'warn' : 'ok'
+  /*
+   * 🔴 颜色**只由 `releaseTone()` 一处算** —— 概览的颜色汇总与「要留意」清单取的是
+   *    同一个函数；卡这里只是把它调出来（不然同一件事会有两份颜色判据）。
+   */
+  const tone: Tone = releaseTone(slots, error)
 
   return (
     <Card
       tone={tone}
       defaultOpen
       title="版本更新"
-      headline={
-        error
-          ? `无法判断 —— 读不到版本公告${error ? `（${error}）` : ''}`
-          : !slots
-            ? '无法判断 —— 还没取到'
-            : `教师端：${say(slots.teacher)} · 教室端：${say(slots.classroom)}`
-      }
+      headline={releaseHeadline(slots, error)}
       note={`本机的 APP_VERSION 是 v${APP_VERSION} —— 客户端的版本比公告旧才会提示`}
     >
       <div className="px-3.5 py-2" style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.85 }}>
@@ -4168,6 +4566,7 @@ function ErrorsCard({
   now,
   onReload,
   busy,
+  headline,
 }: {
   report: ErrorsReport | null
   error: string
@@ -4175,6 +4574,8 @@ function ErrorsCard({
   now: number
   onReload: () => void
   busy: boolean
+  /** 卡上那句话（🔴 与 L0 清单里那一条**逐字同一句**） */
+  headline: string
 }) {
   const [keyword, setKeyword] = useState('')
   const [selected, setSelected] = useState<Record<string, boolean>>({})
@@ -4245,7 +4646,7 @@ function ErrorsCard({
     <Card
       tone={judge.tone}
       title="前端错误日志"
-      headline={judge.text}
+      headline={headline}
       note={
         report === null
           ? error || '正在读…'
@@ -4469,6 +4870,7 @@ function FeedbackCard({
   now,
   onReload,
   busy,
+  headline,
 }: {
   report: AdminFeedbackReport | null
   error: string
@@ -4476,6 +4878,8 @@ function FeedbackCard({
   now: number
   onReload: () => void
   busy: boolean
+  /** 卡上那句话（🔴 与 L0 清单里那一条**逐字同一句**） */
+  headline: string
 }) {
   const [keyword, setKeyword] = useState('')
   const [busy2, setBusy2] = useState(false)
@@ -4518,7 +4922,7 @@ function FeedbackCard({
     <Card
       tone={judge.tone}
       title="用户反馈"
-      headline={judge.text}
+      headline={headline}
       note={
         report === null
           ? error || '正在读…'
