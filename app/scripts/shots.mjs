@@ -375,6 +375,13 @@ const EXPECTED_FILES = [
   //  125 = 那张卡打开、三格填成"太短"之后的样子 —— 屏上**明写着错误原因**（不是静默不提交）。
   //  ⚠️ 图号接着 124 编；`EXPECTED_FILES` 是**集合相等**，所以这一张不登记就会红。
   '125-settings-change-password.png',
+  // 🆕 2026-10-04「版本更新公告」（见 S2 ⑥b 那一节，DEV 钩子 `?rel=…` 驱动）。
+  //  131 = **强制那一档**：教师端**整屏接管**（没有关闭 ×、没有「稍后」、Esc 也关不掉，
+  //        工作台/导航一个字都不渲染）；132 = **选择性那一档**：有关闭 × 与「稍后」，
+  //        关掉之后照常用（所以它必须**保留 children**）。
+  //  ⚠️ 图号挑的是当前最大 1xx（130）之后的两个空闲号；`EXPECTED_FILES` 是集合相等，两张都要登记。
+  '131-release-force.png',
+  '132-release-soft.png',
 ]
 
 /* ---------------- 断言与日志 ---------------- */
@@ -2206,6 +2213,120 @@ await withLock(async () => {
       })
       await shotRaw(room, SR, '32-classroom')
 
+      /* ---------------- 🆕 教室端「置顶小窗 / 声音」：**只该影响壳**的那条判据（2026-10-04）
+       *
+       * 用户报的第 ④ 条原话：「**不支持置顶小窗，为什么还要点一下解锁声音**」（教室端 exe）。
+       * 产品侧把这件事改成"**壳自己声明**"（`_src/desktop/preload.js` 的 `autoplayAllowed`
+       * 与 `documentPip`），而**网页版必须一字不变** —— 这一节钉的就是后半句：
+       *   · dev server 里**没有壳**（没有 `window.__shell_out`）⇒ `shellAutoplayAllowed()` 恒 false
+       *     ⇒「先解锁声音」那一步**照旧在**（那块横幅的 `data-classroom-unlock` 必须在）；
+       *   · 而"小窗不可用"那块横幅的有无，必须与**真实**的 `pipSupported()` 一致。
+       * ⚠️ 这一节**一张图都不出**（判据在 DOM 上；加图要动 `EXPECTED_FILES`，那是集合相等）。
+       * ⚠️ 本机 Edge（Chromium 116+）有 `documentPictureInPicture` ⇒ 那块"开不了"的横幅**不该**出现。
+       *    这里不问浏览器版本，而是**把页面里的真值读回来再断言**；下面 🧪 那一段就是反向那一侧：
+       *    把那个 API **影子掉**（那正是"老浏览器"的现场）⇒ 那块横幅必须出现，而且说的是
+       *    **网页版那句话**（提 Edge / Chrome 116）。而**壳里那句是假话** —— 由
+       *    `_tools/verify-exe.mjs` 反向钉住（壳里那块横幅一个字都不许提 Edge / Chrome 116）。
+       *    📌 2026-10-04 实测（本机 Edge）：`typeof documentPictureInPicture === 'object'`，
+       *       所以这一节走的是"有 API"那一支（解锁那一步在、"开不了"横幅 0 个）。
+       */
+      await step(SR, async () => {
+        await room.goto(`${BASE}/classroom`, { waitUntil: 'networkidle' })
+        await waitPageSettled(room)
+        await room.waitForTimeout(900)
+        /** 这一屏的两块横幅 + 环境真值（本节的读数口） */
+        const readBanners = () =>
+          room.evaluate(() => {
+            const b = document.querySelector('[data-classroom-pip-unsupported]')
+            return {
+              shell: typeof window.__shell_out,
+              api: typeof window.documentPictureInPicture,
+              unlock: document.querySelectorAll('[data-classroom-unlock]').length,
+              unsupported: document.querySelectorAll('[data-classroom-pip-unsupported]').length,
+              bannerText: b ? String(b.textContent ?? '').replace(/\s+/g, ' ').trim() : null,
+            }
+          })
+        const A = await readBanners()
+        check(
+          A.shell === 'undefined',
+          `🔴 ${SR}：dev server 里**没有壳**（\`window.__shell_out\` 不存在）—— 所以这一节量的是**网页版**行为；壳那一侧由 \`_tools/verify-exe.mjs\` 量`,
+          `typeof window.__shell_out = ${A.shell} · typeof documentPictureInPicture = ${A.api}`,
+        )
+        const apiOn = A.api === 'object'
+        check(
+          (apiOn && A.unlock === 1 && A.unsupported === 0) ||
+            (!apiOn && A.unlock === 0 && A.unsupported === 1),
+          `🔴 ${SR}：网页版行为**一字不变** —— 本机 Edge ${apiOn ? '有' : '没有'} \`documentPictureInPicture\` ⇒ ` +
+            (apiOn
+              ? '「先解锁声音」必须在（1 个），"开不了"那块横幅 0 个'
+              : '「先解锁声音」不该在（0 个），"开不了"那块横幅顶上（1 个）'),
+          `unlock ${A.unlock} 个 · pip-unsupported ${A.unsupported} 个`,
+          '⚠️ 这一段是**照实**断言：本机 Edge 若没有那个 API，就按实测那一支走（别放宽判据、也别写成恒真）',
+        )
+
+        /*
+         * 🧪 反向那一侧：**另起一个干净的 context**，把 `documentPictureInPicture` 影子成 undefined
+         *    （= 老浏览器的现场）⇒ 同一屏必须换成"开不了"那块横幅，而且说的是**网页版那句话**。
+         * ⚠️ 为什么另起一个 context、而不是在 `room` 上就地改：
+         *    ① 那个属性挂在 **`Window.prototype`** 上 —— `delete window.documentPictureInPicture`
+         *       **什么都不会发生**，就地改很容易写成"看起来测了、其实环境一个字没动"的假断言；
+         *    ② 就地改还要赌"同 URL 的 `pushState` 会不会让 React 重渲染"。2026-10-04 **实测不会**
+         *       （第一版就这么红的：`api=undefined` 而屏上横幅一个都没换）⇒ 这里直接**真加载一次**。
+         * ⚠️ 这个 context **只读这一屏、跑完就关**（不截图 ⇒ 不动 `EXPECTED_FILES`）。
+         */
+        const ctxNoPip = await browser.newContext({ viewport: { width: 1440, height: 900 }, locale: 'zh-CN' })
+        await ctxNoPip.clock.install({ time: new Date('2026-09-19T10:00:00') })
+        await ctxNoPip.addInitScript((s) => {
+          window.localStorage.setItem('shugao.teacher.v1', JSON.stringify(s))
+          window.localStorage.setItem('shugao.deviceRole', 'teacher')
+        }, TEACHER_STATE)
+        await ctxNoPip.addInitScript(() => {
+          /* 影子（挂在文档加载**之前**才干净）：真属性在原型上，`delete` 动不了它 */
+          Object.defineProperty(window, 'documentPictureInPicture', {
+            value: undefined,
+            configurable: true,
+            writable: true,
+          })
+        })
+        const np = await ctxNoPip.newPage()
+        np.on('pageerror', (e) => errors.push(`PAGEERROR(无 PiP) :: ${e.message}`))
+        np.on('console', (m) => {
+          if (m.type() === 'error') errors.push(`CONSOLE(无 PiP) :: ${m.text()}`)
+        })
+        try {
+          await np.goto(`${BASE}/classroom`, { waitUntil: 'networkidle' })
+          await waitPageSettled(np)
+          await np.waitForTimeout(900)
+          const B = await np.evaluate(() => {
+            const b = document.querySelector('[data-classroom-pip-unsupported]')
+            return {
+              api: typeof window.documentPictureInPicture,
+              unlock: document.querySelectorAll('[data-classroom-unlock]').length,
+              unsupported: document.querySelectorAll('[data-classroom-pip-unsupported]').length,
+              bannerText: b ? String(b.textContent ?? '').replace(/\s+/g, ' ').trim() : null,
+            }
+          })
+          check(
+            B.api === 'undefined' && B.unlock === 0 && B.unsupported === 1,
+            `🔴 ${SR}：把 Document PiP 影子掉（= 老浏览器，干净加载一次）⇒ 「先解锁声音」不在了（0 个）、"开不了"那块横幅顶上（1 个）`,
+            `api=${B.api} · unlock ${B.unlock} 个 · pip-unsupported ${B.unsupported} 个`,
+          )
+          check(
+            B.bannerText !== null && B.bannerText.includes('Edge') && B.bannerText.includes('Chrome 116'),
+            `🔴 ${SR}：而且那块横幅说的是**网页版那句话**（提 Edge / Chrome 116）—— 壳里**不许**出现这句，由 \`verify-exe.mjs\` 反向钉住`,
+            JSON.stringify(B.bannerText),
+          )
+        } finally {
+          await ctxNoPip.close()
+        }
+        const C = await readBanners()
+        check(
+          C.api === A.api && C.unlock === A.unlock && C.unsupported === A.unsupported,
+          `🧪 ${SR}：反证那一次跑在**另一个 context** 里，\`room\` 这一屏**一个字都没被改过**（读数与开头一致）`,
+          `room 上 api=${C.api}（原 ${A.api}）· unlock ${C.unlock}（原 ${A.unlock}）· pip-unsupported ${C.unsupported}（原 ${A.unsupported}）`,
+        )
+      })
+
       /* ---------------- 🆕 课代表在教室端录作业：**必须输班级口令**（2026-10-03 补）
        *
        * 🔴🔴 **为什么这一节原来一条断言都没有**：
@@ -2327,10 +2448,20 @@ await withLock(async () => {
           /public\.rep_set_daily_homework\(/.test(schemaSrc) ? 'rep_set_daily_homework ✔' : 'rep_set_daily_homework ✘',
           'RPC 不在库里 = 口令框点了只会报错',
         )
+        /*
+         * ⚠️ 2026-10-04 18:22（commit `30c0cc3`）：「课代表口令在生产上是坏的：
+         *    `digest()` 撞上 Supabase 的 `extensions` schema ⇒ 换内核 `sha256()`」。
+         *    **不变量一个字都没变**（口令比对仍然**绑班 id**），换的只是内核 ——
+         *    所以这条判据跟着换核（`encode(sha256(convert_to(p_class_id::text || ':' || …
+         *    **不删、也不放宽**）。它一度是红的，而红的原因正是"我找的还是旧内核"
+         *    —— 又一次「核对工具自己先得是对的」。
+         */
         check(
-          /digest\(p_class_id::text \|\| ':' \|\| btrim\(coalesce\(p_pin/.test(schemaSrc),
+          /sha256\(convert_to\(p_class_id::text \|\| ':' \|\| btrim\(coalesce\(p_pin/.test(schemaSrc),
           `${SR}：口令比对在库里做，而且**绑定班 id**（不是全局一个口令）`,
-          /digest\(p_class_id::text/.test(schemaSrc) ? "比对式：digest('<班id>:<口令>')" : '没找到那条比对',
+          /sha256\(convert_to\(p_class_id::text/.test(schemaSrc)
+            ? "比对式：sha256('<班id>:<口令>')"
+            : '没找到那条比对',
           '不绑班 id 的话，隔壁班的课代表拿同一个口令也能录',
         )
       })
@@ -8608,6 +8739,410 @@ await withLock(async () => {
         )
         await shot(annPage, S2, '97-admin-maintenance', { full: true })
 
+        /* ================================================================
+           🆕 ⑥-之补 · 同一页下面那张「版本更新」卡（2026-10-04）
+           ----------------------------------------------------------------
+           🔴 两档（教师端 / 教室端）的 `data-rel-*` **同名**（`Admin.tsx:3786` 写明了
+              刻意同名，避免两套命名）⇒ 所以本节一律**带前缀查**
+              （`[data-rel-form="teacher"] [data-rel-version]`）。不带前缀查 = 读到的是
+              教师端那份还是教室端那份，全看 DOM 顺序 —— 那种断言迟早骗人。
+
+           ⚠️ 本地演示模式（没有服务端）下这一卡的初始态是**可预期**的：
+              `/api/admin/release` 走 `postApi()`，而本地模式**一个请求都不发**
+              （`src/lib/api.ts:50`）⇒ `fetchReleaseState()` 回 `{ok:false}`
+              ⇒ `rel` 为 `null`、`relErr` 是人话 ⇒ **`data-rel-readerr` 那条灰条在屏上**，
+              卡片 headline 是「无法判断」。🔴 灰就是灰：**读不到 ≠ 没在发**。
+
+           ⚠️ 这一节**不点「撤下」也不真的发布成功**（本地模式没有服务端）；
+              但它**要点一次「发布」**，钉的是"不可写的路径必须显式报错"
+              （`AGENTS.md` §三.5：本项目反复栽在"不报错但就是不对"）。
+           ================================================================ */
+        {
+          const { APP_VERSION } = await import('../src/lib/version.ts')
+          const { releaseDefaultNote, RELEASE_NOTE_MAX, RELEASE_BANNED_WORDS } = await import(
+            '../src/lib/release.ts'
+          )
+          /*
+           * ⚠️ `shots.mjs` **只有 `check(cond, label, observed)` 这一个断言器**（没有 `eq`）——
+           *    这里一律 `check` + `JSON.stringify` 比字面量（2026-10-11 S26 那一节就栽过：
+           *    写成 `eq(...)` → `ReferenceError` → 整节在第一条断言之前断掉）。 */
+          const eqv = (label, got, want, extra = '') =>
+            check(got === want, label, `得到 ${JSON.stringify(got)}`, `期望 ${JSON.stringify(want)}${extra ? ` · ${extra}` : ''}`)
+          /** 两档各读一次（**带前缀**：`data-rel-*` 同名，见上面那段说明） */
+          const probeRel = () =>
+            annPage.evaluate(() => {
+              const one = (t, sel) => document.querySelector(`[data-rel-form="${t}"] ${sel}`)
+              const txt = (el) =>
+                el ? String(el.innerText ?? el.textContent ?? '').replace(/\s+/g, ' ').trim() : ''
+              const slotOf = (t) => {
+                const pub = one(t, '[data-rel-publish]')
+                return {
+                  target: t,
+                  form: Boolean(document.querySelector(`[data-rel-form="${t}"]`)),
+                  version: (() => {
+                    const el = one(t, '[data-rel-version]')
+                    return el ? String(el.value) : null
+                  })(),
+                  soft: (() => {
+                    const el = one(t, '[data-rel-force-soft]')
+                    return el ? el.checked === true : null
+                  })(),
+                  hard: (() => {
+                    const el = one(t, '[data-rel-force-hard]')
+                    return el ? el.checked === true : null
+                  })(),
+                  note: (() => {
+                    const el = one(t, '[data-rel-note]')
+                    return el ? String(el.value) : null
+                  })(),
+                  apk: (() => {
+                    const el = one(t, '[data-rel-apk]')
+                    return el !== null
+                  })(),
+                  exe: (() => {
+                    const el = one(t, '[data-rel-exe]')
+                    return el !== null
+                  })(),
+                  count: txt(one(t, '[data-rel-count]')),
+                  preview: txt(one(t, '[data-rel-preview]')),
+                  publishDisabled: pub ? pub.disabled === true : null,
+                  unpublishDisabled: (() => {
+                    const el = one(t, '[data-rel-unpublish]')
+                    return el ? el.disabled === true : null
+                  })(),
+                }
+              }
+              const card = document
+                .querySelector('[data-rel-form="teacher"]')
+                ?.closest('section[data-tone]')
+              return {
+                readerrCount: document.querySelectorAll('[data-rel-readerr]').length,
+                readerr: txt(document.querySelector('[data-rel-readerr]')),
+                cardText: txt(card),
+                msgCount: document.querySelectorAll('[data-rel-msg]').length,
+                errCount: document.querySelectorAll('[data-rel-err]').length,
+                errText: txt(document.querySelector('[data-rel-err]')),
+                teacher: slotOf('teacher'),
+                classroom: slotOf('classroom'),
+              }
+            })
+
+          const R0 = await probeRel()
+          check(
+            R0.readerrCount === 1 && R0.readerr.includes('读不到版本公告'),
+            `🔴 ${S2}：版本更新卡在本地模式下**如实说"读不到"**（一条灰条 + fail-open 那句话），**不是绿**`,
+            `灰条 ${R0.readerrCount} 条 · ${short(R0.readerr, 140)}`,
+          )
+          check(
+            R0.cardText.includes('无法判断') && R0.cardText.includes(`v${APP_VERSION}`),
+            `${S2}：卡片 headline 是「**无法判断**」，而且把本机的 APP_VERSION（v${APP_VERSION}）写在卡上（"读不到 ≠ 没在发"）`,
+            short(R0.cardText, 220),
+          )
+          check(
+            R0.teacher.form && R0.classroom.form,
+            `${S2}：**两档各一份**编辑区（\`data-rel-form="teacher"\` / \`"classroom"\`，各 1 个）`,
+            `teacher=${R0.teacher.form} · classroom=${R0.classroom.form}`,
+          )
+          check(
+            R0.teacher.apk && R0.teacher.exe && R0.classroom.apk && R0.classroom.exe,
+            `${S2}：两档都有**手机链接 / 电脑链接**两个输入框（apk 与 exe 是两种包，缺一个就有端拿不到）`,
+            `teacher apk/exe=${R0.teacher.apk}/${R0.teacher.exe} · classroom=${R0.classroom.apk}/${R0.classroom.exe}`,
+          )
+          check(
+            R0.teacher.count.includes(`/ ${RELEASE_NOTE_MAX} 字`) &&
+              R0.classroom.count.includes(`/ ${RELEASE_NOTE_MAX} 字`),
+            `${S2}：两档都有**字数提示**（正文 ≤ ${RELEASE_NOTE_MAX} 字，写在输入框下面）`,
+            `teacher：${short(R0.teacher.count, 80)}`,
+          )
+          /*
+           * 🔴 版本号 / 正文的**预填**：面板必须**开箱可用** —— 施工单 §七 那张表
+           *    写死了默认文案（`v1.1.1 已发布，建议更新。`），并写明"面板里预填"。
+           *    ⚠️ 期望值一律**从真值算**（`APP_VERSION` / `releaseDefaultNote()`），
+           *       不写字面量 —— 下一轮真发号时（§四 发版三步）这两条不该跟着红。
+           */
+          eqv(
+            `${S2}：教师端那份的版本号**预填成本机的 APP_VERSION**`,
+            R0.teacher.version,
+            APP_VERSION,
+          )
+          eqv(
+            `${S2}：教师端那份的正文**预填成默认那句**（releaseDefaultNote(APP_VERSION, false)）`,
+            R0.teacher.note,
+            releaseDefaultNote(APP_VERSION, false),
+          )
+          eqv(
+            `${S2}：**没选档位**时「发布」是 disabled（服务端 R2 要求 force 显式给布尔；面板只是体验）`,
+            R0.teacher.publishDisabled,
+            true,
+          )
+          eqv(
+            `${S2}：没发布过的档「撤下这一档」也是 disabled（本地模式读不到 ⇒ 不许假装撤下）`,
+            R0.teacher.unpublishDisabled,
+            true,
+          )
+
+          /* ---- 两档互不影响（🔴 本功能最容易写错的地方）---- */
+          await annPage.fill('[data-rel-form="teacher"] [data-rel-version]', APP_VERSION)
+          await annPage.fill('[data-rel-form="classroom"] [data-rel-version]', APP_VERSION)
+          await annPage.waitForTimeout(260)
+          const R1p = await probeRel()
+          eqv(
+            `${S2}：版本号一填，两档正文都自动换成 "建议更新" 那句（版本变 → 正文跟着变）`,
+            `${R1p.teacher.note} / ${R1p.classroom.note}`,
+            `${releaseDefaultNote(APP_VERSION, false)} / ${releaseDefaultNote(APP_VERSION, false)}`,
+          )
+          check(
+            R1p.teacher.preview.includes('得明确选一个'),
+            `🔴 ${S2}：还没选档位时预览**当场说清是哪一条不过**（R2：force 要显式给布尔），而不是"灰一下还能点"`,
+            short(R1p.teacher.preview, 140),
+          )
+          eqv(
+            `${S2}：这时「发布」仍然 disabled（拒在提交之前）`,
+            R1p.teacher.publishDisabled,
+            true,
+          )
+          await annPage.click('[data-rel-form="teacher"] [data-rel-force-hard]')
+          await annPage.waitForTimeout(260)
+          const R2p = await probeRel()
+          eqv(
+            `${S2}：教师端点「强制」→ 正文自动换成 releaseDefaultNote(APP_VERSION, true)`,
+            R2p.teacher.note,
+            releaseDefaultNote(APP_VERSION, true),
+          )
+          check(
+            R2p.teacher.hard === true && R2p.teacher.soft === false,
+            `${S2}：档位切到「强制」（radio 是真选中的那一个，不是只改了样式）`,
+            `hard=${R2p.teacher.hard} · soft=${R2p.teacher.soft}`,
+          )
+          eqv(
+            `${S2}：教师端的「发布」这时**可点**了（表单自洽）`,
+            R2p.teacher.publishDisabled,
+            false,
+          )
+          check(
+            R2p.classroom.note === releaseDefaultNote(APP_VERSION, false) &&
+              R2p.classroom.hard === false &&
+              R2p.classroom.publishDisabled === true,
+            `🔴 ${S2}：**教室端那份一个字不变**（正文仍是"建议更新"那句、档位仍未选、发布仍 disabled）—— 两档互不影响`,
+            `classroom：note=${JSON.stringify(R2p.classroom.note)} · hard=${R2p.classroom.hard} · publishDisabled=${R2p.classroom.publishDisabled}`,
+            '这一条钉的是本功能最容易写错的地方：一次发布只动一档',
+          )
+
+          /* ---- 文案纪律：屏上**默认值**本身就该是干净的 ---- */
+          {
+            const notes = [R0.teacher.note, R0.classroom.note, R2p.teacher.note, R2p.classroom.note]
+            const hits = [
+              ...new Set(notes.filter(Boolean).flatMap((n) => RELEASE_BANNED_WORDS.filter((w) => n.includes(w)))),
+            ]
+            check(
+              hits.length === 0,
+              `${S2}：两档正文框里的值**一个禁词都没有**（默认文案自己就是干净的）`,
+              `命中 ${hits.length} 个${hits.length ? `：${hits.join('、')}` : ''}`,
+            )
+            check(
+              notes.filter(Boolean).length === 4,
+              `${S2} 自证：上面那条真的取到了 4 个正文值（不是"一个都没取到"所以没禁词）`,
+              notes.map((n) => JSON.stringify(n)).join(' / '),
+            )
+          }
+
+          /* ---- 🔴 不可写的路径要**显式报错**（本地模式点「发布」不许假装成功）---- */
+          await annPage.click('[data-rel-form="teacher"] [data-rel-publish]')
+          await annPage.waitForTimeout(500)
+          const R3p = await probeRel()
+          check(
+            R3p.errCount === 1 && R3p.errText.length > 0 && R3p.msgCount === 0,
+            `🔴 ${S2}：本地模式点「发布」→ **显式报错（人话）**，绝不"面板说发布成功而外面什么都没发生"`,
+            `err ${R3p.errCount} 条：${short(R3p.errText, 140)} · 成功提示 ${R3p.msgCount} 条`,
+          )
+        }
+
+        /* ================================================================
+           🆕 ⑥-之补二 · 「输入法组字」四条（2026-10-04，用户报「apk 上点按钮吞字」）
+           ----------------------------------------------------------------
+           用户原话：「点按钮后会把输入了的字吞掉几个」，进一步确认是「**字在框里也没了**」
+           —— 不是"没保存"，是屏上就少了那几个字。
+           根因两步（`src/lib/imeMirror.ts` 文件头写全了）：① 拼音还没选词时那几个字已经
+           **在编辑框里**（屏上看得见），而 React 那侧的状态没有它们；② 于是任何一次
+           「点按钮 → setState → 重渲染」都可能**把旧值写回** ⇒ 那几个字被冲掉。
+
+           🔴 模型（与真机同形，`scripts/_tmp_ime.mjs` 是第一版探针）：
+             ① 输入法**原生写入**编辑框 —— 用 `HTMLTextAreaElement.prototype` 上的 setter，
+                **绝不能写 `el.value = …`**：React 在节点上装了自己的 `value` 描述符
+                （tracker），走 `el.value = …` 会把 React 那份"它以为的值"一起改掉 ⇒
+                补的事件被判成"值没变"、`onChange` 不触发 ⇒ **探针会自己骗自己**
+                （第一版就是这么错的：结论"修法无效"，其实是探针错）。
+             ② 所以只派发 `compositionupdate`（**不派发** `input`），那几个字于是
+                **只在屏上、不在状态里**。
+           判据落在**状态派生的锚点**上（正文框下面那行字数计数 `[data-rel-count]` 与
+           预览行 `[data-rel-preview]` —— 两个都是 `note` 这个 state 派生的）：
+           装了镜像 ⇒ 计数/预览**跟着屏上走**；没装 ⇒ 停在旧值（= 点按钮时会用到的那一份）。
+
+           ⚠️ **关掉镜像的唯一办法**：另起一个 context，把产品**自己的幂等标记**抢在
+              `main.tsx` 之前置上（`installImeMirror()` 里 `if (w.__imeMirrorInstalled) return`
+              就是这个语义）—— **不新加任何测试专用开关**（加了就等于在测另一个产品）。
+           ⚠️ 这一节**一张图都不出**（判据在 DOM 与状态上，加图要动 `EXPECTED_FILES`）。
+           ================================================================ */
+        {
+          const IME_NOTE = '[data-rel-form="teacher"] [data-rel-note]'
+          const IME_COUNT = '[data-rel-form="teacher"] [data-rel-count]'
+          const IME_PREVIEW = '[data-rel-form="teacher"] [data-rel-preview]'
+          const IME_TYPED = '1.1.1 已发布'
+
+          /**
+           * 开一个**干净**的管理台页面：先跑一遍"组字"实验，再跑一遍"正常打字"。
+           * `mirror === false` ⇒ 用幂等标记把镜像关掉（反向对照那一遍）。
+           */
+          const imeRun = async (mirror) => {
+            const ctx = await browser.newContext({ viewport: { width: 414, height: 880 }, locale: 'zh-CN' })
+            await ctx.clock.install({ time: new Date('2026-09-19T10:00:00') })
+            await ctx.addInitScript((base) => {
+              window.localStorage.setItem('shugao.teacher.v1', JSON.stringify(base))
+              window.localStorage.setItem('shugao.deviceRole', 'teacher')
+            }, TEACHER_STATE)
+            if (!mirror) {
+              /* 🔴 抢在 `main.tsx` 之前置上幂等标记 ⇒ `installImeMirror()` 直接 return（镜像没了）。
+                 ⚠️ 顺手记一个"这一步真的做了"的标记：标记置上之后**产品自己也读它**，
+                    所以跑完 `__imeMirrorInstalled` 两边都是 `true` —— 光看它分不出装没装
+                    （2026-10-04 实测：反向那遍 `installed` 也是 true，靠它断言会骗人）。 */
+              await ctx.addInitScript(() => {
+                window.__imeMirrorInstalled = true
+                window.__imeGuardPreset = true
+              })
+            }
+            const ip = await ctx.newPage()
+            ip.on('pageerror', (e) => errors.push(`PAGEERROR(输入法) :: ${e.message}`))
+            ip.on('console', (m) => {
+              if (m.type() === 'error') errors.push(`CONSOLE(输入法) :: ${m.text()}`)
+            })
+            await ip.goto(`${BASE}/admin?roles=${ANN_ROLES}`, { waitUntil: 'networkidle' })
+            await ip.waitForTimeout(600)
+            await ip.locator('[data-admin-seg-key="maintenance"]').click()
+            await ip.waitForTimeout(400)
+            if (mirror) {
+              /* 连装三次：幂等坏掉的话，下面"组字恰好补一个"会当场变成 4 个 */
+              await ip.evaluate(async () => {
+                const m = await import('/src/lib/imeMirror.ts')
+                m.installImeMirror()
+                m.installImeMirror()
+                m.installImeMirror()
+              })
+            }
+            /* 选「强制」档：这样预览行才渲染成"发布后老师看到的是：「…」+「<正文>」" ——
+               正文于是成了**状态派生的锚点**（不选档位时那一行显示的是校验错误） */
+            await ip.click('[data-rel-form="teacher"] [data-rel-force-hard]')
+            /* "正常打三个字"（React 状态里于是有一份 'abc'） */
+            await ip.fill(IME_NOTE, 'abc')
+            await ip.waitForTimeout(120)
+            /* 开始数"补派发的 input"（组字那一下该补 1 个；有没有镜像就是 1 与 0 的差别） */
+            await ip.evaluate(() => {
+              window.__imeInputs = 0
+              document.addEventListener(
+                'input',
+                () => {
+                  window.__imeInputs++
+                },
+                true,
+              )
+            })
+            /* 输入法原生写入那几个"还没上屏"的字 —— **不派发** input，只派发 compositionupdate */
+            await ip.evaluate(
+              ([sel, val]) => {
+                const el = document.querySelector(sel)
+                const setNative = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set
+                setNative.call(el, val)
+                el.dispatchEvent(new CompositionEvent('compositionupdate', { bubbles: true, data: '未上屏' }))
+              },
+              [IME_NOTE, 'abc未上屏'],
+            )
+            await ip.waitForTimeout(150)
+            const composed = await ip.evaluate(
+              ([n, c, pv]) => {
+                const txt = (s) => String(document.querySelector(s)?.textContent ?? '').replace(/\s+/g, ' ').trim()
+                return {
+                  dom: String(document.querySelector(n)?.value ?? ''),
+                  count: txt(c),
+                  preview: txt(pv),
+                  inputs: window.__imeInputs,
+                  installed: window.__imeMirrorInstalled === true,
+                  guardPreset: window.__imeGuardPreset === true,
+                }
+              },
+              [IME_NOTE, IME_COUNT, IME_PREVIEW],
+            )
+
+            /* ---- 正常打字：逐字不差 + 一个 input 都不多发（装 / 不装各打一遍）---- */
+            await ip.fill(IME_NOTE, '') /* ⚠️ 先清空：它有默认文案预填，而且 maxLength=24 */
+            await ip.click(IME_NOTE)
+            await ip.evaluate(() => {
+              window.__imeInputs = 0
+            })
+            await ip.keyboard.type(IME_TYPED)
+            await ip.waitForTimeout(120)
+            const typed = await ip.evaluate(
+              (n) => ({
+                value: String(document.querySelector(n)?.value ?? ''),
+                inputs: window.__imeInputs,
+              }),
+              IME_NOTE,
+            )
+            return { ctx, composed, typed }
+          }
+
+          /* ---------------- ① 正向：装了镜像 ⇒ 状态跟上屏 ---------------- */
+          const IM = await imeRun(true)
+          check(
+            IM.composed.installed === true && IM.composed.dom === 'abc未上屏',
+            `🔴 ${S2}：前置自证 —— 镜像**在**（\`__imeMirrorInstalled\` 为真），且原生写入确实进了框（屏上 6 个字）`,
+            `屏上=${JSON.stringify(IM.composed.dom)} · installed=${IM.composed.installed}`,
+          )
+          check(
+            IM.composed.count.includes('6 / 24') && IM.composed.preview.includes('abc未上屏'),
+            `🔴 ${S2}：装了镜像 ⇒ 一次组字之后**状态跟上了屏**（计数 6 / 24 · 预览里有「abc未上屏」）—— 那几个字不会再被一次重渲染冲掉`,
+            `计数=${JSON.stringify(IM.composed.count)} · 预览=${short(IM.composed.preview, 120)}`,
+          )
+          check(
+            IM.composed.inputs === 1,
+            `🔴 ${S2}：组字那一下**恰好补一个** \`input\`（**连装三次也是 1 个** —— 幂等；多了就是无谓重渲染）`,
+            `${IM.composed.inputs} 个`,
+          )
+
+          /* ---------------- ② 🔴 反向对照：把镜像关掉 ⇒ 状态**跟不上**屏 ---------------- */
+          const NOIM = await imeRun(false)
+          check(
+            NOIM.composed.guardPreset === true && NOIM.composed.dom === 'abc未上屏',
+            `🔴 ${S2} 反向对照前置：这一遍**确实**是"抢在 \`main.tsx\` 之前置上幂等标记"关掉的（镜像没装），而屏上照样写着 6 个字 —— 模型没错，两次的差别只在于镜像`,
+            `关镜像这步做了=${NOIM.composed.guardPreset} · 屏上=${JSON.stringify(NOIM.composed.dom)}`,
+          )
+          check(
+            NOIM.composed.count.includes('3 / 24') &&
+              NOIM.composed.preview.includes('abc') &&
+              !NOIM.composed.preview.includes('abc未上屏'),
+            `🔴 ${S2} 反向对照：**关掉镜像**再跑同一条实验 ⇒ 计数**停在 3 / 24**、预览里只有 \`abc\`（状态没跟上屏 = 点按钮时会被旧的那一份冲掉）`,
+            `计数=${JSON.stringify(NOIM.composed.count)} · 预览=${short(NOIM.composed.preview, 120)}`,
+            '这一条红了才说明上面那条正向断言不是"什么都通过"',
+          )
+          check(
+            NOIM.composed.inputs === 0,
+            `🔴 ${S2} 反向对照：关掉镜像时组字**一个 \`input\` 都不补**（0 ↔ 正向那遍的 1，判据咬的正是补派发那一下）`,
+            `${NOIM.composed.inputs} 个`,
+          )
+
+          /* ---------------- ③ 正常打字**逐字不差**（装 / 不装各一遍） ---------------- */
+          check(
+            IM.typed.value === IME_TYPED && NOIM.typed.value === IME_TYPED,
+            `🔴 ${S2}：正常打字（先清空那张框）**逐字不差** —— 装镜像与不装镜像打出来的都是 ${JSON.stringify(IME_TYPED)}`,
+            `装=${JSON.stringify(IM.typed.value)} · 不装=${JSON.stringify(NOIM.typed.value)}`,
+          )
+          check(
+            IM.typed.inputs === NOIM.typed.inputs && IM.typed.inputs > 0,
+            `🔴 ${S2}：装了镜像之后正常打字**一个 input 都不多发**（与不装时逐字相同 —— 补的事件只发生在组字那两下）`,
+            `装=${IM.typed.inputs} 个 · 不装=${NOIM.typed.inputs} 个`,
+          )
+          await IM.ctx.close()
+          await NOIM.ctx.close()
+        }
+
         /* ---------------- ④ 错误日志分区 ---------------- */
         await annPage.locator('[data-admin-seg-key="errors"]').click()
         await annPage.waitForTimeout(300)
@@ -9065,6 +9600,288 @@ await withLock(async () => {
           `${S2}：体检结论照样拿得到（"${short(adminInMaint.head, 40)}"）—— 面板存在的意义就是"半坏状态下也看得到"`,
         )
         await shot(annPage, S2, '102-maint-admin-exempt', { full: true })
+      })
+
+      /* ================================================================
+         ⑥b · 🆕 版本更新公告（`ReleaseGate`）—— 2026-10-04，DEV 钩子 `?rel=…` 驱动
+         ----------------------------------------------------------------
+         为什么必须用钩子：公告是**服务端**给的（`GET /api/status` 的 `release` 块），
+         而本脚本跑的是**本地演示模式**（没有服务端）⇒「强制那一档整屏拦住、没有关闭按钮、
+         Esc 关不掉」与「选择性那一档关得掉、关掉以后照常用」这两句话**一句都断言不了**。
+         `?rel=<比本机新一档>[&force=1][&slot=classroom]`（`lib/roles.ts` 的 `devInjectedRelease()`）
+         **只影响渲染**，一个字都不写数据库。
+         ⚠️ 这里**不写具体版本号**：新一档 / 同版本 / 更旧三个值都在节内**从 `APP_VERSION` 推**
+         （见那一节开头），发版升号时它自动跟着走。
+
+         🔴 两档是**两条不同的分支**（`ReleaseGate.tsx` 的 `keepChildren`）：
+            · 教师端 + 强制 ⇒ **整块替换**（`children` 根本不渲染）⇒ 这里钉的是
+              "工作台那两块与导航**一个字都不在屏上**"（整屏接管）；
+            · 教室端（**两种档位都**）⇒ **保留 children**，理由与维护豁免 `/classroom` 同源：
+              **组件被卸载 ⇒ 心跳停 ⇒ 面板开始显示"教室端离线"**，而它其实好好地在显示公告
+              —— 那是往"假在线"那条已知缺陷上再叠一层假信号。所以这里钉"班级名**仍在**屏上"。
+            · 选择性（教师端）⇒ 也保留 children（弹窗不该把整页销毁重建，
+              页面上正在填的东西不能没）。
+         ⚠️ 更新公告**不**清学生数据（清数据只发生在**维护**那一档）—— 别把两者混起来。
+
+         ⚠️ 两张图（131 / 132）都登记进 `EXPECTED_FILES` 了（那是**集合相等**，不登记就红）。
+         ================================================================ */
+      const SREL = `${S2} · ⑥b 版本更新公告（?rel= 钩子）`
+      await step(SREL, async () => {
+        /*
+         * 🔴 **这一节里不许出现版本号字面量**（照 S25 ⑤/⑥ 与上面发布表单那一处的口径：
+         *    期望值一律**从真值算**）。要的三种"相对关系"全部从 `APP_VERSION` 推出来：
+         *      · 「比本机新一档」→ 必须弹；
+         *      · 「与本机同版本」→ 不许弹；
+         *      · 「比本机旧」    → 不许弹。
+         * 为什么必须推：这三档在**升降号的那一刻语义会反转**（写死 `?rel=1.1.1` 的话，
+         * APP_VERSION 一升到 1.1.1，它就变成"同版本 ⇒ 不许弹"，而断言期望它弹 ⇒ 当场红；
+         * 那条"同版本"的标签同时变成谎话）。推导式让发版升号**自动跟着走**。
+         */
+        const { APP_VERSION } = await import('../src/lib/version.ts')
+        /** 末位 +1 —— 「比本机新一档」（1.1.0 → 1.1.1） */
+        const REL_NEW = (() => {
+          const p = APP_VERSION.split('.').map(Number)
+          p[p.length - 1] += 1
+          return p.join('.')
+        })()
+        /** 退一档 —— 「比本机旧」；末位是 0 就往前进位（1.1.0 → 1.0.9，而不是原地不动） */
+        const REL_OLD = (() => {
+          const p = APP_VERSION.split('.').map(Number)
+          for (let i = p.length - 1; i >= 0; i--) {
+            if (p[i] > 0) {
+              p[i] -= 1
+              for (let j = i + 1; j < p.length; j++) p[j] = 9
+              break
+            }
+          }
+          return p.join('.')
+        })()
+        /** 同版本 —— 直接用本机的号 */
+        const REL_SAME = APP_VERSION
+        /*
+         * 🔴 先钉**夹具自己**（否则"必须弹"那条用例可能因为推导写坏而悄悄失去意义）：
+         *    三个值互不相同。例：REL_OLD 若在 `x.y.0` 时退化成同一个号，
+         *    这一条当场红，而不是让"更旧"那一档测了个同版本。
+         */
+        check(
+          REL_NEW !== REL_SAME && REL_OLD !== REL_SAME && REL_OLD !== REL_NEW,
+          `🔴 ${SREL}：三个夹具版本号**互不相同**（新一档 ${REL_NEW} / 同版本 ${REL_SAME} / 更旧 ${REL_OLD}）—— 全部从 APP_VERSION 推，判据里不写死号`,
+          `新=${REL_NEW} · 同=${REL_SAME} · 旧=${REL_OLD}`,
+          '反向对照：把推导改成"返回 APP_VERSION"⇒ 这一条当场假',
+        )
+        const ctxRel = await browser.newContext({ viewport: { width: 1280, height: 800 }, locale: 'zh-CN' })
+        await ctxRel.clock.install({ time: new Date('2026-09-19T10:00:00') })
+        await ctxRel.addInitScript((base) => {
+          window.localStorage.setItem('shugao.teacher.v1', JSON.stringify(base))
+          window.localStorage.setItem('shugao.deviceRole', 'teacher')
+        }, TEACHER_STATE)
+        const rp = await ctxRel.newPage()
+        rp.on('pageerror', (e) => errors.push(`PAGEERROR(版本更新) :: ${e.message}`))
+        rp.on('console', (m) => {
+          if (m.type() === 'error') errors.push(`CONSOLE(版本更新) :: ${m.text()}`)
+        })
+        /** 公告这一摊一次读回来（哪一档 / 强不强 / 有没有关掉的落点 / 页面在不在） */
+        const relProbe = () =>
+          rp.evaluate(() => {
+            const el = document.querySelector('[data-release-screen]')
+            const dl = document.querySelector('[data-release-download]')
+            return {
+              screens: document.querySelectorAll('[data-release-screen]').length,
+              slot: el?.getAttribute('data-release-slot') ?? null,
+              force: el?.getAttribute('data-release-force') ?? null,
+              title: String(document.querySelector('[data-release-title]')?.textContent ?? '').trim(),
+              note: String(document.querySelector('[data-release-note]')?.textContent ?? '').trim(),
+              close: document.querySelectorAll('[data-release-close]').length,
+              later: document.querySelectorAll('[data-release-later]').length,
+              download: document.querySelectorAll('[data-release-download]').length,
+              href: dl?.getAttribute('href') ?? null,
+              navs: document.querySelectorAll('nav').length,
+              text: String(document.body.innerText).replace(/\s+/g, ' ').trim(),
+            }
+          })
+        /** 等公告上屏（条件等待，**不等固定毫秒**）；超时就让它去红，不吞错 */
+        const waitRelease = async (ms = 8000) => {
+          try {
+            await rp.waitForSelector('[data-release-screen]', { state: 'attached', timeout: ms })
+            return true
+          } catch {
+            return false
+          }
+        }
+        /** 开屏那层要退场才截图（它是 `z-index: 200` 的全屏浮层，留着会把画面盖住） */
+        const waitBoot = async () => {
+          try {
+            await rp.waitForSelector('[data-splash]', { state: 'detached', timeout: 8000 })
+          } catch {
+            /* 退不出去不阻塞断言：那是个独立的已知问题，这里不替它兜底也不替它判红 */
+          }
+        }
+        try {
+          /* ---- ① 教师端 · **强制**：整屏接管、一个能关的落点都没有、Esc 也关不掉 ---- */
+          await rp.goto(`${BASE}/?rel=${REL_NEW}&force=1`, { waitUntil: 'networkidle' })
+          const a1 = await waitRelease()
+          const R1 = await relProbe()
+          check(
+            a1 && R1.screens === 1 && R1.slot === 'teacher' && R1.force === '1',
+            `🔴 ${SREL}：\`?rel=${REL_NEW}&force=1\`（公告**比本机新一档**）→ 教师端**强制**公告上了屏（data-release-force=1）`,
+            `公告 ${R1.screens} 个 · slot=${R1.slot} · force=${R1.force}`,
+          )
+          check(
+            R1.close === 0 && R1.later === 0,
+            `🔴 ${SREL}：强制那一档**一个能关的落点都没有**（没有关闭 ×、没有「稍后」）`,
+            `[data-release-close] ${R1.close} 个 · [data-release-later] ${R1.later} 个`,
+          )
+          check(
+            R1.download === 1 && String(R1.href ?? '').startsWith('https://'),
+            `🔴 ${SREL}：「下载最新版」**恰好一个**，而且 \`href\` 是 https:// 开头（只显示不执行）`,
+            `按钮 ${R1.download} 个 · href=${JSON.stringify(R1.href)}`,
+          )
+          check(
+            R1.navs === 0 && !R1.text.includes('今日待办') && !R1.text.includes('快捷操作'),
+            `🔴 ${SREL}：**整屏接管** —— 导航 ${R1.navs} 个、工作台的「今日待办 / 快捷操作」一个字都不在屏上`,
+            `nav ${R1.navs} 个 · 今日待办=${R1.text.includes('今日待办')} · 快捷操作=${R1.text.includes('快捷操作')}`,
+            '反向对照：下面第 ② 条（选择性那一档这三样**都在** —— 关掉就能用）',
+          )
+          await waitBoot()
+          await shot(rp, SREL, '131-release-force', { full: true })
+          await rp.keyboard.press('Escape')
+          await rp.waitForTimeout(320)
+          const R1b = await relProbe()
+          check(
+            R1b.screens === 1,
+            `🔴 ${SREL}：按 **Esc 关不掉**（强制那一档没有 Esc 那条路）`,
+            `按 Esc 之后公告 ${R1b.screens} 个`,
+          )
+
+          /* ---- ② 教师端 · **选择性**：有关闭 × 与「稍后」，页面照常在下面 ---- */
+          await rp.goto(`${BASE}/?rel=${REL_NEW}`, { waitUntil: 'networkidle' })
+          const a2 = await waitRelease()
+          const H1 = await relProbe()
+          check(
+            a2 && H1.screens === 1 && H1.force === '0',
+            `🔴 ${SREL}：\`?rel=${REL_NEW}\`（比本机新一档、不加强制）→ 选择性公告上了屏（data-release-force=0）`,
+            `公告 ${H1.screens} 个 · force=${H1.force}`,
+          )
+          check(
+            H1.close === 1 && H1.later === 1,
+            `${SREL}：选择性那一档**有**关闭 × 与「稍后」（各恰好一个）`,
+            `[data-release-close] ${H1.close} 个 · [data-release-later] ${H1.later} 个`,
+          )
+          check(
+            H1.title.includes('有新版本'),
+            `${SREL}：标题是「有新版本」（选择性那一档的固定措辞）`,
+            JSON.stringify(H1.title),
+          )
+          check(
+            H1.note.includes(`v${REL_NEW} 已发布，建议更新。`),
+            `${SREL}：正文是默认那句「v${REL_NEW} 已发布，建议更新。」（公告那一版的号）`,
+            JSON.stringify(H1.note),
+          )
+          check(
+            H1.navs > 0 && H1.text.includes('今日待办') && H1.text.includes('快捷操作'),
+            `🔴 ${SREL}：而且**页面照常在下面**（导航 ${H1.navs} 个 · 「今日待办 / 快捷操作」都在）—— "关掉就能用"`,
+            `nav ${H1.navs} 个 · 今日待办=${H1.text.includes('今日待办')} · 快捷操作=${H1.text.includes('快捷操作')}`,
+          )
+          await waitBoot()
+          await shot(rp, SREL, '132-release-soft', { full: true })
+          await rp.click('[data-release-later]')
+          await rp.waitForTimeout(320)
+          const H2 = await relProbe()
+          check(
+            H2.screens === 0 && H2.navs > 0,
+            `${SREL}：点「稍后」→ 公告消失、**页面还在**（nav ${H2.navs} 个）`,
+            `公告 ${H2.screens} 个 · nav ${H2.navs} 个`,
+          )
+          /* 用户 2026-10-04 拍板：**每次冷启动都再弹一次**（关掉只记在这一次进程里） */
+          await rp.goto(`${BASE}/?rel=${REL_NEW}`, { waitUntil: 'networkidle' })
+          const a2b = await waitRelease()
+          const H3 = await relProbe()
+          check(
+            a2b && H3.screens === 1,
+            `🔴 ${SREL}：**冷启动会再弹一次**（"关过了"只记在这一个进程里 —— 换一次打开就再来）`,
+            `重新打开后公告 ${H3.screens} 个`,
+          )
+
+          /* ---- ③ 不该提示的两种：同版本 / 我比它新（"读不到"那一侧在 nav-checks 的 A12）----
+                 ⚠️ 两个号都**从 APP_VERSION 推**（同版本 / 更旧一档）—— 见本节开头那段说明 */
+          for (const [v, why] of [
+            [REL_SAME, '与本机 APP_VERSION **同版本**'],
+            [REL_OLD, '比本机 APP_VERSION **旧一档**'],
+          ]) {
+            await rp.goto(`${BASE}/?rel=${v}`, { waitUntil: 'networkidle' })
+            await rp.waitForTimeout(700)
+            const N = await relProbe()
+            check(
+              N.screens === 0,
+              `🔴 ${SREL}：\`?rel=${v}\`（${why}）→ **一条公告都不弹**`,
+              `公告 ${N.screens} 个`,
+              '反向对照：① ② 那两条（公告比客户端新时**必须**弹）',
+            )
+          }
+
+          /* ---- ④ 教室端 · 强制：整屏公告，但**页面不许被卸载**（心跳靠它）---- */
+          await rp.goto(`${BASE}/classroom?rel=${REL_NEW}&slot=classroom&force=1`, { waitUntil: 'networkidle' })
+          const a4 = await waitRelease()
+          const C1 = await relProbe()
+          check(
+            a4 && C1.screens === 1 && C1.slot === 'classroom' && C1.force === '1',
+            `🔴 ${SREL}：教室端那一档 → **整屏**公告（data-release-slot=classroom · force=1）`,
+            `公告 ${C1.screens} 个 · slot=${C1.slot} · force=${C1.force}`,
+          )
+          check(
+            C1.text.includes('请在教师电脑上下载后，到这台机器安装。'),
+            `${SREL}：教室端那一档多一句「请在教师电脑上下载后，到这台机器安装。」（那块屏要**人工装一次**）`,
+            short(C1.text, 200),
+          )
+          check(
+            C1.close === 0 && C1.later === 0,
+            `🔴 ${SREL}：教室端强制同样**一个能关的落点都没有**`,
+            `close ${C1.close} 个 · later ${C1.later} 个`,
+          )
+          check(
+            C1.screens === 1 && C1.text.includes('高二(3)班'),
+            `🔴🔴 ${SREL}：**下面那一页没有被卸载** —— 班级名仍在屏上（教室端**永远保留 children**：` +
+              `组件一卸载心跳就停，面板会开始谎报"教室端离线"）`,
+            `班级名 ${C1.text.includes('高二(3)班') ? '在' : '没了'} · 公告 ${C1.screens} 个`,
+            '⚠️ 更新公告**不**清学生数据（清数据只发生在维护那一档）—— 别把两者混起来',
+          )
+
+          /* ---- ⑤ 教室端 · 选择性：关得掉，关掉之后班级名还在 ---- */
+          await rp.goto(`${BASE}/classroom?rel=${REL_NEW}&slot=classroom`, { waitUntil: 'networkidle' })
+          const a5 = await waitRelease()
+          const C2 = await relProbe()
+          check(
+            a5 && C2.screens === 1 && C2.force === '0' && C2.later === 1,
+            `${SREL}：教室端选择性 → 有「稍后」可点（force=0）`,
+            `公告 ${C2.screens} 个 · force=${C2.force} · later ${C2.later} 个`,
+          )
+          await rp.click('[data-release-later]')
+          await rp.waitForTimeout(320)
+          const C3 = await relProbe()
+          check(
+            C3.screens === 0 && C3.text.includes('高二(3)班'),
+            `${SREL}：点掉之后公告消失、**班级名还在**（教室端那块屏照常能用）`,
+            `公告 ${C3.screens} 个 · 班级名 ${C3.text.includes('高二(3)班') ? '在' : '没了'}`,
+          )
+
+          /* ---- ⑥ 🔴 `/admin` 豁免：超管**不会**被自己的强制公告锁在外面 ---- */
+          await annPage.goto(`${BASE}/admin?roles=${ANN_ROLES}&rel=${REL_NEW}&force=1`, {
+            waitUntil: 'networkidle',
+          })
+          await annPage.waitForTimeout(800)
+          const admRel = await annPage.evaluate(() => ({
+            screens: document.querySelectorAll('[data-release-screen]').length,
+            l0: document.querySelector('[data-admin-l0]') !== null,
+          }))
+          check(
+            admRel.screens === 0 && admRel.l0,
+            `🔴🔴 ${SREL}：**\`/admin\` 豁免**（带着 \`?rel=${REL_NEW}&force=1\` 打开超管面板，一条公告都不弹）—— ` +
+              `否则超管会被**自己**锁在外面（维护模式已经踩过这条路）`,
+            `公告 ${admRel.screens} 个 · 面板 L0 健康条在=${admRel.l0}`,
+          )
+        } finally {
+          await ctxRel.close()
+        }
       })
 
       /* ---------------- ⑦ 「我的」页的反馈块（**位置是被点名的**） ---------------- */
@@ -12716,12 +13533,20 @@ await withLock(async () => {
       const mTop = vHits[0]
       const mNext = vHits[1]
       const seg = mTop && mNext && mNext.index > mTop.index ? logSrc.slice(mTop.index, mNext.index) : ''
-      const itemsTop = (seg.match(/^\s{6}'/gm) ?? []).length
+      /*
+       * ⚠️ 条目有**两种写法**，都要数（2026-10-04 v1.1.1 让这条判据红过一次：
+       *   它 5 条里有 2 条是 `{ text: '…', only: 'desktop' }`，而这里原来只数 `^\s{6}'`
+       *   ⇒ 数到 3 条 < 5 ⇒ 判据红，**而条目一条都不少**。
+       *   那是"判据只认一种写法"，不是"顶部那段是占位一行" —— 红的原因又一次在核对工具自己身上。)
+       */
+      const itemsPlain = (seg.match(/^\s{6}'/gm) ?? []).length
+      const itemsObj = (seg.match(/^\s{8}text:\s*'/gm) ?? []).length
+      const itemsTop = itemsPlain + itemsObj
       const atTop = (seg.match(/at:\s*'([^']+)'/) ?? [])[1] ?? null
       check(
         itemsTop >= 5 && atTop !== null && /^\d{1,2}月\d{1,2}日$/.test(atTop),
         `🔴 S25 ⑥ 顶部那一段（${top ? top[1] : '?'}）**真的写了改动**（不是占位一行），发版日按"落进仓库的那一天"填`,
-        `条目 ${itemsTop} 条 · at=${atTop ?? '（没有）'}`,
+        `条目 ${itemsTop} 条（纯文本 ${itemsPlain} + 带标 ${itemsObj}）· at=${atTop ?? '（没有）'}`,
       )
       /* 🔴 §七 的钉子：给老师看的那一屏**不许出现**「内测」「公测」 */
       const banned = ['内' + '测', '公' + '测']
@@ -12781,8 +13606,19 @@ await withLock(async () => {
         `标=${onlyTag ?? '（没打）'} · 渲染在读=${readsOnly} · 网页可见=${changelogVisible(null, onlyTag)} · exe 可见=${changelogVisible('electron', onlyTag)}`,
         '反向对照：🧪 对照 E（把标去掉 → 同一个判据当场翻转）',
       )
-      /* 🧪 对照 E：把标从**真源码**里摘掉 → 判据必须翻转，否则 ⑧ 是恒真的摆设 */
-      const logUntagged = logSrc.replace(/,\s*only:\s*'desktop'/, '')
+      /* 🧪 对照 E：把标从**真源码**里摘掉 → 判据必须翻转，否则 ⑧ 是恒真的摆设
+       *
+       * ⚠️ **必须摘对那一条**（2026-10-04 踩到的）：`String.replace(re, …)` 只换**第一处**，
+       *    而 `only: 'desktop'` 在文件里不止一处 —— v1.1.1 那段（就在顶部）本身有两条带标，
+       *    它们比 ⑧ 读的那条（v1.1.0 的「备份文件夹」）更靠前 ⇒ 摘掉的是**别人的标**，
+       *    而 ⑧ 读的那条纹丝不动 ⇒ 对照 E 自己失效（与 §S27 ㊶b 那个 `replaceAll` 的坑同源：
+       *    "这句在别处也出现过"。教训：**反向对照也要能红**，所以先定位、再就地摘）。 */
+      const onlyMatch = /备份文件夹[^']*',\s*only:\s*'([^']+)'/.exec(logSrc)
+      const logUntagged = onlyMatch
+        ? logSrc.slice(0, onlyMatch.index) +
+          onlyMatch[0].replace(/,\s*only:\s*'[^']+'/, '') +
+          logSrc.slice(onlyMatch.index + onlyMatch[0].length)
+        : logSrc
       const onlyUntagged = onlyOf(logUntagged)
       check(
         logUntagged !== logSrc &&
@@ -14338,7 +15174,7 @@ await withLock(async () => {
       const extra = actual.filter((f) => !want.includes(f))
       /*
        * ⚠️ `SHUGAO_ONLY_COURSE=1` / `SHUGAO_ONLY_NAV=1` 是**节级排查**开关（跑完那几节就停），
-       *    它本来就不会产出全部 141 张图（实测 5 张）—— 这里要是照打"少了 136 张"，
+       *    它本来就不会产出全部 145 张图（实测 5 张）—— 这里要是照打"少了 140 张"，
        *    每次排查都挂一条**假红**，真问题反而被淹掉。
        *    所以节级模式下**换成一行说明**；**整套验收不许带任何 `SHUGAO_ONLY_*`**（那样才会真打这条）。
        */
