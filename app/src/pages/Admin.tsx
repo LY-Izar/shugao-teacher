@@ -90,6 +90,8 @@ import {
   releaseTitle,
   validateReleaseForm,
 } from '../lib/release'
+/* 「提交那一刻从屏上读回真实值」—— 见 `lib/liveInput.ts` 的文件头（点发布吞字的另一半） */
+import { liveValue } from '../lib/liveInput'
 import { Button, Track } from '../components/ui'
 /* 🔴 2026-10-04：「导出档案备份（加密）」与「导出本机备份并发一封通知邮件」这两颗
    从「我的」撤下来、搬进「③ 备份（G2）」卡 —— **实现只有那一份文件**，
@@ -4290,6 +4292,12 @@ function MaintenanceCard({
 
    ⚠️ 两个 `ReleaseSlotForm` 的 `data-rel-*` 属性**同名**（避免两套命名），
       所以在门禁里要**带前缀查**：`[data-rel-form="teacher"] [data-rel-version]`。
+
+   🔴 **真机未验**（2026-10-05 · 本机没有安卓设备，照 A21/A22 的先例写明）：
+      用户报的「点发布后输入框里被吞掉几个字」在真安卓手机上复现；
+      本机能证明的是"提交那一刻读的是屏上那一份"（`lib/liveInput.ts`），
+      那条**时序**（安卓上最后一次 `onChange` 排在点击之后）只能由用户在真机上复验
+      —— 步骤见 `scripts/nav-checks.mjs` 第二十八节 A23 末尾。
    ============================================================ */
 
 /** 占位符里露一句默认正文（只是给超管看个例子；`{v}` 换成版本号） */
@@ -4410,6 +4418,31 @@ function ReleaseSlotForm({
   const [err, setErr] = useState('')
 
   /*
+   * 🔴 **正文框是"非受控"的**（`defaultValue` + `noteRef`）—— 2026-10-05 用户第二次报
+   *    「点发布后输入框里被吞掉几个字」（真安卓手机 · v1.1.2-vc32）。根因见
+   *    `src/lib/liveInput.ts` 的文件头：受控输入只要发生**任何一次重渲染**，React 就会把它
+   *    自己那份（可能比屏上少几个字）的 `note` 写回框里 ⇒ 老师刚打完的字被冲掉；
+   *    而点「发布」正是最典型的一次重渲染。
+   *    改成非受控之后 React **一个字都不往框里写** ⇒ 丢字**从结构上不可能**再发生，
+   *    与"输入法发不发 `composition*` 事件"完全无关（那正是上一版 `imeMirror` 失效的原因）。
+   *
+   * ⚠️ 但正文有**三处是我们自己**要替换它（服务端那一份填进来 · 版本号一变 · 档位一变
+   *    跟着换默认那句）—— 那是"我们确实要改"，所以走 `applyNote()`：
+   *    它同步改 state **并且自己写一次 DOM**（非受控输入要靠这一步才能被程序化更新）。
+   * ⚠️ 另外三个框**照旧受控**：它们要靠 `useEffect` 从服务端预填、版本号还要驱动正文联动，
+   *    改成非受控反而会让"读到服务端那一份"失效 ⇒ 它们走"**提交前读回 DOM**"那条路。
+   */
+  const noteRef = useRef<HTMLTextAreaElement>(null)
+  const versionRef = useRef<HTMLInputElement>(null)
+  const apkRef = useRef<HTMLInputElement>(null)
+  const exeRef = useRef<HTMLInputElement>(null)
+  /** 我们主动改正文时的**唯一**入口（state 与 DOM 一起改；`[]` 里没有会变的东西） */
+  const applyNote = useCallback((next: string) => {
+    setNote(next)
+    if (noteRef.current) noteRef.current.value = next
+  }, [])
+
+  /*
    * 把服务端那一份填进表单（每次读到新状态都刷）。
    * ⚠️ 走一个 0ms 定时器：effect 里**同步** setState 会触发级联渲染
    *    （`react(set-state-in-effect)`，本仓库要求 lint 0 warning）。
@@ -4423,21 +4456,29 @@ function ReleaseSlotForm({
       const f = slot.present ? slot.force : null
       setVersion(v)
       setForce(f)
-      setNote(slot.note || releaseDefaultNote(v, f === true))
+      /* 🔴 正文走 `applyNote()`：这一份是**我们**要替换它（非受控的框得自己写一次 DOM） */
+      applyNote(slot.note || releaseDefaultNote(v, f === true))
       setUrlApk(slot.urlApk)
       setUrlExe(slot.urlExe)
     }, 0)
     return () => window.clearTimeout(t)
-  }, [slot])
+  }, [slot, applyNote])
 
   /** 正文的"自动那句"（版本/档位一变就跟着变，**除非超管自己改过**） */
   const autoNote = (v: string, f: boolean | null) => (v ? releaseDefaultNote(v, f === true) : '')
   const changeVersion = (v: string) => {
-    setNote((cur) => (cur === autoNote(version, force) || !cur ? autoNote(v, force) : cur))
+    /*
+     * 🔴 **不再在 `onChange` 里 `.trim()`**（原来是 `changeVersion(e.target.value.trim())`）：
+     *    那是"改写老师正在打的字"（不变量 I-输入-2），会把刚补上的那一笔又改掉。
+     *    要规范化就在**校验/提交那一刻** —— `validateReleaseForm()` 里已经在 `trim()`。
+     */
+    const next = note === autoNote(version, force) || !note ? autoNote(v, force) : note
+    applyNote(next)
     setVersion(v)
   }
   const changeForce = (f: boolean) => {
-    setNote((cur) => (cur === autoNote(version, force) || !cur ? autoNote(version, f) : cur))
+    const next = note === autoNote(version, force) || !note ? autoNote(version, f) : note
+    applyNote(next)
     setForce(f)
   }
 
@@ -4455,10 +4496,61 @@ function ReleaseSlotForm({
 
   const doSet = async (enabled: boolean) => {
     if (busy2) return
+    /*
+     * 🔴 **提交那一刻从屏上读回真实值**（`lib/liveInput.ts`）—— 这是"点发布吞字"的另一半：
+     *    安卓上最后一次 `onChange` 可能排在这次点击**之后**（输入法提交是异步的），
+     *    而点击触发的重渲染是**同步**的 ⇒ 读 state 就等于"把老师在框里刚打完、
+     *    屏上看得见的那几个字既吞掉（发出去的少几个字）又冲掉（框里也没了）"。
+     *    读回来的值同时写回 state ⇒ 紧接着那次重渲染写回的是**屏上那一份**。
+     * ⚠️ **撤下（`enabled:false`）这条路上也读一次**：它同样会触发重渲染。
+     */
+    const live = {
+      version: liveValue(versionRef.current, version),
+      note: liveValue(noteRef.current, note),
+      urlApk: liveValue(apkRef.current, urlApk),
+      urlExe: liveValue(exeRef.current, urlExe),
+    }
+    setVersion(live.version)
+    applyNote(live.note)
+    setUrlApk(live.urlApk)
+    setUrlExe(live.urlExe)
     setBusy2(true)
     setErr('')
     setMsg('')
-    const r = await setRelease({ target, enabled, version, force: force === true, note, urlApk, urlExe })
+    /*
+     * 🔴 用**读回来的那一份**重算校验，而不是渲染时算好的 `verdict`：
+     *    否则就是"校验的是旧值、发出去的也是旧值"（屏上那行预览说的是另一份字）。
+     *    不 ok ⇒ **显式报错、不发布**（`AGENTS.md` §三.5：不许静默改用户输入，
+     *    也不许"截断之后照发"）。⚠️ 撤下那一档不看这个 —— 正文合不合格都该撤得下来。
+     */
+    const checked = enabled
+      ? validateReleaseForm({
+          target,
+          enabled: true,
+          version: live.version,
+          force,
+          note: live.note,
+          urlApk: live.urlApk,
+          urlExe: live.urlExe,
+        })
+      : null
+    if (checked && !checked.ok) {
+      setErr(checked.error)
+      setBusy2(false)
+      return
+    }
+    const row = checked?.ok ? checked.row : null
+    const outVersion = row ? row.version : live.version
+    const outNote = row ? row.note : live.note
+    const r = await setRelease({
+      target,
+      enabled,
+      version: outVersion,
+      force: force === true,
+      note: outNote,
+      urlApk: row ? row.urlApk : live.urlApk,
+      urlExe: row ? row.urlExe : live.urlExe,
+    })
     setBusy2(false)
     if (!r.ok) {
       setErr(r.message)
@@ -4466,7 +4558,7 @@ function ReleaseSlotForm({
     }
     setMsg(
       enabled
-        ? `已发布：${label} · v${version} · ${force ? '强制' : '选择性'} · 客户端 30 秒内会看到`
+        ? `已发布：${label} · v${outVersion} · ${force ? '强制' : '选择性'} · 客户端 30 秒内会看到`
         : `已撤下：${label}（上次发的字段留着当下次预填）`,
     )
     onReload()
@@ -4513,8 +4605,10 @@ function ReleaseSlotForm({
             className="input"
             style={{ height: 32, fontSize: 12.5, width: 96 }}
             placeholder="1.1.1"
+            ref={versionRef}
             value={version}
-            onChange={(e) => changeVersion(e.target.value.trim())}
+            /* 🔴 不带 `.trim()`：改写用户正在打的字 = 不变量 I-输入-2（规范化交给校验/提交那一刻） */
+            onChange={(e) => changeVersion(e.target.value)}
             data-rel-version
           />
         </label>
@@ -4540,12 +4634,20 @@ function ReleaseSlotForm({
         </label>
       </div>
 
+      {/*
+        🔴 **非受控**（`defaultValue` + `noteRef`，见上面那段说明）：
+           React 再也不往这个框里写回旧值 ⇒ "点发布把刚打的字冲掉"从结构上不可能。
+        🔴 而且**去掉了 `maxLength`**：原生的字数上限会在组字（拼音还没选词）时
+           **静默截断**用户正在打的字 —— 那也是"吞字"的一种，只不过是我们自己造成的。
+           超 24 字现在由 `validateReleaseForm()` **明确报错、不发布**（下面那行预览会说清），
+           即"不许静默改用户输入"（`AGENTS.md` §三.5）。
+      */}
       <textarea
         className="input mt-2"
         style={{ minHeight: 54, fontSize: 13, lineHeight: 1.7 }}
         placeholder={`公告正文（最多 ${RELEASE_NOTE_MAX} 字）。默认是「${RELEASE_NOTE_EXAMPLE}」`}
-        value={note}
-        maxLength={RELEASE_NOTE_MAX}
+        ref={noteRef}
+        defaultValue={note}
         onChange={(e) => setNote(e.target.value)}
         data-rel-note
       />
@@ -4560,6 +4662,7 @@ function ReleaseSlotForm({
             className="input"
             style={{ height: 32, fontSize: 12.5, width: 300 }}
             placeholder="https://…/树高教务通-教师端-v1.1.1-vc30.apk（可空）"
+            ref={apkRef}
             value={urlApk}
             onChange={(e) => setUrlApk(e.target.value)}
             data-rel-apk
@@ -4571,6 +4674,7 @@ function ReleaseSlotForm({
             className="input"
             style={{ height: 32, fontSize: 12.5, width: 300 }}
             placeholder="https://…/树高教务通-教师端-v1.1.1.exe（可空）"
+            ref={exeRef}
             value={urlExe}
             onChange={(e) => setUrlExe(e.target.value)}
             data-rel-exe

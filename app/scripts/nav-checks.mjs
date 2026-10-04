@@ -104,7 +104,38 @@ function section(name) {
   }
 }
 
+/*
+ * ============================================================
+ * 🆕 三态的第三档：**灰**（探不到 ≠ 坏了）—— 2026-10-05（CI 红）
+ * ------------------------------------------------------------
+ * 硬纪律（`AGENTS.md` §三.4）：「没结论必须是灰，绝不能红；红只在"确实没跑/确实坏了"时出现」。
+ *
+ * 🔴 事故：**A21/A22 里的壳那一侧读的是仓库外的打包工程**
+ *    （`C:\Users\Administrator\Desktop\树高教务通打包`，它**不在这个公开仓库里** ⇒
+ *     CI 的干净检出**必然**没有）⇒ 那两节开头那句「找不到就是红」在 CI 上**恒红**，
+ *     而本地（打包工程在）恒绿 ⇒ `0f45438` / `d8d1e98` 两次 CI 都红、而本机 1332/0。
+ *     那是**一条不可能在 CI 变绿的卡**（与 §三.1「假红」同源）。
+ *
+ * ✅ 改法：**只有"读仓库外那份文件"的那一段**允许落灰，其余一个字都不许灰：
+ *    · `shellGray === true` 期间，`check()` 一律打成 `⚪ 灰（探不到）` 并计入 `grayed`，
+ *      **不红也不绿**（那些判据读的是空串，判它们毫无意义）；
+ *    · 打包工程**在**的机器上（维护者本机）这个开关**永远不开** ⇒ 一条判据都不变、一个字都不灰；
+ *    · 🔴 每一节末尾都有一条**自证**（可红）：壳不在时"壳那一侧**一条都没判**"、
+ *      而 app 侧那几条（只读 `app/` 下、CI 里也在的文件）**一条都没灰** ⇒
+ *      将来谁忘了把开关关掉/打开，那条自证当场红。
+ *    ⚠️ 这不是"放宽判据"：**能在 CI 里验的那一半（app 侧源码）照旧逐条判**，
+ *      灰掉的只是"本机才有、CI 里根本不存在"的那半个输入。
+ * ============================================================
+ */
+let grayed = 0
+let shellGray = false
+
 function check(ok, label, observed, extra = '') {
+  if (shellGray) {
+    grayed++
+    console.log(`   ⚪ ${label}\n        灰（探不到，不红不绿）：${observed}`)
+    return
+  }
   if (ok) {
     passed++
     console.log(`   ✅ ${label}${observed ? `\n        实测：${observed}` : ''}`)
@@ -7154,8 +7185,12 @@ return { toMinutes, REMIND_BEFORE, dueRemindersWithSnooze, snoozeMinuteOf, snooz
      · 🔴 **真机未验** —— 本机没有安卓设备，这一节全是**静态**判据。
        真机验收只能由用户做（见本节末尾那条"怎么验"）。
 
-   ⚠️ 壳那一侧不在本仓库（隔壁打包工程），所以照 `shots.mjs:8634` 的先例钉**绝对路径**，
-      并且**找不到就是红**（静默跳过 = 这一节变成永远为绿的摆设）。
+   ⚠️ 壳那一侧不在本仓库（隔壁打包工程），所以照 `shots.mjs:8634` 的先例钉**绝对路径**。
+      🔴 **2026-10-05 改（CI 红）：那里不是"找不到就是红"** —— 打包工程**不在这个公开仓库里**，
+      CI 的干净检出**必然**没有它，那句"红"于是成了**一条不可能在 CI 变绿的卡**（本机恒绿、
+      CI 恒红：`0f45438` / `d8d1e98` 两次）。现在按三态办：**壳那一侧（①–⑦）落灰**
+      （写明原因、不红不绿），**app 侧（⑧–⑪，只读 `app/` 下的文件）照旧逐条判**；
+      本机（打包工程在）那个开关**永远不开** ⇒ 一条判据都不变。节末另有一条自证可红。
    ============================================================ */
 section('第二十六节 · A21：应用内更新（下载完调起安装器）—— manifest / FileProvider / 原生方法 / 网页退回分支')
 
@@ -7186,11 +7221,27 @@ section('第二十六节 · A21：应用内更新（下载完调起安装器）�
     return existsSync(p) ? readFileSync(p, 'utf8') : ''
   }
   const missing = [MANIFEST_REL, PATHS_REL, PLUGIN_REL, BRIDGE_REL].filter((r) => !existsSync(join(PACK, r)))
+  /*
+   * 🔴 三态（2026-10-05 修 CI 红）：打包工程**不在这个公开仓库里** ⇒ CI 的干净检出**必然**
+   *    没有它。原来那句「找不到就是红」于是成了**一条不可能在 CI 变绿的卡**（本机恒绿、
+   *    CI 恒红 —— `0f45438` / `d8d1e98` 两次就是这么红的）。
+   *    ⇒ 壳那一侧（①–⑦，读的全是 `PACK` 下的文件）**落灰**：写明原因、不红不绿；
+   *      **app 侧（⑧–⑪，只读 `app/` 下的文件 —— CI 里也有）照旧逐条判**。
+   */
+  const SHELL_HERE = existsSync(PACK)
+  const g0 = grayed
+  const j0 = passed + failures.length
+  if (!SHELL_HERE) {
+    console.log(
+      `  ⏭ A21 ①–⑦ 壳那一侧**落灰**：打包工程 ${PACK} 不在（它不进这个公开仓库，CI 的干净检出必然没有）—— 不是"坏了"`,
+    )
+    shellGray = true
+  }
   check(
     missing.length === 0,
-    'A21 ① 壳那四个源文件找得到（打包工程 `树高教务通打包`）—— **找不到就是红**，绝不许静默跳过这一节',
+    'A21 ① 壳那四个源文件找得到（打包工程 `树高教务通打包`）',
     missing.length ? `缺 ${missing.length} 个：${missing.join(' · ')}` : `都在 ${PACK}`,
-    '（缺文件时下面每一条都会红：判据读的是空串 —— 这正是"门禁自己也要能红"）',
+    '（壳不在 ⇒ 本条与②–⑦落灰；壳在 ⇒ 缺文件仍是红：判据读的是空串，那正是"门禁自己也要能红"）',
   )
 
   const MANIFEST = stripXml(shellRead(MANIFEST_REL))
@@ -7372,6 +7423,15 @@ section('第二十六节 · A21：应用内更新（下载完调起安装器）�
     )
   }
 
+  /*
+   * ⛔ 壳那一侧到此为止 —— 🔴 **立刻关掉"允许落灰"**：下面 ⑧–⑪ 判的全是 **`app/` 下的文件**
+   *    （CI 的检出里**也有**，本来就能验）⇒ 它们**一条都不许灰**。
+   *    忘了关 ⇒ 节末那条自证当场红（app 侧灰的条数 ≠ 0）。
+   */
+  const shellJudged = passed + failures.length - j0
+  shellGray = false
+  const g1 = grayed
+
   /* ---------------- ⑧ 网页侧：能拿到走壳 · 拿不到保持现在的行为 ---------------- */
   const CAN_RE = /export function canDownloadAndInstall\(\): boolean \{/
   check(
@@ -7495,30 +7555,617 @@ section('第二十六节 · A21：应用内更新（下载完调起安装器）�
      * 🔴 这一条**故意用原始文本（不剥注释）**：上面每一条判据都必须剥注释（"注释里写不许用 X"不算），
      *    而"照实写着真机未验"这件事**只能**在注释里 —— 两种口径各用各的文本，别混。
      */
-    const RAW_SIDES = [
-      ['YlxbNativePlugin.java', shellRead(PLUGIN_REL)],
-      ['shell-bridge-apk.js', shellRead(BRIDGE_REL)],
+    /*
+     * app 侧那两份**永远**要查（CI 的检出里也有）；壳侧两份只在打包工程真的在的那台机器上一起查
+     * —— 三态：量不到的那半个输入不许红、也不许假装绿，但**量得到的半个照旧逐条判**。
+     */
+    const APP_SIDES = [
       ['src/lib/fileOut.ts', readApp('src/lib/fileOut.ts')],
       ['src/components/ReleaseGate.tsx', readApp('src/components/ReleaseGate.tsx')],
     ]
+    const SHELL_SIDES = [
+      ['YlxbNativePlugin.java', shellRead(PLUGIN_REL)],
+      ['shell-bridge-apk.js', shellRead(BRIDGE_REL)],
+    ]
+    const RAW_SIDES = SHELL_HERE ? [...SHELL_SIDES, ...APP_SIDES] : APP_SIDES
     const said = RAW_SIDES.filter(([, t]) => /真机未验/.test(t)).map(([n]) => n)
     const silent = RAW_SIDES.filter(([, t]) => !/真机未验/.test(t)).map(([n]) => n)
     check(
       silent.length === 0,
-      '🔴 A21 ⑪ 两侧四份源码的**注释**里都照实写着"真机未验"（本机没有安卓设备，别假装验过）',
-      silent.length ? `没写：${silent.join(' · ')}｜写了：${said.join(' · ')}` : `四份都写了：${said.join(' · ')}`,
+      `🔴 A21 ⑪ ${SHELL_HERE ? '两侧四份' : 'app 侧那两份（壳侧两份本机没有 ⇒ 一并查不了）'}源码的**注释**里都照实写着"真机未验"（本机没有安卓设备，别假装验过）`,
+      silent.length ? `没写：${silent.join(' · ')}｜写了：${said.join(' · ')}` : `${RAW_SIDES.length} 份都写了：${said.join(' · ')}`,
+    )
+    /*
+     * 🔴 **节末自证（可红）**：壳不在时"壳那一侧（①–⑦）**一条都没判**"（全落灰），
+     *    而 app 侧（⑧–⑪）**一条都没灰** ⇒ 谁忘了把"允许落灰"打开/关掉，这条当场红。
+     * ⚠️ 断言前**强制关掉那个开关**：否则"忘了关"这件事会把**这条自证自己也罩成灰**
+     *    ⇒ 变成一条静默的"假灰"（2026-10-05 实测踩到，已改）。
+     */
+    shellGray = false
+    check(
+      (SHELL_HERE || shellJudged === 0) && grayed - g1 === 0,
+      '🔴 A21 自证（三态）：壳不在时壳那一侧（①–⑦）**一条都没判**（全落灰），app 侧（⑧–⑪）**一条都没灰** —— 忘关/忘开那个开关，这条当场红',
+      `壳在=${SHELL_HERE} · 壳侧真的判了 ${shellJudged} 条 · 壳侧灰了 ${g1 - g0} 条 · app 侧灰了 ${grayed - g1} 条`,
     )
   }
+}
+
+/* ============================================================
+   第二十七节 · A22：到点提醒**交给系统排程**（2026-10-05 真机反馈）
+   ------------------------------------------------------------
+   用户（真安卓手机、`树高教务通-教师端-v1.1.2-vc32.apk`）报的原话：
+     「我从浏览器下载后它自动安装了，然后**通知权限确认时界面跳转正常**，
+       但是**我收不到通知**」
+   ⇒ 症状：**装上了、权限那一步走通了，通知一条都没有**。
+
+   🔴 查清的链（每一步都有 `文件:行`，本机没有安卓设备 ⇒ 全是静态判据）：
+     · 权限那一步是 **Capacitor 的本地通知插件**弹的
+       （`shell-bridge-apk.js` 的 `notify()` → `LN.checkPermissions()` / `requestPermissions()`）
+       —— 它成功只证明**能发**，不证明**有人去发**；
+     · 真正在"到点"那一下做决定的，是应用里那个 **`setInterval(60s)`**
+       （`useScheduleReminder.ts` 的 tick）⇒ 应用一退后台 / 锁屏 / 被杀，
+       WebView 定时器冻结 ⇒ **提醒整条静默消失**；
+     · 而原生侧**三天前就写好了**（`YlxbNativePlugin.scheduleAlarms` → `YlxbAlarms`
+       的 `setExactAndAllowWhileIdle` + `YlxbAlarmReceiver` 发通知 + `YlxbBootReceiver` 开机重排），
+       manifest 也声明了 `SCHEDULE_EXACT_ALARM` / `USE_EXACT_ALARM` / `POST_NOTIFICATIONS`
+       —— **断的只是"桥接层一个口都没暴露"**（全仓 grep `scheduleAlarms` 只命中 Java 自己）。
+
+   ⚠️ 这一节**不改**网页版行为、**不装**新插件、**不动** apk 构建配置：
+      用的全是已经打进 vc32 里的原生能力。
+   🔴 **真机未验**（本机没有安卓设备）—— 怎么验见本节末尾。
+   ============================================================ */
+section('第二十七节 · A22：到点提醒交给系统排程（桥接层 / 原生闹钟 / 网页侧三条都对上）')
+
+{
+  /** 剥注释（照 A21 的写法）—— 判据只许看**真代码** */
+  const strip2 = (s) =>
+    String(s)
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/(^|[^:'"`\w])\/\/[^\n]*/gm, '$1')
+  const stripXml2 = (s) => String(s).replace(/<!--[\s\S]*?-->/g, '')
+  const once2 = (t, s) => t.split(s).length - 1
+  const oneEdit2 = (t, from, to) =>
+    once2(t, from) === 1 ? { ok: true, n: 1, text: t.replace(from, to) } : { ok: false, n: once2(t, from), text: t }
+
+  const PACK2 = 'C:\\Users\\Administrator\\Desktop\\树高教务通打包'
+  const BRIDGE2_REL = '_src/shell-bridge-apk.js'
+  const PLUGIN2_REL = '_src/android/app/src/main/java/com/shugao/jiaowu/YlxbNativePlugin.java'
+  const ALARMS_REL = '_src/android/app/src/main/java/com/shugao/jiaowu/YlxbAlarms.java'
+  const RECV_REL = '_src/android/app/src/main/java/com/shugao/jiaowu/YlxbAlarmReceiver.java'
+  const BOOT_REL = '_src/android/app/src/main/java/com/shugao/jiaowu/YlxbBootReceiver.java'
+  const MANIFEST2_REL = '_src/android/app/src/main/AndroidManifest.xml'
+  const shellRead2 = (rel) => {
+    const p = join(PACK2, rel)
+    return existsSync(p) ? readFileSync(p, 'utf8') : ''
+  }
+  const MUST = [BRIDGE2_REL, PLUGIN2_REL, ALARMS_REL, RECV_REL, BOOT_REL, MANIFEST2_REL]
+  const missing2 = MUST.filter((r) => !existsSync(join(PACK2, r)))
+  /*
+   * 🔴 三态（与 A21 同一条理由，2026-10-05 修 CI 红）：打包工程**不在这个公开仓库里**
+   *    ⇒ CI 的干净检出**必然**没有它 ⇒「找不到就是红」在 CI 上恒红（本地恒绿）。
+   *    ⇒ 壳那一侧（①–④，读的全是 `PACK2` 下的文件）**落灰**；
+   *      **app 侧（⑤–⑧，只读 `app/` 下 —— CI 里也有）照旧逐条判**。
+   */
+  const SHELL_HERE2 = existsSync(PACK2)
+  const g0b = grayed
+  const j0b = passed + failures.length
+  if (!SHELL_HERE2) {
+    console.log(
+      `  ⏭ A22 ①–④ 壳那一侧**落灰**：打包工程 ${PACK2} 不在（它不进这个公开仓库，CI 的干净检出必然没有）—— 不是"坏了"`,
+    )
+    shellGray = true
+  }
+  check(
+    missing2.length === 0,
+    'A22 ① 壳那六份源文件找得到（打包工程 `树高教务通打包`）',
+    missing2.length ? `缺 ${missing2.length} 个：${missing2.join(' · ')}` : `都在 ${PACK2}`,
+    '（壳不在 ⇒ 本条与②–④落灰；壳在 ⇒ 缺文件仍是红：判据读的是空串，那正是"门禁自己也要能红"）',
+  )
+
+  const BRIDGE2 = strip2(shellRead2(BRIDGE2_REL))
+  const PLUGIN2 = strip2(shellRead2(PLUGIN2_REL))
+  const ALARMS = strip2(shellRead2(ALARMS_REL))
+  const RECV = strip2(shellRead2(RECV_REL))
+  const MANIFEST2 = stripXml2(shellRead2(MANIFEST2_REL))
+  const NOTIFY = strip2(readApp('src/lib/notify.ts'))
+  const HOOK = strip2(readApp('src/hooks/useScheduleReminder.ts'))
+
+  /* ---------------- ② 桥接层：把 `scheduleAlarms` 接到 `ShugaoNative` 上 ---------------- */
+  const BR_SCHED = /scheduleAlarms: function \(alarms\) \{/
+  check(
+    BR_SCHED.test(BRIDGE2) && /N\.scheduleAlarms\(\{ alarms: list \}\)/.test(BRIDGE2),
+    '🔴 A22 ② 桥接层（`_src/shell-bridge-apk.js`）把 `scheduleAlarms` 接到 `ShugaoNative` 上 —— **这一条空了三天**，就是"收不到通知"的根因（原生写好了、网页侧无从调用）',
+    `挂了方法=${BR_SCHED.test(BRIDGE2)} · 真的转给原生=${/N\.scheduleAlarms\(\{ alarms: list \}\)/.test(BRIDGE2)}`,
+  )
+  {
+    /* 🧪 反向对照：把桥接那个方法**改名** ⇒ ② 当场红 —— 名字是两侧的约定，改了原生就白写 */
+    const cut = oneEdit2(BRIDGE2, 'scheduleAlarms: function (alarms) {', 'scheduleAlarmsRenamed: function (alarms) {')
+    check(
+      cut.ok && !BR_SCHED.test(cut.text),
+      '🧪 A22 ② 反向对照：把桥接那个方法**改名**（副本）⇒ ② 当场红（证明它真的在数那个名字，不是恒真）',
+      `目标出现 ${cut.n} 处（须恰好 1）· 改完判据=${BR_SCHED.test(cut.text)}`,
+    )
+  }
+  check(
+    /var ID_PERIOD = 2000000000/.test(BRIDGE2) &&
+      /return \(Date\.now\(\) % ID_PERIOD\) \+ 1/.test(BRIDGE2) &&
+      ID_PERIOD_OK(),
+    '🔴 A22 ② 桥接层的即时通知 id **写明了一个 31 位周期**（`ID_PERIOD = 2000000000` < `Integer.MAX_VALUE` = 2147483647）—— 原生 `LocalNotification.java:227-231` 对越界的 id 是当场 `reject`，而这一层把它 `catch` 成 `false`（界面只看到页内兜底，系统通知一条都没有）',
+    `周期常量=${/var ID_PERIOD = 2000000000/.test(BRIDGE2)} · 取模式=${/return \(Date\.now\(\) % ID_PERIOD\) \+ 1/.test(BRIDGE2)} · 上界 < 2^31=${ID_PERIOD_OK()}`,
+  )
+  function ID_PERIOD_OK() {
+    const m = BRIDGE2.match(/var ID_PERIOD = (\d+)/)
+    return !!m && Number(m[1]) > 0 && Number(m[1]) + 1 <= 2147483647
+  }
+  {
+    /* 🧪 反向对照：把周期改成超过 int 的那个值 ⇒ 上界判据当场假 */
+    const cut = oneEdit2(BRIDGE2, 'var ID_PERIOD = 2000000000', 'var ID_PERIOD = 3000000000')
+    const okAfter = (() => {
+      const m = cut.text.match(/var ID_PERIOD = (\d+)/)
+      return !!m && Number(m[1]) + 1 <= 2147483647
+    })()
+    check(
+      cut.ok && !okAfter,
+      '🧪 A22 ② 反向对照：把 `ID_PERIOD` 改成 `3000000000`（= 会越界的那种坏法，副本）⇒ 上面那条上界判据当场假（证明它真在算，不是恒真）',
+      `目标出现 ${cut.n} 处（须恰好 1）· 改完上界合法=${okAfter}`,
+    )
+  }
+
+  /* ---------------- ③ 原生：精确闹钟 + 到点发通知 + 开机重排 ---------------- */
+  const JAVA_SCHED = /public void scheduleAlarms\(PluginCall call\)/
+  check(
+    JAVA_SCHED.test(PLUGIN2) && /YlxbAlarms\.scheduleAll\(getContext\(\), list\)/.test(PLUGIN2),
+    '🔴 A22 ③ 原生插件里有 `@PluginMethod scheduleAlarms(PluginCall)` 且真的转给 `YlxbAlarms.scheduleAll`（桥接层按这个名字调）',
+    `方法在=${JAVA_SCHED.test(PLUGIN2)} · 转给调度核心=${/YlxbAlarms\.scheduleAll\(getContext\(\), list\)/.test(PLUGIN2)}`,
+  )
+  check(
+    /am\.setExactAndAllowWhileIdle\(AlarmManager\.RTC_WAKEUP, fireAt, pi\)/.test(ALARMS) &&
+      /am\.setAndAllowWhileIdle\(AlarmManager\.RTC_WAKEUP, fireAt, pi\)/.test(ALARMS),
+    '🔴 A22 ③ 调度核心用的是**系统闹钟**（`setExactAndAllowWhileIdle`；拿不到精确授权时退化成 `setAndAllowWhileIdle` —— 仍然会响，只是不那么准）：这是"应用关着也能响"的**唯一**来源',
+    `精确=${/am\.setExactAndAllowWhileIdle\(AlarmManager\.RTC_WAKEUP, fireAt, pi\)/.test(ALARMS)} · 退化档=${/am\.setAndAllowWhileIdle\(AlarmManager\.RTC_WAKEUP, fireAt, pi\)/.test(ALARMS)}`,
+  )
+  {
+    /* 🧪 反向对照：把精确那一句换成"页内定时器"根本做不到的写法（`set`）⇒ 判据当场红 */
+    const cut = oneEdit2(ALARMS, 'am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, fireAt, pi)', 'am.set(AlarmManager.RTC, fireAt, pi)')
+    check(
+      cut.ok && !/am\.setExactAndAllowWhileIdle\(AlarmManager\.RTC_WAKEUP, fireAt, pi\)/.test(cut.text),
+      '🧪 A22 ③ 反向对照：把精确闹钟那一句换成 `am.set(...)`（副本）⇒ 上面那条当场红（证明它读的是**那一个**调用）',
+      `目标出现 ${cut.n} 处（须恰好 1）· 改完判据=${/am\.setExactAndAllowWhileIdle\(AlarmManager\.RTC_WAKEUP, fireAt, pi\)/.test(cut.text)}`,
+    )
+  }
+  check(
+    /nm\.notify\(id, b\.build\(\)\)/.test(RECV) &&
+      /MainActivity\.isForeground\(\)/.test(RECV) &&
+      /intent\.getIntExtra\("id", 0\)/.test(RECV) &&
+      /intent\.getStringExtra\("title"\)/.test(RECV),
+    '🔴 A22 ③ 到点那一下**由系统广播接收器发通知**（`YlxbAlarmReceiver`：读 `id` / `title` / `body` / `channel` / `payload` → `nm.notify(...)`），而且**应用在前台时不重复打扰**（页内已有弹窗与语音）',
+    `发通知=${/nm\.notify\(id, b\.build\(\)\)/.test(RECV)} · 前台跳过=${/MainActivity\.isForeground\(\)/.test(RECV)} · 读 id=${/intent\.getIntExtra\("id", 0\)/.test(RECV)}`,
+  )
+  check(
+    /YlxbAlarms\.scheduleAll\(context, list\)/.test(strip2(shellRead2(BOOT_REL))) &&
+      /ACTION_BOOT_COMPLETED/.test(strip2(shellRead2(BOOT_REL))),
+    'A22 ③ 手机重启后**从持久化的那份单子重排**（`YlxbBootReceiver` → `scheduleAll`，`SharedPreferences` 里的 `alarms_json`）—— 否则重启一次，往后几天的提醒就全没了',
+    `开机重排=${/YlxbAlarms\.scheduleAll\(context, list\)/.test(strip2(shellRead2(BOOT_REL)))}`,
+  )
+
+  /* ---------------- ④ manifest：权限 + 两个 receiver + 渠道 ---------------- */
+  const PERMS2 = [
+    'android.permission.POST_NOTIFICATIONS',
+    'android.permission.SCHEDULE_EXACT_ALARM',
+    'android.permission.USE_EXACT_ALARM',
+    'android.permission.RECEIVE_BOOT_COMPLETED',
+  ]
+  check(
+    PERMS2.every((p) => MANIFEST2.includes(`android:name="${p}"`)),
+    '🔴 A22 ④ manifest 四条权限都在（`POST_NOTIFICATIONS`（13+ 运行时权限）· `SCHEDULE_EXACT_ALARM` · `USE_EXACT_ALARM` · `RECEIVE_BOOT_COMPLETED`）—— 少任何一条，"应用关着也响"就有一档是假的',
+    PERMS2.map((p) => `${MANIFEST2.includes(`android:name="${p}"`) ? '✔' : '✖'}${p.split('.').pop()}`).join(' · '),
+  )
+  {
+    /* 🧪 反向对照：删掉 `POST_NOTIFICATIONS` ⇒ ④ 当场红 */
+    const cut = oneEdit2(MANIFEST2, 'android:name="android.permission.POST_NOTIFICATIONS"', 'android:name="android.permission.INTERNET"')
+    check(
+      cut.ok && !cut.text.includes('android:name="android.permission.POST_NOTIFICATIONS"'),
+      '🧪 A22 ④ 反向对照：把 `POST_NOTIFICATIONS` 那一行换成别的权限（副本）⇒ ④ 当场红（13+ 上没这一条，通知请求根本弹不出来）',
+      `目标出现 ${cut.n} 处（须恰好 1）· 改完判据=${cut.text.includes('android:name="android.permission.POST_NOTIFICATIONS"')}`,
+    )
+  }
+  check(
+    /<receiver android:name="\.YlxbAlarmReceiver" android:exported="false" \/>/.test(MANIFEST2) &&
+      /<receiver android:name="\.YlxbBootReceiver"/.test(MANIFEST2) &&
+      /android\.intent\.action\.BOOT_COMPLETED/.test(MANIFEST2),
+    '🔴 A22 ④ 两个 receiver 都注册了（`YlxbAlarmReceiver` = 到点发通知 · `YlxbBootReceiver` = 开机重排，带 `BOOT_COMPLETED` intent-filter）—— 没注册 = 闹钟响了没人接，**界面完全看不出异常**',
+    `闹钟接收器=${/<receiver android:name="\.YlxbAlarmReceiver" android:exported="false" \/>/.test(MANIFEST2)} · 开机接收器=${/<receiver android:name="\.YlxbBootReceiver"/.test(MANIFEST2)} · BOOT_COMPLETED=${/android\.intent\.action\.BOOT_COMPLETED/.test(MANIFEST2)}`,
+  )
+  check(
+    /public static final String CHANNEL_GENERAL = "shugao_general"/.test(PLUGIN2) &&
+      /nm\.createNotificationChannel\(gn\)/.test(PLUGIN2) &&
+      /'shugao_general'/.test(NOTIFY),
+    '🔴 A22 ④ 通知渠道**两侧对得上**：原生建了 `shugao_general`（Android 8+ 没有渠道的通知会被系统丢掉），网页侧排的那张单子也**点名**用这个渠道',
+    `原生渠道常量=${/public static final String CHANNEL_GENERAL = "shugao_general"/.test(PLUGIN2)} · 建渠道=${/nm\.createNotificationChannel\(gn\)/.test(PLUGIN2)} · 网页侧点名=${/'shugao_general'/.test(NOTIFY)}`,
+    '（⚠️ 判据里写的是**单引号**那一版：源码里那个字面量就是单引号，写成双引号会`假红`）',
+  )
+
+  /*
+   * ⛔ 壳那一侧到此为止 —— 🔴 **立刻关掉"允许落灰"**：下面 ⑤–⑧ 判的全是 **`app/` 下的文件**
+   *    （CI 的检出里**也有**）⇒ 它们**一条都不许灰**。忘了关 ⇒ 节末自证当场红。
+   */
+  const shellJudged2 = passed + failures.length - j0b
+  shellGray = false
+  const g1b = grayed
+
+  /* ---------------- ⑤ 网页侧：真去调那个口 + 算得对 ---------------- */
+  check(
+    /typeof s\?\.scheduleAlarms !== 'function'/.test(NOTIFY) && /await s\.scheduleAlarms\(\[\.\.\.alarms\]\)/.test(NOTIFY),
+    '🔴 A22 ⑤ `notify.ts` 的 `scheduleNativeReminders()` 判据是"**桥接对象上这个方法在不在**"（不是"有没有 Capacitor"），而且**真的调**它',
+    `判能力=${/typeof s\?\.scheduleAlarms !== 'function'/.test(NOTIFY)} · 真调=${/await s\.scheduleAlarms\(\[\.\.\.alarms\]\)/.test(NOTIFY)}`,
+  )
+  check(
+    /export const ALARM_ID_MAX = 2147483646/.test(NOTIFY) && /return id \+ 1/.test(NOTIFY),
+    '🔴 A22 ⑤ 交给系统的 id 上界写死在 `ALARM_ID_MAX = 2147483646`（`Integer.MAX_VALUE` 减 1；**不给 0** —— 0 与"没有 id"在别处同义）',
+    `常量在=${/export const ALARM_ID_MAX = 2147483646/.test(NOTIFY)}`,
+  )
+  {
+    /* 🧪 反向对照：把上界改大到越界 ⇒ 判据当场假 */
+    const cut = oneEdit2(NOTIFY, 'export const ALARM_ID_MAX = 2147483646', 'export const ALARM_ID_MAX = 3147483646')
+    check(
+      cut.ok && !/export const ALARM_ID_MAX = 2147483646/.test(cut.text),
+      '🧪 A22 ⑤ 反向对照：把 `ALARM_ID_MAX` 改到越界（副本）⇒ 上面那条当场红（证明它在读**那个字面量**）',
+      `目标出现 ${cut.n} 处（须恰好 1）`,
+    )
+  }
+  check(
+    /if \(fireAt <= t0\) continue/.test(NOTIFY) && /d\.setMinutes\(Math\.trunc\(minute\)\)/.test(NOTIFY),
+    '🔴 A22 ⑤ 排单子时**过期的那些不排**（`fireAt <= t0`）、时刻由"当天第几分钟"算（`setMinutes` 会自己进位：1440 = 次日 00:00）—— 排一堆已经过去的闹钟等于老师一打开应用就被轰一串通知',
+    `过期过滤=${/if \(fireAt <= t0\) continue/.test(NOTIFY)} · 分钟→时刻=${/d\.setMinutes\(Math\.trunc\(minute\)\)/.test(NOTIFY)}`,
+  )
+
+  /* ---------------- ⑥ 挂钩子：真的排了，而且**页内那一条兜底还在** ---------------- */
+  const ARM_RE = /const ok = await scheduleNativeReminders\(nativeReminderPlan\(days, now\)\)/
+  check(
+    ARM_RE.test(HOOK) && /scheduleNativeReminders,[\s\S]{0,80}\} from '\.\.\/lib\/notify'/.test(HOOK),
+    '🔴 A22 ⑥ `useScheduleReminder` 真的把那条单子排出去（`scheduleNativeReminders(nativeReminderPlan(days, now))`）—— 桥接层与适配层都写好了、**没人调**，就是这次事故的形态（`97cf3fd` 同源：桥接层给了答案，业务层没去读）',
+    `排出去=${ARM_RE.test(HOOK)}`,
+  )
+  {
+    /* 🧪 反向对照：把那一句删掉 ⇒ ⑥ 当场红（= 回到"只有页内定时器"的老样子） */
+    const cut = oneEdit2(HOOK, 'const ok = await scheduleNativeReminders(nativeReminderPlan(days, now))', 'const ok = false')
+    check(
+      cut.ok && !ARM_RE.test(cut.text),
+      '🧪 A22 ⑥ 反向对照：把"排出去"那一句删掉（副本）⇒ ⑥ 当场红 —— 那正是**改之前**的状态（整条提醒只靠页内定时器）',
+      `目标出现 ${cut.n} 处（须恰好 1）· 改完判据=${ARM_RE.test(cut.text)}`,
+    )
+  }
+  check(
+    /const NATIVE_PLAN_DAYS = 3/.test(HOOK) &&
+      /for \(let i = 0; i < NATIVE_PLAN_DAYS; i\+\+\)/.test(HOOK),
+    'A22 ⑥ 往后算 `NATIVE_PLAN_DAYS = 3` 天（今天 / 明天 / 后天）—— 每次页面重新可见都会重排一遍，所以"提前几天"这个数不必大：**排太多会吃 ROM 的闹钟配额**',
+    `天数=${/const NATIVE_PLAN_DAYS = 3/.test(HOOK)} · 循环用它=${/for \(let i = 0; i < NATIVE_PLAN_DAYS; i\+\+\)/.test(HOOK)}`,
+  )
+  {
+    /* 🧪 反向对照：把天数改成 0 ⇒ ⑥ 那条当场假（一条都不排 = 静默失效） */
+    const cut = oneEdit2(HOOK, 'const NATIVE_PLAN_DAYS = 3', 'const NATIVE_PLAN_DAYS = 0')
+    check(
+      cut.ok && !/const NATIVE_PLAN_DAYS = 3/.test(cut.text),
+      '🧪 A22 ⑥ 反向对照：把天数改成 `0`（副本）⇒ 上面那条当场红 —— "排 0 天"就是"什么都不排"，而界面上看不出任何异常',
+      `目标出现 ${cut.n} 处（须恰好 1）`,
+    )
+  }
+  check(
+    /const t = window\.setInterval\(\(\) => void tick\(\), 60_000\)/.test(HOOK) &&
+      /const ok = await notifyAsync\(title, body\)/.test(HOOK) &&
+      /perm === 'granted'/.test(HOOK),
+    '🔴 A22 ⑥ **页内那一条兜底照旧保留**（`setInterval(60s)` + `notifyAsync` + 失败时 `push` 页内提示）—— 系统排程是"应用关着也能响"，页内那条是"应用开着时更即时、且失败会有人知道"，两条**分工**，不许二选一',
+    `定时器=${/const t = window\.setInterval\(\(\) => void tick\(\), 60_000\)/.test(HOOK)} · 即时通知=${/const ok = await notifyAsync\(title, body\)/.test(HOOK)} · 页内兜底=${/perm === 'granted'/.test(HOOK)}`,
+  )
+
+  /* ---------------- ⑦ 排不上就**说出来**（不许静默） ---------------- */
+  check(
+    /if \(!warnedNoNative\.current\)/.test(HOOK) && /提醒改在应用内显示/.test(HOOK),
+    '🔴 A22 ⑦ 系统排不上时**说一句人话**（一次会话只说一次）—— §三.5：不可写的路径要显式报错。"收不到通知而界面上看不出任何异常"正是这次事故的形态',
+    `说了=${/if \(!warnedNoNative\.current\)/.test(HOOK)} · 文案在=${/提醒改在应用内显示/.test(HOOK)}`,
+  )
+  {
+    /* 🧪 反向对照：把那一句删掉 ⇒ ⑦ 当场红（= 静默失败） */
+    const cut = oneEdit2(HOOK, 'if (!warnedNoNative.current) {', 'if (false) {')
+    check(
+      cut.ok && !/if \(!warnedNoNative\.current\)/.test(cut.text),
+      '🧪 A22 ⑦ 反向对照：把那句提示的条件改成 `false`（副本）⇒ ⑦ 当场红（排不上也一声不吭）',
+      `目标出现 ${cut.n} 处（须恰好 1）`,
+    )
+  }
+
+  /*
+   * ✅ **怎么真机验**（本机没有安卓设备 ⇒ 这一节全是静态判据，**没有一条**是真机验过的）：
+   *    ① 出一版新 apk（`_tools/package-all.mjs`）装到老师手机上；
+   *    ② 打开应用停在「日程」页（这一步是让网页把那张单子交给系统）⇒ 然后**把应用划掉**；
+   *    ③ 到下一节课「课前 10 分钟」时：通知栏应出现「10 分钟后上课 · 班级 · 地点 · 时间」
+   *       —— 应用**是关着的**（改之前这一条必不出现）；
+   *    ④ 反向：在系统设置里把本应用的通知关掉（或把"闹钟和提醒"关掉）⇒
+   *       打开应用应看到那句「提醒改在应用内显示」，而不是一片安静。
+   */
+  {
+    /* 照 A21 ⑪ 的先例：这一条**故意用原始文本**（"真机未验"这几个字只能写在注释里） */
+    const APP2 = [
+      ['src/lib/notify.ts', readApp('src/lib/notify.ts')],
+      ['src/hooks/useScheduleReminder.ts', readApp('src/hooks/useScheduleReminder.ts')],
+    ]
+    const SHELL2 = [
+      ['shell-bridge-apk.js', shellRead2(BRIDGE2_REL)],
+      ['YlxbNativePlugin.java', shellRead2(PLUGIN2_REL)],
+    ]
+    /* app 侧那两份**永远**要查；壳侧两份只在打包工程真的在的那台机器上一起查（三态） */
+    const RAW2 = SHELL_HERE2 ? [...SHELL2, ...APP2] : APP2
+    const silent2 = RAW2.filter(([, t]) => !/真机未验/.test(t)).map(([n]) => n)
+    check(
+      silent2.length === 0,
+      `🔴 A22 ⑧ ${SHELL_HERE2 ? '四份' : 'app 侧那两份（壳侧两份本机没有 ⇒ 一并查不了）'}源码的**注释**里都照实写着"真机未验"（本机没有安卓设备，别假装验过）`,
+      silent2.length ? `没写：${silent2.join(' · ')}` : `${RAW2.length} 份都写了：${RAW2.map(([n]) => n).join(' · ')}`,
+    )
+    /* 🔴 **节末自证（可红）**：壳不在时壳那一侧（①–④）一条都没判（全落灰），app 侧（⑤–⑧）一条都没灰。
+       ⚠️ 断言前**强制关掉那个开关**，否则它会被"忘了关"这件事罩成灰（静默的假灰）。 */
+    shellGray = false
+    check(
+      (SHELL_HERE2 || shellJudged2 === 0) && grayed - g1b === 0,
+      '🔴 A22 自证（三态）：壳不在时壳那一侧（①–④）**一条都没判**（全落灰），app 侧（⑤–⑧）**一条都没灰** —— 忘关/忘开那个开关，这条当场红',
+      `壳在=${SHELL_HERE2} · 壳侧真的判了 ${shellJudged2} 条 · 壳侧灰了 ${g1b - g0b} 条 · app 侧灰了 ${grayed - g1b} 条`,
+    )
+  }
+}
+
+/* ============================================================
+   第二十八节 · A23：点「发布」吞字 —— **提交读屏、不读 state**（2026-10-05 真机反馈）
+   ------------------------------------------------------------
+   用户（真安卓手机 · `树高教务通-教师端-v1.1.2-vc32.apk` · **公告发布界面**）原话：
+     「我打的是汉字，**在我全部输完以后**，点击**发布**按钮后它**吞了我几个字**」。
+   ⇒ 字已经选好词、已经在框里（不是还挂在候选条上），是**点发布那一刻**少掉的。
+
+   🔴 **上一版为什么没解决**：`src/lib/imeMirror.ts`（`da9ad45`，本包**已经含**）的前提是
+      「`composition*` 一定会来，补派发一个 `input` 就一定让 React 跟上屏」——
+      真机上这条前提**不成立**（有些安卓输入法 / WebView 不发组合事件；就算发了，
+      点击触发的重渲染是**同步**的，它经常排在组字提交**前面**）。
+      ⇒ 修法必须**不依赖任何输入法事件**。
+
+   🔴 断在哪（vc32 的两个位置）：
+     ① **提交读的是 state**：`Admin.tsx` 的 `doSet()` 把渲染期闭包里的 `note` 交给 `setRelease()`
+        ⇒ 安卓上最后一次 `onChange` 若排在点击**之后**，发出去的正文少那几个字，
+        **同时**那次重渲染把旧 `note` 写回受控的 `value=` ⇒ **框里也没了**（两个症状同源）。
+     ② **提交路径上改写用户输入**：版本号框 `onChange={(e) => changeVersion(e.target.value.trim())}`
+        （每击键 `.trim()` 一次 = 不变量 I-输入-2）+ 正文框 `maxLength`（原生上限在组字时**静默截断**）。
+
+   ✅ 修法（`src/lib/liveInput.ts` + `Admin.tsx` 的 `ReleaseSlotForm`）：
+     · 正文框改成**非受控**（`defaultValue` + `noteRef`）：React 一个字都不往框里写
+       ⇒ 丢字**从结构上不可能**；我们自己要替换它（服务端预填 / 版本或档位联动）走唯一的 `applyNote()`。
+     · 点「发布」/「撤下」时**先读 DOM**（`liveValue`）→ 写回 state → 用**读回来的那一份**重算
+       `validateReleaseForm()`；不 ok ⇒ **显式报错、不发布**（不静默截断、不截断后照发）。
+     · 另外三个框照旧受控（要靠服务端预填与版本联动）⇒ 它们走"提交前读回"。
+     · 去掉 `maxLength` 与 `onChange` 里的 `.trim()`。
+
+   ⚠️ 本机没有安卓设备 ⇒ 这一节全是**静态**判据（**没有一条**是真机验过的）；
+      真机验收只能由用户做（复验步骤写在本节末尾的注释里）。
+   ============================================================ */
+section('第二十八节 · A23：公告「发布」吞字（正文非受控 + 提交前从 DOM 读回）')
+
+{
+  /** 剥注释（照 A21/A22 的写法）：判据只许看**真代码**（注释里写"不许用某个东西"不算命中） */
+  const strip3 = (s) =>
+    String(s)
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/(^|[^:'"`\w])\/\/[^\n]*/gm, '$1')
+  /** 🔴 反向对照的前置：目标串必须**恰好出现一次**再替换（`AGENTS.md` §三.2） */
+  const once3 = (t, s) => t.split(s).length - 1
+  const oneEdit3 = (t, from, to) =>
+    once3(t, from) === 1 ? { ok: true, n: 1, text: t.replace(from, to) } : { ok: false, n: once3(t, from), text: t }
+
+  const LIVE_SRC = strip3(readApp('src/lib/liveInput.ts'))
+  const ADMIN = strip3(readApp('src/pages/Admin.tsx'))
+  /*
+   * 🔴 只取**发布表单那一个组件**（`ReleaseSlotForm`）再判：
+   *    `Admin.tsx` 里别的卡（维护模式 / 错误日志 / 教师账号…）也有输入框，
+   *    不切片就会把它们的 `onChange` / `maxLength` 一起算进来 ⇒ 判据会假红或空转。
+   */
+  const slotFrom = ADMIN.indexOf('function ReleaseSlotForm(')
+  const slotTo = ADMIN.indexOf('function ErrorsCard(')
+  const SLOT = slotFrom >= 0 && slotTo > slotFrom ? ADMIN.slice(slotFrom, slotTo) : ''
+  check(
+    SLOT.length > 0 && LIVE_SRC.length > 0,
+    'A23 锚点自证：`ReleaseSlotForm` 那一块与适配层 `lib/liveInput.ts` 都抠出来了（否则下面全是空转）',
+    `ReleaseSlotForm ${SLOT.length} B · liveInput ${LIVE_SRC.length} B`,
+  )
+
+  /* ---------------- ① 正文框：非受控 ---------------- */
+  const noteUncontrolled = (t) =>
+    t.includes('defaultValue={note}') && t.includes('ref={noteRef}') && !/value=\{note\}/.test(t)
+  check(
+    noteUncontrolled(SLOT),
+    '🔴 A23 ① 正文框（`data-rel-note`）是**非受控**的：`defaultValue={note}` + `ref={noteRef}`，**没有** `value={note}` —— React 不再往框里写回旧值 ⇒ "点发布把刚打完的字冲掉"从结构上不可能',
+    `defaultValue=${SLOT.includes('defaultValue={note}')} · ref=${SLOT.includes('ref={noteRef}')} · 还有 value={note}=${/value=\{note\}/.test(SLOT)}`,
+  )
+  {
+    /* 🧪 反向对照：改回受控（= 改之前那份代码）⇒ ① 当场假 */
+    const cut = oneEdit3(SLOT, 'defaultValue={note}', 'value={note}')
+    check(
+      cut.ok && !noteUncontrolled(cut.text),
+      '🧪 A23 ① 反向对照：把 `defaultValue={note}` 换回 `value={note}`（受控 = **改之前**的写法，内存副本）⇒ ① 当场假',
+      `目标出现 ${cut.n} 处（须恰好 1）· 改完还有 value={note}=${/value=\{note\}/.test(cut.text)}`,
+    )
+  }
+
+  /* ---------------- ② 提交那一刻读的是**屏上**，不是 state ---------------- */
+  const readsDom = (t) => t.includes('liveValue(noteRef.current, note)')
+  check(
+    readsDom(SLOT) && SLOT.indexOf('liveValue(noteRef.current') < SLOT.indexOf('setRelease('),
+    '🔴 A23 ② 点「发布」/「撤下」时**先读 DOM**（`liveValue(noteRef.current, note)`）而且**排在 `setRelease(` 之前** —— 安卓上最后一次 `onChange` 可能排在这次点击之后，读 state 就是把老师刚打完、屏上看得见的那几个字吞掉',
+    `读 DOM=${readsDom(SLOT)} · 读的位置 ${SLOT.indexOf('liveValue(noteRef.current')} < 发出去的位置 ${SLOT.indexOf('setRelease(')}`,
+  )
+  {
+    const cut = oneEdit3(SLOT, 'liveValue(noteRef.current, note)', 'note')
+    check(
+      cut.ok && !readsDom(cut.text),
+      '🧪 A23 ② 反向对照：把"读 DOM"换成"读 state"（`note` = 改之前那份代码，内存副本）⇒ ② 当场假（证明它咬的是**从哪儿读**，不是"这两个名字在不在"）',
+      `目标出现 ${cut.n} 处（须恰好 1）· 改完读 DOM=${readsDom(cut.text)}`,
+    )
+  }
+
+  /* ---------------- ③ 读回之后**重算校验**；不 ok 就报错、不发布 ---------------- */
+  const GATE_RE = /if \(checked && !checked\.ok\) \{[\s\S]{0,160}setErr\(checked\.error\)[\s\S]{0,80}return/
+  check(
+    /const checked = enabled/.test(SLOT) && GATE_RE.test(SLOT),
+    '🔴 A23 ③ 提交前用**读回来的那一份**重算 `validateReleaseForm()`；不 ok ⇒ **显式报错并 return**（不发布）—— 不许"校验的是旧值、发出去的也是旧值"，也不许"截断之后照发"',
+    `重算=${/const checked = enabled/.test(SLOT)} · 不 ok 就报错返回=${GATE_RE.test(SLOT)}`,
+  )
+  {
+    const cut = oneEdit3(SLOT, 'if (checked && !checked.ok) {', 'if (false) {')
+    check(
+      cut.ok && !GATE_RE.test(cut.text),
+      '🧪 A23 ③ 反向对照：把"不 ok 就报错返回"那一句的条件改成 `false`（副本）⇒ ③ 当场假（正文不合规也照样发出去）',
+      `目标出现 ${cut.n} 处（须恰好 1）· 改完判据=${GATE_RE.test(cut.text)}`,
+    )
+  }
+  check(
+    /const row = checked\?\.ok \? checked\.row : null/.test(SLOT) && /note: outNote/.test(SLOT),
+    '🔴 A23 ③ 发出去的字段取的是**校验器归一化后的那一份**（`checked.row`），不是渲染期闭包里那几个 state —— 否则"读了 DOM 校验过"与"实际发出去的"又是两份字',
+    `取 checked.row=${/const row = checked\?\.ok \? checked\.row : null/.test(SLOT)} · 用 outNote=${/note: outNote/.test(SLOT)}`,
+  )
+
+  /* ---------------- ④ 提交路径上**不改写**用户输入 ---------------- */
+  check(
+    !/maxLength=/.test(SLOT) && /note\.length\} \/ \{RELEASE_NOTE_MAX\}/.test(SLOT),
+    '🔴 A23 ④ 正文框**没有 `maxLength`**（原生上限会在组字时**静默截断**正在打的字 —— 那也是"吞字"，只不过是我们自己造成的），而字数提示照旧在（`{note.length} / {RELEASE_NOTE_MAX} 字`）⇒ 超 24 字改成"明确报错、不发布"',
+    `还有 maxLength=${/maxLength=/.test(SLOT)} · 字数提示在=${/note\.length\} \/ \{RELEASE_NOTE_MAX\}/.test(SLOT)}`,
+  )
+  {
+    /* 🧪 反向对照：把 `maxLength` 塞回去 ⇒ ④ 当场假（原生静默截断又回来了） */
+    const cut = oneEdit3(SLOT, 'data-rel-note', 'maxLength={RELEASE_NOTE_MAX}\n        data-rel-note')
+    check(
+      cut.ok && /maxLength=/.test(cut.text),
+      '🧪 A23 ④ 反向对照：把 `maxLength={RELEASE_NOTE_MAX}` 塞回正文框（副本）⇒ ④ 当场假（静默改用户输入又回来了）',
+      `目标出现 ${cut.n} 处（须恰好 1）· 塞回去之后还有 maxLength=${/maxLength=/.test(cut.text)}`,
+    )
+  }
+  const TRIM_RE = /onChange=\{\(e\) => changeVersion\(e\.target\.value\.trim\(\)\)\}/
+  check(
+    !TRIM_RE.test(ADMIN),
+    '🔴 A23 ④ 版本号框的 `onChange` 里**不再有 `.trim()`**（原来每打一个字就 `.trim()` 一次 = 改写用户正在打的字，不变量 I-输入-2）—— 规范化留给校验/提交那一刻（`validateReleaseForm()` 自己会 `trim()`）',
+    `还有那一句=${TRIM_RE.test(ADMIN)}`,
+  )
+  {
+    const cut = oneEdit3(
+      ADMIN,
+      'onChange={(e) => changeVersion(e.target.value)}',
+      'onChange={(e) => changeVersion(e.target.value.trim())}',
+    )
+    check(
+      cut.ok && TRIM_RE.test(cut.text),
+      '🧪 A23 ④ 反向对照：把 `.trim()` 加回版本号框（副本）⇒ 上面那条当场假（证明它读的是**那一个**表达式）',
+      `目标出现 ${cut.n} 处（须恰好 1）· 加回去之后命中=${TRIM_RE.test(cut.text)}`,
+    )
+  }
+
+  /* ---------------- ⑤ 另外三个受控框：提交前也读回 ---------------- */
+  const FIELDS3 = ['versionRef', 'apkRef', 'exeRef']
+  const readBack = (t, r) => t.includes(`liveValue(${r}.current`)
+  check(
+    FIELDS3.every((r) => readBack(SLOT, r)) &&
+      FIELDS3.every((r) => SLOT.indexOf(`liveValue(${r}.current`) < SLOT.indexOf('setRelease(')),
+    '🔴 A23 ⑤ 版本号 / 两个链接框**照旧受控**（它们要靠服务端预填、版本号还要驱动正文联动 ⇒ 改成非受控反而会让"读到服务端那一份"失效），所以走另一条路：**提交前各自从 DOM 读回**，三个都排在 `setRelease(` 之前',
+    FIELDS3.map((r) => `${r}:${readBack(SLOT, r) ? '✔' : '✖'}`).join(' · '),
+  )
+  {
+    const cut = oneEdit3(SLOT, 'liveValue(apkRef.current, urlApk)', 'urlApk')
+    check(
+      cut.ok && !readBack(cut.text, 'apkRef'),
+      '🧪 A23 ⑤ 反向对照：把手机链接那个框的读回去掉（副本）⇒ ⑤ 当场假（那一个框又变成"读 state 提交"）',
+      `目标出现 ${cut.n} 处（须恰好 1）· 改完 apkRef 读回=${readBack(cut.text, 'apkRef')}`,
+    )
+  }
+
+  /* ---------------- ⑥ 适配层：只读不写 ---------------- */
+  check(
+    /export function liveValue\(el: LiveField, fallback = ''\): string \{/.test(LIVE_SRC) &&
+      /return el && typeof el\.value === 'string' \? el\.value : fallback/.test(LIVE_SRC),
+    '🔴 A23 ⑥ 适配层 `liveValue()` 的判据是"**元素在、而且它真有 `value`**"，否则退回 `fallback`（拿不到元素时绝不会读出一个 `undefined` 当字符串用）',
+    `函数在=${/export function liveValue/.test(LIVE_SRC)} · 取值判据=${/typeof el\.value === 'string'/.test(LIVE_SRC)}`,
+  )
+  /*
+   * 🔴 判据写成 `\.value\s*=(?!=)`：`===` / `==` 里也有一个 `=`
+   *    —— 第一版写成 `/\.value\s*=/`，当场把 `typeof el.value === 'string'` 判成
+   *    "给 value 赋值"⇒ **假红**（2026-10-05 实测；与 `AGENTS.md` §九.1 同源：
+   *    核对失败时第一件事是怀疑核对工具）。
+   */
+  const WRITE_RE = /\.value\s*=(?!=)/
+  check(
+    !WRITE_RE.test(LIVE_SRC),
+    '🔴 A23 ⑥ 适配层**一个字节都不改 DOM**（剥注释后的代码里没有一处 `.value =`）—— 它只读，所以不可能自己制造一次输入、也不会与组件的 `onChange` 打架',
+    `命中 ${(LIVE_SRC.match(/\.value\s*=(?!=)/g) ?? []).length} 处`,
+  )
+  {
+    /* 自证：塞一句进去则命中（"零命中"不是"什么都搜不到"） */
+    const poisoned = `${LIVE_SRC}\nfunction _bad(el) { el.value = 'x' }\n`
+    check(
+      WRITE_RE.test(poisoned),
+      '🧪 A23 ⑥ 自证：往副本里塞一句 `el.value = …` ⇒ 上面那条"零命中"当场假（证明它不是恒绿的空跑）',
+      `塞进去之后命中 ${(poisoned.match(/\.value\s*=(?!=)/g) ?? []).length} 处`,
+    )
+  }
+  {
+    const cut = oneEdit3(
+      LIVE_SRC,
+      "return el && typeof el.value === 'string' ? el.value : fallback",
+      'return (el as HTMLInputElement).value',
+    )
+    check(
+      cut.ok && !/typeof el\.value === 'string'/.test(cut.text),
+      '🧪 A23 ⑥ 反向对照：把"真有 `value` 才读"换成直接取 `.value`（副本）⇒ 上面那条当场假（拿不到元素时会读出 `undefined`）',
+      `目标出现 ${cut.n} 处（须恰好 1）`,
+    )
+  }
+
+  /* ---------------- ⑦ 两侧都照实写着"真机未验" ---------------- */
+  {
+    /* 照 A21 ⑪ / A22 ⑧ 的先例：这一条**故意用原始文本**（那五个字只能写在注释里） */
+    const RAW3 = [
+      ['src/pages/Admin.tsx', readApp('src/pages/Admin.tsx')],
+      ['src/lib/liveInput.ts', readApp('src/lib/liveInput.ts')],
+    ]
+    const silent3 = RAW3.filter(([, t]) => !/真机未验/.test(t)).map(([n]) => n)
+    check(
+      silent3.length === 0,
+      '🔴 A23 ⑦ 两份源码的**注释**里都照实写着"真机未验"（本机没有安卓设备，别假装验过）',
+      silent3.length ? `没写：${silent3.join(' · ')}` : `两份都写了：${RAW3.map(([n]) => n).join(' · ')}`,
+    )
+  }
+
+  /*
+   * ✅ **怎么真机验**（本机没有安卓设备 ⇒ 这一节全是静态判据，**没有一条**是真机验过的）：
+   *    ① 装一版新 apk（`_tools/package-all.mjs`），进 `/admin` → 「版本更新」卡 → 教师端那一档；
+   *    ② 用**中文输入法**在「公告正文」里连着打十几个汉字（**别用英文、别粘贴** ——
+   *       粘贴绕不出这个 bug，它要的是"用输入法一路打上来"）；
+   *    ③ 打完**立刻**点「发布」：正文框里那几个字**必须一个都不少**，而且报错/成功那句里的
+   *       版本号与正文与屏上一致；
+   *    ④ 反向：把正文改到 25 个字以上再点发布 ⇒ 应看到「公告正文最多 24 字 —— 长了没人读」
+   *       这句**明确报错**，而**不是**"被悄悄截成 24 字发出去"。
+   */
 }
 
 /* ---------------- 结果 ---------------- */
 console.log(`\n================ 结果 ================`)
 
-console.log(`  断言：通过 ${passed} 条，失败 ${failures.length} 条`)
+console.log(
+  `  断言：通过 ${passed} 条，失败 ${failures.length} 条${grayed ? ` · 灰（探不到，不红不绿）${grayed} 条` : ''}`,
+)
 for (const f of failures) console.log(`  ❌ ${f}`)
 if (failures.length) {
   console.log('\n  ⛔ 有断言没过（上面每一条都写了实测值）')
   process.exitCode = 1
+} else if (grayed) {
+  /*
+   * 🔴 三态：**有灰就不许再说"全部通过"**（那正是把"量不到"读成"验过了"）。
+   *    典型情形 = CI 的干净检出：打包工程不在这个公开仓库里 ⇒ A21/A22 的壳那一侧落灰
+   *    （原因见上面那几行 `⏭`），而 app 侧那几条照旧逐条判过。
+   */
+  console.log(
+    `  通过 ✅（另有 ${grayed} 条**灰**：那一半输入本机没有 —— 打包工程不进这个公开仓库，详见上面 ⏭ 那几行）`,
+  )
 } else {
   console.log('  全部通过 ✅（纯函数 A1–A16 / 静态 D1–D7 · D9 · D10 · D11 · D12 · D13 · D14 · D15 · D16 · D17 · D18 / 编码 + 不可见字符 D8）')
 }
