@@ -302,6 +302,14 @@ await withLock(async () => {
    */
   let teacherPatch = 'ok'
   /**
+   * 🆕 2026-10-04 版本更新公告：造「`PATCH` 回了 **200 但一行都没写**」这个形状。
+   *
+   * 🔴 为什么要造它：真 PostgREST 在 `PATCH` 打在一行都没有的表上时回 **204 / `[]`** ——
+   *    什么都不写、也不报错（`functions/api/admin/release.ts` 文件头那一整段就是讲这个）。
+   *    只在本节 ②b 的反向对照里开一小段，**用完立刻关掉**。
+   */
+  let patchZeroRows = false
+  /**
    * 假 PostgREST 的"库结构"：
    *  · `missingTables` 里的表 → 404 + `42P01`（真 PostgREST 的表不存在就是这个形状）；
    *  · `missingCols` 里的 `表.列` → 400 + `42703`（列不存在）。
@@ -492,6 +500,8 @@ await withLock(async () => {
         if (table === 'teachers' && method === 'PATCH' && teacherPatch === 'none') {
           return send(200, [])
         }
+        /* 🆕 ②b：造「`PATCH` 回了 `200 []`」（= 一行都没写上）这个**静默失败**的形状 */
+        if (patchZeroRows && method === 'PATCH') return send(200, [])
         if (method === 'DELETE') {
           /* 真 PostgREST：`return=representation` 时回**被删掉的那些行** */
           const rows = tableRows.get(table) ?? []
@@ -674,7 +684,37 @@ await withLock(async () => {
     updated_at: '2026-09-29T00:00:00.000Z',
     ...over,
   })
-  tableRows.set('site_state', [siteRow()])
+  /**
+   * 🆕 2026-10-04 版本更新公告（施工单 §二.1）：**同一张表、两档各一行**，用 `key` 区分。
+   *
+   * 🔴 字段名与 `supabase/schema.sql` §23.2.1 加的列**逐字相同**
+   *    （`version` / `force` / `url_apk` / `url_exe`，其余列与维护那一行共用）。
+   * ⚠️ `until` / `scheduled_from` 对这两行**没有意义**（恒 null）—— 它们是维护那一档的语义，
+   *    但列是同一组，所以夹具里照写（一个字段一种语义由 `key` 分开读）。
+   */
+  const releaseRow = (target, over = {}) => ({
+    key: 'release:' + target,
+    enabled: false,
+    message: '',
+    until: null,
+    scheduled_from: null,
+    version: '',
+    force: false,
+    url_apk: '',
+    url_exe: '',
+    updated_by: null,
+    updated_at: '2026-09-29T00:00:00.000Z',
+    ...over,
+  })
+  /**
+   * `site_state` 那一张表的**标准种子**（维护一行 + 版本公告两行）。
+   *
+   * 🔴 为什么要有这个常量：`tableRows.set('site_state', […])` 在好几处重置点上出现，
+   *    而 §23.2.1 之后**少一行都是错的世界**（"这一档那一行不在" ≠ "没发布"）。
+   *    抄好几遍就一定会有一处漏掉 —— 那正是这个项目栽过的那类偏差。
+   */
+  const SITE_SEED = () => [siteRow(), releaseRow('teacher'), releaseRow('classroom')]
+  tableRows.set('site_state', SITE_SEED())
   tableRows.set('admin_audit', [])
   /* 🆕 第十一节：教室端账号表（改姓名要按它把"教室端"挡掉）。空表 = 这里没有教室端账号 */
   tableRows.set('classroom_accounts', [])
@@ -721,6 +761,15 @@ await withLock(async () => {
   const MAILLIB = await import(mod('functions/api/_lib/mail.ts', '?maillib'))
   /** 🆕 第五节 ③-B：公告那一支的**真** Function（"系统正文自测"要端到端跑它） */
   const ANNOUNCE = await import(mod('functions/api/announcement.ts', '?ann'))
+  /**
+   * 🆕 2026-10-04 版本更新公告：
+   *   · `RELLIB` = `functions/api/_lib/release.ts`（**共享区**：两档枚举 / 版本比较 /
+   *     五条校验 / 禁词表 / `RELEASE_SELECT_COLS`）—— ②b 那些"文案纪律 + 列名逐字一致"
+   *     的断言全部**读真源码**，不是在这里复刻一份；
+   *   · `RELFN` = `functions/api/admin/release.ts`（`state` / `set` 那个写出口）。
+   */
+  const RELLIB = await import(mod('functions/api/_lib/release.ts', '?rellib'))
+  const RELFN = await import(mod('functions/api/admin/release.ts', '?relfn'))
 
   /** 调一个 Function（真文件）—— 与 `post()` 同款，只是文件名不同 */
   const call = (F, path, body, headers = {}, env = ENV, method = 'POST') =>
@@ -2152,7 +2201,7 @@ await withLock(async () => {
 
     /* 正向：超管能读状态 */
     {
-      tableRows.set('site_state', [siteRow()])
+      tableRows.set('site_state', SITE_SEED())
       const r = await call(MAINT, '/api/admin/maintenance', { action: 'state' }, AUTH)
       const body = await r.json()
       eq('① 超管读维护状态 → 200', r.status, 200)
@@ -2359,7 +2408,7 @@ await withLock(async () => {
         'maintenance.auto-off',
       )
       eq('① 落回之后 `effective=false`', body.maintenance.effective, false)
-      tableRows.set('site_state', [siteRow()])
+      tableRows.set('site_state', SITE_SEED())
     }
 
     /* 🔴 「超管仍能进」的前端那一半：`/admin` 与 `/classroom` 在豁免名单里（源码文本） */
@@ -2402,15 +2451,24 @@ await withLock(async () => {
   /* ---------------- ② `GET /api/status`：**只回三个字段** ---------------- */
   {
     /* ① 未开启 */
-    tableRows.set('site_state', [siteRow()])
+    tableRows.set('site_state', SITE_SEED())
     {
       const r = await call(STATUS, '/api/status', null, AUTH, ENV, 'GET')
       const body = await r.json()
       eq('② `GET /api/status` → 200（匿名可读）', r.status, 200)
+      /*
+       * 🔴 **期望值 2026-10-04 从 `enabled,message,until` 改成多一个 `release`**：
+       *    契约按用户要求长了一块 —— `/api/status` 现在同时带着两档**版本更新公告**
+       *    （施工单 §二.4「与维护共用同一次请求，不许再开一个轮询」）。
+       *    ⇒ 这一条断言改的是**契约本身**，不是为了让绿而改绿：泄露面那句判据
+       *    （"多一个键就是泄露面"）仍然成立，只是现在合法的键是四个。
+       *    ⚠️ `release` 自己那一块的形状由 ②b 逐字段钉住（含"没发布那一档必须是 null"）。
+       */
       eq(
-        '🔴 ② **回话的键恰好是 enabled / message / until**（多一个就是泄露面）',
+        '🔴 ② **回话的键恰好是 enabled / message / until / release**' +
+          '（2026-10-04 起多了 `release` 那一块；多一个别的键就是泄露面）',
         Object.keys(body).sort().join(','),
-        'enabled,message,until',
+        'enabled,message,release,until',
       )
       eq('② 未开启时 `enabled=false`', body.enabled, false)
       eq('② 未开启时 `message` 是空串（不是默认文案 —— 没维护就没话可说）', body.message, '')
@@ -2470,7 +2528,515 @@ await withLock(async () => {
       eq('🔴 ② 而且 503 的体里**只有 error 一个键**（不许出现 enabled / until = 假结论）', Object.keys(body).join(','), 'error')
       ok('② 那句话是人话（点出去处）', String(body.error).includes('RESEND_API_KEY') || String(body.error).includes('SUPABASE_SERVICE_ROLE_KEY'), String(body.error))
     }
-    tableRows.set('site_state', [siteRow()])
+    tableRows.set('site_state', SITE_SEED())
+  }
+
+  /* ============================================================
+     ②b 🆕 2026-10-04 · **版本更新公告**（施工单 `施工单-版本更新提示.md` §三）
+     ------------------------------------------------------------
+     两档（教师端 `teacher` / 教室端 `classroom`）各一行，共用 `site_state` 这张表
+     （`key='release:teacher'` / `'release:classroom'`，§23.2.1）。
+     读出口 = `GET /api/status` 的 `release` 块；写出口 = `POST /api/admin/release`。
+
+     🔴 本节的**反向对照**（每一条都指得出"把它改回去 → 哪一条当场红"）：
+       · 假库**不按 `key=eq.…` 过滤**（整表返回）⇒ 两行**倒着放**，读出来仍必须是各自那一档；
+       · `version:'1.1'`（形状写坏）⇒ 那一档必须是 `null`，**不许**把写坏的行拿去比；
+       · `missingCols` 造"公告读库失败"⇒ `/api/status` **仍是 200**（fail-open），
+         只有 `release.read` 变 failed、维护那三个键照旧；
+       · `patchZeroRows` 造"PATCH 回 0 行"⇒ **503**（静默失败堵死）；关掉它立刻回到 200；
+       · 禁词体检（`bannedWordIn`）必须**真的会命中**，干净正文必须**不命中**；
+       · `ReleaseGate.tsx` 的豁免表逐字比对（去掉 `/admin` 就红 —— 超管会被自己发的公告锁在门外）。
+     ============================================================ */
+
+  section('②b 🆕 版本更新公告：两档各一行 · 形状写死 · 静默失败堵死')
+
+  {
+    clearFlow()
+    superValue = 'true'
+    tokenOk = true
+
+    /** 给客户端那一份的**六个键**（契约：与 `site_state` 的列名逐字相同） */
+    const PUBLIC_KEYS = 'enabled,force,message,url_apk,url_exe,version'
+    /** 上面 `GET /api/status` 回话里 teacher 那一份的键 —— 契约那一组拿它跟 schema 比 */
+    let teacherPublicKeys = ''
+    /** `POST /api/admin/release` 的 `set` 请求体（只覆盖要测的那一格） */
+    const setBody = (over = {}) => ({
+      action: 'set',
+      target: 'teacher',
+      enabled: true,
+      version: '1.1.1',
+      force: false,
+      note: 'v1.1.1 已发布，建议更新。',
+      urlApk: '',
+      urlExe: '',
+      ...over,
+    })
+
+    /* ① 未发布：两档都是 null（**没发布的版本号 / 链接一个字都不外泄**） */
+    {
+      tableRows.set('site_state', SITE_SEED())
+      const r = await call(STATUS, '/api/status', null, AUTH, ENV, 'GET')
+      const body = await r.json()
+      eq('②b 未发布时 `/api/status` 仍然 200（fail-open 的另一半）', r.status, 200)
+      eq('②b 未发布 → `release.read` 是 ok', body.release?.read, 'ok')
+      eq(
+        '🔴 ②b 未发布 → 两档都是 `null`（上次填的版本号与链接**不外泄**）',
+        [body.release?.teacher, body.release?.classroom],
+        [null, null],
+      )
+    }
+
+    /* ② 只发教师端。🔴 两行**倒着放**：假库不按 `key=eq.…` 过滤 ⇒ 服务端必须自己按 key 挑 */
+    {
+      tableRows.set('site_state', [
+        releaseRow('classroom'),
+        releaseRow('teacher', { enabled: true, version: '1.1.1' }),
+      ])
+      const body = await (await call(STATUS, '/api/status', null, AUTH, ENV, 'GET')).json()
+      const t = body.release?.teacher
+      eq('②b 只发教师端 → `teacher.enabled=true`', t?.enabled, true)
+      eq('②b 而且 `teacher.version` 就是**教师端那一行**的版本号（不是倒着放的那一行）', t?.version, '1.1.1')
+      eq('②b `force=false`（选择性）', t?.force, false)
+      eq(
+        '🔴 ②b `message` 留空 → 服务端补**默认正文**「v1.1.1 已发布，建议更新。」（不是空串）',
+        t?.message,
+        'v1.1.1 已发布，建议更新。',
+      )
+      eq('②b 两个链接都是空串（空 = 公告里**不给按钮**）', [t?.url_apk, t?.url_exe], ['', ''])
+      eq(
+        '🔴 ②b 只发教师端 → `classroom` 仍是 `null`（两行都躺在假库里，绝不许串档 —— 那就是发错端）',
+        body.release?.classroom,
+        null,
+      )
+      teacherPublicKeys = Object.keys(t ?? {}).sort().join(',')
+      eq(
+        '🔴 ②b 契约：回话那一份的键恰好是这六个（与 `site_state` 的列名逐字相同）',
+        teacherPublicKeys,
+        PUBLIC_KEYS,
+      )
+    }
+
+    /* ③ 强制那一档：另一句默认正文（反向对照：证明 ② 那句不是"写死的一句"） */
+    {
+      tableRows.set('site_state', [
+        releaseRow('teacher', { enabled: true, version: '1.1.1', force: true }),
+      ])
+      const body = await (await call(STATUS, '/api/status', null, AUTH, ENV, 'GET')).json()
+      eq(
+        '🔴 ②b `force=true` → 换另一句默认正文「v1.1.1 已发布，更新后可继续使用。」',
+        body.release?.teacher?.message,
+        'v1.1.1 已发布，更新后可继续使用。',
+      )
+      eq('②b 而且 `force` 原样回给客户端（客户端只决定"关不关得掉"）', body.release?.teacher?.force, true)
+    }
+
+    /* ④ 版本号形状写坏的行 → 那一档必须是 `null`（**不许拿去比** —— 比出来的结论是假的） */
+    {
+      tableRows.set('site_state', [
+        releaseRow('classroom'),
+        releaseRow('teacher', { enabled: true, version: '1.1', message: '这条正文不许出现在回话里' }),
+      ])
+      const body = await (await call(STATUS, '/api/status', null, AUTH, ENV, 'GET')).json()
+      eq('②b `read` 仍然是 ok（读得到，只是这一档没有能发的公告 —— 两件事）', body.release?.read, 'ok')
+      eq(
+        '🔴 ②b `version:"1.1"`（形状写坏）→ `teacher` 是 `null`，不许把写坏的行拿去比',
+        body.release?.teacher,
+        null,
+      )
+      ok(
+        '②b 而且写坏那一行的正文**一个字都没漏出去**（形状不对 = 整行按"没发布"处理）',
+        !JSON.stringify(body).includes('这条正文不许出现在回话里'),
+        JSON.stringify(body.release),
+      )
+    }
+
+    /* ⑤ 公告读库失败：`read:'failed'` + `reason`，但 `/api/status` **仍是 200**（fail-open） */
+    {
+      /*
+       * ⚠️ 用 `missingCols`（**不是** `missingTables`）：整张表不在时**维护那一次读**也会失败
+       *    ⇒ `status.ts` 直接 503，就测不到"公告这一路坏了、维护照旧"这件事。
+       *    `version` 只出现在公告那两次 `select` 里 ⇒ 正好只打断公告这一路。
+       */
+      tableRows.set('site_state', SITE_SEED())
+      missingCols.add('site_state.version')
+      const r = await call(STATUS, '/api/status', null, AUTH, ENV, 'GET')
+      const body = await r.json()
+      eq('🔴 ②b 公告读失败时 `/api/status` **仍然是 200**（一次抖动不许锁住全校）', r.status, 200)
+      eq('🔴 ②b 而且 `release.read` 如实写 `failed`', body.release?.read, 'failed')
+      ok(
+        '🔴 ②b 而且 `reason` 非空，并指向 §23.2.1（"读不到"要说得出来，**不许写成"已是最新"**）',
+        typeof body.release?.reason === 'string' &&
+          body.release.reason.length > 0 &&
+          body.release.reason.includes('23'),
+        JSON.stringify(body.release?.reason),
+      )
+      eq(
+        '②b 读失败 → 两档都按"没有公告"处理（不是"没有公告"的假结论，read 那一格已经说了）',
+        [body.release?.teacher, body.release?.classroom],
+        [null, null],
+      )
+      eq(
+        '🔴 ②b 维护那三个键照旧有值（公告这一路的失败**不许连累**维护状态）',
+        [body.enabled, body.message, body.until],
+        [false, '', null],
+      )
+      missingCols.delete('site_state.version')
+    }
+
+    /* ⑥ `POST /api/admin/release` 的 `state`：只有超管读得到两档（含没发布的草稿） */
+    {
+      clearFlow()
+      tableRows.set('site_state', SITE_SEED())
+      const r = await call(RELFN, '/api/admin/release', { action: 'state' }, AUTH)
+      const body = await r.json()
+      eq('②b 超管读两档状态 → 200', r.status, 200)
+      eq(
+        '②b 两档都 `present=true`（§23.2.1 那两行种子都在）',
+        [body.release?.teacher?.present, body.release?.classroom?.present],
+        [true, true],
+      )
+      ok(
+        '🔴 ②b 每档都带 `live`（服务端**算好**的那一份，`null` = 没在发）—— 面板预览不许自己拼，' +
+          '否则"面板显示的和外面看到的"会分叉',
+        body.release?.teacher?.live === null && body.release?.classroom?.live === null,
+        JSON.stringify([body.release?.teacher?.live, body.release?.classroom?.live]),
+      )
+      ok(
+        '②b 而且带着审计口（`updatedAt` / `updatedBy`）与原始草稿 `note`（撤下之后还要能预填）',
+        'updatedAt' in (body.release?.teacher ?? {}) &&
+          'updatedBy' in (body.release?.teacher ?? {}) &&
+          'note' in (body.release?.teacher ?? {}),
+        JSON.stringify(Object.keys(body.release?.teacher ?? {}).sort()),
+      )
+
+      superValue = 'false'
+      const no = await call(RELFN, '/api/admin/release', { action: 'state' }, AUTH)
+      eq(
+        '🔴 ②b 非超管（教务处）→ **403**（发公告会把全校旧版拦在门外，误触代价不对称）',
+        no.status,
+        403,
+      )
+      superValue = 'true'
+
+      tokenOk = false
+      const anon = await call(RELFN, '/api/admin/release', { action: 'state' }, AUTH)
+      eq('🔴 ②b 没有会话 → **401**', anon.status, 401)
+      tokenOk = true
+
+      /* 反向对照：判据函数没建（§13 没跑）→ **503，不是 403** */
+      superValue = 'missing'
+      const miss = await call(RELFN, '/api/admin/release', { action: 'state' }, AUTH)
+      eq(
+        '🔴 ②b 反向对照：`is_super_admin()` 不存在（§13 没跑）→ **503**，不是 403' +
+          '（"环境没准备好"误报成"你权限不够"会让人去改权限，越改越乱）',
+        miss.status,
+        503,
+      )
+      superValue = 'true'
+    }
+
+    /* ⑦ `set`：`force:false` 与 `force:true` **各一条**（载荷与回话里的 `live.force` 都要核） */
+    {
+      clearFlow()
+      tableRows.set('site_state', SITE_SEED())
+      const r = await call(RELFN, '/api/admin/release', setBody({ force: false }), AUTH)
+      const body = await r.json()
+      eq('②b `set`（选择性）→ 200', r.status, 200)
+      const patch = lastWrite('site_state', 'PATCH')
+      ok(
+        '②b 而且真的 PATCH 了 `site_state`，并带 `Prefer: return=representation`（回 0 行要能看见）',
+        Boolean(patch) && /return=representation/i.test(patch.prefer),
+        JSON.stringify(writes.map((w) => `${w.method} ${w.table} ${w.prefer}`)),
+      )
+      eq('②b 载荷里 `force=false`', patch?.payload?.force, false)
+      eq('②b 载荷里 `enabled=true`', patch?.payload?.enabled, true)
+      eq('②b 载荷里 `version` 就是填的那个', patch?.payload?.version, '1.1.1')
+      eq(
+        '②b 载荷里正文写进**列名 `message`**（不是 `note` —— `note` 只是请求体里的名字）',
+        patch?.payload?.message,
+        'v1.1.1 已发布，建议更新。',
+      )
+      eq(
+        '🔴 ②b 载荷里 `updated_by` 是**调用者自己的 id**（服务端取，不信前端传的）',
+        patch?.payload?.updated_by,
+        '11111111-1111-4111-8111-111111111111',
+      )
+      eq(
+        '🔴 ②b 回话 `release.teacher.live.force === false`（服务端算的那一份，不是照抄请求体）',
+        body.release?.teacher?.live?.force,
+        false,
+      )
+      eq('②b 而且 `live.version` 也对得上', body.release?.teacher?.live?.version, '1.1.1')
+
+      /* 反向对照：同一条请求只把 `force` 换成 true → 载荷与回话都必须是 true */
+      clearFlow()
+      const r2 = await call(
+        RELFN,
+        '/api/admin/release',
+        setBody({ force: true, note: 'v1.1.1 已发布，更新后可继续使用。' }),
+        AUTH,
+      )
+      const body2 = await r2.json()
+      eq('②b `set`（强制）→ 200', r2.status, 200)
+      eq(
+        '🔴 ②b 载荷里 `force=true`（上面那条 `false` 不是恒 false）',
+        lastWrite('site_state', 'PATCH')?.payload?.force,
+        true,
+      )
+      eq('🔴 ②b 回话 `release.teacher.live.force === true`', body2.release?.teacher?.live?.force, true)
+    }
+
+    /* ⑧ 两档互不影响：一次发布**只动一档那一行**（发错端 = 一张公告发给了错的端） */
+    {
+      clearFlow()
+      tableRows.set('site_state', SITE_SEED())
+      const r = await call(RELFN, '/api/admin/release', setBody({ target: 'teacher' }), AUTH)
+      eq('②b 发教师端 → 200', r.status, 200)
+      const ps = writes.filter((w) => w.table === 'site_state' && w.method === 'PATCH')
+      eq('🔴 ②b 两档互不影响：`site_state` 上的 PATCH **只有一次**', ps.length, 1)
+      ok(
+        '🔴 ②b 而且那一次打的是 `key=eq.release:teacher`，**没有** classroom',
+        /release(%3A|:)teacher/.test(ps[0]?.search ?? '') && !/classroom/.test(ps[0]?.search ?? ''),
+        ps[0]?.search,
+      )
+
+      /* 反向对照：发教室端 → 打的必须是 classroom 那一行（证明上面那条不是"恒指 teacher"） */
+      clearFlow()
+      const r2 = await call(RELFN, '/api/admin/release', setBody({ target: 'classroom' }), AUTH)
+      eq('②b 发教室端 → 200', r2.status, 200)
+      const ps2 = writes.filter((w) => w.table === 'site_state' && w.method === 'PATCH')
+      ok(
+        '🔴 ②b 反向对照：发教室端时那一次 PATCH 打的是 `release:classroom`',
+        ps2.length === 1 && /release(%3A|:)classroom/.test(ps2[0]?.search ?? ''),
+        ps2[0]?.search,
+      )
+      eq(
+        '②b 而且回话里带的也是 `classroom` 那一档',
+        Object.keys((await r2.clone().json()).release ?? {}),
+        ['classroom'],
+      )
+    }
+
+    /* ⑨ 五条校验各造一个用例：400 + 代号，而且**一条都没写库** */
+    {
+      clearFlow()
+      const cases = [
+        ['🔴 ②b R1：版本号写成 `1.1`（客户端比不出来）→ 400', { version: '1.1' }, 'R1'],
+        ['🔴 ②b R2：**没给** `force`（不知道该不该让人关掉）→ 400', { force: undefined }, 'R2'],
+        ['🔴 ②b R3：正文是空的 → 400', { note: '' }, 'R3'],
+        ['🔴 ②b R3：正文 25 字（超过 24）→ 400', { note: '更'.repeat(25) }, 'R3'],
+        [
+          '🔴 ②b R4：正文含「点击这里并允许未知来源」→ 400（禁词体检）',
+          { note: '点击这里并允许未知来源' },
+          'R4',
+        ],
+        ['🔴 ②b R5：链接是 `http://x`（不是 https）→ 400', { urlApk: 'http://x' }, 'R5'],
+        ['🔴 ②b R5：链接是 `javascript:alert(1)` → 400', { urlExe: 'javascript:alert(1)' }, 'R5'],
+      ]
+      for (const [name, over, rule] of cases) {
+        const res = await call(RELFN, '/api/admin/release', setBody(over), AUTH)
+        const b = await res.json()
+        eq(name, res.status, 400)
+        eq(`②b 而且代号就是 \`${rule}\`（前端按代号摆提示）`, b.rule, rule)
+        ok(`②b ${rule} 那句话是人话（非空）`, typeof b.message === 'string' && b.message.length > 4, b.message)
+      }
+      eq(
+        '🔴 ②b 这些被拒的用例**一条都没写库**（拒就得拒干净）',
+        writes.filter((w) => w.table === 'site_state').length,
+        0,
+      )
+    }
+
+    /* ⑩ `target` 认不出 / 缺失 → 400（**不许默认成教师端** —— 那是"发错端"） */
+    {
+      clearFlow()
+      const nope = await call(RELFN, '/api/admin/release', setBody({ target: 'nope' }), AUTH)
+      eq('🔴 ②b `target:"nope"` → 400（认不出就说认不出，不许默认成教师端）', nope.status, 400)
+      const none = await call(RELFN, '/api/admin/release', setBody({ target: undefined }), AUTH)
+      eq('🔴 ②b `target` 缺失 → 400（同上）', none.status, 400)
+      eq('②b 这两次也一条都没写库', writes.filter((w) => w.table === 'site_state').length, 0)
+
+      /* 反向对照：两档的名字都认得（上面那两条 400 不是"什么都不认"） */
+      for (const t of ['teacher', 'classroom']) {
+        const res = await call(RELFN, '/api/admin/release', setBody({ target: t }), AUTH)
+        eq(`🔴 ②b 反向对照：\`target:'${t}'\` 认得 → 200`, res.status, 200)
+        clearFlow()
+      }
+    }
+
+    /* ⑪ 撤下（`enabled:false`）：**不校验**，也**不清空**上次填的字段；留痕是 `release.unpublish` */
+    {
+      clearFlow()
+      tableRows.set('site_state', SITE_SEED())
+      const r = await call(
+        RELFN,
+        '/api/admin/release',
+        { action: 'set', target: 'teacher', enabled: false, version: '1.1', note: '', urlApk: 'http://x' },
+        AUTH,
+      )
+      const body = await r.json()
+      eq('🔴 ②b 撤下 → 200（版本号写坏 / 正文空 / 链接不是 https，**一个都不校验**）', r.status, 200)
+      const patch = lastWrite('site_state', 'PATCH')
+      eq('🔴 ②b 撤下时 `enabled=false`', patch?.payload?.enabled, false)
+      eq(
+        '🔴 ②b 撤下**不清空** version / message / url_apk（留着当下次预填 —— ' +
+          '与维护那边"一关就把 message 清空"**刻意不同**）',
+        [patch?.payload?.version, patch?.payload?.message, patch?.payload?.url_apk],
+        ['1.1', '', 'http://x'],
+      )
+      eq('🔴 ②b 而且 `live` 是 `null`（没在发 = 没有公告）', body.release?.teacher?.live, null)
+      eq('🔴 ②b 撤下留痕 `release.unpublish`', lastWrite('admin_audit')?.payload?.action, 'release.unpublish')
+
+      /* 留痕的另一半：发布那一条（证明它不是恒 `unpublish`） */
+      clearFlow()
+      await call(RELFN, '/api/admin/release', setBody({}), AUTH)
+      eq('🔴 ②b 发布留痕 `release.publish`', lastWrite('admin_audit')?.payload?.action, 'release.publish')
+    }
+
+    /* ⑫ 🔴 反向对照：假库"PATCH 回 200 但一行都没写" → **503**（静默失败堵死） */
+    {
+      clearFlow()
+      tableRows.set('site_state', SITE_SEED())
+      patchZeroRows = true
+      const r = await call(RELFN, '/api/admin/release', setBody({}), AUTH)
+      const body = await r.json()
+      patchZeroRows = false
+      eq(
+        '🔴 ②b PATCH 回 0 行 → **503**（不是 200 —— 否则面板会说"发布成功"而外面什么都没发生）',
+        r.status,
+        503,
+      )
+      ok(
+        '🔴 ②b 而且 message 指向 §23.2.1（让人知道"去跑那一段"）',
+        String(body.message).includes('23'),
+        body.message,
+      )
+
+      /* 反向对照的另一半：关掉那个开关 → 同一条请求立刻回到 200 */
+      clearFlow()
+      const again = await call(RELFN, '/api/admin/release', setBody({}), AUTH)
+      eq(
+        '🔴 ②b 反向对照：关掉"回 0 行"那个开关 → 同一条请求立刻 200（上面那条 503 不是恒真）',
+        again.status,
+        200,
+      )
+    }
+
+    /* ⑬ 🔴 契约（施工单 §三「两边的列名逐字一致」）：schema 里加的列 == 回话那六个键 */
+    {
+      const schemaText = readFileSync(SCHEMA_FILE, 'utf8')
+      const at = schemaText.indexOf('23.2.1 版本更新公告')
+      const seg = at < 0 ? '' : schemaText.slice(at, schemaText.indexOf('23.3 核对', at))
+      const schemaCols = [...seg.matchAll(/alter table site_state add column if not exists ([a-z_][a-z_0-9]*)/gi)].map(
+        (m) => m[1].toLowerCase(),
+      )
+      eq(
+        '🔴 ②b 契约：§23.2.1 给 `site_state` 加的正好是这四列（施工单 §三）',
+        schemaCols,
+        ['version', 'force', 'url_apk', 'url_exe'],
+      )
+      const cols = RELLIB.RELEASE_SELECT_COLS.split(',').map((s) => s.trim())
+      ok(
+        '🔴 ②b 契约：`RELEASE_SELECT_COLS` 含那四列 + `enabled` / `message`' +
+          '（少一列就是"两边各写一套" —— 这个项目栽过）',
+        [...schemaCols, 'enabled', 'message'].every((c) => cols.includes(c)),
+        RELLIB.RELEASE_SELECT_COLS,
+      )
+      eq(
+        '🔴 ②b 契约：`/api/status` 回话那六个键的集合 == 四个新列 + `enabled` + `message`（逐字一致）',
+        teacherPublicKeys,
+        [...schemaCols, 'enabled', 'message'].sort().join(','),
+      )
+      /* 反向对照：把一列从 `select` 清单里抽掉 → 同一条"包含"判据必须**不成立** */
+      const missingOne = cols.filter((c) => c !== 'url_exe')
+      ok(
+        '🔴 ②b 反向对照：抽掉 `url_exe` 之后，同一条"包含"判据**不成立**（它不是恒真）',
+        ![...schemaCols, 'enabled', 'message'].every((c) => missingOne.includes(c)),
+        missingOne.join(','),
+      )
+    }
+
+    /* ⑭ 文案纪律（施工单 §三）：上限与禁词表 —— 每一条都带反向对照 */
+    {
+      eq('②b 正文上限 24 字（`RELEASE_NOTE_MAX`）', RELLIB.RELEASE_NOTE_MAX, 24)
+      eq('②b 标题上限 8 字（`RELEASE_TITLE_MAX`）', RELLIB.RELEASE_TITLE_MAX, 8)
+      ok(
+        '②b 两句标题都 ≤ 8 字',
+        [RELLIB.RELEASE_TITLE_SOFT, RELLIB.RELEASE_TITLE_FORCE].every(
+          (s) => s.length <= RELLIB.RELEASE_TITLE_MAX,
+        ),
+        `${RELLIB.RELEASE_TITLE_SOFT}(${RELLIB.RELEASE_TITLE_SOFT.length}) / ` +
+          `${RELLIB.RELEASE_TITLE_FORCE}(${RELLIB.RELEASE_TITLE_FORCE.length})`,
+      )
+      const notes = [RELLIB.releaseDefaultNote('1.1.1', false), RELLIB.releaseDefaultNote('1.1.1', true)]
+      ok(
+        '②b 两句默认正文都 ≤ 24 字（长了没人读）',
+        notes.every((s) => s.length <= RELLIB.RELEASE_NOTE_MAX),
+        notes.map((s) => `${s}(${s.length})`).join(' / '),
+      )
+      eq(
+        '🔴 ②b 禁词表**逐条都在**（少一个词就红 —— 施工单 §三点名的那十个）',
+        [...RELLIB.RELEASE_BANNED_WORDS],
+        ['点击', '点这里', '请点击', '注意', '未知来源', 'SmartScreen', '安装包', '哈希', '如遇问题', 'vc'],
+      )
+      /* 反向对照：禁词体检必须**真的会命中**，而且干净正文不许命中 */
+      eq(
+        '🔴 ②b 反向对照：`bannedWordIn("点击这里并允许未知来源")` 必须非 null（命中的是「点击」）',
+        RELLIB.bannedWordIn('点击这里并允许未知来源'),
+        '点击',
+      )
+      eq(
+        '②b 而且干净正文一个词都不命中（它不是恒返回一个词）',
+        RELLIB.bannedWordIn('v1.1.1 已发布，建议更新。'),
+        null,
+      )
+      const v = RELLIB.validateReleaseForm({
+        target: 'teacher',
+        enabled: true,
+        version: '1.1.1',
+        force: false,
+        note: '点击这里并允许未知来源',
+        urlApk: '',
+        urlExe: '',
+      })
+      eq(
+        '🔴 ②b 反向对照：那句正文过校验 → `ok===false` 且 `rule===\'R4\'`',
+        [v.ok, v.rule],
+        [false, 'R4'],
+      )
+    }
+
+    /* ⑮ 🔴 豁免表（施工单 §三最后一行）：两张表**各是各的**，不许被合并成一张 */
+    {
+      const gateSrc = readFileSync(resolvePath(APP, 'src/components/ReleaseGate.tsx'), 'utf8')
+      ok(
+        '🔴 ②b `ReleaseGate.tsx` 的豁免表逐字是 `["/login", "/admin"]`（**去掉 `/admin` 就红** —— ' +
+          '超管会被自己发的强制公告锁在门外，那是"开了关不掉"的同款最坏失败模式）',
+        /RELEASE_EXEMPT_PATHS\s*=\s*\[\s*'\/login'\s*,\s*'\/admin'\s*\]\s*as const/.test(gateSrc),
+        gateSrc.match(/RELEASE_EXEMPT_PATHS[\s\S]{0,80}/)?.[0] ?? '(没找到那个常量)',
+      )
+      const maintSrc = readFileSync(resolvePath(APP, 'src/components/MaintenanceGate.tsx'), 'utf8')
+      ok(
+        '🔴 ②b 而且 `MaintenanceGate.tsx` 那张表**仍是独立的一份**（`["/admin", "/classroom"]`）—— ' +
+          '维护与更新是两件事，两张表不许被合并成一张',
+        /MAINTENANCE_EXEMPT_PATHS\s*=\s*\[\s*'\/admin'\s*,\s*'\/classroom'\s*\]\s*as const/.test(maintSrc),
+        maintSrc.match(/MAINTENANCE_EXEMPT_PATHS[\s\S]{0,80}/)?.[0] ?? '(没找到那个常量)',
+      )
+      ok(
+        '🔴 ②b 两张表的内容**确实不同**（`/login` 只在更新那一张、`/classroom` 只在维护那一张；' +
+          '任一份去引用对方的名字 → 这一条红）',
+        gateSrc.includes("'/login'") &&
+          !gateSrc.includes('MAINTENANCE_EXEMPT_PATHS') &&
+          maintSrc.includes("'/classroom'") &&
+          !maintSrc.includes('RELEASE_EXEMPT_PATHS'),
+      )
+    }
+
+    tableRows.set('site_state', SITE_SEED())
+    clearFlow()
+    superValue = 'true'
+    tokenOk = true
+    patchZeroRows = false
   }
 
   /* ---------------- ③ 错误日志：读 / 删的判据 + 留痕 + 服务端再判一次 ---------------- */

@@ -3233,10 +3233,94 @@ await withLock(async () => {
         [await policiesOf('admin_audit'), await canSelect('anon', 'admin_audit'), await canSelect('authenticated', 'admin_audit')],
         [[], false, false],
       )
-      /* 种子行：`key='maintenance'` 必须已经存在（`insert … on conflict do nothing`） */
-      const seed = await db.query(`select key, enabled, until, scheduled_from from site_state`)
-      eq('种子行在：`site_state` 里恰好一行 `maintenance`（幂等：重跑不会多一行）', seed.rows.length, 1)
-      eq('种子行的初始状态是**未开启**', [seed.rows[0].key, seed.rows[0].enabled, seed.rows[0].until], ['maintenance', false, null])
+      /* 种子行：`key='maintenance'` + 🆕 版本更新公告两档（`§23.2.1`）—— 三行都必须已经存在 */
+      const seed = await db.query(
+        `select key, enabled, message, until, scheduled_from, version, force, url_apk, url_exe
+           from site_state order by key`,
+      )
+      eq(
+        '种子行在：`site_state` 里**恰好三行**（维护 + 版本公告两档）' +
+          ' —— 期望值 2026-10-04 从「一行」改成「三行」：§23.2.1 加了两行 `key=release:*` 的种子',
+        seed.rows.length,
+        3,
+      )
+      eq(
+        '🔴 三行的键**恰好**是 maintenance / release:classroom / release:teacher（不多不少、也不重名）',
+        seed.rows.map((r) => r.key),
+        ['maintenance', 'release:classroom', 'release:teacher'],
+      )
+      const maintSeed = seed.rows.find((r) => r.key === 'maintenance')
+      eq(
+        '种子行的初始状态是**未开启**（维护那一行）',
+        [maintSeed.key, maintSeed.enabled, maintSeed.until, maintSeed.scheduled_from],
+        ['maintenance', false, null, null],
+      )
+      /*
+       * 🔴 **幂等**：那三行是 `insert … on conflict (key) do nothing` 种下来的
+       *    ⇒ 把这几句**照原样再跑一遍**，行数必须不变（重跑不会多一行、也不会主键冲突）。
+       * ⚠️ 那三句从 `schema.sql` **现抠**（不在这里抄一份 —— 抄一份就是下一条"过期的副本"）。
+       */
+      const seedInserts = [
+        ...RAW_SCHEMA.matchAll(
+          /insert into site_state \(key\) values \('[^']+'\) on conflict \(key\) do nothing;/g,
+        ),
+      ].map((m) => m[0])
+      eq(
+        '🔴 幂等的来源：`schema.sql` 里那三行种子都是 `insert … on conflict (key) do nothing`（恰好三句）',
+        seedInserts.length,
+        3,
+      )
+      await db.exec(seedInserts.join('\n'))
+      const reseed = await db.query(`select key from site_state order by key`)
+      eq(
+        '🔴 幂等：把那三句再跑一遍 → **仍然是那三行**（重跑不会多一行）',
+        reseed.rows.map((r) => r.key),
+        ['maintenance', 'release:classroom', 'release:teacher'],
+      )
+
+      /* ---------------- ①·2 🆕 §23.2.1：四列真的加了、两行种子的初值是什么 ---------------- */
+      const relColDef = await db.query(
+        `select column_name, is_nullable from information_schema.columns
+          where table_schema = 'public' and table_name = 'site_state'
+            and column_name in ('version', 'force', 'url_apk', 'url_exe')
+          order by column_name`,
+      )
+      eq(
+        '🆕 §23.2.1 的四个新列**真的在** `site_state` 上（version / force / url_apk / url_exe）',
+        relColDef.rows.map((r) => r.column_name),
+        ['force', 'url_apk', 'url_exe', 'version'],
+      )
+      eq(
+        '🆕 四列都是 `not null`（初值是空串 / false，**不是 null** —— 接口与面板都不必分辨"空串还是 null"）',
+        relColDef.rows.map((r) => r.is_nullable),
+        ['NO', 'NO', 'NO', 'NO'],
+      )
+      /* 🔴 反向对照：同一个问法问一个**不存在**的列 → 0 行（上面那两条不是"问什么都回"） */
+      const noSuchCol = await db.query(
+        `select column_name from information_schema.columns
+          where table_schema = 'public' and table_name = 'site_state'
+            and column_name = 'no_such_release_col'`,
+      )
+      eq(
+        '🔴 反向对照：同一个问法问一个**不存在**的列 → 0 行（上面那两条不是恒回四行）',
+        noSuchCol.rows.length,
+        0,
+      )
+      const relSeed = seed.rows.filter((r) => r.key.startsWith('release:'))
+      eq(
+        '🆕 版本公告两行种子的初值：enabled=false / version=\'\' / force=false / 两个链接空串 / message 空',
+        relSeed.map((r) => [r.key, r.enabled, r.version, r.force, r.url_apk, r.url_exe, r.message]),
+        [
+          ['release:classroom', false, '', false, '', '', ''],
+          ['release:teacher', false, '', false, '', '', ''],
+        ],
+      )
+      /* 🔴 反向对照：按 `release:` 前缀挑 → **恰好两行**（上面那条 eq 不是"把三行都算进去"） */
+      eq(
+        '🔴 反向对照：按 `release:` 前缀挑出的是**恰好两行**（不是三行、也不是一行）',
+        relSeed.length,
+        2,
+      )
 
       /* 区间自洽那条 check（与公告同一条纪律）：结束必须晚于开始 */
       try {

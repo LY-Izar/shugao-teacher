@@ -831,3 +831,40 @@ export function devInjectedMaintenance(search: string): string | null {
   if (!raw) return null
   return raw === '1' ? '系统维护中，请稍后重试。' : raw
 }
+
+/**
+ * 🧪 DEV-only 测试钩子：`?rel=1.1.1[&force=1][&slot=classroom]` 把「版本更新公告」
+ * **装成发着**（**生产构建里被编译掉**）。
+ *
+ * 为什么必须有它（2026-10-04，与 `?maint=` 同一条理由）：公告是**服务端**给的
+ * （`GET /api/status` 的 `release` 块），而 `shots.mjs` 跑的是**本地演示模式**
+ * （没有服务端）⇒「强制那一档整屏拦住、**没有关闭按钮**、Esc 关不掉」
+ * 与「选择性那一档关得掉、关掉以后照常用」这两句话**一句都断言不了**。
+ *
+ * ⚠️ 三条边界与 `devInjectedMaintenance()` **逐字相同**：
+ *   ① 只在 `import.meta.env.DEV` 生效（`nav-checks.mjs` 的 D7 读 dist 核对
+ *      `rel` 这个查询参数与函数名一次都没出现）；
+ *   ② 它只影响**渲染**（`useMaintenanceStatus` 那一处），**一个字都不写数据库**、
+ *      也不碰任何数据；
+ *   ③ 空值 / 形状不对（`?rel=` / `?rel=1.1`）当作"没有这个钩子" —— 否则那些断言
+ *      会在忘记写参数时**静默通过**（假通过）。
+ *
+ * ⚠️ 版本号默认 `1.1.1`（`?rel=1` 就是它）—— 必须比 `APP_VERSION` 新，否则不提示。
+ * ⚠️ 链接是**占位**（`example.com`，RFC 2606 保留域名）：只为让「下载最新版」这个按钮
+ *    真的出现。**截图里不许出现真域名**。
+ */
+export function devInjectedRelease(
+  search: string,
+): { version: string; force: boolean; slot: 'teacher' | 'classroom' } | null {
+  if (!(import.meta.env.DEV && search)) return null
+  const q = new URLSearchParams(search)
+  const raw = q.get('rel')
+  if (!raw) return null
+  const version = raw === '1' ? '1.1.1' : raw
+  if (!/^\d+\.\d+\.\d+$/.test(version)) return null
+  return {
+    version,
+    force: q.get('force') === '1',
+    slot: q.get('slot') === 'classroom' ? 'classroom' : 'teacher',
+  }
+}

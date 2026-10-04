@@ -19,6 +19,11 @@
 import { isRemote } from './supabase'
 import { apiMessage, postApi } from './api'
 import { apiUrl } from './apiBase'
+import {
+  RELEASE_SLOTS_UNKNOWN,
+  releaseSlotsFromStatus,
+  type ReleaseSlots,
+} from './release'
 
 /** 自动关闭（小时）：四档可选、**不许留空** */
 export const MAINTENANCE_HOURS = [1, 4, 12, 24] as const
@@ -47,6 +52,19 @@ export type MaintenanceStatus = {
   reason: string
   /** 这次读数的时刻（毫秒）—— 渲染必须是纯的，所以"现在"是一次取数的产物 */
   at: number
+  /**
+   * 🆕 两档版本更新公告（2026-10-04）。
+   * 🔴 **它跟着这一次取数一起回来**（施工单 §二.4「与维护共用同一次请求」）——
+   *    所以这个类型多一个字段，而不是多一个轮询。
+   * ⚠️ 三态：`ok` 是结论；`failed`（读库失败）与 `missing`（服务端还没有这一段）
+   *    都是"没结论" ⇒ 按"没有公告"放行，但**不许**说成"已是最新"。
+   */
+  release: ReleaseSlots
+}
+
+/** 读不到那一次：两档都当"没有公告"，但**如实标注**它是"读不到"（灰，不是"已是最新"） */
+function releaseFailed(reason: string): ReleaseSlots {
+  return { ...RELEASE_SLOTS_UNKNOWN, read: 'failed', reason }
 }
 
 export const MAINTENANCE_UNKNOWN: MaintenanceStatus = {
@@ -56,6 +74,7 @@ export const MAINTENANCE_UNKNOWN: MaintenanceStatus = {
   read: 'local',
   reason: '本地模式：没有服务端，维护状态读不到（按未维护处理）',
   at: 0,
+  release: RELEASE_SLOTS_UNKNOWN,
 }
 
 /** 从服务端回话里读出状态（**只认那三个字段**；多出来的一个都不用） */
@@ -71,6 +90,7 @@ function parseStatus(raw: unknown, at: number): MaintenanceStatus | null {
     read: 'ok',
     reason: '',
     at,
+    release: releaseSlotsFromStatus(o.release),
   }
 }
 
@@ -96,29 +116,17 @@ export async function fetchMaintenanceStatus(): Promise<MaintenanceStatus> {
       } catch {
         /* 非 JSON（比如前端 dev server 的 404 HTML）—— 保持 HTTP 码 */
       }
-      return { enabled: false, message: '', until: null, read: 'failed', reason: why, at }
+      return { enabled: false, message: '', until: null, read: 'failed', reason: why, at, release: releaseFailed(why) }
     }
     const parsed = parseStatus(await res.json(), at)
     if (!parsed) {
-      return {
-        enabled: false,
-        message: '',
-        until: null,
-        read: 'failed',
-        reason: '服务端回话里没有 enabled 字段（形状不对）',
-        at,
-      }
+      const why = '服务端回话里没有 enabled 字段（形状不对）'
+      return { enabled: false, message: '', until: null, read: 'failed', reason: why, at, release: releaseFailed(why) }
     }
     return parsed
   } catch (e) {
-    return {
-      enabled: false,
-      message: '',
-      until: null,
-      read: 'failed',
-      reason: `读不到（${e instanceof Error ? e.message : String(e)}）`,
-      at,
-    }
+    const why = `读不到（${e instanceof Error ? e.message : String(e)}）`
+    return { enabled: false, message: '', until: null, read: 'failed', reason: why, at, release: releaseFailed(why) }
   }
 }
 

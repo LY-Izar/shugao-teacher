@@ -22,7 +22,13 @@ import {
   fetchMaintenanceStatus,
   type MaintenanceStatus,
 } from './maintenance'
-import { devInjectedMaintenance } from './roles'
+import {
+  RELEASE_SLOTS_UNKNOWN,
+  releaseDefaultNote,
+  type Release,
+  type ReleaseSlots,
+} from './release'
+import { devInjectedMaintenance, devInjectedRelease } from './roles'
 
 /** 常态轮询间隔：30 秒（方案里写死的那个数） */
 export const POLL_MS = 30_000
@@ -30,20 +36,43 @@ export const POLL_MS = 30_000
 export const POLL_ACTIVE_MS = 10_000
 
 /**
- * 🧪 DEV-only：`?maint=…` 装成"维护中"（生产构建里被摇掉）。
- * 理由与三条边界写在 `lib/roles.ts` 的 `devInjectedMaintenance()` 上。
+ * 🧪 DEV-only：`?maint=…` 装成"维护中"、`?rel=…` 装成"有新版本"（生产构建里被摇掉）。
+ * 理由与三条边界写在 `lib/roles.ts` 的 `devInjectedMaintenance()` / `devInjectedRelease()` 上。
  */
 function devForced(): MaintenanceStatus | null {
   const search = typeof location === 'undefined' ? '' : location.search
   const msg = devInjectedMaintenance(search)
-  if (msg === null) return null
+  const rel = devInjectedRelease(search)
+  if (msg === null && rel === null) return null
+
+  /* 🧪 公告是**线上一档的形状**（列名）—— 与真服务端那一份走同一个 `releaseFromRow` */
+  let slots: ReleaseSlots = RELEASE_SLOTS_UNKNOWN
+  if (rel) {
+    const notice: Release = {
+      version: rel.version,
+      force: rel.force,
+      note: releaseDefaultNote(rel.version, rel.force),
+      /* 占位链接：只为让「下载最新版」这个按钮真的出现（截图里不许出现真域名） */
+      urlApk: 'https://example.com/update',
+      urlExe: 'https://example.com/update',
+    }
+    slots = {
+      teacher: rel.slot === 'teacher' ? notice : null,
+      classroom: rel.slot === 'classroom' ? notice : null,
+      read: 'ok',
+      reason: '',
+    }
+  }
+
+  const base: MaintenanceStatus = { ...MAINTENANCE_UNKNOWN, at: Date.now(), release: slots }
+  if (msg === null) return base
   return {
+    ...base,
     enabled: true,
     message: msg,
     until: Date.now() + 4 * 3600_000,
     read: 'ok',
     reason: '',
-    at: Date.now(),
   }
 }
 
@@ -62,6 +91,30 @@ function sameStatus(a: MaintenanceStatus, b: MaintenanceStatus): boolean {
     a.enabled === b.enabled &&
     a.message === b.message &&
     a.until === b.until &&
+    a.read === b.read &&
+    a.reason === b.reason &&
+    sameRelease(a.release, b.release)
+  )
+}
+
+/**
+ * 🔴 两档公告也要比 —— **漏了这一条就是"新发的公告永远不弹"**：
+ *    这个 hook 只在"真的变了"时才 setState（理由见 `sameStatus`），所以
+ *    "维护没变、只有公告变了"的那一次轮询必须被认出来。
+ */
+function sameRelease(a: ReleaseSlots, b: ReleaseSlots): boolean {
+  const one = (x: Release | null, y: Release | null) =>
+    x === y ||
+    (x !== null &&
+      y !== null &&
+      x.version === y.version &&
+      x.force === y.force &&
+      x.note === y.note &&
+      x.urlApk === y.urlApk &&
+      x.urlExe === y.urlExe)
+  return (
+    one(a.teacher, b.teacher) &&
+    one(a.classroom, b.classroom) &&
     a.read === b.read &&
     a.reason === b.reason
   )

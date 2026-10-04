@@ -5451,6 +5451,30 @@ create table if not exists site_state (
 
 insert into site_state (key) values ('maintenance') on conflict (key) do nothing;
 
+-- -------- 23.2.1 版本更新公告（`site_state` 的另外两行，2026-10-04）--------
+--  施工单见仓库根 `施工单-版本更新提示.md`；落地口径见 `功能设计与不变量.md` 新那一节。
+--
+--  ⚠️ **刻意用同一张表、不新开 `release_state`**（施工单 §二.1：「两张表 = 以后一定
+--     有一张忘了加列」）。**两档各一行**，用 `key` 区分 ⇒ 主键、`site_state_range_check`
+--     一个字都不用改（`until` / `scheduled_from` 这两列只对维护有意义，这里恒为 null）。
+--
+--  字段语义（与 `maintenance` 那一行**共用同一组列**，但含义按 key 分开读）：
+--    · `enabled`  —— 这一档**正在发**公告（false = 没发；其余字段留着，当下次预填）
+--    · `message`  —— 公告正文（空 = 服务端给默认文案 `v{version} 已发布…`，
+--                    与维护那边的 `MAINTENANCE_DEFAULT_MESSAGE` 同一个套路）
+--    · `version`  —— 最新版本号 `x.y.z`（客户端拿自己的 `APP_VERSION` 与它比）
+--    · `force`    —— 强制（true）/ 选择性（false）
+--    · `url_apk` / `url_exe` —— 下载直链（**服务端只接受 `https://`**，空 = 公告里不给按钮）
+--
+--  ⚠️ 这两列为空串而不是 null：面板与接口都不必再分辨"空串还是 null"（一个字段一种语义）。
+alter table site_state add column if not exists version text not null default '';
+alter table site_state add column if not exists force boolean not null default false;
+alter table site_state add column if not exists url_apk text not null default '';
+alter table site_state add column if not exists url_exe text not null default '';
+
+insert into site_state (key) values ('release:teacher') on conflict (key) do nothing;
+insert into site_state (key) values ('release:classroom') on conflict (key) do nothing;
+
 alter table site_state enable row level security;
 -- 🔴 读也只有一个公开出口（`GET /api/status`）—— 所以这里**连 SELECT 都不给**。
 --    给前端 select 这张表的权限 = 将来往里放任何东西都匿名可见（方案 §二.3 原文）。
@@ -5466,8 +5490,11 @@ revoke all on site_state from anon, authenticated;
 --  -- select has_table_privilege('anon','site_state','select') as anon读,
 --  --        has_table_privilege('authenticated','site_state','select') as 老师读;
 --
---  ③ 种子行在（`key='maintenance'`，未开启）：
---  -- select key, enabled, message is null as 消息为空, until, scheduled_from from site_state;
+--  ③ 种子行在（`key='maintenance'` 未开启 + 版本更新那两行，
+--     三行都必须在；`version` / `force` / `url_apk` / `url_exe` 是 §23.2.1 加的列）：
+--  -- select key, enabled, message is null as 消息为空, until, scheduled_from,
+--  --        version, force, url_apk, url_exe from site_state order by key;
+--  -- 期望：恰好 3 行（maintenance / release:classroom / release:teacher），enabled 全 false
 -- ============================================================
 
 

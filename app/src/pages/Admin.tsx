@@ -53,9 +53,12 @@ import {
   adminDeleteErrors,
   adminListErrors,
   fetchDbUsage,
+  fetchReleaseState,
   sendTestMail,
   setMaintenance,
+  setRelease,
   type AdminErrorRow,
+  type AdminReleaseSlot,
   type DbReport,
   type ErrorsReport,
 } from '../lib/adminOps'
@@ -77,6 +80,16 @@ import {
   type AdminMaintenanceState,
 } from '../lib/maintenance'
 import { useMaintenanceStatus } from '../lib/useMaintenance'
+import {
+  RELEASE_NOTE_MAX,
+  RELEASE_NOTE_SOFT,
+  RELEASE_TITLE_FORCE,
+  RELEASE_TITLE_SOFT,
+  isReleaseUrl,
+  releaseDefaultNote,
+  releaseTitle,
+  validateReleaseForm,
+} from '../lib/release'
 import { Button, Track } from '../components/ui'
 import { downloadJson, readJsonFile } from '../lib/backup'
 import {
@@ -1032,23 +1045,27 @@ export default function Admin() {
   const [fbErr, setFbErr] = useState('')
   const [maint, setMaint] = useState<AdminMaintenanceState | null>(null)
   const [maintErr, setMaintErr] = useState('')
+  /* 🆕 版本更新公告（两档；`null` = 读不到 —— 与"没在发"**绝不共用**一个状态） */
+  const [rel, setRel] = useState<{ teacher: AdminReleaseSlot; classroom: AdminReleaseSlot } | null>(null)
+  const [relErr, setRelErr] = useState('')
   const [opsBusy, setOpsBusy] = useState(false)
 
   /* 纯取数（**不 setState**）—— 与这块屏上 `fetchServer` 同一条口径 */
   const fetchOps = useCallback(async () => {
-    const [d, e, f, m] = await Promise.all([
+    const [d, e, f, m, r] = await Promise.all([
       fetchDbUsage(),
       adminListErrors(''),
       adminListFeedback(''),
       fetchMaintenanceAdminState(),
+      fetchReleaseState(),
     ])
-    return { d, e, f, m }
+    return { d, e, f, m, r }
   }, [])
 
   const reloadOps = useCallback(() => {
     setOpsBusy(true)
     void fetchOps()
-      .then(({ d, e, f, m }) => {
+      .then(({ d, e, f, m, r }) => {
         stamp()
         if (d.ok) {
           setDb(d.report)
@@ -1078,6 +1095,13 @@ export default function Admin() {
           setMaint(null)
           setMaintErr(m.message)
         }
+        if (r.ok) {
+          setRel({ teacher: r.teacher, classroom: r.classroom })
+          setRelErr('')
+        } else {
+          setRel(null)
+          setRelErr(r.message)
+        }
       })
       .finally(() => setOpsBusy(false))
   }, [fetchOps])
@@ -1085,7 +1109,7 @@ export default function Admin() {
   useEffect(() => {
     if (!sessionChecked || !hasSession) return
     let alive = true
-    void fetchOps().then(({ d, e, f, m }) => {
+    void fetchOps().then(({ d, e, f, m, r }) => {
       if (!alive) return
       stamp()
       if (d.ok) setDb(d.report)
@@ -1096,6 +1120,8 @@ export default function Admin() {
       else setFbErr(f.message)
       if (m.ok) setMaint(m.state)
       else setMaintErr(m.message)
+      if (r.ok) setRel({ teacher: r.teacher, classroom: r.classroom })
+      else setRelErr(r.message)
     })
     return () => {
       alive = false
@@ -2322,6 +2348,18 @@ export default function Admin() {
           error={maintErr}
           live={maintLive}
           now={now}
+          onReload={reloadOps}
+          busy={opsBusy}
+        />
+        {/*
+          🆕 版本更新公告那一张（2026-10-04，施工单 §二.6：**维护卡旁边**加一张）。
+          ⚠️ 两档（教师端 / 教室端）**各发各的** —— 一次发布只动一档。
+          ⚠️ 它与维护**不是**一个开关（施工单 §四）：维护是"全站停"，这里是"版本落后"。
+        */}
+        <ReleaseCard
+          slots={rel}
+          error={relErr}
+          live={maintLive}
           onReload={reloadOps}
           busy={opsBusy}
         />
@@ -3728,6 +3766,382 @@ function MaintenanceCard({
         不该是一台机器的时钟 + 一次网络请求。要开就人来开。
       </HintOnly>
     </Card>
+  )
+}
+
+/* ============================================================
+   版本更新公告（`ReleaseCard`）—— 2026-10-04，施工单 `施工单-版本更新提示.md` §二.6
+   ------------------------------------------------------------
+   🔴 **两档各发各的**：教师端一档（**网页端跟随这一档**）、教室端一档（大屏）。
+      一次发布**只动一档** —— 给教师端发强制，教室端那块屏照常能用（反之亦然）。
+
+   🔴 判据全在服务端：`is_super_admin()` + 五条校验（R1…R5，见 `lib/release.ts`）。
+      这里只是**表单 + 预览**：手打 `/api/admin/release` 的人绕不过服务端那一道。
+
+   🔴 **文案纪律**（施工单 §三 / `AGENTS.md` §七，`admin-checks` 有反向对照钉着）：
+      正文 ≤ 24 字、标题 ≤ 8 字；禁词（`点击` / `点这里` / `请点击` / `注意` / `未知来源` /
+      `SmartScreen` / `安装包` / `哈希` / `vc` / `如遇问题`）一条都不许出现 ——
+      系统自己会问、老师自己会点，**公告不该教人点**。
+
+   ⚠️ 两个 `ReleaseSlotForm` 的 `data-rel-*` 属性**同名**（避免两套命名），
+      所以在门禁里要**带前缀查**：`[data-rel-form="teacher"] [data-rel-version]`。
+   ============================================================ */
+
+/** 占位符里露一句默认正文（只是给超管看个例子；`{v}` 换成版本号） */
+const RELEASE_NOTE_EXAMPLE = RELEASE_NOTE_SOFT.replace('{v}', '1.1.1')
+
+function ReleaseCard({
+  slots,
+  error,
+  live,
+  onReload,
+  busy,
+}: {  slots: { teacher: AdminReleaseSlot; classroom: AdminReleaseSlot } | null
+  error: string
+  live: { enabled: boolean; read: string; reason: string }
+  onReload: () => void
+  busy: boolean
+}) {
+  const say = (s: AdminReleaseSlot | undefined) =>
+    !s ? '无法判断' : s.enabled && s.live ? `正在发 v${s.version}（${s.force ? '强制' : '选择性'}）` : '没发'
+  const anyOn = Boolean(slots && (slots.teacher.enabled || slots.classroom.enabled))
+  const tone: Tone = error || !slots ? 'unknown' : anyOn ? 'warn' : 'ok'
+
+  return (
+    <Card
+      tone={tone}
+      defaultOpen
+      title="版本更新"
+      headline={
+        error
+          ? `无法判断 —— 读不到版本公告${error ? `（${error}）` : ''}`
+          : !slots
+            ? '无法判断 —— 还没取到'
+            : `教师端：${say(slots.teacher)} · 教室端：${say(slots.classroom)}`
+      }
+      note={`本机的 APP_VERSION 是 v${APP_VERSION} —— 客户端的版本比公告旧才会提示`}
+    >
+      <div className="px-3.5 py-2" style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.85 }}>
+        · **发出去会发生什么**：版本比公告旧的客户端（含 apk / exe / 网页）会看到一条更新公告；
+        **强制**那一档整屏接管、**关不掉**，登录之后除 `/login` 与 `/admin` 外进不去；
+        **选择性**那一档有关掉的地方，但**每次重新打开应用都会再弹一次**。
+        <br />· **两档互不影响**：给教师端发强制，教室端那块屏照常能用（两边各发各的）。
+        <br />· **教室端被拦时那台机器要人工装一次**（大屏在教室里）—— 公告里会多一句
+        「请在教师电脑上下载后，到这台机器安装。」提醒值班老师。
+        <br />· **已经装在老师机器上的旧包不会有任何提示**：这段代码是这一版才加的，
+        本功能对"这一版之后发布的版本"才生效。
+        <br />· 链接只接受 `https://`，**只显示不执行**（点了是浏览器/系统去下载）。
+      </div>
+
+      {error ? (
+        <div
+          className="mx-3.5 mb-2 p-2.5"
+          style={{
+            background: 'var(--color-idlesoft)',
+            border: '1px solid var(--color-line)',
+            fontSize: 12,
+            lineHeight: 1.75,
+            color: 'var(--color-ink2)',
+          }}
+          data-rel-readerr
+        >
+          读不到版本公告（{error}）—— 各端按"没有更新"放行（fail-open）。
+          ⚠️ 这个代价必须显式露出来：否则就是"无法判断归到绿"。
+        </div>
+      ) : null}
+
+      {live.read === 'failed' ? (
+        <div
+          className="mx-3.5 mb-2 p-2.5"
+          style={{
+            background: 'var(--color-idlesoft)',
+            border: '1px solid var(--color-line)',
+            fontSize: 12,
+            lineHeight: 1.75,
+            color: 'var(--color-ink2)',
+          }}
+        >
+          公开接口 `GET /api/status` 那一段**读不到**（{live.reason}）—— 各端按"没有更新"放行，
+          但面板上不能写成"已是最新"（**灰就是灰**）。
+        </div>
+      ) : null}
+
+      <SubHead>教师端（含网页端）</SubHead>
+      <ReleaseSlotForm target="teacher" slot={slots?.teacher ?? null} busy={busy} onReload={onReload} />
+
+      <SubHead>教室端（教室里那块大屏）</SubHead>
+      <ReleaseSlotForm target="classroom" slot={slots?.classroom ?? null} busy={busy} onReload={onReload} />
+
+      <HintOnly>
+        发布前先问一句**下载链接填了没有**：两个链接都空 = 公告里**不给按钮**，
+        老师只能自己在群里找包 —— 那时正文里要写清去哪儿拿。
+        链接的取法（Cloudflare R2 一步一步）见仓库根 `施工单-版本更新提示.md` §七。
+      </HintOnly>
+    </Card>
+  )
+}
+
+/** 一档的编辑区（教师端 / 教室端各一个实例） */
+function ReleaseSlotForm({
+  target,
+  slot,
+  busy,
+  onReload,
+}: {
+  target: 'teacher' | 'classroom'
+  /** `null` = 这一档读不到（与"没在发"不是一件事） */
+  slot: AdminReleaseSlot | null
+  busy: boolean
+  onReload: () => void
+}) {
+  /*
+   * ⚠️ 初值就是"这一版该发的样子"（版本号 = 本机 `APP_VERSION`、正文 = 默认那句）——
+   *    **不许**留空等取数：读不到那一档时（本地模式 / 服务端 503）表单也得是**能看懂**的，
+   *    否则超管看到的是一张空表 + 一条灰条，不知道"该填成什么样"。
+   *    下面那个 effect 只在**读到了**服务端那一份时覆盖它。
+   */
+  const [version, setVersion] = useState(APP_VERSION)
+  const [force, setForce] = useState<boolean | null>(null)
+  const [note, setNote] = useState(() => releaseDefaultNote(APP_VERSION, false))
+  const [urlApk, setUrlApk] = useState('')
+  const [urlExe, setUrlExe] = useState('')
+  const [busy2, setBusy2] = useState(false)
+  const [msg, setMsg] = useState('')
+  const [err, setErr] = useState('')
+
+  /*
+   * 把服务端那一份填进表单（每次读到新状态都刷）。
+   * ⚠️ 走一个 0ms 定时器：effect 里**同步** setState 会触发级联渲染
+   *    （`react(set-state-in-effect)`，本仓库要求 lint 0 warning）。
+   * ⚠️ 没发过的档：`present` 为真但字段是空的 ⇒ 正文用**默认那句**预填，
+   *    强制/选择性则由超管自己选（`force=null` ⇒ 面板挡住"发布"）。
+   */
+  useEffect(() => {
+    if (!slot) return
+    const t = window.setTimeout(() => {
+      const v = slot.version || APP_VERSION
+      const f = slot.present ? slot.force : null
+      setVersion(v)
+      setForce(f)
+      setNote(slot.note || releaseDefaultNote(v, f === true))
+      setUrlApk(slot.urlApk)
+      setUrlExe(slot.urlExe)
+    }, 0)
+    return () => window.clearTimeout(t)
+  }, [slot])
+
+  /** 正文的"自动那句"（版本/档位一变就跟着变，**除非超管自己改过**） */
+  const autoNote = (v: string, f: boolean | null) => (v ? releaseDefaultNote(v, f === true) : '')
+  const changeVersion = (v: string) => {
+    setNote((cur) => (cur === autoNote(version, force) || !cur ? autoNote(v, force) : cur))
+    setVersion(v)
+  }
+  const changeForce = (f: boolean) => {
+    setNote((cur) => (cur === autoNote(version, force) || !cur ? autoNote(version, f) : cur))
+    setForce(f)
+  }
+
+  const verdict = validateReleaseForm({
+    target,
+    enabled: true,
+    version,
+    force,
+    note,
+    urlApk,
+    urlExe,
+  })
+  const label = target === 'classroom' ? '教室端' : '教师端'
+  const canUnpublish = slot?.enabled === true
+
+  const doSet = async (enabled: boolean) => {
+    if (busy2) return
+    setBusy2(true)
+    setErr('')
+    setMsg('')
+    const r = await setRelease({ target, enabled, version, force: force === true, note, urlApk, urlExe })
+    setBusy2(false)
+    if (!r.ok) {
+      setErr(r.message)
+      return
+    }
+    setMsg(
+      enabled
+        ? `已发布：${label} · v${version} · ${force ? '强制' : '选择性'} · 客户端 30 秒内会看到`
+        : `已撤下：${label}（上次发的字段留着当下次预填）`,
+    )
+    onReload()
+  }
+
+  return (
+    <div className="px-3.5 pb-3" data-rel-form={target}>
+      {slot && !slot.present ? (
+        <div
+          className="mb-2 p-2.5"
+          style={{
+            background: 'var(--color-idlesoft)',
+            border: '1px solid var(--color-line)',
+            fontSize: 12,
+            lineHeight: 1.75,
+            color: 'var(--color-ink2)',
+          }}
+          data-rel-noseed
+        >
+          ⚠️ 数据库里**没有**这一档的种子行（`site_state` 的 `release:{target}`）——
+          发布会被服务端拒掉（它不会假装成功）。去 Supabase → SQL Editor 跑一遍
+          `schema.sql` 第 23 段 §23.2.1。
+        </div>
+      ) : null}
+
+      {slot?.live ? (
+        <div className="mb-2" style={{ fontSize: 12, lineHeight: 1.8 }} data-rel-live>
+          <Line
+            k="外面现在看到"
+            v={
+              <span style={{ color: 'var(--color-warn)' }}>
+                v{slot.version} · {slot.force ? '强制' : '选择性'} · 正文「{String(slot.live.message ?? '')}」·
+                链接：手机{slot.urlApk ? '有' : '无'} / 电脑{slot.urlExe ? '有' : '无'}
+              </span>
+            }
+          />
+        </div>
+      ) : null}
+
+      <div className="flex flex-wrap items-center gap-2">
+        <label className="flex items-center gap-1.5" style={{ fontSize: 12.5 }}>
+          版本号
+          <input
+            className="input"
+            style={{ height: 32, fontSize: 12.5, width: 96 }}
+            placeholder="1.1.1"
+            value={version}
+            onChange={(e) => changeVersion(e.target.value.trim())}
+            data-rel-version
+          />
+        </label>
+        <label className="flex items-center gap-1.5" style={{ fontSize: 12.5 }}>
+          <input
+            type="radio"
+            name={`rel-force-${target}`}
+            checked={force === false}
+            onChange={() => changeForce(false)}
+            data-rel-force-soft
+          />
+          选择性（可关，但每次打开都弹）
+        </label>
+        <label className="flex items-center gap-1.5" style={{ fontSize: 12.5 }}>
+          <input
+            type="radio"
+            name={`rel-force-${target}`}
+            checked={force === true}
+            onChange={() => changeForce(true)}
+            data-rel-force-hard
+          />
+          强制（关不掉）
+        </label>
+      </div>
+
+      <textarea
+        className="input mt-2"
+        style={{ minHeight: 54, fontSize: 13, lineHeight: 1.7 }}
+        placeholder={`公告正文（最多 ${RELEASE_NOTE_MAX} 字）。默认是「${RELEASE_NOTE_EXAMPLE}」`}
+        value={note}
+        maxLength={RELEASE_NOTE_MAX}
+        onChange={(e) => setNote(e.target.value)}
+        data-rel-note
+      />
+      <div className="mt-1" style={{ fontSize: 11.5, color: 'var(--color-ink4)' }} data-rel-count>
+        {note.length} / {RELEASE_NOTE_MAX} 字 · 标题固定为「{RELEASE_TITLE_SOFT}」/「{RELEASE_TITLE_FORCE}」
+      </div>
+
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <label className="flex items-center gap-1.5" style={{ fontSize: 12 }}>
+          手机链接
+          <input
+            className="input"
+            style={{ height: 32, fontSize: 12.5, width: 300 }}
+            placeholder="https://…/树高教务通-教师端-v1.1.1-vc30.apk（可空）"
+            value={urlApk}
+            onChange={(e) => setUrlApk(e.target.value)}
+            data-rel-apk
+          />
+        </label>
+        <label className="flex items-center gap-1.5" style={{ fontSize: 12 }}>
+          电脑链接
+          <input
+            className="input"
+            style={{ height: 32, fontSize: 12.5, width: 300 }}
+            placeholder="https://…/树高教务通-教师端-v1.1.1.exe（可空）"
+            value={urlExe}
+            onChange={(e) => setUrlExe(e.target.value)}
+            data-rel-exe
+          />
+        </label>
+      </div>
+      <div className="mt-1" style={{ fontSize: 11.5, color: 'var(--color-ink4)' }}>
+        {isReleaseUrl(urlApk) || !urlApk ? '' : '⚠️ 手机链接必须是 https:// 开头 · '}
+        {isReleaseUrl(urlExe) || !urlExe ? '' : '⚠️ 电脑链接必须是 https:// 开头 · '}
+        apk 与 exe 都是**要下载之后再装的**文件，老师得自己动手；两个都空 = 公告里不给按钮。
+      </div>
+
+      <div
+        className="mt-2"
+        data-rel-preview
+        style={{
+          fontSize: 12,
+          lineHeight: 1.75,
+          color: verdict.ok ? 'var(--color-ink2)' : 'var(--color-bad)',
+        }}
+      >
+        {verdict.ok
+          ? `发布后老师看到的是：「${releaseTitle(force === true)}」+「${note}」+ ${
+              urlApk || urlExe ? '一个「下载最新版」按钮' : '**没有按钮**（两个链接都空）'
+            }`
+          : `⚠️ ${verdict.error}`}
+      </div>
+
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <Button
+          size="sm"
+          variant={force === true ? 'danger' : 'primary'}
+          disabled={busy2 || !verdict.ok}
+          onClick={() => void doSet(true)}
+          data-rel-publish
+        >
+          {force === true ? '发布（强制）' : '发布'}
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          disabled={busy2 || !canUnpublish}
+          onClick={() => void doSet(false)}
+          data-rel-unpublish
+        >
+          撤下这一档
+        </Button>
+        <Button size="sm" variant="ghost" disabled={busy} onClick={onReload}>
+          重新读取
+        </Button>
+        {slot?.updatedAt ? (
+          <span style={{ fontSize: 11.5, color: 'var(--color-ink4)' }}>
+            上次改动：{agoText(slot.updatedAt)}
+            {slot.updatedBy ? ` · ${slot.updatedBy}` : ''}
+          </span>
+        ) : null}
+      </div>
+
+      {msg ? (
+        <div className="mt-2 flex items-center gap-1.5" style={{ fontSize: 12.5, color: 'var(--color-ok)' }} data-rel-msg>
+          <IconCheck size={14} />
+          {msg}
+        </div>
+      ) : null}
+      {err ? (
+        <div className="mt-2 flex items-center gap-1.5" style={{ fontSize: 12.5, color: 'var(--color-bad)' }} data-rel-err>
+          <IconAlert size={14} />
+          {err}
+        </div>
+      ) : null}
+    </div>
   )
 }
 

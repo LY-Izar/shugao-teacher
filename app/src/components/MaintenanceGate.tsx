@@ -27,6 +27,7 @@ import { Button } from './ui'
 import { Emblem } from './Emblem'
 import { IconAlert, IconCheck, IconClock, IconRefresh } from './icons'
 import { useMaintenanceStatus } from '../lib/useMaintenance'
+import { ReleaseGate } from './ReleaseGate'
 import { beijingNow } from '../lib/holiday'
 import { useStore } from '../data/store'
 import { getSupabase } from '../lib/supabase'
@@ -304,7 +305,14 @@ export function MaintenanceGate({ children }: { children: React.ReactNode }) {
   if (status.enabled && !exempt) {
     return <MaintenanceScreen status={status} variant="teacher" />
   }
-  return <>{children}</>
+  /*
+   * 🆕 版本更新公告那一层（2026-10-04，施工单 §二.5）挂在**这里**，而不是 `App.tsx`：
+   *    · 它要的是**同一次** `/api/status` 取数（施工单 §二.4「不许再开一个轮询」）
+   *      —— `status` 在这里正好在手上；
+   *    · 顺序也就是"维护 → 更新 → 页面"：维护开着时它根本不渲染（那一屏已经在管了）。
+   * ⚠️ 两张豁免表**各存一份**（理由见 `ReleaseGate.tsx` 文件头）。
+   */
+  return <ReleaseGate status={status}>{children}</ReleaseGate>
 }
 
 /**

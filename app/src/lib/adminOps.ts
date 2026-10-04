@@ -162,6 +162,79 @@ export async function setMaintenance(
   }
 }
 
+/* ---------------- ⑤ 版本更新公告（`/api/admin/release`，2026-10-04） ---------------- */
+
+/**
+ * 面板要的那一档。
+ * ⚠️ 形状与 `functions/api/admin/release.ts` 的 `adminSlot()` 一一对应：
+ *    · `note` / `version` / `urlApk` / `urlExe` 是**预填**用的（连没发布的草稿也回）；
+ *    · `live` 是**服务端算好的、外面真正看到的那一份**（`null` = 没在发）——
+ *      面板上的预览必须用它，**不许前端自己拼**（否则"面板显示的和外面看到的"会分叉）。
+ *    · `present` = 那一行在不在（不在 = §23.2.1 的两行种子没跑）。
+ */
+export type AdminReleaseSlot = {
+  present: boolean
+  enabled: boolean
+  version: string
+  force: boolean
+  note: string
+  urlApk: string
+  urlExe: string
+  /** 服务端算好的那一份（`null` = 没在发） */
+  live: Record<string, unknown> | null
+  updatedAt: number | null
+  updatedBy: string | null
+}
+
+function toSlot(v: unknown): AdminReleaseSlot {
+  const s = (v && typeof v === 'object' ? v : {}) as Record<string, unknown>
+  const ms = (x: unknown) => (typeof x === 'string' && Number.isFinite(Date.parse(x)) ? Date.parse(x) : null)
+  return {
+    present: s.present === true,
+    enabled: s.enabled === true,
+    version: String(s.version ?? ''),
+    force: s.force === true,
+    note: String(s.note ?? ''),
+    urlApk: String(s.urlApk ?? ''),
+    urlExe: String(s.urlExe ?? ''),
+    live: s.live && typeof s.live === 'object' ? (s.live as Record<string, unknown>) : null,
+    updatedAt: ms(s.updatedAt),
+    updatedBy: typeof s.updatedBy === 'string' ? s.updatedBy : null,
+  }
+}
+
+/** 读两档（教师端 / 教室端）—— 含没发布的草稿，面板用它预填 */
+export async function fetchReleaseState(): Promise<
+  { ok: true; teacher: AdminReleaseSlot; classroom: AdminReleaseSlot } | { ok: false; message: string }
+> {
+  const r = await postApi('/api/admin/release', { action: 'state' })
+  if (!r.ok) return { ok: false, message: apiMessage(r, '读版本更新状态失败') }
+  const rel = (r.data.release ?? {}) as Record<string, unknown>
+  return { ok: true, teacher: toSlot(rel.teacher), classroom: toSlot(rel.classroom) }
+}
+
+/** 发布 / 撤下**一档**（一次发布只动一档：给教师端发强制，教室端不受影响） */
+export async function setRelease(input: {
+  target: 'teacher' | 'classroom'
+  enabled: boolean
+  version: string
+  force: boolean
+  note: string
+  urlApk: string
+  urlExe: string
+}): Promise<{ ok: true; slot: AdminReleaseSlot } | { ok: false; message: string; rule?: string }> {
+  const r = await postApi('/api/admin/release', { action: 'set', ...input })
+  if (!r.ok) {
+    return {
+      ok: false,
+      message: apiMessage(r, '发布版本更新公告失败'),
+      rule: typeof r.data.rule === 'string' ? r.data.rule : undefined,
+    }
+  }
+  const rel = (r.data.release ?? {}) as Record<string, unknown>
+  return { ok: true, slot: toSlot(rel[input.target]) }
+}
+
 /* ---------------- ④ 发信（`/api/mail`） ---------------- */
 
 export async function sendTestMail(): Promise<{ ok: true; to: string } | { ok: false; message: string }> {
