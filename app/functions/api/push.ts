@@ -133,28 +133,47 @@ async function mintSessionFor(
   }
   const hashed: string | undefined = genBody.hashed_token ?? genBody.properties?.hashed_token
   const otp: string | undefined = genBody.email_otp ?? genBody.properties?.email_otp
-  if (!hashed && !otp) return { error: '造会话第 1 步没返回 token（响应里没有 hashed_token / email_otp）。' }
-  // ② 用一次性 token 换出真会话：有 hashed_token 走 token_hash 那一支，
-  //    只有 email_otp 就走六位码那一支（/auth/v1/verify 两个都收）
-  const verifyBody = hashed
-    ? { type: 'magiclink', token_hash: hashed, email }
-    : { type: 'magiclink', email, token: otp }
-  const verify = await fetch(`${baseUrl(env)}/auth/v1/verify`, {
-    method: 'POST',
-    headers: {
-      apikey: anonKey(env),
-      Authorization: `Bearer ${anonKey(env)}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(verifyBody),
-  })
-  if (!verify.ok) {
-    const t = (await verify.text()).slice(0, 160)
-    return { error: `造会话第 2 步失败（HTTP ${verify.status}）：${t}` }
+  if (!hashed && !otp) {
+    return {
+      error:
+        '造会话第 1 步没返回 token（响应里没有 hashed_token / email_otp；拿到的是 ' +
+        JSON.stringify(Object.keys(genBody)) +
+        '）。',
+    }
   }
-  const s = (await verify.json()) as { access_token?: string; refresh_token?: string }
-  if (!s.access_token || !s.refresh_token) return { error: '造会话第 2 步没返回会话。' }
-  return { access: s.access_token, refresh: s.refresh_token }
+  /*
+   * 🔴 ② verify 端点对请求形状**各版本不一致**（真机第三轮实测：三样都发了仍回
+   *    400 "Or the token_hash and type should be provided"）—— 按**优先级逐形状试**：
+   *    ① token_hash + type + email（hash 流）② email + token（六位码流）。
+   *    哪个被接受用哪个；全失败时 detail 带上"发过哪些字段 + 各自的上游原文"。
+   */
+  const candidates: Array<{ body: Record<string, unknown>; label: string }> = []
+  if (hashed) candidates.push({ body: { type: 'magiclink', token_hash: hashed, email }, label: 'token_hash 形' })
+  if (otp) candidates.push({ body: { type: 'magiclink', email, token: otp }, label: 'email_otp 形' })
+  let lastErr = ''
+  for (const cand of candidates) {
+    const verify = await fetch(`${baseUrl(env)}/auth/v1/verify`, {
+      method: 'POST',
+      headers: {
+        apikey: anonKey(env),
+        Authorization: `Bearer ${anonKey(env)}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(cand.body),
+    })
+    if (!verify.ok) {
+      const t = (await verify.text()).slice(0, 140)
+      lastErr += `［${cand.label}：HTTP ${verify.status} ${t}］`
+      continue
+    }
+    const s = (await verify.json()) as { access_token?: string; refresh_token?: string }
+    if (!s.access_token || !s.refresh_token) {
+      lastErr += `［${cand.label}：200 但没回会话］`
+      continue
+    }
+    return { access: s.access_token, refresh: s.refresh_token }
+  }
+  return { error: `造会话第 2 步失败。${lastErr}` }
 }
 
 export async function onRequestPost(context: { request: Request; env: Env }): Promise<Response> {
