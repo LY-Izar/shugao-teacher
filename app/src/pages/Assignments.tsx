@@ -850,7 +850,9 @@ export default function Assignments() {
             ) : null}
           </div>
 
-          <div className="flex items-center gap-2">
+          {/* 状态那一行。⚠️ 窄屏下「按上次新建」会把这一行挤到放不下 —— 只**换行**、不压按钮
+              （见 `index.css` 末尾那一节；桌面那一段一个字都不改）。 */}
+          <div className="flex items-center gap-2" data-list-filter>
             <div className="seg">
               {FILTERS.map((f) => (
                 <button
@@ -1052,7 +1054,13 @@ export default function Assignments() {
                   </span>
                 </button>
 
+                {/*
+                  ⚠️ `data-card-actions` 是**手机端布局调整的挂点**（见 `index.css` 末尾那一节）：
+                     窄屏下这一排按钮多的时候（档案已批改 + 已起过草稿时会有 3 个）不允许
+                     把按钮压到文字被裁掉 —— 只**换行**、不缩字。桌面（≥ sm）那一段一个字都不改。
+                */}
                 <div
+                  data-card-actions
                   className="flex items-center gap-1 px-3 py-2"
                   style={{
                     borderTop: '1px solid var(--color-line)',

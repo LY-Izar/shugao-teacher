@@ -4681,6 +4681,301 @@ await withLock(async () => {
       })
 
       /* ============================================================
+         ===== R7：手机端布局（390×844 与 320×700）首次纳入门禁 =====
+         ------------------------------------------------------------
+         用户原话：「手机端布局还是得调整一下，有些地方都超格子了」。
+         量出来的三处（真浏览器，见 `index.css` 末尾那一节）：
+           ① 分段控件「全部 / 待收缴 / 待批改」的文字**折成两行**（窄机型上）；
+           ② 卡片底部操作排的按钮被**压窄**到文字裁切（390px 下「看统计」84→65、
+              「收缴记录」76→60、「改错登记」126→94；垃圾桶 27→22）；
+           ③ 垃圾桶 27×27、分段 30 高、操作按钮 32 高 —— 都不到 40×40。
+
+         🔴 **为什么必须单独加这一步**：上面 38/39 那两步跑的是 **414×880**，
+             而这三处病**在 414 上大多量不到**（余量刚好够）—— 只在更窄的机型上现形。
+             靠"414 看着没事"来收工，就是本仓库反复栽过的"绿灯假象"。
+
+         🔴 **为什么不是只查横向滚动**：①② 都是**纵向**的坏法（文字换行 = 长高、
+             按钮被压窄 = 文字被裁），`documentElement.scrollWidth` 一条都抓不到。
+             所以这里另量「文本到底占了几行」「每个按钮的文字有没有被裁」——
+             这两条才是本轮真正的判据。
+
+         🔴 **为什么两档都要量**：390×844 是用户截图那一档；而"折行"的现场在
+             **320×700**（实测：改之前「全部 / 待收缴 / 待批改」的文本高 17px → 37px）。
+             只量 390 的话，把 `.seg { white-space: nowrap }` 去掉**不会有任何一条变红**，
+             那条判据就成了恒绿的摆设（§三.2）。
+
+         🧪 反向对照（常驻）：把「批改中 + 已下发改错」那一排（**3 颗按钮 + 垃圾桶**，
+             最挤的那一种）现造进夹具里 —— 只留两颗按钮的卡片**永远量不出挤压**，
+             那样这条判据就是恒绿的摆设。
+             ⚠️ 注入方式**实测试过三种，只有一种可靠**（别重走）：
+              · 只写 `localStorage` 再 `reload()` → **没用**（`ctx.addInitScript` 每次整页导航都会把快照写回去）；
+              · `import('/src/data/store.ts')` + `useStore.setState` → **没用**（拿到的不是页面正在用的那个实例，屏上什么都没变）；
+              · ✅ **`page.addInitScript` + 整页 `goto`**（后注册的 initScript 后生效）—— 本步用的就是这个。
+             ⚠️ 两档之间必须**重新 `goto` 一次**：只 `setViewportSize` 的话，量到的是"在旧宽度上渲染好的那一屏"
+             （实测 320 那一档直接量成空页 0 排）。
+
+         ⚠️ **本步不产图**，所以 `EXPECTED_FILES` 里**没有**它对应的条目
+             （那份清单是"实际落盘文件集合 == 期望集合"，凭空加一条反而会红）。
+             这是**手机端布局第一次进 shots 门禁**：以前 145 张图**一张都不是 390/320 这一档**，
+             所以"手机端折行 / 压字"在门禁里**从来没有过任何读数**。
+         ============================================================ */
+      const SMOB = 'R7 手机端布局'
+      await step(SMOB, async () => {
+        /*
+         * ⚠️ 两档都量（**这是这条判据能不能红的关键**，别删掉 320 那一档）：
+         *   · **390×844** = 用户截图那一档（iPhone）——它量的是"390 上本来就不该破"；
+         *   · **320×700** = 折行的**现场**：实测改之前「全部 / 待收缴 / 待批改」的文本高
+         *     从 17px 变成 **37px**（两行）。只量 390 的话，把 `nowrap` 去掉
+         *     **不会有任何一条变红**（390 上余量够），那条判据就是恒绿的摆设。
+         */
+        const WIDTHS = [
+          { w: 390, h: 844, tag: '390×844（iPhone）' },
+          { w: 320, h: 700, tag: '320×700（折行现场）' },
+        ]
+
+        /**
+         * 量一屏：把这一档要断言的东西全取回来。
+         * 🔴 探针里**不许引用外层作用域的变量**（`page.evaluate` 的函数体是序列化过去的，
+         *    外面那个 `SMOB` 在里面根本不存在）—— 所以行标签一律由外面拼。
+         */
+        const probeNow = () =>
+          page.evaluate(() => {
+            const norm = (s) => String(s ?? '').replace(/\s+/g, ' ').trim()
+            /** 元素的**文字**占了几行（按行盒算，不看盒子有多高） */
+            const textLines = (el) => {
+              const rg = document.createRange()
+              rg.selectNodeContents(el)
+              const rects = [...rg.getClientRects()].filter((r) => r.width > 0.5)
+              if (!rects.length) return 0
+              const runs = []
+              for (const r of rects.slice().sort((a, b) => a.top - b.top)) {
+                const hit = runs.find((k) => Math.abs(k.top - r.top) < 2)
+                if (hit) hit.h += r.height
+                else runs.push({ top: r.top, h: r.height })
+              }
+              return runs.length
+            }
+            const box = (el) => {
+              const r = el.getBoundingClientRect()
+              return {
+                l: Math.round(r.left),
+                t: Math.round(r.top),
+                r: Math.round(r.right),
+                b: Math.round(r.bottom),
+                w: Math.round(r.width),
+                h: Math.round(r.height),
+              }
+            }
+
+            /* ① 状态分段控件：按**文案**找（不按类名，也不靠"第几个"） */
+            const seg = [...document.querySelectorAll('.seg')].find((s) =>
+              ['全部', '待收缴', '待批改'].every((t) =>
+                [...s.querySelectorAll('button')].some((b) => norm(b.textContent) === t),
+              ),
+            )
+            const segBtns = seg
+              ? [...seg.querySelectorAll('button')].map((b) => ({
+                  txt: norm(b.textContent),
+                  ...box(b),
+                  lines: textLines(b),
+                  /* 文字被裁：盒子比它自己的内容还窄 */
+                  clipped: b.scrollWidth > b.clientWidth + 1,
+                }))
+              : null
+
+            /* ② 卡片底部操作排（`[data-card-actions]`） */
+            const rows = [...document.querySelectorAll('[data-card-actions]')].map((row) => {
+              const rb = box(row)
+              const kids = [...row.querySelectorAll('button')].map((b) => ({
+                txt: norm(b.textContent) || b.getAttribute('aria-label') || '(无名)',
+                ...box(b),
+                lines: textLines(b),
+                /* 文字比盒子宽 ⇒ 被 `overflow: hidden` 裁掉了（`.btn` 是 nowrap） */
+                textClipped: b.scrollWidth > b.clientWidth + 1,
+              }))
+              const overlaps = []
+              for (let i = 0; i < kids.length; i++)
+                for (let j = i + 1; j < kids.length; j++) {
+                  const a = kids[i]
+                  const b = kids[j]
+                  if (a.l < b.r && b.l < a.r && a.t < b.b && b.t < a.b) overlaps.push(`${a.txt} × ${b.txt}`)
+                }
+              /* 有没有谁被挤到这一排的盒子外面 */
+              const escaped = kids.filter((k) => k.r > rb.r + 1 || k.l < rb.l - 1).map((k) => k.txt)
+              return { ...rb, kids, overlaps, escaped, scrollW: row.scrollWidth, clientW: row.clientWidth }
+            })
+
+            /* ③ 自动宽度按钮的可点目标（固定宽的大按钮本来就 > 40，不在这里） */
+            const tapTargets = [...document.querySelectorAll('.seg > button, [data-card-actions] button')].map((el) => ({
+              txt: norm(el.textContent) || el.getAttribute('aria-label') || '(无名)',
+              ...box(el),
+            }))
+
+            /* 夹具那一张卡片：标题带 R7 标记（其它卡片都不带） */
+            const fixtureRow = rows.find((r) => r.kids.some((k) => k.txt.includes('继续批改')))
+
+            return {
+              docW: document.documentElement.clientWidth,
+              docSW: document.documentElement.scrollWidth,
+              bodySW: document.body.scrollWidth,
+              segBtns,
+              rowCount: rows.length,
+              rows,
+              fixtureRow,
+              tapTargets,
+            }
+          })
+
+        try {
+          /*
+           * 夹具：一份「批改中」的档案。
+           *
+           * 🔴 三个字段缺一不可（这是本轮**实际踩过**的坑，第一版只给了 `confirmedNos`
+           *    和 `correctedNos: []`，结果那一排只摆出两颗按钮，夹具断言当场红）：
+           *   · `confirmedNos` 非空 → `gradingStarted()` 为真，主入口写成「继续批改」；
+           *   · `status` 既不是 `open` 也不是 `graded`/`reviewed`（用 `collected`）
+           *     → 才会再多摆一颗「收缴记录」，而且**不会**走"已批改"那一支；
+           *   · `correctionNos` 非空 → 「改错登记」才出现，而**它正是最长的那颗**
+           *     （`改错登记 3/10` ≈ 127px），也是被压得最狠的那颗。
+           * 合起来 = 这一排最挤的形态：3 颗按钮 + 垃圾桶。
+           *
+           * ⚠️ **注入方式也是踩出来的**：先写 `localStorage` 再 `reload()` **没用**
+           *    —— `ctx.addInitScript`（本文件 S1 那段）会在**每次整页导航**时把快照
+           *    重写回去，刚写的那份立刻被打回原样（实测：写完 reload 后 store 里
+           *    那份又没了）。走 `import('/src/data/store.ts')` + `useStore.setState`
+           *    也**没成功**（拿到的不是页面正在用的那个实例，页面上什么都没变）。
+           *    ✅ 可靠的做法与主流程一致：**`page.addInitScript` + 整页 `goto`**
+           *    —— 新增的这条 initScript **后注册、后生效**，于是这一屏加载出来就是带夹具的那份。
+           */
+          await page.setViewportSize({ width: WIDTHS[0].w, height: WIDTHS[0].h })
+          await page.addInitScript(
+            ([s, base]) => {
+              const raw = JSON.parse(JSON.stringify(s))
+              const ongoing = {
+                ...base,
+                id: 'a-r7-ongoing',
+                title: 'R7 夹具：批改中那一份',
+                status: 'collected',
+                confirmedNos: base.confirmedNos?.length ? base.confirmedNos : ['2025001', '2025002'],
+                correctionNos: ['2025001', '2025002', '2025003'],
+                correctedNos: ['2025001'],
+              }
+              raw.state.assignments = [
+                ongoing,
+                ...(raw.state.assignments ?? []).filter((a) => a.id !== 'a-r7-ongoing'),
+              ]
+              window.localStorage.setItem('shugao.teacher.v1', JSON.stringify(raw))
+              window.localStorage.setItem('shugao.deviceRole', 'teacher')
+            },
+            [TEACHER_STATE, DEMO_ASSIGNMENTS[0]],
+          )
+          await page.goto(`${BASE}/assignments`, { waitUntil: 'networkidle' })
+          await waitPageSettled(page)
+          await page.waitForTimeout(600)
+          console.log('     · 夹具已注入（「批改中」那一份：3 颗按钮 + 垃圾桶）')
+
+          for (const vp of WIDTHS) {
+            await page.setViewportSize({ width: vp.w, height: vp.h })
+            /*
+             * ⚠️ 切宽之后**必须整页重载一次**（实测踩过）：只 `setViewportSize` 的话，
+             *    量到的是"在旧宽度上渲染好的那一屏" —— 320 那一档直接量成**空页**
+             *    （0 排操作排、0 个可点目标），于是"没有相交 / 没有被裁 / 没有偏小"
+             *    三条**全部恒真**，看着是绿的，其实什么都没量到（正是 §三.1 那种假绿）。
+             *    重载之后两档都量到 1 排 4 颗按钮。
+             */
+            await page.goto(`${BASE}/assignments`, { waitUntil: 'networkidle' })
+            await waitPageSettled(page)
+            await page.waitForTimeout(500)
+            const probe = await probeNow()
+            const at = `${SMOB}（${vp.tag}）`
+
+            /* ---------- ① 整页不许横向滚 ---------- */
+            check(
+              probe.docSW <= probe.docW && probe.bodySW <= probe.docW,
+              `${at}：整页**没有横向滚动**（documentElement.scrollWidth ≤ clientWidth）`,
+              `scrollWidth=${probe.docSW} · body=${probe.bodySW} · clientWidth=${probe.docW}`,
+            )
+
+            /* ---------- ② 分段控件的文字必须**一行** ---------- */
+            check(
+              Boolean(probe.segBtns?.length),
+              `${at}：找得到「全部 / 待收缴 / 待批改」那个分段控件`,
+              probe.segBtns ? `找到 ${probe.segBtns.length} 格` : '一个都没找到',
+            )
+            if (probe.segBtns) {
+              const bad = probe.segBtns.filter((b) => b.lines !== 1)
+              check(
+                bad.length === 0,
+                `${at}：分段控件每一格的文字都在**一行内**（判据 = 行盒数 === 1）—— 不许折成两行`,
+                probe.segBtns.map((b) => `「${b.txt}」行数${b.lines}`).join(' · '),
+                '反向对照：把 `.seg { white-space: nowrap }` 去掉 → 320×700 那一档当场折成两行',
+              )
+              const clipped = probe.segBtns.filter((b) => b.clipped)
+              check(
+                clipped.length === 0,
+                `${at}：分段控件每一格**没有被压窄到裁字**`,
+                clipped.length
+                  ? `被裁：${clipped.map((b) => `「${b.txt}」${b.w}`).join(' · ')}`
+                  : `都比内容宽：${probe.segBtns.map((b) => `「${b.txt}」${b.w}`).join(' · ')}`,
+              )
+            }
+
+            /* ---------- ③ 卡片操作排：不许互相压、不许裁字、不许挤出去 ---------- */
+            check(
+              Boolean(probe.fixtureRow?.kids.length >= 3),
+              `${at}：夹具那一张卡片真的摆出了 **3 颗按钮 + 垃圾桶**（最挤的那一排）`,
+              probe.fixtureRow
+                ? `摆了 ${probe.fixtureRow.kids.length} 个：${probe.fixtureRow.kids.map((k) => `「${k.txt}」`).join(' ')}`
+                : `没找到带「继续批改」的那一排（本页共 ${probe.rowCount} 排）`,
+              '反向对照：只留两颗按钮的卡片**永远量不出挤压** —— 所以夹具必须有这一种',
+            )
+            const rowOverlaps = probe.rows.flatMap((r) => r.overlaps)
+            check(
+              rowOverlaps.length === 0,
+              `${at}：卡片底部操作排里**没有任何两个元素相交**（boundingBox 互不相交）`,
+              rowOverlaps.length ? `相交：${rowOverlaps.join(' | ')}` : `量了 ${probe.rowCount} 排，两两都不相交`,
+            )
+            const rowEscaped = probe.rows.flatMap((r) => r.escaped)
+            check(
+              rowEscaped.length === 0,
+              `${at}：操作排里没有按钮**被挤出这一排的盒子**`,
+              rowEscaped.length ? `挤出去：${rowEscaped.join(' · ')}` : '一个都没有',
+            )
+            const textClipped = probe.rows.flatMap((r) =>
+              r.kids.filter((k) => k.textClipped).map((k) => `「${k.txt}」${k.w}`),
+            )
+            check(
+              textClipped.length === 0,
+              `${at}：操作排里**没有一个按钮的文字被裁**（`.btn` 是 nowrap + overflow: hidden，被压窄时就是裁字）`,
+              textClipped.length
+                ? `被裁：${textClipped.join(' · ')}`
+                : `量了 ${probe.rows.reduce((n, r) => n + r.kids.length, 0)} 颗按钮，一颗都没裁`,
+              '反向对照：把 `min-width: fit-content` 那一条去掉 → 390px 下「看统计」84→65、「收缴记录」76→60，当场红',
+            )
+            check(
+              probe.rows.every((r) => r.scrollW <= r.clientW + 1),
+              `${at}：操作排自己也不横向溢出（scrollWidth ≤ clientWidth）`,
+              probe.rows.map((r, i) => `第${i + 1}排 ${r.scrollW}/${r.clientW}`).join(' · '),
+            )
+
+            /* ---------- ④ 触摸目标 ≥ 40 ---------- */
+            const small = probe.tapTargets.filter((t) => t.w < 40 || t.h < 40)
+            check(
+              small.length === 0,
+              `${at}：分段控件与卡片操作排的**可点目标都不小于 40×40**`,
+              small.length
+                ? `偏小：${small.map((t) => `「${t.txt}」${t.w}×${t.h}`).join(' · ')}`
+                : `量了 ${probe.tapTargets.length} 个，最小的边 ${Math.min(...probe.tapTargets.map((t) => Math.min(t.w, t.h)))}px`,
+              '反向对照：把 ⑤ 那段 `max-width: 639px` 里的 min-height/min-width 去掉 → 分段 30 高、按钮 32 高、垃圾桶 27×27，当场红',
+            )
+          }
+        } finally {
+          /* 还原成主流程一直在用的 414×880（后面的节按这个宽度量） */
+          await page.setViewportSize({ width: 414, height: 880 })
+        }
+      })
+
+      /* ============================================================
          ===== 按身份显示导航（方案 §五 R2/R3：B1–B7 / C1–C5） =====
          ------------------------------------------------------------
          这一节要回答的是**两个方向**（§18.3：两个坏法方向相反，各要一条对照）：
