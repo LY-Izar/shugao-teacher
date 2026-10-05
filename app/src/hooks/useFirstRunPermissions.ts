@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { useStore, useToast } from '../data/store'
-import { postApi } from '../lib/api'
+import { apiMessage, postApi } from '../lib/api'
 import { apiUrl } from '../lib/apiBase'
 import {
   notifyChannel,
@@ -99,6 +99,8 @@ export function useFirstRunPermissions() {
       const started = token ? await shellStartPush(apiUrl(''), token) : false
       if (started) steps.push('消息保持畅通')
 
+      /* 🔴 失败要说清楚断在哪（用户真机第二轮的教训：一句"没走完"让人对着黄条猜）。
+         reg 失败时 `message`/`detail` 原样带上（"§41 没建"那一档会点名让老师跑 schema）。 */
       if (reg.ok && started) {
         try {
           localStorage.setItem(DONE_KEY, '1')
@@ -107,11 +109,12 @@ export function useFirstRunPermissions() {
         }
         push({ text: '通知设置完成', tone: 'ok', desc: steps.join(' · ') })
       } else {
-        push({
-          text: '通知设置没走完',
-          tone: 'warn',
-          desc: '下次打开应用会自动再试；应用开着时通知照常收。',
-        })
+        const why = !reg.ok
+          ? apiMessage(reg, '连不上服务器')
+          : !token
+            ? '服务端没回推送钥匙'
+            : '前台服务没起来'
+        push({ text: '通知设置没走完', tone: 'warn', desc: `${why} 下次打开应用会自动再试。` })
       }
     })()
   }, [hydrated, teacher, isDemo, accountKind, push])

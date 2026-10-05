@@ -102,32 +102,42 @@ async function findToken(env: Env, token: string): Promise<PushRow | null> {
 /**
  * 给老师**单独造一个会话**（service_role 的 admin magic link → verify 换出会话）。
  * 这个会话只归前台服务用 —— 与老师浏览器里的那个会话互不干扰（refresh 轮换不抢）。
+ * 🔴 每一步失败都带 `detail`（上游原文片段）—— "没建起来"不给原因 = 把人扔在原地。
  */
 async function mintSessionFor(
   env: Env,
   teacherId: string,
   email: string,
-): Promise<{ access: string; refresh: string } | null> {
-  if (!email || !UUID_RE.test(teacherId)) return null
+): Promise<{ access: string; refresh: string } | { error: string }> {
+  if (!email || !UUID_RE.test(teacherId)) return { error: '这个账号没有邮箱，造不了推送会话。' }
   // ① 造 magic link（admin API **不发邮件**，只回一次性 token）
   const gen = await svc(env, '/auth/v1/admin/generate_link', {
     method: 'POST',
     body: JSON.stringify({ type: 'magiclink', email }),
   })
-  if (!gen.ok) return null
+  if (!gen.ok) {
+    const t = (await gen.text()).slice(0, 160)
+    return { error: `造会话第 1 步失败（HTTP ${gen.status}）：${t}` }
+  }
   const genBody = (await gen.json()) as { properties?: { hashed_token?: string } }
   const hashed = genBody.properties?.hashed_token
-  if (!hashed) return null
-  // ② 用一次性 token 换出真会话（anon + otp 校验，与客户端 verify 同一个端点）
+  if (!hashed) return { error: '造会话第 1 步没返回 token（响应形状变了）。' }
+  // ② 用一次性 token 换出真会话（email 一起带上：有的 GoTrue 版本校验它）
   const verify = await fetch(`${baseUrl(env)}/auth/v1/verify`, {
     method: 'POST',
-    headers: { apikey: anonKey(env), Authorization: `Bearer ${anonKey(env)}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ type: 'magiclink', token_hash: hashed }),
+    headers: {
+      apikey: anonKey(env),
+      Authorization: `Bearer ${anonKey(env)}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ type: 'magiclink', token_hash: hashed, email }),
   })
-  if (!verify.ok) return null
+  if (!verify.ok) {
+    const t = (await verify.text()).slice(0, 160)
+    return { error: `造会话第 2 步失败（HTTP ${verify.status}）：${t}` }
+  }
   const s = (await verify.json()) as { access_token?: string; refresh_token?: string }
-  if (!s.access_token || !s.refresh_token) return null
-  void teacherId
+  if (!s.access_token || !s.refresh_token) return { error: '造会话第 2 步没返回会话。' }
   return { access: s.access_token, refresh: s.refresh_token }
 }
 
@@ -155,14 +165,11 @@ export async function onRequestPost(context: { request: Request; env: Env }): Pr
     if (!me) return json({ status: 'error', message: '登录已过期，请重新登录后再试' }, 401)
     if (!me.email) return json({ status: 'error', message: '这个账号没有邮箱，收不了推送。' }, 400)
 
-    const session = await mintSessionFor(env, me.id, me.email)
-    if (!session) {
-      return json(
-        { status: 'error', message: '没能为这台设备建立推送会话（稍后重开应用会自动再试）。' },
-        502,
-      )
+    const minted = await mintSessionFor(env, me.id, me.email)
+    if ('error' in minted) {
+      return json({ status: 'error', message: '没能为这台设备建立推送会话。', detail: minted.error }, 502)
     }
-    // 一位老师一把钥匙：有就换（先删再插，uuid 主键让新的必然是新钥匙）
+    const session = { access: minted.access, refresh: minted.refresh }
     await svc(env, '/rest/v1/push_tokens?teacher_id=eq.' + me.id, { method: 'DELETE' })
     const ins = await svc(env, '/rest/v1/push_tokens', {
       method: 'POST',
@@ -172,7 +179,23 @@ export async function onRequestPost(context: { request: Request; env: Env }): Pr
         refresh_token: session.refresh,
       }),
     })
-    if (!ins.ok) return json({ status: 'error', message: '推送钥匙没存上（服务端）。' }, 502)
+    if (!ins.ok) {
+      const t = (await ins.text()).slice(0, 200)
+      // 🔴 最常见的一档：§41 那张表还没建（用户没在 Supabase 重跑整份 schema.sql）——
+      //    把它从一堆报错里点名出来，别让老师对着一句"没存上"猜。
+      if (/PGRST20[45]|42P01|does not exist|schema cache/i.test(t)) {
+        return json(
+          {
+            status: 'error',
+            message:
+              '数据库还没建推送表（schema §41）：到 Supabase → SQL Editor 把整份 schema.sql 再跑一遍，然后重开应用。',
+            detail: t,
+          },
+          502,
+        )
+      }
+      return json({ status: 'error', message: '推送钥匙没存上（服务端）。', detail: t }, 502)
+    }
     const rows = (await ins.json()) as Array<{ token: string }>
     const token = rows[0]?.token
     if (!token || !UUID_RE.test(token)) return json({ status: 'error', message: '推送钥匙没存上。' }, 502)
