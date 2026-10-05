@@ -154,11 +154,20 @@ function parseSchemaStages(text) {
         targets.push(t)
       }
     }
-    for (const m of flat.matchAll(/create table if not exists ([a-z_][a-z_0-9]*)/gi)) {
+    /*
+     * 🔴 **`(?:public\.)?` 不能省**（2026-10-06 修）：不认 schema 限定符，就会把**限定符本身**
+     *    当成表名 —— `create table if not exists public.push_tokens`（§41，`schema.sql:11335`，
+     *    全仓唯一一条带前缀的建表语句）解析成 `{kind:'table', name:'public'}`，面板于是去探
+     *    `public` 这张**根本不存在的表**（真库 `GET /rest/v1/public` → `404 PGRST205`）
+     *    ⇒ **§41 假红"未跑"**，而那张表明明在（`/rest/v1/push_tokens` → `200 []`）。
+     *    ⚠️ 下面"加列"那条同理（现在是**预防性**的：`schema.sql` 里还没有 `public.` 的加列语句）。
+     *    ⚠️ 这两条**只加前缀，别的解析规则一个字不动**（段头 / 注释剥离 / 去重都照旧）。
+     */
+    for (const m of flat.matchAll(/create table if not exists (?:public\.)?([a-z_][a-z_0-9]*)/gi)) {
       push({ kind: 'table', name: m[1].toLowerCase() })
     }
     for (const m of flat.matchAll(
-      /alter table ([a-z_][a-z_0-9]*) add column if not exists ([a-z_][a-z_0-9]*)/gi,
+      /alter table (?:public\.)?([a-z_][a-z_0-9]*) add column if not exists ([a-z_][a-z_0-9]*)/gi,
     )) {
       push({ kind: 'col', table: m[1].toLowerCase(), column: m[2].toLowerCase() })
     }
@@ -174,8 +183,17 @@ function parseSchemaStages(text) {
      *    正则要是松一点就会把"这一段删掉的策略"也当成"这一段建的"。
      * ⚠️ `targets` 的去重键是 `name ?? column` —— 策略重名（不同表上同名）会互相吃掉，
      *    所以 `push` 里去重时要把 `table` 也算上（下面单独写一份，不动共用的那个 `push`）。
+     * 🔴 **同一类病：限定符不许当成表名**（2026-10-06 修）——
+     *    `create policy classroom_files_read on storage.objects`（§9 / §19）原来解析成
+     *    `table: 'storage'`：`storage` 是 **schema**，真表名是 `objects`
+     *    （`pg_policies.tablename`）。⇒ 现在**认任意一段 `schema.` 前缀**、只留表名。
+     *    末尾那个 `(?![a-z_0-9.])` 是给 §42 的 `on public.%I` 用的：那三条策略的表名
+     *    **是动态的**（`execute format(...)` 轮着挂到 18 张表上，见 `schema.sql:11448-11468`）
+     *    ⇒ **认不出真名时不许编** —— 宁可这条策略不进清单，也不许再写一个 `public` 上去。
      */
-    for (const m of flat.matchAll(/create policy ([a-z_][a-z_0-9]*) on (?:public\.)?([a-z_][a-z_0-9]*)/gi)) {
+    for (const m of flat.matchAll(
+      /create policy ([a-z_][a-z_0-9]*) on (?:[a-z_][a-z_0-9]*\.)?([a-z_][a-z_0-9]*)(?![a-z_0-9.])/gi,
+    )) {
       const name = m[1].toLowerCase()
       const table = m[2].toLowerCase()
       if (!targets.some((x) => x.kind === 'policy' && x.name === name && x.table === table)) {
@@ -189,6 +207,22 @@ function parseSchemaStages(text) {
 /** 清单是否与 `schema.sql` 逐字段一致（门禁用的就是它） */
 function sameStages(a, b) {
   return JSON.stringify(a) === JSON.stringify(b)
+}
+
+/**
+ * 反向对照专用的"原地改一处" —— **先数出现次数，不是 1 就抛错**。
+ *
+ * 🔴 照 `shots.mjs` 里 `mutate(body, mustReplaceOnce)` 那条纪律来（2026-10-04 实测踩过两次）：
+ *    `String.replace(目标, …)` **只换第一处**，而目标串常常在注释里也有一份、还排在真代码前面
+ *    ⇒ 改的是**注释**、判据纹丝不动 ⇒ 对照"假绿"（症状是"原文 = 0 处 · 改过 = 0 处"那种恒等读数）。
+ *    ✅ **宁可当场抛错，也不假绿。**
+ */
+function mutateOnce(src, target, replacement) {
+  const n = src.split(target).length - 1
+  if (n !== 1) {
+    throw new Error(`反向对照的目标在源码里出现 ${n} 次（必须是 1 次）：${JSON.stringify(target)}`)
+  }
+  return src.replace(target, replacement)
 }
 
 /** 把清单渲染成 `adminChart.ts` 里那段被标记包住的源码 */
@@ -1532,6 +1566,156 @@ await withLock(async () => {
       ![35, 36, 37].some((n) => asOldList.some((s) => s.n === n)),
       asOldList.map((s) => s.n).join(','),
     )
+
+    /* ============================================================
+       🆕 🔴 2026-10-06 · 补〇ⓔ **限定符不许当成表名**（§41 假红"未跑"的那条判据）
+       ------------------------------------------------------------
+       病根：解析 `create table` / `alter table … add column` 的那两条正则不认 `public.` 前缀，
+       于是把**限定符本身**当成表名 —— `create table if not exists public.push_tokens`（§41，
+       `schema.sql:11335`）解析成 `{kind:'table', name:'public'}`，面板拿着 `public` **去探一张
+       根本不存在的表**（真库 `GET /rest/v1/public` → `404 PGRST205`）⇒ §41 被报成"未跑"，
+       而那张表明明在（`/rest/v1/push_tokens` → `200 []`）= **假红**（本项目最贵的那类失真）。
+
+       ⚠️ 🔴 **假库抓不到这一类**：它不认识 schema 限定符，`/rest/v1/public` 照回 `200 []`
+          （= 假绿），所以这条病在本脚本的探针断言里**永远是绿的**。判据只能落在
+          **清单里的名字本身**：任何一种 target 的**表名位**都不许是 schema 名，
+          而且都必须长得像标识符（空串 / 带点 / 带 `%I` 一律不行）。
+       ============================================================ */
+    {
+      /** 清单里每一个"名字字段"（表 / 列 / 函数 / 策略名 / 策略所在表） */
+      const nameFields = (stages) =>
+        stages.flatMap((s) =>
+          s.targets.flatMap((t) =>
+            Object.entries(t)
+              .filter(([k, v]) => ['name', 'table', 'column'].includes(k) && typeof v === 'string')
+              .map(([k, v]) => ({ stage: `§${s.n}`, kind: t.kind, field: k, value: v })),
+          ),
+        )
+      /** 这些名字是 **schema**，永远不是表 / 列 / 函数 / 策略 */
+      const SCHEMA_NAMES = [
+        'public',
+        'auth',
+        'storage',
+        'pg_catalog',
+        'information_schema',
+        'extensions',
+        'realtime',
+        'vault',
+        'graphql',
+      ]
+      const qualifierHits = (stages) =>
+        nameFields(stages).filter((x) => SCHEMA_NAMES.includes(x.value))
+      const fields = nameFields(parsed)
+      ok(
+        '补〇ⓔ 🔴 清单里**没有一个名字是 schema 限定符**（`public` / `auth` / `storage` …）—— ' +
+          '有的话面板会去探一张不存在的表（真库 `404 PGRST205`）⇒ 那一段**假红"未跑"**',
+        qualifierHits(parsed).length === 0,
+        JSON.stringify(qualifierHits(parsed)),
+      )
+      ok(
+        '补〇ⓔ 而且每个名字都长得像标识符（`[a-z_][a-z_0-9]*`）—— 空串 / 带点 / 带 `%I` 一律不行',
+        fields.every((x) => /^[a-z_][a-z_0-9]*$/.test(x.value)),
+        JSON.stringify(fields.filter((x) => !/^[a-z_][a-z_0-9]*$/.test(x.value))),
+      )
+      ok(
+        '补〇ⓔ §41（推送令牌）的 target 是**真表名** `push_tokens`，不是 `public`',
+        (() => {
+          const s41 = parsed.find((s) => s.n === 41)
+          return (
+            s41.targets.some((t) => t.kind === 'table' && t.name === 'push_tokens') &&
+            !s41.targets.some((t) => t.name === 'public' || t.table === 'public')
+          )
+        })(),
+        JSON.stringify(parsed.find((s) => s.n === 41).targets),
+      )
+      /*
+       * 🔴 **清单里的名字是否"都是标识符"这条判据，覆盖面要点名**：
+       *    §9 / §19 的三条 + 一条 `classroom_files` 策略是**挂在别的 schema 的表**上的
+       *    （`on storage.objects`）—— 修之前解析成 `table: 'storage'`（`storage` 是 schema，
+       *    真表名是 `objects`）。所以 `objects` 必须**在**清单里出现。
+       */
+      ok(
+        '补〇ⓔ 而且 §9 / §19 挂在 `storage.objects` 上的那几条策略，表名是 `objects`（不是 `storage`）',
+        parsed
+          .filter((s) => [9, 19].includes(s.n))
+          .every((s) =>
+            s.targets
+              .filter((t) => t.kind === 'policy' && t.name.startsWith('classroom_files_'))
+              .every((t) => t.table === 'objects'),
+          ) &&
+          parsed
+            .filter((s) => [9, 19].includes(s.n))
+            .some((s) => s.targets.some((t) => t.kind === 'policy' && t.table === 'objects')),
+        JSON.stringify(
+          parsed
+            .filter((s) => [9, 19].includes(s.n))
+            .map((s) => [s.n, s.targets.filter((t) => t.kind === 'policy').map((t) => t.table)]),
+        ),
+      )
+
+      /* ---- 🔴 反向对照（**内存副本**，仓库文件一个字不改）：把补上的前缀去掉，判据必须当场判假 ---- */
+      const parserSrc = parseSchemaStages.toString()
+      /* ⓐ 建表那条：拿**真的 `schema.sql`** 跑 —— §41 会当场变回表名 `public` */
+      const parseBrokenTable = new Function(
+        `return (${mutateOnce(
+          parserSrc,
+          'if not exists (?:public\\.)?([a-z_][a-z_0-9]*)',
+          'if not exists ([a-z_][a-z_0-9]*)',
+        )})`,
+      )()
+      const brokenStages = parseBrokenTable(schemaText)
+      const brokenS41 = brokenStages.find((s) => s.n === 41)
+      ok(
+        '补〇ⓔ 反向对照ⓐ（内存副本，`mutateOnce` **先数出现次数 ≠1 就抛错**）把建表正则的 ' +
+          '`(?:public\\.)?` 去掉 → §41 当场解析成**表名 `public`**（这就是那一次假红）',
+        brokenS41.targets.some((t) => t.kind === 'table' && t.name === 'public') &&
+          brokenS41.targets.length === parsed.find((s) => s.n === 41).targets.length,
+        JSON.stringify(brokenS41.targets),
+      )
+      ok(
+        '补〇ⓔ 反向对照ⓐ 而且上面那条判据**在同一份坏副本上当场判假**（同一个函数跑出非空命中）',
+        qualifierHits(brokenStages).length > 0,
+        JSON.stringify(qualifierHits(brokenStages).slice(0, 4)),
+      )
+      /* ⓑ 加列那条：`schema.sql` 里现在**没有** `public.` 的加列语句 → 用一句同形的假 SQL 证明它 */
+      const colSnippet = [
+        '-- ============================================================',
+        '-- 41. 反向对照用的假段（不是 `schema.sql` 的内容）',
+        '-- ============================================================',
+        'alter table public.widgets add column if not exists size int;',
+        '',
+      ].join('\n')
+      const parseBrokenCol = new Function(
+        `return (${mutateOnce(parserSrc, 'alter table (?:public\\.)?(', 'alter table (')})`,
+      )()
+      eq(
+        '补〇ⓔ 反向对照ⓑ 真解析器认得出 `alter table public.widgets add column…`（表名 `widgets`）',
+        parseSchemaStages(colSnippet)[0].targets.map((t) => `${t.table}.${t.column}`),
+        ['widgets.size'],
+      )
+      eq(
+        '补〇ⓔ 反向对照ⓑ 去掉加列正则那个前缀 → 同一条 SQL 的加列 target **整个丢失**' +
+          '（症状与建表那条不同：不是名字变错，是这一列不再进清单）',
+        parseBrokenCol(colSnippet)[0].targets.map((t) => `${t.table}.${t.column}`),
+        [],
+      )
+      /* ⓒ 策略那条：退回"只认 `public.` 前缀"的旧写法 → §9 的 `storage` / §42 的 `public` 一起被抓住 */
+      const parseBrokenPolicy = new Function(
+        `return (${mutateOnce(
+          parserSrc,
+          'on (?:[a-z_][a-z_0-9]*\\.)?([a-z_][a-z_0-9]*)(?![a-z_0-9.])',
+          'on (?:public\\.)?([a-z_][a-z_0-9]*)',
+        )})`,
+      )()
+      const brokenPolicyHits = qualifierHits(parseBrokenPolicy(schemaText))
+      ok(
+        '补〇ⓔ 反向对照ⓒ 策略正则退回旧写法 → `storage`（§9 / §19）与 `public`（§42 的 `%I`）' +
+          '**一起**被同一条判据抓住（两类限定符都能红）',
+        brokenPolicyHits.some((x) => x.value === 'storage') &&
+          brokenPolicyHits.some((x) => x.value === 'public'),
+        JSON.stringify(brokenPolicyHits),
+      )
+    }
 
     /* ⓓ 登记节：从 `schema.sql` 里真的算出来是 0 行可执行 SQL 的那两段 */
     const registryNums = parsed.filter((s) => s.sql === 0).map((s) => s.n)
