@@ -403,6 +403,36 @@ await withLock(async () => {
         if (!re.test(text)) throw new Error('负向对照锚点没找到：classes_insert 里的 owns_class(id) 那一支变了')
         return text.replace(re, 'or false                      -- 负向对照：拿掉 owns_class')
       }
+      if (mode === 'maintenance-freeze') {
+        /*
+         * 🆕 2026-10-14（第二十八节）：把 §42 的三条维护守卫从 **restrictive 改成 permissive**。
+         *
+         * 这是那段代码最真实的一种坏法：restrictive 是 **AND（收紧）**，
+         * permissive 是 **OR（放宽）** —— 一次写错就把"维护期间只有超管能写"
+         * 变成一句空话，而**策略还在、名字还在、清单上看起来一模一样**。
+         *
+         * 🔴 锚点先把**三类动作各数一遍**（必须恰好 1 次，`app/AGENTS.md` §三.2）：
+         *    `String.replace` 只换第一处，而且 `for insert` 只出现在 `format(...)`
+         *    那一句里 —— 数不对就抛错，宁可报错也不许把负向对照做成假绿。
+         * 期望：第二十八节里"非超管写被拒 / 教室端插学生被拒"那几条**必须变红**。
+         */
+        let out = text
+        for (const cmd of ['insert', 'update', 'delete']) {
+          /*
+           * ⚠️ 锚点必须是**维护守卫那一句**：光写 `as restrictive for insert to authenticated`
+           *    会命中 §17.6 里那几条教室端守卫（实测 4 处）—— 那一数就对不上，直接抛错。
+           *    这里带上 `maintenance_freeze_${cmd} on public.%I` 把它限定成一条。
+           */
+          const anchor = `maintenance_freeze_${cmd} on public.%I as restrictive for ${cmd} to authenticated`
+          const n = out.split(anchor).length - 1
+          if (n !== 1) throw new Error(`负向对照锚点出现 ${n} 次（要求恰好 1 次）：${anchor}`)
+          out = out.replace(
+            anchor,
+            `maintenance_freeze_${cmd} on public.%I as permissive for ${cmd} to authenticated`,
+          )
+        }
+        return out
+      }
       if (mode === 'p5-lose-kind') {
         /*
          * 🔴 P5 第十六节的负向对照：**把"列表按 kind 收窄"这条纪律从改造后那一侧拿掉**。
@@ -3985,7 +4015,8 @@ await withLock(async () => {
       // ---- 静态审计：设计红线在策略清单上也要看得见 ----
       const pol = await db.query(
         `select policyname, cmd, coalesce(qual,'') || ' ' || coalesce(with_check,'') as body
-           from pg_policies where schemaname = 'public' and tablename = 'assignments' order by cmd, policyname`,
+           from pg_policies where schemaname = 'public' and tablename = 'assignments'
+            and policyname not like 'maintenance_freeze_%' order by cmd, policyname`,
       )
       eq('assignments 上只有逐动作策略（select/insert/update/delete），**没有一条 for all**', pol.rows.map((x) => x.cmd).sort(), ['DELETE', 'INSERT', 'SELECT', 'UPDATE'])
       ok(
@@ -4000,9 +4031,17 @@ await withLock(async () => {
        * 判据不收窄成某个函数名（`is_classroom_account` 改名不该让这里变红），
        * 只要求"教室里那块屏"这个身份在策略正文里被提到。
        */
+      /*
+       * ⚠️ 2026-10-14（§42 维护模式真要禁写）起，这里**排除 `maintenance_freeze_%`**：
+       *    那三条是"维护期间只有超管能写"的**通用**守卫，不属于这一段要审计的那套
+       *    教室端边界清单。把它们混进来的后果不是变松、而是**把这一段真正的判据淹没**
+       *    （下面那条"三条且都调 classroom_account 判据"当场假红）。
+       *    它们的存在与形状由**第二十八节**专门钉住。
+       */
       const tPol = await db.query(
         `select policyname, cmd, permissive, coalesce(qual,'') || ' ' || coalesce(with_check,'') as body
-           from pg_policies where schemaname = 'public' and tablename = 'teachers' order by cmd, policyname`,
+           from pg_policies where schemaname = 'public' and tablename = 'teachers'
+            and policyname not like 'maintenance_freeze_%' order by cmd, policyname`,
       )
       eq(
         '裂缝 A：teachers 上的策略清单（§7 的 for all + §17.1 三条逐动作 restrictive）',
@@ -4032,7 +4071,8 @@ await withLock(async () => {
       )
       const sPol = await db.query(
         `select policyname, cmd, permissive, coalesce(qual,'') || ' ' || coalesce(with_check,'') as body
-           from pg_policies where schemaname = 'public' and tablename = 'schedule_items' order by policyname`,
+           from pg_policies where schemaname = 'public' and tablename = 'schedule_items'
+            and policyname not like 'maintenance_freeze_%' order by policyname`,
       )
       eq(
         '裂缝 B：schedule_items 上的策略清单（读两路 + 写三路 + 一条教室端边界 + 🆕P9 三条"走班班的屏零写"）',
@@ -4066,7 +4106,8 @@ await withLock(async () => {
        */
       const fPol = await db.query(
         `select policyname, cmd, permissive, coalesce(qual,'') || ' ' || coalesce(with_check,'') as body
-           from pg_policies where schemaname = 'public' and tablename = 'shared_files' order by cmd, policyname`,
+           from pg_policies where schemaname = 'public' and tablename = 'shared_files'
+            and policyname not like 'maintenance_freeze_%' order by cmd, policyname`,
       )
       eq(
         'shared_files 上的策略清单（§9 的 for all + §17.6 三条教室端守卫 + §19 一条读 + 两条归属守卫）',
@@ -4352,7 +4393,7 @@ await withLock(async () => {
     {
       const per = (table) =>
         db
-          .query(`select cmd, policyname, (with_check is not null) as has_check from pg_policies where schemaname='public' and tablename=$1 order by cmd, policyname`, [table])
+          .query(`select cmd, policyname, (with_check is not null) as has_check from pg_policies where schemaname='public' and tablename=$1 and policyname not like 'maintenance_freeze_%' order by cmd, policyname`, [table])
           .then((r) => r.rows)
 
       for (const table of ['classes', 'students', 'assignments', 'calls', 'classrooms']) {
@@ -4392,6 +4433,7 @@ await withLock(async () => {
       /* 🆕 `teacher_departments`（部门归属）走的是**同一个形状**：一条 select 策略 + 零条写策略 */
       const deptPol = await db.query(
         `select cmd, policyname from pg_policies where schemaname='public' and tablename='teacher_departments'
+           and policyname not like 'maintenance_freeze_%'
           order by cmd, policyname`,
       )
       eq(
@@ -4753,6 +4795,7 @@ await withLock(async () => {
       const exPol = await db.query(
         `select tablename, policyname, cmd, coalesce(qual,'') || ' ' || coalesce(with_check,'') as body
            from pg_policies where schemaname = 'public' and tablename in ('exams','exam_scores')
+            and policyname not like 'maintenance_freeze_%'
           order by tablename, policyname`,
       )
       eq(
@@ -6524,7 +6567,8 @@ await withLock(async () => {
         (
           await db.query(
             `select policyname, cmd from pg_policies
-              where schemaname = 'public' and tablename = 'student_profiles' order by policyname`,
+              where schemaname = 'public' and tablename = 'student_profiles'
+                and policyname not like 'maintenance_freeze_%' order by policyname`,
           )
         ).rows.map((r) => `${r.policyname}:${r.cmd}`),
         [
@@ -6776,10 +6820,12 @@ await withLock(async () => {
         }),
       )
       eq(
-        '④ 而且**表上没有 DELETE 策略**（删老师走删账号那条路，不在这张表上删行）',
+        '④ 而且**表上没有 DELETE 策略**（删老师走删账号那条路，不在这张表上删行）' +
+          ' —— ⚠️ 排除 §42 那两条通用维护守卫（只挂 insert/update：这张表本来就没有 DELETE）',
         (
           await db.query(
-            `select cmd from pg_policies where schemaname = 'public' and tablename = 'teacher_profiles' order by cmd`,
+            `select cmd from pg_policies where schemaname = 'public' and tablename = 'teacher_profiles'
+              and policyname not like 'maintenance_freeze_%' order by cmd`,
           )
         ).rows.map((r) => r.cmd),
         ['INSERT', 'SELECT', 'UPDATE'],
@@ -6858,7 +6904,8 @@ await withLock(async () => {
         (
           await db.query(
             `select policyname, cmd from pg_policies
-              where schemaname = 'public' and tablename = 'teacher_profiles' order by policyname`,
+              where schemaname = 'public' and tablename = 'teacher_profiles'
+                and policyname not like 'maintenance_freeze_%' order by policyname`,
           )
         ).rows.map((r) => `${r.policyname}:${r.cmd}`),
         ['teacher_profiles_insert:INSERT', 'teacher_profiles_update:UPDATE', 'teacher_profiles_visible:SELECT'],
@@ -9022,6 +9069,7 @@ await withLock(async () => {
         (await rowsOf(`select tablename, policyname, cmd from pg_policies
                         where schemaname = 'public'
                           and (tablename like 'schedule\\_temp%' or tablename = 'schedule_perm_changes')
+                          and policyname not like 'maintenance_freeze_%'
                         order by 1, 3`)).map((r) => `${r.tablename}:${r.policyname}:${r.cmd}`),
         ['schedule_perm_changes:schedule_perm_changes_read:SELECT',
          'schedule_temp_archive:schedule_temp_archive_read:SELECT',
@@ -9061,9 +9109,11 @@ await withLock(async () => {
                        where conname = 'schedule_temp_changes_teacher_keeps_subject'`)).d),
       )
       eq(
-        '🔴 ⑩ `schedule_items` 上的策略清单**一个字都没动**（永久调课走的是同一个"改那一行"，没加新策略）',
+        '🔴 ⑩ `schedule_items` 上的策略清单**一个字都没动**（永久调课走的是同一个"改那一行"，没加新策略）' +
+          ' —— ⚠️ 排除 §42 那三条通用维护守卫（它们由第二十八节专门钉）',
         (await rowsOf(`select policyname from pg_policies
-                        where schemaname = 'public' and tablename = 'schedule_items' order by 1`)).map((r) => r.policyname),
+                        where schemaname = 'public' and tablename = 'schedule_items'
+                          and policyname not like 'maintenance_freeze_%' order by 1`)).map((r) => r.policyname),
         ['schedule_class_visible', 'schedule_class_write', 'schedule_classroom_admin_only_delete',
          'schedule_classroom_admin_only_insert', 'schedule_classroom_admin_only_update',
          'schedule_classroom_scope_only', 'schedule_classroom_write', 'schedule_mine_read', 'schedule_mine_write'],
@@ -9598,6 +9648,74 @@ await withLock(async () => {
           Boolean((await one(`select has_table_privilege('authenticated', 'class_rep_pins', 'select') as v`)).v),
           false,
         )
+
+        /* ============================================================
+           🆕 2026-10-14（安全审计的**唯一真问题**）：口令**失败计数 + 锁定**
+           ------------------------------------------------------------
+           改之前：口令只有 4~12 位，而 `rep_set_daily_homework()` **失败不计数** ⇒
+             教室里那台机器（学生能碰到）可以不限次地试，4 位 = 10^4 次就能撞开。
+           现在：连续 5 次错 ⇒ 锁 10 分钟（§40.4b/§40.5b），锁定期内**连对的口令也拒**。
+           ============================================================ */
+        const failsRow = async () =>
+          (await B.db.query(
+            `select fails, locked_until, (locked_until is not null and locked_until > now()) as locked
+               from class_rep_pin_fails where class_id = $1`, [C.c1])).rows[0] ?? null
+
+        /* ---- ⑦ 上一步那条错口令**记了一次**（不是"错了就算了"） ---- */
+        await asOwner()
+        eq('🆕 错一次就记一次：`class_rep_pin_fails` 里 c1 的 `fails` = 1（前面那条 `9999`）',
+          Number((await failsRow())?.fails ?? -1), 1)
+        eq('🆕 还没到阈值 ⇒ 没锁',
+          Boolean((await failsRow())?.locked), false)
+
+        /* ---- ⑧ 成功一次 ⇒ 清零（否则"昨天错两次 + 今天错三次"会莫名锁住课代表） ---- */
+        await asAuth(U.room)
+        rpcIs('🆕 拿对的口令录一条 ⇒ `{ok:true}`（顺带把计数清零）',
+          await callRpc(REP_SQL, [C.c1, '数学', 'math', '清零这一次', '1234']), true, null)
+        await asOwner()
+        eq('🆕 成功之后 `fails` 回到 0、锁定也撤掉',
+          [Number((await failsRow())?.fails ?? -1), Boolean((await failsRow())?.locked)],
+          [0, false])
+
+        /* ---- ⑨ 连错 5 次 ⇒ 第 6 次起 `reason = 'locked'`（**错的和对的一起拒**） ---- */
+        await asAuth(U.room)
+        const wrongSeq = []
+        for (let i = 1; i <= 4; i++) {
+          wrongSeq.push((await callRpc(REP_SQL, [C.c1, '数学', 'math', `第${i}次错`, '9999'])).reason)
+        }
+        eq('🆕 第 1~4 次错口令仍然回 `bad-pin`（还没到阈值，课代表自己敲错了还能改）',
+          wrongSeq, ['bad-pin', 'bad-pin', 'bad-pin', 'bad-pin'])
+
+        rpcIs("🆕 第 5 次错 ⇒ 仍回 `bad-pin`（这一次把计数顶到 5）",
+          await callRpc(REP_SQL, [C.c1, '数学', 'math', '第5次错', '9999']), false, 'bad-pin')
+        rpcIs("🔴 第 6 次（此时已锁）⇒ `reason = 'locked'` —— 与 `bad-pin` **刻意分开**（前台要说\"等一会儿\"，不是\"口令改了\"）",
+          await callRpc(REP_SQL, [C.c1, '数学', 'math', '锁定期内再试', '9999']), false, 'locked')
+        rpcIs('🔴🔴 而且锁定期内**拿对的口令也拒**（否则"锁定"对爆破毫无意义）',
+          await callRpc(REP_SQL, [C.c1, '数学', 'math', '锁定期内拿对的', '1234']), false, 'locked')
+
+        await asOwner()
+        eq('🆕 锁定是"从最后一次失败起算 600 秒"（阈值 5、时长 600 —— 与 §42 注释里那两个数同源）',
+          Number((await one(`select round(extract(epoch from (locked_until - now())))::int as s from class_rep_pin_fails where class_id = $1`, [C.c1])).s),
+          600)
+        eq('🔴 锁定期内那两次**一行都没写进每日作业**（拒绝不是"先写再撤"）',
+          Number((await one(`select count(*)::int as n from daily_homework where class_id = $1 and content like '%锁定期内%'`, [C.c1])).n), 0)
+
+        /* ---- ⑩ 锁定过期（把时刻挪到过去是**属主**的动作，只为把时间快进）⇒ 对的照旧放行、计数清零 ---- */
+        await B.db.query(`update class_rep_pin_fails set locked_until = now() - interval '1 second' where class_id = $1`, [C.c1])
+        await asAuth(U.room)
+        rpcIs('🆕 锁定一过期、对的就对：`{ok:true}`（不会把课代表永久锁在门外）',
+          await callRpc(REP_SQL, [C.c1, '数学', 'math', '解锁后录的', '1234']), true, null)
+        await asOwner()
+        eq('🆕 解锁那一次也把计数清零', Number((await failsRow())?.fails ?? -1), 0)
+
+        /* ---- ⑪ 这张表与 `class_rep_pins` 同款：客户端一个权限都没有 ---- */
+        eq('🔴 `class_rep_pin_fails` 对 authenticated **连 select 表权限都没有**（否则能读出"锁到什么时候""试到第几次"）',
+          Boolean((await one(`select has_table_privilege('authenticated', 'class_rep_pin_fails', 'select') as v`)).v),
+          false)
+        eq('🔴 而且它 RLS 开着、**一条策略都没有**（读写只走那两个安全定义函数）',
+          [Boolean((await one(`select rowsecurity as v from pg_tables where schemaname='public' and tablename='class_rep_pin_fails'`)).v),
+           Number((await one(`select count(*)::int as n from pg_policies where schemaname='public' and tablename='class_rep_pin_fails'`)).n)],
+          [true, 0])
       } catch (e) {
         /*
          * 🔴 这一节自己也要**能红**（`app/AGENTS.md` §三.1：异常一律记账，别让"这条没跑到"
@@ -9630,6 +9748,246 @@ await withLock(async () => {
         '🧪 反向对照：**注释里**写它不算数（`stripSqlComments` 那一步是吃重的 —— 本仓正是靠它同时做到"留档"与"代码干净"）',
         !DIGEST_CALL.test(stripSqlComments(`-- 不许用 digest(v,'sha256') 那种写法（留档）\nselect 1;`)),
       )
+
+      /* ---- ⑧ 源码防复发 + 反向对照：**口令的锁定三句**（§40.4b/§40.5c）----
+       *  🔴 反向对照的口径照 `app/AGENTS.md` §三.2：**先数出现次数**，不是 1 就抛错 ——
+       *     `String.replace` 只换第一处，而目标串在注释里也有一份 ⇒ 改了注释、判据纹丝不动 ⇒ 假绿。 */
+      {
+        const mustReplaceOnce = (s, target, next) => {
+          const n = s.split(target).length - 1
+          if (n !== 1) throw new Error(`反向对照的锚点出现 ${n} 次（要求恰好 1 次）：${target}`)
+          return s.replace(target, next)
+        }
+
+        /* ① 锁定闸门在**比对之前**，而且是 `reason = 'locked'`（不是并进 bad-pin） */
+        const LOCK_GUARD = `if public.class_rep_pin_locked_until(p_class_id) is not null then`
+        eq('🔴 §40.5 的锁定闸门那一句在（去掉注释后恰好 1 处）',
+          schemaCode.split(LOCK_GUARD).length - 1, 1)
+        const noGuard = mustReplaceOnce(schemaCode, LOCK_GUARD, 'if false then')
+        ok('🧪 反向对照：把锁定闸门那句去掉 ⇒ 上面那条判据**当场判假**（证明它真的盯着那句，不是恒真）',
+          noGuard.split(LOCK_GUARD).length - 1 === 0)
+
+        /* ② 错口令要**记一次失败**；③ 成功要**清零** */
+        const NOTE_BAD = `perform public.class_rep_pin_note_attempt(p_class_id, false);`
+        const NOTE_OK = `perform public.class_rep_pin_note_attempt(p_class_id, true);`
+        eq('🔴 错口令那条路上有"记一次失败"（`note_attempt(..., false)`，恰好 1 处）',
+          schemaCode.split(NOTE_BAD).length - 1, 1)
+        eq('🔴 成功那条路上有"清零"（`note_attempt(..., true)`，恰好 1 处）',
+          schemaCode.split(NOTE_OK).length - 1, 1)
+        ok('🧪 反向对照：把"记一次失败"去掉 ⇒ 判据当场判假（少了它 = 又退化成"可以无限试"）',
+          mustReplaceOnce(schemaCode, NOTE_BAD, 'perform 1;').split(NOTE_BAD).length - 1 === 0)
+
+        /* ④ 阈值与时长：函数体里那两个数**就是**注释里写的那两个（5 次 / 600 秒） */
+        ok('🔴 §40.5b 的阈值是 5 次：`fails + 1 >= 5` 那一句在（恰好 1 处）',
+          schemaCode.split('class_rep_pin_fails.fails + 1 >= 5').length - 1 === 1)
+        ok('🔴 §40.5b 的锁定时长是 600 秒：`make_interval(secs => 600)` 那一句在（恰好 1 处）',
+          schemaCode.split('now() + make_interval(secs => 600)').length - 1 === 1)
+      }
+    }
+
+    /* ============================================================
+       二十八、🆕 2026-10-14 · §42：**维护模式 = 服务端真的禁写**（用户拍板）
+       ------------------------------------------------------------
+       改之前：维护模式只是 UI 门帘（`MaintenanceGate` 把整棵树换成维护画面），
+       **数据面一个字都没拦** —— 老师拿着自己的 JWT 直接打 PostgREST
+       照样能写作业 / 成绩 / 考试。用户原话：「运维面板里面的东西除了超管账号，
+       其他的肯定都要禁止写入呀」。
+
+       这一节**真跑一遍**（建一个独立的库，`max` 只有 5 秒，跑完就 `close()`），
+       要钉住五件事：
+         ① `is_maintenance()` 存在且是 `security definer`（`site_state` 客户端零权限，
+            非 definer 的调用者恒读不到 ⇒ 守卫恒假 = 等于没做）；
+         ② 维护中：**非超管写被拒**（classes 的 insert / update 都要试）；
+         ③ 维护中：**超管照旧写得进**（否则维护期间连超管都改不回来）；
+         ④ 🔴 **失效方向 = 按非维护**：`site_state` 里那一行**不存在**（= 读不到标志）
+            时，非超管照样写得进去 —— "绝不冻结全校"这条不变量就靠它；
+         ⑤ 🔴 `maintenance_freeze_*` 只挂在 insert/update/delete 上，
+            **SELECT 上一条都没有**（restrictive 的 `using` 对 SELECT 也生效 ——
+            §17.1 为此栽过：写成 `for all` 会把教室端"读自己那行 teachers"整条挡掉）。
+
+       反向对照：④ 与 ⑤ 都是"同一批数据、翻一个标志 / 查一遍策略清单"当场对照 ——
+       不是靠改源码文本（那种判据锚点在 `stripSqlComments` 之后可能根本不存在，
+       本项目为此踩过一次假绿）。
+       ============================================================ */
+    section('二十八、🆕 §42 维护模式真要禁写：非超管写被拒 · 超管豁免 · 失效方向按非维护 · SELECT 不受影响')
+    {
+      /*
+       * 🔴 单独建一个库、跑在**事务外**（`makeDb` 不带参数它会拿 `undefined` 去 `db.exec` ——
+       *    所以第一参数必须显式给 `SCHEMA_FULL`；第二参数 true = 灌 B 库那一套夹具）。
+       *    为什么要独立库：这一节要把 `site_state` **真的改来改去**（开/关维护、删那一行），
+       *    借用 `B.db` 会污染后面所有"逐人可见量"的读数；跑完 `close()` 一了百了。
+       */
+      const C42 = await makeDb(SCHEMA_FULL, true)
+      /*
+       * 🔴🔴 **整段必须包在一个显式事务里**（与第二十七节同一个理由，也是本轮踩到的坑）：
+       *    `set local role` / `set_config(..., true)` 的"local"只在**当前事务**里有效。
+       *    PGlite 的 `db.query()` 是**自动提交**的 ⇒ 每一条各自一个事务 ⇒
+       *    切完角色下一条就回到**属主**，而**属主绕过 RLS** ⇒ "被拒"那几条会全部假绿
+       *    （实测就是这样：非超管在维护期间照样插进去了）。`begin` 之后它们才真的生效。
+       *    跑完 `rollback`：判据里那些"试写"一行都不该留在库里。
+       */
+      await C42.db.exec('begin')
+      try {
+        /** 以某个身份跑：会话变量里的假 uid + `set local role authenticated` */
+        const asU42 = async (uid) => {
+          await C42.db.query(`select set_config('request.jwt.claims', $1, true)`, [claimsOf(uid)])
+          await C42.db.exec('set local role authenticated')
+        }
+        const asOwner42 = () => C42.db.exec('reset role')
+        /**
+         * 写一次，回 `{ rows, err }`（异常不往外抛 —— 记成 err 让断言去红）。
+         *
+         * 🔴 **每一次都包在 savepoint 里**：RLS 拒绝是抛 `42501`，而 Postgres 一旦抛错，
+         *    整个事务就进 `aborted` 状态 —— 后面每一条（包括"超管应该成功"那条）都会回
+         *    `current transaction is aborted`，判据全红且**红得没有信息量**（本轮实测踩到）。
+         *    `savepoint` + `rollback to savepoint` 让每一次试写各自独立、互不影响。
+         */
+        let sp42 = 0
+        const write42 = async (sql, values) => {
+          const sp = `sp42_${++sp42}`
+          await C42.db.exec(`savepoint ${sp}`)
+          try {
+            const r = await C42.db.query(sql, values)
+            await C42.db.exec(`release savepoint ${sp}`)
+            return { n: r.rows.length, rows: r.rows, err: '', raw: JSON.stringify(r.rows).slice(0, 160) }
+          } catch (e) {
+            await C42.db.exec(`rollback to savepoint ${sp}`)
+            return { n: 0, rows: [], err: shortErr(e), raw: '' }
+          }
+        }
+        /**
+         * 建班的语句。
+         * ⚠️ `owner` 必须**就是当前身份**：`classes_insert` 的策略正文里有
+         *    `teacher_id = auth.uid()` —— 拿别人的 id 去插会被那条策略拒
+         *    （本轮实测踩到：超管那条插入红成了"new row violates RLS"，
+         *     而真因并不是维护守卫，是 `teacher_id` 写成了别人的）。
+         */
+        const nsert = (title, owner) => ({
+          sql: `insert into classes (name, teacher_id, grade_id) values ($1, $2, (select id from grades limit 1)) returning id, name`,
+          values: [title, owner],
+        })
+
+        /* ---- ① 判据在，而且是 security definer ---- */
+        eq('🔴 §42.1 `is_maintenance()` 是 `security definer`（`site_state` 客户端零权限 —— 非 definer 等于恒读不到）',
+          (await C42.db.query(
+            `select prosecdef, pg_get_userbyid(proowner) as owner from pg_proc where proname = 'is_maintenance'`,
+          )).rows.map((r) => r.prosecdef),
+          [true])
+        eq('🔴 §42.1 `is_maintenance()` 对 authenticated 可执行（策略里要调它；漏 grant = 全部写操作 permission denied）',
+          Boolean((await C42.db.query(
+            `select has_function_privilege('authenticated', 'public.is_maintenance()', 'EXECUTE') as v`,
+          )).rows[0].v),
+          true)
+
+        /* ---- ④ 前置：维护行**不存在** ⇒ 按非维护（fail-open），非超管写得到 ---- */
+        await asOwner42()
+        await C42.db.query(`delete from site_state where key = 'maintenance'`)
+        await asU42(U.head)
+        const noRow = await write42(nsert('维护行不存在时建的班', U.head).sql, nsert('维护行不存在时建的班', U.head).values)
+        eq('🔴🔴 §42 失效方向：`site_state` 里**连那一行都没有**（读不到标志）⇒ 非超管**照旧写得进去**（绝不冻结全校）',
+          [noRow.err === '' && noRow.n === 1, noRow.rows[0]?.name],
+          [true, '维护行不存在时建的班'])
+
+        /* ---- ② 维护行在但 `enabled = false` ⇒ 与"没有它"同款：写得进 ---- */
+        await asOwner42()
+        await C42.db.query(`insert into site_state (key, enabled) values ('maintenance', false) on conflict (key) do update set enabled = false, until = null, scheduled_from = null`)
+        await asU42(U.head)
+        const off = await write42(nsert('非维护时建的班', U.head).sql, nsert('非维护时建的班', U.head).values)
+        eq('§42 `enabled = false` ⇒ 非超管写得进（老行为一字不变）',
+          [off.err === '' && off.n === 1, Boolean((await C42.db.query(`select public.is_maintenance() as v`)).rows[0].v)],
+          [true, false])
+
+        /* ---- ⑤ 策略清单：只挂写命令，SELECT 上一条都没有 ---- */
+        await asOwner42()
+        const freeze = (await C42.db.query(
+          `select cmd, permissive, count(*)::int as n from pg_policies
+            where schemaname = 'public' and policyname like 'maintenance_freeze_%'
+            group by cmd, permissive order by cmd`,
+        )).rows
+        eq('🔴 §42.2 `maintenance_freeze_*` 只挂在 INSERT / UPDATE / DELETE 上，**SELECT 上一条都没有**' +
+           '（restrictive 的 using 对 SELECT 也生效 —— 加到读上会把教室端读自己那行也挡掉）',
+          freeze.map((r) => r.cmd),
+          ['DELETE', 'INSERT', 'UPDATE'])
+        eq('🔴 §42.2 它们全是 **RESTRICTIVE**（permissive 的守卫是放宽，等于没做）',
+          [...new Set(freeze.map((r) => r.permissive))],
+          ['RESTRICTIVE'])
+        ok('🔴 §42.2 覆盖面：这三类动作各挂在**多张**业务表上（不是只挡了一个入口）',
+          freeze.every((r) => r.n >= 10) && freeze.reduce((a, r) => a + r.n, 0) >= 50)
+
+        /* ---- ② 开维护 ⇒ 非超管**写不进去**（insert 与 update 都试） ---- */
+        await asOwner42()
+        await C42.db.query(`update site_state set enabled = true, until = now() + interval '4 hours' where key = 'maintenance'`)
+        eq('§42 前置：`is_maintenance()` 现在回 true',
+          Boolean((await C42.db.query(`select public.is_maintenance() as v`)).rows[0].v), true)
+
+        /*
+         * 🔴🔴 **必须逐个身份显式切到 `authenticated`** —— `makeDb()` 建出来的连接是**属主**
+         *    （PGlite 的 bootstrap 超级用户），属主**绕过 RLS** ⇒ 不切角色的"被拒"断言
+         *    永远绿、永远假绿（本项目栽过的那类"假绿"）。`asU42()` 干的就是这件事。
+         */
+        await asU42(U.head)
+        const deniedIns = await write42(nsert('维护期间不该建出来的班', U.head).sql, nsert('维护期间不该建出来的班', U.head).values)
+        eq('🔴🔴 §42 维护中：**班主任（非超管）插一个班 ⇒ 被 RLS 拒**（rows 0 + 42501，不是"静默 0 行"）',
+          [deniedIns.n, /42501|row-level security|permission denied/i.test(deniedIns.err)],
+          [0, true])
+        const deniedUpd = await write42(
+          `update classes set name = $1 where teacher_id = $2 returning id, name`,
+          ['维护期间改的名字', U.head],
+        )
+        /*
+         * ⚠️ UPDATE 被 RLS 拒的表现是 **`rows: 0` 且不抛错**（策略只筛行）——
+         *    这与 INSERT/`with check` 的 `42501` **不是同一种形状**，所以这里判 `n === 0`
+         *    而不是判抛错（本项目"不可写的路径要显式报错"那条纪律在 UPDATE 上做不到，
+         *    RLS 的语义就是筛行）。
+         */
+        eq('🔴🔴 §42 维护中：**非超管改自己那个班的名字 ⇒ 改不动**（RLS 筛成 0 行、名字没被改掉）',
+          [deniedUpd.n, deniedUpd.err === '', deniedUpd.raw],
+          [0, true, '[]'])
+        await asU42(U.room)
+        const deniedInsRoom = await write42(
+          `insert into students (class_id, name, student_no) values ((select id from classes where teacher_id = $1 limit 1), $2, $3) returning id`,
+          [U.head, '维护期间不该建的学生', '9001'],
+        )
+        eq('🔴 §42 维护中：**教室端往 students 插一行 ⇒ 被拒**',
+          [deniedInsRoom.n, /42501|row-level security|permission denied/i.test(deniedInsRoom.err)],
+          [0, true])
+
+        /* 读**不受影响**（维护期间界面被门帘挡住，但"读"的能力一个字都不该动） */
+        await asU42(U.head)
+        const readStillOk = await C42.db.query(`select count(*)::int as n from classes`)
+        ok('🔴 §42 维护中**读照旧**（这一段只该动写，不该把读一起改掉）',
+          readStillOk.rows[0].n >= 1, `classes 行数 ${readStillOk.rows[0].n}`)
+
+        /* ---- ③ 超管豁免：维护中照样写得进去（否则开完维护就改不回来了） ---- */
+        await asU42(U.super)
+        const superIns = await write42(nsert('维护期间超管建的班', U.super).sql, nsert('维护期间超管建的班', U.super).values)
+        eq('🔴🔴 §42 维护中：**超管照旧写得进去**（豁免在 —— 少了它维护期间连超管都救不回来）',
+          [superIns.err === '' && superIns.n === 1, superIns.rows[0]?.name],
+          [true, '维护期间超管建的班'])
+        ok(`ℹ️ §42 超管那条插入的原始回话（红了才看）：rows=${superIns.raw} err=${superIns.err}`,
+          superIns.err === '' && superIns.n === 1,
+          `rows=${superIns.raw} err=${superIns.err}`)
+        const superUpd = await write42(
+          `update classes set name = $1 where teacher_id = $2 returning id`,
+          ['维护期间超管改的名字', U.head],
+        )
+        ok('🔴 §42 维护中：超管改别人的班也成 —— 而且 `returning` 真的回了行' +
+           '（UPDATE 被策略拒时是"0 行、不报错"，所以**必须**看 returning 的行数，不能只看有没有抛错）',
+          superUpd.n >= 1, `实际回了 ${superUpd.n} 行 · err=${superUpd.err}`)
+
+        /* ---- 🧪 反向对照：把维护关掉 ⇒ 同一条写入立刻成功（同库、同数据、只翻一个标志） ---- */
+        await asOwner42()
+        await C42.db.query(`update site_state set enabled = false, until = null where key = 'maintenance'`)
+        await asU42(U.head)
+        const afterOff = await write42(nsert('关掉维护后建的班', U.head).sql, nsert('关掉维护后建的班', U.head).values)
+        eq('🧪 反向对照：**把维护关掉**，同一条插入立刻成功 ⇒ 证明上面那两条"被拒"真的是这个标志拦的，不是别的原因',
+          [afterOff.err === '' && afterOff.n === 1, afterOff.rows[0]?.name],
+          [true, '关掉维护后建的班'])
+      } catch (e) {
+        ok('🔴 §42 维护模式这一节**从头跑到尾**（中途没抛异常）', false, shortErr(e))
+      } finally {
+        await C42.db.close()
+      }
     }
 
     await B.db.close()

@@ -10922,6 +10922,35 @@ create table if not exists class_rep_pins (
   updated_by_name text not null default ''
 );
 
+-- -------- 40.4b 课代表口令的**失败计数与锁定**（2026-10-14 安全审计补的口子）--------
+--  为什么必须有它：口令只有 4~12 位（本仓的注释自己写着"4~8 位数字"），而 §40.5 原来
+--    **只比对哈希、失败不计数** —— 教室里那台机器（学生能碰到）可以对着
+--    `rep_set_daily_homework()` **不限次地试**：4 位 = 10^4 次就能撞开。
+--    ⇒ 这一张表记"每个班连续错了几次、锁到什么时候"。
+--
+--  口径（**阈值与时长只有这一处定义**，函数体与门禁都读这两个数）：
+--    · `CLASS_REP_PIN_MAX_FAILS = 5`     —— 连续错 5 次就锁
+--    · `CLASS_REP_PIN_LOCK_SECONDS = 600` —— 锁 10 分钟
+--    · **成功一次就清零**（含锁定过期后的第一次成功）
+--  锁定期内**连正确的口令也拒**（`reason = 'locked'`）—— 否则"锁定"对爆破没有意义。
+--
+--  ⚠️ 为什么不加"锁定期间不要继续累加"那种分支：锁定是"从最后一次失败起算 10 分钟"，
+--     所以持续敲只会持续锁死这个班的口令入口。用户能从 `can_manage_class` 那一档（班主任）
+--     **重新设一次口令**当场解锁；这是刻意的代价，换"10000 次可撞开"。
+--  🔴 这张表**没有任何策略、也不给客户端任何表权限**（与 §40.4 同款）：读写只走 §40.5 的
+--     安全定义函数。RLS 必须开着——§14 那条自检要求 public 下"没有一张表漏开 RLS"。
+create table if not exists class_rep_pin_fails (
+  class_id      uuid primary key references classes (id) on delete cascade,
+  fails         int not null default 0,
+  first_fail_at timestamptz,
+  locked_until  timestamptz
+);
+
+alter table class_rep_pin_fails enable row level security;
+
+comment on table class_rep_pin_fails is
+  '课代表口令的失败计数与锁定（§40.4b）：连续 5 次错 ⇒ 锁 10 分钟；成功清零。RLS 开、零策略 = 客户端全拒，只有 §40.5 的安全定义函数用。';
+
 -- -------- 40.5 判据与两个写入口（安全定义函数）--------
 --  ⚠️ `_for` 变体（接受任意 uid）一律 **revoke from public, anon, authenticated** ——
 --     与 §10.3 / §16.2 同一条纪律：不 revoke 就等于任何教师都能枚举别人的班。
@@ -10984,6 +11013,88 @@ as $$ select can_write_daily_homework_for(auth.uid(), p_class_id, p_subject_code
 grant execute on function public.can_write_daily_homework(uuid, text, text) to authenticated;
 revoke all on function public.can_write_daily_homework(uuid, text, text) from public, anon;
 
+-- -------- 40.5b 课代表口令的锁定（§40.4b 那张表的两把钥匙）--------
+--  🔴 **阈值与时长只有这一处定义**，`rep_set_daily_homework()` 与门禁都读这两个数：
+--     · `CLASS_REP_PIN_MAX_FAILS    = 5`   连续错 5 次就锁
+--     · `CLASS_REP_PIN_LOCK_SECONDS = 600` 锁 10 分钟
+--  ⚠️ 两个函数都必须 `security definer`：`class_rep_pin_fails` **一张表权限都不给客户端**
+--     （与 §40.4 的 `class_rep_pins` 同款），非 definer 的调用者读不到也写不进。
+--  ⚠️ 定义位置**必须在 §40.5c 引用它之前**（`create function` 会当场解析函数体里的名字，
+--     `app/AGENTS.md` §四 那条纪律 —— 本项目因此栽过两次）。
+
+-- 这个班的口令现在锁着吗？锁着 ⇒ 回那一刻（timestamptz）；没锁 / 从没失败过 ⇒ null。
+create or replace function public.class_rep_pin_locked_until(p_class_id uuid)
+returns timestamptz
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select case
+           when f.locked_until is not null and f.locked_until > now() then f.locked_until
+           else null
+         end
+    from class_rep_pin_fails f
+   where f.class_id = p_class_id
+$$;
+
+-- 记一次尝试：`p_ok = true` ⇒ 清零；`false` ⇒ 累加，到阈值就（从此刻起）锁
+--   `CLASS_REP_PIN_LOCK_SECONDS` 秒。
+--  ⚠️ 锁定期间再失败 = **延长**锁定（取已有的与新的里更晚的那个），不是"不计"——
+--     否则"锁 10 分钟"会被理解成"到期前那次失败不算数"。
+create or replace function public.class_rep_pin_note_attempt(p_class_id uuid, p_ok boolean)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_fails int;
+begin
+  if p_class_id is null then
+    return;
+  end if;
+
+  if p_ok then
+    /* 成功：连续失败归零、锁定一并撤掉（"锁定过期后拿对一次"也走这条路） */
+    insert into class_rep_pin_fails (class_id, fails, first_fail_at, locked_until)
+    values (p_class_id, 0, null, null)
+    on conflict (class_id) do update
+      set fails         = 0,
+          first_fail_at = null,
+          locked_until  = null;
+    return;
+  end if;
+
+  insert into class_rep_pin_fails (class_id, fails, first_fail_at, locked_until)
+  values (
+    p_class_id,
+    1,
+    now(),
+    /* 新行 = 第 1 次失败，`1 >= CLASS_REP_PIN_MAX_FAILS` 恒假 ⇒ 一定不锁。
+       ⚠️ 这里**故意不写** `case when 1 >= 5 then …`：那是一句永远不会执行的死代码，
+          而它会让"锁定时长 600 秒"这个数在文件里出现两次（判据要数次数）。 */
+    null
+  )
+  on conflict (class_id) do update
+    set fails         = class_rep_pin_fails.fails + 1,
+        first_fail_at = coalesce(class_rep_pin_fails.first_fail_at, now()),
+        locked_until  = case
+                          when class_rep_pin_fails.fails + 1 >= 5
+                            then greatest(
+                                   coalesce(class_rep_pin_fails.locked_until, now()),
+                                   now() + make_interval(secs => 600)
+                                 )
+                          else null
+                        end
+  returning fails into v_fails;
+end $$;
+
+-- ⚠️ 内部钥匙：**不给客户端**（`class_rep_pin_fails` 与 `class_rep_pins` 同款）。
+--    两个都是 definer 函数，调用它们的 `rep_set_daily_homework()` 也是 definer ⇒ 够得着。
+revoke all on function public.class_rep_pin_locked_until(uuid) from public, anon, authenticated;
+revoke all on function public.class_rep_pin_note_attempt(uuid, boolean) from public, anon, authenticated;
+
 -- 班主任设 / 换班级口令。**口令明文只在这一个调用里出现**，落库的是哈希。
 --  判据 = 既有 `can_manage_class()`（超管 / 教务处 / 本年级年级主任 / **本班班主任**）——
 --  值日生与口令都归"管得着这个班的人"，与 §16.2 同一个入口。
@@ -11033,10 +11144,12 @@ revoke all on function public.set_class_rep_pin(uuid, text) from public, anon;
 grant execute on function public.set_class_rep_pin(uuid, text) to authenticated;
 
 -- 课代表在教室端录一条（**口令校验只能在这里** —— RLS 策略读不到调用者手里的口令）。
---  ⚠️ 这是唯一不经 RLS 的写每日作业的入口，所以三件事都要在这一段里钉住：
+--  ⚠️ 这是唯一不经 RLS 的写每日作业的入口，所以四件事都要在这一段里钉住：
 --     ① 调用者必须是**这个班的教室端账号**（屏上那台机器）或本来就有权的老师；
---     ② 口令哈希必须对得上（§40.4 的盐口径）；
---     ③ 只能写**今天**（`beijing_today()`）—— 课代表不许回头改历史。
+--     ② 这个班的口令**没被锁**（§40.4b：连续错满 5 次锁 10 分钟 —— 2026-10-14 补，
+--        之前"不限次可试"，4 位口令 10^4 次就能撞开）；
+--     ③ 口令哈希必须对得上（§40.4 的盐口径；错了就记一次失败）；
+--     ④ 只能写**今天**（`beijing_today()`）—— 课代表不许回头改历史。
 create or replace function public.rep_set_daily_homework(
   p_class_id uuid,
   p_subject text,
@@ -11076,11 +11189,27 @@ begin
   if v_hash is null then
     return jsonb_build_object('ok', false, 'reason', 'no-pin');
   end if;
+
+  /* -------- 🔴 锁定闸门（§40.4b / §40.5b）：连续错满就**连对的口令也拒** --------
+     为什么在比对**之前**：锁定若只针对错口令生效，爆破方照样能一直试
+     （锁定期内试对的那些次会被放行），锁定就白做了。
+     `reason = 'locked'` 与 `'bad-pin'` **刻意分开**：前台要能说"等一会儿再试"，
+     而不是让课代表以为"口令改了"（本项目"失败了会有人知道吗"那条纪律，§三.5）。 */
+  if public.class_rep_pin_locked_until(p_class_id) is not null then
+    return jsonb_build_object('ok', false, 'reason', 'locked');
+  end if;
+
   /* ⚠️ 与 `set_class_rep_pin()` 里那一条**必须逐字同源**（同算法、同拼接、同编码）——
      换哈希口径要两处一起换，否则"设完验不过"。理由（为什么不用 `digest()`）见上面那一段。 */
   if v_hash <> encode(sha256(convert_to(p_class_id::text || ':' || btrim(coalesce(p_pin, '')), 'UTF8')), 'hex') then
+    /* 错一次记一次：到 `CLASS_REP_PIN_MAX_FAILS` 就锁 `CLASS_REP_PIN_LOCK_SECONDS` 秒 */
+    perform public.class_rep_pin_note_attempt(p_class_id, false);
     return jsonb_build_object('ok', false, 'reason', 'bad-pin');
   end if;
+
+  /* 口令对上了：**连续失败清零**（这一步不写业务数据，所以放在 insert 之前也安全） */
+  perform public.class_rep_pin_note_attempt(p_class_id, true);
+
   insert into daily_homework
     (class_id, on_date, subject, subject_code, content, source, author_id, author_name)
   values
@@ -11104,7 +11233,10 @@ grant select, insert, update, delete on duty_assignments to authenticated;
 --  · 校历：**全校**可读（每个班都要知道哪天上课）、只有管校历的那一档能写
 grant select, insert, update, delete on school_calendar  to authenticated;
 --  · 🔴 课代表口令：**一个表权限都不给**客户端 —— 读写都只走 §40.5 那两个函数
+--    （§40.4b 的失败计数表同款：客户端连 select 都不给，否则能读出"锁到什么时候"、
+--      甚至猜到"试到第几次了"）
 revoke all on class_rep_pins from anon, authenticated;
+revoke all on class_rep_pin_fails from anon, authenticated;
 revoke all on daily_homework, duty_assignments, school_calendar from anon;
 
 -- 读（每日作业 / 值日生）：**看得见这个班的人**（教务处 / 超管全校 · 年级主任本年级 ·
@@ -11217,3 +11349,162 @@ create unique index if not exists push_tokens_teacher_idx on public.push_tokens 
 
 comment on table public.push_tokens is
   'apk 前台服务的拉取令牌（§41）。RLS 开、零策略 = 客户端全拒；只有 service_role 的 functions 用。';
+
+-- ============================================================
+--  42. 🔴 维护模式 = **服务端真的禁写**（2026-10-14 安全审计之后用户拍板）
+--
+--  用户原话：「运维面板里面的东西除了超管账号，其他的肯定都要禁止写入呀」。
+--
+--  改之前是什么样（审计实测）：维护模式**只是一个 UI 门帘** ——
+--    `GET /api/status` 给出 `enabled`，`MaintenanceGate` 把整棵树换成维护画面。
+--    可**数据面一个字都没拦**：老师（或任何拿到自己 JWT 的人）在维护期间
+--    直接打 PostgREST 照样能写 `assignments` / `grades` / `exams` …… ✗
+--    （与"面板里的东西只有超管能动"是两件事，用户要的是后者。）
+--
+--  现在这一段的做法：对**业务表的写命令**各挂一条 **restrictive** 策略 ——
+--    `as restrictive for insert|update|delete` ⇒ 它们与既有策略之间是 **AND**
+--    （restrictive **只收紧、绝不放宽**，所以哪怕既有策略写错了也不会被这里放大）。
+--    🔴 **一条都不加到 SELECT 上**：restrictive 的 `using` 对 **SELECT 也生效**，
+--       本项目为此栽过一次（§17.1：写成 `for all` 曾把教室端"读自己那行 teachers"
+--       整条挡掉，`rls-checks` 第三节当场红）。读 **一个字都不该动**：
+--       维护期间界面被门帘挡住，但"读"的能力不变 —— 恢复后一切照旧。
+--
+--  🔴🔴 **失效方向：读不到标志 ⇒ 按"非维护"处理**（`is_maintenance()` 里那三句
+--    `coalesce(..., false)`）。这是刻意的、也是这一段最要紧的一行：
+--    宁可**漏挡一次**写（维护期间多写了一条作业，事后能补），
+--    也**绝不许**因为 `site_state` 没那一行 / 函数出错 / 权限读不到，
+--    就把全校老师冻结一整天 ✗（"一次接口抖动锁死全校"在本项目已有先例：
+--    `/api/status` 那条 fail-open 也是同一条理由，见 `functions/api/status.ts:36-38`）。
+--
+--  ⚠️ 超管豁免：`is_super_admin()` —— 维护期间**只有超管能写**。
+--     `service_role`（各 Function）**绕 RLS，不受这一段影响** ⇒ 维护开关自己、
+--     建号、备份、前端错误上报照旧能用（否则维护就开不回去了）。
+--
+--  ⚠️ 为什么加在**文件末尾**：它引用 31 张业务表 + `is_super_admin()` + `site_state`，
+--     全部必须已经存在（`create policy` 与函数体**当场解析名字**，`app/AGENTS.md` §四）。
+--     同理 `is_maintenance()` 定义在**所有策略之前**。
+--
+--  ⚠️ 幂等：函数 `create or replace`；策略一律先 `drop policy if exists` 再建
+--     （重复跑整份 `schema.sql` 不报错、也不改行为）。
+-- ============================================================
+
+-- -------- 42.1 判据：现在是不是"真的在维护中" --------
+--  🔴 `security definer` 是**必须的**，两个理由：
+--    ① `site_state` **一张表权限都不给客户端**（§23.2 末尾），非 definer 的调用者读不到；
+--    ② 读的时候不该受调用者身份影响 —— 判据要的只是"那一行现在是什么"。
+--  "到底算不算维护中"与 §23.2 的服务端口径**同源**：`enabled` 且（没写 `scheduled_from`
+--  或已到点）且（没写 `until` 或还没到点）。
+create or replace function public.is_maintenance()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select coalesce((
+    select s.enabled
+       and (s.scheduled_from is null or s.scheduled_from <= now())
+       and (s.until          is null or s.until          >  now())
+      from site_state s
+     where s.key = 'maintenance'
+  ), false);
+$$;
+
+grant execute on function public.is_maintenance() to authenticated;
+revoke all on function public.is_maintenance() from public, anon;
+
+-- -------- 42.2 每张业务表的三条写策略（INSERT / UPDATE / DELETE）--------
+--  ⚠️ 为什么必须**逐动作三条**、不写成一条 `for all`：见文件头那段（§17.1 的教训）。
+--
+--  🔴 **名单口径：只放"客户端真的写得进去"的表** —— 判据有两条，缺一不可：
+--    ① 有 `grant … insert/update/delete … to authenticated`（§6 / 各段）；
+--    ② 有 PERMISSIVE 的写策略。
+--    两张都占的才是"老师点一下就能写进去"的地方，也就是维护期间**必须**能冻住的。
+--    ⚠️ `class_members` 是一个例外：它今天**只 grant 了 select**（写策略也还没有）——
+--       留在名单里是为了"以后补了 grant 也不用回来改这里"，今天的策略是空动作。
+--  ⚠️ 每张表挂**哪几个**写命令写在下面那个 `values` 的第二个字段里（不是一律三条）：
+--     多挂一条空动作会踩到"这些表上零条写策略 / 没有 DELETE 策略"那种**设计断言**
+--     （实测被 `rls-checks` 抓过一次：`teacher_profiles` 没有 DELETE grant）。
+--
+--  ⚠️ **故意不在名单里**的表（别"顺手补上"，`rls-checks` 有断言钉着这个设计）：
+--    · `notices` / `notice_targets` / `announcements` / `teacher_roles` / `class_subjects` /
+--      `schools` / `grades` / `subjects` / `academic_years` / `terms` / `classroom_accounts`
+--      / `teacher_departments`：**客户端一条写策略都没有、也没 grant 写权限** ——
+--      写只走服务端（service_role 绕 RLS）。这里再加一条 restrictive 是**空动作**，
+--      却会让"这些表上零条写策略"那条设计断言失去意义（§13.7 / §16.1 的留档）。
+--    · `site_state`（维护开关自己）/ `admin_audit` / `frontend_errors` / `feedback`
+--      / `push_tokens` / `class_rep_pins` / `class_rep_pin_fails`：客户端零权限，
+--      只走 service_role 或安全定义函数 —— 挡了维护开关就**关不回去了**。
+do $$
+declare
+  r record;
+  n int := 0;
+begin
+  /* 🔴 名单只有这一处 —— 加表就往这里加一行（`rls-checks` 第二十八节会核对覆盖面）。
+     ⚠️ 第三个字段是**这张表上真正存在的写命令**：只挂"客户端真的有写权限、
+     也真的成得了策略"的那几个。多挂一条**空动作**（表级权限根本没 grant 的动作）
+     会让"这些表上零条写策略/没有 DELETE 策略"那种设计断言失去意义 ——
+     实测被 `rls-checks` 抓到过一条（`teacher_profiles` 没有 DELETE grant）。 */
+  for r in
+    select * from (values
+      ('daily_homework',        'insert|update|delete'),
+      ('duty_assignments',      'insert|update|delete'),
+      ('school_calendar',       'insert|update|delete'),
+      ('schedule_temp_changes', 'insert|update|delete'),
+      ('assignments',           'insert|update|delete'),
+      ('classes',               'insert|update|delete'),
+      ('students',              'insert|update|delete'),
+      ('student_profiles',      'insert|update|delete'),
+      ('exams',                 'insert|update|delete'),
+      ('exam_scores',           'insert|update|delete'),
+      ('shared_files',          'insert|update|delete'),
+      ('calls',                 'insert|update|delete'),
+      ('classrooms',            'insert|update|delete'),
+      ('schedule_items',        'insert|update|delete'),
+      ('schedule_snoozes',      'insert|update|delete'),
+      ('teachers',              'insert|update|delete'),
+      ('class_members',         'insert|update|delete'),
+      ('teacher_profiles',      'insert|update')
+    ) as t(tablename, actions)
+  loop
+    /* 🔴 判据形状固定为 `(not is_maintenance()) or is_super_admin()`：
+       不维护 ⇒ 恒真（老行为一字不变）；维护中 ⇒ 只剩超管。
+       ⚠️ `is_maintenance()` 自己已经 fail-open，这里的 `or` 是第二层保险。 */
+    if r.actions ~ 'insert' then
+      execute format('drop policy if exists maintenance_freeze_insert on public.%I', r.tablename);
+      execute format(
+        'create policy maintenance_freeze_insert on public.%I as restrictive for insert to authenticated '
+        || 'with check ((not is_maintenance()) or is_super_admin())', r.tablename);
+      n := n + 1;
+    end if;
+
+    if r.actions ~ 'update' then
+      execute format('drop policy if exists maintenance_freeze_update on public.%I', r.tablename);
+      execute format(
+        'create policy maintenance_freeze_update on public.%I as restrictive for update to authenticated '
+        || 'using ((not is_maintenance()) or is_super_admin()) '
+        || 'with check ((not is_maintenance()) or is_super_admin())', r.tablename);
+      n := n + 1;
+    end if;
+
+    if r.actions ~ 'delete' then
+      execute format('drop policy if exists maintenance_freeze_delete on public.%I', r.tablename);
+      execute format(
+        'create policy maintenance_freeze_delete on public.%I as restrictive for delete to authenticated '
+        || 'using ((not is_maintenance()) or is_super_admin())', r.tablename);
+      n := n + 1;
+    end if;
+  end loop;
+end $$;
+
+-- -------- 42.3 自检（把下面几段粘进 SQL Editor 核对）--------
+--  ① 判据在、且是 definer：
+--     select prosecdef from pg_proc where proname = 'is_maintenance';          -- t
+--  ② 这一轮挂了多少条写策略（当前固定值：18 张表，除 teacher_profiles 少一条 delete
+--     ⇒ 17×3 + 2 = **53**）：
+--     select count(*) from pg_policies where policyname like 'maintenance_freeze_%';   -- 53
+--  ③ 🔴 **SELECT 上一条都没有**（这是这一段最要紧的那条自检）：
+--     select count(*) from pg_policies
+--      where policyname like 'maintenance_freeze_%' and cmd <> 'INSERT'
+--        and cmd <> 'UPDATE' and cmd <> 'DELETE';                              -- 0
+--  ④ 维护中写不进去（以老师身份跑）：见 `rls-checks` 第二十八节那几条实测断言。
