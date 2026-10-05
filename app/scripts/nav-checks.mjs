@@ -99,8 +99,34 @@ const failures = []
 let currentSection = '(还没开始)'
 const printed = new Set()
 
+/** 🔴 灰档（`shellGray`）的作用域账 —— 见下面那段"逐节收口"的注释，节末自证拿这两个数咬人 */
+let sectionOpens = 0 // `section()` 被调了几次
+let shellGrayCount = 0 // 一共落灰几条
+/**
+ * 上一个 `section()` 打开时，灰档里是不是已经有灰了？
+ * 正常永远是 `null`：`section()` 会**强制关掉**灰档 ⇒ 新节**不可能继承**上一节的灰。
+ * 只有"灰档跨节泄漏"（= 那几节在 CI 上变成静默 no-op）才会留下一个节名。
+ */
+let grayLeakInto = null
+
 function section(name) {
   currentSection = name
+  sectionOpens++
+  /*
+   * 🔴🔴 **2026-10-05 逐节收口（第三次 CI 红之后同一轮挖出的既有隐患）**：
+   *    `shellGray` 原来靠**各处手工 `= false`** 收口 —— A21 在 7476 关、A22 只在
+   *    **自证块内部**（8760）关、A24 在 9238 关。也就是说"A22 之后还灰不灰"**取决于
+   *    自证那两句恰好被执行到**，而不是取决于"这一节该不该灰" ✗。
+   *    后果（§三.1「门禁自己也要能红」最忌讳的形状）：**谁能保证下一节不会被
+   *    `shellGray === true` 罩住 ⇒ 那一节的断言变成静默 no-op**（在 CI 上"从没跑过"，
+   *    而报告里照样写着"全部通过"✓，因为它既不计红也不计绿）。
+   *    ✅ 收口方式：**每次开新节一律 `shellGray = false`** —— 灰档**不可能跨节**。
+   *       要灰就在**本节内**用 `shellSide()` 或显式 `shellGray = true` 打开，
+   *       并**在本节内关掉**（`shellSide` 自动复原；手工打开的由本节自证兜住）。
+   *    ⚠️ 顺序要紧：先把"上一节结束时还灰着吗"记进 `grayLeakInto`，再清掉它。
+   */
+  if (shellGray) grayLeakInto = `${currentSection} → ${name}`
+  shellGray = false
   if (!printed.has(name)) {
     printed.add(name)
     console.log(`\n── ${name}`)
@@ -136,6 +162,7 @@ let shellGray = false
 function check(ok, label, observed, extra = '') {
   if (shellGray) {
     grayed++
+    shellGrayCount++
     console.log(`   ⚪ ${label}\n        灰（探不到，不红不绿）：${observed}`)
     return
   }
@@ -7468,9 +7495,14 @@ section('第二十六节 · A21：应用内更新（下载完调起安装器）�
   }
 
   /*
-   * ⛔ 壳那一侧到此为止 —— 🔴 **立刻关掉"允许落灰"**：下面 ⑧–⑪ 判的全是 **`app/` 下的文件**
+   * ⛔ 壳那一侧到此为止 —— 下面 ⑧–⑪ 判的全是 **`app/` 下的文件**
    *    （CI 的检出里**也有**，本来就能验）⇒ 它们**一条都不许灰**。
-   *    忘了关 ⇒ 节末那条自证当场红（app 侧灰的条数 ≠ 0）。
+   *    ✅ 2026-10-05（逐节收口那一轮）：这里**必须**把窗口关上 —— 本节 ⑧–⑪ 与
+   *      ①–⑦ 在**同一个 `section()`** 里，`section()` 的自动收口要等到**下一节**才生效，
+   *      那时候 ⑧–⑪ 已经被罩成灰了 ✗（实测：删掉这一句，CI 形态下 A21 自证当场红，
+   *      `app 侧灰了 13 条`）。
+   *    ⚠️ 别指望"A21 走的是手工 `shellGray = true`，`shellSide()` 的 `finally` 会复原" ——
+   *      本节的壳侧**不是**用 `shellSide()` 包的（那是 A22/A24 的写法）。
    */
   const shellJudged = passed + failures.length - j0
   shellGray = false
@@ -7624,6 +7656,9 @@ section('第二十六节 · A21：应用内更新（下载完调起安装器）�
      *    而 app 侧（⑧–⑪）**一条都没灰** ⇒ 谁忘了把"允许落灰"打开/关掉，这条当场红。
      * ⚠️ 断言前**强制关掉那个开关**：否则"忘了关"这件事会把**这条自证自己也罩成灰**
      *    ⇒ 变成一条静默的"假灰"（2026-10-05 实测踩到，已改）。
+     * ⚠️ 这句**保留、不换成"依赖 `section()` 自动收口"**：本节 ⑧–⑪ 就在同一个
+     *    `section()` 里，自动收口要到**下一节**才生效，那时候已经晚了 ✗ ——
+     *    本节内要真判，就必须**本节内**先把开关关上。
      */
     shellGray = false
     check(
@@ -8756,8 +8791,10 @@ section('第二十七节 · A22：到点提醒交给系统排程（桥接层 / �
           而**网页侧**（⑤–⑧ · ⑯⑱⑲⑳网页侧那几半 · ㉒）**一条都没灰**；
        ② 壳在时（维护者本机）：壳那一侧**真的判了**，而且一条都不灰。
        ⚠️ 谁把灰的范围**开大**（罩到网页侧那半）或**开小**（壳侧漏在外面），这条当场红。
-       ⚠️ 断言前**强制关掉那个开关**，否则它会被"忘了关"这件事罩成灰（静默的假灰）。 */
-    shellGray = false
+       ✅ 2026-10-05：这里原来有一句手工 `shellGray = false`，**已删** ——
+         本节的灰档由 `shellSide()` 的 `finally` 复原（它只在本节 ⑮–㉑ 那几段内开），
+         而"跨节"那一层由 `section()` **每次开新节强制收口**兜住 ⇒ 不再需要这句。
+         它留着反而掩盖了"跨节泄漏"这件事（**已实测：删掉它，本节自证照旧绿**）。 */
     const appGray = grayed - g1b - shellWide // 窗口外灰掉的 = 只能来自"灰的范围开大了"
     const shellLegOK =
       /* 🔴 壳那一侧（⑮–㉑）一共就是这 15 条：壳在 ⇒ 15 条全真判、一条不灰；
@@ -9230,12 +9267,13 @@ section('第二十四节之三 · A24：推送失败原因不许被吞（真机 
    *    · 而这一节 app 侧（①② 与那两条反向对照，只读 `app/`）**一条都不许灰**
    *      —— 谁把灰的范围**开大**（罩到 app 侧那半）或**开小**（③ 漏在窗口外，
    *      正是 `4cf89fc` 那次 CI 的坏法）**或改了 ③ 的条数**，这条当场红。
-   * ⚠️ 断言前**强制关掉那个开关**，否则它会被"忘了关"这件事罩成灰（静默的假灰）。
+   * ✅ 2026-10-05：这里原来也有一句手工 `shellGray = false`，**已删** ——
+   *    ③ 的灰档由 `shellSide()` 的 `finally` 复原，跨节那一层由 `section()` 强制收口
+   *    （节末那条"灰档不跨节"的自证现在也盯着它）。**已实测：删掉它，本节自证照旧绿。**
    */
   {
     const A24_SHELL_LEG_N = 2
     const appSideGray = grayed - g24 - shellBridgeGray
-    shellGray = false
     check(
       shellBridgeJudged + shellBridgeGray === A24_SHELL_LEG_N &&
         (SHELL_BRIDGE_HERE ? shellBridgeGray === 0 : shellBridgeJudged === 0) &&
@@ -9244,6 +9282,75 @@ section('第二十四节之三 · A24：推送失败原因不许被吞（真机 
       `壳在=${SHELL_BRIDGE_HERE} · ③ 共 ${A24_SHELL_LEG_N} 条：判了 ${shellBridgeJudged} 条 / 灰了 ${shellBridgeGray} 条 · app 侧灰了 ${appSideGray} 条`,
     )
   }
+}
+
+/* ============================================================
+   🔴 灰档（`shellGray`）**不许跨节** —— 逐节收口的自证（2026-10-05 加）
+   ------------------------------------------------------------
+   为什么单开这一节：**"静默 no-op"是这个仓库最忌讳的假绿形状**
+   （`AGENTS.md` §三.1「门禁自己也要能红」）—— 一条断言被灰档罩住时，
+   它**既不红也不绿**，报告里照样写着"全部通过"✓，而它**在 CI 上从来没跑过** ✗。
+
+   原来 `shellGray` 靠**各处手工 `= false`** 收口 ⇒ "下一节还灰不灰"取决于
+   "自证那两句恰好被跑到"，而不是"这一节该不该灰" ✗。现在 `section()` 里
+   **每开一节一律 `shellGray = false`** ⇒ 灰档在结构上**不可能继承**。
+
+   ⚠️ 本节**故意不建"仿造一份实现再自己验自己"**那种模型（那只能证明模型自洽，
+   证明不了真实现 —— 本项目把这个叫"自证假绿"）。这里咬的是**真运行结果**。
+   ============================================================ */
+section('灰档收口自证：`shellGray` 不许跨节')
+{
+  /** 正常态：本脚本跑完**一次都不该**出现"带着上一节的灰开新节" */
+  const leakOK =
+    grayLeakInto === null &&
+    shellGray === false &&
+    sectionOpens > 30 &&
+    grayed === shellGrayCount
+
+  /**
+   * 🔴 **对着真源码咬这一句**：把仓库里 `section()` 那个函数体抠出来，逐行排除注释后，
+   *    要求里面**恰好有一句**收口。为什么不用 `section.toString()`：`Function.prototype.toString`
+   *    返回的是**已经编译过的形态**，注释会被剥掉 ⇒ 后人把那句收口注释掉时
+   *    `toString()` 照样"看得见"（其实是没看见），那就成了一条会骗人的自证 ✗。
+   *    读**真文件**才掐得住"被注释掉 / 被删掉"两种坏法。
+   *    ⚠️ 必须**逐行排除注释行**：这段函数体里我自己就写了「一律 `shellGray = false`」这句
+   *       注释 ⇒ 不排除的话会数到 2 处（判据假红，本项目栽过好几次"注释里那份"的坑）。
+   */
+  const SELF_SRC = readFileSync(fileURLToPath(import.meta.url), 'utf8')
+  /**
+   * ⚠️ **别在判据里写出被找的那个字符串**：判据自己就住在同一份文件里 ⇒
+   *    `indexOf(那个串)` 会把**本行自己**也数上（第一次写就是这么栽的：
+   *    `FIRST !== LAST`，`LAST` 指的就是本块里那份字面量）。
+   *    ✅ 这里改成**按源码行号定位**：先找到 `section()` 那一行，再取到它的函数体，
+   *       全程不把锚点当字符串字面量写出来。
+   */
+  const SELF_LINES = SELF_SRC.split('\n')
+  const fnLine = SELF_LINES.findIndex((l) => /^function\s+\w+\s*\(\s*\w+\s*\)\s*\{$/.test(l.trim()) && l.includes('name'))
+  if (fnLine < 0) throw new Error('灰档自证：找不到 `section()` 的声明行 —— 锚点坏了')
+  let fnEnd = -1
+  for (let i = fnLine + 1; i < SELF_LINES.length; i++) {
+    if (SELF_LINES[i] === '}') {
+      fnEnd = i
+      break
+    }
+  }
+  if (fnEnd < 0) throw new Error('灰档自证：找不到 `section()` 的收尾行 —— 锚点坏了')
+  /** 真代码里的收口句 = 排除注释行（`//` 与块注释的 `*` 续行）之后数 */
+  const codeLines = SELF_LINES.slice(fnLine, fnEnd + 1).filter((l) => {
+    const t = l.trim()
+    return !t.startsWith('*') && !t.startsWith('/*') && !t.startsWith('//')
+  })
+  const RESET = 'shellGray' + ' = ' + 'false'
+  const resetHits = codeLines.join('\n').split(RESET).length - 1
+
+  /** 🔴 反向对照：把那一句从**内存副本**里抠掉 ⇒ 上面那个判据必须当场数到 0（证明它真在数那一句） */
+  const crippledHits = codeLines.join('\n').replace(RESET, '/* 收口被抠掉了 */').split(RESET).length - 1
+
+  check(
+    leakOK && resetHits === 1 && crippledHits === 0,
+    '🔴 灰档**不许跨节**：每一次开新节都强制 `shellGray = false` ⇒ **没有任何一节带着上一节的灰打开**（否则那一节的断言就是静默 no-op：既不红也不绿、在 CI 上从没跑过，而报告里写着"全部通过"）—— 把 `section()` 那句收口删掉/注释掉、或让谁在本节外把灰档开着，这条当场红',
+    `实际跨节泄漏=${grayLeakInto ?? '无'} · 开过节数=${sectionOpens} · 开关=${shellGray} · 灰档计数一致=${grayed === shellGrayCount} · \`section()\` 里收口句 ${resetHits} 处（须 1）· 抠掉后 ${crippledHits} 处（须 0）`,
+  )
 }
 
 /* ---------------- 结果 ---------------- */
