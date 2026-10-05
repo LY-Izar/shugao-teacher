@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Page } from '../components/AppShell'
 import {
@@ -33,19 +33,15 @@ import { shellPlatform } from '../lib/classroomShell'
 //    ⚠️ 这一页**没有**第二个轮询、也没有第二处 `fetch('/api/status')`（nav-checks D18 钉着）。
 import { releaseDownloads } from '../lib/release'
 import { useReleaseSlots } from '../lib/useRelease'
-import {
-  backupSummary,
-  downloadJson,
-  pushBackupToCloud,
-  readJsonFile,
-  splitExport,
-  validateBackup,
-} from '../lib/backup'
-import { isAdminSealed } from '../lib/backupCrypto'
+/*
+ * ⚠️ 2026-10-05：`lib/backup`（`splitExport` / `validateBackup` / `downloadJson` /
+ *    `pushBackupToCloud` / `readJsonFile` / `backupSummary`）与 `lib/backupCrypto` 的
+ *    `isAdminSealed` 的 import **随「备份与恢复」那张卡一起从这一屏撤下**（见下面那处注释）：
+ *    这一屏不再有导出 / 恢复，所以这里也没有任何调用点 —— 留着就是一堆恒不被调用的 import。
+ *    那些函数本身**一个都没删**（`/admin` 那条路与恢复流程还在用）。
+ * ⚠️ `beijingNow` / `ymdOf` 也只在"导出"那条路上用过（文件名里的日期）⇒ 同批撤下。
+ */
 import { REMIND_BEFORE, itemsForDate } from '../lib/schedule'
-// 只用到时间工具：节假日「数据来源」面板已删（见 功能设计与不变量.md §十七 17.2），
-// 判定函数（isRestDay / dayKind / holidayOn / nextHoliday）仍在别处使用，没有动。
-import { beijingNow, ymdOf } from '../lib/holiday'
 import { toISODate, friendlyDate } from '../lib/date'
 import {
   FEEDBACK_MAX,
@@ -117,8 +113,6 @@ export default function Settings() {
   const schedule = useStore((s) => s.schedule)
   const currentClassId = useStore((s) => s.currentClassId)
   const setCurrentClass = useStore((s) => s.setCurrentClass)
-  const restoreBackup = useStore((s) => s.restoreBackup)
-  const bkRef = useRef<HTMLInputElement>(null)
   const navigate = useNavigate()
   const push = useToast((s) => s.push)
   /**
@@ -579,123 +573,24 @@ export default function Settings() {
           </Panel>
         </div>
 
-        {/* 备份与恢复 */}
-        <div className="mb-4">
-          <Sect>备份与恢复</Sect>
-          <Panel bodyClass="p-3">
-            <input
-              ref={bkRef}
-              type="file"
-              accept=".json,application/json"
-              className="hidden"
-              onChange={async (e) => {
-                const f = e.target.files?.[0]
-                e.target.value = ''
-                if (!f) return
-                try {
-                  const raw = await readJsonFile(f)
-                  /*
-                   * 🆕 2026-10-03：**加密档案那份不许当业务备份恢复**。
-                   * 它是 `lib/backupCrypto.ts` 的信封（`fmt: 'shugao-admin-sealed'`），
-                   * 里面只有学生 / 教师档案，**没有** `v` / `classes` / `students` 这些键。
-                   * ⚠️ 必须先认信封：直接丢给 `validateBackup` 只会得到一句"这不像是备份文件"，
-                   *    用户拿着一份超管给的文件会以为文件坏了。
-                   */
-                  if (isAdminSealed(raw)) {
-                    push({
-                      text: '这是加密的档案备份，不是业务数据备份',
-                      tone: 'warn',
-                      desc: '加密档案只有超管的私钥能解开 —— 请把这份文件交给超管，在 /admin 里解开',
-                    })
-                    return
-                  }
-                  const v = validateBackup(raw)
-                  if (!v.ok) {
-                    push({ text: v.why, tone: 'bad' })
-                    return
-                  }
-                  const yes = window.confirm(
-                    `确定用这份备份覆盖当前数据吗？\n\n${backupSummary(v.data)}\n备份时间：${new Date(v.data.at).toLocaleString()}\n\n当前数据会被替换，此操作不可撤销。`,
-                  )
-                  if (!yes) return
-                  restoreBackup(v.data)
-                  const msg = await pushBackupToCloud(v.data, teacher?.id ?? '')
-                  push({ text: msg, tone: 'ok' })
-                } catch (err) {
-                  push({ text: err instanceof Error ? err.message : '这个文件读不了', tone: 'bad' })
-                }
-              }}
-            />
-            <div className="flex flex-col gap-2">
-              <Button
-                block
-                icon={<IconDownload size={16} />}
-                onClick={async () => {
-                  /*
-                   * 🆕 2026-10：走 `splitExport()`（而不是直接 `makeBackup`）——
-                   * 学生档案 / 教师档案在**两张独立的表**里，必须异步读出来。
-                   *
-                   * 🔴 2026-10-03 用户拍板：**档案不进这份明文文件**（`plain` 里两张表是空数组），
-                   *    档案单独一份、用超管公钥封起来（见下面那个「导出档案备份（加密）」按钮）。
-                   *    为什么：这份文件会被转发 / 进网盘 / 落在下载目录，而它里面装的是
-                   *    **全班家长电话和住址** —— 见 `lib/backupCrypto.ts` 文件头。
-                   *    （键**保留**、值置空：备份形状不变，老版本仍然能读。）
-                   * ⚠️ 读不到档案时**照样导出业务数据**，但把原因说出来（`desc`）——
-                   *    业务数据是老师自己恢复要用的，少两张表也比"什么都没导出"强。
-                   */
-                  const r = await splitExport(useStore.getState())
-                  /*
-                   * 🔴🔴 **拿到保存结果再说"已导出"**（2026-10-04 修）
-                   *
-                   * 旧版是 `downloadJson(...)` 紧接着**无条件** `push({tone:'ok'})` —— 不看结果。
-                   * 而 apk 上 `saveBlob` 恒回 `'saved'`、实际**可能一个文件都没写**
-                   * （`<a download>` 在 Android WebView 里不触发）⇒ 屏上「已导出」是**假绿**。
-                   * 备份这条路上的假绿最贵：老师以为手上有备份 ⇒ 需要恢复那天才发现没有。
-                   *
-                   * ⚠️ `'cancelled'` 是**用户自己取消**（另存为里点了取消）—— 不算失败，
-                   *    但也不能说"已导出"，如实说一句就行。
-                   */
-                  const saved = await downloadJson(r.plain, `树高备份-${ymdOf(beijingNow())}.json`)
-                  if (saved === 'failed') {
-                    push({
-                      text: '文件没保存下来',
-                      tone: 'bad',
-                      desc: '这台设备存不了文件，换个方式导出（或到别的设备上导）。',
-                    })
-                    return
-                  }
-                  if (saved === 'cancelled') {
-                    push({ text: '已取消保存', tone: 'warn' })
-                    return
-                  }
-                  push({
-                    text: `已导出：${backupSummary(r.plain)}`,
-                    tone: 'ok',
-                    ...(r.issues.length ? { desc: `档案没能读到（${r.issues[0]}），加密那份会缺这几条` } : {}),
-                  })
-                }}
-              >
-                导出备份文件
-              </Button>
-              {/*
-                2026-10-04 用户取舍（原话：「保留第一个和第四个按钮就好了，把下面的说明也删除了」
-                ＋「至于全平台的备份，仅在超管面板里面留就好了」）⇒ 这里原来那两颗
-                「导出档案备份（加密）」与「备份到云端」**从这一屏撤下**：
+        {/*
+          这里原来有**一整张「备份与恢复」卡**：一颗导出（把业务数据另存成一份 JSON）、
+          一颗恢复（选一个文件覆盖当前数据），还有只为"恢复"服务的一个 hidden file input。
 
-                  · 它们属于**全平台那一层**，只在超管面板里留（那一路还没接线 ——
-                    别以为这里漏做了，也别在这儿重新长回来）；
-                  · 实现与注释**原样留在** `components/BackupExtraActions.tsx`
-                    （加密封存、发信留痕、StatusMark 那套终态接线都在那一份里；
-                    `shots` 的 S25 ②/③ 仍然钉着它，只是换了锚点）；
-                  · 🔴 超管面板那边**直接摆 `<BackupExtraActions />`**，
-                    别在旁边再写第二份（同一个东西两套实现，这仓库栽过）。
-              */}
-              <Button block icon={<IconUpload size={16} />} onClick={() => bkRef.current?.click()}>
-                从备份文件恢复
-              </Button>
-            </div>
-          </Panel>
-        </div>
+          2026-10-05 按用户要求**整卡删掉**（原话：「把用户可以下载备份文件的入口也取消了吧」）——
+          两颗粒按钮、那个 input、以及它们背后的那套处理（认信封 / 校验 / 二次确认 / 恢复）
+          一起从这一屏撤下：老师端**没有下载备份、也没有从备份恢复**的入口了。
+
+          ⚠️ 删的只是**入口**，底层能力一个字没删：
+              `lib/backup.ts` 的 `splitExport` / `validateBackup` / `makeBackup` /
+              `pushBackupToCloud` / `notifyBackupDone` 那一套、`lib/backupCrypto.ts` 的信封判定，
+              照旧都在 ——
+              **超管面板**那条路（`components/BackupExtraActions.tsx`，那边一个字没动）
+              与恢复流程还在用它们。
+          ⚠️ 别以为是漏做了、又在这一屏把入口加回来 —— 「老师看不到这两颗」这件事是被判据钉住的：
+              · 源码那一侧：`scripts/nav-checks.mjs` §A16 ③；
+              · 真 DOM 那一侧：`scripts/shots.mjs`「09 设置页」的 `absent` + S25 ②附。
+        */}
 
         {/*
           这里原来还有一个「重置为演示数据」按钮（直接调 store.resetDemo，且没有二次确认）。
@@ -711,8 +606,10 @@ export default function Settings() {
 
           为什么该删：这个平台马上要装 **1000+ 学生**的真实数据，而「清空全部数据」
           是个**客户端按钮** —— 点错一次就是全校数据没了，且不可撤销。
-          备份那条线（导出备份文件 / 备份到云端 / 从备份文件恢复）
-          本来就够用，它才是那条该走的保险。别以为是漏做了又加回来
+          备份那条线本来就够用，它才是那条该走的保险。
+          ⚠️ 2026-10-05：那一屏上的备份入口也已**整卡撤下**（见上面那段注释）——
+          这一屏现在既不能导出也不能恢复，但这**不改变**当年删「数据」栏的理由。
+          别以为是漏做了又加回来
           （见 功能设计与不变量.md §十七 17.3）。
         */}
 

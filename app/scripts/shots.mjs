@@ -1490,10 +1490,21 @@ await withLock(async () => {
        * ⚠️ 期望值 2026-10-04 变了：这一页原来有一整张「教室端」卡（地址 + 复制 +
        *    在新标签页打开），用户当天说「图二的教室端入口也没什么用了」⇒ 整卡删掉。
        *    所以标记里的 `教室端` 跟着撤掉（这一屏默认没有 `?rel=`，下载按钮一颗都不摆，
-       *    那个词在这一页上也不再出现）。`备份与恢复` / `关于` 两张卡都还在。
+       *    那个词在这一页上也不再出现）。
+       * 🔴🔴 **期望值 2026-10-05 又变了（用户要求，别再改回去）**：
+       *    「把用户可以下载备份文件的入口也取消了吧」⇒「备份与恢复」那张卡**整卡删掉**
+       *    （导出 / 恢复两颗 + 那个只为恢复服务的 hidden file input 一起走）
+       *    ⇒ ① 标记里的 `备份与恢复` 跟着撤掉（这一屏不再有那张卡，它已经不在了）；
+       *       ② **翻成负向断言**：`导出备份文件` / `从备份文件恢复` 这两句**不许**出现在屏上
+       *          （`absent` 逐字扫 `innerText`）—— 老师看不到那两颗，这一条才绿。
+       *    ⚠️ 这一条判的是**真 DOM**，与源码那一侧（`nav-checks` A16 ③）是两条独立证据链：
+       *       只改源码、漏改这里 ⇒ 屏上少一句话也照样红。
+       *    `关于` 那张卡还在（标记里最后一项就是它）。
        */
       await goto(page, '09 设置页', '/settings', {
-        markers: ['账号 · 数据 · 关于', '备份与恢复', '关于'],
+        markers: ['账号 · 数据 · 关于', '关于'],
+        /* 🔴 负向：老师端**不该**再看到下载 / 恢复备份的入口（用户 2026-10-05 要求） */
+        absent: ['导出备份文件', '从备份文件恢复'],
       })
       await shot(page, '09 设置页', '09-settings', { full: true })
 
@@ -10490,11 +10501,15 @@ await withLock(async () => {
          *    这一轮把它挪进**第一张卡（身份卡）**，与账号有关的事放在一起。
          * 🔴 这里钉的是**真 DOM**（不是源码）：
          *      ① 整页**只有 1 个**「退出登录」按钮 —— **挪，不是复制**；
-         *      ② 它在**第一张卡**里，而且排在后面那些节（备份与恢复 / 关于 / 更新日志）**之前**
+         *      ② 它在**第一张卡**里，而且排在后面那些节（本机角色 / 更新日志）**之前**
          *         —— 也就是真的从页尾挪上来了（不是挪到了另一个看不见的地方）。
          * ⚠️ 反向对照：把那段按钮复制一份塞回页尾 → 这一条的 `count === 1` **当场红**。
          *    源码那一侧（`signOutEverywhere()` 只有一处 + 那两句行为一个字没改）在
          *    `rls-checks` 第二十四节，那边**真跑过**这个反向对照。
+         * 🔴 **锚点 2026-10-05 换了（期望值随之变，方向没变）**：原来拿「备份与恢复」当
+         *    那个"靠后"的锚，而用户当天要求取消老师端下载备份的入口 ⇒ 那张卡**整卡删掉**、
+         *    屏上再也没有这四个字（`indexOf` 会回 -1 ⇒ 这一条会红）。换成它**原来后面那一节**
+         *    「本机角色」—— 判据仍然是"登出按钮在更靠后的节之前"，一个字的强度都没放宽。
          */
         const logout = await annPage.evaluate(() => {
           const txt = String(document.body.innerText)
@@ -10506,7 +10521,7 @@ await withLock(async () => {
             count: btns.length,
             iLogout: txt.indexOf('退出登录'),
             /* 用**靠后**那一节当锚：「关于」在页头副标题里也出现（"账号 · 数据 · 关于"），拿它当锚会假绿 */
-            iBackup: txt.indexOf('备份与恢复'),
+            iSeat: txt.indexOf('本机角色'),
             iLog: txt.indexOf('更新日志'),
             /* "第一张卡"= 那块**身份卡**（它的标志是「任教班级」那一行），不靠 `.panel` 的先后顺序 */
             inIdentityCard: firstPanel ? /任教班级/.test(firstPanel.innerText ?? '') : false,
@@ -10520,11 +10535,11 @@ await withLock(async () => {
         check(
           logout.inIdentityCard &&
             logout.iLogout >= 0 &&
-            logout.iBackup > logout.iLogout &&
+            logout.iSeat > logout.iLogout &&
             logout.iLog > logout.iLogout,
           `${S2}：🔴 它就在**身份卡**里（与「任教班级 / 我的身份 / 当前班级」同一张卡），` +
-            '排在「备份与恢复 / 更新日志」**之前** —— 真的挪到显眼处了',
-          `在身份卡里=${logout.inIdentityCard} · 退出登录=${logout.iLogout} < 备份与恢复=${logout.iBackup} < 更新日志=${logout.iLog}`,
+            '排在「本机角色 / 更新日志」**之前** —— 真的挪到显眼处了',
+          `在身份卡里=${logout.inIdentityCard} · 退出登录=${logout.iLogout} < 本机角色=${logout.iSeat} < 更新日志=${logout.iLog}`,
         )
         await shot(annPage, S2, '103-settings-feedback', { full: true })
       })
@@ -13169,6 +13184,19 @@ await withLock(async () => {
       /* ---------- ② localStorage 的键：一个都没变 ----------
        * 🔴 改名轮最容易顺手改的就是这些键名 —— 改一个，所有人的主题偏好、班级选择、
        *    草稿、设备角色**全丢**（`AGENTS.md` 四、`落地清单.md` B9）。所以把键表钉死。
+       *
+       * 🔴🔴 **期望值 2026-10-05 变了：补进两个**真实**键 —— 这是"表落后于代码"，不是放水**：
+       *    · `shugao.notify.notices` —— `9ba5fc9`（通知补两条链路 + 低版本 WebView 运行时补丁）
+       *      引入，写在 `src/hooks/useNoticeNotify.ts`（"这条通知我提示过没有"）；
+       *    · `shugao.perms.done` —— `212fa54`（推送链路一步到位 + 首启权限流水线）引入，
+       *      写在 `src/hooks/useFirstRunPermissions.ts`（"首启权限那套向导走完没有"）。
+       *    两个都是**应用真的会写**的键（可在上面那两个文件里逐字找到），而本节的**口径**是
+       *    "应用**恰好**写这些键"：少一个键 = 有人删了键（老数据全丢）⇒ 红；
+       *    多一个键 = 有人加了键却**没登记** ⇒ 也红。两头都咬，正是它值钱的地方。
+       *    ⇒ 所以这次红的是**这张表自己落后**；把这两个键登记进来，是让判据与代码**重新对齐**。
+       *    ✗ **不是**为了让红变绿：表里原有 24 个键名一个字没改，
+       *      那条底线（`shugao.theme` / `shugao.accent` / `shugao.teacher.v1` 不许动）照旧。
+       *    ⚠️ 以后**每加一个 `shugao.*` 键，必须同时来这儿登记**（否则这一条就是恒红的）。
        */
       const KEYS22 = [
         'shugao.accent',
@@ -13192,6 +13220,9 @@ await withLock(async () => {
         'shugao.local',
         'shugao.mood.celebrated',
         'shugao.mood.welcomed',
+        /* 🆕 2026-10-05（见上面那段：两个真实键，登记 ≠ 放水） */
+        'shugao.notify.notices',
+        'shugao.perms.done',
         'shugao.remind.seen',
         'shugao.teacher.v1',
         'shugao.theme',
@@ -14187,24 +14218,41 @@ await withLock(async () => {
         '🔴 S25 ②：状态**不再从** `bkNotifyBusy` 推 —— 那个布尔量只说"忙不忙"，说不出"成了还是没成"（绿勾/红叉的信息全在后者）',
         `status 里引用 bkNotifyBusy 的落点 = ${(extraSrc.match(/status=\{[^}]*bkNotifyBusy[^}]*\}/g) ?? []).length} 处`,
       )
-      /* 🔴 S25 ②附（2026-10-04 新增）：那**两颗**真的**不在「我的」页了** ——
-         "删除也是被钉住的"那一面（用户当天三处改动里的第 ③ 条）。 */
+      /* 🔴 S25 ②附（2026-10-04 新增 · 2026-10-05 扩到"那两颗也不在了"）：
+         那**两颗**真的**不在「我的」页了** —— "删除也是被钉住的"那一面
+         （2026-10-04 是"加密导出 / 备份到云端"；**2026-10-05 起连"导出 / 恢复"也不在**：
+          用户要求「把用户可以下载备份文件的入口也取消了吧」⇒ 整张卡撤下）。
+         ⚠️ 这一条判的是**源码**，真 DOM 那一侧在「09 设置页」的 `absent`（两条独立证据链）。 */
       const extraEntryGone = (s) =>
-        !s.includes('data-backup-notify') && !s.includes('data-backup-seal') && !s.includes('notifyBackupDone')
+        !s.includes('data-backup-notify') &&
+        !s.includes('data-backup-seal') &&
+        !s.includes('notifyBackupDone') &&
+        /* 🔴 2026-10-05 新增这两条：老师端的下载 / 恢复入口本身 */
+        !s.includes('导出备份文件') &&
+        !s.includes('从备份文件恢复')
       check(
         extraEntryGone(settingsSrc),
-        '🔴 S25 ②附：「备份到云端」与「导出档案备份（加密）」这两颗**不在「我的」页了**（用户 2026-10-04 取舍：全平台那一层只在超管面板里留）—— 实现没删，只撤了入口',
-        `data-backup-notify=${settingsSrc.includes('data-backup-notify')} · data-backup-seal=${settingsSrc.includes('data-backup-seal')} · notifyBackupDone=${settingsSrc.includes('notifyBackupDone')}`,
+        '🔴 S25 ②附：「备份到云端」与「导出档案备份（加密）」这两颗**不在「我的」页了**（用户 2026-10-04 取舍：全平台那一层只在超管面板里留）；**2026-10-05 起「导出备份文件」与「从备份文件恢复」也不在**（用户要求取消老师端下载备份的入口 ⟹ 整卡撤下）—— 实现没删，只撤了入口',
+        `data-backup-notify=${settingsSrc.includes('data-backup-notify')} · data-backup-seal=${settingsSrc.includes('data-backup-seal')} · notifyBackupDone=${settingsSrc.includes('notifyBackupDone')} · 导出=${settingsSrc.includes('导出备份文件')} · 恢复=${settingsSrc.includes('从备份文件恢复')}`,
       )
-      /* 🧪 反向对照：把那一颗塞回 `Settings` 的**源码副本**（内存里）⇒ 上面那条当场假 */
-      const entryBack = settingsSrc.replace(
-        '                从备份文件恢复',
-        '                <Button block data-backup-notify>备份到云端</Button>\n                从备份文件恢复',
-      )
+      /* 🧪 反向对照：把那一颗塞回 `Settings` 的**源码副本**（内存里）⇒ 上面那条当场假。
+         🔴 锚点 2026-10-05 换了：旧锚点 `'                从备份文件恢复'` **就是这次被删掉的那一行**
+            ⇒ 副本改不动（命中 0 处）⇒ 对照会变成"假绿"（`AGENTS.md` 三·2）。
+            新锚点用「关于」那张卡的开头（源码里唯一一处）。**先数出现次数、恰好 1 处才替换**。 */
+      const SET_ANCHOR = '        <div className="mb-4">\n          <Sect>关于</Sect>'
+      const setAnchorHits = settingsSrc.split(SET_ANCHOR).length - 1
+      const entryBack =
+        setAnchorHits === 1
+          ? settingsSrc.replace(
+              SET_ANCHOR,
+              '        <div className="mb-4">\n          <Sect>备份与恢复</Sect>\n          <Panel bodyClass="p-3">\n            <Button block data-backup-notify>备份到云端</Button>\n            <Button block>导出备份文件</Button>\n            <Button block>从备份文件恢复</Button>\n          </Panel>\n        </div>\n' +
+                SET_ANCHOR,
+            )
+          : settingsSrc
       check(
-        entryBack !== settingsSrc && !extraEntryGone(entryBack),
-        '🧪 S25 ②附 反向对照：把「备份到云端」那一颗塞回 `Settings` 源码副本 ⇒ 同一条判据当场假（"不在这一屏了"真的被判）',
-        `副本真被改过=${entryBack !== settingsSrc} · 塞回去之后判据=${extraEntryGone(entryBack)}`,
+        setAnchorHits === 1 && entryBack !== settingsSrc && !extraEntryGone(entryBack),
+        '🧪 S25 ②附 反向对照：把那一整张卡（含「备份到云端」/ 导出 / 恢复）塞回 `Settings` 源码副本 ⇒ 同一条判据当场假（"不在这一屏了"真的被判）',
+        `锚点出现 ${setAnchorHits} 处（须恰好 1）· 副本真被改过=${entryBack !== settingsSrc} · 塞回去之后判据=${extraEntryGone(entryBack)}`,
       )
 
       /* ---------- ② 停留时长：一个常量，不是三处硬编 ---------- */
