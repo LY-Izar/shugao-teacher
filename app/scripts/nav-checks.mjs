@@ -8338,9 +8338,41 @@ section('第二十七节 · A22：到点提醒交给系统排程（桥接层 / �
         : `目标出现 ${cut.n} 处（须恰好 1）—— 宁可报错，也不假绿`,
     )
   }
+  /*
+   * 🔴🔴 **A22 ⑮–㉑ 也有两条腿**（2026-10-05 修第二次 CI 红）：
+   *    壳那一侧读的是 `PLUGIN2` / `BRIDGE2` / `MANIFEST2` / `RECV` / `ALARMS`
+   *    —— 全在**仓库外**那份打包工程里（CI 的干净检出必然没有，`shellRead2` 回空串）；
+   *    网页侧读的是 `NOTIFY` / `HOOK` / `SCHEDULE`（`app/` 下，CI 里**也有**）。
+   *    🔴 事故：第三/四轮把 ⑤–㉑ 全加在**窗口外** ⇒ 壳那一侧那半读的是空串 ⇒
+   *      `c8da6a1` / `056a54c` 两次 CI 都在这 15 条上红（本机却有打包工程 ⇒ 恒绿）。
+   *    ⇒ 照本节 ①–④ / A21 ①–⑦ 那套**现成**的三态办：壳那一侧用 `shellSide()` 包起来
+   *      （窗口内一律 `⚪ 灰（探不到，不红不绿）`、计入 `grayed`）；
+   *      **网页侧留在窗口外逐条真判，一条都不许灰**（节末自证当场咬）。
+   */
+  let shellWide = 0 // 壳那一侧（下面这些窗口里）灰掉的条数
+  let shellWideJudged = 0 // 壳那一侧真的判了的条数（打包工程在的机器上）
+  /* 壳那一侧（⑮–㉑）**一共多少条判据** —— 节末自证拿它当边界，
+     谁把某条挪进/挪出窗口（灰的范围开大/开小）那条自证当场红；加了新判据就把这个数跟着加。 */
+  const SHELL_LEG_N = 15
+  const shellSide = (fn) => {
+    const g = grayed
+    const j = passed + failures.length
+    const was = shellGray
+    /* 🔴 只在**探不到**（打包工程不在 = CI 的干净检出）时才允许落灰；
+       打包工程在的机器上 `shellGray` 照旧是 `false` ⇒ 窗口内**逐条真判**，一条都不灰。 */
+    shellGray = was || !SHELL_HERE2
+    try {
+      fn()
+    } finally {
+      shellGray = was
+    }
+    shellWide += grayed - g
+    shellWideJudged += passed + failures.length - j
+  }
   const BR_EXACT = /openExactAlarmSettings: function \(\) \{/
   const JAVA_EXACT = /public void openExactAlarmSettings\(PluginCall call\)/
   const EXACT_PAGE = /Settings\.ACTION_REQUEST_SCHEDULE_EXACT_ALARM/
+  shellSide(() => { // ← 壳那一侧（⑮ 原生插件 · ⑯ 桥接层）
   check(
     JAVA_EXACT.test(PLUGIN2) && EXACT_PAGE.test(PLUGIN2),
     '🔴 A22 ⑮ 原生那侧**本来就有**"跳精确闹钟设置"的能力（`YlxbNativePlugin.openExactAlarmSettings` → `ACTION_REQUEST_SCHEDULE_EXACT_ALARM`；**不是本轮新加的**，本轮只是把它挂出来）—— 缺了它，⑯ 那句"去系统设置"会跳到一个不存在的动作上',
@@ -8360,6 +8392,7 @@ section('第二十七节 · A22：到点提醒交给系统排程（桥接层 / �
       `目标出现 ${cut.n} 处（须恰好 1）· 改完判据=${BR_EXACT.test(cut.text)}`,
     )
   }
+  }) // ← 壳那一侧（⑮⑯）到此为止：下面 ⑯ 的**网页侧**那一条只读 `app/`，一条都不许灰
   const APP_EXACT = /export function shellCanOpenExactAlarmSettings\(\): boolean \{/
   const APP_OPEN = /export async function openExactAlarmSettings\(\): Promise<boolean> \{/
   check(
@@ -8408,6 +8441,7 @@ section('第二十七节 · A22：到点提醒交给系统排程（桥接层 / �
    */
 
   /* ---------------- ⑰ manifest 里**有**那个接收器（没声明 = 闹钟响了没人接） ---------------- */
+  shellSide(() => { // ← 壳那一侧（⑰ AndroidManifest 里的接收器声明）
   const RECV_DECL = /<receiver\s+android:name="\.YlxbAlarmReceiver"\s+android:exported="false"\s*\/>/
   check(
     RECV_DECL.test(MANIFEST2),
@@ -8423,23 +8457,33 @@ section('第二十七节 · A22：到点提醒交给系统排程（桥接层 / �
       `目标出现 ${cut.n} 处（须恰好 1）· 改完判据=${RECV_DECL.test(cut.text)}`,
     )
   }
+  }) // ← 壳那一侧（⑰）到此为止
 
   /* ---------------- ⑱ 渠道**同源**：一处定义、两侧引用（不许各写一份字面量） ----------------
    * 🔴 这一条是"到点不响"里最贵的一处：即时那条（老师验通的）在 `shugao-default`，
    *   而到点那条原来在 `shugao_general` —— 同一个功能两个渠道，
    *   老师在系统通知设置里看到两个开关，关掉一个就只有一半提醒会响。
    */
-  const RECV_CH_SAME =
-    /public static final String CHANNEL_REMIND = YlxbNativePlugin\.CHANNEL_IMMEDIATE;/.test(RECV)
-  const RECV_USES = /if \(channel == null \|\| channel\.isEmpty\(\)\) channel = CHANNEL_REMIND;/.test(RECV)
   const APP_CH_SAME = /export const SHELL_ALARM_CHANNEL = 'shugao-default'/.test(NOTIFY)
   const PLAN_USES = /channel: SHELL_ALARM_CHANNEL,/.test(NOTIFY)
   check(
-    RECV_CH_SAME && RECV_USES && APP_CH_SAME && PLAN_USES,
-    '🔴🔴 A22 ⑱ **到点那条通知与即时那条用同一个渠道，而且这个 id 只有一处字面量**：接收器那句 `CHANNEL_REMIND = YlxbNativePlugin.CHANNEL_IMMEDIATE`（引用常量，**不是**再写一遍 `"shugao-default"`）、兜底真的用它；网页侧交出去的单子也点名同一个 id（`SHELL_ALARM_CHANNEL = \'shugao-default\'` + `channel: SHELL_ALARM_CHANNEL`）—— Android 8+ **往不存在的渠道发通知 = 当场被丢掉**（不抛错），而"哪条路用哪个渠道"分叉过一次就是这个 bug',
-    `接收器引用常量=${RECV_CH_SAME} · 接收器真的用它=${RECV_USES} · 网页侧常量=${APP_CH_SAME} · 单子点名它=${PLAN_USES}`,
+    APP_CH_SAME && PLAN_USES,
+    '🔴🔴 A22 ⑱（网页侧那半）**到点那条通知与即时那条用同一个渠道，而且这个 id 只有一处字面量**：接收器那句 `CHANNEL_REMIND = YlxbNativePlugin.CHANNEL_IMMEDIATE`（引用常量，**不是**再写一遍 `"shugao-default"`）、兜底真的用它；网页侧交出去的单子也点名同一个 id（`SHELL_ALARM_CHANNEL = \'shugao-default\'` + `channel: SHELL_ALARM_CHANNEL`）—— Android 8+ **往不存在的渠道发通知 = 当场被丢掉**（不抛错），而"哪条路用哪个渠道"分叉过一次就是这个 bug',
+    `网页侧常量=${APP_CH_SAME} · 单子点名它=${PLAN_USES}`,
   )
+  /* 壳那一侧那条腿（`YlxbAlarmReceiver.java`）：仓库外文件 ⇒ 走灰档 */
+  shellSide(() => {
+    const RECV_CH_SAME =
+      /public static final String CHANNEL_REMIND = YlxbNativePlugin\.CHANNEL_IMMEDIATE;/.test(RECV)
+    const RECV_USES = /if \(channel == null \|\| channel\.isEmpty\(\)\) channel = CHANNEL_REMIND;/.test(RECV)
+    check(
+      RECV_CH_SAME && RECV_USES,
+      '🔴🔴 A22 ⑱（接收器那半）**到点那条通知与即时那条用同一个渠道**：接收器那句 `CHANNEL_REMIND = YlxbNativePlugin.CHANNEL_IMMEDIATE`（引用常量，**不是**再写一遍 `"shugao-default"`）、兜底真的用它 —— Android 8+ **往不存在的渠道发通知 = 当场被丢掉**（不抛错），"哪条路用哪个渠道"分叉过一次就是这个 bug',
+      `接收器引用常量=${RECV_CH_SAME} · 接收器真的用它=${RECV_USES}`,
+    )
+  })
   {
+    shellSide(() => { // ← 壳那一侧（⑱ 接收器那条反向对照）
     /* 🧪 反向对照：把接收器那个常量改回**各写一份字面量**的坏法（= 改之前）⇒ ⑱ 当场红 */
     const cut = oneEdit2(RECV, 'public static final String CHANNEL_REMIND = YlxbNativePlugin.CHANNEL_IMMEDIATE;', 'public static final String CHANNEL_REMIND = "shugao_general";')
     check(
@@ -8447,6 +8491,7 @@ section('第二十七节 · A22：到点提醒交给系统排程（桥接层 / �
       '🧪 A22 ⑱ 反向对照：把接收器那个常量改回**自己写一份字面量**（内存副本 = 到点那条落进另一个渠道的那一版）⇒ ⑱ 当场红',
       `目标出现 ${cut.n} 处（须恰好 1）· 改完判据=${/public static final String CHANNEL_REMIND = YlxbNativePlugin\.CHANNEL_IMMEDIATE;/.test(cut.text)}`,
     )
+    }) // ← 壳那一侧（⑱ 反向对照）到此为止
     /* 🧪 反向对照：把网页侧那个常量改成别的 id ⇒ ⑱ 的"两边同源"当场假 */
     const cut2 = oneEdit2(NOTIFY, "export const SHELL_ALARM_CHANNEL = 'shugao-default'", "export const SHELL_ALARM_CHANNEL = 'shugao_general'")
     check(
@@ -8459,6 +8504,7 @@ section('第二十七节 · A22：到点提醒交给系统排程（桥接层 / �
      *   ⚠️ 判的是**建渠道那一句**在不在（`createNotificationChannel(im)`），
      *     不是"常量在不在" —— 常量在、没人建，正是 2026-10-05 第三轮那个形状。
      */
+    shellSide(() => { // ← 壳那一侧（⑱-补 建渠道 · ⑱-补② 量单渠道开关）
     const CREATED = /new NotificationChannel\(CHANNEL_IMMEDIATE, "到点提醒", NotificationManager\.IMPORTANCE_HIGH\)/.test(PLUGIN2) && /nm\.createNotificationChannel\(im\)/.test(PLUGIN2)
     check(
       CREATED,
@@ -8480,14 +8526,15 @@ section('第二十七节 · A22：到点提醒交给系统排程（桥接层 / �
       '🔴 A22 ⑱-补② 自检**单独量"那个渠道开着吗"**（`ch.getImportance() != IMPORTANCE_NONE` → `channelOn` → 断了就 `stage = "channelOff"`）—— `areNotificationsEnabled()` **管不到单渠道开关**，只量"渠道在不在"会把"「到点提醒」被关掉了"报成"全绿、就是没响"，而老师两秒就能自己开那一个开关',
       `读重要性=${/channelImportance = ch\.getImportance\(\);/.test(PLUGIN2)} · 判是否关着=${/channelOn = channelImportance != NotificationManager\.IMPORTANCE_NONE;/.test(PLUGIN2)} · 断了报 channelOff=${/stage = "channelOff";/.test(PLUGIN2)}`,
     )
+    /* 🧪 反向对照：把"单渠道关着"这一档删掉（= 只量"渠道在不在"的坏法）⇒ 上面那条当场红 */
+    const cut = oneEdit2(PLUGIN2, 'channelOn = channelImportance != NotificationManager.IMPORTANCE_NONE;', 'channelOn = true;')
+    check(
+      cut.ok && !/channelOn = channelImportance != NotificationManager\.IMPORTANCE_NONE;/.test(cut.text),
+      '🧪 A22 ⑱-补② 反向对照：把"单渠道关着"这一档改成恒 `true`（内存副本 = 只量"渠道在不在"的坏法）⇒ 上面那条当场红',
+      `目标出现 ${cut.n} 处（须恰好 1）`,
+    )
+    }) // ← 壳那一侧（⑱-补 · ⑱-补②）到此为止：下面那条反向对照只读 `app/`，一条都不许灰
     {
-      /* 🧪 反向对照：把"单渠道关着"这一档删掉（= 只量"渠道在不在"的坏法）⇒ 上面那条当场红 */
-      const cut = oneEdit2(PLUGIN2, 'channelOn = channelImportance != NotificationManager.IMPORTANCE_NONE;', 'channelOn = true;')
-      check(
-        cut.ok && !/channelOn = channelImportance != NotificationManager\.IMPORTANCE_NONE;/.test(cut.text),
-        '🧪 A22 ⑱-补② 反向对照：把"单渠道关着"这一档改成恒 `true`（内存副本 = 只量"渠道在不在"的坏法）⇒ 上面那条当场红',
-        `目标出现 ${cut.n} 处（须恰好 1）`,
-      )
       /* 🧪 反向对照：网页侧那一档分档话删掉 ⇒ ⑱-补② 当场红（读数有了、屏上不说） */
       const cut2 = oneEdit2(NOTIFY, "if (check.channelOn === false) {", 'if (false) {')
       check(
@@ -8504,17 +8551,25 @@ section('第二十七节 · A22：到点提醒交给系统排程（桥接层 / �
    *   要是这个口偷偷走了 `ShugaoNative.notify`（即时那条，**已经验通的那条**），
    *   那么"自检通过"什么都证明不了 —— **假绿**（§三.1）。
    */
+  /* 网页侧那条腿（只读 `app/src/lib/notify.ts`）—— **窗口外**，CI 里照旧逐条真判、不许灰 */
+  const APP_SELF = /export async function runRemindSelfTest\(\)/.test(NOTIFY) && /typeof s\?\.remindSelfTest !== 'function'/.test(NOTIFY)
+  check(
+    APP_SELF,
+    '🔴🔴 A22 ⑲（网页侧那半）自检那条路**先问能力**：`runRemindSelfTest()` 在桥接对象上没有 `remindSelfTest` 时如实回"这个版本还不能自检"，**不许假装跑过**（跑不了却报成功 = 假绿）',
+    `网页侧能力门=${APP_SELF}`,
+  )
+  /* 壳那一侧那条腿（原生 `YlxbNativePlugin.java` + 桥接层 `shell-bridge-apk.js`）：仓库外文件 ⇒ 走灰档 */
+  shellSide(() => {
   const JAVA_SELF = /public void remindSelfTest\(PluginCall call\)/
   const JAVA_SELF_VIA_REAL = /scheduleAlarms\(inner\);/.test(PLUGIN2)
   const JAVA_SELF_NO_NOTIFY = !/notifySelfTest\(\)/.test(PLUGIN2.slice(PLUGIN2.indexOf('public void remindSelfTest('), PLUGIN2.indexOf('public void remindSelfCheck(')))
   const BR_SELF = /remindSelfTest: function \(\) \{/.test(BRIDGE2)
   const BR_SELF_FWD = /N\.remindSelfTest\(\)/.test(BRIDGE2)
   const BR_SELF_NO_NOTIFY = !/N\.notify\(/.test(BRIDGE2.slice(BRIDGE2.indexOf('remindSelfTest: function () {'), BRIDGE2.indexOf('remindSelfCheck: function () {')))
-  const APP_SELF = /export async function runRemindSelfTest\(\)/.test(NOTIFY) && /typeof s\?\.remindSelfTest !== 'function'/.test(NOTIFY)
   check(
-    JAVA_SELF.test(PLUGIN2) && JAVA_SELF_VIA_REAL && JAVA_SELF_NO_NOTIFY && BR_SELF && BR_SELF_FWD && BR_SELF_NO_NOTIFY && APP_SELF,
+    JAVA_SELF.test(PLUGIN2) && JAVA_SELF_VIA_REAL && JAVA_SELF_NO_NOTIFY && BR_SELF && BR_SELF_FWD && BR_SELF_NO_NOTIFY,
     '🔴🔴 A22 ⑲ 「两分钟后试一条定时提醒」**走的是真实排程那条链**：原生 `remindSelfTest()` **调的是 `scheduleAlarms(inner)` 本身**（不是另写一份、更不是走即时那条路）⇒ 与真实提醒共用同一个 `YlxbAlarms.scheduleAll` / `setExactAndAllowWhileIdle` / `YlxbAlarmReceiver` / 同一个渠道；桥接层与 `notify.ts` 都只转发它、**一个即时通知都不许出现在这一段里** —— 否则"自检通过"只证明即时那条（老师早就验通了），是一次假绿',
-    `原生方法在=${JAVA_SELF.test(PLUGIN2)} · 走真实排程=${JAVA_SELF_VIA_REAL} · 原生那段没走即时=${JAVA_SELF_NO_NOTIFY} · 桥接层挂了=${BR_SELF} · 真的转发=${BR_SELF_FWD} · 桥接那段没走即时=${BR_SELF_NO_NOTIFY} · 网页侧能力门=${APP_SELF}`,
+    `原生方法在=${JAVA_SELF.test(PLUGIN2)} · 走真实排程=${JAVA_SELF_VIA_REAL} · 原生那段没走即时=${JAVA_SELF_NO_NOTIFY} · 桥接层挂了=${BR_SELF} · 真的转发=${BR_SELF_FWD} · 桥接那段没走即时=${BR_SELF_NO_NOTIFY}`,
   )
   {
     /*
@@ -8529,9 +8584,18 @@ section('第二十七节 · A22：到点提醒交给系统排程（桥接层 / �
       `目标出现 ${cut.n} 处（须恰好 1）· 改完还走真实排程=${stillReal}`,
     )
   }
+  }) // ← 壳那一侧（⑲ 原生 + 桥接层）到此为止
 
   /* ---------------- ⑳ 每一步的中间结果都回读到屏上（排了几条 / 到没到 / 哪个渠道） ---------------- */
-  const BR_FIRED = /remindSelfCheck: function \(\) \{/.test(BRIDGE2) && /N\.remindSelfCheck\(\)/.test(BRIDGE2)
+  /* 壳那一侧（桥接层的"到点回读"口）：仓库外文件 ⇒ 走灰档 */
+  shellSide(() => {
+    const BR_FIRED = /remindSelfCheck: function \(\) \{/.test(BRIDGE2) && /N\.remindSelfCheck\(\)/.test(BRIDGE2)
+    check(
+      BR_FIRED,
+      '🔴 A22 ⑳（壳侧那半）桥接层挂了"到点回读"那个口（`remindSelfCheck` + 真的转给 `N.remindSelfCheck()`）—— 网页侧无从调用时，屏上永远只剩"排上了"，到点响没响看不到',
+      `桥接层回读=${BR_FIRED}`,
+    )
+  }) // ← 壳那一侧（⑳）到此为止：下面那条只读 `app/`，一条都不许灰
   const APP_FIRED =
     /export async function runRemindSelfCheck\(\)/.test(NOTIFY) &&
     /export function remindCheckHint\(/.test(NOTIFY) &&
@@ -8541,9 +8605,9 @@ section('第二十七节 · A22：到点提醒交给系统排程（桥接层 / �
     /push\(remindCheckHint\(r, sdk\)\)/.test(SCHEDULE) &&
     /watchRemindSelfCheck\(\(f\) => push\(remindFiredHint\(f\)\)\)/.test(SCHEDULE)
   check(
-    BR_FIRED && APP_FIRED && PAGE_FIRED,
-    '🔴 A22 ⑳ 「两分钟后试一条」把**每一步的中间结果都回报到屏上**（不是一句"成功/失败"）：`remindCheckHint()` 说排了几条 + 精确闹钟读数是几、断在哪一环；到点之后 `watchRemindSelfCheck()` 回读 `remindFiredHint()`，把"接收器到没到 / 用的哪个渠道 / 通知号 / 报错原文"一并说出来 —— 本机没有安卓设备，**这一格读数就是唯一能把断点搬到屏上的东西**',
-    `桥接层回读=${BR_FIRED} · 网页侧三个纯函数=${APP_FIRED} · 页面真的用它们=${PAGE_FIRED}`,
+    APP_FIRED && PAGE_FIRED,
+    '🔴 A22 ⑳（网页侧那半）「两分钟后试一条」把**每一步的中间结果都回报到屏上**（不是一句"成功/失败"）：`remindCheckHint()` 说排了几条 + 精确闹钟读数是几、断在哪一环；到点之后 `watchRemindSelfCheck()` 回读 `remindFiredHint()`，把"接收器到没到 / 用的哪个渠道 / 通知号 / 报错原文"一并说出来 —— 本机没有安卓设备，**这一格读数就是唯一能把断点搬到屏上的东西**',
+    `网页侧三个纯函数=${APP_FIRED} · 页面真的用它们=${PAGE_FIRED}`,
   )
   {
     /* 🧪 反向对照：把页面那颗按钮接回"只报成功/失败"（删掉回读那一步）⇒ ⑳ 当场红 */
@@ -8559,6 +8623,7 @@ section('第二十七节 · A22：到点提醒交给系统排程（桥接层 / �
    * 🔴 回"传进来几条"就会把一次**一条都没排上**报成成功 ⇒ 网页侧那个能力门
    *   （`r.scheduled > 0`）永远为真 ⇒ 界面上看不出任何异常（§三.5）。
    */
+  shellSide(() => { // ← 壳那一侧（㉑ 调度核 `YlxbAlarms.java` + 原生插件）
   const ALARMS_COUNTS = /if \(registerOne\(ctx, am, alarms\.getJSONObject\(i\), exact\)\) scheduled\+\+;/.test(ALARMS)
   const ALARMS_RETURNS = /return scheduled;/.test(ALARMS)
   const JAVA_USES_COUNT = /int scheduled = YlxbAlarms\.scheduleAll\(getContext\(\), list\);/.test(PLUGIN2) && /ret\.put\("scheduled", scheduled\);/.test(PLUGIN2)
@@ -8576,6 +8641,7 @@ section('第二十七节 · A22：到点提醒交给系统排程（桥接层 / �
       `目标出现 ${cut.n} 处（须恰好 1）`,
     )
   }
+  }) // ← 壳那一侧（㉑）到此为止
 
   /* ---------------- ㉒ `canScheduleExact` 的读数**切回前台会被重读** ----------------
    * 🔴 老师已经授权过，应用却还按旧读数说"排不了" —— 就是"只在启动时读一次"那个形态。
@@ -8655,13 +8721,24 @@ section('第二十七节 · A22：到点提醒交给系统排程（桥接层 / �
       `🔴 A22 ⑧ ${SHELL_HERE2 ? '四份' : 'app 侧那两份（壳侧两份本机没有 ⇒ 一并查不了）'}源码的**注释**里都照实写着"真机未验"（本机没有安卓设备，别假装验过）`,
       silent2.length ? `没写：${silent2.join(' · ')}` : `${RAW2.length} 份都写了：${RAW2.map(([n]) => n).join(' · ')}`,
     )
-    /* 🔴 **节末自证（可红）**：壳不在时壳那一侧（①–④）一条都没判（全落灰），app 侧（⑤–⑧）一条都没灰。
+    /* 🔴 **节末自证（可红）**：三态那两条边界 ——
+       ① 壳不在时（= CI 的干净检出）：壳那一侧（①–④ 与 ⑮–㉑）**全落灰、一条都没判**，
+          而**网页侧**（⑤–⑧ · ⑯⑱⑲⑳网页侧那几半 · ㉒）**一条都没灰**；
+       ② 壳在时（维护者本机）：壳那一侧**真的判了**，而且一条都不灰。
+       ⚠️ 谁把灰的范围**开大**（罩到网页侧那半）或**开小**（壳侧漏在外面），这条当场红。
        ⚠️ 断言前**强制关掉那个开关**，否则它会被"忘了关"这件事罩成灰（静默的假灰）。 */
     shellGray = false
+    const appGray = grayed - g1b - shellWide // 窗口外灰掉的 = 只能来自"灰的范围开大了"
+    const shellLegOK =
+      /* 🔴 壳那一侧（⑮–㉑）一共就是这 15 条：壳在 ⇒ 15 条全真判、一条不灰；
+         壳不在 ⇒ 15 条全落灰、一条都不判。 **谁把某条挪进/挪出窗口（= 把灰的范围开大/开小），
+         这条当场红**（两个方向、两台机器上都能红，不只是 CI 上） */
+      shellWide + shellWideJudged === SHELL_LEG_N && (SHELL_HERE2 ? shellWide === 0 : shellWideJudged === 0)
+    const shellHeadOK = SHELL_HERE2 ? shellJudged2 > 0 : shellJudged2 === 0
     check(
-      (SHELL_HERE2 || shellJudged2 === 0) && grayed - g1b === 0,
-      '🔴 A22 自证（三态）：壳不在时壳那一侧（①–④）**一条都没判**（全落灰），app 侧（⑤–⑧）**一条都没灰** —— 忘关/忘开那个开关，这条当场红',
-      `壳在=${SHELL_HERE2} · 壳侧真的判了 ${shellJudged2} 条 · 壳侧灰了 ${g1b - g0b} 条 · app 侧灰了 ${grayed - g1b} 条`,
+      shellLegOK && shellHeadOK && appGray === 0,
+      '🔴 A22 自证（三态）：壳那一侧（①–④ · ⑮–㉑）在壳不在时**全落灰、一条都没判**、壳在时**逐条真判、一条都不灰**；**网页侧一条都没灰** —— 忘关/忘开那个开关、把灰的范围开到网页侧那半、或把壳侧某条挪进/挪出窗口，这条当场红',
+      `壳在=${SHELL_HERE2} · 壳侧①–④ 判了 ${shellJudged2} 条 / 灰了 ${g1b - g0b} 条 · 壳侧⑮–㉑ 共 ${SHELL_LEG_N} 条：判了 ${shellWideJudged} 条 / 灰了 ${shellWide} 条 · 网页侧灰了 ${appGray} 条`,
     )
   }
 }
