@@ -9064,6 +9064,9 @@ section('第二十四节之三 · A24：推送失败原因不许被吞（真机 
   const CODE = strip(HOOK)
   const NCODE = strip(NOTIFY)
 
+  /** 进本节时的灰计数（照 A21/A22 的 `g0`/`g0b` 先例）—— 节末自证用它算"app 侧灰了几条" */
+  const g24 = grayed
+
   /* 字面量 `.replace(/\/+$/, '')` 的正则 —— `+` 与 `$` 都要转义，`/` 要写成 `\/` */
   const TRIM_RE = /replace\(\/\\\/\+\$\/, ''\)/
   const TRIM_BRIDGE_RE =
@@ -9122,10 +9125,58 @@ section('第二十四节之三 · A24：推送失败原因不许被吞（真机 
     `实测 ${/why: r\.why\?\.trim\(\) \|\|/.test(NCODE)}`,
   )
 
-  /* ---------------- ③ 壳侧两处也要带 why（不在 git 里，直接读打包目录） ---------------- */
-  const bridgeFile = join(REPO, '..', '树高教务通打包', '_src', 'shell-bridge-apk.js')
-  if (existsSync(bridgeFile)) {
-    const BR = strip(readFileSync(bridgeFile, 'utf8'))
+  /* ---------------- ③ 壳侧两处也要带 why（不在 git 里，直接读打包目录） ----------------
+   *
+   * 🔴🔴 **2026-10-05 第三次 CI 红（`4cf89fc`）：这一节漏在灰档窗口之外**。
+   *    ⚠️ 引进它的是 `7b6211f`（A24 整节头一次落地），而 `4cf89fc` 是**第一次把它推进
+   *       CI** 的那个提交 —— `7b6211f` / `47fc6d6` / `4cf89fc` 是同一次 push，
+   *       而 GitHub 对一次 push **只跑 tip 那一个 commit**，所以 `7b6211f` 自己没被单独跑过、
+   *       上一个绿（`dbda528`，CI 跑过）里**根本还没有 A24 这一节**。
+   *       这就是"为什么前几次绿、这次红"的答案：判据是新的，不是被改坏的。
+   *    真因有两个，**两个都要**才能修对：
+   *      ① **路径拼法不一致**：A21/A22 读壳侧用的是**绝对路径**
+   *         （`PACK` / `PACK2` = 桌面上那个 `树高教务通打包` 目录的**绝对路径**），
+   *         而这里写的是 `join(REPO, '..', …)` —— `REPO` 是"本脚本所在那份检出"的根。
+   *         于是：**本机**（主工作区跑）解析到隔壁打包工程 ⇒ 在 ⇒ 绿；而
+   *         **`git worktree` 的干净检出**（和 CI 一样的那份，`%TEMP%\shugao-nav-4cf89fc`）
+   *         会解析到 `%TEMP%\树高教务通打包` ⇒ **必然不在** ⇒ 走 else 恒红。
+   *         这就是"本机绿、干净检出红"里**只有本机那半**被 A21/A22 的绝对路径盖住的原因。
+   *      ② **没有三态**：这一节的 `else` 分支是**无条件 `check(false, …)`** ——
+   *         打包工程**不进这个公开仓库**，CI 的干净检出**必然**没有它
+   *         ⇒ 那是一条**不可能在 CI 变绿的卡**（与 `0f45438` / `d8d1e98` 同一个坏法，
+   *         见 `AGENTS.md` §三.1「假红」）。CI 因此**一进来就死**（第 7 步 ~2 秒退出）。
+   *    ✅ 修法照本节 A21/A22 的**现成**机制：**只灰掉"读仓库外那半个输入"**——
+   *       桥接文件在 ⇒ 逐条真判（本机：一条都不灰）；不在 ⇒ 落灰（CI），
+   *       而 app 侧（①②与两条反向对照，只读 `app/`）**一条都不许灰**。
+   *       节末另有一条**自证可红**（写在灰档外面），谁把灰的范围开大/开小当场红。
+   */
+  const BRIDGE_ABS =
+    'C:\\Users\\Administrator\\Desktop\\树高教务通打包\\_src\\shell-bridge-apk.js'
+  const SHELL_BRIDGE_HERE = existsSync(BRIDGE_ABS)
+  let shellBridgeJudged = 0
+  let shellBridgeGray = 0
+  const shellSide = (fn) => {
+    const g = grayed
+    const j = passed + failures.length
+    const was = shellGray
+    shellGray = was || !SHELL_BRIDGE_HERE
+    try {
+      fn()
+    } finally {
+      shellGray = was
+    }
+    shellBridgeGray += grayed - g
+    shellBridgeJudged += passed + failures.length - j
+  }
+
+  shellSide(() => {
+    /*
+     * 🔴 读之前仍要**先问在不在**：`SHELL_BRIDGE_HERE` 为假时这一句在 CI 上会
+     *    抛 `ENOENT`，那是「门禁自己吞异常」那类假绿的老家（`AGENTS.md` §三.1）。
+     *    文件真的缺（打包工程在、桥接文件被删）⇒ 读空串 ⇒ 下面两条**当场红**，
+     *    正是"壳在的机器上缺文件仍是红"那一条纪律。
+     */
+    const BR = SHELL_BRIDGE_HERE ? strip(readFileSync(BRIDGE_ABS, 'utf8')) : ''
     check(
       /插件 ShugaoNative 没加载上/.test(BR) && /调用原生抛错/.test(BR) && /原生回的不是对象/.test(BR),
       'A24 ③ 桥接层**三支都带 why**（插件没加载 / 原生回的不是对象 / 调用抛错）—— 原来全是 `{ok:false}`，真因就在这里被吃掉',
@@ -9136,14 +9187,7 @@ section('第二十四节之三 · A24：推送失败原因不许被吞（真机 
       'A24 ③ 桥接那侧**也**去一道末尾斜杠（两道保险：网页一道、壳一道 —— 少任何一道都会让这个 bug 从另一侧漏回来）',
       `实测 ${TRIM_BRIDGE_RE.test(BR)}`,
     )
-  } else {
-    // 🔴 壳不在本机 ⇒ **显式报"没验"**，不许静默跳过（跳过去就是一条恒绿的摆设）
-    check(
-      false,
-      'A24 ③ ⚠️ 壳侧那两个文件**不在这台机器上**，这一条没验（不是通过）—— 打包目录 `树高教务通打包/_src/` 整个缺失',
-      `找过：${bridgeFile}`,
-    )
-  }
+  })
 
   /* 反向对照 G：把 trim 那一道删掉（副本）⇒ ① 当场假 */
   {
@@ -9176,6 +9220,28 @@ section('第二十四节之三 · A24：推送失败原因不许被吞（真机 
       fabricated(HOOK + '\n// 前台服务没起来。') === 0,
       '🧪 A24 ② 反向对照 H-补：把那句**只放进注释**（副本）⇒ 判据仍判过 —— 证明它数的是真代码、不是注释',
       `注释里那份使读数变成 ${fabricated(HOOK + '\n// 前台服务没起来。')}（期望 0）`,
+    )
+  }
+
+  /*
+   * 🔴 **A24 自证（三态，可红）** —— 写在灰档**外面**，两个方向都能红：
+   *    · 壳在（维护者本机）：③ 那 **2 条**逐条真判、**一条都不灰**；
+   *    · 壳不在（CI 的干净检出）：③ 那 **2 条**全落灰、**一条都没判**；
+   *    · 而这一节 app 侧（①② 与那两条反向对照，只读 `app/`）**一条都不许灰**
+   *      —— 谁把灰的范围**开大**（罩到 app 侧那半）或**开小**（③ 漏在窗口外，
+   *      正是 `4cf89fc` 那次 CI 的坏法）**或改了 ③ 的条数**，这条当场红。
+   * ⚠️ 断言前**强制关掉那个开关**，否则它会被"忘了关"这件事罩成灰（静默的假灰）。
+   */
+  {
+    const A24_SHELL_LEG_N = 2
+    const appSideGray = grayed - g24 - shellBridgeGray
+    shellGray = false
+    check(
+      shellBridgeJudged + shellBridgeGray === A24_SHELL_LEG_N &&
+        (SHELL_BRIDGE_HERE ? shellBridgeGray === 0 : shellBridgeJudged === 0) &&
+        appSideGray === 0,
+      '🔴 A24 自证（三态）：壳不在时 ③ 那两条**全落灰、一条都没判**、壳在时**逐条真判、一条都不灰**；**本节 app 侧那半一条都没灰** —— 谁把 ③ 漏在灰档窗口外（= `4cf89fc` 那次 CI 一进来就死）、把灰的范围开到 app 侧、或改了 ③ 的条数，这条当场红',
+      `壳在=${SHELL_BRIDGE_HERE} · ③ 共 ${A24_SHELL_LEG_N} 条：判了 ${shellBridgeJudged} 条 / 灰了 ${shellBridgeGray} 条 · app 侧灰了 ${appSideGray} 条`,
     )
   }
 }
