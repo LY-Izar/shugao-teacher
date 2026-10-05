@@ -119,10 +119,26 @@ async function mintSessionFor(
     const t = (await gen.text()).slice(0, 160)
     return { error: `造会话第 1 步失败（HTTP ${gen.status}）：${t}` }
   }
-  const genBody = (await gen.json()) as { properties?: { hashed_token?: string } }
-  const hashed = genBody.properties?.hashed_token
-  if (!hashed) return { error: '造会话第 1 步没返回 token（响应形状变了）。' }
-  // ② 用一次性 token 换出真会话（email 一起带上：有的 GoTrue 版本校验它）
+  /*
+   * 🔴 **响应有两种形状都要认**（2026-10-05 真机第二轮的教训）：
+   *   裸 REST 调 `/auth/v1/admin/generate_link` 回的是**扁平**的
+   *   `{ hashed_token, action_link, email_otp, … }`；supabase-js 才把它包成
+   *   `{ properties: { hashed_token, … } }`。只认包着的那一种 = 这一步永远死在
+   *   "没返回 token"（上一版真机上"没能建立推送会话"就是它）。
+   */
+  const genBody = (await gen.json()) as {
+    hashed_token?: string
+    email_otp?: string
+    properties?: { hashed_token?: string; email_otp?: string }
+  }
+  const hashed: string | undefined = genBody.hashed_token ?? genBody.properties?.hashed_token
+  const otp: string | undefined = genBody.email_otp ?? genBody.properties?.email_otp
+  if (!hashed && !otp) return { error: '造会话第 1 步没返回 token（响应里没有 hashed_token / email_otp）。' }
+  // ② 用一次性 token 换出真会话：有 hashed_token 走 token_hash 那一支，
+  //    只有 email_otp 就走六位码那一支（/auth/v1/verify 两个都收）
+  const verifyBody = hashed
+    ? { type: 'magiclink', token_hash: hashed, email }
+    : { type: 'magiclink', email, token: otp }
   const verify = await fetch(`${baseUrl(env)}/auth/v1/verify`, {
     method: 'POST',
     headers: {
@@ -130,7 +146,7 @@ async function mintSessionFor(
       Authorization: `Bearer ${anonKey(env)}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ type: 'magiclink', token_hash: hashed, email }),
+    body: JSON.stringify(verifyBody),
   })
   if (!verify.ok) {
     const t = (await verify.text()).slice(0, 160)

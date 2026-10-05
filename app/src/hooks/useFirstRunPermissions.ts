@@ -111,12 +111,20 @@ export function useFirstRunPermissions() {
         }
         push({ text: '通知设置完成', tone: 'ok', desc: steps.join(' · ') })
       } else {
+        /* 🔴 失败必须把**服务端的 detail** 亮出来 —— "没能建立推送会话"这类笼统话
+           不带原因 = 老师对着黄条猜（真机第三轮：真正的断点是造会话第 1 步的
+           响应形状，detail 一亮就能定位）。 */
         const why = !reg.ok
           ? apiMessage(reg, '连不上服务器')
           : !token
             ? '服务端没回推送钥匙'
             : '前台服务没起来'
-        push({ text: '通知设置没走完', tone: 'warn', desc: `${why} 下次打开应用会自动再试。` })
+        const detail = typeof reg.data.detail === 'string' ? reg.data.detail : ''
+        push({
+          text: '通知设置没走完',
+          tone: 'warn',
+          desc: detail ? `${why} —— ${detail}` : `${why} 下次打开应用会自动再试。`,
+        })
       }
     })()
   }, [hydrated, teacher, isDemo, accountKind, push])
