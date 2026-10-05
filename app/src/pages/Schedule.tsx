@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Page } from '../components/AppShell'
 import {
@@ -21,10 +21,15 @@ import { goBackOr } from '../lib/back'
 import {
   notifyPermission,
   readNotifyPermission,
+  readSdkVersion,
+  remindCheckHint,
+  remindFiredHint,
   requestNotify,
   runNotifySelfTest,
+  runRemindSelfTest,
   selfTestHint,
   shellCanScheduleAlarms,
+  watchRemindSelfCheck,
 } from '../lib/notify'
 import { isSuperAdmin } from '../lib/roles'
 import { shellPlatform } from '../lib/classroomShell'
@@ -80,6 +85,37 @@ export default function Schedule() {
 const [perm, setPerm] = useState<
   NotificationPermission | 'unsupported' | 'native'
 >(() => notifyPermission())
+
+  /*
+   * 🩺 「两分钟后试一条定时提醒」用它**停掉上一次的回读**（老师连点两下 / 离开这一页）。
+   *    ⚠️ 用 `useRef` 而不是 state：它**不是要画出来的东西**，只防两条回读同时跑
+   *    （那会出现"上一轮说没响、下一轮说通了"两条互相打架的话）。
+   */
+  const stopWatch = useRef<(() => void) | null>(null)
+
+  /**
+   * 安卓 API 级别（`Build.VERSION.SDK_INT`，经桥接层的 `sdkVersion()` 读；只有 apk 有）。
+   *
+   * 🔴 只用来**分档一句话**（自检那条"也可以就停在这一页等"只对 12+ 成立）——
+   *   `0` = **量不出来**（网页版 / 老壳 / 读失败）⇒ 传 `undefined` 给分档函数，
+   *   那一档就**不说**（§三.4：没结论是灰，**不许猜**）。
+   * ⚠️ 为什么走原生而不是 `navigator.userAgent`：UA 里的 `Android 13` 是**厂商可改**的
+   *   字符串，`SDK_INT` 是系统自己报的数。
+   */
+  const [sdk, setSdk] = useState<number | undefined>(undefined)
+
+  useEffect(() => {
+    let alive = true
+    void readSdkVersion().then((v) => {
+      if (alive && v > 0) setSdk(v)
+    })
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  /** 离开这一页时把那条回读停掉（不然它会推到一个已经卸载的页面上） */
+  useEffect(() => () => stopWatch.current?.(), [])
 
   /**
    * 🔴🔴 **这块横幅显不显示，先问"这个壳有没有原生排程能力"**（2026-10-05 真机第二轮）。
@@ -371,8 +407,31 @@ const [perm, setPerm] = useState<
             >
               试一条通知
             </Button>
+            {/*
+              * 🩺 **「两分钟后试一条定时提醒」**（2026-10-05 真机第四轮）。
+              *
+              * 🔴 为什么它与旁边那颗**不能合并**：「试一条通知」走的是**即时**那条路
+              *   （应用开着一发就有），而老师报"到点提醒不响"坏的是**排程**那条路
+              *   （系统闹钟 → 到点 → 接收器 → 通知）。即时那条他早就验通了 ✓
+              *   ⇒ 只验那一条就是**假绿**：屏上全绿、到点还是不响。
+              *   这一颗**走真实排程**（同一个 `setExactAndAllowWhileIdle`、
+              *   同一个接收器、同一个渠道），响了才说明整条链通。
+              */}
+            <Button
+              size="sm"
+              onClick={async () => {
+                const r = await runRemindSelfTest()
+                push(remindCheckHint(r, sdk))
+                if (!r.scheduled) return
+                // 排上了 ≠ 响了：到点之后**回读**一次，把"到没到"如实说出来
+                stopWatch.current?.()
+                stopWatch.current = watchRemindSelfCheck((f) => push(remindFiredHint(f)))
+              }}
+            >
+              两分钟后试一条定时提醒
+            </Button>
             <span style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
-              只给管理员，用来查通知通不通
+              只给管理员，用来查到点提醒通不通
             </span>
           </div>
         ) : null}

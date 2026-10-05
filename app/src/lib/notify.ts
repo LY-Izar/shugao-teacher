@@ -73,6 +73,22 @@ interface ShellNotifyBridge {
    */
   selfTest?(): Promise<ShellSelfTest>
   /**
+   * 🆕 **"两分钟后试一条定时提醒"**（2026-10-05 真机第四轮；只有 apk 有）。
+   *
+   * 🔴 与 `selfTest()` 的区别是**这一整轮的关键**：`selfTest()` 走**即时**通知那条路
+   *   （能证明"能发通知"），而这一个走**真实排程**那条路
+   *   （`scheduleAlarms` → `AlarmManager` 精确闹钟 → `YlxbAlarmReceiver` → 通知）。
+   *   老师已经验通了即时那条，坏的恰恰是排程这条 ⇒ **只验即时那条等于假绿**。
+   */
+  remindSelfTest?(): Promise<ShellRemindCheck>
+  /** 🆕 回读那条自检到点了没有（"到点那一下到底响没响"的唯一来源） */
+  remindSelfCheck?(): Promise<ShellRemindFired>
+  /**
+   * 🆕 **安卓 API 级别**（只有 apk 有；`Build.VERSION.SDK_INT`）。
+   * 回 `0` = 量不出来 ⇒ 界面**不许**照它分档（§三.4：没结论是灰）。
+   */
+  sdkVersion?(): Promise<number>
+  /**
    * ⚠️ 这里**故意没有** `platform` 字段：通知这一层不读它。
    * 读它的是 `lib/classroomShell.ts` 的 `shellPlatform()` ——
    * 留一份在两处正是"声明了没人用"（本项目为此栽过四次）。
@@ -98,6 +114,94 @@ export interface ShellSelfTest {
   /** 没发出去时的人话 */
   why?: string
   /** 这一版壳还没有这个检查（`selfCheck` / `notifySelfTest` 没挂） */
+  unsupported?: boolean
+}
+
+/**
+ * 🆕 **"两分钟后试一条定时提醒"**的读数（`remindSelfTest()`；只有 apk 有）。
+ *
+ * 🔴 与 `ShellSelfTest` 分开两个类型而不是合成一个：两者断的**不是同一条路**
+ *   （那一个是即时通知，这一个要经过系统闹钟），合成一个就会出现
+ *   "即时那条绿了 ⇒ 以为排程也绿了"这一种最贵的假绿。
+ *
+ * `stage` 是**断在哪一环**（空串 = 这一环没断）：
+ *   · `notify`   系统里这个应用的通知被关着
+ *   · `granted`  13+ 没给 `POST_NOTIFICATIONS`
+ *   · `channel`  那个通知渠道在系统里不存在（**Android 8+ 往不存在的渠道发 = 静默丢掉**）
+ *   · `schedule` `AlarmManager` 那一下没排上（抛错 / 时刻已过期 / 拿不到系统服务）
+ *   · `''`       真的交给系统了 —— **但"排上了"不等于"到点响了"**，还要 `remindSelfCheck()` 回读
+ */
+export interface ShellRemindCheck {
+  /** 系统允许本应用发通知吗 */
+  notify?: boolean
+  /** 13+ 的 `POST_NOTIFICATIONS` 给了吗 */
+  granted?: boolean
+  /** 到点那条用的渠道在系统里存在吗 */
+  channel?: boolean
+  /**
+   * 🆕 那个渠道**开着**吗（`getImportance() != IMPORTANCE_NONE`）。
+   *
+   * 🔴 与 `channel` **不是同一件事**：Android 允许老师单独关掉某一个渠道
+   *   （「应用通知」→「到点提醒」），那时 `areNotificationsEnabled()` 照样回 `true`，
+   *   而往 `IMPORTANCE_NONE` 的渠道发通知 = **系统静默丢掉**（不抛错）
+   *   ⇒ 只量 `channel` 会把这一档报成"全绿、就是没响"。
+   */
+  channelOn?: boolean
+  /** 那个渠道当前的重要性（`-1` = 没读到） */
+  channelImportance?: number
+  /** 精确闹钟授权（`false` **不是**断点：会退化成 `setAndAllowWhileIdle`，仍然会响） */
+  exact?: boolean
+  /** 真的交给系统了吗 */
+  scheduled?: boolean
+  /** 断在哪一环（空串 = 没断） */
+  stage?: string
+  /** 断点时的人话 */
+  why?: string
+  /** 那条自检该响的时刻（Unix 毫秒） */
+  fireAt?: number
+  /*
+   * 🔴 下面四格是**真实那条排程**（`scheduleAlarms`）当场回上来的中间结果 ——
+   *    用户 2026-10-05 当场追加的要求："把每一步的中间结果都回报到屏上"。
+   *    ⚠️ 它们**不是**"有没有响"，只是"系统收下这条闹钟时说了什么"。
+   */
+  /** `scheduleAlarms` 回的"真的排上了几条"（`-1` = 没读到） */
+  innerScheduled?: number
+  /** `scheduleAlarms` 回的"单子里本来有几条" */
+  innerRequested?: number
+  /** `scheduleAlarms` 当场读到的精确闹钟授权 */
+  innerExact?: boolean
+  /** 这一版壳还没有这个检查 */
+  unsupported?: boolean
+}
+
+/**
+ * 🆕 **那条自检到点了没有**的读数（`remindSelfCheck()`；只有 apk 有）。
+ *
+ * 🔴 `fired:false` 的两种意思必须分开（§三.4：没结论是灰）：
+ *   · `elapsed:false` ⇒ **还没到点**（灰：再等等，别让老师以为坏了）
+ *   · `elapsed:true`  ⇒ 过了点接收器**没跑到**（红：断在 `YlxbAlarmReceiver` 那一环）
+ */
+export interface ShellRemindFired {
+  fired?: boolean
+  /** 已经过了那条自检该响的时刻（用来区分"还没到"与"没到"） */
+  elapsed?: boolean
+  at?: number
+  /** 那条自检**该响**的时刻（Unix 毫秒）—— 与 `at` 一起看就知道"晚了多久" */
+  due?: number
+  /**
+   * 🔴 到点那一下**用的渠道 id**（空 = 接收器没跑到）。
+   *    它必须与即时那条同为 `shugao-default` —— 这是"两条路同源"的**真机判据**
+   *    （屏上直接看得见，不靠源码形状推断）。
+   */
+  channel?: string
+  /** 交给 `NotificationManagerCompat` 的通知 id（`-1` = 没发到那一步） */
+  notifyId?: number
+  /** 标题走了接收器的兜底（自检那条**本来**就该走兜底 ⇒ `true` 是正常的） */
+  fallbackTitle?: boolean
+  /** 接收器发通知那一步抛错的原文（空 = 没抛错） */
+  receiverError?: string
+  exact?: boolean
+  why?: string
   unsupported?: boolean
 }
 
@@ -348,6 +452,29 @@ export async function notifyAsync(title: string, body: string): Promise<boolean>
 /** id 的上界：**`Integer.MAX_VALUE` 减 1**（留一格余量，且**不给 0** —— 0 与"没有 id"在别处同义） */
 export const ALARM_ID_MAX = 2147483646
 
+/**
+ * 🔴🔴 **到点那条通知用哪个渠道** —— 字面量**只许有这一份**（2026-10-05 真机第四轮）。
+ *
+ * 断在哪（两条路各用了**不同的**渠道，而老师已经验通的只有其中一条）：
+ *   · 即时那条（`ShugaoNative.notify`）→ 原生 `YlxbNativePlugin.CHANNEL_IMMEDIATE`
+ *     = **`shugao-default`**「到点提醒」/ `IMPORTANCE_HIGH` ⇒ 老师点「试一条通知」**真的响了** ✓
+ *   · 到点那条（`YlxbAlarmReceiver`）→ 原来兜底取 `CHANNEL_GENERAL` = `shugao_general`
+ *     「一般通知」/ `IMPORTANCE_DEFAULT` ⇒ **同一个功能在两个渠道里**
+ *     （系统通知设置里两个开关，关掉一个就只有一半提醒会响，界面看不出异常）✗
+ *
+ * ⇒ 现在**一处定义、两侧引用**：原生那侧是
+ *   `YlxbAlarmReceiver.CHANNEL_REMIND = YlxbNativePlugin.CHANNEL_IMMEDIATE`，
+ *   本文件是这一条常量 —— 两边字面量都必须是 `shugao-default`，
+ *   而它由 `ensureChannels()` 真建过（不然 Android 8+ **静默丢掉**那条通知）。
+ *
+ * 🔴 为什么在网页侧也写一份：交出去的单子里必须**写明**用哪个渠道
+ *   （`nativeReminderPlan()` 每一条都带 `channel`）—— 从前那一条写的是
+ *   `'shugao_general'`，与即时那条**不同源**。判据在 `nav-checks.mjs` 第二十七节
+ *   （两侧一起数，改任一侧当场红）。
+ * ⚠️ **不是** `shugao_general`（那个仍然建着，但没人点名用它了）。
+ */
+export const SHELL_ALARM_CHANNEL = 'shugao-default'
+
 /** `yyyy-mm-dd` → 一个稳定的天数序号（`Date.UTC` 解析，避免时区把它挪一天） */
 function epochDayOf(ymd: string): number {
   const [y, m, d] = ymd.split('-').map(Number)
@@ -417,7 +544,7 @@ export function nativeReminderPlan(
         fireAt,
         title: it.title,
         body: it.body,
-        channel: 'shugao_general',
+        channel: SHELL_ALARM_CHANNEL,
         payload: `shugao://notify/${encodeURIComponent(it.id)}`,
       })
     }
@@ -552,6 +679,240 @@ export function selfTestHint(r: ShellSelfTest): { text: string; desc: string; to
   if (r.granted === false) return { text: '还没允许本应用发通知', desc: '去系统设置允许本应用发通知。', tone: 'warn' }
   if (r.channel === false) return { text: '通知渠道没建起来', desc: '这一条要装新版本才能修。', tone: 'warn' }
   return { text: '没发出去', desc: r.why || '过一会儿再试一次。', tone: 'warn' }
+}
+
+/**
+ * 🩺🩺 **排一条"两分钟后响"的定时提醒**（"两分钟后试一条定时提醒"那个入口的底座；只有 apk 有）。
+ *
+ * 🔴🔴 **它必须走真实排程那条链**（`ShugaoNative.remindSelfTest` →
+ *   `YlxbAlarms.registerPrepared` 的 `setExactAndAllowWhileIdle` → `YlxbAlarmReceiver`
+ *   → `NotificationManager`），**不许**图省事去调即时通知（`shell().notify`）——
+ *   后者只能证明"能发通知"（老师已经验通了），**证明不了到点会响**，
+ *   那就是一次**假绿**（`AGENTS.md` §三.1）。
+ *
+ * ⚠️ 三态不许混（§三.4）：`{unsupported:true}` = 这一版壳还没有这个检查；
+ *   `{scheduled:false, stage:'…'}` = 跑过、断在某一环（`stage` 说得出是哪一环）；
+ *   `{scheduled:true}` = 真交给系统了（**到没到**还要 `runRemindSelfCheck()` 回读）。
+ */
+export async function runRemindSelfTest(): Promise<ShellRemindCheck> {
+  const s = shell()
+  if (typeof s?.remindSelfTest !== 'function') return { unsupported: true }
+  try {
+    const r = await s.remindSelfTest()
+    return r && typeof r === 'object' ? r : { scheduled: false, stage: 'schedule', why: '自检没返回结果。' }
+  } catch {
+    return { scheduled: false, stage: 'schedule', why: '自检没跑起来。' }
+  }
+}
+
+/**
+ * 🩺 **回读**那条自检到点了没有（"两分钟后试一条"的第二步）。
+ *
+ * `{unsupported:true}` = 这一版壳还没有这个检查；`{fired:false, elapsed:true}` =
+ * 过了点接收器没跑到（断在接收器那一环）；`{fired:false, elapsed:false}` = **还没到点**（灰）。
+ */
+export async function runRemindSelfCheck(): Promise<ShellRemindFired> {
+  const s = shell()
+  if (typeof s?.remindSelfCheck !== 'function') return { unsupported: true }
+  try {
+    const r = await s.remindSelfCheck()
+    return r && typeof r === 'object' ? r : { fired: false, elapsed: false }
+  } catch {
+    return { fired: false, elapsed: false }
+  }
+}
+
+/**
+ * 把"两分钟后试一条"的读数翻成**老师能照做的一句话**（纯函数 ⇒ 判据能直接跑它，§三.2）。
+ *
+ * 🔴 分档按**断在哪一环**（每一环对应一个**不同的**动作），**不许**合成一句"定时提醒不通"：
+ *   · `unsupported`       → 这一版应用还没有这个检查（**如实说**，不许假装检查过了）
+ *   · `notify=false`      → 去系统里把这个应用的通知打开
+ *   · `granted=false`     → 13+ 还没允许发通知
+ *   · `channel=false`     → **渠道没建起来**（Android 8+ 往不存在的渠道发 = 静默丢掉）
+ *   · `schedule` 断       → 系统闹钟没排上（把这句 `why` 原样给老师，它说的是真因）
+ *   · `scheduled=true`    → 已排上，告诉他"两分钟后会响"（**还没响**，别写成已经响了）
+ *
+ * @param check `runRemindSelfTest()` 的读数
+ * @param sdk   安卓 API 级别（不给 = 不知道 ⇒ 不说那句只对 13+ 成立的话）
+ */
+export function remindCheckHint(
+  check: ShellRemindCheck,
+  sdk?: number,
+): { text: string; desc: string; tone: 'ok' | 'warn' } {
+  if (check.unsupported) {
+    return { text: '这个版本还不能定时自检', desc: '装上最新版再试。', tone: 'warn' }
+  }
+  if (check.notify === false) {
+    return { text: '系统里通知是关着的', desc: '去系统设置把本应用的通知打开，再点一次。', tone: 'warn' }
+  }
+  if (check.granted === false) {
+    return { text: '还没允许本应用发通知', desc: '去系统设置允许本应用发通知，再点一次。', tone: 'warn' }
+  }
+  if (check.channel === false) {
+    return { text: '通知渠道没建起来', desc: '这一条要装新版本才能修。', tone: 'warn' }
+  }
+  /*
+   * 🔴 **渠道被单独关掉**这一档（`areNotificationsEnabled()` 管不到它）：
+   *   老师两秒就能自己开 —— 所以给的是**可操作的一步**，不是"就是没响"。
+   */
+  if (check.channelOn === false) {
+    return {
+      text: '「到点提醒」被关掉了',
+      desc: '去系统的应用通知设置里把「到点提醒」那个开关打开，再点一次。',
+      tone: 'warn',
+    }
+  }
+  if (check.scheduled === false) {
+    // 把原生当场回的中间结果也说出来（"排了几条 / 单子里几条 / 精确闹钟给没给"）
+    const detail =
+      check.innerScheduled !== undefined && check.innerScheduled >= 0
+        ? `系统只收下 ${check.innerScheduled} 条（单子里 ${check.innerRequested ?? 0} 条）。`
+        : ''
+    return {
+      text: '定时提醒没排上',
+      desc: `${check.why || '系统闹钟这一步没过去。'}${detail}`,
+      tone: 'warn',
+    }
+  }
+  /*
+   * ⚠️ 到这里是"**排上了**"——不是"响了"。文案必须写成**将要发生**的事，
+   *   写"已发出"就是把"排上"说成"响了"（§三.4：不许把"没结论"说成结论）。
+   * 🔴 中间结果一律报出来（用户要求）：真的排上了几条 · 精确闹钟读数是几。
+   */
+  const inner =
+    check.innerScheduled !== undefined && check.innerScheduled >= 0
+      ? `已排上 ${check.innerScheduled} 条 · 精确闹钟${check.innerExact ? '已允许' : '没允许'}`
+      : ''
+  /*
+   * ⚠️ "可以停在这一页等" 只对 **Android 12+（API 31+）** 说：自检那条带了
+   *   `selfCheck` 标记、会绕过接收器的前台早退；而**真实提醒不会**（前台由即时那条路负责）。
+   *   量不到 sdk（`undefined`）⇒ 不说这句（§三.4：没结论是灰）。
+   */
+  return {
+    text: '两分钟后会响一条定时提醒',
+    desc: [
+      inner,
+      sdk !== undefined && sdk >= 31 ? '可以先把这个应用切到后台，也可以就停在这一页等。' : '可以先把这个应用切到后台。',
+      check.exact === false ? '还没允许「闹钟和提醒」，可能会晚一点响。' : '',
+    ]
+      .filter(Boolean)
+      .join(' '),
+    tone: 'ok',
+  }
+}
+
+/**
+ * 那条自检**到没到**翻成一句人话（纯函数；只有 apk 会走到）。
+ *
+ * 🔴 三态（§三.4）—— 把"还没到点"与"过了点没到"分开，是这一条的全部意义：
+ *   · `unsupported`                    → 这一版应用还没有这个检查
+ *   · `fired=true`                     → **整条链通了**（权限 → 渠道 → 排程 → 接收器 → 通知）
+ *   · `fired=false` + `elapsed=false`  → **还没到点**（灰：再等等，别说坏了）
+ *   · `fired=false` + `elapsed=true`   → 过了点还没到 ⇒ **断在接收器那一环**（说得出是哪一环）
+ */
+export function remindFiredHint(fired: ShellRemindFired): {
+  text: string
+  desc: string
+  tone: 'ok' | 'warn'
+} {
+  if (fired.unsupported) {
+    return { text: '这个版本还不能定时自检', desc: '装上最新版再试。', tone: 'warn' }
+  }
+  if (fired.fired === true) {
+    return {
+      text: '定时提醒这条链是通的',
+      desc: `刚才那条就是走系统闹钟到点的。渠道 ${fired.channel || '未知'}，通知号 ${fired.notifyId ?? -1}。关掉应用也会响。`,
+      tone: 'ok',
+    }
+  }
+  if (fired.elapsed === true) {
+    /*
+     * 🔴 断在接收器这一环时，把**能读到的都读出来**（用户要求"屏上报哪几个数"）：
+     *   有没有抛错 / 渠道读到什么 / 通知号是多少 —— 空着的那一格就是断点。
+     */
+    const parts = [
+      `该响 ${fired.due ? new Date(fired.due).toLocaleTimeString('zh-CN') : '未知'}`,
+      `接收器读到 ${fired.fired ? '到了' : '没到'}`,
+      `渠道 ${fired.channel || '（空）'}`,
+      `通知号 ${fired.notifyId ?? -1}`,
+    ]
+    if (fired.receiverError) parts.push(`报错 ${fired.receiverError}`)
+    return {
+      text: '到点了但没响',
+      desc: `${parts.join(' · ')}。`,
+      tone: 'warn',
+    }
+  }
+  return { text: '还没到点', desc: '再等一会儿，别关掉通知栏。', tone: 'warn' }
+}
+
+/**
+ * 🩺 **安卓 API 级别**（`Build.VERSION.SDK_INT`；只有 apk 有）。
+ *
+ * @returns `0` = **量不出来**（网页版 / 两个 exe / 老壳 / 读失败）
+ *          —— 调用方**不许**照它分档（§三.4：没结论是灰，不许拿"不知道"当"是"）。
+ */
+export async function readSdkVersion(): Promise<number> {
+  const s = shell()
+  if (typeof s?.sdkVersion !== 'function') return 0
+  try {
+    const v = await s.sdkVersion()
+    return typeof v === 'number' && v > 0 ? v : 0
+  } catch {
+    return 0
+  }
+}
+
+/**
+ * 🩺 **等那条自检到点，然后把"到没到"回报给界面**（"两分钟后试一条"的第二步的驱动）。
+ *
+ * 🔴 为什么不做成"睡两分钟再问一次"：那条自检**正好在两分钟后**响，
+ *   一次定时问下去必然问在一次**没有信息的时刻**上（早了=还没到，晚了=没意义）。
+ *   ⇒ 按固定间隔**回读**，一旦"过了点"( `elapsed` ) 或"真的到了"( `fired` ) 就收工。
+ *   这**不是**页内定时器兜底那一条：它**不发任何通知**，只读原生那一笔账
+ *   （到点响不响由系统闹钟与 `YlxbAlarmReceiver` 决定，与页面在不在前台无关）。
+ *
+ * ⚠️ `unsupported`（老壳没有 `remindSelfCheck`）⇒ **立刻收工**，一个字都不猜。
+ * @param onResult 每次读到结果都回调一次（界面**就地**把"还没到点 / 通了 / 没响"说出去）
+ * @returns 一个"取消"函数（组件卸载时调，避免报到一次已经卸载的组件上）
+ */
+export function watchRemindSelfCheck(
+  onResult: (r: ShellRemindFired) => void,
+  intervalMs = 20_000,
+  maxRounds = 12,
+): () => void {
+  let stopped = false
+  let rounds = 0
+  let timer: number | undefined
+  const stop = () => {
+    stopped = true
+    if (timer !== undefined) window.clearTimeout(timer)
+  }
+  const step = async () => {
+    if (stopped) return
+    rounds += 1
+    const r = await runRemindSelfCheck()
+    if (stopped) return
+    // 老壳没有这个口 ⇒ 立刻收工（**不许**猜"到了"或"没到"）
+    if (r.unsupported) {
+      stop()
+      return
+    }
+    /*
+     * ⚠️ **只有"到了"或"过了点还没到"才回报**：`fired:false && elapsed:false` 是
+     *   "还没到点"，把这一档也推出去等于每 20 秒刷老师一条"还没到点"
+     *   —— 那不是信息，是噪音（与 `remindFiredHint()` 的三态分档是同一件事）。
+     */
+    if (r.fired === true || r.elapsed === true || rounds >= maxRounds) {
+      onResult(r)
+      stop()
+      return
+    }
+    timer = window.setTimeout(() => void step(), intervalMs)
+  }
+  void step()
+  return stop
 }
 
 /**

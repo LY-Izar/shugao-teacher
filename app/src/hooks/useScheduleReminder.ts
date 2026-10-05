@@ -158,7 +158,22 @@ export function useScheduleReminder() {
     let alive = true
     const arm = async () => {
       /*
-       * 🔴 刚从「闹钟和提醒」那页回来 ⇒ 先**量一次**"开成了没有"，再决定排不排。
+       * 🔴🔴 **先量一次"精确闹钟给没给"**（2026-10-05 真机第四轮）。
+       *
+       * 改之前这句只在**失败分支**里读（而且被 `warnedNoNative` 挡成"一次会话只读一次"）
+       * ⇒ 老师去「闹钟和提醒」把开关打开、切回来，这个读数**不会重读** ⇒
+       * 界面上照旧按旧读数说那句最误导的话 ✗（他真机上看到的就是这个形态：
+       * 人已经授权过、应用还在说"排不了"）。
+       * 现在它排在**这条 effect 的最前面**，而这条 effect 挂着
+       * "回到前台就重跑"的监听（见下面 `rearm`）⇒ **每次切回前台都重读一遍** ✓。
+       * ⚠️ 一次 arm 只读**一次**：下面每一档都用**这一个**读数
+       *   （同一分钟内量两次只会漂，而且那是多一次跨层往返）。
+       */
+      const canExactNow = await canScheduleExactNative()
+      if (!alive) return
+
+      /*
+       * 🔴 刚从「闹钟和提醒」那页回来 ⇒ 用**刚量到的那个**读数决定说不说"开成了没有"。
        *   条条都摆明才动：量到 `false` 说明他还没开 ⇒ **别**重排（重排必失败）、
        *   **别**再跳一次设置（那就是把人来回弹）；量到 `true` / `null` 照旧重排一遍
        *   （这也是这一页原来就有的"回到前台重排"语义，一个字没改）。
@@ -166,9 +181,7 @@ export function useScheduleReminder() {
       const backFromSettings = returnFromSettings.current
       if (backFromSettings) {
         returnFromSettings.current = false
-        const armed = await canScheduleExactNative()
-        if (!alive) return
-        if (armed === false) {
+        if (canExactNow === false) {
           push({
             text: '提醒仍只能在应用内显示',
             tone: 'warn',
@@ -204,7 +217,29 @@ export function useScheduleReminder() {
         if (items.length) days.push({ ymd, items })
       }
 
-      const ok = await scheduleNativeReminders(nativeReminderPlan(days, now))
+      const plan = nativeReminderPlan(days, now)
+      /*
+       * 🔴🔴 **"没东西可排"不是失败**（2026-10-05 真机第四轮）。
+       *
+       * 断在哪：`scheduleNativeReminders()` 在 `alarms.length === 0` 时直接回 `false`
+       *   （`notify.ts` 那条能力门），于是这里落到下面那个失败分支、说出
+       *   「提醒改在应用内显示。关掉应用就收不到了。」+「换一版应用可以收到系统通知。」
+       *   —— 而**真因根本不是"排不了"**：是**今天要响的提醒都已经过去了**
+       *   （`nativeReminderPlan()` 把 `fireAt <= 现在` 的那些滤掉）+ 往后几天没有课
+       *   （`s.weekday === wd` 那条 filter）⇒ 单子本来就是空的。
+       *   老师真机上看到那句误导话的**那一次**，就是他 14:31 那节课的提醒（14:21）已经过去的时候 ✓
+       *   ⇒ 他据此以为"应用排不了闹钟"，还去开了一遍「闹钟和提醒」✗
+       *
+       * ⇒ 空单子这一档**什么都不说**（没有异常要报，也没有可操作的一步）；
+       *   真正的"排不上 / 被系统拒"是下面 `ok === false` 那一档，它一个字没改。
+       * ⚠️ 这里**每一条出口的写法必须与判据钉的字符串一字不差**：
+       *   顺序判据（`nav-checks` A22 ⑪）要求
+       *   `if (!shellCanScheduleAlarms()) return`（上面）→ `const plan = …` → 那个
+       *   `push({ text: hint.text, … })` 出口 —— 加早退时别把这几个位置挪乱。
+       */
+      if (plan.length === 0) return
+
+      const ok = await scheduleNativeReminders(plan)
       if (!alive) return
       if (!ok) {
         /*
@@ -226,10 +261,9 @@ export function useScheduleReminder() {
            *     它回 `false` 不抛错）—— 但**文案不依赖**这次跳成功没有：
            *     老师说得出"去系统设置开『闹钟与提醒』"就够了。
            */
-          const canExact = await canScheduleExactNative()
-          const hint = remindFailHint(canExact, shellCanOpenExactAlarmSettings())
+          const hint = remindFailHint(canExactNow, shellCanOpenExactAlarmSettings())
           push({ text: hint.text, tone: 'warn', desc: hint.desc })
-          if (canExact === false && shellCanOpenExactAlarmSettings()) {
+          if (canExactNow === false && shellCanOpenExactAlarmSettings()) {
             // 真的把老师送过去；他改完切回来会看到下面那条"开完就生效"
             await openExactAlarmSettings()
             if (!alive) return
@@ -245,14 +279,28 @@ export function useScheduleReminder() {
     }
 
     void arm()
-    // 回到前台就重排一次：老师可能刚在系统设置里把通知/精确闹钟打开
-    const onVisible = () => {
+    /*
+     * 🔴🔴 **回到前台就重读一遍**（2026-10-05 真机第四轮）。
+     *
+     * 老师去「闹钟和提醒」把开关打开，切回来时这一页**不会重新挂载** ⇒ 不重读的话
+     * 界面上照旧按**旧读数**说那句话（他真机上看到的就是这个形态：人已经授权过，
+     * 应用还在说"排不了"）✗。`arm()` 现在**第一句**就是 `canScheduleExactNative()`
+     * （见上面那条注释）⇒ 挂上这两个监听就等于"每次回到前台重读一次读数"。
+     *
+     * ⚠️ 两个监听都要：`visibilitychange` 管切走再切回（后台 → 前台），
+     *    `focus` 管"页面一直可见、只是从别的窗口点回来"这一档（部分安卓 WebView 只发后者）。
+     * ⚠️ 这也是"回到前台重排一次"这个**原有语义**（一个字没改）——
+     *    老师可能刚在系统设置里把通知 / 精确闹钟打开，重排一次才生效。
+     */
+    const rearm = () => {
       if (document.visibilityState === 'visible') void arm()
     }
-    document.addEventListener('visibilitychange', onVisible)
+    document.addEventListener('visibilitychange', rearm)
+    window.addEventListener('focus', rearm)
     return () => {
       alive = false
-      document.removeEventListener('visibilitychange', onVisible)
+      document.removeEventListener('visibilitychange', rearm)
+      window.removeEventListener('focus', rearm)
     }
   }, [schedule, classes, snoozes, push])
 
