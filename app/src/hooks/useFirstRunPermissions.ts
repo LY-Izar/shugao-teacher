@@ -56,8 +56,9 @@ export function useFirstRunPermissions() {
     if (!hydrated || !teacher || isDemo || accountKind === 'classroom') return
     /* 总闸：只有 apk 的壳有整条链。exe 与网页版：一个字都不新增（弹窗噪音）。 */
     if (notifyChannel() !== 'native' || !shellHasPushFlow()) return
+    let doneMark = false
     try {
-      if (localStorage.getItem(DONE_KEY) === '1') return
+      doneMark = localStorage.getItem(DONE_KEY) === '1'
     } catch {
       return
     }
@@ -66,12 +67,29 @@ export function useFirstRunPermissions() {
     void (async () => {
       const steps: string[] = []
 
+      /*
+       * 🔴 2026-10-05 真机第五轮（用户把 1.1.3 **覆盖安装**到 1.1.2 上、没卸载没清数据的实测）：
+       *
+       * `shugao.perms.done` 只是**一个布尔**，而"账上记过"与"现在真的达成了"是两件事 ——
+       *   覆盖安装会把上一个版本留下的 `=1` 原样带进新版（localStorage 跟着 WebView 数据走）
+       *   ⇒ 新版**整条流水线一次都不跑**：通知授权那一步不再请求、推送钥匙不再登记，
+       *     而屏上**什么都不说** ⇒ 用户看到的就是"通知权限还是没有正常弹出"（§三.5：不许静默）。
+       *
+       * ⇒ 跳过整条流水线的判据从"一个布尔"改成**两件事同时成立**：
+       *   ① 账上记过（`doneMark`）**且** ② 现在真的量到"通知开着"（`st.notify === true`）。
+       *   量不到（`null` = 不知道）或量到没开 ⇒ **照跑**。这不是"每次都重跑一遍"：
+       *   下面每一步都是**先量再动** —— 已授权的精确闹钟不弹、已在白名单的电池不弹、
+       *   register 是幂等的 ⇒ 只有**真正缺的那一步**会被补上，不会重复打扰。
+       */
+      let st = await shellPushStatus()
+      if (doneMark && st?.notify === true) return
+
       /* ① 通知授权弹窗（Android 13+；12- 及以下系统默认给，弹都不弹） */
       const perm = await shellRequestNotifyPermission()
       if (perm === 'granted') steps.push('通知已允许')
 
       /* ② 精确闹钟（Android 12+）：量到没给就跳系统页；回来复核，还不给就跳过这一步 */
-      let st = await shellPushStatus()
+      st = await shellPushStatus()
       if (st && st.exact === false) {
         push({
           text: '第 2 步 / 共 3 步：允许「闹钟和提醒」',
@@ -122,7 +140,24 @@ export function useFirstRunPermissions() {
           //   （插件不存在 / Promise reject）都只回 `{ok:false}` 把 why 吃掉
           //   ⇒ 屏上只剩「前台服务没起来」，用户和开发者都无从下手。
           //   这里再兜一层底：why 为空时说的是"原因没带回来"而不是编一个原因。
+          /*
+           * 🔴 2026-10-05 真机第五轮：**通知那一格的读数也要上屏**。
+           *
+           * 用户连着两轮报"通知权限始终没有正常弹出" —— 而这一步（① 请求授权）
+           * 无论回 `granted` 还是 `denied`，**今天在屏上都没有任何痕迹** ✗：
+           * 已授权时系统**本来就不会再弹**（Android 只弹一次），于是"没弹"与"早就给了"
+           * 在界面上一模一样，谁也分不清。⇒ 这里把**当场量到的读数**写进横幅：
+           * 通知开关关着 / 13+ 没授权 / 这个壳没有那个口 —— 三档分别说自己那一句，
+           * 量不到（`st` 为 `null`）就一个字都不说（§三.4：没结论是灰，不许编）。
+           */
           desc:
+            (st?.notify === false
+              ? '系统里这个应用的通知开关是关着的（去系统设置里打开）。 '
+              : perm === 'denied'
+                ? '系统还没允许这个应用发通知（若从没弹过授权窗，去系统设置里手动打开）。 '
+                : perm === 'unsupported'
+                  ? '这个壳没有通知授权那个口。 '
+                  : '') +
             (startedRes.why?.trim() || '原因没带回来（看 logcat 里 ShugaoNative 那行）') +
             ' · 下次打开应用会自动再试。',
         })
