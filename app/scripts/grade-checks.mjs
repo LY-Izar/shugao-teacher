@@ -1225,12 +1225,26 @@ await withLock(async () => {
   /* ---------------- M：读策略（读得宽）与前端不崩（探针） ---------------- */
   {
     /* `student_subjects` 的读策略：看得见这个班就能读 —— 这几条库里没有 RLS 的完整替身，
-       所以只核"策略在不在"，真正的逐人可见量在 `rls-checks.mjs` 里 */
+       所以只核"策略在不在"，真正的逐人可见量在 `rls-checks.mjs` 里。
+       🔴 2026-10-15：期望值原来只有 3 条（两张表的读 / 写），**落后于代码** ——
+       `schema.sql` §42.2 的维护模式那一轮（提交 47fc6d6）把 `class_members` 加进了
+       冻结名单（见那份名单里的 `('class_members', 'insert|update|delete')`），
+       于是这张表上**多出三条** `maintenance_freeze_*`（restrictive，只挂写命令）。
+       ⇒ 为什么期望值变了：**不是放宽**，是把"这两张表上真实存在的策略"补全 ——
+       维护中禁写是 §42 的设计，本来就该在这两张表上看得见；
+       少写一条的代价是 CI 恒红（本仓库恰是 47fc6d6 起红到 83172bc）。
+       ⚠️ `student_subjects` **不在**那份冻结名单里（改名时漏了或有意排除），所以它没有冻结策略 ——
+       这一条也被这一行钉住：将来谁把它加进去 / 从 `class_members` 拿掉，这里都要跟着动。
+       ⚠️ 这里**只用 `tablename` 圈定**（不照 `rls-checks` 那样 `not like 'maintenance_freeze_%'` 过滤掉），
+       所以未知的新策略仍然会**当场红**（这行是精确比对，不是"至少包含"）。 */
     const pol = rowsOf(
       await db.query(`select policyname from pg_policies where tablename in ('student_subjects','class_members') order by policyname`),
     ).map((x) => x.policyname)
-    eq('M1：两张新表的策略都在（读 / 写各一条）', pol, [
+    eq('M1：两张新表的策略就是这六条（class_members 的读 + 三条维护冻结；student_subjects 的读 / 写）', pol, [
       'class_members_read',
+      'maintenance_freeze_delete',
+      'maintenance_freeze_insert',
+      'maintenance_freeze_update',
       'student_subjects_read',
       'student_subjects_write',
     ])
