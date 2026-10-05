@@ -176,7 +176,41 @@ async function mintSessionFor(
   return { error: `造会话第 2 步失败。${lastErr}` }
 }
 
+/**
+ * 🔴🔴 2026-10-05 真机第五轮：**整条处理过程包一层 try/catch**（改之前一处都没有）。
+ *
+ * 真机横幅原文（用户截的）：
+ *   `startPush 里 register（POST …/api/push）这一步：HTTP 500 · 服务端返回的不是 JSON
+ *    对象（响应体开头：error code: 1101）`
+ * `error code: 1101` 是 **Cloudflare 自己的码** = Worker 抛了**未捕获的 JavaScript 异常**
+ * —— 函数里任何一处 `await ….json()`、任何一次 `undefined.xxx` 抛出来，平台都会把响应
+ * 换成纯文本的 `error code: 1101`（线上实测：`Content-Type: text/plain`、
+ * `Content-Length: 17`、HTTP 500）⇒ 原生 `new JSONObject(<纯文本>)` 当场抛 org.json 黑话，
+ * **HTTP 码与真因一起被吞掉**（§三.5：不可写的路径要显式报错，不许静默）。
+ *
+ * ⇒ 这里兜底：异常一律回**JSON**（`status` / `message` / `detail`）+ 502。
+ *   `detail` 带**异常原文**（`String(e)` —— 只是消息，**不是**栈，不泄内部信息）
+ *   ⇒ 用户把横幅那句话原样发回来就能一路追到真因。
+ *
+ * ⚠️ 已有的正常分支（register / pull / revoke 的响应体、状态码、字段）**一个字都没动**。
+ */
 export async function onRequestPost(context: { request: Request; env: Env }): Promise<Response> {
+  try {
+    return await handlePush(context)
+  } catch (e) {
+    return json(
+      {
+        status: 'error',
+        message: '推送接口出错了（服务端）。把下面这行原样发给管理员。',
+        detail: String(e),
+      },
+      502,
+    )
+  }
+}
+
+/** 真正的处理过程 —— 被上面那层 try/catch 整个罩住（同文件内，不导出） */
+async function handlePush(context: { request: Request; env: Env }): Promise<Response> {
   const { request, env } = context
 
   if (!serviceKey(env) || !anonKey(env) || !baseUrl(env)) {
@@ -190,6 +224,17 @@ export async function onRequestPost(context: { request: Request; env: Env }): Pr
   try {
     body = (await request.json()) as typeof body
   } catch {
+    return json({ status: 'error', message: '请求格式不对' }, 400)
+  }
+  /*
+   * 🔴 2026-10-05：**形状守卫**。
+   *   `request.json()` 对字面 `null` 是**成功**的（`null` 是合法 JSON）⇒ `body` 会是
+   *   `null` ⇒ 下一句 `body.action` **当场 TypeError**（这是 `error code: 1101` 的一种来路）。
+   *   字符串 / 数字 / 布尔同理（`(await request.json())` 的回值就是那几种标量）。
+   * ⇒ 读 `.action` **之前**先确认"它是个对象"，不是就回 400「请求格式不对」。
+   * ⚠️ 数组是 `typeof === 'object'`，放行 —— 读 `.action` 只会得到 `undefined`（不会抛）。
+   */
+  if (typeof body !== 'object' || body === null) {
     return json({ status: 'error', message: '请求格式不对' }, 400)
   }
   const action = body.action ?? ''
@@ -206,8 +251,24 @@ export async function onRequestPost(context: { request: Request; env: Env }): Pr
     }
     const session = { access: minted.access, refresh: minted.refresh }
     await svc(env, '/rest/v1/push_tokens?teacher_id=eq.' + me.id, { method: 'DELETE' })
+    /*
+     * 🔴🔴 2026-10-05 真机第五轮：**`Prefer: return=representation` 原来漏了 —— 这就是那条
+     *    `error code: 1101` 的真凶**（原生的 register 请求形状是写死的
+     *    `{"action":"register"}` + `Authorization: Bearer`，见打包工程
+     *    `YlxbNativePlugin.java` 的 `startPush` ⇒ 上面那条形状守卫**不是**它触发的）。
+     *
+     *    为什么漏了就必炸：PostgREST 对 POST 的默认是 `return=minimal` —— 插成功也只回
+     *    **201 + 空体**（这正是全仓别处读 `json()` 的 POST 一律显式写
+     *      `Prefer: return=representation` 的原因：`notice.ts` / `teacher-account.ts` /
+     *      `announcement.ts` / `feedback.ts` / `admin/release.ts` … 一处不缺）。
+     *    而下一句 `await ins.json()` 读的是**空体** ⇒ 抛 `SyntaxError: Unexpected end of
+     *    JSON input` ⇒ 冲出函数 ⇒ 平台换成纯文本 1101 ⇒ 原生横幅只剩 org.json 黑话，
+     *    "register 永远建不起拉取钥匙"这件事在界面上看不出任何原因。
+     *    ⇒ 补上它，`rows[0].token` 那两行才有东西可读（这才是这段代码本来的意思）。
+     */
     const ins = await svc(env, '/rest/v1/push_tokens', {
       method: 'POST',
+      headers: { Prefer: 'return=representation' },
       body: JSON.stringify({
         teacher_id: me.id,
         email: me.email,
@@ -231,7 +292,29 @@ export async function onRequestPost(context: { request: Request; env: Env }): Pr
       }
       return json({ status: 'error', message: '推送钥匙没存上（服务端）。', detail: t }, 502)
     }
-    const rows = (await ins.json()) as Array<{ token: string }>
+    /*
+     * 🔴🔴 2026-10-05 真机第五轮：**`await ins.json()` 原来裸着**。
+     *    上游回 2xx 但响应体**不是 JSON**（空体 / 纯文本 / HTML 网关页）时它当场抛，
+     *    而"到底回了什么"就在那个响应体里 —— 抛掉它等于把唯一的线索丢了（§三.5）。
+     * ⇒ 先 `clone()` 留一份原文（`json()` 会把 body 消费掉，克隆出来的那份还能读），
+     *    解析失败时把 **HTTP 码 + 响应体开头（≤200 字节）+ 异常原文** 一起写进 `detail`。
+     * ⚠️ 这不改任何成功路径：解析成功时 `rows` 与改之前**逐字同一个值**。
+     */
+    const insRaw = ins.clone()
+    let rows: Array<{ token: string }>
+    try {
+      rows = (await ins.json()) as Array<{ token: string }>
+    } catch (e) {
+      const t = await insRaw.text().catch(() => '')
+      return json(
+        {
+          status: 'error',
+          message: '推送钥匙存进去了，但服务端回的话读不懂（服务端问题）。',
+          detail: `HTTP ${ins.status} · 响应体开头：${t.slice(0, 200) || '(空)'} · ${String(e)}`,
+        },
+        502,
+      )
+    }
     const token = rows[0]?.token
     if (!token || !UUID_RE.test(token)) return json({ status: 'error', message: '推送钥匙没存上。' }, 502)
     return json({ status: 'ok', token })

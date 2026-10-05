@@ -8418,7 +8418,19 @@ section('第二十七节 · A22：到点提醒交给系统排程（桥接层 / �
   let shellWideJudged = 0 // 壳那一侧真的判了的条数（打包工程在的机器上）
   /* 壳那一侧（⑮–㉑）**一共多少条判据** —— 节末自证拿它当边界，
      谁把某条挪进/挪出窗口（灰的范围开大/开小）那条自证当场红；加了新判据就把这个数跟着加。 */
-  const SHELL_LEG_N = 21
+  const SHELL_LEG_N = 22
+  /**
+   * 🔴 上面这 22 条里，**不依赖仓库外那份输入**（只吃内存里造出来的字符串）、
+   *    **两台机器上都真判**的条数 —— 就是 ⑲-补 那条**形状自证**（`checkUngrayed`）。
+   *
+   * 2026-10-05（`dc34e8c` 那次 CI 红，第四次）补：原来它是**普通 `check`** ⇒ 壳不在的
+   * 干净检出（= CI）里它**也落灰** ⇒ "判据自证"这条在 CI 上从没跑过（§三.1 那种静默 no-op：
+   * 既不红也不绿、报告里照样写"通过"）。可它**一个字节都不读仓库外的文件** ⇒ 按本节
+   * 定下的规矩（"只在**探不到**时灰，能在 CI 验的一条不许灰"）它**必须真判**。
+   * ⇒ 单给它一个 `checkUngrayed` 的口，节末自证用这个数把账对平：
+   *    壳不在 ⇒ 灰 `22 - 1 = 21` 条、真判 **1** 条；壳在 ⇒ 灰 0 条、真判 22 条。
+   */
+  const SHELL_CI_LEG_N = 1
   const shellSide = (fn) => {
     const g = grayed
     const j = passed + failures.length
@@ -8433,6 +8445,56 @@ section('第二十七节 · A22：到点提醒交给系统排程（桥接层 / �
     }
     shellWide += grayed - g
     shellWideJudged += passed + failures.length - j
+  }
+  /**
+   * 🔴 "**能在 CI 验的一条不许灰**"：⑲-补 那条**形状自证**只吃内存里造出来的字符串
+   *    （`probeBody()` 拼的假桥接层），跟仓库外那份真桥接层**一个字节都不相干**
+   *    ⇒ 它在 CI 上也得**真判**，不许落灰。
+   * ⚠️ 所以只给它开这一个口：判这一条时把灰档**关一下**，判完立刻复原（`shellGray` 的账照旧）。
+   * ⚠️ 它算"判了的"、而且不依赖仓库外那半 ⇒ 节末自证那本账认得它（`SHELL_CI_LEG_N`）。
+   * 🔴 **别拿它去放行"真读仓库外文件"的判据** —— 那样节末自证的条数当场对不上，直接红。
+   */
+  const checkUngrayed = (ok, label, observed) => {
+    const was = shellGray
+    shellGray = false
+    try {
+      check(ok, label, observed)
+    } finally {
+      shellGray = was
+    }
+  }
+  {
+    /* 🧪 自证（可红）：这个口**真的绕过灰档** —— 灰档开着时普通 `check` 落灰、
+       而 `checkUngrayed` 照旧计进"判了的"。谁把它改回普通 `check`（= 那条形状自证
+       又变成 CI 上的静默 no-op），这一条当场红。
+       ⚠️ 量完把计数器**原样复原**：这里只是"量一下这个口"，不该污染门禁的账
+       （否则它自己那 1 灰 1 判会顶到 `appGray` / `shellWide` 上，节末自证反过来假红）。 */
+    const g0 = grayed
+    const c0 = shellGrayCount
+    const p0 = passed
+    const f0 = failures.length
+    const was = shellGray
+    const realLog = console.log
+    console.log = () => {}
+    let probeOK = false
+    try {
+      shellGray = true
+      check(true, '自证占位（普通 check）', '灰')
+      checkUngrayed(true, '自证占位（checkUngrayed）', '判')
+      probeOK = grayed - g0 === 1 && passed + failures.length - p0 === 1
+    } finally {
+      console.log = realLog
+      shellGray = was
+      grayed = g0
+      shellGrayCount = c0
+      passed = p0
+      failures.length = f0
+    }
+    check(
+      probeOK,
+      '🧪 A22 ⑲-补 自证②（可红）：`checkUngrayed` **真的绕过灰档**（灰档开着时它照样计进"判了的"），而普通 `check` 照旧落灰 —— 谁把它改回普通 `check`（= ⑲-补 那条"只吃内存形状"的自证又变回 CI 上的静默 no-op），这一条当场红',
+      `灰档开着时：普通 check 灰了 1 条 / 改过的口判了 1 条 ⇒ 这个口绕过灰档=${probeOK}`,
+    )
   }
   const BR_EXACT = /openExactAlarmSettings: function \(\) \{/
   const JAVA_EXACT = /public void openExactAlarmSettings\(PluginCall call\)/
@@ -8839,7 +8901,9 @@ section('第二十七节 · A22：到点提醒交给系统排程（桥接层 / �
      */
     const probeBody = (req, ret) =>
       `bridge = {\n    probe: function () { ${req}\n      return N.remindSelfCheck()\n.then(function (r) { ${ret}; }).catch(function () {})\n    },\n\n    nextOne: function () {}\n  }`
-    check(
+    /* 🔴 用 `checkUngrayed`：这条只吃**内存里造出来的**形状（`probeBody()`），
+       不读仓库外那份桥接层 ⇒ 按"能在 CI 验的一条不许灰"，它在 CI 上也得真判 */
+    checkUngrayed(
       PROBE.every(([req, ret, want]) => propOK(probeBody(req, ret), 'probe') === want),
       '🔴 A22 ⑲-补 判据自证（形状，可红）：这个谓词**认得出"整体透传"与"白名单挑键"两种形态** —— `return r` / `return r || {…}` / `return JSON.parse(JSON.stringify(r))` / `{...r}` / `Object.assign({}, r, {…})` 判过 · `return { a: r.a }` / `return r.sdk` / `return !!(r && r.ok)` 判假；**谁把它改成恒真/恒假，这条当场红**',
       PROBE.map(([req, ret, want]) => `「${ret}」→${propOK(probeBody(req, ret), 'probe') ? '整体透传' : '白名单挑键'}（期望 ${want ? '整体透传' : '白名单挑键'}）`).join(' · '),
@@ -8882,7 +8946,33 @@ section('第二十七节 · A22：到点提醒交给系统排程（桥接层 / �
       /* 🧪 反向对照：把 `remindSelfCheck` 改成**白名单挑键**（内存副本）⇒ 上面那条**当场假** */
       const target = 'return N.remindSelfCheck()'
       const a = BRIDGE2.split(target).length - 1
-      if (a !== 1) throw new Error(`A22 ⑲-补：目标「${target}」在桥接层出现 ${a} 处（必须恰好 1）`)
+      /**
+       * 🔴🔴 **2026-10-05 第四次 CI 红（`dc34e8c`，第 7 步 `nav-checks`）**：这个计数守卫
+       *    原来是**无条件** `throw` —— 而灰档（`shellGray`）**只罩 `check()`，罩不住 `throw`** ✗
+       *    ⇒ 壳不在的干净检出（= CI，打包工程不进这个公开仓库）里 `BRIDGE2` 是**空串**
+       *    ⇒ 目标出现 **0** 处 ⇒ 当场抛 ⇒ **整个脚本死在半路**（`withLock` 只有 `finally`、
+       *    不接异常）⇒ 比"判红一条"更糟：**这一节剩下的、后面所有节一条都没跑，报告也没有**。
+       *    （本机有打包工程 ⇒ `a === 1` ⇒ 恒绿 ⇒ 又一次"本机有的东西 CI 没有"。）
+       * ✅ 分两种情况，判据本身一个字没放宽：
+       *    · **读不到源**（空串 = 壳不在）：**不抛** —— 交给下面的 `check` 走灰档
+       *      （灰只该在"探不到"时出现）；
+       *    · **读到了源却数不到恰好 1 处**（被改名/删掉/多出一份）：照旧**当场抛**
+       *      （真坏就得响；而且这种情形下壳是在的 ⇒ `shellGray` 为 `false` ⇒
+       *      下面那两条 `check` 也会如实判红，不会静默）。
+       *    判据**单独拎成 `shouldThrow`**：下面有一条自证咬它（内联的话自证只能咬一份副本）。
+       */
+      const shouldThrow = (src) => src !== '' && src.split(target).length - 1 !== 1
+      if (shouldThrow(BRIDGE2))
+        throw new Error(`A22 ⑲-补：目标「${target}」在桥接层出现 ${a} 处（必须恰好 1）`)
+      /* 🧪 自证（可红）：把守卫改回"无条件抛"（= `dc34e8c` 那份写法）⇒ 这条当场红；
+         三个方向都钉住：空串**不抛** · 真源（恰好 1 处）**不抛** · 多出一处**抛** */
+      check(
+        shouldThrow('') === false &&
+          shouldThrow(BRIDGE2) === false &&
+          shouldThrow(`${BRIDGE2}\n${target}`) === true,
+        '🧪 A22 ⑲-补 自证③（可红）：那个计数守卫**只在"读到了源却数不到恰好 1 处"时才抛**——**源读不到（空串 = 壳不在 = CI）时不许抛**（抛了就是 `dc34e8c` 那次"第 7 步死在半路"）；谁把它改回无条件 `if (a !== 1) throw`，这条当场红',
+        `空串 ⇒ 抛=${shouldThrow('')}（期望 false）· 真源 ⇒ 抛=${shouldThrow(BRIDGE2)}（期望 false）· 目标多出一处 ⇒ 抛=${shouldThrow(`${BRIDGE2}\n${target}`)}（期望 true）`,
+      )
       const mutated = BRIDGE2.replace(
         target,
         'return N.remindSelfCheck().then(function (r) { return { fired: !!(r && r.fired), elapsed: !!(r && r.elapsed) } })',
@@ -9052,15 +9142,19 @@ section('第二十七节 · A22：到点提醒交给系统排程（桥接层 / �
          它留着反而掩盖了"跨节泄漏"这件事（**已实测：删掉它，本节自证照旧绿**）。 */
     const appGray = grayed - g1b - shellWide // 窗口外灰掉的 = 只能来自"灰的范围开大了"
     const shellLegOK =
-      /* 🔴 壳那一侧（⑮–㉑）一共就是这 15 条：壳在 ⇒ 15 条全真判、一条不灰；
-         壳不在 ⇒ 15 条全落灰、一条都不判。 **谁把某条挪进/挪出窗口（= 把灰的范围开大/开小），
-         这条当场红**（两个方向、两台机器上都能红，不只是 CI 上） */
-      shellWide + shellWideJudged === SHELL_LEG_N && (SHELL_HERE2 ? shellWide === 0 : shellWideJudged === 0)
+      /* 🔴 壳那一侧（⑮–㉑）一共就是这 `SHELL_LEG_N` 条：壳在 ⇒ **全真判、一条不灰**；
+         壳不在 ⇒ 灰 `SHELL_LEG_N - SHELL_CI_LEG_N` 条、真判 **`SHELL_CI_LEG_N`** 条
+         —— 那一条是 ⑲-补 的**形状自证**：它只吃内存里造出来的假桥接层
+         （`probeBody()`）、**一个字节都不读仓库外**，按"能在 CI 验的一条不许灰"它必须真判。
+         **谁把某条挪进/挪出窗口（= 把灰的范围开大/开小），这条当场红**
+         （两个方向、两台机器上都能红，不只是 CI 上）。 */
+      shellWide + shellWideJudged === SHELL_LEG_N &&
+      (SHELL_HERE2 ? shellWide === 0 : shellWideJudged === SHELL_CI_LEG_N)
     const shellHeadOK = SHELL_HERE2 ? shellJudged2 > 0 : shellJudged2 === 0
     check(
       shellLegOK && shellHeadOK && appGray === 0,
-      '🔴 A22 自证（三态）：壳那一侧（①–④ · ⑮–㉑）在壳不在时**全落灰、一条都没判**、壳在时**逐条真判、一条都不灰**；**网页侧一条都没灰** —— 忘关/忘开那个开关、把灰的范围开到网页侧那半、或把壳侧某条挪进/挪出窗口，这条当场红',
-      `壳在=${SHELL_HERE2} · 壳侧①–④ 判了 ${shellJudged2} 条 / 灰了 ${g1b - g0b} 条 · 壳侧⑮–㉑ 共 ${SHELL_LEG_N} 条：判了 ${shellWideJudged} 条 / 灰了 ${shellWide} 条 · 网页侧灰了 ${appGray} 条`,
+      '🔴 A22 自证（三态）：壳那一侧（①–④ · ⑮–㉑）在壳不在时**只剩那条"只吃内存形状"的形状自证真判、其余全落灰**、壳在时**逐条真判、一条都不灰**；**网页侧一条都没灰** —— 忘关/忘开那个开关、把灰的范围开到网页侧那半、把壳侧某条挪进/挪出窗口、或把那条"能在 CI 验"的形状自证又罩回灰档（= CI 上的静默 no-op），这条当场红',
+      `壳在=${SHELL_HERE2} · 壳侧①–④ 判了 ${shellJudged2} 条 / 灰了 ${g1b - g0b} 条 · 壳侧⑮–㉑ 共 ${SHELL_LEG_N} 条：判了 ${shellWideJudged} 条（壳不在时期望 ${SHELL_CI_LEG_N} 条）/ 灰了 ${shellWide} 条 · 网页侧灰了 ${appGray} 条`,
     )
   }
 }
@@ -9535,6 +9629,224 @@ section('第二十四节之三 · A24：推送失败原因不许被吞（真机 
         appSideGray === 0,
       '🔴 A24 自证（三态）：壳不在时 ③ 那两条**全落灰、一条都没判**、壳在时**逐条真判、一条都不灰**；**本节 app 侧那半一条都没灰** —— 谁把 ③ 漏在灰档窗口外（= `4cf89fc` 那次 CI 一进来就死）、把灰的范围开到 app 侧、或改了 ③ 的条数，这条当场红',
       `壳在=${SHELL_BRIDGE_HERE} · ③ 共 ${A24_SHELL_LEG_N} 条：判了 ${shellBridgeJudged} 条 / 灰了 ${shellBridgeGray} 条 · app 侧灰了 ${appSideGray} 条`,
+    )
+  }
+}
+
+/* ============================================================
+   第二十四节之四 · A25：`/api/push` 抛出去的东西**不许冲出函数**（2026-10-05 真机第五轮）
+   ------------------------------------------------------------
+   真机横幅原文（用户截的）：
+     `startPush 里 register（POST /api/push）这一步：HTTP 500 · 服务端返回的不是 JSON
+      对象（响应体开头：error code: 1101）`
+   `error code: 1101` 是 **Cloudflare 自己的码** = Worker 抛了**未捕获的 JavaScript 异常**。
+   本机 curl 复现（body 用文件发，避开 PowerShell 吞引号那件事）：
+     `POST /api/push` body `null` ⇒ **HTTP 500 · Content-Type: text/plain ·
+      Content-Length: 17 · 体 = `error code: 1101``
+     `POST /api/push` body `{"action":"pull"}` ⇒ 401 JSON（路由在，函数被正常调到）
+   ⇒ 原生那侧 `new JSONObject(<纯文本>)` 当场抛 org.json 黑话，**HTTP 码与真因一起被吞**。
+
+   这一节钉四件事（app 侧静态判据，只读 `functions/api/push.ts`）：
+     ① `onRequestPost` **整体**包了一层 try/catch，异常回 JSON + 502 且 `detail: String(e)`；
+     ② 读 `body.action` **之前**有对象形状守卫（字面 `null` 是**合法 JSON**，
+        `request.json()` 会成功返回 `null` ⇒ 原来当场 TypeError）；
+     ③ `await ins.json()` 有保护（上游回 2xx 非 JSON 时，把 HTTP 码 + 响应体开头写进 detail）；
+     ④ 往 `push_tokens` 插那一条**带 `Prefer: return=representation`** —— 这是那条 1101 的
+        **真凶**：PostgREST 对 POST 默认 `return=minimal`（插成功也只回 **201 空体**），
+        而下一句 `ins.json()` 读空体必抛；全仓别处读 `json()` 的 POST 一处不缺地带这个头
+        （`notice.ts` / `teacher-account.ts` / `announcement.ts` / `feedback.ts` /
+         `admin/release.ts` / `schedule-notice.ts` / `admin/errors.ts` …）。
+   ⚠️ 原生 register 的**请求形状**是写死的 `{"action":"register"}` + `Authorization: Bearer`
+      （打包工程 `YlxbNativePlugin.java` 的 `startPush`）⇒ ② 那条守卫**不是**它触发的，
+      真机那 500 出在 ④ 那一处（`ins.json()` 读空体）。
+   每条都有反向对照，且**先数出现次数、不是 1 就抛错**（§三.2 的坑：换的是注释里那份）。
+   ============================================================ */
+section('第二十四节之四 · A25：/api/push 抛出的异常不许冲出函数（Cloudflare 1101）')
+
+{
+  const PUSH = readApp('functions/api/push.ts')
+
+  /** 剥注释（与 A24 同一套写法）：判据只许看**真代码** */
+  const strip = (s) =>
+    String(s)
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/(^|[^:'"`\w])\/\/[^\n]*/gm, '$1')
+  const PCODE = strip(PUSH)
+
+  /** 数出现次数（判据里用它，不做替换 ⇒ 不抛错，红了能看清读数） */
+  const countIn = (needle, hay) => hay.split(needle).length - 1
+  /**
+   * 🔴 反向对照专用：**出现次数必须恰好 1**，否则抛错（`String.replace` 只换第一处，
+   *    而目标串经常在注释里也有一份、且排在真代码前面 ⇒ 改的是注释、判据纹丝不动 = 对照假绿）。
+   *    宁可当场报错，也不假绿（`AGENTS.md` §三.2）。
+   */
+  const mustOnce = (needle, hay, who) => {
+    const hits = countIn(needle, hay)
+    if (hits !== 1) throw new Error(`A25 ${who}：目标「${needle}」出现 ${hits} 处（必须恰好 1）`)
+    return hits
+  }
+
+  /**
+   * 抠出某个函数声明的整段（花括号配平）—— 判据只在**那个函数里**找，别把别处的 try 数进来。
+   * ⚠️🔴 必须**先跨过参数表**再找函数体那个 `{`：`onRequestPost(context: { request: Request;
+   *    env: Env })` 的签名里**自己就带一对花括号**（类型字面量）—— 头一版直接
+   *    `indexOf('{', at)` 抠到的是那对类型花括号（35 个字），于是"函数体里 `try {` 0 处"，
+   *    ① 当场假、反向对照还因"目标 0 处"抛错（§三.2 那条纪律正好把它拦住了，没假绿）。
+   */
+  const fnBody = (src, decl) => {
+    const at = src.indexOf(decl)
+    if (at < 0) return ''
+    const p = src.indexOf('(', at)
+    if (p < 0) return ''
+    let pd = 1
+    let i = p + 1
+    for (; i < src.length && pd > 0; i++) {
+      if (src[i] === '(') pd++
+      else if (src[i] === ')') pd--
+    }
+    const open = src.indexOf('{', i)
+    if (open < 0) return ''
+    let depth = 0
+    for (let j = open; j < src.length; j++) {
+      if (src[j] === '{') depth++
+      else if (src[j] === '}') {
+        depth--
+        if (depth === 0) return src.slice(open, j + 1)
+      }
+    }
+    return ''
+  }
+
+  const POST_DECL = 'export async function onRequestPost'
+  const POST_BODY = fnBody(PCODE, POST_DECL)
+
+  check(
+    POST_BODY.length > 40 &&
+      POST_BODY.length < 900 &&
+      /handlePush/.test(POST_BODY) &&
+      /export async function onRequestPost/.test(PCODE) &&
+      countIn('async function handlePush', PCODE) === 1,
+    'A25 ⓪ 锚点自证：`onRequestPost` 那一整段抠出来了，而且它只做一件事（转发给同文件唯一那个 `handlePush`）—— 抠错了下面四条全是空转',
+    `抠出 ${POST_BODY.length} 字（须 40–900）· 含 handlePush=${/handlePush/.test(POST_BODY)} · handlePush 声明 ${countIn('async function handlePush', PCODE)} 处（须 1）`,
+  )
+
+  /* ---------------- ① 外层 try/catch ---------------- */
+  /**
+   * 那个 `try` 必须是**函数体最外层的第一句** —— 只判"文件里出现过 try"是不够的
+   * （那样"只罩住里面一小段"也会判过，而异常照样冲出去）。
+   */
+  const outerOk = (bodyTxt) =>
+    /^try\s*\{/.test(String(bodyTxt).replace(/^\{\s*/, '')) &&
+    /catch\s*\(\s*\w+\s*\)\s*\{/.test(bodyTxt) &&
+    /detail:\s*String\(\s*e\s*\)/.test(bodyTxt) &&
+    /\b502\b/.test(bodyTxt)
+
+  const outerTryHits = countIn('try {', POST_BODY)
+  check(
+    outerOk(POST_BODY) && outerTryHits === 1,
+    '🔴 A25 ① `onRequestPost` **整体**包了一层 try/catch（整个函数体里只有这一个 try ⇒ 真的是"罩住全函数"），异常一律回 JSON + 502，`detail: String(e)` 带异常原文 —— 改之前任何一次未捕获异常都被 Cloudflare 换成 `text/plain` 的 `error code: 1101`（实测 HTTP 500），原生 `new JSONObject(<纯文本>)` 当场抛 org.json 黑话、HTTP 码与真因一起被吞',
+    `最外层是 try=${/^try\s*\{/.test(POST_BODY.replace(/^\{\s*/, ''))} · catch=${/catch\s*\(\s*\w+\s*\)\s*\{/.test(POST_BODY)} · detail=String(e)=${/detail:\s*String\(\s*e\s*\)/.test(POST_BODY)} · 有 502=${/\b502\b/.test(POST_BODY)} · 函数体里 try 的处数=${outerTryHits}（须 1）`,
+  )
+
+  /* ---------------- ② body 形状守卫（必须在读 .action 之前） ---------------- */
+  const GUARD = "typeof body !== 'object' || body === null"
+  const guardOk = (src) => {
+    const g = src.indexOf(GUARD)
+    const a = src.indexOf('body.action')
+    if (g < 0 || a < 0 || a < g) return false
+    const win = src.slice(g, g + 200)
+    return /请求格式不对/.test(win) && /,\s*400\s*\)/.test(win)
+  }
+  const guardAt = PCODE.indexOf(GUARD)
+  const actionAt = PCODE.indexOf('body.action')
+  check(
+    guardOk(PCODE),
+    '🔴 A25 ② 读 `body.action` **之前**先过对象形状守卫（`typeof body !== \'object\' || body === null` ⇒ 回 400「请求格式不对」）—— `request.json()` 对字面 `null` 是**成功**的（`null` 是合法 JSON），改之前 `body.action` 当场 TypeError（1101 的一条来路）',
+    `守卫在第 ${guardAt} 字 · 第一次读 body.action 在第 ${actionAt} 字（须晚于守卫）· 守卫段里回 400=${/,\s*400\s*\)/.test(guardAt >= 0 ? PCODE.slice(guardAt, guardAt + 200) : '')}`,
+  )
+
+  /* ---------------- ③ ins.json() 有保护 ---------------- */
+  const INS = 'ins.json()'
+  const insOk = (src) => {
+    const at = src.indexOf(INS)
+    if (at < 0) return false
+    const before = src.slice(Math.max(0, at - 600), at)
+    const after = src.slice(at, at + 700)
+    return (
+      /try\s*\{/.test(before) &&
+      /clone\(\)/.test(before) &&
+      /catch\s*\(\s*\w+\s*\)/.test(after) &&
+      /slice\(0,\s*200\)/.test(after) &&
+      /\b502\b/.test(after)
+    )
+  }
+  const insBefore = PCODE.slice(Math.max(0, PCODE.indexOf(INS) - 600), PCODE.indexOf(INS))
+  const insAfter = PCODE.slice(PCODE.indexOf(INS), PCODE.indexOf(INS) + 700)
+  check(
+    insOk(PCODE),
+    '🔴 A25 ③ `await ins.json()` 有保护：先 `clone()` 留一份原文（`json()` 会把 body 消费掉），解析失败时把 HTTP 码 + 响应体开头（≤200 字节）+ 异常原文写进 `detail` 回 502 —— 上游回 2xx 非 JSON（空体 / 纯文本 / 网关页）时原来当场抛，**唯一的线索就在那个响应体里**（§三.5）',
+    `ins.json() 前有 try=${/try\s*\{/.test(insBefore)} · 前有 clone()=${/clone\(\)/.test(insBefore)} · 后有 catch=${/catch\s*\(\s*\w+\s*\)/.test(insAfter)} · 后有 slice(0,200)=${/slice\(0,\s*200\)/.test(insAfter)} · 后有 502=${/\b502\b/.test(insAfter)}`,
+  )
+
+  /* ---------------- ④ 插入那一条带 Prefer: return=representation ---------------- */
+  const PREFER = "Prefer: 'return=representation'"
+  const preferHits = countIn(PREFER, PCODE)
+  const insertAt = PCODE.indexOf("'/rest/v1/push_tokens', {")
+  const notOkAt = PCODE.indexOf('if (!ins.ok)')
+  const preferAt = PCODE.indexOf(PREFER)
+  check(
+    preferHits === 1 && insertAt >= 0 && preferAt > insertAt && preferAt < notOkAt,
+    '🔴 A25 ④ 往 `push_tokens` 插那一条**带** `Prefer: return=representation`（位置就在 `!ins.ok` 那道判断之前）—— PostgREST 对 POST 默认 `return=minimal` ⇒ 插成功也只回 **201 空体** ⇒ 下一句 `ins.json()` 必抛。**这就是真机那条 `error code: 1101` 的真凶**，也是 register 永远建不起拉取钥匙的原因（全仓别处读 `json()` 的 POST 都显式带这个头）',
+    `该头 ${preferHits} 处（须 1）· 插入语句在第 ${insertAt} 字 · Prefer 在第 ${preferAt} 字（须在两者之间）· !ins.ok 在第 ${notOkAt} 字`,
+  )
+
+  /* ---------------- 剥注释自证（§三.2：注释里那份会骗过反向对照） ---------------- */
+  const rawGuardWord = countIn('请求格式不对', PUSH)
+  const codeGuardWord = countIn('请求格式不对', PCODE)
+  check(
+    rawGuardWord > codeGuardWord && codeGuardWord === 2,
+    '🧪 A25 剥注释自证：`请求格式不对` 在原文里比在真代码里多（注释里那一份被剥掉了），而真代码里恰好 2 处（`request.json()` 解析失败那一支 + 形状守卫那一支）—— 证明下面几条看的是**真代码**，不是注释',
+    `原文 ${rawGuardWord} 处 · 剥注释后 ${codeGuardWord} 处（须 2）`,
+  )
+
+  /* 反向对照 G1：把外层 try 换成 `if (false) {`（副本）⇒ ① 当场假 */
+  {
+    const hits = mustOnce('try {', POST_BODY, '①反向对照')
+    const noTry = POST_BODY.replace('try {', 'if (false) {')
+    check(
+      noTry !== POST_BODY && !outerOk(noTry),
+      '🧪 A25 ① 反向对照：把外层那个 `try {` 换成 `if (false) {`（副本 = 没有兜底的那一版）⇒ ① 当场假 —— 证明它咬的是"整个函数体被 try 罩住"，不是"文件里出现过 try"',
+      `目标 ${hits} 处 · 副本被改过=${noTry !== POST_BODY} · 改完 ① 判过=${outerOk(noTry)}（期望 false）`,
+    )
+  }
+  /* 反向对照 G2：把守卫条件换成 `false`（副本）⇒ ② 当场假 */
+  {
+    const hits = mustOnce(GUARD, PCODE, '②反向对照')
+    const noGuard = PCODE.replace(GUARD, 'false')
+    check(
+      noGuard !== PCODE && !guardOk(noGuard),
+      '🧪 A25 ② 反向对照：把守卫条件换成 `false`（副本 = 改之前"不判形状就读 `.action`"的写法）⇒ ② 当场假',
+      `目标 ${hits} 处 · 改完 ② 判过=${guardOk(noGuard)}（期望 false）`,
+    )
+  }
+  /* 反向对照 G3：把"先留一份原文"去掉（副本）⇒ ③ 当场假 */
+  {
+    const hits = mustOnce('ins.clone()', PCODE, '③反向对照')
+    const noClone = PCODE.replace('ins.clone()', 'ins')
+    check(
+      noClone !== PCODE && !insOk(noClone),
+      '🧪 A25 ③ 反向对照：把 `ins.clone()`（先留一份原文）去掉（副本 = 改之前裸读的写法）⇒ ③ 当场假 —— 拿不到 JSON 时连响应体都读不出来（body 已被消费）',
+      `目标 ${hits} 处 · 改完 ③ 判过=${insOk(noClone)}（期望 false）`,
+    )
+  }
+  /* 反向对照 G4：把那个头换成 return=minimal（副本）⇒ ④ 当场假 */
+  {
+    const hits = mustOnce(PREFER, PCODE, '④反向对照')
+    const noPrefer = PCODE.replace(PREFER, "Prefer: 'return=minimal'")
+    check(
+      noPrefer !== PCODE && countIn(PREFER, noPrefer) === 0,
+      '🧪 A25 ④ 反向对照：把这个头换成 `return=minimal`（副本 = 真机那一版，插成功也只回空体）⇒ ④ 当场假',
+      `目标 ${hits} 处 · 改完出现 ${countIn(PREFER, noPrefer)} 处（期望 0）`,
     )
   }
 }
