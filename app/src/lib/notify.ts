@@ -1016,17 +1016,39 @@ export async function shellRequestIgnoreBattery(): Promise<boolean> {
 }
 
 /** 启动推送拉取前台服务。`false` = 没这条路 / 起失败（调用方要给页内兜底） */
+/**
+ * 启动推送拉取前台服务。
+ *
+ * 🔴 2026-10-05 真机第四轮补：`endpoint` 现在**必须去掉末尾斜杠**。
+ *   `apiUrl('')` 返回的是 `https://站点/`（末尾带 `/`，那是它给 `'/api/…'` 拼的），
+ *   而原生那边拼的是 `endpoint + "/api/push"` ⇒ 变成 `//api/push`。
+ *   实测（线上）：`POST /api/push` → **401**（路由在，只是没带 token）；
+ *   `POST //api/push` → **405**（命中另一个资源）。
+ *   ⇒ 那道横幅上写「前台服务没起来」，而真因是路径多了一个斜杠。
+ *   这里 trim 掉，比让每处调用方自己记得干净更可靠。
+ *
+ * ⚠️ 🔴 `why` 一路带到屏上：桥接那层 `.catch()` 与"插件不存在"两支都只回 `{ok:false}`，
+ *   把原生带回的真因吃掉了 ⇒ 屏上只能显示兜底那句「前台服务没起来」。
+ *   所以下面每一条回不回 `why` 都要说清楚为什么（§五「失败了会有人知道吗」）。
+ */
 export async function shellStartPush(
   endpoint: string,
   accessToken: string,
 ): Promise<{ ok: boolean; why?: string }> {
   const s = shell()
   if (typeof s?.startPush !== 'function') return { ok: false, why: '这个壳没有推送链。' }
+  // 去掉末尾斜杠：原生那边自己会拼 `/api/…`
+  const base = String(endpoint || '').replace(/\/+$/, '')
   try {
-    const r = await s.startPush({ endpoint, accessToken })
-    return r && typeof r === 'object' ? r : { ok: false }
-  } catch {
-    return { ok: false, why: '启动失败。' }
+    const r = await s.startPush({ endpoint: base, accessToken })
+    if (r && typeof r === 'object') {
+      // `why` 是空串时补一句能定位的（空串在界面上等于"没原因"）
+      return r.ok ? r : { ...r, why: r.why?.trim() || '壳那边没回失败原因（看 logcat 的 ShugaoNative）。' }
+    }
+    return { ok: false, why: '壳那边回的不是对象（桥接层多半被截断了）。' }
+  } catch (e) {
+    // 🔴 这一支原来只回 '启动失败。' —— 把真因吃掉，屏上只剩一句废话
+    return { ok: false, why: `调用壳失败：${e instanceof Error ? e.message : String(e)}` }
   }
 }
 

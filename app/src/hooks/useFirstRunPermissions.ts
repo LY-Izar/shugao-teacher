@@ -117,7 +117,14 @@ export function useFirstRunPermissions() {
         push({
           text: '通知设置没走完',
           tone: 'warn',
-          desc: (startedRes.why || '前台服务没起来。') + ' 下次打开应用会自动再试。',
+          // 🔴 `why` 一定要带上真因（2026-10-05 真机实测）：
+          //   原生把「路径多了一个斜杠」这件事如实回了（405），但桥接层那两支
+          //   （插件不存在 / Promise reject）都只回 `{ok:false}` 把 why 吃掉
+          //   ⇒ 屏上只剩「前台服务没起来」，用户和开发者都无从下手。
+          //   这里再兜一层底：why 为空时说的是"原因没带回来"而不是编一个原因。
+          desc:
+            (startedRes.why?.trim() || '原因没带回来（看 logcat 里 ShugaoNative 那行）') +
+            ' · 下次打开应用会自动再试。',
         })
       }
     })()

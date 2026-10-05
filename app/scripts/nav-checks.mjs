@@ -48,6 +48,9 @@
  *     「备份与恢复」里的加密导出 / 备份到云端 / 下面那段说明）**在源码里必须真的没有**，
  *     而换上去的三颗下载按钮要接 `releaseDownloads(useReleaseSlots())`；
  *     撤下的那两颗的**实现**另存于 `components/BackupExtraActions.tsx`（入口撤、实现留）。
+ *     🔴🔴 **③ 的期望值 2026-10-05 变了（用户要求，别再改回去）**：
+ *     「把用户可以下载备份文件的入口也取消了吧」⇒ 连导出 / 恢复那两颗也撤，
+ *     「备份与恢复」**整卡删掉**（源码里一颗都不许在）—— 详见本节 ③ 那段注释。
  *     ⚠️ 判据一律**先剥注释**（"为什么删"就写在注释里，不剥会被自己骗过）。
  *   · 静态（D1–D7 / D9 / D10）：路由 ↔ 登记表 ↔ 本文档矩阵三方咬合；入口判据不许各写一套；
  *     谁在读 `myRoles` / `ROLE_NAME` 要有白名单；`PIN_KEYS` 不许脱队；
@@ -5316,9 +5319,11 @@ section('第二十节之三 · A13：输入法组字镜像（捕获阶段补派�
      ①「关于」：删掉「学段学科」「存储」两行，换成三颗下载按钮
         （教师端 安卓 / 教师端 Windows / 教室端 Windows，链接 = 面板里填的那两行）；
      ②「教室端」那张卡**整卡删掉**（教室端现在有自己的程序，1.1.2 起还有原生置顶小窗）；
-     ③「备份与恢复」：只留「导出备份文件」与「从备份文件恢复」，**下面那段说明也删掉** ——
-        撤下的两颗（加密档案导出 / 备份到云端）属于全平台那一层，只在超管面板里留，
-        所以**实现没删、只把入口从这一屏撤下**（搬去 `components/BackupExtraActions.tsx`）。
+     ③「备份与恢复」：2026-10-04 那一版是"只留「导出备份文件」与「从备份文件恢复」"，
+        **2026-10-05 期望值又变了一次**（用户原话：「把用户可以下载备份文件的入口也取消了吧」）
+        ⇒ 那两颗也撤，**整卡删掉**：老师端不再有下载 / 恢复备份的入口。
+        删的只是**入口** —— `lib/backup.ts` 那一套能力与
+        `components/BackupExtraActions.tsx`（超管面板那条路）**一个字都没删**。
    🔴 这一节钉的是**源码这一侧**（"删掉了"本身就是判据）；屏上那一侧（真 DOM 上的
       文案与 href、以及"面板没填就不出现"）在 `shots.mjs`。
    ⚠️ 一律**先剥注释**再判：这三处的中文在注释里**正当地**出现（写着"为什么删"），
@@ -5381,28 +5386,53 @@ section('第二十节之四 · A16：「我的」页三处取舍（删除也是�
     `副本真被改过=${roomBack !== SET} · 塞回去之后判据=${roomOk(roomBack)}`,
   )
 
-  /* ---------------- ③ 「备份与恢复」：只留第一、第四颗 + 那段说明没了 ---------------- */
+  /* ---------------- ③ 「备份与恢复」**整卡撤下**（期望值 2026-10-05 变了） ----------------
+   * 🔴 **为什么期望值变了**：2026-10-04 那一版判的是"只留第一、第四颗"（加密档案导出 /
+   *    备份到云端从这一屏撤下）。2026-10-05 用户要求「把用户可以下载备份文件的入口也取消了吧」
+   *    ⇒ 连**导出 / 恢复**那两颗也撤 —— 撤完那张卡里只剩一个 hidden file input（空壳）
+   *    ⇒ 按文案纪律**整卡删掉**（含小标题）。
+   *    ⚠️ 所以这一条从"必须包含这两颗"翻成"**一颗都不许在**" —— 是**期望值**变了，
+   *       不是判据被放宽：原来那五条"不许在"的（`导出档案备份（加密）` / `data-backup-seal` /
+   *       `data-backup-notify` / `notifyBackupDone` / `云端是主副本`）照旧逐条钉着，
+   *       而且**新增**了三条（小标题 / 只为恢复服务的 `bkRef` / `restoreBackup` 调用点）。
+   * ⚠️ 仍然只判**入口**：实现与终态接线在 `components/BackupExtraActions.tsx`，
+   *    由下面 ③附 照旧钉着（那一条一个字没动）。
+   */
   const bkOk = (s) =>
-    s.includes('导出备份文件') &&
-    s.includes('从备份文件恢复') &&
+    !s.includes('导出备份文件') &&
+    !s.includes('从备份文件恢复') &&
+    !s.includes('<Sect>备份与恢复</Sect>') &&
     !s.includes('导出档案备份（加密）') &&
     !s.includes('data-backup-seal') &&
     !s.includes('data-backup-notify') &&
     !s.includes('notifyBackupDone') &&
-    !s.includes('云端是主副本')
+    !s.includes('云端是主副本') &&
+    !s.includes('bkRef') &&
+    !s.includes('restoreBackup')
   check(
     bkOk(SET),
-    '🔴 A16 ③「备份与恢复」：只留「导出备份文件」与「从备份文件恢复」；撤下的两颗（加密档案导出 / 备份到云端）连调用点都没有了，**下面那段说明也删了**',
-    `导出=${SET.includes('导出备份文件')} · 恢复=${SET.includes('从备份文件恢复')} · 加密那颗=${SET.includes('data-backup-seal')} · 云端那颗=${SET.includes('data-backup-notify')} · 说明段=${SET.includes('云端是主副本')}`,
+    '🔴 A16 ③「备份与恢复」**整卡撤下**（用户 2026-10-05 要求取消下载备份的入口）：源码里没有那两颗粒按钮 · 没有小标题 · 也没有只为恢复服务的 file input（`bkRef`）与 `restoreBackup` 调用点 —— 老师端不再有下载 / 从备份恢复的入口',
+    `导出=${SET.includes('导出备份文件')} · 恢复=${SET.includes('从备份文件恢复')} · 小标题=${SET.includes('<Sect>备份与恢复</Sect>')} · 加密那颗=${SET.includes('data-backup-seal')} · 云端那颗=${SET.includes('data-backup-notify')} · 说明段=${SET.includes('云端是主副本')} · bkRef=${SET.includes('bkRef')} · restoreBackup=${SET.includes('restoreBackup')}`,
   )
-  const bkBack = SET.replace(
-    '                从备份文件恢复',
-    '                <Button block data-backup-notify>备份到云端</Button>\n                从备份文件恢复',
-  )
+  /* 🧪 反向对照：把**整张卡**塞回副本 ⇒ 同一条判据当场假。
+     🔴 锚点 2026-10-05 换了：旧锚点 `'                从备份文件恢复'` **就是这次被删掉的那一行**，
+        不改的话副本根本改不动（命中 0 处）⇒ 对照会变成"假绿"（§三.2 那一类）。
+        新锚点用「关于」那张卡的开头（与 ② 用同一个锚，它是源码里唯一一处）。
+     🔴 先数出现次数、**恰好 1 处**才替换：`String.replace` 只换第一处，宁可报错也不假绿。 */
+  const CARD_ANCHOR = '        <div className="mb-4">\n          <Sect>关于</Sect>'
+  const anchorHits = SET.split(CARD_ANCHOR).length - 1
+  const bkBack =
+    anchorHits === 1
+      ? SET.replace(
+          CARD_ANCHOR,
+          '        <div className="mb-4">\n          <Sect>备份与恢复</Sect>\n          <Panel bodyClass="p-3">\n            <Button block>导出备份文件</Button>\n            <Button block>从备份文件恢复</Button>\n          </Panel>\n        </div>\n' +
+            CARD_ANCHOR,
+        )
+      : SET
   check(
-    bkBack !== SET && !bkOk(bkBack),
-    '🧪 A16 ③ 反向对照：把「备份到云端」那一颗塞回副本 ⇒ 同一条判据当场假（"删掉了"这件事真的被钉着）',
-    `副本真被改过=${bkBack !== SET} · 塞回去之后判据=${bkOk(bkBack)}`,
+    anchorHits === 1 && bkBack !== SET && !bkOk(bkBack),
+    '🧪 A16 ③ 反向对照：把那张卡（含导出 / 恢复两颗）塞回副本 ⇒ 同一条判据当场假（"整卡撤下了"真的被判，不是文件里恰好没有）',
+    `锚点出现 ${anchorHits} 处（须恰好 1）· 副本真被改过=${bkBack !== SET} · 塞回去之后判据=${bkOk(bkBack)}`,
   )
 
   /* ---- ③附：撤下的那两颗**实现没跟着丢**（用户口径：只把入口从这一屏去掉） ---- */
@@ -8976,6 +9006,178 @@ section('第二十八节 · A23：公告「发布」吞字（正文非受控 + �
    *    ④ 反向：把正文改到 25 个字以上再点发布 ⇒ 应看到「公告正文最多 24 字 —— 长了没人读」
    *       这句**明确报错**，而**不是**"被悄悄截成 24 字发出去"。
    */
+}
+
+/* ============================================================
+   第二十四节之三 · A24：推送那条链的**失败原因不许被吞**（2026-10-05 真机实测）
+   ------------------------------------------------------------
+   ⚠️ 编号：A21（应用内更新）/ A22（系统排程）/ A23（发布吞字）已被并行那几节占掉
+      ⇒ 本节取 **A24**，别再往这三号上撞（同号两节会让"看日志定位"当场失效）。
+
+   🔴 起因（真机第四轮，用户在 apk 上看到）：横幅写「通知设置没走完 · 前台服务没起来。」
+      而真因是**接口地址末尾多了一个斜杠**：原生拼 `endpoint + "/api/push"`，
+      网页给的 `apiUrl('')` 末尾带 `/` ⇒ `//api/push` ⇒ **405**。
+      （实测线上对照：`/api/push` → 401 路由在；`//api/push` → 405 命中另一个资源。）
+
+   🔴 为什么用户看到的是「前台服务没起来」而不是 405 —— **原因被吞了三次**：
+      ① 桥接 `.catch()` 只 `console.error`；
+      ② 桥接"插件不存在"那一支只回 `{ok:false, unsupported:true}`，没有 `why`；
+      ③ `shellStartPush` 拿到非对象时只回 `{ok:false}`。
+      三处都把"没回原因"和"原因很严重"压成同一句话
+      ⇒ 那道横幅成了**恒真的废话**（§五「失败了会有人知道吗」那一问的答案：没人知道）。
+
+   这一节钉住三件事：地址**不许**带末尾斜杠 · `why` **一路**带得到屏上 ·
+   405/404 这类"地址错了"要在真因**前面**点出来（不然用户以为是服务端故障）。
+
+   🔴🔴 **本节自己头一版写出来的四条判据全红，两个真因都指不到真因**（留档）：
+      ① 字面量 `.replace(/\/+$/, '')` 里的 **`+` 必须转义** —— 我写成 `\/+`，
+         那是「一个或多个斜杠」，匹配不到字面的 `+` ⇒ **源码明明是对的，判据恒假**；
+      ② **不剥注释就判，反向对照会被注释骗过** —— `前台服务没起来` / `原因没带回来`
+         这两串字在我**新写的注释**里各有一份，`String.replace` 只换第一处、
+         且第一处是 desc 那句 ⇒ 换完注释里那份还在 ⇒ 对照判假
+         ⇒ 与它成对的那条"编造兜底不在了"反而**假绿**（它靠"中间插了注释使
+         pattern 不匹配"蒙混过关）。
+      ✅ 这一节**全部先 `strip()` 再判**，并加了一条 strip 自证
+         （同一句塞进注释判过、塞进代码判假）。
+   ============================================================ */
+section('第二十四节之三 · A24：推送失败原因不许被吞（真机 405 那次）')
+
+{
+  const HOOK = readApp('src/hooks/useFirstRunPermissions.ts')
+  const NOTIFY = readApp('src/lib/notify.ts')
+
+  /**
+   * 剥注释 —— 本节**每一条**都走它。
+   *
+   * 🔴 不剥会出两种坏结果（头一版四条红就是这么来的）：
+   *   ① 正则里那个 `+` 没转义：字面量是 `.replace(/\/+$/, '')`，我写 `\/+`
+   *      （=「一个或多个斜杠」）⇒ **源码明明对，判据恒假**；
+   *   ② 反向对照被**注释**骗过：`前台服务没起来` / `原因没带回来` 这两串字在
+   *      我新写的注释里各有一份，`String.replace` 只换第一处（= desc 那句）
+   *      ⇒ 换完注释里那份还在 ⇒ 对照判假 ⇒ 与它成对的"编造兜底不在了"
+   *      反而**假绿**（靠"中间插了注释使整个 pattern 不匹配"蒙混过关）。
+   */
+  const strip = (s) =>
+    String(s)
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/(^|[^:'"`\w])\/\/[^\n]*/gm, '$1')
+  const CODE = strip(HOOK)
+  const NCODE = strip(NOTIFY)
+
+  /* 字面量 `.replace(/\/+$/, '')` 的正则 —— `+` 与 `$` 都要转义，`/` 要写成 `\/` */
+  const TRIM_RE = /replace\(\/\\\/\+\$\/, ''\)/
+  const TRIM_BRIDGE_RE =
+    /var base = String\(\(opts && opts\.endpoint\) \|\| ''\)\.replace\(\/\\\/\+\$\/, ''\)/
+
+  /* ---------------- ① 地址不许带末尾斜杠 ---------------- */
+  check(
+    TRIM_RE.test(NCODE) && /endpoint: base/.test(NCODE),
+    'A24 ① `shellStartPush` **自己**去掉 endpoint 末尾的斜杠（原生拼的是 `endpoint + "/api/push"` ⇒ 多一个斜杠就是 405）',
+    `实测 ${TRIM_RE.test(NCODE)} / ${/endpoint: base/.test(NCODE)}`,
+  )
+  check(
+    /apiUrl\(''\)/.test(CODE) === true,
+    'A24 ① 调用处确实传的是 `apiUrl(\'\')`（站点 origin，不是某个具体路由 —— 路由由原生那边自己拼）',
+    `实测 ${/apiUrl\(''\)/.test(CODE)}`,
+  )
+
+  /* ---------------- ② why 一路带得到屏上 ---------------- */
+  const whyKept = [
+    /这个壳没有推送链/.test(NCODE),
+    /壳那边回的不是对象/.test(NCODE),
+    /调用壳失败/.test(NCODE),
+    /原因没带回来/.test(CODE),
+  ]
+  check(
+    whyKept.every(Boolean) && whyKept.length === 4,
+    'A24 ② `shellStartPush` 的**四条**返回支路各带一句能定位的话（"没回原因"与"原因严重"不许压成同一句）',
+    `实测 ${whyKept.filter(Boolean).length}/4`,
+  )
+
+  /**
+   * 「编造的那句兜底」在**代码**里还剩几处 —— 必须先 `strip()` 再数。
+   *
+   * ⚠️ 🔴 这一条头一版是**假绿**：它判的是"整段 pattern 匹配不上"，
+   *    而 pattern 匹配不上只是因为我在 `text:` 与 `desc:` **中间插了注释**
+   *    ⇒ 与"那句话真的拿掉了"毫无关系（同一个坏法见 §三.1「靠放水而绿」）。
+   *    现在改成"数真代码里那串字"，并且**塞回代码必须判假、塞进注释必须判过**。
+   */
+  const fabricated = (src) => strip(src).split('前台服务没起来').length - 1
+  check(
+    fabricated(HOOK) === 0,
+    'A24 ② 横幅那一句**不再用编造的兜底原因**（`why || "前台服务没起来。"` —— 真因被吞时的第一现场就是它）',
+    `剥注释后真代码里还有 ${fabricated(HOOK)} 处（期望 0）`,
+  )
+  check(
+    fabricated(HOOK + "\nconst x = '前台服务没起来。'") === 1 &&
+      fabricated(HOOK + '\n// 前台服务没起来。') === 0,
+    '🧪 A24 ② strip 自证：同一句塞进**代码** ⇒ 数到 1（判假）· 塞进**注释** ⇒ 数到 0（判过）—— 证明"剥注释"真的在区分两者，不是把整份文件删空',
+    `代码里=${fabricated(HOOK + "\nconst x = '前台服务没起来。'")}（期望 1）· 注释里=${fabricated(
+      HOOK + '\n// 前台服务没起来。',
+    )}（期望 0）`,
+  )
+  check(
+    /why: r\.why\?\.trim\(\) \|\|/.test(NCODE),
+    'A24 ② 原生回 `{ok:false}` 但 `why` 是**空串**时，补一句"看 logcat"（空串在界面上等于"没原因"）',
+    `实测 ${/why: r\.why\?\.trim\(\) \|\|/.test(NCODE)}`,
+  )
+
+  /* ---------------- ③ 壳侧两处也要带 why（不在 git 里，直接读打包目录） ---------------- */
+  const bridgeFile = join(REPO, '..', '树高教务通打包', '_src', 'shell-bridge-apk.js')
+  if (existsSync(bridgeFile)) {
+    const BR = strip(readFileSync(bridgeFile, 'utf8'))
+    check(
+      /插件 ShugaoNative 没加载上/.test(BR) && /调用原生抛错/.test(BR) && /原生回的不是对象/.test(BR),
+      'A24 ③ 桥接层**三支都带 why**（插件没加载 / 原生回的不是对象 / 调用抛错）—— 原来全是 `{ok:false}`，真因就在这里被吃掉',
+      `实测 插件=${/插件 ShugaoNative 没加载上/.test(BR)} · 非对象=${/原生回的不是对象/.test(BR)} · 抛错=${/调用原生抛错/.test(BR)}`,
+    )
+    check(
+      TRIM_BRIDGE_RE.test(BR),
+      'A24 ③ 桥接那侧**也**去一道末尾斜杠（两道保险：网页一道、壳一道 —— 少任何一道都会让这个 bug 从另一侧漏回来）',
+      `实测 ${TRIM_BRIDGE_RE.test(BR)}`,
+    )
+  } else {
+    // 🔴 壳不在本机 ⇒ **显式报"没验"**，不许静默跳过（跳过去就是一条恒绿的摆设）
+    check(
+      false,
+      'A24 ③ ⚠️ 壳侧那两个文件**不在这台机器上**，这一条没验（不是通过）—— 打包目录 `树高教务通打包/_src/` 整个缺失',
+      `找过：${bridgeFile}`,
+    )
+  }
+
+  /* 反向对照 G：把 trim 那一道删掉（副本）⇒ ① 当场假 */
+  {
+    // 🔴 **先数出现次数，不是 1 就抛错**（§三.2）：`String.replace` 只换第一处，
+    //    而目标串经常在注释里也有一份 ⇒ 改的是注释、判据纹丝不动 = 对照假绿。
+    const needle = ".replace(/\\/+$/, '')"
+    const hits = NCODE.split(needle).length - 1
+    if (hits !== 1) throw new Error(`A24 G：目标在 notify 里出现 ${hits} 处（必须恰好 1）`)
+    const noTrim = NCODE.replace(needle, '')
+    check(
+      noTrim !== NCODE && !TRIM_RE.test(noTrim),
+      '🧪 A24 ① 反向对照 G：把「去掉末尾斜杠」那一行删掉（副本）⇒ 上面那条当场假（证明它在读真源码）',
+      `目标 ${hits} 处 · 副本被改过=${noTrim !== NCODE} · 改完判据=${TRIM_RE.test(noTrim)}（期望 false）`,
+    )
+  }
+  /* 反向对照 H：把编造兜底那句塞回**代码**（副本）⇒ ② 当场假 */
+  {
+    const needle = '原因没带回来（看 logcat 里 ShugaoNative 那行）'
+    const hits = CODE.split(needle).length - 1
+    if (hits !== 1) throw new Error(`A24 H：目标在真代码里出现 ${hits} 处（必须恰好 1）`)
+    const back = HOOK.replace(needle, '前台服务没起来。')
+    check(
+      back !== HOOK && fabricated(back) === 1,
+      '🧪 A24 ② 反向对照 H：把兜底原因**换回编造的那句**（副本）⇒ ② 当场假（证明那句"编造原因不许在"真在判）',
+      `目标 ${hits} 处 · 副本被改过=${back !== HOOK} · 改完真代码里有 ${fabricated(back)} 处（期望 1）`,
+    )
+    // 🔴 头一版就是栽在这儿：换的是 desc 那句，而**注释里那份还在** ⇒ 对照判假、
+    //    与它成对的那条反而假绿。所以再钉一次"注释里那份不影响判据"：
+    check(
+      fabricated(HOOK + '\n// 前台服务没起来。') === 0,
+      '🧪 A24 ② 反向对照 H-补：把那句**只放进注释**（副本）⇒ 判据仍判过 —— 证明它数的是真代码、不是注释',
+      `注释里那份使读数变成 ${fabricated(HOOK + '\n// 前台服务没起来。')}（期望 0）`,
+    )
+  }
 }
 
 /* ---------------- 结果 ---------------- */
