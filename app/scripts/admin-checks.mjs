@@ -3936,11 +3936,12 @@ await withLock(async () => {
       superValue = 'false'
       const forbidden = await call(MAILFN, '/api/mail', { action: 'test' }, AUTH, ENV_MAIL)
       eq('🔴 ⑤ 非超管发测试邮件 → **403**（它用的是平台的邮件配额）', forbidden.status, 403)
-      superValue = 'true'
-      contactValue = 'false'
+      /* 🆕 2026-10-05 攻击事件收紧：`backup` 那一支从 `can_contact_admin` 改成
+         `is_super_admin` —— 在册教师也能发的话，攻击者（自助注册的号）就借
+         备份通知给超管塞任意文本（2026-10-06 05:49 真实发生一封）。 */
       const bNo = await call(MAILFN, '/api/mail', { action: 'backup', summary: 'x' }, AUTH, ENV_MAIL)
-      eq('🔴 ⑤ `backup` 那一支用的是 `can_contact_admin`（教室端 → 403）', bNo.status, 403)
-      contactValue = 'true'
+      eq('🔴 ⑤ `backup` 收紧成 `is_super_admin`：教师 → **403**', bNo.status, 403)
+      superValue = 'true'
       const bOk = await call(
         MAILFN,
         '/api/mail',

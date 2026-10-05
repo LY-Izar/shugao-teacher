@@ -34,7 +34,6 @@ import {
   caller,
   json,
   mailedInLastDay,
-  needStage,
   rpcBool,
   serviceKey,
 } from './_lib/supa'
@@ -48,7 +47,8 @@ import {
 const NEED_STAGE13 =
   '数据库还没跑权限函数（仓库里 supabase/schema.sql 第 13 段：is_super_admin）。' +
   '到 Supabase → SQL Editor 跑一遍再回来；刚跑完的话等十几秒让接口刷新一下缓存。'
-const NEED_STAGE25 = needStage('25', '用户反馈（`can_contact_admin` 判据就在那一段）')
+/* 🆕 2026-10-05：`NEED_STAGE25` 随 `backup` 收紧成 `is_super_admin` 一并退场
+   （`can_contact_admin` 只剩反馈那条路在用，判据在 `feedback.ts` 自己那里）。 */
 
 type Body = {
   action?: 'test' | 'backup'
@@ -122,12 +122,19 @@ export async function onRequestPost(context: { request: Request; env: Env }): Pr
   }
 
   /* ---------------- backup：备份完成通知 ---------------- */
+  /*
+   * 🔴🆕 2026-10-05 收紧（攻击事件）：原来用 `can_contact_admin()`（在册教师）——
+   *    而这封邮件的收件人是**超管自己**，`summary`/`detail` 又是**调用者可控文本**
+   *    ⇒ 任何一个教师（包括自助注册的）都能往超管邮箱塞任意内容
+   *    （2026-10-06 05:49 真实发生：一封 summary 为 "??????????" 的伪装备份通知）。
+   *    现在只允许 `is_super_admin()`（唯一合法调用方 = 超管面板上那颗手动通知按钮）。
+   */
   if (action === 'backup') {
-    const allowed = await rpcBool(env, me.token, 'can_contact_admin')
-    if (allowed === 'missing') return json({ status: 'error', message: NEED_STAGE25 }, 503)
+    const allowed = await rpcBool(env, me.token, 'is_super_admin')
+    if (allowed === 'missing') return json({ status: 'error', message: NEED_STAGE13 }, 503)
     if (!allowed) {
       return json(
-        { status: 'error', message: '只有在册教师能发备份通知（教室端那台屏不在这一档）' },
+        { status: 'error', message: '只有超管能发备份完成通知。' },
         403,
       )
     }
