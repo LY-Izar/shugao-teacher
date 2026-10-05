@@ -18,7 +18,15 @@ import { useStore, useToast } from '../data/store'
 import { loadClassMembers, loadClassSubjects } from '../data/remote'
 import { WEEKDAY_TEXT, type ScheduleItem, type ScheduleKind } from '../data/types'
 import { goBackOr } from '../lib/back'
-import { notifyPermission, readNotifyPermission, requestNotify } from '../lib/notify'
+import {
+  notifyPermission,
+  readNotifyPermission,
+  requestNotify,
+  runNotifySelfTest,
+  selfTestHint,
+  shellCanScheduleAlarms,
+} from '../lib/notify'
+import { isSuperAdmin } from '../lib/roles'
 import { shellPlatform } from '../lib/classroomShell'
 import {
   REMIND_BEFORE,
@@ -50,6 +58,11 @@ export default function Schedule() {
   const addScheduleMany = useStore((s) => s.addScheduleMany)
   const updateSchedule = useStore((s) => s.updateSchedule)
   const removeSchedule = useStore((s) => s.removeSchedule)
+  /**
+   * 🔴 只给超管看的那个"试一条通知"入口（见下面那块）。
+   *   `myRoles` 是**我这个账号的身份**（多身份是常态 ⇒ 数组）。
+   */
+  const myRoles = useStore((s) => s.myRoles)
   const navigate = useNavigate()
   const push = useToast((s) => s.push)
 
@@ -67,6 +80,28 @@ export default function Schedule() {
 const [perm, setPerm] = useState<
   NotificationPermission | 'unsupported' | 'native'
 >(() => notifyPermission())
+
+  /**
+   * 🔴🔴 **这块横幅显不显示，先问"这个壳有没有原生排程能力"**（2026-10-05 真机第二轮）。
+   *
+   * 用户（真安卓手机）在 apk 里看到那条黄条：
+   *   「**这个设备收不到系统通知**」+「要在手机上收到系统通知，请用浏览器打开网站并允许通知」✗
+   *
+   * 为什么是错的：这条判据问的是**网页的** `Notification`（WebView 里恒不存在
+   *   ⇒ `notifyChannel() === 'unsupported'`），而 **apk 的通知根本不走网页那一条** ——
+   *   它走原生 `AlarmManager` 排程（`__shell_out.scheduleAlarms`），
+   *   而这条链**已经能用** ⇒ 还在劝老师"用浏览器打开网站"是**照着做也没用的建议**
+   *   （`AGENTS.md` §三.5：不许给一条执行不了的出路）。
+   *
+   * ⇒ 顺序必须是：**壳里有原生排程 ⇒ 这块横幅整个不出现**
+   *   （老师已经能收到系统通知了，没什么要"开启"的，也没有"收不到"这回事）；
+   *   没有原生排程（网页版 / 两个 exe）⇒ **原来的行为一个字不变**。
+   *
+   * ⚠️ 与 `useScheduleReminder.ts` 里那句兜底话**分开判**：这一条管的是
+   *   "通知这条路通不通"，那一条管的是"排不排得上"（能力门 + 精确闹钟授权）。
+   */
+  const shellSchedules = shellCanScheduleAlarms()
+  const showPermBanner = perm !== 'granted' && !shellSchedules
 
   /*
    * 🔴🔴 **挂载后把权限读成真值**（2026-10-04 修，用户报"通知还是不对"）
@@ -193,7 +228,7 @@ const [perm, setPerm] = useState<
 
       <Page>
         {/* 提醒权限 */}
-        {perm !== 'granted' ? (
+        {showPermBanner ? (
           <div
             className="anim-in mb-3 flex flex-wrap items-center gap-3 p-3.5"
             style={{
@@ -312,6 +347,35 @@ const [perm, setPerm] = useState<
             </span>
           </div>
         )}
+
+        {/*
+          * 🩺 **只给超管**的"试一条通知"入口（2026-10-05 真机第三轮）。
+          *
+          * 🔴 为什么要有它：老师连着两轮报"收不到通知"，而**本机没有安卓设备** ——
+          *   静态判据钉得住源码形状，钉不住"这台手机上哪一环断了"。
+          *   点一下就知道：权限 / 渠道 / 到底发出去了没有，**哪一格不对**（见 `selfTestHint`）。
+          * 🔴 为什么不给所有人：这是**排查工具**，不是功能（文案纪律：界面只说
+          *   "这里是什么、我能做什么"）。两个老师里只有超管看得到。
+          * ⚠️ `Array.isArray()` 是必须的：`myRoles` 在 store 的初值/异常路径上可能是
+          *   `undefined`（`store.ts` 里它有几处 `[]`、也有一处 `snap.roles`）。
+          */}
+        {Array.isArray(myRoles) && isSuperAdmin(myRoles) ? (
+          <div className="anim-in mb-3 flex flex-wrap items-center gap-3 p-3">
+            <Button
+              size="sm"
+              onClick={async () => {
+                push(selfTestHint(await runNotifySelfTest()))
+                // 自检可能动了系统里那一格 ⇒ 横幅跟着刷新，别留一个过期读数
+                setPerm(await readNotifyPermission())
+              }}
+            >
+              试一条通知
+            </Button>
+            <span style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
+              只给管理员，用来查通知通不通
+            </span>
+          </div>
+        ) : null}
 
         {/* 今天 */}
         <div className="mb-4">

@@ -51,10 +51,54 @@ interface ShellNotifyBridge {
   /** 🆕 这个壳能不能排**精确**闹钟（Android 12+ 要在设置里开；回 `null` = 不知道） */
   canScheduleExact?(): Promise<boolean | null>
   /**
+   * 🆕 **精确闹钟没授权时，跳到系统那一页**（Android 12+ 的「闹钟与提醒」；
+   * 只有 apk 有，网页版与两个 exe 都没有 —— 它们也没有这个东西要授权）。
+   *
+   * 🔴 为什么非有不可：`canScheduleExact()` 只**量**得出来"没授权"，量完
+   *   只丢一句"收不到"等于把老师扔在原地（`AGENTS.md` §三.5：不可写的路径要显式报错，
+   *   而且**要给一条真能走的出路**）。原生侧那个方法（三级回退：
+   *   带包名跳转 → 不带包名跳转 → 应用详情页）早就写好了，**桥接层一直没挂** ⇒ 网页侧无从调用。
+   */
+  openExactAlarmSettings?(): Promise<boolean>
+  /**
+   * 🆕 **通知自检**（2026-10-05 真机第三轮；只有 apk 有）。
+   *
+   * 回的是**分散的读数**，不是一句"成功/失败" —— 断在哪一环就哪一格 `false`：
+   *   · `notify`  系统允许本应用发通知吗
+   *   · `granted` Android 13+ 的运行时权限给了吗
+   *   · `channel` 那个通知渠道**在系统里真的存在**吗
+   *   · `posted`  测试那条**真的交给系统**了吗
+   *   · `why`     没发出去时的人话（能读懂、能照做）
+   *   · `unsupported` 这一版壳还没有这个检查（**如实报**，不许假装检查过）
+   */
+  selfTest?(): Promise<ShellSelfTest>
+  /**
    * ⚠️ 这里**故意没有** `platform` 字段：通知这一层不读它。
    * 读它的是 `lib/classroomShell.ts` 的 `shellPlatform()` ——
    * 留一份在两处正是"声明了没人用"（本项目为此栽过四次）。
    */
+}
+
+/**
+ * 通知自检的读数（**每一格都要能单独看见** —— 合成一个 boolean 就没法定位断点了）。
+ *
+ * 🔴 为什么要有这个类型而不用 `boolean`：老师连着两轮报"收不到通知"，而本机
+ *   **没有安卓设备**。静态判据钉得住源码形状，钉不住"这台手机上哪一环断了" ——
+ *   自检就是那个"把断点搬到屏上"的东西。
+ */
+export interface ShellSelfTest {
+  /** 系统里这个应用的通知是开着的吗（`areNotificationsEnabled()`） */
+  notify?: boolean
+  /** Android 13+ 的 `POST_NOTIFICATIONS` 给了吗 */
+  granted?: boolean
+  /** 那个通知渠道在系统里存在吗（**不存在 ⇒ 通知会被静默丢掉**） */
+  channel?: boolean
+  /** 测试那条真的交给系统了吗 */
+  posted?: boolean
+  /** 没发出去时的人话 */
+  why?: string
+  /** 这一版壳还没有这个检查（`selfCheck` / `notifySelfTest` 没挂） */
+  unsupported?: boolean
 }
 
 /**
@@ -423,6 +467,34 @@ export async function scheduleNativeReminders(alarms: readonly ShellAlarm[]): Pr
   }
 }
 
+/**
+ * 这个壳**有没有**"跳到精确闹钟授权页"这条路（`openExactAlarmSettings` 在不在）。
+ *
+ * 与 `shellCanScheduleAlarms()` 同一套纪律：**先问能力、再谈成败** ——
+ * 网页版与两个 exe 都没有这个方法，对它们调它只会拿回 `false`，
+ * 界面据此说"去系统设置"就是**照着做也没用的建议**。
+ */
+export function shellCanOpenExactAlarmSettings(): boolean {
+  const s = shell()
+  return typeof s?.openExactAlarmSettings === 'function'
+}
+
+/**
+ * 跳到系统那一页（Android 12+ 的「闹钟与提醒 / 作息时间」），让老师把精确闹钟开给本应用。
+ *
+ * @returns `true` = 真的跳过去了（失败不谎称成功 —— 跳不过去时原生自己退到应用详情页，
+ *          那里也有同一个开关）；`false` = 这个壳没有这条路
+ */
+export async function openExactAlarmSettings(): Promise<boolean> {
+  const s = shell()
+  if (typeof s?.openExactAlarmSettings !== 'function') return false
+  try {
+    return (await s.openExactAlarmSettings()) === true
+  } catch {
+    return false
+  }
+}
+
 /** 这个壳能不能排**精确**闹钟（Android 12+ 要在设置里开）—— 没这条路的壳回 `null`（**不知道**，不是"不能"） */
 export async function canScheduleExactNative(): Promise<boolean | null> {
   const s = shell()
@@ -433,6 +505,53 @@ export async function canScheduleExactNative(): Promise<boolean | null> {
   } catch {
     return null
   }
+}
+
+/**
+ * 🩺 **跑一遍通知自检**（"给我发一条测试通知"那个入口的底座；只有 apk 有）。
+ *
+ * 🔴 为什么非有不可：用户连着两轮报「收不到通知」，而**本机没有安卓设备** ——
+ *   静态判据能钉住源码形状，钉不住"这台手机上到底哪一环断了"。
+ *   这个函数把四个断点**分开**报出来（系统关着 / 13+ 权限 / 渠道没建 / 真发出去了），
+ *   老师点一下就知道该去开哪一格（`AGENTS.md` §三.5：不可写的路径要显式报错，
+ *   而且要给一条真能走的出路）。
+ *
+ * ⚠️ 三态不许混（§三.4）：
+ *   · `{unsupported:true}` = 这一版壳还没有这个检查（网页版与两个 exe 恒是这一档）；
+ *   · `{why:…}`            = 自检**跑过**、但某一步没通（或读不出来）；
+ *   · `{posted:true}`      = 测试那条真的交给系统了。
+ *   **不许**把"没跑起来"说成"发出去了"。
+ */
+export async function runNotifySelfTest(): Promise<ShellSelfTest> {
+  const s = shell()
+  if (typeof s?.selfTest !== 'function') return { unsupported: true }
+  try {
+    const r = await s.selfTest()
+    return r && typeof r === 'object' ? r : { why: '自检没返回结果。' }
+  } catch {
+    return { why: '自检没跑起来。' }
+  }
+}
+
+/**
+ * 把自检那四格读数翻成**老师能照做的一句话**（纯函数 ⇒ 判据能直接跑它，§三.2）。
+ *
+ * 🔴 每一格对应一个**不同的**动作，所以**不许**合成一句"通知有问题"：
+ *   · `notify=false`  → 去系统里把这个应用的通知打开（渠道、权限都对了也没用）
+ *   · `granted=false` → 13+ 还没允许发通知
+ *   · `channel=false` → **渠道没建起来**（这一格存在本身就是"通知会被静默丢掉"的判据）
+ *   · `posted=true`   → 让老师去通知栏找那一条
+ *   · `unsupported`   → 这一版壳还没有这个检查（**如实说**，不许假装检查过了）
+ *
+ * `tone` 跟着走：`ok` 只有"真的发出去了"那一档配得上。
+ */
+export function selfTestHint(r: ShellSelfTest): { text: string; desc: string; tone: 'ok' | 'warn' } {
+  if (r.unsupported) return { text: '这个版本还不能自检', desc: '装上最新版再试。', tone: 'warn' }
+  if (r.posted === true) return { text: '已发出一条测试通知', desc: '去手机的通知栏找「测试通知」。', tone: 'ok' }
+  if (r.notify === false) return { text: '系统里通知是关着的', desc: '去系统设置把本应用的通知打开。', tone: 'warn' }
+  if (r.granted === false) return { text: '还没允许本应用发通知', desc: '去系统设置允许本应用发通知。', tone: 'warn' }
+  if (r.channel === false) return { text: '通知渠道没建起来', desc: '这一条要装新版本才能修。', tone: 'warn' }
+  return { text: '没发出去', desc: r.why || '过一会儿再试一次。', tone: 'warn' }
 }
 
 /**

@@ -5,6 +5,9 @@ import {
   notifyAsync,
   readNotifyPermission,
   shellCanScheduleAlarms,
+  shellCanOpenExactAlarmSettings,
+  canScheduleExactNative,
+  openExactAlarmSettings,
   nativeReminderPlan,
   scheduleNativeReminders,
 } from '../lib/notify'
@@ -24,6 +27,40 @@ const SEEN_KEY = 'shugao.remind.seen'
 const NATIVE_PLAN_DAYS = 3
 
 type Seen = Record<string, true>
+
+/**
+ * 「系统排不上」那一句到底该说哪一句 —— **唯一的分档点**（纯函数，判据能直接跑它）。
+ *
+ * 🔴🔴 2026-10-05 真机第二轮：兜底话原来**只有一句**「提醒改在应用内显示。关掉应用就收不到了。」
+ *   +「换一版应用可以收到系统通知。」—— 老师看到的是"**收不到**"和一个**做不了的**建议
+ *   （这一版就是最新版，换哪一版都收不到）。真因是 **Android 12+ 没给"精确闹钟"
+ *   （`SCHEDULE_EXACT_ALARM`）授权**，而这是一步**他两分钟就能自己开的设置**。
+ *
+ * ⇒ 分档：
+ *   · `canExact === false`（**量到了**：系统确实没授权）+
+ *     `canOpenSettings === true`（**这个壳有那条跳设置的路**）
+ *     ⇒ 给**可操作的一步**：去系统设置把「闹钟与提醒」允许给本应用；
+ *   · 其余（没量到 / 跳不了 / 老壳）⇒ 照旧那句兜底，**不许**凭空指着设置说"去那儿开"
+ *     （§三.4：量不出来就是不知道，不许猜；指错地方比不说更坏）。
+ *
+ * ⚠️ `canOpenSettings` 这一档是**能力门**：网页版与两个 exe 上它恒 `false`
+ *   ⇒ "去系统设置"那句话在它们那里**从结构上不可达**（与 `shellCanScheduleAlarms()` 同一套纪律）。
+ */
+export function remindFailHint(
+  canExact: boolean | null,
+  canOpenSettings: boolean,
+): { text: string; desc: string } {
+  if (canExact === false && canOpenSettings) {
+    return {
+      text: '提醒只能在应用内显示',
+      desc: '去系统设置把「闹钟与提醒」允许给本应用，关掉应用也能响。',
+    }
+  }
+  return {
+    text: '提醒改在应用内显示。关掉应用就收不到了。',
+    desc: '换一版应用可以收到系统通知。',
+  }
+}
 
 function loadSeen(): Seen {
   try {
@@ -75,6 +112,15 @@ export function useScheduleReminder() {
    */
   const warnedNoNative = useRef(false)
 
+  /**
+   * 「已经因为这个把老师送去系统设置、他还没回来」——`useRef` 同理（不是要画出来的东西）。
+   *
+   * 🔴 为什么要有这一档：送去设置页之后，回来时那句系统排程**照旧是失败的**
+   *   （老师未必当场开、也可能开完要等下一次重排）⇒ 不记一笔就会**又跳一次设置、
+   *   又弹一次同样的话**。而一旦他开好了，下面那条"开完就生效"会告诉他结果。
+   */
+  const returnFromSettings = useRef(false)
+
   /*
    * 🔴🔴 把提醒**交给系统排程**（2026-10-05，真机反馈「装上了、权限也过了，就是收不到通知」）。
    *
@@ -111,6 +157,27 @@ export function useScheduleReminder() {
 
     let alive = true
     const arm = async () => {
+      /*
+       * 🔴 刚从「闹钟和提醒」那页回来 ⇒ 先**量一次**"开成了没有"，再决定排不排。
+       *   条条都摆明才动：量到 `false` 说明他还没开 ⇒ **别**重排（重排必失败）、
+       *   **别**再跳一次设置（那就是把人来回弹）；量到 `true` / `null` 照旧重排一遍
+       *   （这也是这一页原来就有的"回到前台重排"语义，一个字没改）。
+       */
+      const backFromSettings = returnFromSettings.current
+      if (backFromSettings) {
+        returnFromSettings.current = false
+        const armed = await canScheduleExactNative()
+        if (!alive) return
+        if (armed === false) {
+          push({
+            text: '提醒仍只能在应用内显示',
+            tone: 'warn',
+            desc: '「闹钟与提醒」还没允许给本应用，应用关着时提醒不响。',
+          })
+          return
+        }
+        push({ text: '已交给系统提醒', tone: 'ok', desc: '应用关着也会响。' })
+      }
       const now = beijingNow()
       const days: Array<{ ymd: string; items: Array<{ id: string; title: string; body: string; minute: number }> }> =
         []
@@ -147,11 +214,32 @@ export function useScheduleReminder() {
         console.warn('[remind] 系统排程不可用，本次会话的提醒只能靠页内那一条')
         if (!warnedNoNative.current) {
           warnedNoNative.current = true
-          push({
-            text: '提醒改在应用内显示。关掉应用就收不到了。',
-            tone: 'warn',
-            desc: '换一版应用可以收到系统通知。',
-          })
+          /*
+           * 🔴🔴 **先量、再指路**（2026-10-05 真机第二轮）：
+           *   · `canScheduleExactNative()` = 同步问系统"精确闹钟给了没有"
+           *     （没这条路的壳回 `null` = **不知道**，不是"不能"）；
+           *   · `openExactAlarmSettings()` = **真的跳到**「闹钟和提醒」那一页
+           *     （Android 12+ 的特殊权限页，不是普通通知页 —— 老师自己翻半天翻不到）。
+           *   ⚠️ 两个都只在**壳里确实有原生排程能力**时才会走到（上面那句能力门挡着）
+           *     ⇒ 网页版与两个 exe **一个字都不变**。
+           *   ⚠️ 跳失败也照实说那句话（`try/catch` 在 `openExactAlarmSettings()` 里，
+           *     它回 `false` 不抛错）—— 但**文案不依赖**这次跳成功没有：
+           *     老师说得出"去系统设置开『闹钟与提醒』"就够了。
+           */
+          const canExact = await canScheduleExactNative()
+          const hint = remindFailHint(canExact, shellCanOpenExactAlarmSettings())
+          push({ text: hint.text, tone: 'warn', desc: hint.desc })
+          if (canExact === false && shellCanOpenExactAlarmSettings()) {
+            // 真的把老师送过去；他改完切回来会看到下面那条"开完就生效"
+            await openExactAlarmSettings()
+            if (!alive) return
+            /*
+             * ⚠️ 那条 Toast 只活 2.6 秒 —— 跳到设置页之后它在**后台就过期了**，
+             *   老师回来会看不见任何字。⇒ 用 `once` 记一笔，回来的那一下补发一条
+             *   （这也是"只给一次可操作的一步"的收口：说过就不再刷屏）。
+             */
+            returnFromSettings.current = true
+          }
         }
       }
     }

@@ -1901,6 +1901,14 @@ section('第九节 · D3/D4/D5：判据白名单 · myRoles 读取点白名单 �
           '真正的闸门是数据库：改 / 删走 `classes_update` / `classes_delete`（同一条判据），' +
           '加删成员走 §37.1 的函数（函数体内第一句就是 `can_manage_class()`）',
       ],
+      [
+        'src/pages/Schedule.tsx',
+        '🆕 通知自检入口（2026-10-05 真机第三轮）：**只决定摆不摆那个排查按钮**' +
+          '（`isSuperAdmin(myRoles)` ⇒ 只给超管看「试一条通知」）。' +
+          '**与权限、与任何数据行都无关** —— 它不筛课表、不决定能看什么课，' +
+          '只是"这个按钮给谁看"。⚠️ 这条前端判据**不是闸门**（真正的闸门在数据库）：' +
+          '即使普通老师把自检打进来，它也只是**给本机发一条测试通知**，读不到任何别人的数据',
+      ],
     ])
   const hits = []
   const walk = (dir) => {
@@ -1979,6 +1987,12 @@ section('第九节 · D3/D4/D5：判据白名单 · myRoles 读取点白名单 �
       '🆕 走班班的编辑 / 删除（2026-10-08）：4 处 `.filter` **没有一处与角色有关** —— ' +
         '滤的是行政班 / 走班班（`splitByKind`）、名单里的搜索命中、以及全年级在册学生；' +
         '`myRoles` 单独出现在那两个入口的显隐上（`canEditClassFor(myRoles, …)`，见 D4 的白名单理由）',
+    ],
+    [
+      'src/pages/Schedule.tsx',
+      '🆕 通知自检入口（2026-10-05 真机第三轮）：那一处 `.filter` 与角色**毫无关系** —— ' +
+        '它滤的是课表里 `scope !== "class"` 的那一份（"只提醒我自己的课"）；' +
+        '`myRoles` 单独出现在超管那道门上（`isSuperAdmin(myRoles)`，见 D4 的白名单理由）',
     ],
   ])
   const SUSPECT = []
@@ -7669,6 +7683,12 @@ section('第二十七节 · A22：到点提醒交给系统排程（桥接层 / �
   const MANIFEST2 = stripXml2(shellRead2(MANIFEST2_REL))
   const NOTIFY = strip2(readApp('src/lib/notify.ts'))
   const HOOK = strip2(readApp('src/hooks/useScheduleReminder.ts'))
+  /**
+   * 🔴 `Schedule.tsx`（⑫ 要判的那块黄条就在这一页）—— 同样**剥注释**：
+   *   块注释里写着"不许说这个设备收不到系统通知"，不剥就会把**注释**当成命中
+   *   （§三.2 那个"改的是注释、判据纹丝不动"的坑）。
+   */
+  const SCHEDULE = strip2(readApp('src/pages/Schedule.tsx'))
 
   /* ---------------- ② 桥接层：把 `scheduleAlarms` 接到 `ShugaoNative` 上 ---------------- */
   const BR_SCHED = /scheduleAlarms: function \(alarms\) \{/
@@ -7752,12 +7772,11 @@ section('第二十七节 · A22：到点提醒交给系统排程（桥接层 / �
   const PERMS2 = [
     'android.permission.POST_NOTIFICATIONS',
     'android.permission.SCHEDULE_EXACT_ALARM',
-    'android.permission.USE_EXACT_ALARM',
     'android.permission.RECEIVE_BOOT_COMPLETED',
   ]
   check(
     PERMS2.every((p) => MANIFEST2.includes(`android:name="${p}"`)),
-    '🔴 A22 ④ manifest 四条权限都在（`POST_NOTIFICATIONS`（13+ 运行时权限）· `SCHEDULE_EXACT_ALARM` · `USE_EXACT_ALARM` · `RECEIVE_BOOT_COMPLETED`）—— 少任何一条，"应用关着也响"就有一档是假的',
+    '🔴 A22 ④ manifest 三条权限都在（`POST_NOTIFICATIONS`（13+ 运行时权限）· `SCHEDULE_EXACT_ALARM` · `RECEIVE_BOOT_COMPLETED`）—— 少任何一条，"应用关着也响"就有一档是假的',
     PERMS2.map((p) => `${MANIFEST2.includes(`android:name="${p}"`) ? '✔' : '✖'}${p.split('.').pop()}`).join(' · '),
   )
   {
@@ -7769,6 +7788,36 @@ section('第二十七节 · A22：到点提醒交给系统排程（桥接层 / �
       `目标出现 ${cut.n} 处（须恰好 1）· 改完判据=${cut.text.includes('android:name="android.permission.POST_NOTIFICATIONS"')}`,
     )
   }
+  /**
+   * 🔴🔴 A22 ④-补：**`USE_EXACT_ALARM` 必须不在**（2026-10-05 真机第三轮）。
+   *
+   * 老师报的原话：「**闹钟和提醒**里面**根本就没有我们应用**」（那张特殊权限表里看不到）。
+   * 根因就在这条上：Android 13+ 的 `USE_EXACT_ALARM` 是**安装即授予**（同款能力的"自动档"）
+   * ⇒ 系统认"这应用已经能排精确闹钟了" ⇒ **那张"要用户自己开"的特殊权限表里压根不列它** ✗
+   * ⇒ 只留 `SCHEDULE_EXACT_ALARM`，系统才把本应用列进那张表、老师才开得了。
+   *
+   * ⚠️ 判的是**剥过注释**的 `MANIFEST2` —— 否则上面那段"解释它为什么不能有"的话
+   *   本身会把这条判据判红（注释也会误伤）。
+   */
+  check(
+    !MANIFEST2.includes('android:name="android.permission.USE_EXACT_ALARM"'),
+    '🔴 A22 ④-补 manifest **不许**声明 `USE_EXACT_ALARM` —— 13+ 上它是"安装即授予"，声明了系统就**不把本应用列进「闹钟和提醒」那张特殊权限表**（老师报的"根本没有我们应用"就是这一条）；要留在那张表里让老师自己开，只能声明 `SCHEDULE_EXACT_ALARM`',
+    `声明了 USE_EXACT_ALARM=${MANIFEST2.includes('android:name="android.permission.USE_EXACT_ALARM"')}（须 false）· 声明了 SCHEDULE_EXACT_ALARM=${MANIFEST2.includes('android:name="android.permission.SCHEDULE_EXACT_ALARM"')}（须 true）`,
+  )
+  {
+    /* 🧪 反向对照：把 `USE_EXACT_ALARM` 加回 manifest 副本 ⇒ ④-补 当场红 */
+    const cut = oneEdit2(
+      MANIFEST2,
+      '<uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />',
+      '<uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />\n    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />',
+    )
+    const back = cut.text.includes('android:name="android.permission.USE_EXACT_ALARM"')
+    check(
+      cut.ok && back,
+      '🧪 A22 ④-补 反向对照：把 `USE_EXACT_ALARM` 那一行**加回去**（副本 = 老师报"表里看不到我们应用"的那一版）⇒ ④-补 当场红',
+      `目标出现 ${cut.n} 处（须恰好 1）· 改完又声明了=${back}`,
+    )
+  }
   check(
     /<receiver android:name="\.YlxbAlarmReceiver" android:exported="false" \/>/.test(MANIFEST2) &&
       /<receiver android:name="\.YlxbBootReceiver"/.test(MANIFEST2) &&
@@ -7776,14 +7825,161 @@ section('第二十七节 · A22：到点提醒交给系统排程（桥接层 / �
     '🔴 A22 ④ 两个 receiver 都注册了（`YlxbAlarmReceiver` = 到点发通知 · `YlxbBootReceiver` = 开机重排，带 `BOOT_COMPLETED` intent-filter）—— 没注册 = 闹钟响了没人接，**界面完全看不出异常**',
     `闹钟接收器=${/<receiver android:name="\.YlxbAlarmReceiver" android:exported="false" \/>/.test(MANIFEST2)} · 开机接收器=${/<receiver android:name="\.YlxbBootReceiver"/.test(MANIFEST2)} · BOOT_COMPLETED=${/android\.intent\.action\.BOOT_COMPLETED/.test(MANIFEST2)}`,
   )
+  const CH_GENERAL2 = /public static final String CHANNEL_GENERAL = "shugao_general"/
+  const CH_GENERAL_CREATE2 = /nm\.createNotificationChannel\(gn\)/
+  const CH_IMM2 = /public static final String CHANNEL_IMMEDIATE = "shugao-default"/
+  const CH_IMM_CREATE2 = /nm\.createNotificationChannel\(im\)/
   check(
-    /public static final String CHANNEL_GENERAL = "shugao_general"/.test(PLUGIN2) &&
-      /nm\.createNotificationChannel\(gn\)/.test(PLUGIN2) &&
-      /'shugao_general'/.test(NOTIFY),
-    '🔴 A22 ④ 通知渠道**两侧对得上**：原生建了 `shugao_general`（Android 8+ 没有渠道的通知会被系统丢掉），网页侧排的那张单子也**点名**用这个渠道',
-    `原生渠道常量=${/public static final String CHANNEL_GENERAL = "shugao_general"/.test(PLUGIN2)} · 建渠道=${/nm\.createNotificationChannel\(gn\)/.test(PLUGIN2)} · 网页侧点名=${/'shugao_general'/.test(NOTIFY)}`,
-    '（⚠️ 判据里写的是**单引号**那一版：源码里那个字面量就是单引号，写成双引号会`假红`）',
+    CH_GENERAL2.test(PLUGIN2) &&
+      CH_GENERAL_CREATE2.test(PLUGIN2) &&
+      /'shugao_general'/.test(NOTIFY) &&
+      CH_IMM2.test(PLUGIN2) &&
+      CH_IMM_CREATE2.test(PLUGIN2) &&
+      /var CHANNEL_IMMEDIATE = 'shugao-default'/.test(BRIDGE2),
+    '🔴 A22 ④ 通知渠道**两侧对得上**，而且**每一个渠道都有创建者**：原生建了 `shugao_general`（闹钟那条点名用它）与 `shugao-default`（即时通知那条点名用它），桥接层那个常量与原生**一字不差** —— Android 8+ **往不存在的渠道发通知 = 那条通知被系统当场丢掉**（不抛错），这正是老师报"连应用内都没有通知"的那一环',
+    `原生一般渠道=${CH_GENERAL2.test(PLUGIN2)}/${CH_GENERAL_CREATE2.test(PLUGIN2)} · 原生即时渠道=${CH_IMM2.test(PLUGIN2)}/${CH_IMM_CREATE2.test(PLUGIN2)} · 桥接层常量=${/var CHANNEL_IMMEDIATE = 'shugao-default'/.test(BRIDGE2)} · 网页侧点名 general=${/'shugao_general'/.test(NOTIFY)}`,
+    '（⚠️ `shugao-default` 那个字面量**含连字符**，与 `shugao_general` 不同族 —— 两侧必须逐字相同，改了任一侧这条当场红）',
   )
+  {
+    /* 🧪 反向对照：把原生那个即时渠道常量**改名** ⇒ 上面那条当场红（渠道没人建了） */
+    const cut = oneEdit2(PLUGIN2, 'public static final String CHANNEL_IMMEDIATE = "shugao-default"', 'public static final String CHANNEL_IMMEDIATE = "shugao_default_renamed"')
+    check(
+      cut.ok && !CH_IMM2.test(cut.text) && /var CHANNEL_IMMEDIATE = 'shugao-default'/.test(BRIDGE2),
+      '🧪 A22 ④ 反向对照：把原生那个即时渠道常量**改名**（副本）⇒ 上面那条当场红（桥接层点名的渠道又没人建了 = 通知被静默丢掉）',
+      `目标出现 ${cut.n} 处（须恰好 1）· 改完两侧还对得上=${CH_IMM2.test(cut.text)}`,
+    )
+  }
+  {
+    /* 🧪 反向对照：**删掉原生那一句建渠道** ⇒ 上面那条当场红（这正是改之前的形状：常量在、没人建） */
+    const cut = oneEdit2(PLUGIN2, 'nm.createNotificationChannel(im);', '/* 渠道没建 */')
+    check(
+      cut.ok && !CH_IMM_CREATE2.test(cut.text) && CH_IMM2.test(cut.text),
+      '🧪 A22 ④ 反向对照：把原生那句 `nm.createNotificationChannel(im)` 删掉（副本 = **改之前**的形状：常量在、渠道没人建）⇒ 上面那条当场红',
+      `目标出现 ${cut.n} 处（须恰好 1）· 改完还建着=${CH_IMM_CREATE2.test(cut.text)}`,
+    )
+  }
+
+  /* ---------------- ④-② 即时通知那条路：走原生 `notify`，而且**报得出真失败** ---------------- */
+  const BR_NATIVE_NOTIFY = /return N\.notify\(\{ id: nextId\(\), title: t, body: b \}\)/
+  const BR_LN_SCHED = /LN\.schedule\(/
+  check(
+    BR_NATIVE_NOTIFY.test(BRIDGE2) && !BR_LN_SCHED.test(BRIDGE2),
+    '🔴 A22 ④-② 桥接层的即时通知走**原生** `ShugaoNative.notify`（`YlxbNativePlugin` 的 `@PluginMethod notify`），**不再**走 `LocalNotifications.schedule` —— 后者在"渠道不存在"时**照样 resolve**（把"被系统丢掉"报成成功，这一层永远分不清发出去没有），而原生那一句会把 `ok:false` + 人话回上来',
+    `转给原生=${BR_NATIVE_NOTIFY.test(BRIDGE2)} · 还在用插件 schedule=${BR_LN_SCHED.test(BRIDGE2)}（须 false）`,
+  )
+  {
+    /* 🧪 反向对照：把那一句换回 `LocalNotifications.schedule` 的老写法 ⇒ ④-② 当场红 */
+    const cut = oneEdit2(BRIDGE2, 'return N.notify({ id: nextId(), title: t, body: b })', "return LN.schedule({ notifications: [{ id: nextId(), title: t, body: b, channelId: CHANNEL_IMMEDIATE }] }).then(function () { return true })")
+    check(
+      cut.ok && BR_LN_SCHED.test(cut.text) && !BR_NATIVE_NOTIFY.test(cut.text),
+      '🧪 A22 ④-② 反向对照：把那一句换回老写法 `LN.schedule(…).then(return true)`（副本 = "被丢掉也报成功"的坏法）⇒ ④-② 当场红',
+      `目标出现 ${cut.n} 处（须恰好 1）· 改完又用插件=${BR_LN_SCHED.test(cut.text)}`,
+    )
+  }
+  /* ⚠️ 判据咬的是**那道守卫本身**，不是 `areNotificationsEnabled()` 这个名字 ——
+     这个名字在 `selfCheck` / `notifySelfTest` 里也有，拿它当判据会被那两处**撑住不红** */
+  const JAVA_NOTIFY_GUARD = /if \(nm0 == null \|\| !nm0\.areNotificationsEnabled\(\)\) \{/
+  check(
+    /public void notify\(PluginCall call\)/.test(PLUGIN2) &&
+      JAVA_NOTIFY_GUARD.test(PLUGIN2) &&
+      /Manifest\.permission\.POST_NOTIFICATIONS/.test(PLUGIN2) &&
+      /NotificationManagerCompat\.from\(ctx\)\.notify\(id, b\.build\(\)\)/.test(PLUGIN2),
+    '🔴 A22 ④-② 原生 `notify` **先量再发**：那道守卫 `if (nm0 == null || !nm0.areNotificationsEnabled())` 排在最前面（这个应用的通知有没有被系统关掉）· 再量 13+ 的 `POST_NOTIFICATIONS` · 都过了才 `NotificationManagerCompat.notify` —— 断了就回 `ok:false` + 一句人话（**不许静默**：改之前"发不出去"与"发出去了"在这一层长得一模一样）',
+    `方法在=${/public void notify\(PluginCall call\)/.test(PLUGIN2)} · 守卫在=${JAVA_NOTIFY_GUARD.test(PLUGIN2)} · 量13+权限=${/Manifest\.permission\.POST_NOTIFICATIONS/.test(PLUGIN2)} · 真的发=${/NotificationManagerCompat\.from\(ctx\)\.notify\(id, b\.build\(\)\)/.test(PLUGIN2)}`,
+  )
+  {
+    /* 🧪 反向对照：把那道守卫短路成 `if (false) {` ⇒ 上面那条当场红（= 又回到"不量就发"） */
+    const cut = oneEdit2(PLUGIN2, 'if (nm0 == null || !nm0.areNotificationsEnabled()) {', 'if (false) {')
+    check(
+      cut.ok && !JAVA_NOTIFY_GUARD.test(cut.text),
+      '🧪 A22 ④-② 反向对照：把那道守卫短路成 `if (false) {`（副本 = "不量就发、发丢了也不说"的坏法）⇒ 上面那条当场红',
+      `目标出现 ${cut.n} 处（须恰好 1）· 改完守卫还在=${JAVA_NOTIFY_GUARD.test(cut.text)}`,
+    )
+  }
+
+  /* ---------------- ④-③ 自检入口（老师自己点一下就知道断在哪一环） ---------------- */
+  const BR_SELFTEST = /selfTest: function \(\) \{/
+  const JAVA_SUB = /public void selfCheck\(PluginCall call\)/
+  const JAVA_SUB2 = /public void notifySelfTest\(PluginCall call\)/
+  const TEST_ID2 = /private static final int NOTIFY_TEST_ID = \d+;/
+  check(
+    BR_SELFTEST.test(BRIDGE2) &&
+      /N\.selfCheck\(\)/.test(BRIDGE2) &&
+      /N\.notifySelfTest\(\)/.test(BRIDGE2) &&
+      JAVA_SUB.test(PLUGIN2) &&
+      JAVA_SUB2.test(PLUGIN2) &&
+      /nm\.getNotificationChannel\(CHANNEL_IMMEDIATE\) != null/.test(PLUGIN2),
+    '🔴 A22 ④-③ **自检那条路两侧都通**：桥接层挂 `selfTest()`（转发 `selfCheck` = 只量 + `notifySelfTest` = 真发一条），原生两个方法都在，而且自检**直接量那个渠道在不在**（`getNotificationChannel(CHANNEL_IMMEDIATE) != null`）—— 本机没有安卓设备，这一格读数就是"把这台手机上的断点搬到屏上"的唯一办法',
+    `桥接层=${BR_SELFTEST.test(BRIDGE2)} · 转发只量=${/N\.selfCheck\(\)/.test(BRIDGE2)} · 转发真发=${/N\.notifySelfTest\(\)/.test(BRIDGE2)} · 原生两个方法=${JAVA_SUB.test(PLUGIN2)}/${JAVA_SUB2.test(PLUGIN2)} · 量渠道=${/nm\.getNotificationChannel\(CHANNEL_IMMEDIATE\) != null/.test(PLUGIN2)}`,
+  )
+  {
+    /* 🧪 反向对照：把桥接层那个自检方法**改名** ⇒ ④-③ 当场红（网页侧又无从调用） */
+    const cut = oneEdit2(BRIDGE2, 'selfTest: function () {', 'selfTestRenamed: function () {')
+    check(
+      cut.ok && !BR_SELFTEST.test(cut.text),
+      '🧪 A22 ④-③ 反向对照：把桥接层那个 `selfTest` **改名**（副本 = "原生写好了、网页侧没挂"那个形态）⇒ ④-③ 当场红',
+      `目标出现 ${cut.n} 处（须恰好 1）· 改完判据=${BR_SELFTEST.test(cut.text)}`,
+    )
+  }
+  check(
+    TEST_ID2.test(PLUGIN2),
+    '🔴 A22 ④-③ 自检那条通知用**写死的固定 id**（`NOTIFY_TEST_ID`）—— 重复点只覆盖不堆通知栏；而且它是个小常数，**不会**像 `System.currentTimeMillis()` 那样在 2038 年后越过 Java int（这个入口要长期留着）',
+    `固定 id=${TEST_ID2.test(PLUGIN2)}`,
+  )
+  {
+    /* 🧪 反向对照：把固定 id 换成 `System.currentTimeMillis()` 那种写法 ⇒ 上面那条当场红 */
+    const cut = oneEdit2(PLUGIN2, 'private static final int NOTIFY_TEST_ID = 944001;', 'private static final int NOTIFY_TEST_ID = (int) System.currentTimeMillis();')
+    check(
+      cut.ok && !TEST_ID2.test(cut.text),
+      '🧪 A22 ④-③ 反向对照：把那句固定 id 换成 `(int) System.currentTimeMillis()`（副本 = 2038 年后越界的那种坏法）⇒ 上面那条当场红',
+      `目标出现 ${cut.n} 处（须恰好 1）· 改完还是固定常数=${TEST_ID2.test(cut.text)}`,
+    )
+  }
+
+  /* ---------------- ④-④ 网页侧：自检那四格读数 + 只给超管的入口 ---------------- */
+  check(
+    /export interface ShellSelfTest \{/.test(NOTIFY) &&
+      /selfTest\?\(\): Promise<ShellSelfTest>/.test(NOTIFY) &&
+      /export async function runNotifySelfTest\(\): Promise<ShellSelfTest> \{/.test(NOTIFY) &&
+      /if \(typeof s\?\.selfTest !== 'function'\) return \{ unsupported: true \}/.test(NOTIFY) &&
+      /export function selfTestHint\(r: ShellSelfTest\)/.test(NOTIFY) &&
+      /if \(r\.unsupported\) return \{ text: '这个版本还不能自检'/.test(NOTIFY) &&
+      /if \(r\.posted === true\) return \{ text: '已发出一条测试通知'/.test(NOTIFY),
+    '🔴 A22 ④-④ 网页侧那条自检路**三态分明**：`ShellSelfTest` 把四格读数分开（`notify` / `granted` / `channel` / `posted`，**合成一个 boolean 就没法定位断点了**）· **先问能力**（`selfTest` 不在 ⇒ 回 `unsupported`，不许假装检查过）· `selfTestHint()` 把每一格翻成**不同的**一句人话（"系统里通知是关着的" ≠ "渠道没建起来"）',
+    `类型在=${/export interface ShellSelfTest \{/.test(NOTIFY)} · 能力门=${/if \(typeof s\?\.selfTest !== 'function'\) return \{ unsupported: true \}/.test(NOTIFY)} · 分档=${/export function selfTestHint\(r: ShellSelfTest\)/.test(NOTIFY)} · 未支持档=${/if \(r\.unsupported\) return \{ text: '这个版本还不能自检'/.test(NOTIFY)} · 成功档=${/if \(r\.posted === true\) return \{ text: '已发出一条测试通知'/.test(NOTIFY)}`,
+  )
+  {
+    /* 🧪 反向对照：把"先问能力"那一句短路 ⇒ ④-④ 当场红（网页版也会去调一个不存在的口） */
+    const cut = oneEdit2(NOTIFY, "if (typeof s?.selfTest !== 'function') return { unsupported: true }", 'if (false) return { unsupported: true }')
+    check(
+      cut.ok && !/if \(typeof s\?\.selfTest !== 'function\) return \{ unsupported: true \}/.test(cut.text),
+      '🧪 A22 ④-④ 反向对照：把"先问能力"那一句短路成 `if (false)`（副本 = 网页版与两个 exe 也会去调一个不存在的口）⇒ ④-④ 当场红',
+      `目标出现 ${cut.n} 处（须恰好 1）`,
+    )
+  }
+  /**
+   * 🔴 只给超管的那块入口（`Schedule.tsx`）。
+   *
+   * 为什么判"只给超管"：它是**排查工具**，不是功能（文案纪律：界面只说"这里是什么、
+   * 我能做什么"）。两个老师里只有超管看得到 ⇒ 普通老师屏上不多出一个技术按钮。
+   * ⚠️ 同一块里必须**真的调** `runNotifySelfTest()`，否则就是"摆了按钮没人接"。
+   */
+  check(
+    /Array\.isArray\(myRoles\) && isSuperAdmin\(myRoles\)/.test(SCHEDULE) &&
+      /await runNotifySelfTest\(\)/.test(SCHEDULE) &&
+      /push\(selfTestHint\(/.test(SCHEDULE),
+    '🔴 A22 ④-④ 「试一条通知」那块入口**只给超管**（`Array.isArray(myRoles) && isSuperAdmin(myRoles)` —— 先确认是数组再读，`myRoles` 在个别路径上可能是 `undefined`），而且真的把自检**跑起来并把结果说出去**（`push(selfTestHint(await runNotifySelfTest()))`）',
+    `只给超管=${/Array\.isArray\(myRoles\) && isSuperAdmin\(myRoles\)/.test(SCHEDULE)} · 真的跑=${/await runNotifySelfTest\(\)/.test(SCHEDULE)} · 真的说=${/push\(selfTestHint\(/.test(SCHEDULE)}`,
+  )
+  {
+    /* 🧪 反向对照：把那道超管门去掉（改成恒显示）⇒ 上面那条当场红（普通老师屏上会多出技术按钮） */
+    const cut = oneEdit2(SCHEDULE, 'Array.isArray(myRoles) && isSuperAdmin(myRoles)', 'true')
+    check(
+      cut.ok && !/Array\.isArray\(myRoles\) && isSuperAdmin\(myRoles\)/.test(cut.text),
+      '🧪 A22 ④-④ 反向对照：把那道超管门去掉（副本 = 普通老师屏上也多一个排查按钮）⇒ 上面那条当场红',
+      `目标出现 ${cut.n} 处（须恰好 1）`,
+    )
+  }
 
   /*
    * ⛔ 壳那一侧到此为止 —— 🔴 **立刻关掉"允许落灰"**：下面 ⑤–⑧ 判的全是 **`app/` 下的文件**
@@ -7822,7 +8018,7 @@ section('第二十七节 · A22：到点提醒交给系统排程（桥接层 / �
   /* ---------------- ⑥ 挂钩子：真的排了，而且**页内那一条兜底还在** ---------------- */
   const ARM_RE = /const ok = await scheduleNativeReminders\(nativeReminderPlan\(days, now\)\)/
   check(
-    ARM_RE.test(HOOK) && /scheduleNativeReminders,[\s\S]{0,80}\} from '\.\.\/lib\/notify'/.test(HOOK),
+    ARM_RE.test(HOOK) && /scheduleNativeReminders,[\s\S]{0,120}\} from '\.\.\/lib\/notify'/.test(HOOK),
     '🔴 A22 ⑥ `useScheduleReminder` 真的把那条单子排出去（`scheduleNativeReminders(nativeReminderPlan(days, now))`）—— 桥接层与适配层都写好了、**没人调**，就是这次事故的形态（`97cf3fd` 同源：桥接层给了答案，业务层没去读）',
     `排出去=${ARM_RE.test(HOOK)}`,
   )
@@ -7937,34 +8133,213 @@ section('第二十七节 · A22：到点提醒交给系统排程（桥接层 / �
       const at = (s) => t.indexOf(s)
       const g = at('if (!shellCanScheduleAlarms()) return')
       const c = at('const ok = await scheduleNativeReminders(nativeReminderPlan(days, now))')
-      const p = at("text: '提醒改在应用内显示。关掉应用就收不到了。'")
-      return { g, c, p, n: once2(t, '提醒改在应用内显示'), ok: g >= 0 && c > g && p > c && once2(t, '提醒改在应用内显示') === 1 }
+      /*
+       * ⚠️ 这里数的是**真的把话推出去**那一句（`push({ text: hint.text`），
+       *    **不是**那句文案本身 —— 2026-10-05 起文案搬进了纯函数 `remindFailHint()`
+       *    （排在文件前面，为的是让 ⑭ 能直接把它当代码跑）⇒ 按文案的位置判会**假红**
+       *    （文案@907 < 排单子@3582）。"谁能把这句话说出去"才是这条要判的东西：
+       *    出口只有一个，而且它在能力门**之后**。
+       */
+      const p = at('push({ text: hint.text, tone: \'warn\', desc: hint.desc })')
+      /* 能力门必须是**真判据**（`if (false) return` 这种短路要能红） */
+      const gOk = g >= 0 && /if \(!shellCanScheduleAlarms\(\)\) return/.test(t)
+      return { g, c, p, n: once2(t, '提醒改在应用内显示'), gOk, ok: gOk && c > g && p > c && once2(t, '提醒改在应用内显示') === 1 }
     }
     const o = gateOrder(HOOK)
-    const IMPORTED = /shellCanScheduleAlarms,[\s\S]{0,80}\} from '\.\.\/lib\/notify'/.test(HOOK)
+    const IMPORTED = /shellCanScheduleAlarms,[\s\S]{0,200}\} from '\.\.\/lib\/notify'/.test(HOOK)
     check(
       o.ok && IMPORTED,
-      '🔴 A22 ⑪ 提示的触发条件**先判"这个壳有没有这个能力"**：`if (!shellCanScheduleAlarms()) return` 排在"排单子"和那句人话**之前** ⇒ 网页版 / 两个 exe **连提示分支都进不去**（而不是"尝试后失败 ⇒ 提示"）；判据从 `lib/notify` 那一个口导入（不在页面里另抄一遍）',
-      `能力门@${o.g} · 排单子@${o.c} · 那句人话@${o.p}（须 门 < 排 < 说）· 那句话在真代码里 ${o.n} 处（须恰好 1）· 从 notify 导入=${IMPORTED}`,
+      '🔴 A22 ⑪ 提示的触发条件**先判"这个壳有没有这个能力"**：`if (!shellCanScheduleAlarms()) return` 是**真判据**（不是短路），且排在"排单子"和那个**唯一出口**（`push({ text: hint.text … })`）**之前** ⇒ 网页版 / 两个 exe **连提示分支都进不去**（而不是"尝试后失败 ⇒ 提示"）；判据从 `lib/notify` 那一个口导入（不在页面里另抄一遍）',
+      `能力门@${o.g}（真判据=${o.gOk}）· 排单子@${o.c} · 那个出口@${o.p}（须 门 < 排 < 出口）· 那句兜底话在真代码里 ${o.n} 处（须恰好 1）· 从 notify 导入=${IMPORTED}`,
     )
     /* 🧪 反向对照：把"先判能力"短路掉 = 改之前"直接判失败就提示"的形状 ⇒ ⑪ 当场红 */
     const cut = oneEdit2(HOOK, 'if (!shellCanScheduleAlarms()) return', 'if (false) return')
-    const o2 = cut.ok ? gateOrder(cut.text) : { g: -1, c: -1, p: -1, n: -1, ok: true }
+    const o2 = cut.ok ? gateOrder(cut.text) : { g: -1, c: -1, p: -1, n: -1, gOk: false, ok: true }
     check(
       cut.ok && !o2.ok,
       '🧪 A22 ⑪ 反向对照：把"先判能力"那一句短路成 `if (false) return`（内存副本 = 改之前"没排上就提示"的形状）⇒ ⑪ 当场红（那句话又变成网页版也会弹）',
-      `目标出现 ${cut.n} 处（须恰好 1）· 改完能力门@${o2.g} · 判据=${o2.ok}`,
+      `目标出现 ${cut.n} 处（须恰好 1）· 改完能力门@${o2.g} · 真判据=${o2.gOk} · 判据=${o2.ok}`,
+    )
+  }
+
+  /*
+   * ---------------- ⑫–⑯ **"提示与真实能力不匹配"**（2026-10-05 真机第二轮，两条 ✗） ----------------
+   *
+   * 用户在真机（最新 apk）上看到两句**不该那样说**的话：
+   *   ✗ ① 工作台顶部：「提醒改在应用内显示。关掉应用就收不到了。」／「换一版应用可以收到系统通知。」
+   *        —— 那是**兜底话**：出现说明**能力门过了**（⑪），紧跟着的真因是
+   *        **系统没给"精确闹钟"**（Android 12+ 的 `SCHEDULE_EXACT_ALARM`）
+   *        ⇒ 话里得有**可操作的一步**（去系统设置开「闹钟与提醒」），不能只说"收不到"。
+   *   ✗ ② 日程表页那张黄条：「这个设备收不到系统通知」／「要在手机上收到系统通知，请用浏览器打开网站并允许通知。」
+   *        —— 那是**更早的**判断，问的是**网页的**通知权限（WebView 里本来就没有
+   *        `Notification` ⇒ `notifyChannel() === 'unsupported'`），而 **apk 的通知走的是原生
+   *        `AlarmManager`**（`__shell_out.scheduleAlarms`）⇒ 它明明收得到，还在劝去浏览器 ✗。
+   *
+   * 🔴 两处共同的纪律：**先问能力，再谈成败**；量不出来就**灰**（不说），绝不猜（§三.4）。
+   * 🔴 硬边界：**网页版与两个 exe 的行为一个字不许变** —— 下面那些"能力门"就是这条边界的守卫，
+   *    每条都配一条能红的反向对照（§三.2：`String.replace` 前先数出现次数）。
+   */
+  const IMP_SCHED =
+    /import \{\s*notifyPermission,[\s\S]{0,200}shellCanScheduleAlarms,\s*\} from '\.\.\/lib\/notify'/
+  const SHOW_RE = /const showPermBanner = perm !== 'granted' && !shellSchedules/
+  check(
+    IMP_SCHED.test(SCHEDULE) && /const shellSchedules = shellCanScheduleAlarms\(\)/.test(SCHEDULE) && SHOW_RE.test(SCHEDULE),
+    '🔴 A22 ⑫ 日程页那块权限横幅**先问原生能力**：从 `notify.ts` 那一个口导入 `shellCanScheduleAlarms()`，显示条件是 `perm !== \'granted\' && !shellSchedules` —— **壳里有原生排程（apk）⇒ 这块横幅整个不出现**（老师明明收得到系统通知，没有"收不到"这回事，也没有"开启通知"要他做）',
+    `导入=${IMP_SCHED.test(SCHEDULE)} · 问能力=${/const shellSchedules = shellCanScheduleAlarms\(\)/.test(SCHEDULE)} · 条件=${SHOW_RE.test(SCHEDULE)}`,
+  )
+  {
+    /* 🧪 反向对照：把能力那一项从显示条件里删掉 ⇒ ⑫ 当场红（= 回到"只看网页权限"的坏法：apk 上又会劝去浏览器） */
+    const cut = oneEdit2(SCHEDULE, "const showPermBanner = perm !== 'granted' && !shellSchedules", "const showPermBanner = perm !== 'granted'")
+    check(
+      cut.ok && !SHOW_RE.test(cut.text),
+      '🧪 A22 ⑫ 反向对照：把 `&& !shellSchedules` 从显示条件里删掉（内存副本 = apk 上又会劝"用浏览器打开网站"的坏法）⇒ ⑫ 当场红',
+      `目标出现 ${cut.n} 处（须恰好 1）· 改完判据=${SHOW_RE.test(cut.text)}`,
+    )
+  }
+  {
+    /*
+     * ⚠️ 那句引导话在 `HOOK` 里只出现**一处**（`remindFailHint()` 的函数体里）——
+     *   而**真正给出去**的那一句是下面 `const hint = remindFailHint(...)` 那一行
+     *   （它的 `push` 在 ⑪ 出口判据里钉着）。
+     *   ⇒ 这里判的是：那句文案**只有** `remindFailHint()` 这一个来源，
+     *     而它的**调用点**在文案之后、且**过得了那道能力门**（`canExact === false && canOpenSettings`）。
+     *   ⚠️ 抠不出函数定义 / 找不到调用点 ⇒ 全是 `-1` ⇒ 判据当场红（不空转）。
+     */
+    const order = (t) => {
+      const fn = t.indexOf('export function remindFailHint(')
+      const g = t.indexOf('去系统设置把「闹钟与提醒」允许给本应用，关掉应用也能响。')
+      const u =
+        fn < 0 ? -1 : t.indexOf('const hint = remindFailHint(canExact, shellCanOpenExactAlarmSettings())', fn)
+      return {
+        g,
+        u,
+        n: t.split('去系统设置把「闹钟与提醒」允许给本应用，关掉应用也能响。').length - 1,
+        ok: fn >= 0 && g > fn && u > fn && u > g,
+      }
+    }
+    const o = order(HOOK)
+    check(
+      /export function remindFailHint\(/.test(HOOK) &&
+        /if \(canExact === false && canOpenSettings\) \{/.test(HOOK) &&
+        o.ok,
+      '🔴 A22 ⑬ 兜底话**给出可操作的一步**：`remindFailHint(canExact, canOpenSettings)` 分档（纯函数，判据直接跑它），只有**量到"精确闹钟没授权"（`false`）**且**这个壳有那条跳设置的路**时，才说「去系统设置把『闹钟与提醒』允许给本应用，关掉应用也能响。」—— 其余情形（没量到 / 跳不了）照旧那句兜底，**不许**凭空指着设置说"去那儿开"',
+      `分档函数=${/export function remindFailHint\(/.test(HOOK)} · 能力门在=${/if \(canExact === false && canOpenSettings\) \{/.test(HOOK)} · 引导话@${o.g} < 调用点@${o.u}（须严格在这个顺序上）· 那句话全文件 ${o.n} 处（须恰好 1：唯一出口在分档函数里）`,
+    )
+    /* 🧪 反向对照：把"量到了没授权"这一个前提反过来 ⇒ ⑬ 的能力门当场假（那就会对着"不知道"乱指路） */
+    const cut = oneEdit2(HOOK, 'if (canExact === false && canOpenSettings) {', 'if (canExact === true && canOpenSettings) {')
+    check(
+      cut.ok && !/if \(canExact === false && canOpenSettings\) \{/.test(cut.text),
+      '🧪 A22 ⑬ 反向对照：把前提改成"**量到 `true` 才算没授权**"（内存副本 = 拿"知道能排"去指路，方向反了）⇒ ⑬ 当场红',
+      `目标出现 ${cut.n} 处（须恰好 1）· 改完判据=${/if \(canExact === false && canOpenSettings\) \{/.test(cut.text)}`,
+    )
+  }
+  {
+    /**
+     * 🧪 把 `remindFailHint()` 的函数体**真的跑一遍**（`Function` 构造器 —— 行为判据，不是文字判据）。
+     *    输入三档：量到没授权（`false`）· 量到已授权（`true`）· 没量到（`null`）；
+     *    每种再分"这个壳有跳设置那条路 / 没有"。
+     */
+    const HINT_SIG =
+      /export function remindFailHint\(\s*canExact: boolean \| null,\s*canOpenSettings: boolean,\s*\): \{ text: string; desc: string \} \{([\s\S]*?)\n\}/
+    const body = HOOK.match(HINT_SIG)?.[1] ?? ''
+    const run = (t, c) => {
+      try {
+        const f = new Function('canExact', 'canOpenSettings', t)
+        return { text: String(f(c, true)?.text ?? ''), desc: String(f(c, true)?.desc ?? ''), err: '' }
+      } catch (e) {
+        return { text: '', desc: '', err: String(e?.message ?? e) }
+      }
+    }
+    /** 网页版 / 两个 exe：**没有**那条跳设置的路 ⇒ 一个字都不许变（照旧那句兜底） */
+    const webOk = (t) => {
+      const f = new Function('canExact', 'canOpenSettings', t)
+      return [null, false, true].every((c) => f(c, false).text === '提醒改在应用内显示。关掉应用就收不到了。')
+    }
+    let r = { text: '', desc: '', err: '抠不出 remindFailHint() 的函数体（形状变了 ⇒ 这一条当场红）' }
+    let web = false
+    if (body) {
+      r = run(body, false)
+      try {
+        web = webOk(body)
+      } catch {
+        web = false
+      }
+    }
+    const ok =
+      body !== '' && r.err === '' && r.desc.includes('去系统设置') && r.desc.includes('闹钟与提醒') && web
+    check(
+      ok,
+      '🔴 A22 ⑭ 把那个分档**当代码跑**：`canExact = false`（系统确实没给精确闹钟）⇒ 那句里**真的**有「去系统设置」+「闹钟与提醒」；而 `null`（**没量到**）与 `true`（已经给了）都照旧那句兜底 —— 三态不许混（§三.4：没结论是灰，不许拿"不知道"去指路）',
+      r.err ? `🔴 跑不起来：${r.err}` : `false ⇒ ${r.text}／${r.desc} · 没量到与已授权那两档走兜底=${web}`,
+    )
+    /* 🧪 反向对照：把"量到了没授权"改判成"量到了已授权" ⇒ 引导话**打不出来**了，上面那条当场红 */
+    const cut = oneEdit2(HOOK, 'if (canExact === false && canOpenSettings) {', 'if (canExact === true && canOpenSettings) {')
+    const cutBody = cut.ok ? cut.text.match(HINT_SIG)?.[1] ?? '' : ''
+    const rc = cutBody ? run(cutBody, false) : { desc: '', err: '抠不出函数体' }
+    check(
+      cut.ok && rc.err === '' && !rc.desc.includes('去系统设置'),
+      '🧪 A22 ⑭ 反向对照：把那一档改判成"量到 `true` 才指路"（内存副本）⇒ 兜底话里「去系统设置」**一个字都打不出来** —— 证明这条判据咬的是那句真代码，不是恒真',
+      cut.ok
+        ? `目标出现 ${cut.n} 处（须恰好 1）· 改完 desc=${JSON.stringify(rc.desc)}`
+        : `目标出现 ${cut.n} 处（须恰好 1）—— 宁可报错，也不假绿`,
+    )
+  }
+  const BR_EXACT = /openExactAlarmSettings: function \(\) \{/
+  const JAVA_EXACT = /public void openExactAlarmSettings\(PluginCall call\)/
+  const EXACT_PAGE = /Settings\.ACTION_REQUEST_SCHEDULE_EXACT_ALARM/
+  check(
+    JAVA_EXACT.test(PLUGIN2) && EXACT_PAGE.test(PLUGIN2),
+    '🔴 A22 ⑮ 原生那侧**本来就有**"跳精确闹钟设置"的能力（`YlxbNativePlugin.openExactAlarmSettings` → `ACTION_REQUEST_SCHEDULE_EXACT_ALARM`；**不是本轮新加的**，本轮只是把它挂出来）—— 缺了它，⑯ 那句"去系统设置"会跳到一个不存在的动作上',
+    `插件方法=${JAVA_EXACT.test(PLUGIN2)} · 那一页=${EXACT_PAGE.test(PLUGIN2)}`,
+  )
+  check(
+    BR_EXACT.test(BRIDGE2) && /N\.openExactAlarmSettings\(\)/.test(BRIDGE2),
+    '🔴 A22 ⑯ 桥接层挂上了 `openExactAlarmSettings`（与 `openInstallPermissionSettings` 同一个口）—— **原生写好了、桥接层没挂**正是 `scheduleAlarms` 空了三天那个形态：网页侧无从调用，界面上看不出异常',
+    `挂了方法=${BR_EXACT.test(BRIDGE2)} · 真的转给原生=${/N\.openExactAlarmSettings\(\)/.test(BRIDGE2)}`,
+  )
+  {
+    /* 🧪 反向对照：把桥接那个方法**改名** ⇒ ⑯ 当场红（名字是两侧的约定，改了原生就白写） */
+    const cut = oneEdit2(BRIDGE2, 'openExactAlarmSettings: function () {', 'openExactAlarmSettingsRenamed: function () {')
+    check(
+      cut.ok && !BR_EXACT.test(cut.text),
+      '🧪 A22 ⑯ 反向对照：把桥接那个方法**改名**（内存副本）⇒ ⑯ 当场红 —— 名字是两侧的约定，改了原生那个 `@PluginMethod` 就白写',
+      `目标出现 ${cut.n} 处（须恰好 1）· 改完判据=${BR_EXACT.test(cut.text)}`,
+    )
+  }
+  const APP_EXACT = /export function shellCanOpenExactAlarmSettings\(\): boolean \{/
+  const APP_OPEN = /export async function openExactAlarmSettings\(\): Promise<boolean> \{/
+  check(
+    APP_EXACT.test(NOTIFY) &&
+      APP_OPEN.test(NOTIFY) &&
+      /if \(typeof s\?\.openExactAlarmSettings !== 'function'\) return false/.test(NOTIFY) &&
+      /await s\.openExactAlarmSettings\(\)/.test(NOTIFY),
+    '🔴 A22 ⑯ 网页侧那条路也齐全：`shellCanOpenExactAlarmSettings()`（**能力门**：问 `__shell_out` 上这个方法在不在）+ `openExactAlarmSettings()`（真的调它）—— 「去系统设置」那句话只在这道门里面可达，网页版与两个 exe 上从结构上走不到',
+    `能力门=${APP_EXACT.test(NOTIFY)} · 真的调=${APP_OPEN.test(NOTIFY)} · 先问能力=${/if \(typeof s\?\.openExactAlarmSettings !== 'function'\) return false/.test(NOTIFY)}`,
+  )
+  {
+    /* 🧪 反向对照：把能力门那一句短路掉 ⇒ 上面那条当场红（= 网页版也会去调一个不存在的口） */
+    const cut = oneEdit2(NOTIFY, "if (typeof s?.openExactAlarmSettings !== 'function') return false", 'if (false) return false')
+    check(
+      cut.ok && !/if \(typeof s\?\.openExactAlarmSettings !== 'function'\) return false/.test(cut.text),
+      '🧪 A22 ⑯ 反向对照：把能力门那一句短路成 `if (false) return false`（内存副本）⇒ 上面那条当场红 —— 那正是"先试再谈成败"的坏法（网页版上也会去调一个不存在的口）',
+      `目标出现 ${cut.n} 处（须恰好 1）`,
     )
   }
 
   /*
    * ✅ **怎么真机验**（本机没有安卓设备 ⇒ 这一节全是静态判据，**没有一条**是真机验过的）：
-   *    ① 出一版新 apk（`_tools/package-all.mjs`）装到老师手机上；
-   *    ② 打开应用停在「日程」页（这一步是让网页把那张单子交给系统）⇒ 然后**把应用划掉**；
-   *    ③ 到下一节课「课前 10 分钟」时：通知栏应出现「10 分钟后上课 · 班级 · 地点 · 时间」
-   *       —— 应用**是关着的**（改之前这一条必不出现）；
-   *    ④ 反向：在系统设置里把本应用的通知关掉（或把"闹钟和提醒"关掉）⇒
-   *       打开应用应看到那句「提醒改在应用内显示」，而不是一片安静。
+   *    🔴 2026-10-05 真机第三轮改过复验步骤（两条 ✗ 分别对应两处修）：
+   *    ① **断点 A（那张特殊权限表）**：装新 apk → 系统设置 → 其他特殊权限 →
+   *       「闹钟和提醒」⇒ **这一版列表里应当有「树高教务通」**（上一版没有，因为
+   *       `USE_EXACT_ALARM` 把它变成了"安装即授予"）；把那个开关打开 ⇒
+   *       再进应用，「试一条通知」应回 `exact:true`（`canScheduleExactAlarms()` 变真）。
+   *    ② **断点 B（应用内通知）**：装新 apk → 用超管账号登录 → 「日程」页 →
+   *       点「**试一条通知**」⇒ 通知栏**应当出现一条「测试通知」**；
+   *       不出现时，屏上那句话会**直接说明是哪一环**（系统里通知关着 / 13+ 权限没给 /
+   *       渠道没建起来）—— 照它去开对应的开关，再点一次。
+   *    ③ 之后：停在「日程」页（让网页把那张单子交给系统）⇒ **把应用划掉** ⇒
+   *       到下一节课「课前 10 分钟」时通知栏应出现「10 分钟后上课 · 班级 · 地点 · 时间」
+   *       —— 应用**是关着的**。
    */
   {
     /* 照 A21 ⑪ 的先例：这一条**故意用原始文本**（"真机未验"这几个字只能写在注释里） */
