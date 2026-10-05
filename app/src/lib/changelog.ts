@@ -83,6 +83,14 @@ export type ChangeLogEntry = {
 
 export const CHANGELOG: ChangeLogEntry[] = [
   {
+    v: '1.1.3',
+    at: '2026年10月5日',
+    items: [
+      '修复：通知设置最后一步总是失败，现在会说清楚卡在哪',
+      '修复：上课提醒收不到时不再只报一句看不懂的话，会把系统回的原因直接显示出来',
+    ],
+  },
+  {
     v: '1.1.2',
     at: '2026年10月4日',
     items: [
