@@ -60,6 +60,20 @@ interface ShellNotifyBridge {
    *   带包名跳转 → 不带包名跳转 → 应用详情页）早就写好了，**桥接层一直没挂** ⇒ 网页侧无从调用。
    */
   openExactAlarmSettings?(): Promise<boolean>
+  /* ============================================================
+     🆕 推送链路（2026-10-02，用户拍板"一步到位"）—— 只有 apk 的壳有这几个口。
+     判据照旧写"方法在不在"：exe / 网页版一个字都不会变。
+     ============================================================ */
+  /** 首启引导：Android 13+ 的通知授权弹窗（**真弹**，与只读的 `notifyPermission` 不同） */
+  requestNotifyPermission?(): Promise<'granted' | 'denied' | 'unsupported'>
+  /** 首启引导：三格读数（通知总开关 / 精确闹钟 / 电池优化白名单） */
+  pushStatus?(): Promise<{ notify?: boolean; exact?: boolean; battery?: boolean } | null>
+  /** 首启引导：电池优化白名单（系统弹窗，直接跳转引导用户点"允许"） */
+  requestIgnoreBattery?(): Promise<{ ok: boolean; already?: boolean; why?: string }>
+  /** 启动推送拉取前台服务（endpoint = 业务站基址；token = /api/push/register 换的钥匙） */
+  startPush?(opts: { endpoint: string; token: string }): Promise<{ ok: boolean; why?: string }>
+  /** 登出时停掉前台服务 */
+  stopPush?(): Promise<{ ok: boolean }>
   /**
    * 🆕 **通知自检**（2026-10-05 真机第三轮；只有 apk 有）。
    *
@@ -951,3 +965,75 @@ export function watchRemindSelfCheck(
       而"有没有 Capacitor"要看依赖树 —— 门禁没法在屏上量它。
       `preflight.mjs` 也有 `SHELL` 那条规则盯着谁可以直接摸这个对象。
    ============================================================ */
+/* ============================================================
+   🆕 推送链路的应用侧包装（2026-10-02）—— 首启引导与前台服务。
+   只有 apk 的壳会真的动；exe / 网页版方法不存在 ⇒ 如实回 false/null，
+   调用方直接跳过（§三.5：没这条路就别说这条路的话）。
+   ============================================================ */
+
+/** 这个壳有没有整条推送链（startPush + pushStatus 都在）—— 首启引导的总闸 */
+export function shellHasPushFlow(): boolean {
+  const s = shell()
+  return typeof s?.startPush === 'function' && typeof s?.pushStatus === 'function'
+}
+
+/** Android 13+ 的通知授权弹窗（真弹）。12- 及以下系统默认已有 ⇒ 也会回 granted */
+export async function shellRequestNotifyPermission(): Promise<'granted' | 'denied' | 'unsupported'> {
+  const s = shell()
+  if (typeof s?.requestNotifyPermission !== 'function') return 'unsupported'
+  try {
+    const r = await s.requestNotifyPermission()
+    return r === 'granted' ? 'granted' : 'denied'
+  } catch {
+    return 'denied'
+  }
+}
+
+export type ShellPushStatus = { notify?: boolean; exact?: boolean; battery?: boolean }
+
+/** 三格读数（通知总开关 / 精确闹钟 / 电池白名单）。读不到 = null（**不知道**，不许猜） */
+export async function shellPushStatus(): Promise<ShellPushStatus | null> {
+  const s = shell()
+  if (typeof s?.pushStatus !== 'function') return null
+  try {
+    const r = await s.pushStatus()
+    return r && typeof r === 'object' ? (r as ShellPushStatus) : null
+  } catch {
+    return null
+  }
+}
+
+/** 电池优化白名单（系统弹窗）。`false` = 这个壳没有这条路 / 跳转失败（如实） */
+export async function shellRequestIgnoreBattery(): Promise<boolean> {
+  const s = shell()
+  if (typeof s?.requestIgnoreBattery !== 'function') return false
+  try {
+    const r = await s.requestIgnoreBattery()
+    return !!(r && r.ok)
+  } catch {
+    return false
+  }
+}
+
+/** 启动推送拉取前台服务。`false` = 没这条路 / 起失败（调用方要给页内兜底） */
+export async function shellStartPush(endpoint: string, token: string): Promise<boolean> {
+  const s = shell()
+  if (typeof s?.startPush !== 'function') return false
+  try {
+    const r = await s.startPush({ endpoint, token })
+    return !!(r && r.ok)
+  } catch {
+    return false
+  }
+}
+
+/** 登出时停掉前台服务（停失败不抛 —— 登出路径不该被它挡住） */
+export async function shellStopPush(): Promise<void> {
+  const s = shell()
+  if (typeof s?.stopPush !== 'function') return
+  try {
+    await s.stopPush()
+  } catch {
+    /* 忽略 */
+  }
+}

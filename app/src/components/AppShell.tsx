@@ -8,6 +8,7 @@ import { useClassroomPresence } from '../hooks/useClassroomPresence'
 import { useMood } from '../hooks/useMood'
 import { useScheduleReminder } from '../hooks/useScheduleReminder'
 import { useNoticeNotify } from '../hooks/useNoticeNotify'
+import { useFirstRunPermissions } from '../hooks/useFirstRunPermissions'
 import { rosterStateOf } from '../lib/roster'
 import { classKindOf } from '../lib/pick'
 import { currentIdentityLabel, ENTRIES, entryVisible, IDENTITY_TAG_STYLE } from '../lib/roles'
@@ -2087,6 +2088,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   useScheduleReminder()
   // 教务处发了通知 → 系统通知（T-通知 2026-10-02；边界与去重见 hooks/useNoticeNotify.ts 文件头）
   useNoticeNotify()
+  // 首启权限流水线（通知弹窗 → 精确闹钟跳转 → 电池白名单 → 启动推送服务；见 useFirstRunPermissions.ts）
+  useFirstRunPermissions()
   // 早上问候 / 当天完成的收尾
   const mood = useMood()
   /** 当前时刻（北京时间，按分钟）—— 用于右栏判断哪节课已结束 */

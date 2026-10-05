@@ -1045,6 +1045,8 @@ export const useStore = create<State>()(
         })),
 
       signOut: () => {
+        /* T-通知（2026-10-02）：登出把推送前台服务停掉 —— 换账号后不能还拉着上一把钥匙 */
+        void import('../lib/notify').then((m) => m.shellStopPush()).catch(() => {})
         set({
           teacher: null,
           userId: null,

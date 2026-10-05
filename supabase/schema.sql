@@ -11175,3 +11175,45 @@ create policy school_calendar_write on school_calendar for all to authenticated
 
 
 
+
+-- ============================================================
+-- §41 推送令牌（2026-10-02）—— apk 前台服务的"到点也能收到通知"链路
+-- ------------------------------------------------------------
+-- 为什么要有这张表：apk 的前台服务（YlxbPushService）每 30 秒拉一次"有没有新通知"，
+--   它没有老师会话的密码，也**不能**用老师浏览器的那个会话
+--   （Supabase 的 refresh token 是轮换的：谁先刷新谁拿到新的，另一方立刻失效 ——
+--     服务拿走它 = 老师被登出）。所以注册流程是：
+--   老师开着应用时（此时有合法 JWT）→ POST /api/push/register →
+--     服务端用 **service_role 给这位老师单独造一个会话**（admin magic link → verify）
+--     → 把那个会话的 refresh_token 存进本表 → 以后前台服务用它刷新、按**老师自己的
+--     JWT** 读通知 —— **RLS 原样生效，可见性判据只有一处**（不在这份 TS 里重写）。
+--
+-- 🔴 **RLS 开着、一条策略都不给**：客户端（PostgREST）对这张表**全拒** ——
+--    refresh_token 是能读通知的钥匙，绝不能让任何前端读到；
+--    只有 functions（service_role，绕 RLS）在 register/pull 里读写。
+--    想读它只有一条路：猜出那把 uuid 令牌，然后还是只能拿到**他自己的**通知。
+--
+-- 幂等：create table if not exists；重复跑不报错、不改已有行。
+-- 自检（Supabase SQL Editor）：
+--   select count(*) from pg_tables
+--     where schemaname='public' and tablename='push_tokens';           -- 1
+--   select count(*) from pg_policies where tablename='push_tokens';    -- 0（故意）
+-- ============================================================
+
+create table if not exists public.push_tokens (
+  token         uuid primary key default gen_random_uuid(),
+  teacher_id    uuid not null references public.teachers(id) on delete cascade,
+  email         text,
+  refresh_token text not null,
+  created_at    timestamptz not null default now(),
+  updated_at    timestamptz not null default now(),
+  last_pull_at  timestamptz
+);
+
+alter table public.push_tokens enable row level security;
+
+-- 一位老师一把钥匙：重新注册（重装 / 重新登录）就换掉旧的那把
+create unique index if not exists push_tokens_teacher_idx on public.push_tokens (teacher_id);
+
+comment on table public.push_tokens is
+  'apk 前台服务的拉取令牌（§41）。RLS 开、零策略 = 客户端全拒；只有 service_role 的 functions 用。';

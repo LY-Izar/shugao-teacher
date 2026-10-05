@@ -1505,7 +1505,10 @@ await withLock(async () => {
       '补〇ⓑ 清单覆盖到 `schema.sql` 的**最后一个段头**（不是写死的数字 —— 加段就自动跟上）',
       nums.length === parsed.length &&
         Math.max(...nums) === parsed[parsed.length - 1].n &&
-        Math.max(...nums) === 40,
+        /* 🆕 2026-10-02（§41 轮）：原来这里写死 `=== 40`（当时 schema 的末段）——
+           schema 又长了（§41），写死的数字与这条断言自己的注释矛盾。现在要求
+           "末段号 ≥ 40"（本日已知的底线）+ 与当场解析一致 ⇒ 加段自动跟上，截断必红。 */
+        parsed[parsed.length - 1].n >= 40,
       `${nums.length} 段 / 最大 §${Math.max(...nums)}（schema.sql 末段 §${parsed[parsed.length - 1].n}）`,
     )
     ok(
@@ -1645,7 +1648,12 @@ await withLock(async () => {
       )
       ok(
         '补〇二ⓖ §38 探得到 → 总结论不再偏低（**这次补探针要的就是这个数**）',
-        sum.latest === 40 && /线上库已跑到\s*§40/.test(sum.text),
+        /* 🆕 2026-10-02（§41 轮）：原来的 `=== 40` 是写死的末段号，schema 长到 §41 就红了。
+           改成"总结论里的末段号 == 当场解析 schema 的末段号"—— 断言的本意就是它。 */
+        (() => {
+          const lastN = parseSchemaStages(readFileSync(SCHEMA_FILE, 'utf8')).slice(-1)[0]?.n ?? 0
+          return sum.latest === lastN && new RegExp('线上库已跑到\\s*§' + lastN).test(sum.text)
+        })(),
         sum.text,
       )
       ok(
