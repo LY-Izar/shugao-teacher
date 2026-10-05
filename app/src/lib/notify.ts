@@ -70,8 +70,32 @@ interface ShellNotifyBridge {
   pushStatus?(): Promise<{ notify?: boolean; exact?: boolean; battery?: boolean } | null>
   /** 首启引导：电池优化白名单（系统弹窗，直接跳转引导用户点"允许"） */
   requestIgnoreBattery?(): Promise<{ ok: boolean; already?: boolean; why?: string }>
+  /**
+   * 🆕 **厂商「自启动 / 后台运行」页**（2026-10-06 加；只有 apk 有）。
+   *
+   * 与 `requestIgnoreBattery` 是**两个开关**：国产 ROM 上"允许后台运行"与
+   * "允许自启动"分开管，前者过了、后者没开，划掉应用后服务照样起不来。
+   * 原生侧**逐档回退**（MIUI / EMUI / ColorOS / OriginOS / 三星 / 魅族 / 一加 / 乐视
+   * → 最后退应用详情页），每档各自 try/catch。
+   * `via` = 真的跳到了哪一页；`tried` = 依次试过哪几档（跳不动时用来定位）。
+   */
+  openAutoStartSettings?(): Promise<{ ok: boolean; via?: string; tried?: string[]; why?: string }>
   /** 启动推送拉取前台服务（endpoint = 业务站基址；token = /api/push/register 换的钥匙） */
   startPush?(opts: { endpoint: string; accessToken: string }): Promise<{ ok: boolean; why?: string }>
+  /**
+   * 🆕 **每次打开应用 / 回到前台：确保通知通道在跑**（2026-10-06 加；只有 apk 有）。
+   *
+   * 与 `startPush` 的差别是这次修复的关键：**它不登记钥匙**（不联网），
+   * 只看"钥匙在不在"，在就把前台服务拉起来 —— 见 `shellEnsurePushRunning()`。
+   * 老壳没有这一支 ⇒ 调用方**如实跳过**（`unsupported` 那一档），不许假装拉过。
+   */
+  ensurePushRunning?(opts: { endpoint: string }): Promise<{
+    ok: boolean
+    running?: boolean
+    already?: boolean
+    started?: boolean
+    why?: string
+  }>
   /** 登出时停掉前台服务 */
   stopPush?(): Promise<{ ok: boolean }>
   /**
@@ -214,6 +238,24 @@ export interface ShellRemindFired {
   fallbackTitle?: boolean
   /** 接收器发通知那一步抛错的原文（空 = 没抛错） */
   receiverError?: string
+  /**
+   * 🔴🆕 **"到点的提醒被丢了几条"**（`YlxbAlarmReceiver.KEY_DROP_COUNT`；2026-10-06 补）。
+   *
+   * 为什么非要把它报上来：老师报"提醒没响"时，下面两种情形在**屏上长得一模一样**
+   * （都是"什么都没有"），而**修法完全不同**：
+   *   · 「**被丢了**」—— 闹钟真的到点了、接收器也跑了，只是**晚得太多**
+   *     （超出容忍窗，见 `YlxbAlarmReceiver.STALE_TOLERANCE_MS`）⇒ 这一格 > 0；
+   *   · 「**根本没排上**」—— `AlarmManager` 那一步就没成，或这一刻应用从未打开过 ⇒ 恒 0。
+   * ⇒ 有这一格，一句"到点了但没响"才**说得出断在哪**（§三.5：不许静默）。
+   *
+   * ⚠️ 它是**历史累计**（不是"这一次"），而且只在"真的丢了"时才涨 ⇒
+   *   读到 `0` **不等于**"从来没丢过"（重装 / 清数据之后从 0 开始）。
+   */
+  dropCount?: number
+  /** 最后一次丢弃发生在什么时候（Unix 毫秒；`0` = 没有过） */
+  dropAt?: number
+  /** 最后一次被丢的那条**晚了多久**（毫秒；`0` = 没有过） */
+  dropLateMs?: number
   exact?: boolean
   why?: string
   unsupported?: boolean
@@ -407,6 +449,24 @@ export function notify(title: string, body: string): boolean {
   } catch {
     return false
   }
+}
+
+/**
+ * 站点基址**去掉末尾斜杠** —— 全模块**只此一处**（2026-10-06 抽出来）。
+ *
+ * 🔴 为什么非抽不可：`nav-checks` 的 A24 ① 与它的反向对照要求
+ *   「`.replace(/\/+$/, '')` 这一句在 `notify.ts` 的**真代码里恰好 1 处**」
+ *   （`String.replace` 只换第一处 ⇒ 有两处时那条对照会改到别的地方去 = **假绿**）。
+ *   而这一轮新加的 `shellEnsurePushRunning()` 也需要同一个 trim ——
+ *   于是**共用这一个函数**，而不是把那一行再抄一份。
+ *
+ * 为什么非 trim 不可：原生拼的是 `endpoint + "/api/push"`，而 `apiUrl('')`
+ *   返回的是 `https://站点/`（末尾带 `/`）⇒ 变成 `//api/push`。实测（线上）：
+ *   `POST /api/push` → **401**（路由在，只是没带 token）；
+ *   `POST //api/push` → **405**（命中另一个资源）。
+ */
+function trimBase(endpoint: string): string {
+  return String(endpoint || '').replace(/\/+$/, '')
 }
 
 /**
@@ -833,10 +893,20 @@ export function remindFiredHint(fired: ShellRemindFired): {
   if (fired.unsupported) {
     return { text: '这个版本还不能定时自检', desc: '装上最新版再试。', tone: 'warn' }
   }
+  /*
+   * 🔴 **"有没有到点的提醒被丢掉"这一句要跟着每条出路一起说**（2026-10-06 补）。
+   *
+   * 为什么不能只在"没响"那一支说：老师说"提醒没响"时，最坏的一档恰恰是
+   * **自检这条链看着全通、而真提醒在另一条路上被丢光了**（自检豁免了容忍窗，
+   * 真提醒没有）⇒ 只在失败支说这句，就会把这一档漏掉。
+   */
+  const dropNote = dropNoteOf(fired)
   if (fired.fired === true) {
     return {
       text: '定时提醒这条链是通的',
-      desc: `刚才那条就是走系统闹钟到点的。渠道 ${fired.channel || '未知'}，通知号 ${fired.notifyId ?? -1}。关掉应用也会响。`,
+      desc:
+        `刚才那条就是走系统闹钟到点的。渠道 ${fired.channel || '未知'}，通知号 ${fired.notifyId ?? -1}。关掉应用也会响。` +
+        dropNote,
       tone: 'ok',
     }
   }
@@ -854,11 +924,35 @@ export function remindFiredHint(fired: ShellRemindFired): {
     if (fired.receiverError) parts.push(`报错 ${fired.receiverError}`)
     return {
       text: '到点了但没响',
-      desc: `${parts.join(' · ')}。`,
+      desc: `${parts.join(' · ')}。${dropNote}`,
       tone: 'warn',
     }
   }
-  return { text: '还没到点', desc: '再等一会儿，别关掉通知栏。', tone: 'warn' }
+  return { text: '还没到点', desc: `再等一会儿，别关掉通知栏。${dropNote}`, tone: 'warn' }
+}
+
+/**
+ * 🔴 **"有几条到点的提醒被丢了"那句人话**（纯函数，判据能直接跑它，§三.2；2026-10-06 补）。
+ *
+ * 为什么单拎出来：它要挂在**每一条出路**上（通了 / 没响 / 还没到点）——
+ *   最坏的一档正是"自检那条链看着全通，而**真提醒**在另一条路上被丢光了"
+ *   （自检豁免了容忍窗，真提醒没有）⇒ 只在失败支说这句就会漏掉这一档。
+ *
+ * 三态（§三.4）：
+ *   · `dropCount > 0` ⇒ 说出**丢了几条 + 最后一次晚了多久**（附一句"这是历史累计"，
+ *     免得老师把它当成"刚才那一条"）；
+ *   · `dropCount === 0` / 读不到 ⇒ **一个字都不说**（不是"没丢过"，是"这一格没有读数"
+ *     —— 见 `ShellRemindFired.dropCount` 的注释；拿它说"一切正常"就是编）。
+ *
+ * @returns 拼在后面的一句话（前面自带空格；没有可说的就回空串）
+ */
+export function dropNoteOf(fired: ShellRemindFired): string {
+  const n = typeof fired.dropCount === 'number' ? fired.dropCount : 0
+  if (n <= 0) return ''
+  const late = typeof fired.dropLateMs === 'number' && fired.dropLateMs > 0
+    ? `，最后一次晚了 ${Math.round(fired.dropLateMs / 60_000)} 分钟`
+    : ''
+  return ` 另外：有 ${n} 条到点的提醒因为系统把它们推迟得太久（超过 10 分钟）被丢掉了${late}。`
 }
 
 /**
@@ -971,7 +1065,16 @@ export function watchRemindSelfCheck(
    调用方直接跳过（§三.5：没这条路就别说这条路的话）。
    ============================================================ */
 
-/** 这个壳有没有整条推送链（startPush + pushStatus 都在）—— 首启引导的总闸 */
+/**
+ * 这个壳有没有整条推送链（startPush + pushStatus 都在）—— 首启引导的总闸。
+ *
+ * ⚠️ **故意不把 `ensurePushRunning` 也算进来**（2026-10-06 想过、否了）：
+ *   它是"每次回前台确保通道在跑"那一支，**与首启引导无关**；
+ *   把它算进这个总闸，会让"装了还带这一支的旧壳"（没有它）连首启引导都跑不了
+ *   —— 那是**用一个可选的补丁去挡掉一条本来能用的链**。
+ *   ⇒ 它自己那一支**单独问能力**（`shellEnsurePushRunning()` 里那句
+ *   `typeof s?.ensurePushRunning !== 'function'` ⇒ 老壳如实跳过，一个字不做）。
+ */
 export function shellHasPushFlow(): boolean {
   const s = shell()
   return typeof s?.startPush === 'function' && typeof s?.pushStatus === 'function'
@@ -1015,6 +1118,37 @@ export async function shellRequestIgnoreBattery(): Promise<boolean> {
   }
 }
 
+/**
+ * 🆕 **跳到厂商「自启动 / 后台运行」页**（2026-10-06 加；只有 apk 有）。
+ *
+ * 与 `shellRequestIgnoreBattery()` 是**两个开关**（国产 ROM 上分开管），
+ * 所以两条都要走一遍。返回的是**原生逐档回退的读数**（不是一句"成功/失败"）：
+ *   · `via`   —— 真的跳到了哪一页（最后一档 `应用详情页` 也**算跳成功**，
+ *                只是要多点两下；界面照实说，别把它写成"已打开自启动页"）；
+ *   · `tried` —— 依次试过哪几档（跳不动时用来定位是哪台机器/哪个 ROM 的事）；
+ *   · `ok:false` —— **一档都没跳成**（连详情页都打不开）⇒ 调用方必须给一句人话出路。
+ *
+ * ⚠️ 老壳没有这一支 ⇒ 回 `{ok:false, unsupported:true}`，调用方**一个字都不做**
+ *   （§三.4：没这条路就别说这条路的话）。
+ */
+export async function shellRequestAutoStart(): Promise<{
+  ok: boolean
+  via?: string
+  tried?: string[]
+  why?: string
+  unsupported?: boolean
+}> {
+  const s = shell()
+  if (typeof s?.openAutoStartSettings !== 'function') return { ok: false, unsupported: true }
+  try {
+    const r = await s.openAutoStartSettings()
+    if (r && typeof r === 'object') return r
+    return { ok: false, why: '壳那边回的不是对象（桥接层多半被截断了）。' }
+  } catch (e) {
+    return { ok: false, why: `调用壳失败：${e instanceof Error ? e.message : String(e)}` }
+  }
+}
+
 /** 启动推送拉取前台服务。`false` = 没这条路 / 起失败（调用方要给页内兜底） */
 /**
  * 启动推送拉取前台服务。
@@ -1037,8 +1171,8 @@ export async function shellStartPush(
 ): Promise<{ ok: boolean; why?: string }> {
   const s = shell()
   if (typeof s?.startPush !== 'function') return { ok: false, why: '这个壳没有推送链。' }
-  // 去掉末尾斜杠：原生那边自己会拼 `/api/…`
-  const base = String(endpoint || '').replace(/\/+$/, '')
+  // 去掉末尾斜杠（**唯一那一处在 `trimBase`**：原生那边自己会拼 `/api/…`）
+  const base = trimBase(endpoint)
   try {
     const r = await s.startPush({ endpoint: base, accessToken })
     if (r && typeof r === 'object') {
@@ -1060,5 +1194,43 @@ export async function shellStopPush(): Promise<void> {
     await s.stopPush()
   } catch {
     /* 忽略 */
+  }
+}
+
+/**
+ * 🔴🆕 **每次打开应用 / 回到前台：确保通知通道在跑**（2026-10-06 补）。
+ *
+ * 与 `shellStartPush()` 的分工**必须分清楚**（合起来就是一个真值源被拆成两半）：
+ *   · `shellStartPush()` —— **登记钥匙**（要网络 + access token）**并且**起服务，首启引导用；
+ *   · 这一个 —— **不登记**，只看"钥匙在不在"，在就把前台服务拉起来。
+ *
+ * 🔴 为什么非有不可（用户真机 vc53 + 当场核过的那句话）：
+ *   用户说「**通知我在不开应用后台的情况下是收不到**同一账号在电脑上发送的通知的」，
+ *   随后确认**通知栏里根本没有那条常驻通知** ⇒ 前台服务**从来没起过**（Android 硬要求：
+ *   前台服务必有常驻通知）。而原来它只有两个启动点，两个都靠不住：
+ *     ① 首启引导第 ④ 步 —— 整条流水线被 `localStorage` 里一个布尔跳过（覆盖安装会带过来），
+ *        而且它**先要 register 那张网成功才起服务** ⇒ 一次网络失败 = 服务不起；
+ *     ② `YlxbBootReceiver` —— 只有**真重启**才跑。
+ *   ⇒ 这一支补的就是"**应用开着的时候把它拉起来**"这个缺口（此刻在前台，
+ *     不受 Android 12+ "不许从后台起前台服务"那条限制）。
+ *
+ * @returns `running:true` = 钥匙在、系统收下了这次启动（**不等于**那条常驻通知已经出现
+ *          —— 那一格只有老师自己看通知栏才算数）；`ok:false` 时 `why` 一定有话说
+ */
+export async function shellEnsurePushRunning(
+  endpoint: string,
+): Promise<{ ok: boolean; running?: boolean; already?: boolean; started?: boolean; why?: string }> {
+  const s = shell()
+  if (typeof s?.ensurePushRunning !== 'function') {
+    return { ok: false, running: false, why: '这个壳还没有这一支（装最新版）。' }
+  }
+  // 与 `shellStartPush` 共用同一个 trim（见 `trimBase`：全模块唯一一处）
+  const base = trimBase(endpoint)
+  try {
+    const r = await s.ensurePushRunning({ endpoint: base })
+    if (r && typeof r === 'object') return r
+    return { ok: false, running: false, why: '壳那边回的不是对象（桥接层多半被截断了）。' }
+  } catch (e) {
+    return { ok: false, running: false, why: `调用壳失败：${e instanceof Error ? e.message : String(e)}` }
   }
 }

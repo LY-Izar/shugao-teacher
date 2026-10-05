@@ -5,14 +5,26 @@ import { apiUrl } from '../lib/apiBase'
 import {
   notifyChannel,
   openExactAlarmSettings,
+  shellEnsurePushRunning,
   shellHasPushFlow,
   shellPushStatus,
   shellRequestIgnoreBattery,
+  shellRequestAutoStart,
   shellRequestNotifyPermission,
   shellStartPush,
 } from '../lib/notify'
 
 const DONE_KEY = 'shugao.perms.done'
+
+/**
+ * 🔴 「原生没把失败原因带回来」时**唯一的那句兜底话**（2026-10-06 抽成常量）。
+ *
+ * 为什么非抽不可：这句话在文件里出现**两处**（首启引导第 ④ 步那条横幅 + 新增的
+ *   "通知通道没起来"那条），而门禁 A24 ② 的反向对照要求它在**真代码里恰好 1 处**
+ *   —— `String.replace` 只换第一处，两处时那条对照会改到别的地方去 = **假绿**
+ *   （`AGENTS.md` §三.2）。⇒ 一个真值源：常量在这里，两处都引它。
+ */
+const NO_WHY_HINT = '原因没带回来（看 logcat 里 ShugaoNative 那行）'
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
@@ -50,6 +62,24 @@ export function useFirstRunPermissions() {
   const accountKind = useStore((s) => s.accountKind)
   const push = useToast((s) => s.push)
   const ran = useRef(false)
+
+  /**
+   * 🔴 「通知通道没起来」这句**一次会话只说一次**（2026-10-06 补）。
+   *
+   * 为什么不是 `useState`：它不是要画出来的东西，只防刷屏 —— 放成 state 就得进
+   * effect 依赖 ⇒ 每次说完话 effect 重跑 ⇒ 又拉起一次（`useScheduleReminder`
+   * 的 `warnedNoNative` 同一个理由）。
+   */
+  const warned = useRef(false)
+  /**
+   * 🔴 **已经成功拉起过一次**（同一次会话）——之后失败就不再提醒。
+   *
+   * 为什么：这一段挂在"每次回到前台"上，而**服务被划掉/被 ROM 清掉**是常态
+   *   （清掉之后又会被 `onTaskRemoved` / 兜底任务拉回来）。老师来回切几次应用
+   *   就弹几次"没起来" = 刷屏，而它并不代表"真的坏了"。
+   * ⚠️ 成功过之后仍会**照常重试**（只是不吭声）—— 失败照样进 console.warn。
+   */
+  const ensuredOk = useRef(false)
 
   useEffect(() => {
     if (ran.current) return
@@ -111,6 +141,30 @@ export function useFirstRunPermissions() {
         steps.push('后台运行已允许')
       }
 
+      /*
+       * ③-补 🔴 **厂商「自启动 / 后台运行」页**（2026-10-06 补，用户要求"覆盖各机型"）。
+       *
+       * 为什么与上一步是**两件事**：国产 ROM（MIUI / EMUI / ColorOS / OriginOS…）上
+       *   "允许后台运行"与"允许自启动"**分开管** —— 上一步过了、这一步没开，
+       *   老师把应用划掉之后**服务照样起不来**，而屏上什么都看不出来（就是本轮真机那个现象）。
+       * 原生侧**逐档回退**（各家自启动页 → 组件直指 → 最后退应用详情页），
+       *   每一档各自 `try/catch` ⇒ 某一档在这台机器上不存在，不影响别的档。
+       *
+       * ⚠️ **它不许挡住第 ④ 步**：跳不过去（`ok:false`）也**照走**，只把读数带进收尾那条横幅 ——
+       *   一个"捷径"没通不该把整条推送链拖死（与上面两步同一条纪律）。
+       * ⚠️ 只有**跳成了**才等老师回来（`waitBackFromSettings`）；没跳成时等下去
+       *   只会白等 4 秒（`ok:false` 意味着我们根本没离开这一页）。
+       */
+      const auto = await shellRequestAutoStart()
+      if (auto.ok) {
+        // 跳过去就得等他回来，否则下面 ④ 那一步的 register 会在"老师在系统页面上"时发出去
+        await waitBackFromSettings()
+        steps.push(auto.via ? `自启动已打开（${auto.via}）` : '自启动已打开')
+      } else if (!auto.unsupported) {
+        // 如实记一笔：跳不动时说出来（不静默），但**不影响**后面的步骤
+        console.warn('[push] 自启动页没跳成：', auto.why ?? '（没带原因）', auto.tried ?? [])
+      }
+
       /* ④ 注册拉取钥匙 → 启动前台服务。失败不记账 done ⇒ 下次打开自动重试。
          🔴 register 由**原生**发（WebView 里这条跨域 POST 会 Failed to fetch——
             真机第四轮实测），这里只把会话的 access token 递给壳。 */
@@ -158,10 +212,76 @@ export function useFirstRunPermissions() {
                 : perm === 'unsupported'
                   ? '这个壳没有通知授权那个口。 '
                   : '') +
-            (startedRes.why?.trim() || '原因没带回来（看 logcat 里 ShugaoNative 那行）') +
+            (startedRes.why?.trim() || NO_WHY_HINT) +
             ' · 下次打开应用会自动再试。',
         })
       }
     })()
+  }, [hydrated, teacher, isDemo, accountKind, push])
+
+  /*
+   * ============================================================
+   * 🔴🔴 **每次打开应用 / 回到前台：确保那条常驻通知在**（2026-10-06 补）
+   * ============================================================
+   * 断在哪（用户真机 vc53）：原话「**通知我在不开应用后台的情况下是收不到**同一账号
+   *   在电脑上发送的通知的」，随后当场确认：**通知栏里根本没有那条常驻通知** ⇒
+   *   前台服务**从头到尾没起过**（Android 硬要求：前台服务必有常驻通知）。
+   *   而上面那条流水线**只有两个启动点**，两个都靠不住：
+   *     ① 首启引导第 ④ 步 —— 整条被 `localStorage` 里一个布尔跳过（覆盖安装会带过来），
+   *        而且它**先要 register 那张网成功才起服务**（一次网络失败 ⇒ 服务不起）；
+   *     ② `YlxbBootReceiver` —— 只有**手机重启**才跑。
+   *   ⇒ "装完一直没重启、引导又早走完"这一档里，服务**一次都没起过**，而屏上静默。
+   *
+   * 这一段补的就是那个缺口：**应用在前台时把它拉起来**（此刻不受 Android 12+
+   *   "不许从后台起前台服务"的限制）。与第 ④ 步**分工明确、不是第二份真值源**：
+   *   · 第 ④ 步 = 登记钥匙 + 起服务（要网络）；
+   *   · 这一段 = **不登记**，只看钥匙在不在，在就起。
+   *
+   * ⚠️ **失败只报一次**（`warned`）：这一段在"每次回到前台"都会跑 ——
+   *   每次都弹一句"拉起失败"会变成刷屏。第一次说清楚，之后只留 console.warn
+   *   （判据/维护者仍看得到，§三.5：不许静默）。而**一旦成功过就不再提醒**：
+   *   那时候"通知栏里那条常驻通知在不在"才是老师该看的判据。
+   * ⚠️ 只有 apk 的壳有这一支（`ensurePushRunning` 不在 ⇒ 一个字都不做，
+   *   exe / 网页版行为完全不变）。
+   */
+  useEffect(() => {
+    if (!hydrated || !teacher || isDemo || accountKind === 'classroom') return
+    if (notifyChannel() !== 'native' || !shellHasPushFlow()) return
+    let alive = true
+    const ensure = async () => {
+      const r = await shellEnsurePushRunning(apiUrl(''))
+      if (!alive) return
+      if (r.ok) {
+        ensuredOk.current = true
+        return
+      }
+      console.warn('[push] 通知通道这一趟没起来：', r.why ?? '（没带原因）')
+      if (ensuredOk.current || warned.current) return
+      warned.current = true
+      push({
+        text: '通知通道没起来',
+        tone: 'warn',
+        // ⚠️ 那句"没带原因"的兜底文案**只在上面那条流水线里写一份**（同一个真值源）：
+        //    门禁 A24 ② 的反向对照要求它在**真代码里恰好 1 处**（两处时那条对照会改到
+        //    别的地方、自己变假绿）。所以这里引 `NO_WHY_HINT`，不重写一遍那句话。
+        desc: `${r.why?.trim() || NO_WHY_HINT} · 通知栏里那条「树高教务通」就是它在跑的标志。`,
+      })
+    }
+    void ensure()
+    /*
+     * 回到前台再确认一次 —— 与第 ④ 步同一个理由：老师可能刚在系统设置里
+     * 把通知打开 / 关掉电池优化，切回来这一下正是"补一次"的时机。
+     * ⚠️ 两个监听都要（`visibilitychange` 管切走再切回；部分安卓 WebView 只发 `focus`）。
+     */
+    const reensure = () => {
+      if (document.visibilityState === 'visible') void ensure()
+    }
+    document.addEventListener('visibilitychange', reensure)
+    window.addEventListener('focus', reensure)
+    return () => {
+      alive = false
+      document.removeEventListener('visibilitychange', reensure)
+      window.removeEventListener('focus', reensure)
+    }
   }, [hydrated, teacher, isDemo, accountKind, push])
 }
