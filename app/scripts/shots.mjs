@@ -4559,6 +4559,62 @@ await withLock(async () => {
       })
       await shot(page, '41 日程表', '41-schedule', { full: true, wait: 0 })
 
+      /*
+       * 🆕 2026-10-05/06：日程页那两颗**只给超管的临时自检入口**已经撤掉
+       *    （用户原话：「日程里面两个测试按钮可以删除了」）⇒ 期望值从"超管看得到"
+       *    翻成"**超管也看不到**"（`absent` 逐字扫 `innerText`）。
+       *
+       * 🔴 为什么必须换一个**超管**身份来判：那块入口原本的门就是
+       *    `isSuperAdmin(myRoles)`，而上面那一屏是**普通老师**（`TEACHER_STATE`
+       *    里没有 `myRoles` ⇒ 恒为 `[]`）—— 拿老师判"看不到"是一条**恒绿的废物断言**
+       *    （那块本来就不给老师看，删不删都绿）。这里用 `App.tsx` 的 DEV 钩子
+       *    `?as=super`（与「按身份显示导航」那一节同一个钩子；生产构建里被摇掉，
+       *    见 `nav-checks` 的 D7）。
+       *
+       * 🔴🔴 **前提自证**（没有它上面那个理由就白写了）：就地切到 1440px 桌面宽度 ——
+       *    那一档左栏比任课教师**多出「行政管理」**（判据是 `entryVisible`，
+       *    由「按身份显示导航」那一节钉着）。所以 `markers` 里那一项就是
+       *    **"这一刻真的是超管"**的指纹：身份钩子万一没生效，它先红，
+       *    下面那三句 `absent` 才不会退化成"其实还是老师、所以当然看不到"的假绿。
+       *    ⚠️ 后面那一大段都在 414×880 的手机宽度上量（底栏胶囊的几何）⇒ `finally` 里还原。
+       *
+       * ⚠️ 这一条判的是**真 DOM**，与源码那两条（`nav-checks` A22 ④-④/⑳ ·
+       *    本文件 S26 ①附）是**两条独立证据链**：只改源码、漏改这里 ⇒ 屏上照旧有
+       *    那句话也照样红。
+       */
+      await page.setViewportSize({ width: 1440, height: 1000 })
+      try {
+        await goto(page, '41 日程表（超管）', '/schedule?as=super', {
+          url: /^\/schedule(\?|$)/,
+          markers: ['日程表', '整周日程', '今天 · 周', '行政管理'],
+          absent: ['试一条通知', '两分钟后试一条定时提醒', '只给管理员，用来查到点提醒通不通'],
+        })
+
+        /* 🧪 反向对照（DOM 那一侧）：往这一屏的 DOM 里**塞回**那颗按钮的原文
+           ⇒ 上面那三条"看不到"当场假 —— 证明 `absent` 真的在逐字扫屏，不是恒绿摆设
+           （与 `nav-checks` 的内存副本对照是同一件事的两个层面）。
+           ⚠️ 塞进去、读一次、**当场删掉**：后面还要接着在这份 DOM 上走。 */
+        const injected = await page.evaluate(() => {
+          const b = document.createElement('button')
+          b.id = '__tmp-selftest-back'
+          b.textContent = '试一条通知'
+          document.body.appendChild(b)
+          return String(document.body.innerText ?? '').includes('试一条通知')
+        })
+        const cleaned = await page.evaluate(() => {
+          document.getElementById('__tmp-selftest-back')?.remove()
+          return !String(document.body.innerText ?? '').includes('试一条通知')
+        })
+        check(
+          injected && cleaned,
+          '🧪 41 日程表（超管）：反向对照 —— 把「试一条通知」塞回 DOM（副本）⇒ 上面那条当场假（塞回去读得到、删掉又读不到）',
+          `塞回去后读得到=${injected} · 删掉后读不到=${cleaned}`,
+        )
+      } finally {
+        /* 还原成主流程一直在用的 414×880（底栏拖拽那一步要按这个宽度量胶囊） */
+        await page.setViewportSize({ width: 414, height: 880 })
+      }
+
       /* ================= 底栏拖拽：胶囊实时跟手 ================= */
 
       const SD = '38–39 底栏拖拽'
@@ -16155,6 +16211,46 @@ const restoreBtn = />\s*恢复\s*</.test(BTN)
       cut !== PAGE && !/只挪提醒，课还是原来的时间/.test(cut),
       '🧪 S26 ① 反向对照 F：把那半句换掉（副本）⇒「那句话在屏上」当场假（证明它在读真源码，不是恒绿摆设）',
       `副本真的被改过=${cut !== PAGE}`,
+    )
+  }
+
+  /* ---------------- ①附 那两颗**临时自检入口**已经撤了（2026-10-05/06） ----------------
+   * 🔴 期望值变了：原来这一页上（只给超管）摆着「试一条通知」+「两分钟后试一条定时提醒」
+   *    + 一句「只给管理员，用来查到点提醒通不通」——那是 2026-10-05 真机第三/四轮为排查
+   *    "收不到通知"临时加的**自检入口**。用户：「日程里面两个测试按钮可以删除了」（功能
+   *    已验通：权限提示正常、计时正常）⇒ 撤入口。
+   * ⇒ 判据**翻成负向**：这三句**不许**再出现在源码里（真 DOM 那一侧是上面
+   *    「41 日程表（超管）」那一步的 `absent`）。
+   * ⚠️ 撤的是**入口**，不是能力：`lib/notify.ts` 里 `runNotifySelfTest()` /
+   *    `runRemindSelfTest()` 那些桥接与原生方法一个都没删（将来还要排障）——
+   *    那一条由 `nav-checks` A22 ④-③/④-④/⑲/⑳ 继续钉着。
+   * ============================================================ */
+  const SELFTEST_ENTRY_TEXT = [
+    '试一条通知',
+    '两分钟后试一条定时提醒',
+    '只给管理员，用来查到点提醒通不通',
+  ]
+  const entryTextHits = (s) => SELFTEST_ENTRY_TEXT.filter((m) => s.includes(m))
+  check(
+    entryTextHits(PAGE).length === 0,
+    '🔴 S26 ①附 日程页那两颗**临时自检入口**与那句说明已撤（用户 2026-10-05/06：功能已验通 ⇒ 撤排查工具）—— 源码里一句都不剩',
+    `还在的：${entryTextHits(PAGE).join('、') || '（一句都没有）'}`,
+  )
+  {
+    /* 🧪 反向对照 G：把那一块**塞回源码副本** ⇒ 上面那条当场假。
+       🔴 先数出现次数（≠1 就抛错），别用"只换第一处"的 `String.replace` ——
+          这个项目已经踩过两次"改的是注释、判据纹丝不动"的假绿（`AGENTS.md` §三.2）。 */
+    const anchor = '通知已开启 · 上课前'
+    const n = PAGE.split(anchor).length - 1
+    if (n !== 1) throw new Error(`S26 ①附 反向对照 G 的锚点出现 ${n} 处（须恰好 1）`)
+    const back = PAGE.replace(
+      anchor,
+      '试一条通知 两分钟后试一条定时提醒 只给管理员，用来查到点提醒通不通 ' + anchor,
+    )
+    check(
+      back !== PAGE && entryTextHits(back).length === SELFTEST_ENTRY_TEXT.length,
+      '🧪 S26 ①附 反向对照 G：把那三句**塞回源码副本**（= 撤掉之前的形态）⇒ 上面那条当场假（证明它读的是真源码，不是恒绿摆设）',
+      `锚点出现 ${n} 处（须恰好 1）· 塞回去后命中 ${entryTextHits(back).length}/${SELFTEST_ENTRY_TEXT.length}`,
     )
   }
 }

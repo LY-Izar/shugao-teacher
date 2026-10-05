@@ -1931,14 +1931,6 @@ section('第九节 · D3/D4/D5：判据白名单 · myRoles 读取点白名单 �
           '真正的闸门是数据库：改 / 删走 `classes_update` / `classes_delete`（同一条判据），' +
           '加删成员走 §37.1 的函数（函数体内第一句就是 `can_manage_class()`）',
       ],
-      [
-        'src/pages/Schedule.tsx',
-        '🆕 通知自检入口（2026-10-05 真机第三轮）：**只决定摆不摆那个排查按钮**' +
-          '（`isSuperAdmin(myRoles)` ⇒ 只给超管看「试一条通知」）。' +
-          '**与权限、与任何数据行都无关** —— 它不筛课表、不决定能看什么课，' +
-          '只是"这个按钮给谁看"。⚠️ 这条前端判据**不是闸门**（真正的闸门在数据库）：' +
-          '即使普通老师把自检打进来，它也只是**给本机发一条测试通知**，读不到任何别人的数据',
-      ],
     ])
   const hits = []
   const walk = (dir) => {
@@ -2017,12 +2009,6 @@ section('第九节 · D3/D4/D5：判据白名单 · myRoles 读取点白名单 �
       '🆕 走班班的编辑 / 删除（2026-10-08）：4 处 `.filter` **没有一处与角色有关** —— ' +
         '滤的是行政班 / 走班班（`splitByKind`）、名单里的搜索命中、以及全年级在册学生；' +
         '`myRoles` 单独出现在那两个入口的显隐上（`canEditClassFor(myRoles, …)`，见 D4 的白名单理由）',
-    ],
-    [
-      'src/pages/Schedule.tsx',
-      '🆕 通知自检入口（2026-10-05 真机第三轮）：那一处 `.filter` 与角色**毫无关系** —— ' +
-        '它滤的是课表里 `scope !== "class"` 的那一份（"只提醒我自己的课"）；' +
-        '`myRoles` 单独出现在超管那道门上（`isSuperAdmin(myRoles)`，见 D4 的白名单理由）',
     ],
   ])
   const SUSPECT = []
@@ -8036,26 +8022,49 @@ section('第二十七节 · A22：到点提醒交给系统排程（桥接层 / �
     )
   }
   /**
-   * 🔴 只给超管的那块入口（`Schedule.tsx`）。
+   * 🆕 **入口已撤**（用户 2026-10-05/06 原话：「日程里面两个测试按钮可以删除了」）。
    *
-   * 为什么判"只给超管"：它是**排查工具**，不是功能（文案纪律：界面只说"这里是什么、
-   * 我能做什么"）。两个老师里只有超管看得到 ⇒ 普通老师屏上不多出一个技术按钮。
-   * ⚠️ 同一块里必须**真的调** `runNotifySelfTest()`，否则就是"摆了按钮没人接"。
+   * 🔴 为什么期望值从"在屏上"翻成"看不到"：那块（「试一条通知」+「两分钟后试一条
+   *    定时提醒」+ 那句「只给管理员，用来查到点提醒通不通」）是 2026-10-05 真机第三/四轮
+   *    为排查"收不到通知"临时加的**自检入口**。用户已确认功能正常（权限提示正常、
+   *    计时正常）⇒ **撤掉入口**（文案纪律：界面只说"这里是什么、我能做什么"；
+   *    排查工具不该常驻）。
+   * ⚠️⚠️ **撤的是入口，不是能力**：`notify.ts` 里 `runNotifySelfTest()` / `selfTestHint()`
+   *    那一整条路照旧由本节上一条（自检四格读数）与 ⑳ 钉着 —— 将来还要排障。
+   *    所以这一条**只**判"日程页里不再出现它们"，一个字都不碰 `notify.ts`。
    */
+  const SELFTEST_ENTRY_GONE2 = [
+    '试一条通知',
+    '两分钟后试一条定时提醒',
+    '只给管理员，用来查到点提醒通不通',
+    'isSuperAdmin(myRoles)',
+    'runNotifySelfTest',
+    'runRemindSelfTest',
+    'selfTestHint',
+    'remindCheckHint',
+    'remindFiredHint',
+    'watchRemindSelfCheck',
+  ]
+  const entryGone2 = (s) => SELFTEST_ENTRY_GONE2.every((m) => !s.includes(m))
+  const entryHits2 = (s) => SELFTEST_ENTRY_GONE2.filter((m) => s.includes(m))
   check(
-    /Array\.isArray\(myRoles\) && isSuperAdmin\(myRoles\)/.test(SCHEDULE) &&
-      /await runNotifySelfTest\(\)/.test(SCHEDULE) &&
-      /push\(selfTestHint\(/.test(SCHEDULE),
-    '🔴 A22 ④-④ 「试一条通知」那块入口**只给超管**（`Array.isArray(myRoles) && isSuperAdmin(myRoles)` —— 先确认是数组再读，`myRoles` 在个别路径上可能是 `undefined`），而且真的把自检**跑起来并把结果说出去**（`push(selfTestHint(await runNotifySelfTest()))`）',
-    `只给超管=${/Array\.isArray\(myRoles\) && isSuperAdmin\(myRoles\)/.test(SCHEDULE)} · 真的跑=${/await runNotifySelfTest\(\)/.test(SCHEDULE)} · 真的说=${/push\(selfTestHint\(/.test(SCHEDULE)}`,
+    entryGone2(SCHEDULE),
+    '🔴 A22 ④-④ 日程页那两颗**临时自检入口已撤掉**（「试一条通知」/「两分钟后试一条定时提醒」/「只给管理员，用来查到点提醒通不通」，用户 2026-10-05/06 要求：功能已验通 ⇒ 撤排查工具）—— 入口撤、**能力仍在**（`notify.ts` 那半条路由上一条与 ⑳ 继续钉着）',
+    `还在屏上/源码里的：${entryHits2(SCHEDULE).join('、') || '（一处都没有）'}`,
   )
   {
-    /* 🧪 反向对照：把那道超管门去掉（改成恒显示）⇒ 上面那条当场红（普通老师屏上会多出技术按钮） */
-    const cut = oneEdit2(SCHEDULE, 'Array.isArray(myRoles) && isSuperAdmin(myRoles)', 'true')
+    /* 🧪 反向对照：把那一块**塞回源码副本**（锚点 = 它撤掉之前紧挨着的那句横幅三目，
+       剥注释后恰好 1 处）⇒ 上面那条当场假 —— 证明它读的是真源码，不是恒绿摆设。
+       ⚠️ `oneEdit2` 先数出现次数（≠1 就不改、判 `ok:false`），宁可报错也不假绿。 */
+    const cut = oneEdit2(
+      SCHEDULE,
+      '{showPermBanner ? (',
+      '{Array.isArray(myRoles) && isSuperAdmin(myRoles) ? (<Button>试一条通知</Button>) : null}\n{showPermBanner ? (',
+    )
     check(
-      cut.ok && !/Array\.isArray\(myRoles\) && isSuperAdmin\(myRoles\)/.test(cut.text),
-      '🧪 A22 ④-④ 反向对照：把那道超管门去掉（副本 = 普通老师屏上也多一个排查按钮）⇒ 上面那条当场红',
-      `目标出现 ${cut.n} 处（须恰好 1）`,
+      cut.ok && !entryGone2(cut.text),
+      '🧪 A22 ④-④ 反向对照：把「试一条通知」那块**塞回源码副本**（= 撤掉之前的形态）⇒ 上面那条当场假',
+      `目标出现 ${cut.n} 处（须恰好 1）· 改完还"一处都没有"=${entryGone2(cut.text)} · 命中的：${entryHits2(cut.text).join('、')}`,
     )
   }
 
@@ -9010,22 +9019,37 @@ section('第二十七节 · A22：到点提醒交给系统排程（桥接层 / �
     /export async function runRemindSelfCheck\(\)/.test(NOTIFY) &&
     /export function remindCheckHint\(/.test(NOTIFY) &&
     /export function remindFiredHint\(/.test(NOTIFY)
-  const PAGE_FIRED =
-    /await runRemindSelfTest\(\)/.test(SCHEDULE) &&
-    /push\(remindCheckHint\(r, sdk\)\)/.test(SCHEDULE) &&
-    /watchRemindSelfCheck\(\(f\) => push\(remindFiredHint\(f\)\)\)/.test(SCHEDULE)
+  /**
+   * 🆕 **期望值 2026-10-05/06 变了**（用户：「日程里面两个测试按钮可以删除了」）：
+   *    日程页那颗「两分钟后试一条定时提醒」**已撤** ⇒ 这一半从"页面真的用它们"
+   *    翻成"页面**不再**接它们"。
+   * 🔴 为什么能力那一半照旧判绿：`runRemindSelfCheck()` / `remindCheckHint()` /
+   *    `remindFiredHint()`（还有桥接层与原生两半）**一个都没删** ——
+   *    用户要撤的是**入口**，排查能力要留着（将来还要排障）。
+   */
+  const pageFired2 = (s) =>
+    /await runRemindSelfTest\(\)/.test(s) ||
+    /push\(remindCheckHint\(r, sdk\)\)/.test(s) ||
+    /watchRemindSelfCheck\(/.test(s)
+  const PAGE_FIRED = pageFired2(SCHEDULE)
   check(
-    APP_FIRED && PAGE_FIRED,
-    '🔴 A22 ⑳（网页侧那半）「两分钟后试一条」把**每一步的中间结果都回报到屏上**（不是一句"成功/失败"）：`remindCheckHint()` 说排了几条 + 精确闹钟读数是几、断在哪一环；到点之后 `watchRemindSelfCheck()` 回读 `remindFiredHint()`，把"接收器到没到 / 用的哪个渠道 / 通知号 / 报错原文"一并说出来 —— 本机没有安卓设备，**这一格读数就是唯一能把断点搬到屏上的东西**',
-    `网页侧三个纯函数=${APP_FIRED} · 页面真的用它们=${PAGE_FIRED}`,
+    APP_FIRED && !PAGE_FIRED,
+    '🔴 A22 ⑳（网页侧那半）`remindCheckHint()` / `remindFiredHint()` 这些**分步读数**照旧在 `notify.ts` 里（能力留）；而日程页那颗「两分钟后试一条定时提醒」入口**已撤**（用户 2026-10-05/06 要求，见 ④-④）—— 页面**不再**接它们，但将来要排障时那条路整条都还在',
+    `网页侧三个纯函数=${APP_FIRED} · 页面仍接它们=${PAGE_FIRED}（须 false）`,
   )
   {
-    /* 🧪 反向对照：把页面那颗按钮接回"只报成功/失败"（删掉回读那一步）⇒ ⑳ 当场红 */
-    const cut = oneEdit2(SCHEDULE, 'watchRemindSelfCheck((f) => push(remindFiredHint(f)))', 'Promise.resolve()')
+    /* 🧪 反向对照：把页面那一整段接线**塞回源码副本** ⇒ ⑳ 当场红（锚点 = 撤掉之前
+       紧挨着的那句横幅三目，剥注释后恰好 1 处）。
+       ⚠️ `oneEdit2` 先数出现次数（≠1 就判 `ok:false`），宁可报错也不假绿。 */
+    const cut = oneEdit2(
+      SCHEDULE,
+      '{showPermBanner ? (',
+      'const sdk = 0\nconst r = await runRemindSelfTest()\npush(remindCheckHint(r, sdk))\nwatchRemindSelfCheck((f) => push(remindFiredHint(f)))\n{showPermBanner ? (',
+    )
     check(
-      cut.ok && !/watchRemindSelfCheck\(\(f\) => push\(remindFiredHint\(f\)\)\)/.test(cut.text),
-      '🧪 A22 ⑳ 反向对照：把"到点回读"那一步删掉（内存副本 = 只报"排上了"、永远不知道响没响）⇒ ⑳ 当场红',
-      `目标出现 ${cut.n} 处（须恰好 1）· 改完判据=${/watchRemindSelfCheck\(\(f\) => push\(remindFiredHint\(f\)\)\)/.test(cut.text)}`,
+      cut.ok && pageFired2(cut.text),
+      '🧪 A22 ⑳ 反向对照：把那一整段接线（`runRemindSelfTest` / `remindCheckHint` / `watchRemindSelfCheck` + `remindFiredHint`）**塞回源码副本**（= 撤掉之前的形态）⇒ ⑳ 当场红',
+      `目标出现 ${cut.n} 处（须恰好 1）· 改完"仍接它们"=${pageFired2(cut.text)}`,
     )
   }
 
