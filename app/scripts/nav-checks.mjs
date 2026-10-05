@@ -8418,7 +8418,7 @@ section('第二十七节 · A22：到点提醒交给系统排程（桥接层 / �
   let shellWideJudged = 0 // 壳那一侧真的判了的条数（打包工程在的机器上）
   /* 壳那一侧（⑮–㉑）**一共多少条判据** —— 节末自证拿它当边界，
      谁把某条挪进/挪出窗口（灰的范围开大/开小）那条自证当场红；加了新判据就把这个数跟着加。 */
-  const SHELL_LEG_N = 15
+  const SHELL_LEG_N = 21
   const shellSide = (fn) => {
     const g = grayed
     const j = passed + failures.length
@@ -8650,6 +8650,261 @@ section('第二十七节 · A22：到点提醒交给系统排程（桥接层 / �
     )
   }
   }) // ← 壳那一侧（⑲ 原生 + 桥接层）到此为止
+
+  /* ---------------- ⑲-补 桥接层**不许白名单挑键**：原生的读数必须整体透传 ----------------
+   *
+   * 🔴🔴 2026-10-05 真机第五轮：`remindSelfTest` / `remindSelfCheck` 在这一层是
+   *    **白名单式重打包**（`return { notify: … , scheduled: … , why: … }`），
+   *    于是原生**新加**的读数（`innerScheduled` / `innerRequested` / `innerExact`
+   *    —— 见 `YlxbNativePlugin.java:558-560`）**被静默丢掉** ✗
+   *    ⇒ `notify.ts` 的 `remindCheckHint()` 读到的全是 `undefined`
+   *    ⇒ 屏上永远拼不出第二句「已排上 N 条 · 精确闹钟已允许／没允许」——
+   *      真机第四轮老师点完只看到第一句，就是这么来的（同一形态第二次咬人：
+   *      `remindSelfCheck` 那边五个键 `due` / `channel` / `notifyId` /
+   *      `fallbackTitle` / `receiverError` 也是这么丢的）。
+   *
+   * ⚠️ **形态本身是可静态识别的**，不用跑真机：
+   *    · ✅ 整体透传：`return r` / `return r || {…}` / `return JSON.parse(JSON.stringify(r))`
+   *      / `Object.assign({}, r, {…})` —— **新加的读数自动到屏上**；
+   *    · ❌ 白名单挑键：`return { a: r.a, … }` —— **每加一个原生读数都要人手跟一遍**，
+   *      漏一次就是一个**看不见的**丢字（§三.5：不许静默）。
+   *
+   * 🔴 判据不许退化成"这两个方法名在不在"（那已经由 ⑲/⑳ 钉住了）——
+   *    这里咬的是**键集**：从桥接那段真代码里数出它回上去的键，**与原生真回的键对齐**。
+   *    原生回的是哪几个键**不是我列的表**，是**同一份 Java 源码里 `ret.put("…")` 数出来的**
+   *    —— 判据与原生**同源**（写死一张表 = 下一次原生加读数时这张表也一起过时 ✗）。
+   */
+  shellSide(() => {
+    /*
+     * ⚠️ 这里自己带一份"剥注释"：A22 那个 `strip2`/`strip` 在**本节另一个块**里，
+     *    跨块看不见（实测：`ReferenceError: strip is not defined` —— 门禁自己抛异常
+     *    就是 §三.1 说的"自己吞异常"那类假绿，所以这里**一个字都不借**）。
+     */
+    const stripC = (s) =>
+      String(s)
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/(^|[^:'"`\w])\/\/[^\n]*/gm, '$1')
+    /**
+     * 🔴 这两组就是**前端真的会读、而桥接层白名单丢掉**的那些读数（真机第四/五轮的账）：
+     *    · `remindSelfTest` 的三个 `inner*` —— 丢了 ⇒ 屏上永远拼不出第二句
+     *      「已排上 N 条 · 精确闹钟已允许／没允许」；
+     *    · `remindSelfCheck` 的五个 —— 丢了 ⇒ 「定时提醒这条链是通的 · 渠道 … · 通知号 …」
+     *      里渠道恒显示"未知"、通知号恒 -1。
+     *
+     * ⚠️ 这两组是从**前端**那份类型/读数函数里点出来的（`lib/notify.ts` 的
+     *    `remindCheckHint()` / `remindFiredHint()`），**不是**原生回的全集：
+     *    原生还回 `id` / `ok` / `stage` 这类**过程量**，桥接层本来就不转（它们只给原生自己用）
+     *    —— 要求"原生每一个键都必须转上去"会把 `id` / `ok` 判红，那是**假红**
+     *    （实测：头一版就是这么红的）。
+     */
+    const NATIVE_INNER = ['innerScheduled', 'innerRequested', 'innerExact']
+    const NATIVE_FIRED = ['due', 'channel', 'notifyId', 'fallbackTitle', 'receiverError']
+    /**
+     * 桥接层里那个方法的**函数体**（抠不出 ⇒ 空串 ⇒ 下面几支全判假，不会空转）。
+     *
+     * 🔴 为什么用**扫描器**而不是正则找边界（这段源码的形态很坑，实测踩了四次）：
+     *    ① `},` 出现在一大串缩进档上（`      },` / `            },` / `    },`）
+     *       ⇒ 按"两空格的 `},`"找会匹配到别处，函数体一路吃到文件末尾；
+     *    ② 用 `.catch(` 当结尾会被**注释**截住（注释里就写着 `.catch(` 这三个字）；
+     *    ③ 用 `.then(` 当结尾会把**回调整个切掉** ⇒ 键集一个都数不到；
+     *    ④ **行首缩进不可靠**：`strip()` 只剥注释，`\` 续行会把两行接成一行，
+     *       行首空白会变（实测：`\n  },` 根本不存在，`  },\n` 才在）。
+     * ✅ 唯一稳的办法：**按花括号配平**抠出 `name: function (…) { … }`，
+     *    并且跳过字符串/模板字面量里的花括号（否则一句 `'{'` 就把配平带偏）。
+     */
+    const bodyOf = (src, name) => {
+      const clean = stripC(String(src))
+      const m = new RegExp(String.raw`(?:^|[,{\s])${name}\s*:\s*function\s*\([^)]*\)\s*\{`).exec(clean)
+      if (!m) return ''
+      const start = m.index + m[0].length - 1
+      let depth = 0
+      let q = ''
+      for (let i = start; i < clean.length; i++) {
+        const c = clean[i]
+        if (q) {
+          if (c === '\\') i++
+          else if (c === q) q = ''
+          continue
+        }
+        if (c === "'" || c === '"' || c === '`') {
+          q = c
+          continue
+        }
+        if (c === '{') depth++
+        else if (c === '}' && --depth === 0) return clean.slice(m.index, i + 1)
+      }
+      return ''
+    }
+    /** 被**整对象摊开**的那些标识符（`{...r}` / `Object.assign({}, r, …)` 里的 `r`） */
+    const spreadIdsOf = (s) =>
+      [
+        ...String(s).matchAll(
+          /(?:\.\.\.|Object\.assign\(\s*(?:\{\s*\}\s*,\s*)?)\s*([A-Za-z_$][\w$]*)/g,
+        ),
+      ].map((m) => m[1])
+    /**
+     * 原生真回的键集 —— 这段 Java 方法里所有 `ret.put("…")`。
+     * ⚠️ 用**没剥注释**的原生源码（`PLUGIN2` 是剥过注释的）：`ret.put` 是**代码**，
+     *    注释里不会出现（真出现了也是不该有的重复，那一条由 D 支当场点名）。
+     */
+    const nativeKeysOf = (name) => {
+      const src = shellRead2(PLUGIN2_REL)
+      const i = src.indexOf(`public void ${name}(PluginCall call)`)
+      if (i < 0) return []
+      const rest = src.slice(i + 10)
+      const j = rest.search(/public void \w+\(PluginCall call\)/)
+      const seg = j > 0 ? rest.slice(0, j) : rest
+      return [...seg.matchAll(/ret\.put\("([A-Za-z0-9_]+)"/g)].map((m) => m[1])
+    }
+    /**
+     * ✅ 一条判据：这个 `.then()` 回调有没有**把原生那份对象整体带上去**。
+     *
+     * 认这几种（都不靠变量名叫什么，只看形状；先剥掉可能包在外面的一层 `{`）：
+     *   · `return r` / `return r || {…}`       —— 直接透传；
+     *   · `return JSON.parse(JSON.stringify(r))` —— 深拷贝透传；
+     *   · `return { ...r, … }` / `Object.assign({}, r, {…})` —— 摊开进新对象。
+     * ❌ 不认：`return { a: r.a, b: r.b }` —— **白名单挑键**：原生那份对象本身没被带上，
+     *    于是**每加一个原生读数都要人手跟一遍**，漏一次就是一个看不见的丢字。
+     * ⚠️ 抠不出 `.then(` / 抠不出那句 `return` ⇒ **当场假**（宁可报错，也不空转）。
+     */
+    const propOK = (src, name) => {
+      const ret = thenReturnOf(src, name)
+      if (!ret) return false
+      const t = ret.trim().replace(/^\{\s*/, '')
+      if (/^return\s+[A-Za-z_$][\w$]*\s*(\|\||;|$)/.test(t)) return true
+      if (/^return\s+JSON\.parse\(\s*JSON\.stringify\(/.test(t)) return true
+      return spreadIdsOf(t).length > 0
+    }
+    /** 这条原生读数在"这个方法的返回"里到得了屏上吗（整体透传 ⇒ 一定到） */
+    const keyCarried = (src, name, k) => {
+      const ret = thenReturnOf(src, name)
+      if (!ret) return false
+      /* 🔴 整体透传 ⇒ 这一条恒真：**别**再去这段里找键名（`return r` 里当然找不到 `due`）
+         —— 头一版漏了这一句，于是"整体透传"的副本被判成"5 个读数全丢"（假红） */
+      if (propOK(src, name)) return true
+      if (spreadIdsOf(ret).length > 0) return true
+      return new RegExp(`(?:^|[,{\\s])${k}\\s*:`).test(ret)
+    }
+    /**
+     * `.then()` 回调里**那一句** `return`（取**最后**那句：守卫里也可能有 `return`）。
+     *
+     * ⚠️ 不能只取"最后一句"就完事 —— 守卫那句（`return Promise.resolve({…})`）
+     *    也长得像"返回对象"，而且它排在前面 ⇒ 必须取**最后**那句。
+     * ⚠️ 返回的是**整段表达式**（对象字面量是多行的，`return\s+(.+)` 那种按行取
+     *    只拿得到 `return {` ⇒ 谓词恒假，实测踩过）。
+     */
+    const thenReturnOf = (src, name) => {
+      const b = bodyOf(src, name)
+      const i = b.indexOf('.then(')
+      if (i < 0) return ''
+      const j = b.indexOf('{', i)
+      if (j < 0) return ''
+      /* 花括号配平：只取 `.then(function (r) { … })` 这一段，**不含**后面的 `.catch(` */
+      let depth = 0
+      let seg = ''
+      for (let k = j; k < b.length; k++) {
+        if (b[k] === '{') depth++
+        else if (b[k] === '}' && --depth === 0) {
+          seg = b.slice(i, k + 1)
+          break
+        }
+      }
+      if (!seg) return ''
+      const r = seg.lastIndexOf('return')
+      if (r < 0) return ''
+      const raw = seg.slice(r).replace(/[;)\s]+$/, '')
+      return raw.length > 2000 ? `${raw.slice(0, 2000)}…` : raw
+    }
+    /**
+     * 🧪 形状自证（可红）：`[守卫那句, 回调 return 的那句, 期望]`
+     * ⚠️ 两个方向都要有：**透传的几种写法**判过、**白名单挑键的几种写法**判假
+     *    —— 缺任何一边，这个谓词都可能变成"永远为绿的摆设"（§三.1）。
+     */
+    const PROBE = [
+      ['if (!N || !N.remindSelfCheck) return Promise.resolve({ unsupported: true })', 'return r', true],
+      ['if (!N) return Promise.resolve({})', 'return r || { ok: false }', true],
+      ['if (!N) return Promise.resolve({})', 'return JSON.parse(JSON.stringify(r))', true],
+      ['if (!N) return Promise.resolve({})', 'return Object.assign({}, r, { unsupported: false })', true],
+      ['if (!N) return Promise.resolve({})', 'return { ...r, unsupported: false }', true],
+      ['if (!N) return Promise.resolve({})', 'return { ok: !!(r && r.ok), why: (r && r.why) || "" }', false],
+      ['if (!N) return Promise.resolve(0)', 'return r && typeof r.sdk === "number" ? r.sdk : 0', false],
+      ['if (!N) return Promise.resolve(0)', 'return r.sdk', false],
+      ['if (!N) return Promise.resolve(false)', 'return !!(r && r.ok)', false],
+      ['if (!N) return Promise.resolve({})', 'return { fired: !!(r.fired), elapsed: !!(r.elapsed) }', false],
+    ]
+    /**
+     * 探针的载体 —— **必须长得像真桥接层**：方法名 + 上一句守卫的 `return` +
+     * 后面的 `.catch(` 兜底 + 下一个方法。
+     * 🔴 少了"下一个方法那个逗号"，`bodyOf` 的方法名定位会匹配不上（实测：整段恒空）。
+     */
+    const probeBody = (req, ret) =>
+      `bridge = {\n    probe: function () { ${req}\n      return N.remindSelfCheck()\n.then(function (r) { ${ret}; }).catch(function () {})\n    },\n\n    nextOne: function () {}\n  }`
+    check(
+      PROBE.every(([req, ret, want]) => propOK(probeBody(req, ret), 'probe') === want),
+      '🔴 A22 ⑲-补 判据自证（形状，可红）：这个谓词**认得出"整体透传"与"白名单挑键"两种形态** —— `return r` / `return r || {…}` / `return JSON.parse(JSON.stringify(r))` / `{...r}` / `Object.assign({}, r, {…})` 判过 · `return { a: r.a }` / `return r.sdk` / `return !!(r && r.ok)` 判假；**谁把它改成恒真/恒假，这条当场红**',
+      PROBE.map(([req, ret, want]) => `「${ret}」→${propOK(probeBody(req, ret), 'probe') ? '整体透传' : '白名单挑键'}（期望 ${want ? '整体透传' : '白名单挑键'}）`).join(' · '),
+    )
+
+    /**
+     * 🔴 主判据：桥接层**不许白名单挑键** —— 屏幕上要读的那几个读数，一个都不许在半路丢掉。
+     *
+     * 判过（二选一）：① **整体透传**（`return r` / 深拷贝 / `{...r}`）——
+     *    以后原生再加读数**自动**到屏上，不用人手跟；或 ② 那个读数在这段返回值里**真的在**
+     *    （键集与原生同源）。
+     * ⚠️ 只有**前端真的会读**的那几个（`NATIVE_INNER` / `NATIVE_FIRED`）算数：
+     *    原生还回 `id` / `ok` / `now` 这类**过程量**，桥接层不转它们是对的
+     *    —— 要求"原生每个键都上来"会当场假红（实测：头一版就是被 `id` / `ok` 判红的）。
+     */
+    const droppedOf = (src, name, ks) => ks.filter((k) => !keyCarried(src, name, k))
+    const RULES = [
+      ['remindSelfTest', NATIVE_INNER],
+      ['remindSelfCheck', NATIVE_FIRED],
+    ]
+    for (const [name, ks] of RULES) {
+      const nats = nativeKeysOf(name)
+      const lost = droppedOf(BRIDGE2, name, ks)
+      const pass = propOK(BRIDGE2, name)
+      check(
+        nats.length > 0 && (pass || lost.length === 0),
+        `🔴 A22 ⑲-补 桥接层的 \`${name}\` **不许白名单挑键**：屏幕要读的 ${ks.length} 个读数（${ks.join(' / ')}）一个都不许在半路丢掉 —— 要么**整体透传**（\`return r\` / 深拷贝 / \`{...r}\`，以后原生加读数自动到屏），要么这几个键**真的在**`,
+        nats.length === 0
+          ? `抠不出原生 \`${name}\` 的 \`ret.put(…)\` ⇒ **判据当场假**（宁可报错，也不空转）`
+          : `整体透传=${pass} · 屏上要读的这几个里**到不了的：${lost.length ? lost.join(' · ') : '无'}**`,
+      )
+    }
+    check(
+      NATIVE_INNER.every((k) => nativeKeysOf('remindSelfTest').includes(k)) &&
+        NATIVE_FIRED.every((k) => nativeKeysOf('remindSelfCheck').includes(k)),
+      '🔴 A22 ⑲-补 自证①（原生那侧真回了这些读数）：`remindSelfTest` 回 `innerScheduled` / `innerRequested` / `innerExact`（`YlxbNativePlugin.java:558-560` 那三句 `ret.put`）· `remindSelfCheck` 回 `due` / `channel` / `notifyId` / `fallbackTitle` / `receiverError` —— 这两组就是真机第五轮差点被桥接层丢掉的那几个',
+      `remindSelfTest 有 ${NATIVE_INNER.filter((k) => nativeKeysOf('remindSelfTest').includes(k)).length}/3 · remindSelfCheck 有 ${NATIVE_FIRED.filter((k) => nativeKeysOf('remindSelfCheck').includes(k)).length}/5`,
+    )
+    {
+      /* 🧪 反向对照：把 `remindSelfCheck` 改成**白名单挑键**（内存副本）⇒ 上面那条**当场假** */
+      const target = 'return N.remindSelfCheck()'
+      const a = BRIDGE2.split(target).length - 1
+      if (a !== 1) throw new Error(`A22 ⑲-补：目标「${target}」在桥接层出现 ${a} 处（必须恰好 1）`)
+      const mutated = BRIDGE2.replace(
+        target,
+        'return N.remindSelfCheck().then(function (r) { return { fired: !!(r && r.fired), elapsed: !!(r && r.elapsed) } })',
+      )
+      const mLost = droppedOf(mutated, 'remindSelfCheck', NATIVE_FIRED)
+      check(
+        mutated !== BRIDGE2 && mLost.length === NATIVE_FIRED.length,
+        '🧪 A22 ⑲-补 反向对照：把 `remindSelfCheck` 改成**白名单挑键**（内存副本 = 这个形态原本的样子）⇒ 上面那条**当场假** —— 原生那五个读数（`due` / `channel` / `notifyId` / `fallbackTitle` / `receiverError`）一个都到不了屏上',
+        `目标出现 ${a} 处（须恰好 1）· 到不了屏上 ${mLost.length}/${NATIVE_FIRED.length} 个：${mLost.join(' · ')}`,
+      )
+      /* 🧪 反方向：副本改成**整体透传** ⇒ 上面那条**判过**（证明它认得出修好的样子，不是恒假） */
+      const repaired = BRIDGE2.replace(
+        target,
+        'return N.remindSelfCheck().then(function (r) { return JSON.parse(JSON.stringify(r)) })',
+      )
+      check(
+        repaired !== BRIDGE2 && propOK(repaired, 'remindSelfCheck') && droppedOf(repaired, 'remindSelfCheck', NATIVE_FIRED).length === 0,
+        '🧪 A22 ⑲-补 反向对照（反方向）：把同一个口改成**整体透传**（内存副本 = 修好之后的样子）⇒ 上面那条**判过**、屏幕要读的五个读数**全部到得了屏上** —— 证明这条判据不是恒假的一张贴纸',
+        `改完整体透传=${propOK(repaired, 'remindSelfCheck')} · 到不了屏上 ${droppedOf(repaired, 'remindSelfCheck', NATIVE_FIRED).length} 个`,
+      )
+    }
+  }) // ← 壳那一侧（⑲-补）到此为止
 
   /* ---------------- ⑳ 每一步的中间结果都回读到屏上（排了几条 / 到没到 / 哪个渠道） ---------------- */
   /* 壳那一侧（桥接层的"到点回读"口）：仓库外文件 ⇒ 走灰档 */
