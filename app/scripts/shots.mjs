@@ -13555,6 +13555,26 @@ await withLock(async () => {
        *    ✗ **不是**为了让红变绿：表里原有 24 个键名一个字没改，
        *      那条底线（`shugao.theme` / `shugao.accent` / `shugao.teacher.v1` 不许动）照旧。
        *    ⚠️ 以后**每加一个 `shugao.*` 键，必须同时来这儿登记**（否则这一条就是恒红的）。
+       *
+       * 🔴🔴 **期望值 2026-10-06 又变了一次：补进 1 个真实键（26 → 27）——
+       *    同样是"表落后于代码"，不是放水**：
+       *    · `shugao.chunkReloaded` —— 分块加载失败自愈那一批引入，写在
+       *      `src/lib/chunkReload.ts` 的 `RELOAD_MARK`（"这一页是不是已经自动重载过 1 次"）。
+       *      自愈时**先写标记、再重载**，正是它防住**无限刷新**。
+       *
+       * ⚠️ 顺带把这一节的口径**说准**（改这条时实读代码得到的，不是推测）：
+       *    上面那行断言文案里的「`localStorage` 的键」**并不准** —— 这个判据**根本没读浏览器**，
+       *    它是**静态扫源码**：把 `src` / `scripts` / `functions` 里所有
+       *    `shugao.*` 字面量收成一张表（`collectKeys22`，见下面几行）。
+       *    ⇒ 它是**与 storage 无关**的"应用会写的 `shugao.*` 键名总表"：
+       *      这张表**本来就装着 sessionStorage 的键** —— `shugao.ann.sessSeen`
+       *      （`src/lib/announcements.ts` 里 `popup='session'` 那一档）早在表里。
+       *    ⇒ 所以 `shugao.chunkReloaded` 虽然是 `sessionStorage` 的键
+       *      （`sessionStorage.setItem`，`src/lib/chunkReload.ts`），
+       *      **被这个判据看见是正常的、登记它是把表与代码对齐**。口径照旧：
+       *      少一个红、多一个红 ⇒ 表落后于代码才是 bug。
+       *    ⚠️ 遗留（**本轮没动**，超出边界）：那行断言的**文案**仍写着 `localStorage`，
+       *      与判据实际口径不符 —— 属"名不副实"，需另起一轮连同文案一起收口。
        */
       const KEYS22 = [
         'shugao.accent',
@@ -13566,6 +13586,8 @@ await withLock(async () => {
         'shugao.ann.sessSeen',
         'shugao.backup',
         'shugao.backupDir',
+        /* 🆕 2026-10-06（见上面那段：sessionStorage 的键，但本判据扫的是"应用会写的键名"） */
+        'shugao.chunkReloaded',
         'shugao.classroom',
         'shugao.classroom.classId',
         'shugao.classroom.v1',
