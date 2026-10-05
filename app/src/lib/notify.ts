@@ -71,7 +71,7 @@ interface ShellNotifyBridge {
   /** 首启引导：电池优化白名单（系统弹窗，直接跳转引导用户点"允许"） */
   requestIgnoreBattery?(): Promise<{ ok: boolean; already?: boolean; why?: string }>
   /** 启动推送拉取前台服务（endpoint = 业务站基址；token = /api/push/register 换的钥匙） */
-  startPush?(opts: { endpoint: string; token: string }): Promise<{ ok: boolean; why?: string }>
+  startPush?(opts: { endpoint: string; accessToken: string }): Promise<{ ok: boolean; why?: string }>
   /** 登出时停掉前台服务 */
   stopPush?(): Promise<{ ok: boolean }>
   /**
@@ -1016,14 +1016,17 @@ export async function shellRequestIgnoreBattery(): Promise<boolean> {
 }
 
 /** 启动推送拉取前台服务。`false` = 没这条路 / 起失败（调用方要给页内兜底） */
-export async function shellStartPush(endpoint: string, token: string): Promise<boolean> {
+export async function shellStartPush(
+  endpoint: string,
+  accessToken: string,
+): Promise<{ ok: boolean; why?: string }> {
   const s = shell()
-  if (typeof s?.startPush !== 'function') return false
+  if (typeof s?.startPush !== 'function') return { ok: false, why: '这个壳没有推送链。' }
   try {
-    const r = await s.startPush({ endpoint, token })
-    return !!(r && r.ok)
+    const r = await s.startPush({ endpoint, accessToken })
+    return r && typeof r === 'object' ? r : { ok: false }
   } catch {
-    return false
+    return { ok: false, why: '启动失败。' }
   }
 }
 

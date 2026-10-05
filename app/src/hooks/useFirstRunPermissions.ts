@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { useStore, useToast } from '../data/store'
-import { apiMessage, postApi } from '../lib/api'
+import { getSupabase } from '../lib/supabase'
 import { apiUrl } from '../lib/apiBase'
 import {
   notifyChannel,
@@ -93,17 +93,19 @@ export function useFirstRunPermissions() {
         steps.push('后台运行已允许')
       }
 
-      /* ④ 注册拉取钥匙 → 启动前台服务。失败不记账 done ⇒ 下次打开自动重试 */
-      /* 🔴 路径是 `/api/push`（动作写在 body.action 里，与 pull/revoke 同一个函数）——
-         调 `/api/push/register` 会落到静态层回 405（用户真机第三轮的 HTTP 405 就是它）。 */
-      const reg = await postApi('/api/push', { action: 'register' })
-      const token = reg.ok && typeof reg.data.token === 'string' ? reg.data.token : ''
-      const started = token ? await shellStartPush(apiUrl(''), token) : false
+      /* ④ 注册拉取钥匙 → 启动前台服务。失败不记账 done ⇒ 下次打开自动重试。
+         🔴 register 由**原生**发（WebView 里这条跨域 POST 会 Failed to fetch——
+            真机第四轮实测），这里只把会话的 access token 递给壳。 */
+      const sb = getSupabase()
+      const sess = sb ? (await sb.auth.getSession()).data.session : null
+      const accessToken = sess?.access_token ?? ''
+      const startedRes = accessToken
+        ? await shellStartPush(apiUrl(''), accessToken)
+        : { ok: false, why: '登录会话已过期，重新登录后再试。' }
+      const started = startedRes.ok
       if (started) steps.push('消息保持畅通')
 
-      /* 🔴 失败要说清楚断在哪（用户真机第二轮的教训：一句"没走完"让人对着黄条猜）。
-         reg 失败时 `message`/`detail` 原样带上（"§41 没建"那一档会点名让老师跑 schema）。 */
-      if (reg.ok && started) {
+      if (started) {
         try {
           localStorage.setItem(DONE_KEY, '1')
         } catch {
@@ -111,19 +113,11 @@ export function useFirstRunPermissions() {
         }
         push({ text: '通知设置完成', tone: 'ok', desc: steps.join(' · ') })
       } else {
-        /* 🔴 失败必须把**服务端的 detail** 亮出来 —— "没能建立推送会话"这类笼统话
-           不带原因 = 老师对着黄条猜（真机第三轮：真正的断点是造会话第 1 步的
-           响应形状，detail 一亮就能定位）。 */
-        const why = !reg.ok
-          ? apiMessage(reg, '连不上服务器')
-          : !token
-            ? '服务端没回推送钥匙'
-            : '前台服务没起来'
-        const detail = typeof reg.data.detail === 'string' ? reg.data.detail : ''
+        /* 🔴 失败原因由原生侧带回（服务端 message/detail 原文），一亮就能定位 */
         push({
           text: '通知设置没走完',
           tone: 'warn',
-          desc: detail ? `${why} —— ${detail}` : `${why} 下次打开应用会自动再试。`,
+          desc: (startedRes.why || '前台服务没起来。') + ' 下次打开应用会自动再试。',
         })
       }
     })()
