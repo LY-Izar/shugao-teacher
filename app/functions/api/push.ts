@@ -15,6 +15,26 @@
  *   · pull     —— 前台服务每 30 秒调（X-Push-Token）。按 cursor 返回**新**通知
  *     （id/title/body/createdAt）+ 新 cursor。会话失效（改密码/被登出）时回
  *     `{ reauth: true }` ⇒ 服务端停拉，等老师下次打开应用重新 register。
+ *
+ *     🔴 **2026-10-05 补：这一条同时返回全站公告**（`announcements`，schema §22）——
+ *       原来这里**只读 `notices`** ⇒ 超管在电脑上发的全站公告**永远到不了手机**
+ *       （用户实测"电脑上发通知，手机没弹"很可能就是它）。
+ *       · **判据复用点 = `sbAs(env, access, …)`**（老师自己的会话，就是下面读通知那一个）
+ *         ⇒ `announcements_visible`（§22.3）在这一读上**原样生效**；
+ *       · ⇒ 服务端**一个自己的可见性条件都不加**（连 `revoked_at` 都不加），
+ *         可见性**只有一处判据**（那条 RLS 策略，教师端横幅走的也是它）；
+ *       · ⛔ 绝不用 `svc()`（service_role）读公告 —— 那就是绕开 RLS（安全红线）。
+ *       · 🔴 两边**各有各的 cursor**（通知 `since`/`cursor`，公告 `annSince`/`annCursor`）：
+ *         共用一个是错的 —— 一方一次多于 10 条时，另一方的 cursor 会被顶到未来、
+ *         中间那几条**永远读不到**（而"轰炸"和"漏掉"是同一个机制的两面）。
+ *         两条的**语义**仍然逐字一致：`> cursor` 单调递增、`asc`、`limit 10`、
+ *         去重靠行 id（原生那侧用 id 当通知 id）。
+ *       · 公告的 cursor 刻度 = `greatest(created_at, active_from)`：
+ *         `active_from` 是**未来**的公告（§22.1 允许排期）在创建时**被 RLS 挡着**，
+ *         只按 `created_at` 判它会**永远收不到**（创建时刻早就落在 cursor 之后了）
+ *         ⇒ 过滤写成 `created_at > since OR active_from > since`。
+ *       · ⚠️ 公告读失败（§22 没跑 / 网络）**不许连累通知**：通知照旧返回，
+ *         另回一个 `annError` 说明原因（§三.5：不许静默）。
  *   · revoke   —— 老师登出时调（Authorization: 老师的 JWT）。作废自己的钥匙。
  *
  * 部署：functions/api/push.ts，推 GitHub 后 Cloudflare 自动带上（与 notice.ts 同一套环境变量）。
@@ -220,7 +240,7 @@ async function handlePush(context: { request: Request; env: Env }): Promise<Resp
     )
   }
 
-  let body: { action?: string; token?: string; since?: number }
+  let body: { action?: string; token?: string; since?: number; annSince?: number }
   try {
     body = (await request.json()) as typeof body
   } catch {
@@ -362,8 +382,18 @@ async function handlePush(context: { request: Request; env: Env }): Promise<Resp
       body: JSON.stringify({ refresh_token: refreshNew, last_pull_at: new Date().toISOString() }),
     })
 
+    /*
+     * 🔴 2026-10-05：**两条路各有各的 cursor，缺省都是"一天前"**。
+     *
+     * 原来这里没有这个缺省 —— `since` 缺失时退回 `0`（= 1970）⇒ 冷启动那一次会把
+     * **全部历史通知**一次性当"新"发出去（老师屏上瞬间几十条）。而原生那侧
+     * （`YlxbPushService.pullOnce`）自己有一份"一天前"的缺省 ⇒ 两边口径必须一致：
+     * 一天前是**窗口**，不是"漏掉历史"（历史在应用内看得到）。
+     * ⚠️ 公告那一路（`annSince` / `annCursor`）用**同一个窗口**，别让它退回 0。
+     */
+    const dayAgo = Date.now() - 24 * 3600_000
     // ② 按老师自己的会话读（RLS 原样生效）；cursor = 上一次见过的最大 createdAt
-    const since = typeof body.since === 'number' && body.since >= 0 ? body.since : 0
+    const since = typeof body.since === 'number' && body.since >= 0 ? body.since : dayAgo
     const sinceIso = new Date(since).toISOString()
     const res = await sbAs(
       env,
@@ -383,7 +413,77 @@ async function handlePush(context: { request: Request; env: Env }): Promise<Resp
       if (at > cursor) cursor = at
       return { id: r.id, title: r.title, body: (r.body ?? '').slice(0, 200), createdAt: at }
     })
-    return json({ status: 'ok', notices, cursor })
+
+    /*
+     * 🔴🔴 2026-10-05 补：**全站公告**（`announcements`，schema §22）走**同一个会话**读。
+     *
+     * 断在哪：这一条原样只读 `notices` ⇒ 超管在电脑上发的全站公告**永远到不了手机**
+     *   （用户实测"电脑上发通知，手机没弹"很可能就是它）。
+     *
+     * 🔴 **判据复用点 = 上面那个 `sbAs(env, access, …)`** —— 老师自己的会话 ⇒
+     *   `announcements_visible`（§22.3：未撤下 + 生效区间 + 非教室端）在这一读上
+     *   原样生效。⇒ 服务端**一个自己的可见性条件都不加**：
+     *   可见性判断**只有一处** = 那条 RLS 策略（教师端横幅走的也是它）。
+     *   ⚠️ 查询串里那个 `revoked_at=is.null` **不是**第二套判据 —— 它只是**性能筛**
+     *     （别把撤下的行取回来再让 RLS 丢掉）＋**意图自明**：少了它行为**一模一样**。
+     *     生效区间同理：**一个字都不筛**，交给 RLS（那里是闭区间，自己再写一遍迟早漂开）。
+     *   ⛔ **绝不用 `svc()`（service_role）读公告** —— 那就是绕开 RLS（安全红线）。
+     *
+     * 🔴 **公告的 cursor 刻度 = `greatest(created_at, active_from)`**：
+     *   `active_from` 在**未来**的公告（§22.1 允许排期）在创建时**被 RLS 挡着**，
+     *   只按 `created_at` 判它会**永远收不到**（创建时刻早就落在 cursor 之后了）
+     *   ⇒ 过滤与游标都写成"两列取大"，两边**同一个刻度**，不重不漏。
+     *
+     * ⚠️ **公告读失败不许连累通知**：通知照旧返回（上面已经算好），另回一个
+     *   `annError` 说明原因（§三.5：不许静默）—— 公告那一半坏了不该让整条拉取变红。
+     */
+    const annSince = typeof body.annSince === 'number' && body.annSince >= 0 ? body.annSince : dayAgo
+    const annSinceIso = new Date(annSince).toISOString()
+    const enc = encodeURIComponent(annSinceIso)
+    let anns: Array<{ id: string; title: string; body: string; createdAt: number }> = []
+    let annCursor = annSince
+    let annError: string | undefined
+    try {
+      /*
+       * ⚠️ `active_from` **可能为空**（= 立即生效，§22.1）—— `gt.` 对 NULL 恒不成立，
+       *   只写 `active_from=gt.<cursor>` 会把"立即生效"的公告**全部漏掉** ⇒ 用 `or=(…)`
+       *   把两列并列（PostgREST 至少要有一个合取项成立）。
+       */
+      const annRes = await sbAs(
+        env,
+        access,
+        `/rest/v1/announcements?select=id,title,body,created_at,active_from` +
+          `&or=(created_at.gt.${enc},active_from.gt.${enc})&revoked_at=is.null` +
+          `&order=created_at.asc&limit=10`,
+      )
+      if (!annRes.ok) {
+        annError = `公告读取失败（RLS/网络 · HTTP ${annRes.status}）。`
+      } else {
+        const annRows = (await annRes.json()) as Array<{
+          id: string
+          title: string
+          body: string | null
+          created_at: string
+          active_from: string | null
+        }>
+        anns = annRows.map((r) => {
+          const created = new Date(r.created_at).getTime() || 0
+          const from = r.active_from ? new Date(r.active_from).getTime() || 0 : 0
+          const at = Math.max(created, from)
+          if (at > annCursor) annCursor = at
+          return { id: r.id, title: r.title, body: (r.body ?? '').slice(0, 200), createdAt: at }
+        })
+      }
+    } catch (e) {
+      annError = `公告读取出错：${String(e)}`
+    }
+
+    /*
+     * ⚠️ `annCursor` **只在真的读到行时才写回**：读失败时原样回传收到的那个
+     *   ⇒ 原生那侧不会因为"服务端这一轮坏了"把 cursor 推到未来、把中间几条**永远漏掉**。
+     *   （与通知那一路同一个语义：cursor 只能由"真的见过的行"推进。）
+     */
+    return json({ status: 'ok', notices, cursor, announcements: anns, annCursor, annError })
   }
 
   return json({ status: 'error', message: '未知动作' }, 400)
