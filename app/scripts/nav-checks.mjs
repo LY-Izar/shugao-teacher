@@ -9944,6 +9944,215 @@ section('灰档收口自证：`shellGray` 不许跨节')
   )
 }
 
+/* ============================================================
+   第二十九节 · D19：分块加载失败的自愈 / 那句话与错误码 / 上报（真机反馈 2026-10-06）
+   ------------------------------------------------------------
+   🔴 现场：`/admin` 错误日志里那条
+      「[渲染] Failed to fetch dynamically imported module: …/Workbench-<旧哈希>.js」，
+      老师补充"**这是安卓 10 系统上登录时出的**"⇒ 低版本 WebView + 部署换代：
+      浏览器里留着**上一版的 `index.html`**（写死旧分块名），新部署一上线旧分块就没了。
+   ✅ 三件事都在这一节钉住：① 自愈一次且**不许成环**；② 给老师的是人话+错误码
+      （调试期多一行 URL，**一个开关**管着）；③ 上报**复用既有那一条链**。
+   🔴 每条都带**反向对照**（改内存副本 ⇒ 当场假）—— 照 `AGENTS.md` §三.2。
+   ============================================================ */
+section('第二十九节 · D19：分块加载失败要能自愈一次 · 人话+错误码分两档 · 复用既有上报链')
+
+{
+  const chunkSrc = readFileSync(join(APP, 'src/lib/chunkReload.ts'), 'utf8')
+  const ebSrc = readFileSync(join(APP, 'src/components/ErrorBoundary.tsx'), 'utf8')
+  const mainSrc = readFileSync(join(APP, 'src/main.tsx'), 'utf8')
+
+  const count = (s, needle) => s.split(needle).length - 1
+
+  /* ---------- ① 接住哪几类失败（两个事件都要，少一个就漏一半现场） ---------- */
+  /*
+   * ⚠️ 数的是 **`addEventListener('…')` 那一句**，不是裸事件名 ——
+   *    事件名在同一份文件里还会出现在 `removeEventListener` 与注释里（第一次写就数成 5 处假红）。
+   */
+  const VITE_EV = "addEventListener('vite:preloadError'"
+  const ERR_EV = "addEventListener('error'"
+  const REJ_EV = "addEventListener('unhandledrejection'"
+
+  const written = chunkSrc.indexOf('function installChunkRecovery')
+  /*
+   * ⚠️ `indexOf` 取的是**第一次**出现 ⇒ 会命中 import 那一行（`.tsx` 里 `createRoot` 排在
+   *    真正的调用之前），量出来是"装在 createRoot 之后"的假红。取**最后一次**才是调用。
+   */
+  const called = mainSrc.lastIndexOf('installChunkRecovery()')
+  /*
+   * ⚠️ 锚点必须带 `(document`：`indexOf('createRoot(')` 命中的是**import 那一行**
+   *    （`import { createRoot } from 'react-dom/client'` 里的 `createRoot(` 排在最前面）
+   *    ⇒ 量出来是"装在 createRoot 之后"的假红。第一次写就踩了这个。
+   */
+  const rooted = mainSrc.indexOf('createRoot(document')
+
+  check(
+    count(chunkSrc, VITE_EV) === 1 &&
+      count(chunkSrc, ERR_EV) === 1 &&
+      count(chunkSrc, REJ_EV) === 1 &&
+      written > 0 &&
+      called >= 0 &&
+      rooted >= 0 &&
+      called < rooted,
+    '🔴 D19 ① 接住**三路**：`vite:preloadError`（Vite 官方那条）＋ `error` ＋ `unhandledrejection`（低版本 WebView 上不发第一条的那几种走法），且**装在 `createRoot()` 之前**（`lazy()` 失败比 `useEffect` 早得多，装在 effect 里就接不住"第一次进这一页"）',
+    `三处 addEventListener：vite ${count(chunkSrc, VITE_EV)} / error ${count(chunkSrc, ERR_EV)} / unhandledrejection ${count(chunkSrc, REJ_EV)} 处（各须 1）· 调用位置 ${called} ${rooted >= 0 ? `< createRoot 位置 ${rooted}` : '（main.tsx 里没有 createRoot 了？）'}`,
+  )
+
+  /* ---------- ② 自愈一次：防循环标记 + 无条件 reload 的反向对照 ---------- */
+  const MARK = 'RELOAD_MARK'
+  const READ_MARK = 'sessionStorage.getItem(' + MARK
+  const SET_MARK = 'sessionStorage.setItem(' + MARK
+  const GUARD_RE = /if\s*\(\s*reloadAlreadyTried\(\)\s*\)/
+  const reloadCall = 'hardReload()'
+
+  const guardHits = (chunkSrc.match(GUARD_RE) ?? []).length
+  const markSetHits = count(chunkSrc, SET_MARK)
+  /*
+   * ⚠️ 这两个 index 都**只取第一次出现**：函数体里 `setItem` 与 `hardReload()` 各只有一处
+   *    （上面 `markSetHits === 1` 由判据自己咬住，不靠这里）。
+   */
+  const iSet = chunkSrc.indexOf(SET_MARK)
+  const iReload = chunkSrc.indexOf(reloadCall, iSet > 0 ? iSet : 0)
+
+  check(
+    count(chunkSrc, READ_MARK) === 1 &&
+      markSetHits === 1 &&
+      guardHits === 1 &&
+      iSet > 0 &&
+      iReload > iSet,
+    '🔴 D19 ② 自愈**只有一次、且不许成环**：`sessionStorage` 里那枚一次性标记先**读**（防重入）再**写**，写标记必须在重载**之前** —— 顺序反了就是"重载被挡住 ⇒ 页面原地停着 ⇒ 下次再刷"，老师手机上一秒一刷还进不去',
+    `读标记 ${count(chunkSrc, READ_MARK)} 处 · 写标记 ${markSetHits} 处 · 防循环守卫 ${guardHits} 处 · 写标记@${iSet} < 重载@${iReload}`,
+  )
+
+  /* 🔴 反向对照之一：把防循环守卫整句抠掉（副本 = 无条件重载）⇒ 上面那条必须当场假 */
+  const crippledGuard = chunkSrc.replace(GUARD_RE, 'if (true)')
+  const crippledMark = chunkSrc.replace(SET_MARK, 'sessionStorage.removeItem(' + MARK)
+  check(
+    (crippledGuard.match(GUARD_RE) ?? []).length === 0 &&
+      count(crippledGuard, SET_MARK) === markSetHits &&
+      guardHits === 1,
+    '🧪 D19 ②-a 反向对照：把 `if (reloadAlreadyTried())` 那个守卫抠掉（副本 = **无条件 reload**）⇒ ② 当场假 —— 证明它真在数"防循环"那一句，不是摆设',
+    `原文守卫 ${guardHits} 处 · 抠掉后 ${(crippledGuard.match(GUARD_RE) ?? []).length} 处（须 0）· 写标记 ${count(crippledGuard, SET_MARK)} 处（这条守卫不管写标记，故仍须 ${markSetHits}）`,
+  )
+
+  /* 🔴 反向对照之二：把"先落标记"那句拿掉（只重载、不留痕）⇒ 同一枚标记当场数到 0 */
+  check(
+    count(crippledMark, SET_MARK) === 0 && markSetHits === 1,
+    '🧪 D19 ②-b 反向对照：把 `sessionStorage.setItem(RELOAD_MARK, …)` 换掉（副本 = 只重载、不落标记）⇒ ② 当场假 —— 少了这一句就是**无限刷新**',
+    `原文写标记 ${markSetHits} 处 · 拿掉后 ${count(crippledMark, SET_MARK)} 处（须 0）`,
+  )
+
+  /* ---------- ③ 上报：复用既有封装，绝不新造第二条链 ---------- */
+  /*
+   * ⚠️ import 是**多行**的（格式化器折过行）⇒ 单行正则判不出来（第一次写就假红）。
+   *    这里改成：① 源码里出现 `reportFrontendError` 与 `lib/errors`；② **只有那一处** import；
+   *    ③ 本文件里没有裸 `rpc(`。
+   * ⚠️ `report_frontend_error` 那个字符串**允许出现在注释里**（要写明用的是哪条 RPC）——
+   *    该禁的是**在源码里自己调它**（那才是第二条链）。所以判据落到 `rpc(` 上。
+   */
+  const importsWrapper = chunkSrc.includes('reportFrontendError') && chunkSrc.includes('lib/errors')
+  const importCount = (chunkSrc.match(/^\s*import\b/gm) ?? []).length
+  const bareRpc = /(?:sb|supabase)\s*\.\s*rpc\s*\(|(?:^|[^.\w])rpc\s*\(/m.test(chunkSrc)
+  const callSites = count(chunkSrc, 'reportFrontendError({')
+  check(
+    importsWrapper &&
+      importCount === 2 &&
+      count(chunkSrc, 'import { reportFrontendError }') === 1 &&
+      callSites === 1 &&
+      !bareRpc,
+    '🔴 D19 ③ 上报**走既有的那一个封装** `reportFrontendError()`（`lib/errors.ts`，匿名可调的 `report_frontend_error` RPC 就在它里面）—— 新的一条链会多一份限流/脱敏口径，也要多一处审计',
+    `导入既有封装 ${importsWrapper} · 本文件 import 共 ${importCount} 处（须 2：封装 + 版本号）· 封装调用点 ${callSites} 处（须 1）· 自己裸调 rpc( ${bareRpc}（须 false）`,
+  )
+
+  /* ---------- ④ 上屏的是人话 + 错误码，且调试/正式**只有一个开关** ---------- */
+  const codeUses = (ebSrc.match(/CHUNK_ERROR_CODE/g) ?? []).length
+  const debugDef = /export const DEBUG_ERROR_SCREEN = (?:true|false)/.test(chunkSrc)
+  const decTheEB = /DEBUG_ERROR_SCREEN\s*=/.test(ebSrc)
+  const defCode = /export const CHUNK_ERROR_CODE = 'FE-CHUNK-01'/.test(chunkSrc)
+  /*
+   * ⚠️ 数的是**布尔判断处**（`{DEBUG_ERROR_SCREEN &&`，带那个开括号），不是那个词本身 ——
+   *    同一份文件里那个词还出现在 import 与三处注释里（数词频就是假红）。
+   */
+  const COND_RE = /\{\s*DEBUG_ERROR_SCREEN\s*&&/g
+  const screenCond = (ebSrc.match(COND_RE) ?? []).length
+  check(
+    defCode &&
+      debugDef &&
+      codeUses === 3 &&
+      screenCond === 1 &&
+      !decTheEB &&
+      ebSrc.includes('错误码 {code}'),
+    '🔴 D19 ④ 给老师的那一句**只有人话 + 错误码**（原文只出现在调试开关那一档里），且**调试/正式只有一个开关**：`DEBUG_ERROR_SCREEN` 定义在 `lib/chunkReload.ts` 一处、`ErrorBoundary` 只读不定义（切正式期 = 只改那一行）',
+    `错误码常量定义 ${defCode} · 开关定义（chunkReload 一处）${debugDef} · ErrorBoundary 用错误码 ${codeUses} 处（须 3：import + 取名 + 那一档）· 调试行显示条件 ${screenCond} 处（须 1）· ErrorBoundary 自己定义开关 ${decTheEB}（须 false）· 屏上有"错误码 {code}" ${ebSrc.includes('错误码 {code}')}`,
+  )
+
+  /*
+   * 🔴 反向对照之三（2026-10-06 写第三版才对，前两版都是**假绿**，形状与 `AGENTS.md` §三.2 同源）：
+   *    第一版："把 `DEBUG_ERROR_SCREEN &&` 换成 `false &&`，再数它剩几处（须 0）" ——
+   *     那个数是**恒等的 0**（那个串在副本里本来就不存在）⇒ 既不能证明开关在管事，
+   *     也不能证明改对了地方；
+   *    第二版：用 `$1` 拼替换串，但那是**模板串**、`$1` 是字面量 ⇒ 副本里被塞进
+   *     一个新的 `DEBUG_ERROR_SCREEN`，读数反而对不上。
+   *    ✅ 现在：锚点**带开括号**（源码里 `DEBUG_ERROR_SCREEN` 先出现在 import 与注释里），
+   *       替换串**不含 `$`**，收据用**短路符总数**（恰好多一个 `&&`）。
+   */
+  const COND = 'DEBUG_ERROR_SCREEN &&'
+  const blindReplace = ebSrc.replace(COND, 'false && ' + COND)
+  const crippledScreen = ebSrc.replace('{' + COND, '{false && ' + COND)
+  const andCount = (s) => (s.match(/&&/g) ?? []).length
+  check(
+    crippledScreen !== ebSrc &&
+      screenCond === 1 &&
+      andCount(crippledScreen) === andCount(ebSrc) + 1 &&
+      blindReplace !== ebSrc,
+    '🧪 D19 ④-a 反向对照：把那一档的显示条件短路成 `{false && DEBUG_ERROR_SCREEN && (…)`（副本 = 正式期只要人话+错误码）⇒ 源码里那个条件**当场被短路**（锚点收据：短路符 +1）—— 这一条自己也被写红过两版，正是"对照也得能红"的活例子',
+    `原文条件 ${screenCond} 处（须 1）· 带锚点副本变过 ${crippledScreen !== ebSrc} · 短路符 ${andCount(ebSrc)}→${andCount(crippledScreen)}（须 +1）· 不带开括号的替换也改得到东西 ${blindReplace !== ebSrc}（注释里那份也是同一个串 ⇒ 判据认的必须是带开括号的那个条件）`,
+  )
+
+  /* ---------- ⑤ 上报里必须有那几样，且**不许带个人信息** ---------- */
+  /*
+   * 🔴 这里判的是**上报载荷本身**（不是整份源码，也**先剥掉注释**）：
+   *    源码注释里出现"版本号 / 学生"这类字眼是正常的（要写清楚口径），
+   *    会被误判成 PII 的只有**载荷**；而载荷的注释块恰好就写着"不带学生信息"（第一次写就假红）。
+   */
+  const callAt = chunkSrc.indexOf('reportFrontendError({')
+  const rawPayload =
+    callAt < 0 ? '' : chunkSrc.slice(callAt, chunkSrc.indexOf('})\n  } catch', callAt) + 1)
+  const payload = rawPayload.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ')
+  const PII_IN_PAYLOAD = [
+    ['姓名', /姓名/],
+    ['班级', /班级/],
+    ['学号', /学号/],
+    ['学生', /学生/],
+    ['账号类型', /accountKind/],
+    ['同步错误', /syncError/],
+  ]
+  const piiHits = PII_IN_PAYLOAD.filter(([, re]) => re.test(payload)).map(([n]) => n)
+  const payloadFields = [
+    ['错误码代码', /\[\$\{CHUNK_ERROR_CODE\}\]/],
+    ['阶段', /\[阶段=\$\{CHUNK_PHASE\}\]/],
+    ['自愈', /\[自愈=\$\{heal\}\]/],
+    ['分块URL', /\[url=\$\{url\}\]/],
+    ['页面', /\[页面=\$\{pagePath\(\)\}\]/],
+    ['版本', /\[版本=\$\{APP_VERSION_LABEL\}\]/],
+  ].filter(([, re]) => re.test(payload))
+  check(
+    rawPayload.length > 0 &&
+      payloadFields.length === 6 &&
+      piiHits.length === 0,
+    '🔴 D19 ⑤ 上报里带 **错误码 + 阶段（加载）+ 自愈状态 + 分块 URL + 页面路径 + 版本号** 六样，且**一个个人信息字段都没有**（姓名/班级/学号/学生/账号类型/同步错误都不许进载荷——那张表会被一起备份）',
+    `载荷字段 ${payloadFields.length}/6（${payloadFields.map(([n]) => n).join(' ')}）· 命中个人信息 ${piiHits.length ? piiHits.join(',') : '无'}`,
+  )
+
+  /* ---------- ⑥ 那条人话 / 错误码**在真源码里各只有一处**（防止将来被抄成两份走散） ---------- */
+  const chunkCodeDef = /export const CHUNK_ERROR_CODE = 'FE-CHUNK-01'/.test(chunkSrc)
+  check(
+    chunkCodeDef && chunkSrc.includes("const CHUNK_FAIL_RE ="),
+    '🔴 D19 ⑥ 错误码与"分块失败"的识别器**都只有一处定义**（`FE-CHUNK-01` / `CHUNK_FAIL_RE`）—— 抄成两份就会走散（本项目栽过：版本号分居两个文件）',
+    `错误码定义 ${chunkCodeDef} · 识别器一处 ${chunkSrc.includes('const CHUNK_FAIL_RE =')}`,
+  )
+}
+
 /* ---------------- 结果 ---------------- */
 console.log(`\n================ 结果 ================`)
 
