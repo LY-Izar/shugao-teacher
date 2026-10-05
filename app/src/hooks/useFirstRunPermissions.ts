@@ -94,7 +94,9 @@ export function useFirstRunPermissions() {
       }
 
       /* ④ 注册拉取钥匙 → 启动前台服务。失败不记账 done ⇒ 下次打开自动重试 */
-      const reg = await postApi('/api/push/register', { action: 'register' })
+      /* 🔴 路径是 `/api/push`（动作写在 body.action 里，与 pull/revoke 同一个函数）——
+         调 `/api/push/register` 会落到静态层回 405（用户真机第三轮的 HTTP 405 就是它）。 */
+      const reg = await postApi('/api/push', { action: 'register' })
       const token = reg.ok && typeof reg.data.token === 'string' ? reg.data.token : ''
       const started = token ? await shellStartPush(apiUrl(''), token) : false
       if (started) steps.push('消息保持畅通')
