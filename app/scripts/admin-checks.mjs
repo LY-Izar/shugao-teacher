@@ -5031,6 +5031,130 @@ function sourceFileHealth(rel) {
     }
   }
 
+  /* ============================================================
+     第十二节 🆕 重置密码（reset）：**目标闸** + 前后各一条留痕
+
+     🔴 这是"最急"的那个洞：`reset` 会把**新密码的明文**回给调用者
+        （`return json({ status:'ok', password })`），而它的闸门
+        `can_create_teacher_accounts` 含**办公室主任** —— 少了目标闸，
+        办公室主任 / 教务处就能把最高管理员的密码重置成自己知道的值，然后以超管登录。
+     判据两半（都在这一节里跑真接口）：
+       · 教务处（非超管）重置**超管** ⇒ **403**，而且**一次业务写都不发**（没碰 GoTrue、没留痕）；
+       · 超管重置超管 ⇒ 闸门放行（`seen` 里必须出现那一发 GoTrue 的 PUT）。
+     🧪 反向对照：把源码里那句 `if (targetIsSuper)` 换成 `if (false)`（`mutateOnce` 保证
+        恰好改到 1 处）⇒ 下面"reset 分支里有目标闸"那条**当场假**。
+     ============================================================ */
+
+  section('第十二节 🆕 重置密码（reset）：目标含 super 只有超管能重置 · 前后各一条留痕')
+  {
+    const TID = '33333333-3333-4333-8333-333333333333'
+    const AUTH = { Authorization: 'Bearer good-token' }
+    const callReset = () => call(ACCT, '/api/teacher-account', { action: 'reset', teacherId: TID }, AUTH)
+
+    callerId = '11111111-1111-4111-8111-111111111111'
+    createAcctValue = 'true'
+    tableRows.set('classroom_accounts', [])
+    tableRows.set('teachers', [{ id: TID, name: '张三' }])
+    /** 业务写 = 除判据 RPC 之外的写（RPC 是 POST，也会进 `writes`） */
+    const bizWrites = () => writes.filter((w) => w.table !== 'rpc')
+
+    /* ---- ① 教务处（非超管）重置**超管** ⇒ 403，而且一次业务写都没发出去 ---- */
+    tableRows.set('teacher_roles', [{ role: 'super' }])
+    superValue = 'false'
+    clearFlow()
+    {
+      const res = await callReset()
+      const body = await res.json()
+      eq(
+        '🔴 ① 教务处重置**最高管理员**的密码 → 403（闸门在"目标是谁"那一侧，不在"能不能建号"那一侧）',
+        res.status,
+        403,
+      )
+      ok(
+        '🔴 ① 而且**一次业务写都没发出去**（没碰 GoTrue、没留痕 —— 那个密码一个字节都没改）',
+        !seen.some((s) => s.path === `/auth/v1/admin/users/${TID}`) && bizWrites().length === 0,
+        `GoTrue 命中 ${seen.filter((s) => s.path.startsWith('/auth/v1/admin/users')).length} 次 · 业务写 ${bizWrites().length} 次`,
+      )
+      ok(
+        '① 403 的正文说的是"最高管理员账号"这件事（不是笼统的"没权限"）',
+        /最高管理员账号/.test(String(body.message ?? '')),
+        String(body.message ?? ''),
+      )
+    }
+
+    /* ---- ② 超管重置超管 ⇒ 闸门放行（那一发 GoTrue 的 PUT 必须真的发出去）---- */
+    tableRows.set('teacher_roles', [{ role: 'super' }])
+    superValue = 'true'
+    clearFlow()
+    {
+      const res = await callReset()
+      await res.json()
+      ok(
+        '🔴 ② 超管重置超管 ⇒ **闸门放行**：`seen` 里出现了那一发带 service_role 的 GoTrue PUT' +
+          '（不是被自己的闸门挡在门外）',
+        seen.some((s) => s.path === `/auth/v1/admin/users/${TID}` && /fake-service-role/.test(s.auth)),
+        seen.filter((s) => s.path.startsWith('/auth/v1/admin/users')).map((s) => s.path).join(' · ') || '(一次都没发)',
+      )
+      /* 假库只认 `/auth/v1/user`，GoTrue 那一发必然 404 ⇒ 接口必须**如实报 502**，不许假装成功 */
+      eq('🔴 ② GoTrue 那一发失败时**如实回 502**（不是回 200 装作重置成功）', res.status, 502)
+      const audits = writes.filter((w) => w.table === 'admin_audit')
+      ok(
+        '🔴 ② 失败也是写动作，照旧留痕（**两条**：重置前 affected 1 + 失败 affected 0，人话里带着 HTTP 码）',
+        /* ⚠️ 探针纪律（2026-10-13 修）：源码是"重置前先写一条 `affected: 1`"（teacher-account.ts:922），
+           失败时再写一条 `affected: 0`（:945）⇒ 这一发 reset 必然留下**两条** `admin_audit` ✓。
+           原来写的 1 是探针自己数错了 ✗（实测 `实际 2`）—— 期望值按**实读的代码行为**改。 */
+        audits.length === 2 &&
+          audits[0].payload?.action === 'teacher.reset' &&
+          audits[0].payload?.affected === 1 &&
+          audits[1].payload?.action === 'teacher.reset' &&
+          audits[1].payload?.affected === 0 &&
+          /重置失败（GoTrue HTTP 404）/.test(String(audits[1].payload?.detail ?? '')),
+        JSON.stringify(audits.map((w) => w.payload)),
+      )
+      eq('② 留痕的 `target` 是"姓名 · uuid"（事后要能读懂是谁）', audits[0]?.payload?.target, `张三 · ${TID}`)
+      eq('🔴 ② 留痕的 `actor_id` 是**调用者自己**（不是前端传进来的任何东西）', audits[0]?.payload?.actor_id, callerId)
+      eq('② 留痕的 `actor_name` 是调用者自己那一行的姓名快照', audits[0]?.payload?.actor_name, '张三')
+    }
+
+    /* ---- ③ 静态：reset 分支里**必须有目标闸**（+ 反向对照）---- */
+    {
+      const src = readFileSync(resolvePath(APP, 'functions/api/teacher-account.ts'), 'utf8')
+      const resetBranchOf = (text) => {
+        const at = text.indexOf(`if (action === 'reset')`)
+        if (at < 0) return ''
+        const end = text.indexOf('/* ---------------- rename', at)
+        return text.slice(at, end < 0 ? at + 6000 : end)
+      }
+      const hasTargetGate = (text) => {
+        const b = resetBranchOf(text)
+        return (
+          /teacher_roles\?select=role&teacher_id=eq\./.test(b) &&
+          /if \(targetIsSuper\)/.test(b) &&
+          /is_super_admin/.test(b) &&
+          /403/.test(b) &&
+          (b.match(/action: 'teacher\.reset'/g) ?? []).length >= 3
+        )
+      }
+      const marks = (text) => (resetBranchOf(text).match(/action: 'teacher\.reset'/g) ?? []).length
+      ok(
+        '🔴 ③ reset 分支里有**目标闸**：读目标 `teacher_roles` + `if (targetIsSuper)` + 问 `is_super_admin` + 403',
+        hasTargetGate(src),
+        `长度 ${resetBranchOf(src).length} 字符 · teacher.reset ${marks(src)} 处`,
+      )
+      ok(
+        '🔴 ③ 而且 `teacher.reset` 留痕**至少 3 处**（重置前 / 失败 / 重置后 —— 明文交出去这个动作必须查得到）',
+        marks(src) >= 3,
+        `${marks(src)} 处`,
+      )
+      const mutated = mutateOnce(src, 'if (targetIsSuper) {', 'if (false) {')
+      ok(
+        '🧪 ③ 反向对照：把 `if (targetIsSuper)` 换成 `if (false)` ⇒ "reset 分支里有目标闸"**当场假**',
+        hasTargetGate(src) && !hasTargetGate(mutated),
+        `原文 ${hasTargetGate(src)} · 改过 ${hasTargetGate(mutated)}`,
+      )
+    }
+  }
+
   /* ---------------- 收尾 ---------------- */
 
   server.close()

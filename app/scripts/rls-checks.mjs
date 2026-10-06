@@ -4044,13 +4044,16 @@ await withLock(async () => {
             and policyname not like 'maintenance_freeze_%' order by cmd, policyname`,
       )
       eq(
-        '裂缝 A：teachers 上的策略清单（§7 的 for all + §17.1 三条逐动作 restrictive）',
+        '裂缝 A：teachers 上的策略清单（§7 三条逐动作 permissive + §17.1 三条逐动作 restrictive）' +
+          '—— 🔴 §43.1 起**教师自己那三条里没有 DELETE 了**（原来那条 `for all` 含 DELETE）',
         tPol.rows.map((x) => `${x.policyname}:${x.cmd}:${x.permissive}`),
         [
-          'teachers_self:ALL:PERMISSIVE',
           'teachers_not_classroom_delete:DELETE:RESTRICTIVE',
           'teachers_not_classroom_insert:INSERT:RESTRICTIVE',
+          'teachers_self_insert:INSERT:PERMISSIVE',
+          'teachers_self_select:SELECT:PERMISSIVE',
           'teachers_not_classroom_update:UPDATE:RESTRICTIVE',
+          'teachers_self_update:UPDATE:PERMISSIVE',
         ],
       )
       /*
@@ -7754,12 +7757,24 @@ await withLock(async () => {
       const setNull = (rows) => rows.filter((r) => r.del === 'n').map((r) => r.k)
       const notCasc = (rows) => rows.filter((r) => r.del === 'a' || r.del === 'r').map((r) => `${r.k}(${r.del})`)
 
+      /*
+       * 🔴 2026-10-13 变更（`schema.sql` §10.1 修 · 真缺陷）：`classroom_accounts.created_by` **不再**是拦人的那条。
+       *   它原来写的是 `references teachers (id)`（无 `on delete` ⇒ NO ACTION = 拦人），与同文件 §34 那处
+       *   同名字段（`:5327`，**有** `on delete set null`）不一致；补上之后它归到下面"数据库自己置空"那一边。
+       *   ⇒ 这里是**四列变三列**、下面 21 条升 22 条 —— 不是放宽判据，是**数据库的事实变了**。
+       */
       const RESTRICT_EXPECT = [
-        'classroom_accounts.created_by',
         'student_subject_changes.changed_by',
         'student_subject_changes.purged_by',
         'student_subjects.updated_by',
       ]
+      /*
+       * 服务端那份 `RESTRICT_COLS` **故意多留一列** `classroom_accounts.created_by`：
+       *   Cloudflare 的代码先上、Supabase 的 SQL 后跑 ⇒ 还没迁移的老库上那一列**仍然拦人**，
+       *   少了它整次删除会 23503 回滚（迁移过的库上它只是**多清一次**，无害）。
+       *   依据 `AGENTS.md` §四「SQL 没在线上跑过时前端不能崩」。
+       */
+      const RESTRICT_LEGACY = ['classroom_accounts.created_by']
 
       eq(
         '① 指向 `auth.users` 的两张表**都是 cascade**（删登录账号 → 教师行 / 教室端账号行跟着走）',
@@ -7768,18 +7783,20 @@ await withLock(async () => {
       )
       const toTeachers = await fkOf('teachers')
       eq(
-        '🔴 ① 指向 `teachers` 的外键里，**会拦住删除的恰好是这四列**（= 要手工先清的那一份清单）',
+        '🔴 ① 指向 `teachers` 的外键里，**会拦住删除的恰好是这三列**（= 要手工先清的那一份清单）',
         notCasc(toTeachers).sort(),
         RESTRICT_EXPECT.map((k) => `${k}(a)`).sort(),
       )
       ok(
-        '🔴 ① 另外 **21** 条是 `on delete set null`（数据库自己置空，**不拦人**）—— 别把它们也算进"要手工清"里' +
+        '🔴 ① 另外 **22** 条是 `on delete set null`（数据库自己置空，**不拦人**）—— 别把它们也算进"要手工清"里' +
           '（🆕课程管理那三张表加进来 11 条：改课的人 / 原来那位老师 / 撤回人 / 清理人 …）',
         // 🆕 17 → 21（教室端改造 `schema.sql` §40 又加进来 4 条，全是 `on delete set null`）：
         //    `class_rep_pins.updated_by` / `daily_homework.author_id` /
         //    `duty_assignments.author_id` / `school_calendar.updated_by`
         //    —— 删老师不会拦人，那几行只是把"谁写的"置空。
-        setNull(toTeachers).length === 21,
+        // 🆕 21 → 22（2026-10-13 `schema.sql` §10.1 给 `classroom_accounts.created_by` 补了 set null）：
+        //    它原本在**拦人**那一份里，补上之后归到这一边 —— 正是 `rls-checks` §43.4 那两条要盯的。
+        setNull(toTeachers).length === 22,
         `${setNull(toTeachers).length} 条 set null · ${setNull(toTeachers).join(' / ')}`,
       )
       ok(
@@ -7793,9 +7810,10 @@ await withLock(async () => {
           (m) => `${m[1]}.${m[2]}`,
         )
         eq(
-          '🔴 ① 服务端 `RESTRICT_COLS` 与真库那四列**逐字相同**（少一列 → 23503 整次回滚；多一列 → 白清一次）',
+          '🔴 ① 服务端 `RESTRICT_COLS` = 真库那三列**逐字相同** + 故意多留的旧库兼容列 `classroom_accounts.created_by`' +
+            '（少一列 → 未迁移的老库上 23503 整次回滚；多清一次 → 无害）',
           declared.sort(),
-          [...RESTRICT_EXPECT].sort(),
+          [...RESTRICT_EXPECT, ...RESTRICT_LEGACY].sort(),
         )
         /*
          * 反面：**不清那四列会怎样** —— 这一条不靠断言，靠下面"真删"那一步顺带验到：
@@ -9988,6 +10006,422 @@ await withLock(async () => {
       } finally {
         await C42.db.close()
       }
+    }
+
+    /* ============================================================
+       四十三、🔴 安全收紧第三批（`schema.sql` §43）
+
+         · §43.2 最后一个最高管理员**撤不成 0 个**（delete 与 update 两条一起拦）
+         · §43.3 错误上报限洪（同 (人, view, message) 折叠 + 全局每分钟上限）
+         · §43.1 教师本人**删不掉自己那行** `teachers`（`for all` 里的 DELETE 被拿掉）
+
+       🔴 每一条都带**当场就能做、必须变红**的反向对照 —— 照 §二·之二·之二
+          `drop index` 那段的套路：改的**不是仓库文件**，是这个库（PGlite），
+          而且**收拾干净**（触发器 / 策略 / 那一行都还原，小节末尾有"收拾干净"那条断言）。
+       ============================================================ */
+    section('四十三 🆕 安全收紧第三批：最后一个 super 撤不掉 · 教师删不掉自己那行 · 上报限洪')
+    {
+      /** 整段包在事务里跑、结束一律 rollback —— 反向对照改的是这个库，但不留残留 */
+      const inRollback = async (fn) => {
+        await db.exec('begin')
+        try {
+          return await fn()
+        } finally {
+          await db.exec('rollback')
+        }
+      }
+
+      /* ---- ⓑ §43.2 最后一个 super 撤不掉 ---- */
+      const supNow = (await db.query(`select r.id, r.teacher_id from teacher_roles r where r.role = 'super'`)).rows
+      eq('§43.2 前置：库里**恰好 1 个** super（"撤最后一个"这句话才有意义）', supNow.length, 1)
+      const superRoleId = supNow[0]?.id
+
+      const delLast = await inRollback(async () => {
+        try {
+          const r = await db.query(`delete from teacher_roles where id = $1 returning id`, [superRoleId])
+          return { n: r.rows.length, err: '' }
+        } catch (e) {
+          return { n: 0, err: shortErr(e) }
+        }
+      })
+      ok(
+        '🔴 §43.2 删**最后一条** `super` ⇒ 被数据库拒（触发器 + 人话，不是静默 0 行）',
+        /最后一个最高管理员/.test(delLast.err),
+        delLast.err || `居然删掉了（${delLast.n} 行）`,
+      )
+      eq(
+        '§43.2 拒了之后库里仍是 1 个 super（那一行一个字都没动）',
+        Number((await db.query(`select count(*)::int as n from teacher_roles where role = 'super'`)).rows[0].n),
+        1,
+      )
+
+      const updLast = await inRollback(async () => {
+        try {
+          const r = await db.query(`update teacher_roles set role = 'admin' where id = $1 returning id`, [superRoleId])
+          return { n: r.rows.length, err: '' }
+        } catch (e) {
+          return { n: 0, err: shortErr(e) }
+        }
+      })
+      ok(
+        '🔴 §43.2 把最后一条 super **改成别的角色** ⇒ 同样被拒（只拦 DELETE 挡不住这条路）',
+        /最后一个最高管理员/.test(updLast.err),
+        updLast.err || `居然改掉了（${updLast.n} 行）`,
+      )
+
+      const otherRoleId = (await db.query(`select id from teacher_roles where role <> 'super' limit 1`)).rows[0]?.id
+      ok('§43.2 前置：库里有一条**非 super** 的身份行（下面那条对照要有东西可撤）', Boolean(otherRoleId))
+      const delOther = await inRollback(async () => {
+        try {
+          const r = await db.query(`delete from teacher_roles where id = $1 returning id`, [otherRoleId])
+          return { n: r.rows.length, err: '' }
+        } catch (e) {
+          return { n: 0, err: shortErr(e) }
+        }
+      })
+      ok(
+        '🔴 §43.2 对照：撤**别的**身份（非 super）照旧删得掉 —— 触发器只盯"最后一条 super"，不是把所有删除都挡了',
+        delOther.err === '' && delOther.n === 1,
+        `${delOther.n} 行 · ${delOther.err}`,
+      )
+
+      const ctlSuper = await inRollback(async () => {
+        await db.exec('drop trigger teacher_roles_keep_one_super on teacher_roles')
+        const r = await db.query(`delete from teacher_roles where id = $1 returning id`, [superRoleId])
+        return r.rows.length
+      })
+      eq('🧪 §43.2 反向对照：`drop trigger` 之后**删得掉了**（= 上面那条断言会红）', ctlSuper, 1)
+      eq(
+        '§43.2 收拾干净：rollback 把触发器与那一行都还回来了（这一段不留残留）',
+        (
+          await db.query(
+            `select (select count(*)::int from pg_trigger where tgname = 'teacher_roles_keep_one_super' and not tgisinternal) as t,
+                    (select count(*)::int from teacher_roles where role = 'super') as s`,
+          )
+        ).rows[0],
+        { t: 1, s: 1 },
+      )
+
+      /* ---- ⓒ §43.3 上报限洪 ---- */
+      const RPC = `select report_frontend_error($1,'teacher',$2,$3,'','','web','') as j`
+      const reportCommitted = async (username, view, message) => {
+        await db.exec('begin')
+        try {
+          await db.query(`select set_config('request.jwt.claims', $1, true)`, [JSON.stringify({ role: 'anon' })])
+          await db.exec('set local role anon')
+          const j = (await db.query(RPC, [username, view, message])).rows[0].j
+          await db.exec('commit')
+          return j
+        } catch (e) {
+          await db.exec('rollback')
+          throw e
+        }
+      }
+      await db.query(`delete from frontend_errors`)
+      const j1 = await reportCommitted('限洪探针', '/p', '同一句')
+      const j2 = await reportCommitted('限洪探针', '/p', '同一句')
+      ok(
+        '🔴 §43.3 同一个人 + 同 view + 同一句 message：60 秒内**只落第一条**（第二次 id 为 null = 被静默丢弃）',
+        (j1?.id ?? null) !== null && (j2?.id ?? null) === null,
+        `j1=${JSON.stringify(j1)} · j2=${JSON.stringify(j2)}`,
+      )
+      eq(
+        '§43.3 库里确实只有 1 行（不是"回了 ok 其实写了两行"）',
+        Number((await db.query(`select count(*)::int as n from frontend_errors where username = '限洪探针'`)).rows[0].n),
+        1,
+      )
+
+      await db.query(`delete from frontend_errors`)
+      const burst = []
+      /*
+       * ⚠️ 探针纪律（2026-10-13 修）：**每人一个不同的 username** ✓
+       *   这条要撞的是 §43.3 的**全局**配额（1 分钟 60）✗ —— 如果 65 次都用同一个 username，
+       *   会**先撞** §24.2 既有的"同一人 5 分钟 ≤ 20" ⇒ 只落 20 条（实测 `实际 20，期望 60`）✗，
+       *   那测的就是**逐人限**、不是全局限 ✓。分成 65 个人 ⇒ 每人 1 条，只可能被全局配额挡 ✓。
+       */
+      for (let i = 0; i < 65; i++) burst.push(await reportCommitted(`限洪探针2-${i}`, '/p2', `第 ${i} 条（限洪探针2）`))
+      eq(
+        '🔴 §43.3 全局每分钟上限：连报 **65 条**（65 个不同的人，避开 §24.2 逐人限）、一次只落 **60 条**（超出的静默丢弃）',
+        Number((await db.query(`select count(*)::int as n from frontend_errors where username like '限洪探针2-%'`)).rows[0].n),
+        60,
+      )
+      ok(
+        '§43.3 被丢掉的那 5 条回话**仍然是 `ok:true`**（上报这条路不把错误带回给前端）',
+        burst.length === 65 && burst.every((x) => x?.ok === true),
+        `${burst.filter((x) => x?.ok === true).length}/65 回 ok`,
+      )
+
+      const ctlGate = await inRollback(async () => {
+        await db.exec('drop trigger frontend_errors_gate on frontend_errors')
+        await db.query(`select set_config('request.jwt.claims', $1, true)`, [JSON.stringify({ role: 'anon' })])
+        await db.exec('set local role anon')
+        const a = (await db.query(RPC, ['限洪探针3', '/p3', '同一句'])).rows[0].j
+        const b = (await db.query(RPC, ['限洪探针3', '/p3', '同一句'])).rows[0].j
+        return [a?.id ?? null, b?.id ?? null]
+      })
+      ok(
+        '🧪 §43.3 反向对照：`drop trigger` 之后同一句连报两次**两次都有 id**（= 上面那条"只落一条"会红）',
+        ctlGate[0] !== null && ctlGate[1] !== null,
+        JSON.stringify(ctlGate),
+      )
+
+      const ctlCap = await inRollback(async () => {
+        await db.exec('delete from frontend_errors')
+        await db.exec('drop trigger frontend_errors_gate on frontend_errors')
+        for (let i = 0; i < 65; i++) {
+          await db.query(`insert into frontend_errors (username, message) values ('限洪探针4', $1)`, [`第 ${i} 条`])
+        }
+        return Number((await db.query(`select count(*)::int as n from frontend_errors where username = '限洪探针4'`)).rows[0].n)
+      })
+      eq(
+        '🧪 §43.3 反向对照：`drop trigger` 之后 65 条**一条不少**（= 上面那条"只落 60 条"会红）',
+        ctlCap,
+        65,
+      )
+      await db.query(`delete from frontend_errors`)
+
+      /* ---- ⓔ §43.4 🔴 删"建过教室端账号的老师"不许被外键挡死（真实缺陷，2026-10-13 修）----
+       * 症状（实测）：`schema.sql` 里 `classroom_accounts.created_by` 原来是
+       *   `uuid references teachers (id)`（**没有** `on delete`）⇒ 删这种老师时抛
+       *   `violates foreign key constraint "classroom_accounts_created_by_fkey"`（NO ACTION = 拦人）。
+       * 对照：同文件 §34 那处同名字段**有** `on delete set null`（`:5327`）—— 这一处是漏了，已补齐。
+       * 下面两半：① 静态核"指向 teachers 的外键**恰好 1 条**、且是 set null"；
+       *          ② 真删一次：教师删得掉 + 教室端账号**行还在** + `created_by` 被置空。 */
+      const fksToTeachers = (
+        await db.query(
+          `select conname, confdeltype::text as del
+             from pg_constraint
+            where conrelid = 'classroom_accounts'::regclass
+              and confrelid = 'teachers'::regclass
+              and contype = 'f'
+            order by conname`,
+        )
+      ).rows
+      eq(
+        '🔴 §43.4 `classroom_accounts` 指向 `teachers` 的外键**恰好 1 条**、而且带 `on delete set null`（confdeltype = n）',
+        fksToTeachers.map((r) => `${r.conname}:${r.del}`),
+        ['classroom_accounts_created_by_fkey:n'],
+      )
+
+      const TMP_CB = mk('af', 1)
+      const TMP_CA = mk('af', 2)
+      /** 造一对"临时教师 + 他当年建的教室端账号"（`classroom_accounts.class_id` 有 unique，挑一个没被占的班） */
+      const seedCreatedByPair = async () => {
+        for (const [id, label] of [
+          [TMP_CB, '临时教师（§43.4）'],
+          [TMP_CA, '临时教室端账号（§43.4）'],
+        ]) {
+          await db.query(
+            `insert into auth.users (id, email, raw_user_meta_data) values ($1, $2, '{}'::jsonb) on conflict (id) do nothing`,
+            [id, `${id}@shugao.test`],
+          )
+          if (id === TMP_CB) {
+            await db.query(`insert into teachers (id, name, subject) values ($1, $2, '物理') on conflict (id) do nothing`, [
+              id,
+              label,
+            ])
+          }
+        }
+        const cls = (
+          await db.query(`select id from classes where id not in (select class_id from classroom_accounts) limit 1`)
+        ).rows[0]?.id
+        /* ⚠️ 找不到空班位就**显式报错**，不许静默跳过（AGENTS §三.5：不可走的路径要有人知道） */
+        if (!cls) return '找不到空班位（classroom_accounts 的 unique (class_id) 全被占了）'
+        await db.query(
+          `insert into classroom_accounts (id, class_id, name, email, created_by)
+           values ($1, $2, '临时教室端账号（§43.4）', $3, $4)`,
+          [TMP_CA, cls, `${TMP_CA}@shugao.test`, TMP_CB],
+        )
+        return ''
+      }
+
+      const createdByDel = await inRollback(async () => {
+        const seeded = await seedCreatedByPair()
+        if (seeded) return { seeded, del: null, left: null }
+        const r = await db.query(`delete from teachers where id = $1 returning id`, [TMP_CB])
+        const left = (await db.query(`select id, created_by from classroom_accounts where id = $1`, [TMP_CA])).rows[0]
+        return { seeded: '', del: r.rows.length, left: left ? [left.id === TMP_CA, left.created_by] : null }
+      })
+      eq(
+        '🔴 §43.4 删一个"建过教室端账号的老师" ⇒ **删得掉**（不再被 `classroom_accounts_created_by_fkey` 的 23503 挡死）',
+        [createdByDel.seeded, createdByDel.del],
+        ['', 1],
+      )
+      eq(
+        '§43.4 那个教室端账号**行还在**、`created_by` 被置空（`on delete set null` 该有的样子 —— 不是连账号一起删）',
+        createdByDel.left,
+        [true, null],
+      )
+
+      /* 🧪 反向对照：把 `on delete set null` **去掉**（在这个库里就地重建同一个约束）⇒ 上面那句删除必须当场抛 */
+      const ctlFk = await inRollback(async () => {
+        await db.exec(
+          `alter table classroom_accounts drop constraint classroom_accounts_created_by_fkey;
+           alter table classroom_accounts add constraint classroom_accounts_created_by_fkey
+             foreign key (created_by) references teachers (id)`,
+        )
+        const seeded = await seedCreatedByPair()
+        if (seeded) return seeded
+        try {
+          await db.query(`delete from teachers where id = $1 returning id`, [TMP_CB])
+          return ''
+        } catch (e) {
+          return shortErr(e)
+        }
+      })
+      ok(
+        '🧪 §43.4 反向对照：约束去掉 `on delete set null` 之后，同一句删除**当场抛 23503 / 指名那个外键**（= 上面那条断言会红）',
+        /classroom_accounts_created_by_fkey/.test(ctlFk) && /foreign key constraint|23503/.test(ctlFk),
+        ctlFk || '居然删掉了 —— 反向对照是假的',
+      )
+
+      /* ---- ⓐ §43.1 教师删不掉自己那行（放在最后：它的反向对照**真的会删掉一行**）---- */
+      const selfDel = await attempt(db, U.phy, `delete from teachers where id = $1 returning id`, [U.phy])
+      eq(
+        '🔴 §43.1 教师 JWT 删**自己那行** `teachers` ⇒ 影响 0 行（`for all` 里那个 DELETE 已经拿掉了）',
+        [selfDel.outcome, selfDel.affected],
+        ['blocked', 0],
+      )
+      const otherDel = await attempt(db, U.phy, `delete from teachers where id = $1 returning id`, [U.head])
+      eq(
+        '§43.1 同一句删**别人**那行 ⇒ 也是 0 行（客户端这一侧根本没有 DELETE 这一档）',
+        [otherDel.outcome, otherDel.affected],
+        ['blocked', 0],
+      )
+      const selfUpd = await attempt(db, U.phy, `update teachers set name = $1 where id = $2 returning id`, [
+        '物理老师改自己（§43.1 对照）',
+        U.phy,
+      ])
+      eq(
+        '🔴 §43.1 对照：真老师**改**自己那行照旧通过（只拿掉 DELETE，没有误伤改名 / upsert）',
+        [selfUpd.outcome, selfUpd.affected],
+        ['ok', 1],
+      )
+      const ownerDel = await inRollback(async () => {
+        /*
+         * 🔴 2026-10-13 修（探针笔误）：这里原来删的是 `U.phy` —— 可它被种子里的
+         *   `classroom_accounts.created_by` 指着（`classroom_accounts_created_by_fkey`）。
+         *   在 `schema.sql` 补 `on delete set null` 之前，那句删除**当场抛 23503**
+         *   ⇒ 这条探针红在一个**与判据无关**的原因上（判据本身是"属主 / service_role 绕过 RLS，删得掉"）。
+         *   ✅ 改成：先插一条**没有任何引用**的一次性教师，再删它 —— 判据的意思一个字没变；
+         *   "删建过教室端账号的老师"另由 §43.4 那两条专门盯（那条踩的才是真缺陷）。
+         */
+        const tmp = mk('af', 3)
+        await db.query(
+          `insert into auth.users (id, email, raw_user_meta_data) values ($1, $2, '{}'::jsonb) on conflict (id) do nothing`,
+          [tmp, `${tmp}@shugao.test`],
+        )
+        await db.query(`insert into teachers (id, name, subject) values ($1, $2, '物理') on conflict (id) do nothing`, [
+          tmp,
+          '临时教师（§43.1 属主删除对照）',
+        ])
+        const r = await db.query(`delete from teachers where id = $1 returning id`, [tmp])
+        return r.rows.length
+      })
+      eq(
+        '🔴 §43.1 对照：**管理台那条路**（service_role / 属主，绕过 RLS）照旧删得掉（= 管理台不受影响）',
+        ownerDel,
+        1,
+      )
+
+      /* 🧪 反向对照：把三条拆开的策略**改回一条 `for all`** ⇒ 最上面那条必须变红
+       * ⚠️ 2026-10-13 修（探针笔误）：这一步原来包在 `inRollback` 里 —— 而 PostgreSQL 的 DDL 是**事务性**的，
+       *    `rollback` 会把刚建的 `for all` 策略一起撤掉 ⇒ 下一句 `delAfterForAll` 量到的其实是**原来的三条**策略
+       *    （实测 `["blocked",0]`，期望 `["ok",1]`）⇒ 这条对照两头不靠；而且因为那一行**没被删掉**，
+       *    后面的"插回来"又撞 `teachers_pkey`（连带红）。这一段此前从没跑到过（§43.1 上面那条探针先崩了）。
+       * ✅ 改成**显式改 → 探 → 按文件原文显式还原**（三句从 `schema.sql` 现抠，不在这里抄一份）。 */
+      /* 🧪 反向对照**用一次性教师**（与上面 `ownerDel` 的 `mk('af', 3)` 同一个做法）：
+       *   原来拿种子里的 `U.phy` 当靶子 —— 它被别的表指着（`classroom_accounts.created_by` 虽已
+       *   `on delete set null`，但**别的引用**还在），于是 `for all` 下删的是**另一个原因**拦下的；
+       *   而那一行删又删不掉 ⇒ 后面"插回来"必撞 `teachers_pkey`（连带红）。
+       * ✅ `mk('af', 4)` 这条**没有任何引用** ⇒ 删得动删不动只由 `teachers` 上的策略决定（判据本意不变）。 */
+      const teacherSelfPolicies = [
+        ...readFileSync(SCHEMA_FILE, 'utf8').matchAll(/create policy teachers_self_(?:select|insert|update)[\s\S]*?;/g),
+      ].map((m) => m[0])
+      eq(
+        '🧪 §43.1 反向对照前置：从 `schema.sql` 里抠出**恰好 3 条**逐动作策略（少了就当场红，不静默）',
+        teacherSelfPolicies.map((s) => s.match(/teachers_self_\w+/)[0]).sort(),
+        ['teachers_self_insert', 'teachers_self_select', 'teachers_self_update'],
+      )
+      const swap = await (async () => {
+        try {
+          await db.exec(`
+            drop policy if exists teachers_self_select on teachers;
+            drop policy if exists teachers_self_insert on teachers;
+            drop policy if exists teachers_self_update on teachers;
+            create policy teachers_self on teachers
+              for all to authenticated
+              using (id = auth.uid())
+              with check (id = auth.uid());
+          `)
+          return ''
+        } catch (e) {
+          return shortErr(e)
+        }
+      })()
+      ok('🧪 §43.1 反向对照：策略换回 `for all` 这一步本身没出错', swap === '', swap)
+      const delAfterForAll = await (async () => {
+        const tmp = mk('af', 4)
+        await db.query(
+          `insert into auth.users (id, email, raw_user_meta_data) values ($1, $2, '{}'::jsonb) on conflict (id) do nothing`,
+          [tmp, `${tmp}@shugao.test`],
+        )
+        await db.query(`insert into teachers (id, name, subject) values ($1, $2, '物理') on conflict (id) do nothing`, [
+          tmp,
+          '临时教师（§43.1 反向对照靶子）',
+        ])
+        return attempt(db, tmp, `delete from teachers where id = $1 returning id`, [tmp])
+      })()
+      eq(
+        '🧪 §43.1 反向对照：换回 `for all` 之后教师**又能删掉自己那行了**（= 最上面那条断言会红）',
+        [delAfterForAll.outcome, delAfterForAll.affected],
+        ['ok', 1],
+      )
+      if (delAfterForAll.outcome !== 'ok') {
+        console.log(`     ↳ 反向对照实际读数：${JSON.stringify(delAfterForAll)}`)
+      }
+      /* 收拾干净：`for all` 那条换回**文件里的三句**（上面现抠的那三句），下面那条 `pg_policies` 断言就是它的判据 */
+      const polBack = await (async () => {
+        try {
+          await db.exec(`drop policy if exists teachers_self on teachers;`)
+          await db.exec(teacherSelfPolicies.join('\n'))
+          return ''
+        } catch (e) {
+          return shortErr(e)
+        }
+      })()
+      ok('§43.1 收拾干净：三条逐动作策略按 `schema.sql` 原文建回来了（不再借 rollback）', polBack === '', polBack)
+      /* 收拾干净：靶子是一次性教师、且 `attempt` 那一回合**跑完就 rollback**（见 `attempt` 上方注释）
+       *   ⇒ 磁盘上还要显式收拾：属主身份把 `mk('af', 4)` 删掉（再断言上面那条"删得掉"不是空话）。
+       *   ⚠️ 上一版这里写的是"把 `U.phy` 插回来" —— 那补丁本身就是"拿种子行当靶子"留下的，
+       *   而且当靶子没被删掉时**必撞 `teachers_pkey`**（本轮那条连带红就是这么来的）。 */
+      const cleanup = await (async () => {
+        try {
+          const r = await db.query(`delete from teachers where id = $1 returning id`, [mk('af', 4)])
+          await db.query(`delete from auth.users where id = $1 returning id`, [mk('af', 4)])
+          return r.rows.length
+        } catch (e) {
+          return shortErr(e)
+        }
+      })()
+      ok('§43.1 收拾干净：反向对照那条一次性教师收拾掉了（`teachers` 里不留残留）', cleanup === 1, String(cleanup))
+      /* 下面那句"又删不掉了"拿种子里的 `U.phy` 当靶子 ⇒ 先确认那一行**确实还在**（否则是空断言） */
+      const seedAlive = (await db.query(`select count(*)::int as n from teachers where id = $1`, [U.phy])).rows[0].n
+      ok('§43.1 收拾干净：种子那位物理老师那行还在（下一句才不是空断言）', seedAlive === 1, String(seedAlive))
+      const teachersPol = (
+        await db.query(
+          `select count(*) filter (where policyname = 'teachers_self')::int as forall,
+                  count(*) filter (where policyname in ('teachers_self_select','teachers_self_insert','teachers_self_update'))::int as three
+             from pg_policies where schemaname = 'public' and tablename = 'teachers'`,
+        )
+      ).rows[0]
+      eq('§43.1 收拾干净：三条逐动作策略回来了、`teachers_self`（for all）不在了', [teachersPol.forall, teachersPol.three], [0, 3])
+      const delAgain = await attempt(db, U.phy, `delete from teachers where id = $1 returning id`, [U.phy])
+      eq(
+        '§43.1 而且教师**又删不掉了**（策略恢复得与文件里的那份是同一件事）',
+        [delAgain.outcome, delAgain.affected],
+        ['blocked', 0],
+      )
     }
 
     await B.db.close()
