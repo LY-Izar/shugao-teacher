@@ -10424,6 +10424,89 @@ await withLock(async () => {
       )
     }
 
+    /* ============================================================
+       四十三之二、🔴 §43.2 的触发器**只许引用建表语句里真有的列**（2026-10-06 线上报错之后补）
+
+         · 记录：本段原先写 `r.id <> old.id`，而 `id` 是**后加**的列；
+           `create table if not exists` **不会给已存在的表补列** ⇒ 线上库可能是**旧形状**。
+         · 🔴 关键实测（这一节就是钉它）：**旧形状表上，删一个非 super 身份根本不会经过那一支**
+           （PL/pgSQL 的 SQL 是首次执行时才解析）⇒ 那条报错**不是**"取消班主任身份"崩掉的原因；
+           但"删/改最后一条 super"会报 `column r.id does not exist`（该拦的拦住了，话不是人话）。
+         · 判据用**旧形状表**（只有 teacher_id / role / scope_type / scope_id / created_at）
+           直接跑 `schema.sql` 里那份函数原文 —— 门禁跑的是新版 schema，这里补上线上那种形状。
+         · 反向对照：把函数体换回 `r.id <> old.id`（**必须先数出现次数 = 1**）⇒ 必须报 r.id 不存在。
+       ============================================================ */
+    section('四十三之二 🔴 唯一超管触发器**不许引用 `id`**（旧形状库实测 + 反向对照）')
+
+    {
+      const FN_HEAD = 'create or replace function public.teacher_roles_keep_one_super()'
+      eq('🔴 §43.2b 前置：`schema.sql` 里那份触发器函数**恰好 1 处**（反向对照要拿它当锚点）',
+        RAW_SCHEMA.split(FN_HEAD).length - 1, 1)
+      const fnText = /create or replace function public\.teacher_roles_keep_one_super\(\)[\s\S]*?end \$\$;/.exec(RAW_SCHEMA)?.[0] ?? ''
+      ok('🔴 §43.2b 能把函数原文整段抠出来（抠不出来下面全是空断言）',
+        fnText.includes('teacher_roles_keep_one_super') && fnText.includes('最后一个最高管理员'), fnText.slice(0, 80))
+
+      /* ① 源码级：函数体里**一处 `.id` 都不许有** */
+      const usesId = /\b(?:old|new|r)\.id\b/.test(fnText)
+      ok('🔴 §43.2b 函数体里**不引用任何 `.id`**（线上旧形状表上没有这一列）', !usesId,
+        `命中：${(fnText.match(/\b(?:old|new|r)\.id\b/g) ?? []).join(' · ')}`)
+
+      /** 旧形状表（**没有 id 列**）+ 被测函数原文 —— 造一个一次性的小库 */
+      const OLD_SHAPE = `
+        create table teacher_roles (
+          teacher_id uuid not null, role text not null,
+          scope_type text, scope_id uuid,
+          created_at timestamptz not null default now()
+        );`
+      const SEED = `
+        insert into teacher_roles (teacher_id, role, scope_type, scope_id) values
+          ('a0000000-0000-4000-8000-000000000001', 'super', 'school', null),
+          ('a0000000-0000-4000-8000-000000000001', 'head_teacher', 'class',
+           'c0000000-0000-4000-8000-000000000001');`
+      const TRG = `
+        create trigger teacher_roles_keep_one_super
+          before delete or update on teacher_roles
+          for each row execute function public.teacher_roles_keep_one_super();`
+
+      const runOldShape = async (body) => {
+        const d = new PGlite()
+        try {
+          await d.exec(OLD_SHAPE + body + TRG + SEED)
+          const del = async (sql) => {
+            try {
+              const r = await d.query(sql)
+              return { n: r.affectedRows ?? r.rows.length, err: '' }
+            } catch (e) {
+              return { n: 0, err: shortErr(e) }
+            }
+          }
+          const other = await del(`delete from teacher_roles where role = 'head_teacher'`)
+          const last = await del(`delete from teacher_roles where role = 'super'`)
+          return { other, last }
+        } finally {
+          await d.close()
+        }
+      }
+
+      const now2 = await runOldShape(fnText)
+      ok('🔴 §43.2b 旧形状库上：删一个**非 super** 身份照旧删得掉（没被触发器误伤）',
+        now2.other.err === '' && now2.other.n === 1, `${now2.other.n} 行 · ${now2.other.err}`)
+      ok('🔴 §43.2b 旧形状库上：删**最后一条 super** 被拒，而且是**我们那句人话**（不是 `column r.id does not exist`）',
+        /最后一个最高管理员/.test(now2.last.err) && !/r\.id/.test(now2.last.err),
+        now2.last.err || `居然删掉了（${now2.last.n} 行）`)
+
+      /* ② 🧪 反向对照：换回 `r.id <> old.id` ⇒ 必须变成 Postgres 的原生报错 */
+      const ID_CLAUSE = `(r.teacher_id is distinct from old.teacher_id
+            or r.scope_type is distinct from old.scope_type
+            or r.scope_id   is distinct from old.scope_id)`
+      eq('🧪 §43.2b 反向对照前置：自然键那一句在文件里**恰好 1 处**（少了就当场红，不静默）',
+        fnText.split(ID_CLAUSE).length - 1, 1)
+      const ctl = await runOldShape(fnText.replace(ID_CLAUSE, 'r.id <> old.id'))
+      ok('🧪 §43.2b 反向对照：把那一句换回 `r.id <> old.id` ⇒ 旧形状库上**报 r.id 不存在**' +
+         '（= 上面那条"人话"断言会红，证明它真的盯着这一句）',
+        /r\.id/.test(ctl.last.err), ctl.last.err || '（竟然没报错 —— 这条对照是假的）')
+    }
+
     await B.db.close()
     await A.db.close()
 

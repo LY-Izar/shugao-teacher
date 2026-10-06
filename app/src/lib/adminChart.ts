@@ -703,7 +703,7 @@ export const SCHEMA_STAGES: readonly SchemaStage[] = [
   { n: 40, title: '教室端改造（**数据层**）—— 每日作业 / 值日生 / 校历 / 课代表口令', from: 10869, to: 11349, sql: 297, targets: [{ kind: 'table', name: 'daily_homework' }, { kind: 'table', name: 'duty_assignments' }, { kind: 'table', name: 'school_calendar' }, { kind: 'table', name: 'class_rep_pins' }, { kind: 'table', name: 'class_rep_pin_fails' }, { kind: 'policy', table: 'daily_homework', name: 'daily_homework_read' }, { kind: 'policy', table: 'duty_assignments', name: 'duty_assignments_read' }, { kind: 'policy', table: 'daily_homework', name: 'daily_homework_insert' }, { kind: 'policy', table: 'daily_homework', name: 'daily_homework_update' }, { kind: 'policy', table: 'daily_homework', name: 'daily_homework_delete' }, { kind: 'policy', table: 'duty_assignments', name: 'duty_assignments_write' }, { kind: 'policy', table: 'school_calendar', name: 'school_calendar_read' }, { kind: 'policy', table: 'school_calendar', name: 'school_calendar_write' }] },
   { n: 41, title: '推送令牌（2026-10-02）—— apk 前台服务的"到点也能收到通知"链路', from: 11351, to: 11391, sql: 13, targets: [{ kind: 'table', name: 'push_tokens' }] },
   { n: 42, title: '🔴 维护模式 = **服务端真的禁写**（2026-10-14 安全审计之后用户拍板）', from: 11393, to: 11551, sql: 76, targets: [{ kind: 'fn', name: 'is_maintenance' }] },
-  { n: 43, title: '🔴 安全收紧第三批（本轮）：超管撤不成 0 个 · 教师自己删不掉自己那行 · 错误上报限洪', from: 11553, to: 11726, sql: 73, targets: [{ kind: 'col', table: 'frontend_errors', column: 'source_digest' }] },
+  { n: 43, title: '🔴 安全收紧第三批（本轮）：超管撤不成 0 个 · 教师自己删不掉自己那行 · 错误上报限洪', from: 11553, to: 11748, sql: 83, targets: [{ kind: 'col', table: 'frontend_errors', column: 'source_digest' }] },
 ]
 /* @gen:schema-stages END */
 

@@ -1261,6 +1261,11 @@ export async function onRequestPost(context: {
     const shape = SCOPE_OF[role]
     let scope: string | null = null
     let subjectCode: string | null = null
+    /**
+     * 🔴 `adding` = "加身份"，`!adding` = "取消身份"。两者**共用**这一段的形状校验，
+     *    但**只有加身份**才需要"目标真的存在"（取消是删那一行，见下面那三段注释）。
+     */
+    const adding = on === true
 
     if (shape === 'grade' || shape === 'grade_subject') {
       if (!UUID_RE.test(scopeId)) {
@@ -1275,18 +1280,32 @@ export async function onRequestPost(context: {
           400,
         )
       }
-      const check = await read(await sb(env, `/rest/v1/grades?select=id&id=eq.${scopeId}`))
-      if (!check.ok || check.rows.length === 0) {
-        return json({ status: 'error', message: '找不到这个年级' }, 404)
+      /*
+       * 🔴 **"这个年级还在不在"只在 `on: true`（加身份）时才问**（2026-10-06 线上报错之后改）。
+       *    撤销一个已有的身份是**删那一行**，判据只有"删哪一行"（见下面那段拼键）——
+       *    目标年级/班级**早就没了**的时候，旧写法会返回 404，于是**这一行永远撤不掉**
+       *    （死锁），而前端把 404 翻成"账号服务暂时不可用"（`lib/accounts.ts`），
+       *    用户看到的是"服务坏了"而不是"这个班没了"。实测症状：**只有"取消某人的班主任身份"报错**，
+       *    同一个人的其它动作（加身份 / 生成新密码 / 改名 / 删账号）全都正常。
+       *    ⚠️ 判据一个字都没放松：加身份时**照样**要求目标真的存在（下面那三个 `if (!adding)` 之外的分支）。
+       */
+      if (adding) {
+        const check = await read(await sb(env, `/rest/v1/grades?select=id&id=eq.${scopeId}`))
+        if (!check.ok || check.rows.length === 0) {
+          return json({ status: 'error', message: '找不到这个年级（先在「年级管理」里建它）' }, 400)
+        }
       }
       scope = scopeId
     } else if (shape === 'class') {
       if (!UUID_RE.test(scopeId)) {
         return json({ status: 'error', message: '班主任要指定一个班级' }, 400)
       }
-      const check = await read(await sb(env, `/rest/v1/classes?select=id&id=eq.${scopeId}`))
-      if (!check.ok || check.rows.length === 0) {
-        return json({ status: 'error', message: '找不到这个班级' }, 404)
+      /* 同上：撤销时不问"这个班还在不在"（理由见上面那一段） */
+      if (adding) {
+        const check = await read(await sb(env, `/rest/v1/classes?select=id&id=eq.${scopeId}`))
+        if (!check.ok || check.rows.length === 0) {
+          return json({ status: 'error', message: '找不到这个班级（先在「班级」里建它）' }, 400)
+        }
       }
       scope = scopeId
     }
@@ -1306,15 +1325,19 @@ export async function onRequestPost(context: {
           400,
         )
       }
-      const dict = await subjectRow(env, roleSubjectCode)
-      if (dict === 'reject') {
-        return json(
-          {
-            status: 'error',
-            message: `数据库的学科字典（subjects 表）里没有「${roleSubjectCode}」这一科。先跑 schema.sql 第 12 段。`,
-          },
-          400,
-        )
+      /* 同上面那两档：**取消**组长身份时不问"这一科还在不在字典里" —— 删那一行不需要它。
+         ❌ 这一条曾经让"撤一位备课组长"在字典改动之后永远撤不掉。 */
+      if (adding) {
+        const dict = await subjectRow(env, roleSubjectCode)
+        if (dict === 'reject') {
+          return json(
+            {
+              status: 'error',
+              message: `数据库的学科字典（subjects 表）里没有「${roleSubjectCode}」这一科。先跑 schema.sql 第 12 段。`,
+            },
+            400,
+          )
+        }
       }
       subjectCode = roleSubjectCode
     }
@@ -1435,12 +1458,22 @@ export async function onRequestPost(context: {
         parts.push(scope ? `scope_id=eq.${scope}` : 'scope_id=is.null')
         parts.push(subjectCode ? `subject_code=eq.${subjectCode}` : 'subject_code=is.null')
       }
-      const res = await read(
-        await sb(env, `/rest/v1/teacher_roles?${parts.join('&')}`, {
+      /*
+       * 🔴 `subject_code` 那一列可能还不存在（第 10.1.1 段没跑）——**下面这一支是本次线上报错补的**。
+       *    旧写法在 DELETE 上**没有**这一层兜底，而**加身份那条路有**（见下面 `post()` 那一段的
+       *    `isMissingColumn` 重试）⇒ 两边不对称 ⇒ 旧库上"加得进去、撤不掉"，
+       *    而回话是 `NEED_STAGE10`（"第 10 段没跑"），与"撤一个身份"这件事**毫无关系**，误导排查。
+       *    判据一个字没放松：只认「列不存在」（42703 / PGRST204），其余错误照旧 502 报出来。
+       */
+      const del = (qs: string) =>
+        sb(env, `/rest/v1/teacher_roles?${qs}`, {
           method: 'DELETE',
           headers: { Prefer: 'return=minimal' },
-        }),
-      )
+        })
+      let res = await read(await del(parts.join('&')))
+      if (!res.ok && isMissingColumn(res.status, res.text)) {
+        res = await read(await del(parts.filter((p) => !p.startsWith('subject_code=')).join('&')))
+      }
       if (!res.ok) {
         return json(
           {

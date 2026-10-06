@@ -11591,6 +11591,18 @@ end $$;
 --        ⇒ 一样被拒（管理台那条路本来就自己挡了"删最后一个超管"，这里是第二层）。
 --  判据：`rls-checks` 第四十三节 —— 删最后一条 super 必须被拒、把 super 改成别的角色也必须被拒、
 --        而撤**别的**身份照旧放行；反向对照是当场 `drop trigger` ⇒ 上面那两条必须变红。
+--  🔴 线上报错之后的一条纪律（2026-10-06）：**触发器体里只许引用「建表语句里真有」的列** ✗。
+--     本段原先写的是 `... where r.role = 'super' and r.id <> old.id` —— 而 `id` 是 §10.1.1
+--     之后才该有的列（`create table if not exists` **不会给已存在的表补列** ⇒ 线上可能是旧形状）。
+--     实测（PGlite · 旧形状表 = 只有 teacher_id / role / scope_type / scope_id / created_at）：
+--       · 删一个**非 super** 身份 → 那一支不进（PL/pgSQL 的 SQL 是**首次执行时才解析**）⇒ 不报错
+--         —— 这一条**否证**了"取消班主任身份崩了"是 `r.id` 干的（别照猜改，照实测改）；
+--       · 删/改**最后一条 super** → 报 `column r.id does not exist` ⇒ 该拦的**拦住了**，
+--         但话是 Postgres 的，不是我们那句人话（保护在、可读性没了、而且依赖一个可能不存在的列）。
+--     ⇒ 改用**自然键**排除自己那一行（`teacher_id` + `scope_type` + `scope_id`）：
+--       这三列在**新旧两种形状**上都有，`role` 由 `where` 兜着。
+--       ⚠️ 别退回 `id` ✗；也别写成 `r.teacher_id <> old.teacher_id` ——
+--          那会漏掉"同一个人名下两条 super"（旧库上那条部分唯一索引可能没建起来）。
 create or replace function public.teacher_roles_keep_one_super()
 returns trigger
 language plpgsql
@@ -11602,7 +11614,13 @@ declare
 begin
   if (tg_op = 'DELETE' and old.role = 'super')
      or (tg_op = 'UPDATE' and old.role = 'super' and new.role is distinct from 'super') then
-    select count(*) into v_left from teacher_roles r where r.role = 'super' and r.id <> old.id;
+    select count(*) into v_left
+      from teacher_roles r
+     where r.role = 'super'
+       /* 排除**正在被动的那一行**：自然键（理由见上面那段实测） */
+       and (r.teacher_id is distinct from old.teacher_id
+            or r.scope_type is distinct from old.scope_type
+            or r.scope_id   is distinct from old.scope_id);
     if v_left = 0 then
       raise exception '不能撤掉最后一个最高管理员：撤完就没有人能再指派身份 / 发超管了。要交接就先给另一个人加上这一档，再撤这一条。'
         using errcode = '23514';
@@ -11614,6 +11632,10 @@ begin
   return new;
 end $$;
 
+/*
+ * 🔴 **旧版覆盖**（幂等）：函数体换了，触发器**不必**重建（它调的是同名函数）——
+ *    这里仍旧 `drop … if exists` 再建一遍，只为了让"跑过中途版本"的库也对齐。
+ */
 drop trigger if exists teacher_roles_keep_one_super on teacher_roles;
 create trigger teacher_roles_keep_one_super
   before delete or update on teacher_roles

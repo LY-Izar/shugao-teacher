@@ -324,6 +324,12 @@ await withLock(async () => {
    *    把它抠出来核一遍，两条对得上才算数。
    */
   let createAcctValue = 'true'
+  /**
+   * 🆕 2026-10-06：`can_assign_roles` 对调用者返回什么（`role` 动作要它）。
+   * ⚠️ 默认 `'false'` —— 与上面那个相反：既有那几节的夹具都不走 `role` 动作，
+   *    所以默认值必须是"最窄"的那一个，免得某一节"借上一节的余温"而绿。
+   */
+  let assignRolesValue = 'false'
   /** 🆕 假 `/auth/v1/user` 认为调用者是谁（第十一节逐个身份换它） */
   let callerId = '11111111-1111-4111-8111-111111111111'
   /**
@@ -486,6 +492,8 @@ await withLock(async () => {
        *    第十一节逐个身份换它，并按**真 schema 的判据**给出期望值。
        */
       if (fn === 'can_create_teacher_accounts') return send(200, createAcctValue)
+      /** 🆕 2026-10-06：`role`（指派 / 撤销身份）的判据 —— 见 `assignRolesValue` 的注释 */
+      if (fn === 'can_assign_roles') return send(200, assignRolesValue)
       // §16 / §15 的裸版判据：对未登录调用者恒为 false（这就是"函数在"的正面证据）
       return send(200, 'false')
     }
@@ -5153,6 +5161,98 @@ function sourceFileHealth(rel) {
         `原文 ${hasTargetGate(src)} · 改过 ${hasTargetGate(mutated)}`,
       )
     }
+  }
+
+  /* ============================================================
+     第十一节之三 🆕 2026-10-06 线上报错：「**只有"取消某人的班主任身份"报错**」
+
+     🔴 症状与根因（先实测、再改，别照猜改）：
+       · 前端那个 toast「账号服务暂时不可用」**只对应 HTTP 404**（`src/lib/accounts.ts` 把 404
+         单独翻成那一句）⇒ 说明服务端回的是 **404**；
+       · `role` 动作里**唯一**两处 404 就是"找不到这个年级 / 找不到这个班级"这两句
+         —— 它们是"目标还在不在"的**存在性探测**，而旧代码**加身份与取消身份都跑它**；
+       · ⇒ 那个班的行没了（或读不到）时，这一行身份**永远撤不掉**（死锁），
+         而屏幕上说的是"服务坏了"。同一个人的加身份 / 重置密码 / 改名 / 删账号全都正常，
+         正是"只有取消报错"的形状。
+       · 修法：**存在性探测只在"加身份"时做**（取消是删那一行，判据只有"删哪一行"）；
+         并且把这两句的 404 改成 **400 + 人话**（404 会被前端翻成"服务不可用"，误导排查）。
+     🔴 每一条都带反向对照：加身份时**照样**要探测（把闸拔掉 ⇒ 那条必须红），
+        以及"删的键依旧逐字带上 scope_id"（少一个字段 = 那行删不掉，见源码注释）。
+     ============================================================ */
+
+  section('第十一节之三 🆕 取消身份不许因"目标班级/年级没了"而 404（加身份照旧探测）')
+
+  {
+    const src = readFileSync(resolvePath(APP, 'functions/api/teacher-account.ts'), 'utf8')
+    const TID = '22222222-2222-4222-8222-222222222222'
+    const CLASS_GONE = '33333333-3333-4333-8333-333333333333'
+    const roleCall = (on) =>
+      call(
+        ACCT,
+        '/api/teacher-account',
+        { action: 'role', teacherId: TID, role: 'head_teacher', scopeType: 'class', scopeId: CLASS_GONE, on },
+        AUTH,
+      )
+
+    /** 夹具：调用者是最高管理员 + 有指派权；`classes` 里**没有**那个班（= 线上那种"班没了"） */
+    tokenOk = true
+    callerId = '11111111-1111-4111-8111-111111111111'
+    superValue = 'true'
+    createAcctValue = 'true'
+    assignRolesValue = 'true'
+
+    tableRows.set('teacher_roles', [
+      { teacher_id: TID, role: 'head_teacher', scope_type: 'class', scope_id: CLASS_GONE, subject_code: null },
+    ])
+    tableRows.set('classes', [])
+
+    /* ---- ① 取消身份：目标班**没了**也必须删得掉（而且删的键逐字对得上） ---- */
+    clearFlow()
+    {
+      const r = await roleCall(false)
+      const body = await r.json()
+      eq('🔴 ① 取消班主任身份（那个班**已经没了**）→ **200**（旧写法这里是 404 ⇒「账号服务暂时不可用」）',
+        r.status, 200)
+      eq('① 回话 status=ok', body.status, 'ok')
+      const del = writes.filter((w) => w.table === 'teacher_roles' && w.method === 'DELETE').pop()
+      ok('🔴 ① 而且删的键**逐字对上那一行**（含 `scope_id`；少一个字段 = 看起来取消成功了、其实那行还在）',
+        Boolean(del) &&
+          del.search.includes(`teacher_id=eq.${TID}`) &&
+          del.search.includes('role=eq.head_teacher') &&
+          del.search.includes('scope_type=eq.class') &&
+          del.search.includes(`scope_id=eq.${CLASS_GONE}`),
+        del?.search ?? '（没有发出 DELETE）')
+    }
+
+    /* ---- ② 🧪 反向对照：**加**身份时照样要探测目标存在（闸没被整条拔掉） ---- */
+    clearFlow()
+    {
+      const r = await roleCall(true)
+      const body = await r.json()
+      eq('🧪 ② 反向对照：**加**班主任身份、那个班不在 → **400**（存在性探测只为加身份保留）', r.status, 400)
+      ok('② 而且话里有"找不到这个班级"（人话，不是"服务不可用"）',
+        String(body.message ?? '').includes('找不到这个班级'), String(body.message))
+      ok('② 加身份被拦时**一次写都没发出去**（不是先把行写脏再报错）',
+        writes.filter((w) => w.table === 'teacher_roles').length === 0,
+        writes.map((w) => `${w.method} ${w.table}`).join(' · '))
+    }
+
+    /* ---- ③ 源码级：404 那两处必须不再出现（否则前端又会说"账号服务暂时不可用"） ---- */
+    ok('🔴 ③ `role` 动作里再也没有以 **404** 回"找不到这个年级 / 班级"（那两句会被前端翻成"服务不可用"）',
+      !/message: '找不到这个(年级|班级)'[^}]*\}, 404/.test(src) && !/找不到这个(年级|班级)[\s\S]{0,40}404/.test(src),
+      (src.match(/找不到这个(年级|班级)[\s\S]{0,40}/g) ?? []).join(' · '))
+
+    /* ---- ④ 源码级 + 反向对照：DELETE 那条键也要有"`subject_code` 列不存在就摘掉重试"的兜底 ---- */
+    const FALLBACK = `if (!res.ok && isMissingColumn(res.status, res.text)) {
+        res = await read(await del(parts.filter((p) => !p.startsWith('subject_code=')).join('&')))
+      }`
+    const countOf = (s) => s.split(FALLBACK).length - 1
+    eq('🔴 ④ DELETE 那条路上有"列不存在就摘掉 `subject_code` 重试"的兜底（与下面 `post()` 那条路对称）',
+      countOf(src), 1)
+    ok('🧪 ④ 反向对照：把这一支去掉 ⇒ 上面那条判据**当场判假**（证明它真盯着这段代码，不是恒真）',
+      countOf(src.replace(FALLBACK, '// 反向对照：摘掉这一支')) === 0)
+    ok('④ 而且它用的判据是**同一处** `isMissingColumn`（不另写一套"这算不算列不存在"）',
+      /if \(!res\.ok && isMissingColumn\(res\.status, res\.text\)\)/.test(src))
   }
 
   /* ---------------- 收尾 ---------------- */
