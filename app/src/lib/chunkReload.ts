@@ -60,7 +60,9 @@ export type ChunkFailure = { message: string; url: string; filename?: string }
  * `vite:preloadError` 是首选信号，但它**只在 Vite 的 preload helper 那一层**发得出来；
  * 低版本 WebView 上还有几种走法：静态 `import` 失败后抛的 TypeError、
  * Page Not Found 的 404、以及 `<link rel=stylesheet>` 拉不到。
- * 所以下面**三条中文/英文原文都要认**，多认一种不多花一分钱，少认一种就是老师卡住。
+ * 所以下面那条正则里的**五支原文都要认**（`Failed to fetch dynamically imported module` /
+ * `error loading dynamically imported module` / `Importing a module script failed` /
+ * `Unable to preload CSS` / `dynamically imported module`），多认一种不多花一分钱，少认一种就是老师卡住。
  */
 const CHUNK_FAIL_RE =
   /Failed to fetch dynamically imported module|error loading dynamically imported module|Importing a module script failed|Unable to preload CSS|dynamically imported module/i
