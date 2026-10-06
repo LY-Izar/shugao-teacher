@@ -1126,8 +1126,26 @@ export default function Classroom() {
       // 网页先算好 0–100 的整数再给壳：一个字段一种语义，壳里不再乘一遍
       ratePct: Math.round((cur?.rate ?? 0) * 100),
       missing: collect?.missing ?? 0,
+      /*
+       * 🆕 题号条 + 每一题的名单（2026-10-05，施工单 §一「与网页里那个小窗**同一份信息**」）。
+       *
+       * 🔴 数据源就是**屏上那份 `PipPanel` 用的同一个数组**（`all={stats?.questions ?? []}`，
+       *    见下面那处 `<PipPanel tone="inline" …>` 与末尾 portal 那处）：
+       *    正确率 / 分档取自 `stats.questions[i]`，姓名走**同一个 `nameOf`** ——
+       *    壳里不再算一遍，也不另开数据源（施工单 §二.3）。
+       * ⚠️ 每一题的名单一起带：小窗那边**没有回话的口子**（不给 preload），
+       *    它在窗内翻到哪一题，就得有哪一题的名单在手边。
+       */
+      questions: (stats?.questions ?? []).map((q, i) => ({
+        seq: i + 1,
+        ratePct: Math.round(q.rate * 100),
+        band: q.band,
+        // 档名文案跟网页同源（`BAND_META` 里只有一份），壳里不抄
+        bandLabel: BAND_META[q.band].label,
+        wrong: q.wrongNos.map((no) => ({ no, name: nameOf(no) })),
+      })),
     })
-  }, [pipNative, klass?.name, seq, cur, stats?.questions.length, collect?.missing])
+  }, [pipNative, klass?.name, seq, cur, stats?.questions, collect?.missing, nameOf])
 
   /* ============================================================
      🆕 维护模式（2026-09-29 管理台第二期）—— 教室端**自己**渲染维护画面

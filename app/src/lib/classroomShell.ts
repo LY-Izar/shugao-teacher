@@ -1,3 +1,5 @@
+import type { Band } from './grading'
+
 /**
  * 「教室端 exe 只让教室端账号登录」—— 壳级约束（2026-10-03）。
  *
@@ -113,9 +115,36 @@ interface ShellPipBridge {
 }
 
 /**
- * 推给小窗的那一屏数据（**字段只有这五个，语义一个字段一种**）。
+ * 题号条上的一格 —— **与网页版 `PipPanel` 的 `all[i]`（`gradeStats().questions[i]`）同源**。
+ * 🔴 一题一格：题号 + 这一题自己的正确率 + 分档（分档决定小窗里那个颜色 = 讲评优先级）。
+ * ⚠️ `bandLabel` 也由网页推：档名文案在 `BAND_META` 里**只有一份**，壳里不再抄一遍
+ *    （抄一份就是"改了这边忘了那边"）。
+ */
+export interface ShellPipQuestion {
+  /** 题号（1 起） */
+  seq: number
+  /** 这一题的正确率，**0–100 的整数**（网页已经乘好了） */
+  ratePct: number
+  /** 分档（`BAND_META` 的键）—— 小窗按它给这一格着色 */
+  band: Band
+  /** 档名文案（`BAND_META[band].label`）—— 与网页那一份逐字相同 */
+  bandLabel: string
+  /**
+   * 这一题答错的人（**与网页版 `PipPanel` 的 `wrongNos` 同源**，`name` 由网页用 `nameOf` 解好）。
+   * ⚠️ 姓名不在壳里查：壳拿不到学生名单，也不该去查。
+   */
+  wrong: Array<{ no: string; name: string }>
+}
+
+/**
+ * 推给小窗的那一屏数据（**语义一个字段一种**）。
  * 🔴 **全部由网页算好**：壳只把它们填进 HTML —— 题号/正确率这种业务量绝不在壳里再算一遍
  *    （施工单 §二.3：一个字段一种语义；算两遍就一定有分家的那一天）。
+ *
+ * 🆕 2026-10-05（施工单 §一「与网页里那个小窗**同一份信息**」）：原来只有那五个字段，
+ *    壳小窗因此丢了网页版 `PipPanel` 的三样东西 —— **题号条**（全部题号 + 各自正确率 + 分档着色）、
+ *    **点题号展开的错误名单**、**◀ ▶ 翻页**。⇒ 补一个 `questions`：题号条的每一格，
+ *    顺带把每一题的名单一起带过去（小窗没有回话的口子，翻到哪一题就得有哪一题的数据）。
  */
 export interface ShellPipData {
   /** 班级名 */
@@ -124,10 +153,15 @@ export interface ShellPipData {
   seq: number
   /** 这份作业的总题数；**0 = 还没有可讲评的作业**（壳据此显示那句空态，不留纯白空窗） */
   total: number
-  /** 正确率，**0–100 的整数**（网页已经乘好了：壳里少一步换算，就少一处会分家的地方） */
+  /** 当前题的正确率，**0–100 的整数**（网页已经乘好了：壳里少一步换算，就少一处会分家的地方） */
   ratePct: number
   /** 未交人数 */
   missing: number
+  /**
+   * 题号条：**全部题目**，下标 = 题号 − 1（与 `PipPanel` 的 `all` 同一个顺序）。
+   * ⚠️ 只有这里没有当前题那一格时，壳才拿上面那个 `ratePct` 兜底（免得那一行空着）。
+   */
+  questions: ShellPipQuestion[]
 }
 
 function bridge(): ShellBridge | null {

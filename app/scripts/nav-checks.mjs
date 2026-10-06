@@ -5832,13 +5832,19 @@ section('第二十一节 · A14：壳声明 ↔ 网页判据（置顶小窗 / �
         （试了就是一屏"没打开"的红字，老师白按一次）；没有壳时走的还是 Document PiP 那条老路；
         壳侧没建出窗口是 `failed`、两条都没有才是 `no-api`（两档在屏上是两句不同的话）；
      ③ `Classroom.tsx` 里"**题号一变就推数据**"那一处的**存在性 / 字段 / 位置**：
-        推的那一屏必须有那四个字段（班级 / 题号 / 正确率 / 未交人数），
-        依赖数组里必须有 `seq`，而且那个 effect **必须在 `const cur = …` 之后**
+        推的那一屏必须有那五个字段（班级 / 题号 / 正确率 / 未交人数）+ 🆕 `questions`
+        （题号条与每一题的名单），依赖数组里必须有 `seq`，而且那个 effect **必须在 `const cur = …` 之后**
         （依赖数组是在渲染期求值的，放前面会撞 TDZ ⇒ **整页崩**，不是静默）。
+     ④ 🆕 **壳小窗那一屏本身**（2026-10-05，施工单 §一「与网页里那个小窗**同一份信息**」）：
+        壳源码里那个 `pipHtml` 抠出来**真跑一遍**，断言那一屏里有**题号条**（每题一格、各自正确率、
+        分档着色）、**◀ ▶ 与方向键**、**名单容器**（号码 + 姓名 + 几人错）、**深色渐变配色**，
+        以及班级 / 题号 / 正确率 / 未交人数四样；并比着 `index.css` 暗色块钉住那份分档色。
+        ⚠️ **期望值 2026-10-05 变了**：原来这一屏是从零写的，比网页版 `PipPanel` 少了三样、配色也换了
+        —— 这一轮按用户批准的方案①补回来，所以判据从"有那四个字段"变成"与网页同一份信息"。
 
    ⚠️ **真壳那一半**（窗口数 1→2 / 新窗口 `isAlwaysOnTop()` / 小窗里没有 preload /
       教师端 `pip === undefined` 那条反向）只能在**出包之后**由 `_tools/verify-exe.mjs` 量；
-      本节量的是"网页这一半"，两条合起来才是完整的一条链。
+      本节量的是"网页这一半 + 壳那份 HTML"，三条合起来才是完整的一条链。
    ============================================================ */
 section('第二十二节 · A15：教室端原生置顶小窗（壳原生 → Document PiP → no-api）')
 
@@ -6046,10 +6052,19 @@ section('第二十二节 · A15：教室端原生置顶小窗（壳原生 → Do
       if (end < 0) return null
       return { at, i, end, head: s.slice(at, i), payload: s.slice(i, depsAt), deps: s.slice(depsAt + 4, end) }
     }
-    /** 那一屏的四个字段（**一个字段一种语义**，施工单 §二.3） */
-    const PIP_KEYS = ['className', 'seq', 'total', 'ratePct', 'missing']
-    /** 依赖：`pipNative`（只在小窗开着时推）+ 会变的三个量（题号 / 正确率 / 未交人数） */
-    const PIP_DEP_KEYS = ['pipNative', 'seq', 'cur', 'collect?.missing']
+    /**
+     * 那一屏的字段（**一个字段一种语义**，施工单 §二.3）。
+     * 🆕 2026-10-05：加 `questions`（题号条 + 每一题的名单）—— 施工单 §一「与网页里那个小窗
+     *    同一份信息」；壳那边没有回话的口子，翻到哪一题就得有哪一题的名单（见 A15 ④）。
+     */
+    const PIP_KEYS = ['className', 'seq', 'total', 'ratePct', 'missing', 'questions']
+    /**
+     * 依赖：`pipNative`（只在小窗开着时推）+ 会变的那些量：题号 / 当前那一题 / 未交人数 /
+     * **整份题目数组**（题号条与名单都出自它）/ `nameOf`（名单里的姓名）。
+     * ⚠️ **期望值 2026-10-05 变了**：原来写的是 `stats?.questions.length` —— 而题号条与名单
+     *    要的是**每一项**（长度变了内容也可能变），所以钉 `stats?.questions` 本身 + `nameOf`。
+     */
+    const PIP_DEP_KEYS = ['pipNative', 'seq', 'cur', 'collect?.missing', 'stats?.questions', 'nameOf']
     const pushWiredRight = (s) => {
       const e = pushEffect(s)
       return (
@@ -6069,7 +6084,7 @@ section('第二十二节 · A15：教室端原生置顶小窗（壳原生 → Do
 
     check(
       pushWiredRight(CLS_RAW),
-      '🔴 A15 ③ `Classroom.tsx` 里"**题号一变就推数据**"那一处在（`useEffect` + `if (!pipNative) return` + `pushPipScreen`），那一屏带着四个字段（班级 / 题号 / 正确率 / 未交人数），依赖里有 `seq`、`cur?.rate`、`collect?.missing`',
+      '🔴 A15 ③ `Classroom.tsx` 里"**题号一变就推数据**"那一处在（`useEffect` + `if (!pipNative) return` + `pushPipScreen`），那一屏带着五个字段（班级 / 题号 / 正确率 / 未交人数 / 🆕 `questions` 题号条与每题名单），依赖里有 `seq`、`cur`、`collect?.missing`、`stats?.questions`、`nameOf`',
       `那一处=${!!pushEffect(CLS_RAW)} · 依赖=[${pushEffect(CLS_RAW)?.deps.trim() ?? '-'}]`,
     )
     check(
@@ -6122,6 +6137,197 @@ section('第二十二节 · A15：教室端原生置顶小窗（壳原生 → Do
       '🧪 A15 ③ 反向对照 B：把那一段 effect 挪到 `const cur` **之前**（会撞 TDZ）⇒ **位置**那条判据当场红，而字段/依赖那条仍绿（证明两条咬的不是同一件事）',
       `副本真的被改过=${clsBroken?.bChanged} · 位置判据红=${clsBroken?.bRed} · 字段依赖判据仍绿=${clsBroken?.bStillWired}`,
     )
+
+    /* ============================================================
+       ④ 🆕 壳小窗**那一屏本身** —— 与网页里那个小窗**同一份信息**（2026-10-05）
+       ------------------------------------------------------------
+       用户批准的方案①（施工单 `施工单-教室端原生置顶小窗.md:28`）：
+         「显示内容（与现在网页里那个小窗同一份信息）：班级 · 当前题号 · 正确率 · 未交人数」。
+       原来壳里那个 `pipHtml` 是从零写的 HTML 字符串，比网页版 `PipPanel.tsx` **少三样**
+       （题号条 / 点题号展开的名单 / ◀ ▶ 与方向键）、配色也换了（纯色 vs 深色渐变）。
+       这一轮补回来 —— 下面的判据钉的就是"补回来了、而且以后不许再丢"。
+
+       ⚠️ 壳源码**不在本仓库**（隔壁打包工程，`_src/desktop/shell-ipc.mjs`；照 A21/A22 的先例）：
+          探不到就**落灰**（CI 的干净检出必然没有它，不是"坏了"）。
+       🔴 判据吃的是**真渲染出来的那一屏 HTML**：把 `escapeHtml` + `pipHtml` 那段源码从壳文件里
+          抠出来，用 `new Function` 真跑一遍（不是拿正则去猜源码）。反向对照因此是真的：
+          在**内存副本**里把题号条那一句抠掉 ⇒ 同一个判据当场假（磁盘一个字节都不动）。
+
+       🔴 **一条如实的边界**：这一屏**没有回话的口子**（不给 preload）⇒ ◀ ▶ 与点题号只翻**窗内**
+          那一屏，改不了网页上"现在是第几题"。所以壳里那份 HTML 在两边不一致时会显示
+          「网页在第 N 题」（判据里也钉了这一句）。**真壳上的观感要等出包后由 `verify-exe.mjs` 量。**
+       ============================================================ */
+    const SHELL_IPC_ABS = 'C:\\Users\\Administrator\\Desktop\\树高教务通打包\\_src\\desktop\\shell-ipc.mjs'
+    const shellIpcRaw = (() => {
+      try {
+        return readFileSync(SHELL_IPC_ABS, 'utf8')
+      } catch {
+        return null
+      }
+    })()
+    const grayWas4 = shellGray
+    if (shellIpcRaw === null) shellGray = true
+    try {
+      /*
+       * 抠 `escapeHtml` … `pipHtml` 这一整段（到下一个顶层 `export function` 为止）。
+       * 锚点找不到 ⇒ `null` ⇒ 下面几条当场红（源码形状变了要有人知道，不许静默）。
+       */
+      const fnSrc = (() => {
+        if (shellIpcRaw === null) return null
+        const i = shellIpcRaw.indexOf('function escapeHtml(s) {')
+        const j = shellIpcRaw.indexOf('\nexport function registerPip', i)
+        return i >= 0 && j > i ? shellIpcRaw.slice(i, j) : null
+      })()
+      /** 照着壳里那个 `render()` 的调法建函数（`new Function` 里跑的就是壳里那一段源码） */
+      const build = (src) => new Function(`${src}; return pipHtml`)()
+      let buildErr = ''
+      let pipHtmlFn = null
+      try {
+        pipHtmlFn = fnSrc === null ? null : build(fnSrc)
+      } catch (e) {
+        buildErr = String(e?.message ?? e)
+      }
+      /** 探针那一屏：三题，第 2 题是当前题（与 `verify-exe.mjs` 里那份假数据同形） */
+      const SAMPLE = {
+        className: '高二(3)班',
+        seq: 2,
+        total: 3,
+        ratePct: 50,
+        missing: 1,
+        questions: [
+          { seq: 1, ratePct: 80, band: 'brief', bandLabel: '点到即止', wrong: [] },
+          {
+            seq: 2,
+            ratePct: 50,
+            band: 'focus',
+            bandLabel: '优先精讲',
+            wrong: [{ no: '1001', name: '张三' }, { no: '1002', name: '李四' }],
+          },
+          { seq: 3, ratePct: 20, band: 'deep', bandLabel: '重点讲，并检查前置知识', wrong: [] },
+        ],
+      }
+      const html = pipHtmlFn === null ? '' : pipHtmlFn(SAMPLE)
+      const countOf = (h, re) => (h.match(re) ?? []).length
+      /** ① 题号条：**每题一格**，每格带自己的题号与正确率、格子上就是它自己那一档的颜色 */
+      const hasStrip = (h) =>
+        countOf(h, /class="chip(?: on)?"/g) === 3 &&
+        countOf(h, /class="pct"/g) === 3 &&
+        h.includes('data-q="1"') && h.includes('data-q="2"') && h.includes('data-q="3"') &&
+        h.includes('onclick="pick(2)"') &&
+        h.includes('>80%<') && h.includes('>50%<') && h.includes('>20%<') &&
+        /* 第 2 题是 focus 档 ⇒ 它的那一格用 `--color-bad` 那个色（绿/黄混进来就不算） */
+        h.includes('data-q="2" aria-label="第 2 题" onclick="pick(2)" style="color:#ff7d89;border-color:#ff7d89"')
+      /** ② ◀ ▶ 两个键 + 键盘方向键 + Esc（对齐 `PipPanel.tsx:121-129` 与它底下那排按钮） */
+      const hasNav = (h) =>
+        countOf(h, /class="nb"/g) === 3 &&
+        h.includes('>◀</button>') && h.includes('>▶</button>') &&
+        h.includes('onclick="step(-1)"') && h.includes('onclick="step(1)"') &&
+        h.includes('ArrowLeft') && h.includes('ArrowRight') && h.includes("=== 'Escape'") &&
+        /* 🔴 两边不一致那句必须在（没有回话的口子 ⇒ 必须**看得见**） */
+        h.includes('网页在第 ')
+      /** ③ 名单容器：号码 + 姓名 + 几人错（与 `PipPanel` 的 `wrongNos` / `nameOf` 同源） */
+      const hasList = (h) =>
+        countOf(h, /class="list"/g) === 3 &&
+        countOf(h, /class="who"/g) === 2 &&
+        h.includes('1001') && h.includes('张三') && h.includes('1002') && h.includes('李四') &&
+        h.includes('2 人错') && h.includes('名单 2') &&
+        h.includes('panel.showlist .list')
+      /** ④ 配色回到网页那份深色渐变 + 施工单那四样（班级 / 题号 / 正确率 / 未交人数）一个不缺 */
+      const hasLook = (h) =>
+        h.includes('linear-gradient(180deg,#10151c,#171e28)') &&
+        h.includes('高二(3)班') && h.includes('第 2 题') && h.includes('/ 3') &&
+        h.includes('>50%<') && h.includes('未交 1 人') && h.includes('优先精讲')
+
+      check(
+        !!html && hasStrip(html) && hasNav(html) && hasList(html) && hasLook(html),
+        '🔴 A15 ④ 壳小窗那一屏**与网页里那个小窗同一份信息**：题号条（每题一格 + 各自正确率 + 分档着色）+ ◀ ▶ 与方向键 + 名单容器（号码 / 姓名 / 几人错）+ 深色渐变配色 + 班级/题号/正确率/未交人数四样',
+        html
+          ? `题号格 ${countOf(html, /class="chip(?: on)?"/g)} 个 · 名单容器 ${countOf(html, /class="list"/g)} 个 · 题号条=${hasStrip(html)} · 翻页=${hasNav(html)} · 名单=${hasList(html)} · 配色与四字段=${hasLook(html)}`
+          : `🔴 抠不出 \`pipHtml\`：${buildErr || '源码形状变了（锚点找不到）'}`,
+      )
+
+      /**
+       * 反向对照用的"改一处"：**先数出现次数，不是 1 处就报错、不改**（AGENTS §三.2 —— `replace`
+       * 只换第一处，目标串要是在别处也有一份，改的就是别人 ⇒ **对照假绿**）。
+       */
+      const cutOnce = (src, from, to) => {
+        const hits = src.split(from).length - 1
+        if (hits !== 1) return { hits, src: null }
+        return { hits, src: src.replace(from, to) }
+      }
+      const cutStrip = fnSrc === null ? null : cutOnce(fnSrc, "const chips = items.map((x) => x.chip).join('')", "const chips = ''")
+      const cutNav = fnSrc === null ? null : cutOnce(fnSrc, 'onclick="step(-1)"', 'onclick="noop()"')
+      const cutList = fnSrc === null ? null : cutOnce(fnSrc, '<div class="list">', '<div class="nolist">')
+      /** 改坏的副本也**真跑一遍**（跑不起来就是"副本没跑起来"，不是对照成功 —— 照 A15 ② 的教训） */
+      const htmlOfCut = (cut) => {
+        if (cut === null || cut.src === null) return { html: '', err: '' }
+        try {
+          return { html: build(cut.src)(SAMPLE), err: '' }
+        } catch (e) {
+          return { html: '', err: String(e?.message ?? e) }
+        }
+      }
+      const hStrip = htmlOfCut(cutStrip)
+      const hNav = htmlOfCut(cutNav)
+      const hList = htmlOfCut(cutList)
+      check(
+        cutStrip?.hits === 1 && !hStrip.err && !hasStrip(hStrip.html) && hasNav(hStrip.html) && hasList(hStrip.html),
+        '🧪 A15 ④ 反向对照 A：把**题号条**那一段从内存副本里抠掉（`.join(\'\')` → 空串）⇒ "题号条"那条当场假，而翻页 / 名单两条仍绿（证明三条咬的不是同一件事）',
+        `抠掉处数=${cutStrip?.hits} · ${hStrip.err ? `副本没跑起来：${hStrip.err}` : `题号条=${hasStrip(hStrip.html)} · 翻页=${hasNav(hStrip.html)} · 名单=${hasList(hStrip.html)}`}`,
+      )
+      check(
+        cutNav?.hits === 1 && !hNav.err && !hasNav(hNav.html) && hasStrip(hNav.html) && hasList(hNav.html),
+        '🧪 A15 ④ 反向对照 B：把 ◀ 那颗键的 `step(-1)` 改掉 ⇒ "翻页"那条当场假，题号条 / 名单仍绿',
+        `抠掉处数=${cutNav?.hits} · ${hNav.err ? `副本没跑起来：${hNav.err}` : `翻页=${hasNav(hNav.html)} · 题号条=${hasStrip(hNav.html)} · 名单=${hasList(hNav.html)}`}`,
+      )
+      check(
+        cutList?.hits === 1 && !hList.err && !hasList(hList.html) && hasStrip(hList.html) && hasNav(hList.html),
+        '🧪 A15 ④ 反向对照 C：把**名单容器**那一层抠掉 ⇒ "名单"那条当场假，题号条 / 翻页仍绿',
+        `抠掉处数=${cutList?.hits} · ${hList.err ? `副本没跑起来：${hList.err}` : `名单=${hasList(hList.html)} · 题号条=${hasStrip(hList.html)} · 翻页=${hasNav(hList.html)}`}`,
+      )
+
+      /*
+       * ⑤ **分档色**：网页那边 `BAND_META[band].color` 是 CSS 变量，小窗里没有那张样式表
+       *    ⇒ 壳里只能把暗色主题那几个 hex 抄一遍。抄错一个字节，颜色就跟网页分家了
+       *    —— 所以拿 `index.css` 的**暗色块**比着钉（不是只钉"壳里有这几个 hex"）。
+       */
+      const cssRaw = readApp('src/index.css')
+      const darkAt = cssRaw.indexOf('--color-surface: #14181f')
+      const darkCss = darkAt < 0 ? '' : cssRaw.slice(darkAt)
+      const BAND2VAR = {
+        solo: '--color-ink4',
+        brief: '--color-ok',
+        focus: '--color-bad',
+        deep: '--color-warn',
+        suspect: '--color-warn',
+      }
+      const colorPairs = Object.entries(BAND2VAR).map(([band, v]) => {
+        const inShell = (fnSrc?.match(new RegExp(`${band}: '(#[0-9a-f]{6})'`)) ?? [])[1] ?? null
+        const inCss = (darkCss.match(new RegExp(`${v}:\\s*(#[0-9a-f]{6})`)) ?? [])[1] ?? null
+        return { band, v, inShell, inCss, same: !!inShell && inShell === inCss }
+      })
+      check(
+        darkCss !== '' && colorPairs.length === 5 && colorPairs.every((p) => p.same),
+        '🔴 A15 ④ 壳里那份**分档色**与网页 `index.css` 暗色主题逐字相同（`solo/brief/focus/deep/suspect` ↔ `--color-ink4/ok/bad/warn/warn`）—— 小窗里没有 CSS 变量，只能抄一遍；抄错了师生看到的就是两套颜色',
+        colorPairs.map((p) => `${p.band}=${p.inShell ?? '?'}/${p.inCss ?? '?'}`).join(' · '),
+      )
+      /* 🧪 反向对照 D：把壳里 `brief` 那个色改一个字节 ⇒ 同一条判据当场假 */
+      const cutColor = fnSrc === null ? null : cutOnce(fnSrc, "brief: '#35c98a'", "brief: '#35c98b'")
+      const colorBroken = cutColor?.src === null || cutColor === null
+        ? false
+        : (() => {
+            const inShell = (cutColor.src.match(/brief: '(#[0-9a-f]{6})'/) ?? [])[1] ?? null
+            const inCss = (darkCss.match(/--color-ok:\s*(#[0-9a-f]{6})/) ?? [])[1] ?? null
+            return !!inShell && inShell === inCss
+          })()
+      check(
+        cutColor?.hits === 1 && colorBroken === false,
+        '🧪 A15 ④ 反向对照 D：把壳里 `brief` 那个色改一个字节（`#35c98a` → `#35c98b`）⇒ "分档色与 index.css 逐字相同"那条当场假',
+        `改一处=${cutColor?.hits} · 改后仍算相同=${colorBroken}`,
+      )
+    } finally {
+      shellGray = grayWas4
+    }
   } finally {
     putBackG()
   }
@@ -10203,6 +10409,213 @@ section('第二十九节 · D19：分块加载失败要能自愈一次 · 人话
     chunkCodeDef && chunkSrc.includes("const CHUNK_FAIL_RE ="),
     '🔴 D19 ⑥ 错误码与"分块失败"的识别器**都只有一处定义**（`FE-CHUNK-01` / `CHUNK_FAIL_RE`）—— 抄成两份就会走散（本项目栽过：版本号分居两个文件）',
     `错误码定义 ${chunkCodeDef} · 识别器一处 ${chunkSrc.includes('const CHUNK_FAIL_RE =')}`,
+  )
+}
+
+/* ============================================================
+   🆕 教室端口令：班主任**自己设一个**（源码级静态判据 + 反向对照）
+   ------------------------------------------------------------
+   用户原话：「班级端的密码能不能由班主任自己设置，而不是只能重置」。
+   改动只落三个文件：`functions/api/classroom-account.ts`（服务端加 `set`）、
+   `src/lib/classroomAccount.ts`（加 `apiSetClassroomPassword`）、
+   `src/pages/ClassDetail.tsx`（浮层扩成两选）。
+   ⚠️ **强断言**（拿假服务端真打一遍 `onRequestPost`）留在 `rls-checks.mjs` 第二十一节 ——
+      那是安全那一路的地盘，**待协调后再补**；本节只做源码级判据。
+   ============================================================ */
+section('🆕 教室端口令：班主任自己设一个（set 的源码级判据 + 反向对照）')
+{
+  const raw = readApp('functions/api/classroom-account.ts')
+  /* 🔴 剥注释：注释里也写着 makePassword / password / 业务库这些名字 —— 不剥就是假红 */
+  const naked = raw
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/^[ \t]*\/\/[^\n]*$/gm, ' ')
+
+  const once = (t, s) => t.split(s).length - 1
+  const oneEdit = (t, from, to) => (once(t, from) === 1 ? t.replace(from, to) : null)
+
+  /** `set` 分支那一段（锚点：`if (action === 'set')` → 建号那一支的 `pickEmail`） */
+  const SET_HEAD = "if (action === 'set')"
+  const SET_TAIL = 'const email = await pickEmail(env, cls.name)'
+  const branchOf = (t) => {
+    const a = t.indexOf(SET_HEAD)
+    const b = t.indexOf(SET_TAIL)
+    return a >= 0 && b > a ? t.slice(a, b) : ''
+  }
+
+  /**
+   * `classroom_accounts` 每一条写入的 JSON body：**按大括号配平取**，
+   * 不靠"URL 后面 N 个字符"猜（猜的窗口要么漏掉写进去的口令、要么把别处的 `password` 误当写入）。
+   * 只在 URL 之后 400 字符内找 `body:` —— 再远就不是这一条请求的了。
+   */
+  const bodiesOf = (t) => {
+    const out = []
+    for (const m of t.matchAll(/'\/rest\/v1\/classroom_accounts[^']*'/g)) {
+      const at = t.indexOf('body: JSON.stringify(', m.index)
+      if (at < 0 || at - m.index > 400) continue
+      const open = t.indexOf('{', at)
+      let depth = 0
+      for (let i = open; i < t.length; i++) {
+        if (t[i] === '{') depth++
+        else if (t[i] === '}') {
+          depth--
+          if (depth === 0) {
+            out.push(t.slice(open, i + 1))
+            break
+          }
+        }
+      }
+    }
+    return out
+  }
+  const dbOk = (t) => {
+    const bodies = bodiesOf(t)
+    return bodies.length === 4 && !bodies.some((b) => /password/.test(b))
+  }
+  const setOk = (t) => {
+    const b = branchOf(t)
+    return b.length > 200 && b.includes('body.password') && !/makePassword/.test(b)
+  }
+  const gateOk = (t) => {
+    const g = "if (!mayManage(roles, cls)) {"
+    return once(t, g) === 1 && t.indexOf(SET_HEAD) > t.indexOf(g)
+  }
+  const auditOk = (t) => {
+    const a = t.indexOf('async function auditRow(')
+    const b = a >= 0 ? t.indexOf('\n}', a) : -1
+    const body = a >= 0 && b > a ? t.slice(a, b) : ''
+    return body.includes('try {') && body.includes('} catch {') && body.includes('return false')
+  }
+
+  const setBranch = branchOf(naked)
+  const audited = (t) => (t.match(/await auditRow\(/g) ?? []).length
+
+  /* ---- ① 动作契约里有 `set` ---- */
+  const CONTRACT = "'create' | 'reset' | 'set' | 'disable' | 'enable' | 'status'"
+  check(
+    naked.includes(CONTRACT),
+    `① 动作契约里有 set（六个值：${CONTRACT}）—— 自设口令是一个**新动作**，不是把 reset 拆开`,
+    `六个值的联合类型 ${naked.includes(CONTRACT) ? '在' : '不在'}`,
+  )
+  check(
+    setBranch.length > 200,
+    '① 自证：`set` 分支那一段真的被切出来了（切不出来下面几条就是在量空串 —— 假绿）',
+    `锚点之间 ${setBranch.length} 个字符`,
+  )
+
+  /* ---- ② 复用同一个 `mayManage()` 闸门，不另写判据 ---- */
+  check(
+    gateOk(naked),
+    '🔴 ② `set` 分支复用**同一个** `mayManage()` 闸门（全文件只有这一处闸门，且 `set` 分支在它**之后**）—— 班主任本来就有权，缺的只是"自己定一个"',
+    `闸门 ${once(naked, "if (!mayManage(roles, cls)) {")} 处 · set 分支在闸门之后 ${gateOk(naked)}`,
+  )
+  check(
+    setBranch.length > 0 && !/\brole\b|scope_id|can_manage/.test(setBranch),
+    '🔴 ② `set` 分支里**没有第二套权限判据**（不出现 `role` / `scope_id` / `can_manage`）—— 权限名单不变（`can_manage_class_for()` 逐档相等那条在 `rls-checks` 第二十一节②）',
+    `分支里出现角色判据 ${/\brole\b|scope_id|can_manage/.test(setBranch)}`,
+  )
+
+  /* ---- ③ 口令来自调用者（不是 `makePassword()`），且规则是 6–12 位 + 字母 + 数字 + 禁空格 ---- */
+  check(
+    setOk(naked),
+    '🔴 ③ `set` 分支的 password **来自调用者**（读 `body.password`），**没有**调用 `makePassword()` —— 随机生成那条只归 `reset`',
+    `读调用者传入 ${setBranch.includes('body.password')} · 出现 makePassword ${/makePassword/.test(setBranch)}`,
+  )
+  check(
+    /function passwordProblem\(pw: string\): string \| null/.test(naked) &&
+      naked.includes('const PW_MIN = 6') &&
+      naked.includes('const PW_MAX = 12') &&
+      /\/\[A-Za-z\]\//.test(naked) &&
+      /\/\[0-9\]\//.test(naked) &&
+      /\/\\s\//.test(naked) &&
+      setBranch.includes('passwordProblem(password)') &&
+      setBranch.includes('message: bad }, 400)'),
+    '🔴 ③ 口令规则是 **6 到 12 位 + 字母和数字都要有 + 不许有空格**（`PW_MIN = 6` / `PW_MAX = 12` / `[A-Za-z]` / `[0-9]` / `\\s`），且 `set` 分支真的过这道规则、不合规回 **400 + 人话**（不是课代表口令那条 4–12 位）',
+    `规则函数在 ${/function passwordProblem/.test(naked)} · 上下限 ${naked.includes('const PW_MIN = 6')}/${naked.includes('const PW_MAX = 12')} · set 分支过规则 ${setBranch.includes('passwordProblem(password)')} · 400 ${setBranch.includes('message: bad }, 400)')}`,
+  )
+
+  /* ---- ④ 业务库一个字段都不写（口令只去 GoTrue 的 auth.users） ---- */
+  check(
+    dbOk(naked),
+    '🔴 ④ `classroom_accounts` 的**每一条写入路径**里都没有 `password`（自证：正好 4 条写入 —— 停用/恢复、随机重置、自己设置、建号；多一条就要来这儿说清它为什么该在）',
+    `${bodiesOf(naked).length} 条写入 · 含 password 的 ${bodiesOf(naked).filter((b) => /password/.test(b)).length} 条`,
+  )
+  {
+    const pwBodies = [...naked.matchAll(/JSON\.stringify\(\{\s*password\s*\}\)/g)]
+    const putAt = naked.indexOf('function putPassword(')
+    const putEnd = putAt >= 0 ? naked.indexOf('\n}', putAt) : -1
+    const putBody = putAt >= 0 && putEnd > putAt ? naked.slice(putAt, putEnd) : ''
+    check(
+      pwBodies.length === 1 &&
+        putBody.includes('JSON.stringify({ password })') &&
+        putBody.includes('/auth/v1/admin/users/'),
+      '🔴 ④ 全文件**只有一处**把口令序列化（`JSON.stringify({ password })`），且它在 `putPassword()` 里、打给 GoTrue 的 `/auth/v1/admin/users/{id}` —— `set` 与 `reset` 走的是同一条路',
+      `序列化 ${pwBodies.length} 处 · putPassword 里有它 ${putBody.includes('JSON.stringify({ password })')} · 打的是 GoTrue ${putBody.includes('/auth/v1/admin/users/')}`,
+    )
+  }
+
+  /* ---- ⑤ 留痕：包成不影响响应 ---- */
+  check(
+    auditOk(naked),
+    '🔴 ⑤ 留痕写入被包住：`auditRow()` 自己 `try`/`catch`、失败回 `false`（**绝不抛错**）—— 留痕失败不许把一次已经改成功的换密码变成 500',
+    `auditRow 里有 try/catch + return false ${auditOk(naked)}`,
+  )
+  check(
+    audited(setBranch) >= 2 &&
+      setBranch.includes("action: 'classroom.set'") &&
+      setBranch.includes('audited: auditedBefore && auditedFail') &&
+      setBranch.includes('audited: auditedBefore && auditedAfter'),
+    '🔴 ⑤ `set` 动手前后**各一条**留痕（`classroom.set`，失败那条也写），且 `audited` 随回话带出 —— 留痕失败看得见，但不影响响应',
+    `set 分支 auditRow ${audited(setBranch)} 次 · action 名 ${setBranch.includes("action: 'classroom.set'")} · 成功/失败都带回 audited ${setBranch.includes('audited: auditedBefore && auditedFail') && setBranch.includes('audited: auditedBefore && auditedAfter')}`,
+  )
+  {
+    const a = naked.indexOf("if (action === 'reset')")
+    const b = naked.indexOf(SET_HEAD)
+    const resetBranch = a >= 0 && b > a ? naked.slice(a, b) : ''
+    check(
+      resetBranch.includes("action: 'classroom.reset'") && audited(resetBranch) >= 2,
+      '🔴 ⑤ 顺手：**随机重置（reset）也留痕**（`classroom.reset`，前后各一条）—— 口令类动作两条路都留痕',
+      `reset 分支 auditRow ${audited(resetBranch)} 次 · action 名 ${resetBranch.includes("action: 'classroom.reset'")}`,
+    )
+  }
+
+  /* ---------------- 反向对照（内存副本，不落盘） ----------------
+     纪律（`AGENTS.md` 三·2）：**先断言目标出现次数恰好 1，再替换** ——
+     不是 1 处就说明锚点变了，那一条对照**自己红**，绝不假绿。 */
+  const rcGate = oneEdit(naked, "if (!mayManage(roles, cls)) {", 'if (false) {')
+  check(
+    gateOk(naked) === true && rcGate !== null && gateOk(rcGate) === false,
+    '🧪 ② 反向对照：把 `mayManage()` 那一句抠掉（副本里换成 `if (false) {`）⇒ 「闸门只有一处、且 set 在它之后」**当场假** —— 证明②咬的正是那个闸门',
+    `原文 ${gateOk(naked)} · 副本 ${rcGate === null ? '锚点不是恰好 1 处（对照自己红）' : gateOk(rcGate)}`,
+  )
+  const rcSet = oneEdit(
+    naked,
+    "const password = typeof body.password === 'string' ? body.password : ''",
+    'const password = makePassword()',
+  )
+  check(
+    setOk(naked) === true && rcSet !== null && setOk(rcSet) === false,
+    '🧪 ③ 反向对照：把 `set` 分支里的口令换回 `makePassword()`（副本）⇒ 「口令来自调用者」**当场假** —— 证明③真的在量那条赋值',
+    `原文 ${setOk(naked)} · 副本 ${rcSet === null ? '锚点不是恰好 1 处（对照自己红）' : setOk(rcSet)}`,
+  )
+  const rcDb = oneEdit(
+    naked,
+    '      email,\n      created_by: uid,',
+    '      email,\n      password,\n      created_by: uid,',
+  )
+  check(
+    dbOk(naked) === true && rcDb !== null && dbOk(rcDb) === false,
+    '🧪 ④ 反向对照：往建号那条写库语句里塞一个 `password`（副本，就是"把口令写进业务库"的样子）⇒ 「业务库里没有口令」**当场假**',
+    `原文 ${dbOk(naked)} · 副本 ${rcDb === null ? '锚点不是恰好 1 处（对照自己红）' : dbOk(rcDb)}`,
+  )
+  const rcAudit = oneEdit(
+    naked,
+    '    return res.ok\n  } catch {\n    return false',
+    '    return res.ok\n  } finally {\n    return false',
+  )
+  check(
+    auditOk(naked) === true && rcAudit !== null && auditOk(rcAudit) === false,
+    '🧪 ⑤ 反向对照：把留痕那层 `try`/`catch` 换成 `try`/`finally`（副本）⇒ 「留痕被包住、失败回 false」**当场假** —— 证明⑤咬的是那层兜底',
+    `原文 ${auditOk(naked)} · 副本 ${rcAudit === null ? '锚点不是恰好 1 处（对照自己红）' : auditOk(rcAudit)}`,
   )
 }
 
