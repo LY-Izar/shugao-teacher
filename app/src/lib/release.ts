@@ -452,11 +452,20 @@ export function releaseTargetOf(role: ShellRole, pathname: string): ReleaseTarge
  *    所以宁可**不给按钮**（返回空串）也不给错的。
  * ⚠️ 网页版（`platform === null`，含补 `platform` 之前的老 apk）：先电脑的，
  *    没有再给手机的 —— 教师控制台多数开在电脑上。
+ *
+ * 🔴 2026-10-05 加：挑出来的那一条**还要过 `isReleaseUrl()`（域名白名单）**，
+ *    不过就返回空串 —— `ReleaseGate` 那边是 `view.url ? <a …> : null`
+ *    ⇒ **一个可点的落点都不摆**（拒了就是拒了，不许"log 一下照样放行"）。
+ *    为什么这条最要紧：这是**老师真正点下去**的那条路（公告横幅），
+ *    而这一行是从 `site_state` 直接读出来的 ⇒ 行被投毒（service_role / 供应链）时，
+ *    这里就是**最后一道还能拦住的闸门**。
+ * ⚠️ 口径：**被拒时返回空串，不退而给另一端那一条** —— 被投毒的行不许靠
+ *    "另一条大概没问题"继续放行（那就是第二种口径，正是这个项目反复栽的坑）。
  */
 export function pickReleaseUrl(r: Release, platform: ShellPlatform): string {
-  if (platform === 'capacitor') return r.urlApk
-  if (platform === 'electron') return r.urlExe
-  return r.urlExe || r.urlApk
+  const want =
+    platform === 'capacitor' ? r.urlApk : platform === 'electron' ? r.urlExe : r.urlExe || r.urlApk
+  return isReleaseUrl(want) ? want : ''
 }
 
 /**

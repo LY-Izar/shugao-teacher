@@ -5605,6 +5605,73 @@ function sourceFileHealth(rel) {
     }
   }
 
+  /* ---- ⑥ 公告横幅那条链接（**老师真正点的那一条**）也过同一道闸门 ---- */
+  {
+    /* ⚠️ 这一段**故意自带宽一份** `REL_SRC`：它挂在"附节"那个块**外面**
+       （收尾之前、与附节平级），别去引附节里的同名变量 —— 那样会 `ReferenceError`。 */
+    const REL_SRC = readFileSync(resolvePath(APP, 'src/lib/release.ts'), 'utf8')
+    const rel = await import(mod('src/lib/release.ts'))
+    const UR_SRC = readFileSync(resolvePath(APP, 'src/lib/useRelease.ts'), 'utf8')
+    const UM_SRC = readFileSync(resolvePath(APP, 'src/lib/useMaintenance.ts'), 'utf8')
+    /** `pickReleaseUrl` 的函数体里过不过 `isReleaseUrl`（切不出 → `false`） */
+    const pickGateOf = (text) => {
+      const m =
+        /export function pickReleaseUrl\(r: Release, platform: ShellPlatform\): string \{([\s\S]*?)\n\}/.exec(
+          text,
+        )
+      return m ? m[1].includes('isReleaseUrl(') : false
+    }
+    const P = (apk, exe) => ({ version: '1.1.2', force: false, note: '', urlApk: apk, urlExe: exe })
+    const REL_BASE = 'https://gitee.com/LY-Izar/shugao-downloads/releases/download/v1.1.2/'
+    const OK_APK = `${REL_BASE}ShugaoTeacher.apk`
+    const OK_EXE = `${REL_BASE}ShugaoTeacher.exe`
+    const POISON = 'https://evil.example.com/update.exe'
+
+    ok(
+      '🔴 ⑥ 公告横幅那条链接**也过白名单**：投毒的行在三个端上都**不给可点**（空串 ⇒ `ReleaseGate` 连 `<a>` 都不摆）',
+      pickGateOf(REL_SRC) === true &&
+        ['capacitor', 'electron', null].every((p) => rel.pickReleaseUrl(P(POISON, POISON), p) === ''),
+      `pickReleaseUrl 过闸门=${pickGateOf(REL_SRC)} · 三端读数=` +
+        ['capacitor', 'electron', null]
+          .map((p) => JSON.stringify(rel.pickReleaseUrl(P(POISON, POISON), p)))
+          .join(' / '),
+    )
+    ok(
+      '🔴 ⑥b 白名单里的地址**照旧给**，分端口径一个字没变（手机只给 apk / 电脑只给 exe / 网页先 exe 再 apk / 没填的不给）',
+      rel.pickReleaseUrl(P(OK_APK, OK_EXE), 'capacitor') === OK_APK &&
+        rel.pickReleaseUrl(P(OK_APK, OK_EXE), 'electron') === OK_EXE &&
+        rel.pickReleaseUrl(P(OK_APK, ''), null) === OK_APK &&
+        rel.pickReleaseUrl(P('', OK_EXE), 'capacitor') === '' &&
+        rel.pickReleaseUrl(P(OK_APK, ''), 'electron') === '',
+      ['capacitor', 'electron', null]
+        .map((p) => `${p}=${JSON.stringify(rel.pickReleaseUrl(P(OK_APK, OK_EXE), p))}`)
+        .join(' · '),
+    )
+    ok(
+      '🔴 ⑥c 网页端：`url_exe` 被写坏时**不退而给 apk** —— 被投毒的行不许靠"另一条大概没问题"继续放行（空串 = 不给可点）',
+      rel.pickReleaseUrl(P(OK_APK, POISON), null) === '',
+      `读数=${JSON.stringify(rel.pickReleaseUrl(P(OK_APK, POISON), null))}`,
+    )
+    ok(
+      '🔴 ⑦ 横幅那条链接**只有一个来源**（`useRelease.ts` 的 `pickReleaseUrl(notice, shellPlatform())`），那一页自己**不读** `url_apk` / `url_exe`',
+      UR_SRC.split('pickReleaseUrl(notice, shellPlatform())').length - 1 === 1 &&
+        !/urlApk|urlExe|url_apk|url_exe/.test(UR_SRC),
+      `来源 ${UR_SRC.split('pickReleaseUrl(notice, shellPlatform())').length - 1} 处 · 自己读了链接列=${/urlApk|urlExe|url_apk|url_exe/.test(UR_SRC)}`,
+    )
+    const umUrls = [...UM_SRC.matchAll(/'(https:\/\/[^']+)'/g)].map((m) => m[1])
+    ok(
+      '🔴 ⑦b DEV 占位链接（`useMaintenance.ts` 的 `?rel=` 钩子）也落在白名单内、且不再用 `example.com`（否则 DEV 的横幅与「关于」那几颗按钮全摆不出来）',
+      umUrls.length >= 2 && umUrls.every((u) => rel.isReleaseUrl(u)) && !UM_SRC.includes('example.com/update'),
+      `DEV 链接 = ${JSON.stringify(umUrls)}`,
+    )
+    const noPickGate = mutateOnce(REL_SRC, "return isReleaseUrl(want) ? want : ''", 'return want')
+    ok(
+      '🧪 ⑥ 反向对照 ⓒ：把 `pickReleaseUrl` 那道闸门抠掉（直接 `return want`）⇒ 上面 ⑥ / ⑦ 那几条**当场红**',
+      pickGateOf(REL_SRC) === true && pickGateOf(noPickGate) === false,
+      `原文过闸门=${pickGateOf(REL_SRC)} · 抠掉后=${pickGateOf(noPickGate)}`,
+    )
+  }
+
   /* ---------------- 收尾 ---------------- */
 
   server.close()

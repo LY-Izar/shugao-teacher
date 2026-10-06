@@ -50,14 +50,19 @@ function devForced(): MaintenanceStatus | null {
         的分工与真服务端一致：公告那一层看 `enabled`，地址这一层不看）。 */
   let slots: ReleaseSlots = RELEASE_SLOTS_UNKNOWN
   if (rel) {
-    const apk = rel.urls === 'exe' ? '' : 'https://example.com/update'
-    const exe = rel.urls === 'apk' ? '' : 'https://example.com/update'
+    /* 🔴 2026-10-05：占位域名换成**白名单里**的自家站点 —— `isReleaseUrl()` 现在会拒
+       陌生域名，再用 `example.com` 的话这条 DEV 钩子造出来的链接会被闸门拒掉
+       ⇒ 公告横幅与「我的 → 关于」那几颗按钮**一颗可点的都摆不出来**。
+       ⚠️ 只借**域名**（自家站点在仓库里本来就公开，见 `apiBase.ts`），路径照旧是假的
+          `/update`；**下载站那条真地址一个字都不写进 DEV 夹具**。 */
+    const apk = rel.urls === 'exe' ? '' : 'https://shugao-teacher.pages.dev/update'
+    const exe = rel.urls === 'apk' ? '' : 'https://shugao-teacher.pages.dev/update'
     const notice: Release = {
       version: rel.version,
       force: rel.force,
       note: releaseDefaultNote(rel.version, rel.force),
       /* 占位链接：只为让「下载最新版」与「我的 → 关于」那几颗按钮真的出现
-         （截图里不许出现真域名）。`?urls=apk` / `?urls=exe` 让它**只填一半** ——
+         （域名是自家站点、路径是假的）。`?urls=apk` / `?urls=exe` 让它**只填一半** ——
          门禁靠它验"面板只填了其中一个时，屏上只摆对应的那一颗"。 */
       urlApk: apk,
       urlExe: exe,
