@@ -15017,19 +15017,30 @@ await withLock(async () => {
       /* B：往更新日志里塞一个禁词 → "不出现"那条必须判假 */
       const bannedOf = (s) => banned.filter((w) => s.includes(w))
       /*
-       * ⚠️ **锚点 2026-10-04 跟着更新日志的"简洁化"改过一次**（red 过一次，记下来）：
-       *   原来锚的是整句「从这一版起，平台正式给全校用（此前只在少数几位老师之间试用）」，
-       *   重写后那句变成了「新增：平台从这一版起正式给全校用，有了名字「树高教务通」和校徽」
-       *   ⇒ `String.replace` 找不到 ⇒ `poisoned === logSrc` ⇒ **对照自己先失效**
-       *   （"塞过=0 处"就是它的症状，与 S25 对照 E 那个"摘错地方"是同一类坑）。
-       *   ⇒ 锚点只取**现在真的在**的那一截；以后改文案要连着这行一起看。
+       * ⚠️ **锚点跟着更新日志改过两次，两次都是"对照自己先失效"**（记在案，别再来第三次）：
+       *   · 2026-10-04（简洁化）：原锚是整句「从这一版起，平台正式给全校用（此前只在少数几位老师之间试用）」，
+       *     重写后那句变成了「新增：平台从这一版起正式给全校用，有了名字「树高教务通」和校徽」；
+       *   · 2026-10-06（`7d17111` 按新规格重写全部条目）：**连那一句也没了** ⇒ 锚点命中 **0 处**
+       *     ⇒ `String.replace` 什么都不换 ⇒ `poisoned === logSrc` ⇒ 这条反向对照**恒真**
+       *     （症状：读数里"原=0 处 · 塞过=0 处"，而它照样打 ✅ —— 与 S25 对照 E 那个"摘错地方"同源）。
+       *   ⇒ 🔴 修法两件一起做：
+       *     ① 锚**1.0.0 段里真在的那一条**（`changelog.ts:176`，就是上面那句的后代）；
+       *     ② **注入前先断言锚点恰好命中 1 处**（AGENTS §三.2：先数出现次数、不是 1 就报错，
+       *        宁可红也不要假绿）—— 以后文案再被改，这条**当场红**，不会再静默失效。
        */
-      const poisonAnchor = '平台从这一版起正式给全校用'
+      const poisonAnchor = '平台启用名「树高教务通」与校徽标识'
+      /** 命中处数：0 ⇒ 对照已失效（必须红）；≥2 ⇒ `replace` 只换第一处，说不清换的是谁（也必须红） */
+      const poisonHits = logSrc.split(poisonAnchor).length - 1
+      check(
+        poisonHits === 1,
+        '🧪 S25 对照 B 前置：下面那条注入用的锚点**恰好命中 1 处**（`changelog.ts` 1.0.0 段里真在的一句话）—— 文案一改这条就**红**，绝不让反向对照静默失效',
+        `锚点=${JSON.stringify(poisonAnchor)} · 命中 ${poisonHits} 处 · 期望恰好 1 处`,
+      )
       const poisoned = logSrc.replace(poisonAnchor, `${poisonAnchor}（结束${banned[0]}）`)
       check(
-        bannedOf(logSrc).length === 0 && bannedOf(poisoned).length === 1 && poisoned !== logSrc,
+        poisonHits === 1 && bannedOf(logSrc).length === 0 && bannedOf(poisoned).length === 1 && poisoned !== logSrc,
         '🧪 S25 对照 B：往 `1.0.0` 段里**塞一个禁词** → 同一个判据当场判假（⑦ 真的在扫屏上那句话）',
-        `原=${bannedOf(logSrc).length} 处 · 塞过=${bannedOf(poisoned).length} 处`,
+        `锚点命中 ${poisonHits} 处 · 原=${bannedOf(logSrc).length} 处 · 塞过=${bannedOf(poisoned).length} 处 · 源码真被改过=${poisoned !== logSrc}`,
       )
       /* C：把一个 `setX('done')` 删掉 → "三档都真被写到"必须判假 */
       const scanAll = (src, v) => ['running', 'done', 'failed'].every((st) => writesTo(src, v, st))

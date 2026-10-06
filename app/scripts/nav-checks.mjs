@@ -6157,7 +6157,7 @@ section('第二十二节 · A15：教室端原生置顶小窗（壳原生 → Do
           那一屏，改不了网页上"现在是第几题"。所以壳里那份 HTML 在两边不一致时会显示
           「网页在第 N 题」（判据里也钉了这一句）。**真壳上的观感要等出包后由 `verify-exe.mjs` 量。**
        ============================================================ */
-    const SHELL_IPC_ABS = 'C:\\__ci-shape-sim__\\树高教务通打包\\_src\\desktop\\shell-ipc.mjs'
+    const SHELL_IPC_ABS = 'C:\\Users\\Administrator\\Desktop\\树高教务通打包\\_src\\desktop\\shell-ipc.mjs'
     const shellIpcRaw = (() => {
       try {
         return readFileSync(SHELL_IPC_ABS, 'utf8')
@@ -6165,6 +6165,41 @@ section('第二十二节 · A15：教室端原生置顶小窗（壳原生 → Do
         return null
       }
     })()
+
+    /* ---------- ④-0 **仓库内那一半**：硬判据，**永不落灰**（CI 上也要真判） ----------
+     * 施工单 §一那份数据的**类型**就在仓库里（`src/lib/classroomShell.ts`），推送处在
+     * `src/pages/Classroom.tsx`（A15 ③ 钉着那一段）—— 这两半**两台机器上都验得了**，不许灰。
+     * 只有"壳那份 HTML 长什么样"那一半才是灰的（壳源码在仓库外，CI 的干净检出必然没有）。
+     */
+    const CLS_SHELL_RAW = readApp('src/lib/classroomShell.ts')
+    /** 取 `export interface X {` 到它那一行 `}` 的正文（取不到 ⇒ `null` ⇒ 下面那条红） */
+    const ifaceBody = (src, name) => {
+      const i = src.indexOf(`export interface ${name} {`)
+      if (i < 0) return null
+      const j = src.indexOf('\n}', i)
+      return j < 0 ? null : src.slice(i, j)
+    }
+    const dataBody = ifaceBody(CLS_SHELL_RAW, 'ShellPipData')
+    const qBody = ifaceBody(CLS_SHELL_RAW, 'ShellPipQuestion')
+    const SHAPE_KEYS = ['seq: number', 'ratePct: number', 'band: Band', 'bandLabel: string', 'wrong: Array<{ no: string; name: string }>']
+    const shapeOK =
+      !!dataBody && !!qBody && dataBody.includes('questions: ShellPipQuestion[]') && SHAPE_KEYS.every((k) => qBody.includes(k))
+    const gShape = grayed
+    const pShape = passed
+    check(
+      shapeOK,
+      '🔴 A15 ④-0（**只读仓库里的文件 ⇒ 永不落灰、CI 上也真判**）`ShellPipData` 里声明了 `questions: ShellPipQuestion[]`，而 `ShellPipQuestion` 的五个字段（题号 / 正确率 / 分档 / 档名 / 名单）一个不缺 —— 壳小窗要的那份数据在**类型上**就是与网页同一份',
+      `ShellPipData=${!!dataBody} · ShellPipQuestion=${!!qBody} · questions 字段=${!!dataBody && dataBody.includes('questions: ShellPipQuestion[]')} · 缺的字段=[${SHAPE_KEYS.filter((k) => !qBody?.includes(k)).join('、')}]`,
+    )
+    /** ④-0 必须**真判**（判了恰好 1 条、灰了 0 条）—— 自证拿这个数咬人 */
+    const shapeJudged = passed - pShape === 1 && grayed - gShape === 0
+    /*
+     * ④ 那 6 条的基线：**必须在 ④-0 之后取**（④-0 也算"判了"，混进来就变成"壳不在时判了 1 条"
+     * —— 2026-10-06 实测，就是这里第一次把自证弄红的），而且要在 ④ 那条自证 `check()` **之前**取。
+     */
+    const pShell0 = passed
+    const gShell0 = grayed
+
     const grayWas4 = shellGray
     if (shellIpcRaw === null) shellGray = true
     try {
@@ -6328,6 +6363,25 @@ section('第二十二节 · A15：教室端原生置顶小窗（壳原生 → Do
     } finally {
       shellGray = grayWas4
     }
+
+    /*
+     * 🔴 **自证（三态）** —— 照 A21/A22/A24 那套口径：
+     *   · 壳源码**不在**（CI 的干净检出 / 别人的机器）⇒ ④ 那 6 条**全落灰、一条都没判**
+     *     （不红不绿 = **未测**，不是"通过"），而 ④-0 那条（只读仓库里的文件）**照样真判**；
+     *   · 壳源码**在**（维护者本机）⇒ 6 条**逐条真判、一条都不灰**。
+     * ⇒ 谁忘了开/关那个开关、把**仓库内那半**也罩进灰档（= CI 上的静默 no-op）、
+     *   或改了 ④ 的条数，这一条当场红。
+     */
+    const A15_4_N = 6
+    const shellJudged = passed - pShell0
+    const shellGrayed = grayed - gShell0
+    check(
+      shapeJudged &&
+        shellJudged === (shellIpcRaw === null ? 0 : A15_4_N) &&
+        shellGrayed === (shellIpcRaw === null ? A15_4_N : 0),
+      '🔴 A15 ④ 自证（三态）：壳源码**不在**时 ④ 那 6 条**全落灰、一条都没判**（不红不绿 = 未测）、而 ④-0 那条**照样真判**；壳源码**在**时 6 条**逐条真判、一条都不灰** —— 忘开/忘关那个开关、把仓库内那半也罩进灰档、或改了条数，这条当场红',
+      `壳在=${shellIpcRaw !== null} · ④-0（仓库内那半）真判=${shapeJudged} · ④ 那 ${A15_4_N} 条：判了 ${shellJudged} 条 / 灰了 ${shellGrayed} 条`,
+    )
   } finally {
     putBackG()
   }
