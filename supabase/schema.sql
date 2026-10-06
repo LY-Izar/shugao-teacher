@@ -327,12 +327,28 @@ alter table classrooms     enable row level security;
 alter table calls          enable row level security;
 
 -- 教师：只能读写自己那一行
---  ⚠️ 这一条会被 §17.1 **重写**成三条逐动作策略（`teachers_self_select` /
---     `_insert` / `_update`），并加上"教室端不算教师"那一支。这里保留原文是为了
---     让 §7 这一段单独跑完时，行为与本文件历史版本**一字不差**。
+--  ⚠️ §17.1 给这一行**又加了一支**（`teachers_not_classroom_*` 三条 restrictive：
+--     "教室端不算教师"）。上面那句"会被 §17.1 重写成三条"当年写错了 —— §17.1 只加
+--     restrictive，**没有动这里**。
+--
+--  🔴 本轮（§43.1）：**拆成 select / insert / update 三条，把 DELETE 拿掉**。
+--     原因是 `for all` **含 DELETE**：教师 JWT 能删掉自己那行 `teachers`
+--     （`auth.users` 与 refresh token 都还在 = 孤儿账号；同一个 uuid 还能再插回来 = 凤凰账号）。
+--     删除只留给管理端（`/api/admin/teacher-delete` 用 service_role，绕过 RLS）。
+--     三条的名字就是当年那句注释里写的 `teachers_self_select` / `_insert` / `_update`
+--     —— 现在把它做成真的。判据与实测见 §43.1（文件末尾那一节）。
 drop policy if exists teachers_self on teachers;
-create policy teachers_self on teachers
-  for all to authenticated
+drop policy if exists teachers_self_select on teachers;
+drop policy if exists teachers_self_insert on teachers;
+drop policy if exists teachers_self_update on teachers;
+create policy teachers_self_select on teachers
+  for select to authenticated
+  using (id = auth.uid());
+create policy teachers_self_insert on teachers
+  for insert to authenticated
+  with check (id = auth.uid());
+create policy teachers_self_update on teachers
+  for update to authenticated
   using (id = auth.uid())
   with check (id = auth.uid());
 
@@ -740,11 +756,34 @@ create table if not exists classroom_accounts (
   school_id  uuid references schools (id),
   name       text not null,        -- 「高二(4)班教室」
   email      text not null default '',
-  created_by uuid references teachers (id),
+  -- 🔴 2026-10-13 修（真缺陷）：原来是 `uuid references teachers (id)`，**没有** `on delete` ⇒ NO ACTION = 拦人。
+  --    后果：删一个"当年建过教室端账号的老师"会抛 23503
+  --    （`update or delete on table "teachers" violates foreign key constraint "classroom_accounts_created_by_fkey"`）
+  --    + 整次删除回滚。同文件 §34 那处同名 `created_by` **有** `on delete set null`（第 5327 行），这一处是漏了 —— 补齐对齐。
+  created_by uuid references teachers (id) on delete set null,
   disabled   boolean not null default false,
   created_at timestamptz not null default now(),
   unique (class_id)                -- 一个班只允许一个教室端账号
 );
+
+-- 🔴 老库（已经建过 `classroom_accounts` 的库）**拿不到上面那一行** ——
+--    `create table if not exists` 在表已存在时整段跳过。所以这里再补一次**幂等**的迁移：
+--    只有当那个外键**还在拦人**（`confdeltype <> 'n'`）时才重建它；已经是 set null 的库上，这一段是空操作。
+--    ⚠️ 这一段就是要在 Supabase 上手工跑的那几行（与本文件逐字一致）。
+do $$
+begin
+  if exists (
+    select 1 from pg_constraint
+     where conrelid   = 'classroom_accounts'::regclass
+       and conname    = 'classroom_accounts_created_by_fkey'
+       and confdeltype <> 'n'
+  ) then
+    alter table classroom_accounts drop constraint classroom_accounts_created_by_fkey;
+    alter table classroom_accounts
+      add constraint classroom_accounts_created_by_fkey
+      foreign key (created_by) references teachers (id) on delete set null;
+  end if;
+end $$;
 
 -- 新表同样要开 RLS：不开等于裸奔
 alter table schools            enable row level security;
@@ -11508,3 +11547,179 @@ end $$;
 --      where policyname like 'maintenance_freeze_%' and cmd <> 'INSERT'
 --        and cmd <> 'UPDATE' and cmd <> 'DELETE';                              -- 0
 --  ④ 维护中写不进去（以老师身份跑）：见 `rls-checks` 第二十八节那几条实测断言。
+
+
+-- ============================================================
+--  43. 🔴 安全收紧第三批（本轮）：超管撤不成 0 个 · 教师自己删不掉自己那行 · 错误上报限洪
+--
+--  这三条都是"只读核查逐条对着代码证实"之后用户批准的**最小修法**。
+--
+--  🔴 共同前提：服务端 `/api/teacher-account` 用的是 **service_role**
+--     （`app/functions/api/teacher-account.ts:240-241`，它自己的注释写着
+--     "调用前校验一步都不能省"）⇒ 它**绕过 RLS** ⇒ 拦得住它的只有
+--     **数据层触发器**（连 service_role 一起拦）与**服务端自己的目标校验**。
+--     所以这一节的主语是"上数据层"，服务端那一半在 `teacher-account.ts`（reset / role 两个动作）。
+-- ============================================================
+
+-- -------- 43.1 ③ 教师本人删不掉自己那行（`teachers_self` 在 §7 原地拆成三条）--------
+--  🔴 **为什么改既有策略（§7）**：那一条是 `for all`，而 `for all` **含 DELETE** ——
+--     实测：教师 JWT 能删掉自己那行 `teachers`（§17.3 里"没有 teachers 的 DELETE 策略"
+--     那句话当时是**错的**）。删完之后 `auth.users` 那一行与 refresh token 都还在
+--     （= 孤儿账号），而同一个 uuid 还能把 `teachers` 行再插回来（= 凤凰账号）。
+--     改法就是 §7 已经做过的那件事（拆 select / insert / update，去掉 DELETE），
+--     **原地改**：策略正文只能有一处，这里只留档。
+--  ⚠️ 管理台删人**不受影响**：`/api/admin/teacher-delete` 走 service_role（绕 RLS）。
+--  ⚠️ 应用里**没有**"教师自己注销账号"这个入口（本轮 grep 过 `app/src`：对 `teachers`
+--     只有 select 与"本人资料 upsert"，删除只出现在管理台那一页），所以拆掉 DELETE
+--     没有弄坏任何合法功能。
+--  判据：`rls-checks` 第四十三节 —— "教师 JWT 删自己那行 = 影响 0 行"，
+--        并在同一节里**当场把策略改回 `for all`** 做反向对照（那一条必须变红）。
+
+-- -------- 43.2 ② 最后一个最高管理员**撤不掉**（delete 与 update 两条一起拦）--------
+--  原来唯一的保护在服务端（`teacher-account.ts:1246` 那一句
+--  `!on && role === 'super' && teacherId === me.id`），而它**只挡"自己撤自己"**：
+--  `can_assign_roles()` 含教务处 ⇒ **教务处能把最后一个超管撤成 0 个**。
+--  撤成 0 之后 `can_assign_super_role_for()`（§13.2.2）对所有人都是 false
+--  ⇒ 界面上再无入口，只能进 SQL Editor。
+--  `teacher_roles_one_super`（§10.1.1 ⑥）是**部分唯一索引**：它防"多"，**不防"删"**。
+--
+--  🔴 所以这里补一条 `before delete or update` 触发器：`role='super'` 且改/删之后剩 0 条 ⇒ raise。
+--     ⚠️ UPDATE 那一半（把 super 改成别的角色）**必须一起拦** —— 只拦 DELETE 的话，
+--        `update teacher_roles set role='admin' where role='super'` 一样能撤成 0 个。
+--     ⚠️ 它拦的是**所有角色**，包括 service_role（触发器与 RLS 是两回事）。
+--     ⚠️ 级联也要过它：删最后那位超管的 `teachers` 行 → `on delete cascade` 删到这条 super
+--        ⇒ 一样被拒（管理台那条路本来就自己挡了"删最后一个超管"，这里是第二层）。
+--  判据：`rls-checks` 第四十三节 —— 删最后一条 super 必须被拒、把 super 改成别的角色也必须被拒、
+--        而撤**别的**身份照旧放行；反向对照是当场 `drop trigger` ⇒ 上面那两条必须变红。
+create or replace function public.teacher_roles_keep_one_super()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_left integer;
+begin
+  if (tg_op = 'DELETE' and old.role = 'super')
+     or (tg_op = 'UPDATE' and old.role = 'super' and new.role is distinct from 'super') then
+    select count(*) into v_left from teacher_roles r where r.role = 'super' and r.id <> old.id;
+    if v_left = 0 then
+      raise exception '不能撤掉最后一个最高管理员：撤完就没有人能再指派身份 / 发超管了。要交接就先给另一个人加上这一档，再撤这一条。'
+        using errcode = '23514';
+    end if;
+  end if;
+  if tg_op = 'DELETE' then
+    return old;
+  end if;
+  return new;
+end $$;
+
+drop trigger if exists teacher_roles_keep_one_super on teacher_roles;
+create trigger teacher_roles_keep_one_super
+  before delete or update on teacher_roles
+  for each row execute function public.teacher_roles_keep_one_super();
+
+-- -------- 43.3 ④ 错误上报限洪（`frontend_errors` / `report_frontend_error`）--------
+--  🔴 这一条**不是加鉴权**：`report_frontend_error()` 必须能匿名用
+--     （登录页 / 教室端 / hydrate 失败三个现场都没有会话）。它加的是"限洪"：
+--    ① **精确重复折叠**：同一个人（`auth.uid()` / 自报 username）+ 同一个 view + 同一句 message
+--       在 60 秒内已经报过 ⇒ 这一次**丢弃**（崩溃循环里那种一模一样的连打）。
+--    ② **全局每分钟 / 每小时上限**：全表 1 分钟 ≥ 60 条、或 1 小时 ≥ 300 条 ⇒ 丢弃。
+--       §24.2 原有的"同一人 5 分钟 ≤ 20 / 全表 5 分钟 ≤ 200"**一个字都不动**，这一层更紧。
+--    ③ **粗粒度来源**：多存一列 `source_digest` = UA 的摘要 +（拿得到时）来源 IP 的哈希。
+--       🔴 **绝不存原 IP**。⚠️ 匿名场景**拿不到可靠身份** —— PostgREST 只有在网关给了
+--          `x-forwarded-for` 时才拿得到 IP，拿不到就**留空**（不假装）：
+--          所以限洪的主语是"**payload + 时间窗 + 全局配额**"，不是"按 IP 限"。
+--
+--  🔴 为什么做在**数据层**（`before insert` 触发器）而不是服务端：
+--     前端是**直接**用 anon key 调这个 RPC 的（`app/src/lib/errors.ts`），
+--     服务端 `functions/api/errors.ts` 那一条路拦不住绕过它的人 ——
+--     那批 `anon-probe-*` / `rl-probe-*` 就是这么进去的。
+--     RPC 走的路只有函数体与触发器能拦。
+--  ⚠️ 触发器函数必须 `security definer`：anon 对这张表**连 select 都没有**（§24.1），
+--     而它要数"最近一分钟有多少条"。
+--  ⚠️ 丢弃是**静默**的（`return null`）：上报这条路**任何情况下都不该把错误带回给前端**
+--     （它自己就是错误路径），所以 RPC 照旧回 `{ok: true}`，只是这一行没落库。
+--  🔴 这一层**拦不住**"换个名字接着打"：`rl-probe-same` 那种"同名、payload 不同"的连打
+--     只能靠上面的全局配额兜（按 IP / 按名字限在匿名场景**做不到**，别假装做得到）。
+--  判据：`rls-checks` 第四十三节 —— 同 (人, view, message) 报两次只落一条、
+--        连报 65 条只落 60 条；反向对照是当场 `drop trigger` ⇒ 两条都必须变红。
+alter table frontend_errors add column if not exists source_digest text;
+
+create or replace function public.frontend_errors_gate()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_hdr text;
+  v_ip  text := '';
+  v_key text;
+  v_n   integer;
+begin
+  /* ③ 粗粒度来源：UA 摘要 +（拿得到时）来源 IP 的哈希。原 IP 一个字节都不留 */
+  v_key := coalesce(new.account_id::text, coalesce(new.username, ''));
+  v_hdr := coalesce(current_setting('request.headers', true), '');
+  if v_hdr <> '' then
+    begin
+      v_ip := split_part(coalesce((v_hdr::jsonb) ->> 'x-forwarded-for', ''), ',', 1);
+    exception when others then
+      v_ip := '';   -- 头不是合法 JSON（或没有这个 GUC）⇒ 留空，不假装
+    end;
+  end if;
+  new.source_digest := left(md5(coalesce(new.ua, '') || '|' || v_ip), 16);
+
+  /* ① 精确重复折叠：同一个人 + 同 view + 同一句 message，60 秒内只留第一条 */
+  select count(*) into v_n
+    from frontend_errors e
+   where e.ts > now() - interval '60 seconds'
+     and coalesce(e.account_id::text, e.username) = v_key
+     and coalesce(e.view, '') = coalesce(new.view, '')
+     and e.message = new.message;
+  if v_n > 0 then
+    return null;
+  end if;
+
+  /* ② 全局上限：1 分钟 60 条 / 1 小时 300 条（比 §24.2 的"5 分钟 200 条"紧一档多） */
+  if (select count(*) from frontend_errors e where e.ts > now() - interval '1 minute') >= 60 then
+    return null;
+  end if;
+  if (select count(*) from frontend_errors e where e.ts > now() - interval '1 hour') >= 300 then
+    return null;
+  end if;
+
+  return new;
+end $$;
+
+drop trigger if exists frontend_errors_gate on frontend_errors;
+create trigger frontend_errors_gate
+  before insert on frontend_errors
+  for each row execute function public.frontend_errors_gate();
+
+-- -------- 43.4 这一段跑完之后，前端会怎样（"SQL 没跑也不崩"）--------
+--  · **只跑了 §7（没跑 §43.2 / §43.3）**：策略那一半已经生效（教师删不掉自己那行），
+--    另两条要等本节的触发器 —— 它们**各自独立**，谁先跑谁生效；
+--  · **跑了 §43.3**：`frontend_errors` 多一列 `source_digest`，上报照旧（丢弃是静默的，
+--    回话仍是 `{ok:true}`）—— 界面与接口一个字都不用改；
+--  · **跑了 §43.2**：管理台"撤身份"少一种玩法（撤最后一个超管会被拒，回话里带人话）。
+--    接口那边本来就有同义的一道（`teacher-account.ts` 的 role 动作，403 + 人话），
+--    触发器是"绕过接口也拦得住"的第二层。
+--
+-- -------- 43.5 自检（把下面整段粘进 SQL Editor，逐条对着看）--------
+--  ① 三条策略在、且没有 DELETE：
+--     select cmd, policyname from pg_policies where tablename = 'teachers' order by cmd;
+--       -- 期望：INSERT/UPDATE 各两条（一条 permissive 自己、一条 restrictive 教室端）、
+--       --       SELECT 一条、**DELETE 只有 restrictive 那条**（= 谁都不能从客户端删）
+--  ② 触发器在（两条）：
+--     select tgname, tgrelid::regclass from pg_trigger
+--      where not tgisinternal and tgname in ('teacher_roles_keep_one_super', 'frontend_errors_gate');
+--       -- 期望 2 行
+--  ③ 最后一个超管撤不掉（**会报错，这是对的**）：
+--     -- update teacher_roles set role = 'admin' where role = 'super';
+--     -- ERROR: 不能撤掉最后一个最高管理员…
+--  ④ 限洪生效（**会报错，这也是对的** —— 看第二步的 select 只有 1 行）：
+--     -- select public.report_frontend_error('探针','teacher','/x','第 1 条','','','web','');
+--     -- select public.report_frontend_error('探针','teacher','/x','第 1 条','','','web','');
+--     -- select count(*) from frontend_errors where username = '探针';   -- 期望 1
+--     -- delete from frontend_errors where username = '探针';            -- 收尾：把探针行删掉
