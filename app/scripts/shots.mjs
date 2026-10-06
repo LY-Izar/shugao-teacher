@@ -4721,12 +4721,17 @@ await withLock(async () => {
          ============================================================ */
       const SMOB = 'R7 手机端布局'
       /*
-       * 🔴🔴 R7 停用中 · 未完成 ✗（代码原样留着，一条断言没删）：一执行就抛 `at.btn is not a function`
-       *   ⇒ V8 落点 4949:47 = 下面那条「文字被裁」的标签串（行号因本次插入后移）——**已定位**：那串正文里
-       *   嵌了一对裸反引号 `.btn`，提前闭合模板串 ⇒ 后半截成了"对字符串打标签调用"✗；它一抛就打断整轮 shots（后面断言全失去保护 ✗）。
-       * TODO(恢复前**必须**做)：① 修掉那对反引号（别靠"改名试列号"倒推）；② 删掉下面这道闸；③ 真跑一次全量 `npm run shots`（0 失败 · 145 张）。
+       * ✅ **R7 已启用**（默认就跑，不需要任何环境变量）。历史两条坑都已修掉，留档以免重走：
+       *   ① 那串「文字被裁」的标签里原来嵌了一对**裸反引号** `` `.btn` ``，提前闭合模板串
+       *      ⇒ 后半截成了"对字符串打标签调用"⇒ `at.btn is not a function`，一抛就打断整轮 shots；
+       *      现在写在反引号里时已转义（`\`.btn\``）⇒ 不再抛。
+       *   ② 🔴 **夹具（`a-r7-ongoing` 那份「批改中」档案）以前注进去就不管了** ✗ ——
+       *      它是 `page.addInitScript` 写进 `shugao.teacher.v1` 的，而 initScript **每次整页导航都生效**，
+       *      于是后面几节（S42 早上欢迎弹窗 / S46 今天完成）读到的是被污染的数据 ⇒
+       *      屏上真的出现过「今日待办 **R7 夹具**：批改中那一份」，连红并让整轮中断。
+       *      ✅ 现在这一步**结束时显式撤销**（见下面 `finally` 里那段 restore）：
+       *      把夹具那份从 `assignments` 里删掉、其余字段原样写回，并断言"夹具 0 份 / 快照里没有它"。
        */
-      if (process.env.SHUGAO_R7_FORCE === '1') /* 🔴 R7 停用点 —— 见上 TODO，别当成已完成 ✗ */
       await step(SMOB, async () => {
         /*
          * ⚠️ 两档都量（**这是这条判据能不能红的关键**，别删掉 320 那一档）：
@@ -4855,8 +4860,15 @@ await withLock(async () => {
            *    —— 新增的这条 initScript **后注册、后生效**，于是这一屏加载出来就是带夹具的那份。
            */
           await page.setViewportSize({ width: WIDTHS[0].w, height: WIDTHS[0].h })
+          /*
+           * 🔴 夹具**只在带 `?r7=1` 的那几次导航注入**（第二道保险）：这条 initScript 是
+           *    `page` 级的、**活到这一节结束之后**，若不加这道门，后面任何一次整页导航
+           *    都会把夹具重新写回 `shugao.teacher.v1` ⇒ 又污染 S42 / S46。
+           *    URL 门一关，即使 `finally` 里那次清理漏了，夹具也不会再回来。
+           */
           await page.addInitScript(
             ([s, base]) => {
+              if (!new URL(location.href).searchParams.has('r7')) return
               const raw = JSON.parse(JSON.stringify(s))
               const ongoing = {
                 ...base,
@@ -4876,7 +4888,8 @@ await withLock(async () => {
             },
             [TEACHER_STATE, DEMO_ASSIGNMENTS[0]],
           )
-          await page.goto(`${BASE}/assignments`, { waitUntil: 'networkidle' })
+          /* 🔴 这一节的 goto 一律带 `?r7=1`（夹具的注入门在上面的 initScript 里） */
+          await page.goto(`${BASE}/assignments?r7=1`, { waitUntil: 'networkidle' })
           await waitPageSettled(page)
           await page.waitForTimeout(600)
           console.log('     · 夹具已注入（「批改中」那一份：3 颗按钮 + 垃圾桶）')
@@ -4890,7 +4903,7 @@ await withLock(async () => {
              *    三条**全部恒真**，看着是绿的，其实什么都没量到（正是 §三.1 那种假绿）。
              *    重载之后两档都量到 1 排 4 颗按钮。
              */
-            await page.goto(`${BASE}/assignments`, { waitUntil: 'networkidle' })
+            await page.goto(`${BASE}/assignments?r7=1`, { waitUntil: 'networkidle' })
             await waitPageSettled(page)
             await page.waitForTimeout(500)
             const probe = await probeNow()
@@ -4979,6 +4992,49 @@ await withLock(async () => {
         } finally {
           /* 还原成主流程一直在用的 414×880（后面的节按这个宽度量） */
           await page.setViewportSize({ width: 414, height: 880 })
+
+          /*
+           * 🔴🔴 **夹具清理**（R7 原来被停用的真正原因）：把 `a-r7-ongoing` 那份从
+           * `shugao.teacher.v1` 里删掉，其余字段原样写回 —— 用 `finally` 是因为
+           * **红了也必须清**（否则一条红会连累后面几节，报告里就看不出真正挂在哪一步）。
+           *
+           * ⚠️ 为什么不能只"再 `goto` 一次"：夹具那条 initScript 是**后注册的**，
+           *    每次整页导航都会重新写进去 —— 不撤销就永远在。
+           * ⚠️ 为什么以**删夹具**为主、而不是整份回写一份旧快照：本步只加了
+           *    `a-r7-ongoing` 一份，删它最精确（不会顺手把别处合法改动一起回滚）。
+           *    下面那条 `removed === 1` 就是"确实注进去过、也确实删掉了"的证据。
+           */
+          try {
+            const back = await page.evaluate(() => {
+              const cur = window.localStorage.getItem('shugao.teacher.v1')
+              if (!cur) return { ok: false, why: '快照整个不见了' }
+              let parsed
+              try {
+                parsed = JSON.parse(cur)
+              } catch {
+                return { ok: false, why: '快照不是合法 JSON' }
+              }
+              const list = parsed?.state?.assignments
+              if (!Array.isArray(list)) return { ok: false, why: '快照里没有 assignments 数组' }
+              const kept = list.filter((a) => a?.id !== 'a-r7-ongoing')
+              parsed.state.assignments = kept
+              window.localStorage.setItem('shugao.teacher.v1', JSON.stringify(parsed))
+              /* 读回来核对（§三.5：不许"不报错但就是不对"） */
+              const after = JSON.parse(window.localStorage.getItem('shugao.teacher.v1') ?? '{}')
+              const ids = (after?.state?.assignments ?? []).map((a) => a?.id)
+              return { ok: true, removed: list.length - kept.length, ids }
+            })
+            check(
+              back.ok && back.removed === 1 && !back.ids.includes('a-r7-ongoing'),
+              `${SMOB}：🔴 夹具**用完就清**（\`a-r7-ongoing\` 已从 \`shugao.teacher.v1\` 里删掉，后面几节读到的是干净数据）`,
+              back.ok
+                ? `删掉 ${back.removed} 份 · 剩下的 ids = ${back.ids.join('/')}`
+                : `清理没做成：${back.why}`,
+            )
+          } catch (e) {
+            /* 清理本身失败要记账，不能吞（§三.1：门禁自己也要能红） */
+            failures.push(`${SMOB}：夹具清理抛异常 —— ${e?.message ?? e}`)
+          }
         }
       })
 
