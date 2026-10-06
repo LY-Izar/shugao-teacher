@@ -11043,7 +11043,11 @@ await withLock(async () => {
         const D3 = await openSettings(`&rel=${REL_UP7b}`)
         check(
           dlOk(D3, ['teacher-apk', 'teacher-exe']) &&
-            D3.every((d) => d.href === 'https://example.com/update') &&
+            /* 🔴 2026-10-05：期望值跟着 DEV 夹具一起改 —— `useMaintenance.ts` 里那条占位链接
+               已经换成**白名单里**的自家站点（`isReleaseUrl()` 现在会拒陌生域名，
+               `example.com` 造出来的链接会被闸门拒掉 ⇒ 一颗可点的按钮都摆不出来）。
+               **只换期望值，判据一个字没松** ✗。 */
+            D3.every((d) => d.href === 'https://shugao-teacher.pages.dev/update') &&
             D3.map((d) => d.label).join(' · ') === '下载教师端（安卓） · 下载教师端（Windows）',
           `🔴 ${S2} ①：两个都填 ⇒ 教师端两颗都在（文案就是用户点名的那两句、href 就是面板那一档里的两条）`,
           D3.map((d) => `${d.label}=${d.href}`).join(' · '),

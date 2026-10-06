@@ -4639,18 +4639,21 @@ section('第二十节 · A12：版本更新公告（共享区逐字节相同 · 
       'v1.1.1 已发布，更新后可继续使用。',
     )
 
-    /* ②-4 点出去是哪条链接：**手机不给 exe、电脑不给 apk**（拿错了那个包装不上） */
+    /* ②-4 点出去是哪条链接：**手机不给 exe、电脑不给 apk**（拿错了那个包装不上）
+       🔴 2026-10-05：下面这些夹具域名换成**白名单里**的（`gitee.com`）—— `isReleaseUrl()`
+       现在会拒陌生域名，`https://a/...` 那种假域名会被闸门拒掉 ⇒ 期望值跟着夹具一起改。
+       **只换域名，判据一个字没松** ✗。 */
     {
       const one = {
         version: '1.1.1',
         force: false,
         note: '',
-        urlApk: 'https://a/x.apk',
-        urlExe: 'https://a/x.exe',
+        urlApk: 'https://gitee.com/x.apk',
+        urlExe: 'https://gitee.com/x.exe',
       }
-      eq("A12：platform='capacitor'（手机）→ urlApk", rel.pickReleaseUrl(one, 'capacitor'), 'https://a/x.apk')
-      eq("A12：platform='electron'（电脑）→ urlExe", rel.pickReleaseUrl(one, 'electron'), 'https://a/x.exe')
-      eq('A12：platform=null（网页端）→ urlExe || urlApk', rel.pickReleaseUrl(one, null), 'https://a/x.exe')
+      eq("A12：platform='capacitor'（手机）→ urlApk", rel.pickReleaseUrl(one, 'capacitor'), 'https://gitee.com/x.apk')
+      eq("A12：platform='electron'（电脑）→ urlExe", rel.pickReleaseUrl(one, 'electron'), 'https://gitee.com/x.exe')
+      eq('A12：platform=null（网页端）→ urlExe || urlApk', rel.pickReleaseUrl(one, null), 'https://gitee.com/x.exe')
       check(
         rel.pickReleaseUrl(one, 'capacitor') !== one.urlExe,
         '🔴 A12：手机那一端**不给 exe**（拿错了装不上）',
@@ -4700,7 +4703,7 @@ section('第二十节 · A12：版本更新公告（共享区逐字节相同 · 
           version: '1.1.1',
           force: false,
           message: '',
-          url_apk: 'https://a/x.apk',
+          url_apk: 'https://gitee.com/x.apk',
           url_exe: '',
         },
       })
@@ -4754,7 +4757,7 @@ section('第二十节 · A12：版本更新公告（共享区逐字节相同 · 
         version: '1.1.1',
         force: true,
         note: '建议更新。',
-        urlApk: 'https://a/x.apk',
+        urlApk: 'https://gitee.com/x.apk',
         urlExe: '',
       })
       eq('A12：干净的表单 → ok:true（上面那条 R4 不是"一律拒绝"）', good.ok, true)
@@ -4791,9 +4794,16 @@ section('第二十节 · A12：版本更新公告（共享区逐字节相同 · 
       const slotsOf = (t, c, dl = EMPTY_DL) => ({ teacher: t, classroom: c, read: 'ok', reason: '', downloads: dl })
       const noticeOf = (apk, exe) => ({ version: '1.1.2', force: false, note: '', urlApk: apk, urlExe: exe })
       const keys = (l) => l.map((d) => d.key)
-      const A = 'https://dl.example.com/teacher.apk'
-      const E = 'https://dl.example.com/teacher.exe'
-      const C = 'https://dl.example.com/classroom.exe'
+      /*
+       * 🔴 2026-10-05：夹具域名换成**白名单里**的（`RELEASE_URL_HOSTS`：`gitee.com` / `github.com` /
+       *    `objects.githubusercontent.com` / `shugao-teacher.pages.dev`；**主机名逐字相等、不认子域**）。
+       *    为什么必须换：`isReleaseUrl()` 现在会拒陌生域名，而 `dl.example.com` / `a` 这种假域名
+       *    会被闸门直接拒掉 ⇒ 三颗按钮**一颗都摆不出来**、`validateReleaseForm` 也判 false
+       *    （判据当场红 —— 那是**夹具过期**，不是产品坏了）。**只换域名，判据一个字没松** ✗。
+       */
+      const A = 'https://gitee.com/teacher.apk'
+      const E = 'https://gitee.com/teacher.exe'
+      const C = 'https://gitee.com/classroom.exe'
 
       /* ---- 四种组合逐个（"没填就不出现"那一条） ---- */
       eqSet('🔴 A12：教师端**只填了安卓**那个地址 ⇒ 只有「下载教师端（安卓）」那一颗', keys(rel.releaseDownloads(slotsOf(noticeOf(A, ''), null, downloadsOf(A, '')))), ['teacher-apk'])
@@ -4930,7 +4940,7 @@ section('第二十节 · A12：版本更新公告（共享区逐字节相同 · 
          ⚠️ 所以"撤下 ⇒ 收起"这句话现在**只对公告那一层成立**，对按钮那一层是**错的**。
        ------------------------------------------------------------------ */
     {
-      const row = { enabled: false, version: '1.1.2', force: false, message: '', url_apk: 'https://a/x.apk', url_exe: 'https://a/x.exe' }
+      const row = { enabled: false, version: '1.1.2', force: false, message: '', url_apk: 'https://gitee.com/x.apk', url_exe: 'https://gitee.com/x.exe' }
       /** 🔴 `keys` 是上面那一块的**块级**变量 —— 这里自己再定义一份（别跨块引用） */
       const keys = (l) => l.map((d) => d.key)
       /** 两端地址那一层（**不看 `enabled`**）：与公告那一层各自独立 */
@@ -4956,7 +4966,7 @@ section('第二十节 · A12：版本更新公告（共享区逐字节相同 · 
       eq(
         '🔴 A12：而且两颗绑的就是库里存着的那两列（撤下只写 `enabled`，地址留在库里当下次预填）',
         rel.releaseDownloads(offSlots).map((d) => d.url).join(' · '),
-        'https://a/x.apk · https://a/x.exe',
+        'https://gitee.com/x.apk · https://gitee.com/x.exe',
       )
 
       /* 🧪 反向对照 C（**期望值变了的那一条**）：
@@ -8803,7 +8813,16 @@ section('第二十七节 · A22：到点提醒交给系统排程（桥接层 / �
       shellGray = true
       check(true, '自证占位（普通 check）', '灰')
       checkUngrayed(true, '自证占位（checkUngrayed）', '判')
-      probeOK = grayed - g0 === 1 && passed + failures.length - p0 === 1
+      /*
+       * 🔴 2026-10-05（修一个公式隐患，本轮发现）：原来写的是
+       *    `passed + failures.length - p0 === 1` —— 把**绝对**的 `failures.length` 掺进了增量里
+       *    ⇒ 只要它**前面有任何一条红**（`failures.length > 0`），这个差就恒 ≠ 1
+       *    ⇒ 这条自证**被别人的红牵连**成假红（实测三档：前 0 红⇒绿 · 前 1 红⇒红 · 前 16 红⇒红）。
+       *    ⇒ 基线上把**开始时的红数一起减掉**：`- (p0 + f0)`。
+       *    改完三档：前 0 红⇒**绿** · 前 1 红⇒**绿**（不再被牵连）· **真增量 ≠ 1**（这个口没绕过
+       *    灰档 / 没真判）⇒ 仍**当场红**。
+       */
+      probeOK = grayed - g0 === 1 && passed + failures.length - (p0 + f0) === 1
     } finally {
       console.log = realLog
       shellGray = was
