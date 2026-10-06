@@ -673,7 +673,34 @@ export async function onRequestPost(context: {
   if (action === 'list') {
     const dir = await loadDirectory(env)
     if ('error' in dir) return json({ status: 'error', message: dir.error }, 502)
-    return json({ status: 'ok', canManage: true, ...dir })
+    /*
+     * 🔴 2026-10-14（安全收紧第四批，`schema.sql` §44）**服务端那一层**：
+     *    **非超管的读者**（教务处 / 办公室主任）在这一份目录里**看不到超管那个人** ——
+     *    连 `id` 都不给（UUID 也是"超管账号的信息"，`rls-checks` 第四十四节里有实测）。
+     *
+     *    用户原话：「在其他老师处读取不到超管的任何信息，就是在其他人那里根本看不见超管有账号」。
+     *
+     *  🔴 为什么数据层之外还要这一层（本仓铁律"能上数据层的上数据层，服务端再补一层"）：
+     *    `loadDirectory` 走的是 **service_role**（它绕过 RLS，§43 那段注释的原话），
+     *    所以 §44 那三条 restrictive 策略**拦不住这一条路径** ——
+     *    也就是说：**没有这一段，教务处与办公室主任照样能把超管的 id / 姓名 / 身份读走**。
+     *
+     *    ⚠️ 这是"双重防线"，不是"重复判断"：策略管直连 PostgREST 的读者，
+     *       这一段管经这个接口的读者；两边的判据都只有一条 —— `is_super_admin()`。
+     *    ⚠️ `roles` 里那一条 `role: 'super'` 也要摘掉：光摘人、留下身份行，
+     *       "他是超管"照样读得出来（§44.2 在数据层做的是同一件事）。
+     *    ⚠️ 超管自己（`isSuper` = true）一个字都不变：`teachable` 那一位仍由服务端给，
+     *       只是他本来就在自己那一份名单里（"教师管理"那一页他管的就是这些人）。
+     */
+    const isSuper = (await rpcBool(env, me.token, 'is_super_admin')) === true
+    if (isSuper) return json({ status: 'ok', canManage: true, ...dir })
+    const visible = dir.teachers.filter((t) => !t.roles.some((r) => r.role === 'super'))
+    return json({
+      status: 'ok',
+      canManage: true,
+      ...dir,
+      teachers: visible.map((t) => ({ ...t, roles: t.roles.filter((r) => r.role !== 'super') })),
+    })
   }
 
   /* ---------------- create：建号（学科必须带上） ---------------- */

@@ -378,6 +378,22 @@ export default function ClassDetail() {
    */
   const [teacherName, setTeacherName] = useState('')
   const [teacherUnknown, setTeacherUnknown] = useState(false)
+  /*
+   * 🔴 2026-10-14 新增：**名字读不到**（≠ 读不到任教关系、更 ≠ 还没分配）。
+   *
+   * 为什么要有这一位（这一轮的安全收紧，`supabase/schema.sql` §44「超管隐身」）：
+   *   上面那一行老师名是从 `listTeachers()`（`/api/teacher-account` 的 `list`）里认的，
+   *   而那个接口**只有能建号的那三档**（超管 / 教务处 / 办公室主任）进得去 ——
+   *   普通教师 / 班主任 / 年级主任调它拿的是 **403**（判据 = `can_create_teacher_accounts()`）。
+   *   也就是说：**绝大多数读者在这一页上永远认不出这位老师的名字**（这不是坏掉，是权限）。
+   *
+   *   ⚠️ 旧写法是 `setTeacherName(t?.name ?? tid)` —— 认不出时**把 UUID 打到屏上**
+   *      （当时的顾虑是"空白会被读成没分配"）。但 UUID 是**账号的身份信息**，
+   *      比空白更不能出现；而且这一位还会被当作 `authorName` 写进值日记录（见 `saveDuty`）。
+   *   ⇒ 认不出就**不印身份、也不写库**：屏上用中性标签「任课老师」（见下面那一处），
+   *     库里那一列留空（值日记录本来就不要求作者名）。
+   */
+  const [teacherNameHidden, setTeacherNameHidden] = useState(false)
   useEffect(() => {
     if (!id || !isStream) return
     let alive = true
@@ -391,14 +407,24 @@ export default function ClassDetail() {
       setTeacherUnknown(false)
       if (!rows.length) {
         setTeacherName('')
+        setTeacherNameHidden(false)
         return
       }
       const tid = rows[0].teacherId
       const r = await listTeachers()
       if (!alive) return
       const t = r.ok ? r.data.teachers.find((x) => x.id === tid) : undefined
-      /* ⚠️ 认不出名字时**显示 id 而不是空白**：空白会被读成"没分配"（这个项目最忌的形状） */
-      setTeacherName(t?.name ?? tid)
+      /*
+       * 🔴 认不出名字就不印任何身份：**不印 UUID**（`r.ok === false` 时那个 id 正是 UUID，
+       *    §44 之后普通教师 / 班主任 / 年级主任在这条路上**必然**认不出名字）。
+       *    屏上由 `teacherNameHidden` 那一支说"任课老师"（中性标签，见下面渲染处）。
+       * ⚠️ 走班班**没定老师**（`teacherId` 为空）与**认不出是谁**是两件事，分开：
+       *    前者照旧"还没分配"，后者说"一位任课老师"。空白会被读成"没分配"，
+       *    所以这里必须给一个**非空的中性词**，不能什么都不说。
+       */
+      const known = t?.name?.trim() ? t.name : ''
+      setTeacherName(known)
+      setTeacherNameHidden(known === '')
     })()
     return () => {
       alive = false
@@ -472,6 +498,7 @@ export default function ClassDetail() {
       classId: klass.id,
       onDate: dutyDate,
       studentId: dutyPick,
+      /* ⚠️ 认不出名字时**不写这一列**（见上面 `teacherNameHidden` 那段注释：它以前会被写成 UUID） */
       authorName: teacherName || undefined,
     })
     setDutyBusy(false)
@@ -1071,7 +1098,9 @@ export default function ClassDetail() {
           >
             <span style={{ color: 'var(--color-ink3)' }}>走班班老师</span>
             <span style={{ fontWeight: 600 }}>
-              {teacherUnknown ? '没读到' : teacherName || '还没分配'}
+              {teacherUnknown
+                ? '没读到'
+                : teacherName || (teacherNameHidden ? '一位任课老师' : '还没分配')}
             </span>
             {teacherUnknown ? (
               <span style={{ color: 'var(--color-ink3)' }}>（网络或权限 —— 不代表还没分配）</span>

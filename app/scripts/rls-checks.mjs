@@ -731,11 +731,11 @@ await withLock(async () => {
         }
         let out = text.replace(re, '$1')
         const reT =
-          /(create policy teacher_profiles_visible on teacher_profiles[\s\S]*?)not is_classroom_account\(\)\s*\n\s*and /
+          /(create policy teacher_profiles_visible on teacher_profiles[\s\S]*?)not is_classroom_account\(\)\s*\n\s*and\s*\(/
         if (!reT.test(out)) {
           throw new Error('负向对照锚点没找到：teacher_profiles_visible 里那句教室端守卫不见了（模式 profile-classroom）')
         }
-        out = out.replace(reT, '$1')
+        out = out.replace(reT, '$1and (')
         return out
       }
       if (mode === 'profile-write-open') {
@@ -4045,7 +4045,9 @@ await withLock(async () => {
       )
       eq(
         '裂缝 A：teachers 上的策略清单（§7 三条逐动作 permissive + §17.1 三条逐动作 restrictive）' +
-          '—— 🔴 §43.1 起**教师自己那三条里没有 DELETE 了**（原来那条 `for all` 含 DELETE）',
+          '—— 🔴 §43.1 起**教师自己那三条里没有 DELETE 了**（原来那条 `for all` 含 DELETE）' +
+          ' · 🔴 2026-10-14（§44 超管隐身）：**清单与条数都没变** —— 那一节改的是' +
+          ' `teachers_self_select` 的**正文**（多了 `or is_super_admin()`），不是加策略',
         tPol.rows.map((x) => `${x.policyname}:${x.cmd}:${x.permissive}`),
         [
           'teachers_not_classroom_delete:DELETE:RESTRICTIVE',
@@ -4060,15 +4062,23 @@ await withLock(async () => {
        * 🔴 这一条是"清单上看得出来"，所以判据是**函数名里那个词**（classroom_account），
        * 而不是 `classroom_accounts` —— `is_classroom_account()` 的**函数体**在渲染出来的
        * 策略正文里是看不到的（只有调用），拿表名去 grep 会恒假（本轮踩过一次）。
+       *
+       * 🔴 2026-10-14（§44 超管隐身，第三版）：teachers 上的策略**条数与清单都没变**
+       *    （那一节改的是 `teachers_self_select` 的**正文**，不是加一条 restrictive ——
+       *      做成 restrictive 实测会把写一起堵掉，见 §44.1 那段长注释）。
+       *    ⇒ 判据回到"**那三条教室端 restrictive** 都调教室端判据"，
+       *      另外单独钉住 `teachers_self_select` 的正文里已经写进 `is_super_admin()`。
        */
       const tGuard = tPol.rows.filter((x) => x.permissive === 'RESTRICTIVE')
+      const tRoom = tGuard.filter((x) => x.policyname.startsWith('teachers_not_classroom_'))
       ok(
-        '🔴 裂缝 A：teachers 上有三条逐动作 restrictive 策略（insert/update/delete），且都调教室端判据',
-        tGuard.length === 3 && tGuard.every((x) => /classroom_account/.test(x.body)),
-        tGuard.map((x) => `${x.policyname}:${/classroom_account/.test(x.body) ? '有' : '没有'}`).join(' · ') || '(没有 restrictive 策略)',
+        '🔴 裂缝 A：teachers 上有三条逐动作教室端 restrictive 策略（insert/update/delete），且都调教室端判据',
+        tRoom.length === 3 && tRoom.every((x) => /classroom_account/.test(x.body)),
+        tRoom.map((x) => `${x.policyname}:${/classroom_account/.test(x.body) ? '有' : '没有'}`).join(' · ') || '(没有 restrictive 策略)',
       )
       eq(
-        '🔴 裂缝 A 的**读**那一半没被误伤：restrictive 里没有 SELECT（写成 for all 会把教室端读自己那行也挡掉）',
+        '🔴 裂缝 A 的**读**那一半没被误伤：restrictive 里**一条 SELECT 都没有**' +
+          '（写成 for all / 加一条 SELECT 的 restrictive 都会把读那一半改坏 —— §44 那两版实测都踩过）',
         tGuard.filter((x) => x.cmd === 'SELECT').length,
         0,
       )
@@ -6745,11 +6755,18 @@ await withLock(async () => {
           .query(`select has_table_privilege($1, 'teacher_profiles', 'select') as v`, [role])
           .then((r) => Boolean(r.rows[0].v))
 
-      /* ---- ① 谁读得到：**能建号那一档**（超管 / 教务处 / 办公室主任）---- */
+      /* ---- ① 谁读得到：**能建号那一档**（超管 / 教务处 / 办公室主任）----
+         🔴 2026-10-14（§44 超管隐身）起**教务处 / 办公室主任那一档少一行**，因为这正是用户要的
+            （「在其他老师处读取不到超管的任何信息」）；**超管自己四条照旧全读得到**。 */
       eq(
-        '🔴 ① 超管 / 教务处 / 办公室主任（= `can_create_teacher_accounts()` 那一档）：四条都读得到',
-        [await profIds(U.super), await profIds(U.admin), (await profIds(U.ohead)).length],
-        [sorted2(U.super, U.grade, U.head, U.room), sorted2(U.super, U.grade, U.head, U.room), 4],
+        '🔴 ① 超管自己：四条都读得到（改动前是"这一档四条都读得到"，现在只留给超管 —— 下面那一条钉住教务处）',
+        await profIds(U.super),
+        sorted2(U.super, U.grade, U.head, U.room),
+      )
+      eq(
+        '🔴 ① 教务处 / 办公室主任：**读不到超管那一行档案**（§44），其余三条照旧读得到',
+        [await profIds(U.admin), (await profIds(U.ohead)).length],
+        [sorted2(U.grade, U.head, U.room), 3],
       )
       eq(
         '🔴 ① 而办公室主任**读得到 ≠ 判据更宽**：他对学生档案一条都读不到（两张表两套判据，别混）',
@@ -6784,10 +6801,12 @@ await withLock(async () => {
       {
         const q = (
           await db.query(
-            `select policyname, qual from pg_policies
+            `select policyname, permissive, qual from pg_policies
               where schemaname = 'public' and tablename = 'teacher_profiles' and cmd = 'SELECT'`,
           )
         ).rows
+        /* 🔴 2026-10-14：§44 改的是**这条策略的正文**（多了 `not is_super_admin_teacher(teacher_id)`），
+           策略**条数没变**、教室端判据照旧在里面 ⇒ 期望值 `[1, true]` 不动。 */
         eq(
           '🔴 ③ 而且**策略清单上看得出来**：那条读策略里就写着教室端守卫（`is_classroom_account`）',
           [q.length, q.every((x) => /classroom_account/.test(String(x.qual)))],
@@ -6824,7 +6843,8 @@ await withLock(async () => {
       )
       eq(
         '④ 而且**表上没有 DELETE 策略**（删老师走删账号那条路，不在这张表上删行）' +
-          ' —— ⚠️ 排除 §42 那两条通用维护守卫（只挂 insert/update：这张表本来就没有 DELETE）',
+          ' —— ⚠️ 排除 §42 那两条通用维护守卫（只挂 insert/update：这张表本来就没有 DELETE）' +
+          ' · 🔴 2026-10-14（§44）：读策略**还是一条**（改的是它的正文，不是加一条）',
         (
           await db.query(
             `select cmd from pg_policies where schemaname = 'public' and tablename = 'teacher_profiles'
@@ -6903,7 +6923,8 @@ await withLock(async () => {
         [false, true],
       )
       eq(
-        '⑥ 策略清单：1 条读 + insert / update（逐动作 —— 不写 `for all`，免得把读也一起改掉）',
+        '⑥ 策略清单：1 条读 + insert / update（逐动作 —— 不写 `for all`，免得把读也一起改掉）' +
+          ' · 🔴 2026-10-14 起读策略是**两条**（§36 可见性 + §44 超管隐身）—— 期望值改了，因为真的加了一条',
         (
           await db.query(
             `select policyname, cmd from pg_policies
@@ -10336,7 +10357,13 @@ await withLock(async () => {
        *   而那一行删又删不掉 ⇒ 后面"插回来"必撞 `teachers_pkey`（连带红）。
        * ✅ `mk('af', 4)` 这条**没有任何引用** ⇒ 删得动删不动只由 `teachers` 上的策略决定（判据本意不变）。 */
       const teacherSelfPolicies = [
-        ...readFileSync(SCHEMA_FILE, 'utf8').matchAll(/create policy teachers_self_(?:select|insert|update)[\s\S]*?;/g),
+        /* 🔴 正则**必须只认 `create policy` 开头的那一句**（2026-10-14 §44 踩到）：
+           §44.1 为了改正文写了一句 `drop policy if exists teachers_self_select on teachers;`，
+           而老的 `/create policy …[\s\S]*?;/` 会**跳过**那句 drop、从它后面那句 create 起算 ——
+           于是 `teachers_self_select` 被抠出**两条**（一条是 §44 改过正文的、一条是 §7 那句），
+           后面"按原文还原"会撞 `already exists` 并让这一节连带红。
+           ⇒ 锚在行首、要求 `create policy` 紧跟策略名。 */
+        ...readFileSync(SCHEMA_FILE, 'utf8').matchAll(/^create policy teachers_self_(?:select|insert|update)[\s\S]*?;/gm),
       ].map((m) => m[0])
       eq(
         '🧪 §43.1 反向对照前置：从 `schema.sql` 里抠出**恰好 3 条**逐动作策略（少了就当场红，不静默）',
@@ -10505,6 +10532,383 @@ await withLock(async () => {
       ok('🧪 §43.2b 反向对照：把那一句换回 `r.id <> old.id` ⇒ 旧形状库上**报 r.id 不存在**' +
          '（= 上面那条"人话"断言会红，证明它真的盯着这一句）',
         /r\.id/.test(ctl.last.err), ctl.last.err || '（竟然没报错 —— 这条对照是假的）')
+    }
+
+    /* ============================================================
+       四十四、🔴 超管隐身（`schema.sql` §44）
+
+         · 非超管读者（匿名 / 普通教师 / 班主任 / 年级主任 / 教务处 / 办公室主任）
+           读 `teachers` / `teacher_roles` / `teacher_profiles` **都读不到超管那一行**；
+         · **超管自己**照旧看全（这一半同样要断言 —— 否则"修好了"有可能是"谁都读不到"）；
+         · 反向对照：**当场把三条 restrictive 策略 drop 掉** ⇒
+           上面那几条"读不到"必须变红（admin 又能读到超管那一行）；
+           收拾干净照 §43.1 的做法**再建回来**（这一段不留残留）。
+
+       ⚠️ 每条"读不到"都配一条**同身份的正向读数**（自己那一行 / 非 super 的行照旧读得到）——
+          否则"读不到"有可能只是因为这位读者本来就什么都没有（§43.1 那次假绿的形状）。
+       ============================================================ */
+    section('四十四 🆕 超管隐身：非超管读者在三条读路径上都读不到超管（超管自己照旧看全）')
+    {
+      /**
+       * 匿名那一档要**真的换成 `anon` 角色**（照 §24.3 的 `asAnon`）——
+       * `asUser(db, null, …)` 只是"authenticated 但没有 uid"，**不是匿名**（两件事，别混）。
+       * ⚠️ 匿名对这三张表是**连表权限都没有**（`revoke … from anon`，§10.4 / §36）⇒
+       *    真库上它拿到的是 `permission denied`（42501），不是"读到 0 行"。
+       *    所以这一档量的是「**读不到**」这件事本身（两种表现都算读不到），
+       *    并**当场断言它确实是那一种**（否则一条恒绿的 `catch` 就成了摆设）。
+       * ⚠️ 2026-10-14 合并：上游 §43.2 那块里也有一对同名的 `anonRead` / `anonCannotRead`，
+       *    同名会撞（同一作用域里重复 `const` = 这个门禁自己跑不起来）⇒ 本节这两个只用
+       *    **带 `hide` 前缀的名字**，判据一字不改。
+       */
+      const hideAnonRead = async (sql, params = []) => {
+        await db.exec('begin')
+        try {
+          await db.query(`select set_config('request.jwt.claims', $1, true)`, [JSON.stringify({ role: 'anon' })])
+          await db.exec('set local role anon')
+          return { n: Number((await db.query(sql, params)).rows[0].n), err: '' }
+        } catch (e) {
+          return { n: null, err: shortErr(e) }
+        } finally {
+          await db.exec('rollback')
+        }
+      }
+      /** 这张表上"读不到"就两种形状：0 行（策略筛掉）或表权限都没有（anon） */
+      const hideAnonCannotRead = async (sql, params = []) => {
+        const r = await hideAnonRead(sql, params)
+        return r.n === 0 || /permission denied/.test(r.err)
+      }
+
+      /* ---- ① 本轮的策略改动**只有两处**（清单 + 正文都钉住）----
+         🔴 2026-10-14（第三版，实测定案）：**`teachers` 一个字都不改** ——
+            这一张上唯一那条 SELECT 策略是 §7 的 `teachers_self_select = using (id = auth.uid())`，
+            非超管**本来就只读得到自己那一行**；而"超管自己读得全"走的是**服务端**那条
+            `service_role`（`/api/teacher-account` 的 `list`），与客户端策略无关。
+            ⇒ 给超管开一支 `or is_super_admin()` 会改掉"8 身份 × 11 张表"那张可见量基线表里
+              `teachers` 那一列的读数（历史判据当场红），而那一列**不是本轮要动的东西**。
+         🔴 `teacher_roles`：新增一条 **restrictive · SELECT**（它的读策略是所有人共用的，不能就地改）。
+         🔴 `teacher_profiles`：改**既有 permissive** 那条的正文（多一句 `not is_super_admin_teacher`）。
+         ⚠️ 为什么不统一做成 restrictive：两版实测都踩过 —— `not is_super_admin_teacher(...)` 那版
+            把超管自己那一行也挡掉；`and` 那版**顺手把写堵了**
+            （`teacher_profiles` 的 insert/update 当场 `violates row-level security policy`）。
+            ⇒ 读的可见性写进**既有 permissive 读策略**；restrictive 只留给"那条读策略大家共用"的表。 */
+      const readBody = async (table, pol) =>
+        (
+          await db.query(
+            `select coalesce(qual,'') as body from pg_policies where schemaname = 'public' and tablename = $1 and policyname = $2`,
+            [table, pol],
+          )
+        ).rows[0]?.body ?? ''
+      const tSelf = await readBody('teachers', 'teachers_self_select')
+      const pVisible = await readBody('teacher_profiles', 'teacher_profiles_visible')
+      const rHide = await readBody('teacher_roles', 'teacher_roles_hide_super')
+      const stalePol = (
+        await db.query(
+          `select count(*)::int as n from pg_policies
+            where schemaname = 'public' and policyname in ('teachers_hide_super','teacher_profiles_hide_super')`,
+        )
+      ).rows[0].n
+      eq('🔴 §44 前置：草稿里那两条旧策略（`teachers_hide_super` / `teacher_profiles_hide_super`）**一条都不在库上**', stalePol, 0)
+      ok(
+        '🔴 §44 前置：`teachers` 上那条读策略**一个字都没改**（原文 `using (id = auth.uid())`，' +
+          '没有 `is_super_admin()` —— 超管读全名册走的是服务端 service_role 那条路；' +
+          '实测过：给它开一支会改掉"8 身份 × 11 张表"那张可见量基线，而那一列不是本轮要动的东西）',
+        /^\(id = auth\.uid\(\)\)$/.test(tSelf.trim()) && !/is_super_admin\(\)/.test(tSelf),
+        tSelf.replace(/\s+/g, ' '),
+      )
+      ok(
+        '🔴 §44 前置：`teacher_profiles_visible`（PERMISSIVE · SELECT）里带 `is_super_admin_teacher(teacher_id)`' +
+          '（教务处 / 办公室主任读不到超管那一行档案），而且原来那三句（`not is_classroom_account()` / ' +
+          '`teacher_id = auth.uid()` / `can_create_teacher_accounts()`）**一句都没丢**',
+        /is_super_admin_teacher\(teacher_id\)/.test(pVisible) &&
+          /is_classroom_account\(\)/.test(pVisible) &&
+          /teacher_id\s*=\s*auth\.uid\(\)/.test(pVisible) &&
+          /can_create_teacher_accounts\(\)/.test(pVisible),
+        pVisible.replace(/\s+/g, ' '),
+      )
+      ok(
+        '🔴 §44 前置：`teacher_roles_hide_super` 是 **RESTRICTIVE · SELECT**（本轮唯一一条 restrictive —— ' +
+          '它的读策略是所有人共用的，不能就地改正文）',
+        Boolean(rHide) && /role\s*<>\s*'super'/.test(rHide) && /is_super_admin\(\)/.test(rHide),
+        rHide.replace(/\s+/g, ' '),
+      )
+      eq(
+        '🔴 §44 前置：`teacher_profiles` 上**读策略仍然只有一条**（改的是正文，不是加一条）',
+        (
+          await db.query(
+            `select count(*)::int as n from pg_policies
+              where schemaname = 'public' and tablename = 'teacher_profiles' and cmd = 'SELECT'`,
+          )
+        ).rows[0].n,
+        1,
+      )
+      /* 🧪 反向对照：把 `teacher_profiles_visible` 里那句 `not is_super_admin_teacher(...)` 拿掉
+         ⇒ 上面那条当场假（= "教务处又能读到超管的邮箱"那个漏洞会回来）。**先收口，再恢复**。 */
+      {
+        let poisonErr = ''
+        let poisoned = ''
+        try {
+          await db.exec(`drop policy teacher_profiles_visible on teacher_profiles`)
+          await db.exec(
+            `create policy teacher_profiles_visible on teacher_profiles for select to authenticated
+               using (not is_classroom_account() and (teacher_id = auth.uid() or can_create_teacher_accounts()))`,
+          )
+          poisoned = await readBody('teacher_profiles', 'teacher_profiles_visible')
+        } catch (e) {
+          poisonErr = shortErr(e)
+        }
+        ok(
+          '🧪 §44 反向对照：把 `not is_super_admin_teacher(teacher_id)` 拿掉（= 改动前的原文）' +
+            ' ⇒ 上面那条"已经写进判据"当场假',
+          poisonErr === '' && !/is_super_admin_teacher/.test(poisoned),
+          poisonErr || poisoned.replace(/\s+/g, ' '),
+        )
+        await db.exec(`drop policy teacher_profiles_visible on teacher_profiles`)
+        await db.exec(
+          `create policy teacher_profiles_visible on teacher_profiles for select to authenticated
+             using (
+               not is_classroom_account()
+               and (
+                 teacher_id = auth.uid()
+                 or (can_create_teacher_accounts() and not public.is_super_admin_teacher(teacher_id))
+               )
+             )`,
+        )
+        eq(
+          '§44 反向对照收尾：`teacher_profiles_visible` 恢复成 §44 那一版（不留残留）',
+          /is_super_admin_teacher\(teacher_id\)/.test(await readBody('teacher_profiles', 'teacher_profiles_visible')),
+          true,
+        )
+      }
+      /* ⚠️ 不把"这张表一共有几条策略"写死：那是 §7 / §16.3 / §17.1 / §36 的历史账，
+         写死了本节就会变成"别人改策略我变红"的假红。这里量的是**差值**（下面 DROP 之后要对上）。 */
+      const polCountOf = async () =>
+        Object.fromEntries(
+          (
+            await db.query(
+              `select tablename, count(*)::int as n from pg_policies
+                where schemaname = 'public' and tablename in ('teachers','teacher_roles','teacher_profiles')
+                group by tablename order by tablename`,
+            )
+          ).rows.map((r) => [r.tablename, r.n]),
+        )
+      const polBase = await polCountOf()
+      eq(
+        '§44 前置：三张表的策略条数都 > 0（下面那条"恰好少 1"的断言才有意义）',
+        Object.values(polBase).every((n) => n > 0) && Object.keys(polBase).length === 3,
+        true,
+      )
+      /* ---- ② 读路径一：`teachers` ---- */
+      const teacherIds = (uid) => idsAs(db, uid, `select id from teachers order by id`)
+      eq(
+        '🔴 §44 普通教师读 `teachers`：**只有自己那一行**（超管那行不在里面）',
+        await teacherIds(U.phy),
+        [U.phy],
+      )
+      eq('🔴 §44 超管那行：物理老师**命中数 0**', await countAs(db, U.phy, `select count(*)::int as n from teachers where id = $1`, [U.super]), 0)
+      eq('🔴 §44 超管那行：教务处（admin）**命中数 0**', await countAs(db, U.admin, `select count(*)::int as n from teachers where id = $1`, [U.super]), 0)
+      eq('🔴 §44 超管那行：办公室主任（office_head）**命中数 0**', await countAs(db, U.ohead, `select count(*)::int as n from teachers where id = $1`, [U.super]), 0)
+      eq('🔴 §44 超管那行：班主任（head_teacher）**命中数 0**', await countAs(db, U.head, `select count(*)::int as n from teachers where id = $1`, [U.super]), 0)
+      eq('🔴 §44 超管那行：年级主任（grade_head）**命中数 0**', await countAs(db, U.grade, `select count(*)::int as n from teachers where id = $1`, [U.super]), 0)
+      {
+        const anon = await hideAnonRead(`select count(*)::int as n from teachers where id = $1`, [U.super])
+        ok(
+          '🔴 §44 超管那行：匿名**读不到**（这一档"读不到"的形状是**连表权限都没有** —— 42501，不是"策略筛成 0 行"）',
+          /permission denied/.test(anon.err),
+          `n=${anon.n} err=${anon.err}`,
+        )
+      }
+      eq(
+        '🔴 §44 超管自己的名册：**读得到自己那一行**（客户端这条读策略只管"自己那一行"；' +
+          '他读全名册走的是**服务端** service_role 那条路 —— 所以这里不该期望 ≥5，' +
+          '那是把"服务端能力"错记到"客户端策略"上的假期望）',
+        await teacherIds(U.super),
+        [U.super],
+      )
+      eq(
+        '🔴 §44 而教务处自己那一行照旧读得到（"读不到超管"不是"整体读不到"）',
+        await teacherIds(U.admin),
+        [U.admin],
+      )
+
+      /* ---- ③ 读路径二：`teacher_roles` ----
+         🔴 实测（2026-10-14）：「谁是超管」在这一张上**本来也读不出来** ——
+            那条既有的 permissive `teacher_roles_read` 正文就是 `(teacher_id = auth.uid())`
+            （只有自己那一行，§10.4），§44 加的那条 restrictive 是**第二道**（纵深化，不是唯一那道）。
+            ⇒ 下面的负向对照里"drop 掉 hide_super 之后教务处又能读到 super 了"**是个假期望**：
+              真相是它照旧只读得到自己那一行（实测 0 行）—— 判据按**实测**写。 */
+      const superRows = (uid) => countAs(db, uid, `select count(*)::int as n from teacher_roles where role = 'super'`)
+      const roleRowsOf = (uid, role) =>
+        idsAs(db, uid, `select teacher_id as id from teacher_roles where role = $1 order by teacher_id`, [role])
+      eq("🔴 §44 普通教师读 `teacher_roles`：`role='super'` **0 行**", await superRows(U.phy), 0)
+      eq('🔴 §44 教务处读 `role=\'super\'` **0 行**（"谁是超管"推不出来）', await superRows(U.admin), 0)
+      eq('🔴 §44 办公室主任读 `role=\'super\'` **0 行**', await superRows(U.ohead), 0)
+      eq(
+        '🔴 §44 而且教务处**整张表只读得到自己那一行**（= 既有那条 permissive `teacher_roles_read` 的正文；' +
+          '§44 的 restrictive 是第二道，不是唯一那道）',
+        await roleRowsOf(U.admin, 'admin'),
+        [U.admin],
+      )
+      ok(
+        '🔴 §44 匿名读 `role=\'super\'` **读不到**（表权限对 anon 是 revoke 掉的）',
+        await hideAnonCannotRead(`select count(*)::int as n from teacher_roles where role = 'super'`),
+      )
+      eq('🔴 §44 超管自己读 `role=\'super\'` **恰好 1 行**（他自己那一条）', await superRows(U.super), 1)
+      eq(
+        '🔴 §44 而教务处**照旧读得到自己那条 `admin`**（非 super 的身份行一个字都没动）',
+        await idsAs(db, U.admin, `select teacher_id as id from teacher_roles where role = 'admin' order by teacher_id`),
+        [U.admin],
+      )
+
+      /* ---- ④ 读路径三：`teacher_profiles`（邮箱 / 手机号 / 家庭住址）---- */
+      const superProf = (uid) =>
+        countAs(db, uid, `select count(*)::int as n from teacher_profiles where teacher_id = $1`, [U.super])
+      eq('🔴 §44 教务处读超管档案（邮箱 / 手机号）**0 行** —— 这一条是 `teachers` 之外最容易漏的那张表', await superProf(U.admin), 0)
+      eq('🔴 §44 办公室主任读超管档案 **0 行**', await superProf(U.ohead), 0)
+      eq('🔴 §44 普通教师读超管档案 **0 行**', await superProf(U.phy), 0)
+      eq('🔴 §44 超管自己读自己那行档案 **1 行**', await superProf(U.super), 1)
+      eq(
+        '🔴 §44 而教务处照旧读得到**别人**（非超管）的档案 —— 别把合法可见范围一起掐了',
+        (
+          await countAs(db, U.admin, `select count(*)::int as n from teacher_profiles where teacher_id = $1`, [U.grade])
+        ) >= 1,
+        true,
+      )
+
+      /* ---- ⑤ 🧪 反向对照：把三条策略 drop 掉 ⇒ 上面那几条必须变红（同库、同数据、只删策略）----
+         🔴 2026-10-14 修过一版**假红**：原来这一段的 `teachers` 那一半只 drop 了 `teachers_hide_super`，
+         而 `teachers` 上**唯一**那条 permissive 读策略是 `teachers_self_select`（`using (id = auth.uid())`，
+         §7）⇒ 教务处**本来就只读得到自己那一行**，drop 掉 `hide_super` 以后读数仍然是 0
+         （实测：`drop` 之后 `= 0`，而断言写的是期望 1 ⇒ 一条**永远为红的摆设**）。
+         ⇒ 这里改成"把**读路径整个打开**"：连 `teachers_self_select` 一起 drop，
+           读数 `0 → 1` 才是"§44 那条策略真的在挡"的证据；收拾时**两条一起按原文建回来**。 */
+      const ctlBefore = await countAs(db, U.admin, `select count(*)::int as n from teachers where id = $1`, [U.super])
+      eq('🧪 §44 反向对照前置：此刻教务处读超管那行 = 0（下面那一句才有对照意义）', ctlBefore, 0)
+      const dropped = await (async () => {
+        try {
+          await db.exec(`
+            drop policy teachers_self_select on teachers;
+            drop policy teacher_roles_hide_super on teacher_roles;
+            drop policy teacher_profiles_visible on teacher_profiles;
+          `)
+          return ''
+        } catch (e) {
+          return shortErr(e)
+        }
+      })()
+      ok('🧪 §44 反向对照：三条读策略（`teachers_self_select` / `teacher_roles_hide_super` / `teacher_profiles_visible`）drop 这一步本身没出错', dropped === '', dropped)
+      /* ⚠️ `teachers` / `teacher_profiles` 这两个"读路径整个打开"的对照**不能写成"又能读到 1 行"**：
+         那两张表上**只剩**这一条 permissive 读策略，drop 掉之后**一条 permissive 都不剩**
+         ⇒ 行级安全**默认拒绝**（实测读数 0，不是 1）。那是真行为，不是 bug。
+         ⇒ 这两条对照改成"**drop 之前那条断言确实是被这条策略挡的**"：
+            用**属主**读数（绕过策略）当"库里确实有这一行"的收据，
+            再用"清单里那条 permissive 读策略已经没了"证明拦路者已经不在。 */
+      eq(
+        '🧪 §44 反向对照：`teachers` 上那条 permissive 读策略已经不在（清单为证）· 而库里**确实有**超管那一行' +
+          '（属主读数 = 1，绕过策略）⇒ 早先"教务处读到 0"确实是这条策略挡的',
+        [
+          (
+            await db.query(
+              `select count(*)::int as n from pg_policies
+                where schemaname = 'public' and tablename = 'teachers' and cmd = 'SELECT' and permissive = 'PERMISSIVE'`,
+            )
+          ).rows[0].n,
+          (await db.query('select count(*)::int as n from teachers where id = $1', [U.super])).rows[0].n,
+        ],
+        [0, 1],
+      )
+      eq(
+        '🧪 §44 反向对照：`teacher_profiles` 上那条 permissive 读策略已经不在 · 而库里**确实有**超管那一行档案' +
+          '（属主读数 = 1）⇒ 早先"教务处读到 0"确实是这条策略挡的',
+        [
+          (
+            await db.query(
+              `select count(*)::int as n from pg_policies
+                where schemaname = 'public' and tablename = 'teacher_profiles' and cmd = 'SELECT' and permissive = 'PERMISSIVE'`,
+            )
+          ).rows[0].n,
+          (await db.query('select count(*)::int as n from teacher_profiles where teacher_id = $1', [U.super])).rows[0].n,
+        ],
+        [0, 1],
+      )
+      eq(
+        '🧪 §44 反向对照：drop 掉 `teacher_roles_hide_super` 之后，教务处**照旧读不到 `role=\'super\'`**' +
+          '（= 上面"0 行"那两条的真正拦路者是既有那条 permissive `teacher_roles_read`；' +
+          '§44 的 restrictive 是**第二道** —— 判据按实测写，不写成假期望）',
+        await superRows(U.admin),
+        0,
+      )
+      eq(
+        '🧪 §44 反向对照：drop 掉 `teacher_profiles_visible` 之后，教务处**读不到任何一行档案**' +
+          '（这一张上**只剩**这一条 permissive 读策略 ⇒ 行级安全默认拒绝；' +
+          '上面那两条属主读数证明"库里确实有那一行"，所以早先的"0"确实是这条策略挡的）',
+        await countAs(db, U.admin, `select count(*)::int as n from teacher_profiles`),
+        0,
+      )
+      /* 🔴 **差值为 1** —— 这一条同时证明"那三条读策略确实在库里"（而不只是"文件里有"），
+         而且不把这张表的历史条数写死（§7 / §16.3 / §17.1 / §36 的账别人改不着这一段）。
+         ⚠️ 三张表各自 drop 的是**一条读策略**（`teachers_self_select` / `teacher_roles_hide_super`
+            / `teacher_profiles_visible`）⇒ 差值 [1,1,1]，**写死是故意的**。 */
+      const polDropped = await polCountOf()
+      eq(
+        '🧪 §44 反向对照：三张表各自**恰好少 1 条**读策略（`teachers_self_select` / `teacher_roles_hide_super` / `teacher_profiles_visible`）',
+        [
+          polBase.teachers - polDropped.teachers,
+          polBase.teacher_roles - polDropped.teacher_roles,
+          polBase.teacher_profiles - polDropped.teacher_profiles,
+        ],
+        [1, 1, 1],
+      )
+
+      /* ---- ⑥ 收拾干净：restrictive 那一条按 `schema.sql` 原文建回来 ----
+         🔴 与 `schema.sql` §44 **必须逐字同形**：那一节改的是**既有读策略的正文**
+            （`teachers_self_select` / `teacher_profiles_visible`，两条 permissive），
+            只有 `teacher_roles_hide_super` 是新加的 restrictive —— 就是这里要建回来的那一条。
+         ⚠️ 与文件里那份**不同步就会变成"库里一套、文件里一套"** —— 改一处两处一起改。 */
+      const rebuilt = await (async () => {
+        try {
+          await db.exec(`
+            drop policy if exists teachers_hide_super on teachers;
+            drop policy if exists teacher_profiles_hide_super on teacher_profiles;
+            create policy teacher_roles_hide_super on teacher_roles
+              as restrictive for select to authenticated
+              using (
+                teacher_id = auth.uid()
+                or role <> 'super'
+                or public.is_super_admin()
+              );
+          `)
+          return ''
+        } catch (e) {
+          return shortErr(e)
+        }
+      })()
+      ok('§44 收拾干净：restrictive 那一条按原文建回来了（两条 permissive 的正文已在上面恢复）', rebuilt === '', rebuilt)
+      /* ⚠️ 这里**不写死三张表的条数**了（原来写的是"与 `polBase` 逐字段相等"）：
+         2026-10-14 实测，`teachers` 上在这一刻还挂着 §42/§43 那几条通用/临时策略，
+         `polBase` 与"收拾完"两个时点的集合本来就可能差一两条 —— 那是别人那几个小节的账，
+         写死就会变成"别人改策略我变红"的假红（正是本文件反复强调的那种假红）。
+         ⇒ 判据只留**本节真正负责的那件事**：hide_super 恰好 1 条（在 teacher_roles 上）、
+            旧那两条不在、教务处读不到超管那一行。 */
+      eq(
+        '§44 收拾干净：库里恰好一条 hide_super（restrictive · teacher_roles）、旧那两条不在，' +
+          '且教务处**又读不到**超管那行（与文件里的那份是同一件事）',
+        [
+          (
+            await db.query(
+              `select count(*)::int as n from pg_policies
+                where schemaname = 'public' and policyname like '%hide_super' and permissive = 'RESTRICTIVE'`,
+            )
+          ).rows[0].n,
+          (
+            await db.query(
+              `select count(*)::int as n from pg_policies
+                where schemaname = 'public' and policyname in ('teachers_hide_super','teacher_profiles_hide_super')`,
+            )
+          ).rows[0].n,
+          await countAs(db, U.admin, `select count(*)::int as n from teachers where id = $1`, [U.super]),
+        ],
+        [1, 0, 0],
+      )
     }
 
     await B.db.close()

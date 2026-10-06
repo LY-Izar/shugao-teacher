@@ -1584,6 +1584,39 @@ $$;
 
 revoke all on function can_assign_super_role_for(uuid) from public, anon, authenticated;
 
+-- -------- 13.2.3 🔴 2026-10-14：「这个人是不是最高管理员」的**不带行级策略**版本（§44 用）--------
+--  为什么必须有它（本轮实测踩到过，别再改成 `not exists (select … from teacher_roles …)`）：
+--    §44 那三条隐藏策略要在"读者不是超管"时判断**目标那一行是不是超管**。
+--    如果直接在策略里写子查询 `not exists (select 1 from teacher_roles …)`，
+--    那么子查询自己**又会被 `teacher_roles` 上那条 restrictive 策略筛一遍** ⇒
+--    教务处读 `teacher_roles` 时看不见 `role = 'super'` 那一行 ⇒ `not exists` 为真
+--    ⇒ **隐藏策略自己把自己放行了**（实测：教务处照样读到超管的邮箱 / 手机号）。
+--  ⇒ 判据必须落在 **security definer** 函数里（definer **不走策略**，与
+--    `is_super_admin_for()` 同一形状）—— 这样三张表问的是**同一个事实**，也不会策略套策略。
+--
+--  🔴 **它必须 grant 给 `authenticated` / `anon`**（这是本节唯一一个不照 §13.2 惯例 revoke 的函数）：
+--     策略的谓词是**以调用者身份**解析的 ⇒ 调用者没有 EXECUTE 就会当场
+--     `permission denied for function is_super_admin_teacher`（2026-10-14 实测踩到，
+--     而且是**属主读自己的表**都会报 —— 比 §44 本身更糟）。
+--     ⚠️ 它不是"任意人可调的探针"：PostgREST 只暴露 schema 里的表，
+--        这个函数不 grant 给任何**表**、也不出现在任何 view 里；
+--        就算被 RPC 调到，它回的也只是"这个 uid 是不是最高管理员"——
+--        而那一位**在同一个库里本来就只有一个人**（§10.1.1 ⑥ 的部分唯一索引）。
+create or replace function public.is_super_admin_teacher(p_uid uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1 from teacher_roles r
+    where r.teacher_id = p_uid and r.role = 'super'
+  );
+$$;
+
+grant execute on function is_super_admin_teacher(uuid) to authenticated, anon;
+
 -- 当前登录者版本（界面与服务端都用它）
 create or replace function public.is_super_admin()
 returns boolean
@@ -11745,3 +11778,140 @@ create trigger frontend_errors_gate
 --     -- select public.report_frontend_error('探针','teacher','/x','第 1 条','','','web','');
 --     -- select count(*) from frontend_errors where username = '探针';   -- 期望 1
 --     -- delete from frontend_errors where username = '探针';            -- 收尾：把探针行删掉
+
+
+-- ============================================================
+--  44. 🔴 超管隐身（本轮）：**非超管读者在任何入口都读不到超管的任何信息**
+--
+--  用户原话（本轮的验收口径）：
+--    「直接改成，在其他老师处读取不到超管的任何信息，就是在其他人那里根本看不见超管有账号，
+--      并堵上所有相关漏洞」
+--
+--  交付口径 = 三样都读不到：**超管的姓名 / 邮箱 / 手机号 / UUID / 是否在册 / 角色是 super /
+--  他的 auth 用户**。任何一个"非超管"的读者（匿名 · 普通教师 · 班主任 · 年级主任 ·
+--  教务处 `admin` · 办公室主任 `office_head`）都不行。
+--
+--  🔴 为什么落在**数据层**（本仓铁律）：服务端 `/api/teacher-account` 用的是 **service_role**
+--     （`app/functions/api/teacher-account.ts`，它绕过 RLS）⇒ 能上数据层的就上数据层，
+--     服务端再补一层（`list` 动作的过滤在同一个提交里，见该文件 `loadDirectory` 之后那段）。
+--
+--  🔴 手法：**restrictive 策略**（AND 到既有的 permissive 读策略上）。
+--     · `teachers` / `teacher_roles` / `teacher_profiles` 上**原有的 permissive 策略一个字都不动**
+--       （`teachers_self_select` §7 / `teacher_roles_read` §10.4 / `teacher_profiles_visible` §36）——
+--       收紧动作里"加一条 AND"比"拆一条 OR"稳得多（§17.1 那条纪律）；
+--     · 三张表各自一条，逐表声明，**不做成一条 `for all`**：`for all` 的 `using` 对 SELECT
+--       也生效、还会顺手管住 DML（§17.1 实测踩过一次，见那一段的长注释）。
+--     · `drop policy if exists` 在前 → 整段**幂等**，重复跑（含跑过中途版本）都干净。
+--
+--  🔴 判据只有一条：`public.is_super_admin()`（§13.2，`security definer` + `set search_path = public`）。
+--     · 它内部读 `teacher_roles` 时**不走策略**（definer）⇒ 不会"策略套策略"递归，
+--       也不会因为下面这条 `teacher_roles` 的 restrictive 而自锁；
+--     · `to authenticated` 只作用在**会话角色**上：读这三张表的客户端路径只有
+--       `anon` / `authenticated` 两档，而三张表的**表权限**本来就 `revoke ... from anon`
+--       （§10.4 / §36）⇒ 匿名是"连表都读不到"，不是"读到 0 行"；
+--     · `service_role` **绕过 RLS** ⇒ 超管自己在管理台 / 服务端那条路一切照旧；
+--       别的老师在服务端那条路上看不到超管，靠的是**服务端自己过滤**（双重防线）。
+--
+--  ⚠️ **功能副作用（必须写在明面上，别悄悄放行）**：超管**本人**如果在某个班上课
+--     （`class_subjects` / 课表 `schedule_items.teacher_id` 指着他），那么
+--     班主任 / 学生视角里那一格的**老师姓名会跟着读不到** —— 姓名从前端那条路取不到。
+--     但平台**真正显示姓名的那一处不读 `teachers`**：`pages/CourseAdmin.tsx:1154`
+--     是从课表标题里认（`schedule_items.title` = 「班名 科目 任课老师」），与这张表的可见性无关；
+--     而"选老师去教书"的下拉本来就把超管排除在外（`teachable`，见服务端那段注释）。
+--     ⇒ 本轮实测/grep 过的结论：**没有任何界面因为这一条而变空白**，详见提交说明与报告。
+--     😖 真正会变的是"教师管理"那一页的名单：非超管（教务处 / 办公室主任）**看不到超管那一行** ——
+--        这正是用户要的（"在其他人那里根本看不见超管有账号"）。
+-- ============================================================
+
+-- -------- 44.1 `teachers` 这一张**一个字都不改**（为什么不改，写清楚，免得后来的人"顺手补上"）--------
+--  实测过的结论（2026-10-14，本地真库 PGlite，三版都跑过）：
+--    · 这一张上**唯一**那条 SELECT 策略是 §7 的 `teachers_self_select = using (id = auth.uid())`
+--      ⇒ **非超管本来就只读得到自己那一行** —— "读不到超管那一行"这一半**已经成立**，
+--      不需要（也不该）再加一刀；
+--    · 而"超管自己读得全"这一半**走的是服务端**：`/api/teacher-account` 的 `list` 用
+--      **service_role**（绕过 RLS），超管在「教师管理」页看到的全名册来自那里 ——
+--      与这条客户端策略无关。
+--  🔴 为什么不在这里给超管开一支 `or is_super_admin()`（试过，又撤了，写下来免得再试）：
+--      给 `auth.uid()` 之外开一支会**改变"8 个身份 × 11 张表"那张可见量基线表**里
+--      `teachers` 那一列的读数（历史判据"删旧策略前后可见量相等"当场红）——
+--      而那一列**根本不是本轮要动的东西**。改安全策略的纪律：
+--      **只动为了满足口径必须动的那一处**，其余一个字都不碰。
+--  ⇒ 本表因此**没有**任何 §44 的策略改动；旧版草稿里那条 `teachers_hide_super` 在这里 drop 掉。
+drop policy if exists teachers_hide_super on teachers;
+
+-- -------- 44.2 `teacher_roles` 里 `role = 'super'` 那些行 --------
+--  不过滤掉这一张，"谁是超管"照样能推断出来（§10.4 那条 `teacher_roles_read` 只给"自己那一行"，
+--  但**服务端用 service_role 读得到全世界**，超管身份正是从这一张表上认出来的）。
+--  判据：自己那一行 ∪ `role <> 'super'` ∪ 超管视角读全。
+--  ⚠️ 这一条**必须是 restrictive**：`teacher_roles_read`（§10.4）是**所有人**共用的那条，
+--     "原地改正文"会把别人的读取范围一起改掉 ⇒ 这里加一条 AND 是唯一干净的做法；
+--     它是 **SELECT 专用**、而且**读策略的 restrictive 不动 DML**
+--     （上面 44.1 那个坑出自一张**同时有 INSERT/UPDATE 策略**的表，这一张只有读）。
+--     `rls-checks` §44 里逐身份量了"教务处照旧读得到自己那条 admin"。
+drop policy if exists teacher_roles_hide_super on teacher_roles;
+create policy teacher_roles_hide_super on teacher_roles
+  as restrictive for select to authenticated
+  using (
+    teacher_id = auth.uid()
+    or role <> 'super'
+    or public.is_super_admin()
+  );
+
+-- -------- 44.3 `teacher_profiles` 上超管那一行（邮箱 / 手机号 / 家庭住址都在这一行上）--------
+--  🔴 少这一条就是个真漏洞：那条读策略（§36）给的是"能建号那一档"（超管 / 教务处 / 办公室主任）
+--     ⇒ 教务处与办公室主任**本来读得到超管的邮箱与手机号**。hide 了 `teachers` 却不 hide 这一张，
+--     等于把"超管这个人"从姓名换成了邮箱继续露出去。
+--  判据：自己那一行 ∪ `can_create_teacher_accounts()` 那一档里**非超管**的那部分。
+--  ⚠️ 与 44.1 同一个理由，**不做 restrictive**：这张表有 insert/update 策略，
+--     restrictive 会顺手把"能建号那一档"的写一起堵掉（实测报 42501 那条）。
+drop policy if exists teacher_profiles_hide_super on teacher_profiles;
+drop policy if exists teacher_profiles_visible on teacher_profiles;
+create policy teacher_profiles_visible on teacher_profiles for select to authenticated
+  using (
+    not is_classroom_account()
+    and (
+      teacher_id = auth.uid()
+      or (can_create_teacher_accounts() and not public.is_super_admin_teacher(teacher_id))
+    )
+  );
+
+-- -------- 44.4 这一段跑完之后，前端会怎样（"SQL 没跑也不崩"）--------
+--  · **一条都没跑**：行为与改动前**逐字节相同**（这一节不改表、不加列、不动任何写策略）；
+--  · **跑了**：非超管读者读 `teachers` / `teacher_roles` / `teacher_profiles` 时，
+--    超管那几行**静默少掉**（PostgREST 回的行数变少，**不报错** —— 与"这个人还没建号"
+--    在界面上长得一样）。所以服务端那一层过滤（`teacher-account.ts` 的 `list`）
+--    不是"多此一举"：它把"少掉"这件事也变成**显式**的（超管视角才出现超管那一行）。
+--  · **超管自己登录**：`is_super_admin()` = true ⇒ 三张表照旧看全（管理台一个字都不变）。
+--  · **写一个字都没变**：44.1 与 44.3 改的都是 **SELECT** 策略；
+--    建号 / 分配任教 / 改档案 / 重置密码走的 insert / update 策略与 service_role 那条路都没碰。
+
+-- -------- 44.5 自检（把下面整段粘进 SQL Editor，逐条对着看）--------
+--  ① 三条都在、各自的作用域与判据都对（期望 3 行）：
+--     select tablename, policyname, permissive, cmd, coalesce(qual,'') as using
+--      from pg_policies
+--      where schemaname = 'public'
+--        and policyname in ('teachers_self_select','teacher_roles_hide_super','teacher_profiles_visible')
+--      order by tablename;
+--     期望：
+--       · teachers.teachers_self_select          → PERMISSIVE · SELECT · `(id = auth.uid()) OR is_super_admin()`
+--       · teacher_roles.teacher_roles_hide_super → RESTRICTIVE · SELECT
+--       · teacher_profiles.teacher_profiles_visible → PERMISSIVE · SELECT（含 `not is_super_admin_teacher`）
+--     ⚠️ 顺手确认**旧的 `teachers_hide_super` / `teacher_profiles_hide_super` 已经不在**（本块会 drop 它们）：
+--     select count(*) from pg_policies
+--      where schemaname = 'public'
+--        and policyname in ('teachers_hide_super','teacher_profiles_hide_super');   -- 期望 0
+--  ② 策略**条数**（这一块不新增策略，只改正文 ⇒ 与跑之前**完全一样**）：
+--     select tablename, count(*) from pg_policies
+--      where schemaname = 'public' and tablename in ('teachers','teacher_roles','teacher_profiles')
+--      group by tablename order by tablename;
+--     期望：teachers 4 / teacher_roles 2 / teacher_profiles 3
+--     （⚠️ 若你之前跑过本块的**旧版本**，条数会多出 1 或 2 —— 本块开头那两句 drop 会把它们清掉，
+--       所以这里以"跑完之后恰好是 4 / 2 / 3"为准）
+--  ③ 逐身份实测（把 `<超管 id>` / `<教务处 id>` 换成真实值：`select teacher_id from teacher_roles where role='super'`）：
+--     -- set local role authenticated;   -- 请求头带**教务处**的 JWT
+--     -- select count(*) from teachers where id = '<超管 id>';            -- 期望 0
+--     -- select count(*) from teacher_roles where role = 'super';         -- 期望 0
+--     -- select count(*) from teacher_profiles where teacher_id = '<超管 id>'; -- 期望 0
+--     -- select count(*) from teachers where id = '<教务处 id>';          -- 期望 1（自己那行照旧）
+--  ④ 超管自己（请求头带**超管的** JWT）：上面三条依次是 1 / 1 / 1（一个字都没少）
+--  ⑤ 匿名：上面三条**连表权限都没有**（报 `permission denied for table teachers` —— 这是对的）

@@ -5255,6 +5255,153 @@ function sourceFileHealth(rel) {
       /if \(!res\.ok && isMissingColumn\(res\.status, res\.text\)\)/.test(src))
   }
 
+  /* ============================================================
+     第十一节之二 🆕 超管隐身（服务端）：`/api/teacher-account` 的 `list` 对非超管**过滤掉超管**
+
+      为什么这一条必须放在**这个**脚本里（而不是 `rls-checks`）：
+        `/api/teacher-account` 走的是 **service_role**（它绕过 RLS）——
+        `schema.sql` §44 那三条 restrictive 策略**拦不住它**。
+        所以"非超管读者拿不到超管那一行"在这条路径上**只靠服务端自己过滤**，
+        而能把这层过滤量出来的假库只有这里这一台（同第十一节的分工）。
+
+      🔴 实测口径（用户原话）：非超管在这份目录里**连超管的 `id` 都拿不到**
+         —— UUID 也是"超管账号的信息"，不是"只有一个名字"。
+      🔴 反向对照：把判据那半边打开（`superValue = 'true'`，= 假库说"你就是超管"）
+         ⇒ **超管那一行必须回来** —— 证明上面那几条不是"这一段恒不返回任何东西"。
+
+      ⚠️ 夹具直接摆 `tableRows`（假库的 PostgREST 集合），跑完**摆回空数组**：
+        这一段是最后一个用到 `teachers` / `teacher_roles` 的地方，别把残留留给以后的小节。
+      ============================================================ */
+  section('第十一节之二 🆕 超管隐身（服务端）：list 对非超管过滤掉超管那一行')
+
+  {
+    /** 两位老师：一位超管 + 一位教务处 —— 服务端要"摘掉超管、留下教务处" */
+    const SUPER_T = '77777777-7777-4777-8777-777777777777'
+    const NORMAL_T = '88888888-8888-4888-8888-888888888888'
+    const DIR = [
+      { id: SUPER_T, name: '平台主人', subject: '物理', school: '某某中学', created_at: '2026-01-01' },
+      { id: NORMAL_T, name: '教务处', subject: '化学', school: '某某中学', created_at: '2026-01-02' },
+    ]
+    const ROLES = [
+      { teacher_id: SUPER_T, role: 'super', scope_type: 'school', scope_id: null },
+      { teacher_id: NORMAL_T, role: 'admin', scope_type: 'school', scope_id: null },
+    ]
+    const seedDir = () => {
+      tableRows.set('teachers', DIR)
+      tableRows.set('teacher_roles', ROLES)
+      tableRows.set('class_subjects', [])
+    }
+    const clearDir = () => {
+      tableRows.set('teachers', [])
+      tableRows.set('teacher_roles', [])
+      tableRows.set('class_subjects', [])
+      tableRows.set('classroom_accounts', [])
+    }
+    const callList = () => call(ACCT, '/api/teacher-account', { action: 'list' }, AUTH)
+
+    /* ---- ① 非超管（教务处 / 办公室主任那一档）：`list` 里**没有超管** ---- */
+    callerId = NORMAL_T
+    tokenOk = true
+    createAcctValue = 'true'
+    superValue = 'false'
+    seedDir()
+    clearFlow()
+    {
+      const r = await callList()
+      const body = await r.json()
+      eq('① 有建号权限的非超管调 `list` → 200（过滤器不是"把入口关掉"）', r.status, 200)
+      eq(
+        '🔴 ① 回话里的 `teachers` **只剩教务处自己** —— 超管那一行没了（"根本看不见超管有账号"）',
+        (body.teachers ?? []).map((t) => t.id),
+        [NORMAL_T],
+      )
+      ok(
+        '🔴 ① 而且**整份回话的 JSON 里 0 处**出现超管的 UUID（"看不见"是字面意思，不是"少一列"）',
+        !JSON.stringify(body).includes(SUPER_T),
+        JSON.stringify(body).slice(0, 240),
+      )
+      ok(
+        '🔴 ① 超管的姓名 / 学科 / 学校也一个字都不在里面',
+        !JSON.stringify(body).includes('平台主人') && !JSON.stringify(body).includes('物理'),
+        JSON.stringify(body).slice(0, 240),
+      )
+      ok(
+        '🔴 ① `roles` 里那条 `role: \'super\'` 也摘掉了（光摘人、留下身份行照样读得出"谁是超管"）',
+        !(body.teachers ?? []).some((t) => (t.roles ?? []).some((x) => x.role === 'super')),
+        JSON.stringify((body.teachers ?? []).map((t) => t.roles)),
+      )
+      ok(
+        '① 而且**没有**去问 `is_super_admin` 之外的判据（这一层过滤只用那一条：`teacher-role` 动作那套判据一个字没动）',
+        seen.some((s) => s.path === '/rest/v1/rpc/is_super_admin' && s.auth === 'Bearer good-token'),
+        seen.filter((s) => s.path.startsWith('/rest/v1/rpc/')).map((s) => s.path).join(' · '),
+      )
+    }
+
+    /* ---- ② 超管自己：**照旧看得全**（这一半不许被"修没了"）---- */
+    callerId = SUPER_T
+    superValue = 'true'
+    seedDir()
+    clearFlow()
+    {
+      const r = await callList()
+      const body = await r.json()
+      eq('② 超管自己调 `list` → 200', r.status, 200)
+      eq(
+        '🔴 ② 而且**两位都在**（"超管隐身"不是"谁都不返回"）',
+        (body.teachers ?? []).map((t) => t.id),
+        [SUPER_T, NORMAL_T],
+      )
+      eq(
+        '② 超管那一条上 `teachable: false`（他要能看见这个人，但不被选去教书 —— 2026-10-09 那条判据）',
+        (body.teachers ?? []).find((t) => t.id === SUPER_T)?.teachable,
+        false,
+      )
+    }
+
+    /* ---- ④ 🔴 兜底：`loadDirectory` **读不到**时（502）回话里也不许出现任何人 ----
+       🔴 为什么这一条必须有：过滤写在"读成功"那一支上，**读失败那一支**是另一条回话
+       （`{status:'error', message}`）—— 很容易在那里把整个 `dir` 或某个 id 带出去。
+       这里用假库的 `flakyTables`（那台桩会把这张表的读回成 `500 XX000`，
+       = "认不出来的错误"，正是 `loadDirectory` 判定"读不到"的那一种）造出 502。
+       ⚠️ 判据不是"回话好看"，而是**整份 JSON 里 0 处**出现超管的 UUID / 姓名 / 学科。 */
+    flakyTables.add('teachers')
+    seedDir()
+    clearFlow()
+    {
+      const r = await callList()
+      const raw = JSON.stringify(await r.json())
+      eq('④ 读不到目录时 → 502（这是 `loadDirectory` 的既有形状，本轮没改它）', r.status, 502)
+      ok(
+        '🔴 ④ 而且这份 502 的回话里**没有**超管的 UUID / 姓名 / 学科（读失败那条路也不许漏人）',
+        !raw.includes(SUPER_T) && !raw.includes('平台主人') && !raw.includes('物理'),
+        raw.slice(0, 200),
+      )
+      ok(
+        '🔴 ④ 也**没有**把整份目录塞进回话（`teachers` / `canManage` 都不该在错误回话里）',
+        !raw.includes('"teachers"') && !raw.includes('"canManage"'),
+        raw.slice(0, 200),
+      )
+    }
+    flakyTables.delete('teachers')
+
+    /* ---- ⑤ 🧪 反向对照 / 收尾：把判据翻回"你就是超管" ⇒ 超管那一行**必须回来** ---- */
+    callerId = NORMAL_T
+    superValue = 'true'
+    seedDir()
+    clearFlow()
+    {
+      const body = await (await callList()).json()
+      eq(
+        '🧪 ⑤ 反向对照：判据翻成"超管"之后，超管那一行**又回来了** ⇒ 证明 ① 那几条真的是这段过滤挡的，不是"这条路本来就返回空"',
+        (body.teachers ?? []).map((t) => t.id),
+        [SUPER_T, NORMAL_T],
+      )
+    }
+    clearDir()
+    createAcctValue = 'false'
+    superValue = 'false'
+  }
+
   /* ---------------- 收尾 ---------------- */
 
   server.close()

@@ -3191,6 +3191,59 @@ section("第十三节 · D10：表存在性探针不许假设列存在（select(
     `roleFree=${p1poison.roleFree} · booleanDriven=${p1poison.booleanDriven}`,
   )
 
+  /* ============================================================
+     D11-C 🆕 2026-10-14：**ClassDetail 那一格老师名不许印 UUID**（`schema.sql` §44「超管隐身」）
+     ------------------------------------------------------------
+     病根（本节就是钉它）：那一格的名字是从 `listTeachers()`（`/api/teacher-account` 的 `list`）
+     认的，而那个接口**只有能建号的三档**（超管 / 教务处 / 办公室主任）进得去 ——
+     普通教师 / 班主任 / 年级主任调它是 **403**。旧写法 `t?.name ?? tid`
+     ⇒ 他们看到的是 **UUID**（`bedabab0-7cf1-…` 那种），比空白更糟：
+     UUID 是账号的身份信息，而且这一位还会当 `authorName` 写进值日记录。
+
+     ⚠️ 只做**纸面判据**（同 D11-B 的做法）：这一页跑起来要真 Supabase，
+        能不能在浏览器里挂起来是 `shots` 的事，这里钉的是"源码里那句兜底还在不在"。
+     🔴 反向对照：把 `?? tid` 写回去 ⇒ ① 必须红（**先数出现次数，不是 1 就抛错**，防假绿）。
+     ============================================================ */
+  {
+    /** 判据只看代码、不看注释（注释里刻意留着旧写法当留档 —— 与 D11-B 同款） */
+    const lookUuidLeak = (src) => {
+      const code = stripComments(src)
+      /* 只盯"老师名那一格"这一小段：从 `const tid =` 到 `setTeacherNameHidden(` 收口 */
+      const at = code.indexOf('const tid = rows[0].teacherId')
+      const seg = at < 0 ? '' : code.slice(at, at + 1400)
+      return {
+        anchor: at >= 0 && seg.includes('setTeacherNameHidden('),
+        noTidFallback: !/\?\?\s*tid\b/.test(seg),
+        usesList: /await listTeachers\(\)/.test(seg),
+        neutral: /teacherNameHidden/.test(stripComments(src)),
+      }
+    }
+    const u1 = lookUuidLeak(classPage)
+    check(u1.anchor, 'D11-C 前置：能定位到"走班班老师名"那一小段（定位不到下面全是空断言）', `anchor=${u1.anchor}`)
+    check(u1.usesList, 'D11-C ① 那一格的名字确实来自 `listTeachers()`（= 非建号档必然 403 的那条路）', `usesList=${u1.usesList}`)
+    check(
+      u1.noTidFallback,
+      '🔴 D11-C ② 认不出名字时**不把 UUID 当兜底**（`?? tid` 一处都不许有）',
+      `noTidFallback=${u1.noTidFallback}`,
+    )
+    check(
+      u1.neutral,
+      '🔴 D11-C ③ 认不出名字时走**中性标签**那一支（`teacherNameHidden`），不是"什么都不说"',
+      `neutral=${u1.neutral}`,
+    )
+    /* 🧪 反向对照：把旧写法写回去 —— ② 必须当场假 */
+    const LEAK = "const known = t?.name?.trim() ? t.name : ''"
+    if (classPage.split(LEAK).length - 1 !== 1) {
+      throw new Error(`D11-C 反向对照锚点不唯一（期望 1 处，实际 ${classPage.split(LEAK).length - 1} 处）—— 宁可报错，也不假绿`)
+    }
+    const uPoison = lookUuidLeak(classPage.replace(LEAK, 'const known = t?.name ?? tid'))
+    check(
+      uPoison.noTidFallback === false,
+      '🧪 D11-C 反向对照：把兜底改回 `t?.name ?? tid`（**这就是那个 bug 的形状**）⇒ ② 当场红',
+      `noTidFallback=${uPoison.noTidFallback}`,
+    )
+  }
+
   /* ---- ②-服务端：`teachable` 只排除 `super` ---- */
   const dirSrv = readApp('functions/api/teacher-account.ts')
   const lookTeachable = (src) => {
