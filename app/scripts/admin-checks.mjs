@@ -1841,12 +1841,44 @@ await withLock(async () => {
       ok(
         '补〇二ⓖ §38 探得到 → 总结论不再偏低（**这次补探针要的就是这个数**）',
         /* 🆕 2026-10-02（§41 轮）：原来的 `=== 40` 是写死的末段号，schema 长到 §41 就红了。
-           改成"总结论里的末段号 == 当场解析 schema 的末段号"—— 断言的本意就是它。 */
+           改成"总结论里的末段号 == 当场解析 schema 得到的那个末段号"—— 断言的本意就是它。
+           🆕 2026-10-14（§44 轮）：**期望值必须再窄一格** ——
+             原来是"schema 的最后一段"，而 §44 的产物**全是 `create policy`**
+             （本面板按设计探不到 `pg_policies`）⇒ 它不会进 `latest`，写"最后一段"就**恒红**。
+             改成"**有可探产物（非 policy）的最高那一段**"：这既是对面板语义的准确表述，
+             又与环境无关（只读仓库里的 `schema.sql` 纯函数解析，不碰任何线上库）。
+           ⚠️ 它是**确定性**断言：干净 CI（`git archive` + `npm ci` + 无凭据）上一样绿 ——
+             因为下面的 `probeSchemaDrift()` 打的是一个**本地假库**（`admin-checks` 里的桩），
+             不是真 Supabase。 */
         (() => {
-          const lastN = parseSchemaStages(readFileSync(SCHEMA_FILE, 'utf8')).slice(-1)[0]?.n ?? 0
-          return sum.latest === lastN && new RegExp('线上库已跑到\\s*§' + lastN).test(sum.text)
+          const stages = parseSchemaStages(readFileSync(SCHEMA_FILE, 'utf8'))
+          const probeable = stages
+            .filter((s) => (s.targets ?? []).some((t) => t.kind !== 'policy'))
+            .map((s) => s.n)
+          const lastProbeable = probeable.length ? Math.max(...probeable) : 0
+          return sum.latest === lastProbeable && new RegExp('线上库已跑到\\s*§' + lastProbeable).test(sum.text)
         })(),
         sum.text,
+      )
+      /*
+       * 🧪 反向对照（2026-10-14 §44 轮补）：把"有可探产物"的**最高那一节**的格子抽掉
+       *    （`cells` 置空 ⇒ 它退化成"探不到"）⇒ 上面的 `latest` 判据**必须当场假**。
+       *    ⚠️ 它证明的是"上面那条真的盯着 `latest`"，不是恒真。
+       *    ⚠️ 目标是**当场算出来的**那一节（不写死 §43）—— 别人再加段时这一条不会跟着烂。
+       */
+      ok(
+        '🧪 补〇二ⓖ 反向对照：抽掉"有可探产物的最高那一节"的读数 ⇒ 上面那条 `latest` 判据当场假',
+        (() => {
+          const stages = parseSchemaStages(readFileSync(SCHEMA_FILE, 'utf8'))
+          const probeable = stages
+            .filter((s) => (s.targets ?? []).some((t) => t.kind !== 'policy'))
+            .map((s) => s.n)
+          const lastProbeable = probeable.length ? Math.max(...probeable) : 0
+          const poisoned = C.driftSummary(
+            r.sections.map((s) => (Number(s.stage.replace('§', '')) === lastProbeable ? { ...s, cells: [] } : s)),
+          )
+          return poisoned.latest !== lastProbeable
+        })(),
       )
       ok(
         '补〇二ⓖ "探不到"的理由**点名 `pg_policies` + 策略名字**（不是一句"探不到"就完了）',
