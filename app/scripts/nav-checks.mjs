@@ -10602,7 +10602,7 @@ section('🆕 教室端口令：班主任自己设一个（set 的源码级判�
       /\/\\s\//.test(naked) &&
       setBranch.includes('passwordProblem(password)') &&
       setBranch.includes('message: bad }, 400)'),
-    '🔴 ③ 口令规则是 **6 到 12 位 + 字母和数字都要有 + 不许有空格**（`PW_MIN = 6` / `PW_MAX = 12` / `[A-Za-z]` / `[0-9]` / `\\s`），且 `set` 分支真的过这道规则、不合规回 **400 + 人话**（不是课代表口令那条 4–12 位）',
+    '🔴 ③ 口令规则是 **6 到 12 位 + 字母和数字都要有 + 不许有空格**（`PW_MIN = 6` / `PW_MAX = 12` / `[A-Za-z]` / `[0-9]` / `\\s`），且 `set` 分支真的过这道规则、不合规回 **400 + 人话**（不是课代表口令那条 6–12 位）',
     `规则函数在 ${/function passwordProblem/.test(naked)} · 上下限 ${naked.includes('const PW_MIN = 6')}/${naked.includes('const PW_MAX = 12')} · set 分支过规则 ${setBranch.includes('passwordProblem(password)')} · 400 ${setBranch.includes('message: bad }, 400)')}`,
   )
 
