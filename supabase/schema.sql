@@ -10995,7 +10995,7 @@ create table if not exists class_rep_pins (
 );
 
 -- -------- 40.4b 课代表口令的**失败计数与锁定**（2026-10-14 安全审计补的口子）--------
---  为什么必须有它：口令只有 4~12 位（本仓的注释自己写着"4~8 位数字"），而 §40.5 原来
+--  为什么必须有它：口令只有 **6~12** 位（2026-10-14 前是 4~12；本仓的注释当年自己写着"4~8 位数字"），而 §40.5 原来
 --    **只比对哈希、失败不计数** —— 教室里那台机器（学生能碰到）可以对着
 --    `rep_set_daily_homework()` **不限次地试**：4 位 = 10^4 次就能撞开。
 --    ⇒ 这一张表记"每个班连续错了几次、锁到什么时候"。
@@ -11007,8 +11007,12 @@ create table if not exists class_rep_pins (
 --  锁定期内**连正确的口令也拒**（`reason = 'locked'`）—— 否则"锁定"对爆破没有意义。
 --
 --  ⚠️ 为什么不加"锁定期间不要继续累加"那种分支：锁定是"从最后一次失败起算 10 分钟"，
---     所以持续敲只会持续锁死这个班的口令入口。用户能从 `can_manage_class` 那一档（班主任）
---     **重新设一次口令**当场解锁；这是刻意的代价，换"10000 次可撞开"。
+--     所以持续敲只会持续锁死这个班的口令入口。**班主任重新设一次口令 = 当场解锁** ——
+--     解锁在 `set_class_rep_pin()` 里那一句 `delete from class_rep_pin_fails`（§40.5），
+--     **不是这张表的读侧自动过期**：`class_rep_pin_locked_until()` 只在时刻过期时才回 null。
+--     ⚠️ 那句 delete 是**唯一**的清锁路径（`class_rep_pin_fails` 的写入口只有
+--        `class_rep_pin_note_attempt()`：成功清零、失败累加），删了它这句注释就又变成假话。
+--     这是刻意的代价，换"10000 次可撞开"。
 --  🔴 这张表**没有任何策略、也不给客户端任何表权限**（与 §40.4 同款）：读写只走 §40.5 的
 --     安全定义函数。RLS 必须开着——§14 那条自检要求 public 下"没有一张表漏开 RLS"。
 create table if not exists class_rep_pin_fails (
@@ -11193,9 +11197,22 @@ begin
   if not public.can_manage_class(p_class_id) then
     return jsonb_build_object('ok', false, 'reason', 'forbidden');
   end if;
-  if length(v_pin) < 4 or length(v_pin) > 12 then
+  /* 🔴 长度下限 = 6（2026-10-14 从 4 提到 6）：4 位纯数字只有 10^4 种，
+     配合"教室里那台机器谁都能碰"就是可爆破的。⚠️ **不设到 8** —— 8 位是教室端大屏
+     **手输**时的体验底线（§40 那一节反复量过），这里是班主任在教师端设的，6 位够了。
+     ⚠️ 只收**新设 / 重设**这一条路：已存的 4~5 位口令不失效（哈希照旧能验），
+        要加长只能靠下一次重设 —— 前台因此要把 `reason = 'length'` 说成"至少 6 位"。 */
+  if length(v_pin) < 6 or length(v_pin) > 12 then
     return jsonb_build_object('ok', false, 'reason', 'length');
   end if;
+  /* 🔴 **重设口令 = 唯一且有效的解锁入口**（§40.4b 那句注释指的就是这一行）：
+     不清掉 `class_rep_pin_fails`，锁定期内连**刚设的新口令**都会被 `rep_set_daily_homework()`
+     的锁定闸门拒掉（那一段在比对之前，`reason = 'locked'`）⇒ 班主任"重设了却还是进不去"。
+     ⚠️ 位置在 `can_manage_class()` 与长度闸门**之后**：没权限 / 口令太短时不许顺手清锁，
+        否则任何人都能靠"拿个 3 位口令去设"把这个班的锁定无限续命 / 清掉。
+     为什么不是"只清 `locked_until` 不清 `fails`"：`fails` 留着还是 5，
+     下一次失败会立刻又锁 —— 重设口令的语义是**重新开始**。 */
+  delete from class_rep_pin_fails where class_id = p_class_id;
   insert into class_rep_pins (class_id, pin_hash, updated_at, updated_by, updated_by_name)
   values (
     p_class_id,
@@ -11219,7 +11236,9 @@ grant execute on function public.set_class_rep_pin(uuid, text) to authenticated;
 --  ⚠️ 这是唯一不经 RLS 的写每日作业的入口，所以四件事都要在这一段里钉住：
 --     ① 调用者必须是**这个班的教室端账号**（屏上那台机器）或本来就有权的老师；
 --     ② 这个班的口令**没被锁**（§40.4b：连续错满 5 次锁 10 分钟 —— 2026-10-14 补，
---        之前"不限次可试"，4 位口令 10^4 次就能撞开）；
+--        之前"不限次可试"，4 位口令 10^4 次就能撞开；正因为 4 位能撞开，
+--        同一轮把**长度下限从 4 提到 6**：现有 4~5 位的口令**不失效**（老哈希照样能验），
+--        只在**下次重设**时必须写满 6 位）；
 --     ③ 口令哈希必须对得上（§40.4 的盐口径；错了就记一次失败）；
 --     ④ 只能写**今天**（`beijing_today()`）—— 课代表不许回头改历史。
 create or replace function public.rep_set_daily_homework(

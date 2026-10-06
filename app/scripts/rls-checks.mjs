@@ -9624,22 +9624,30 @@ await withLock(async () => {
           (await B.db.query(`select pin_hash, updated_by from class_rep_pins where class_id = $1`, [C.c1])).rows[0] ?? null
         const one = async (sql, params) => (await B.db.query(sql, params)).rows[0]
 
-        /* ---- ① 长度闸门：3 位 / 13 位 ⇒ reason 'length'，而且**一行都没写进去** ---- */
+        /* ---- ① 长度闸门：3 位 / 13 位 ⇒ reason 'length'，而且**一行都没写进去** ----
+         * 🆕 2026-10-14：下限**从 4 提到 6**（4 位纯数字在教室里那台机器上可爆破）——
+         *    改了期望值的那几条（原来是 3 位 / 13 位两条）**保留原文、只加新的一条 4 位**，
+         *    并在断言文案里写明"为什么期望值是 length"：4 位曾经是合法的（改动前
+         *    `set_class_rep_pin` 只判 `< 4`，所以 `'1234'` 会被接受），现在必须被拒。 */
         await asAuth(U.head)
         rpcIs('🔴 口令 3 位 ⇒ `{ok:false, reason:"length"}`（不是抛异常、也不是写进去）',
           await callRpc(PIN_SQL, [C.c1, '123']), false, 'length')
         rpcIs('🔴 口令 13 位 ⇒ 同上（上限 12 位）',
           await callRpc(PIN_SQL, [C.c1, '1234567890123']), false, 'length')
+        /* 🆕 4 位：**改动前这一条是绿的（会被接受）**，本轮下限提到 6 之后必须变红的那条新断言。
+           ⚠️ 不做成"文本里数一次 `< 6`"——那种判据钉的是写法，这条钉的是**行为**（真的被拒）。 */
+        rpcIs('🔴 口令 4 位 ⇒ `{ok:false, reason:"length"}`（2026-10-14 下限 4 → 6：4 位纯数字只有 10^4 种，教室里那台机器谁都能碰）',
+          await callRpc(PIN_SQL, [C.c1, '1234']), false, 'length')
         await asOwner()
-        eq('越界那两次**一行都没落库**（闸门在 insert 之前 —— 表里还是空的）', await pinRow(), null)
+        eq('越界那三次**一行都没落库**（闸门在 insert 之前 —— 表里还是空的）', await pinRow(), null)
 
         /* ---- ② 正路：班主任（管得着这个班的人）设定口令 ⇒ ok，落库的是哈希 ---- */
         await asAuth(U.head)
         rpcIs('班主任（`can_manage_class(班)` 为真）设定口令 ⇒ `{ok:true}`',
-          await callRpc(PIN_SQL, [C.c1, '1234']), true, null)
+          await callRpc(PIN_SQL, [C.c1, '123456']), true, null)
         await asOwner()
         const row = await pinRow()
-        const pinText = `${C.c1}:1234`
+        const pinText = `${C.c1}:123456`
         const nodeHash = createHash('sha256').update(pinText, 'utf8').digest('hex')
         eq(
           '🔴 落库的 `pin_hash` 与 node:crypto 按 `sha256(班id + ":" + 口令)` 算的**逐字相同**（hex 小写）',
@@ -9655,7 +9663,7 @@ await withLock(async () => {
 
         /* ---- ③ 端到端：教室端那台屏（课代表）拿**对的**口令录今天那一科 ---- */
         await asAuth(U.room)
-        const rep = await callRpc(REP_SQL, [C.c1, '数学', 'math', '口令内容', '1234'])
+        const rep = await callRpc(REP_SQL, [C.c1, '数学', 'math', '口令内容', '123456'])
         rpcIs('🔴 教室端（课代表）拿对口令录"今天 · 数学" ⇒ `{ok:true}`', rep, true, null)
         const written = (await B.db.query(
           `select subject, content, source, author_id, author_name, on_date = public.beijing_today() as is_today
@@ -9675,10 +9683,10 @@ await withLock(async () => {
         /* ---- ⑤ 这条路不是敞着的：打不动这个班的人轮不到试口令；没设口令的班也录不进 ---- */
         await asAuth(U.fresh)
         rpcIs("🔴 无身份老师（不是本班教室端、也不是本班任课）⇒ reason 'forbidden'（口令对不对都轮不到他试）",
-          await callRpc(REP_SQL, [C.c1, '数学', 'math', '别人班的内容', '1234']), false, 'forbidden')
+          await callRpc(REP_SQL, [C.c1, '数学', 'math', '别人班的内容', '123456']), false, 'forbidden')
         await asAuth(U.phy)
         rpcIs("🔴 还没设过口令的班（4 班）⇒ reason 'no-pin'（任课老师那条路也走这个闸门）",
-          await callRpc(REP_SQL, [C.c2, '物理', 'physics', '4 班还没设口令', '1234']), false, 'no-pin')
+          await callRpc(REP_SQL, [C.c2, '物理', 'physics', '4 班还没设口令', '123456']), false, 'no-pin')
 
         /* ---- ⑥ §40.4/§40.6：口令哈希**客户端读不到**（这张表一个表权限都不给，读写只走那两个函数） ---- */
         await asOwner()
@@ -9710,7 +9718,7 @@ await withLock(async () => {
         /* ---- ⑧ 成功一次 ⇒ 清零（否则"昨天错两次 + 今天错三次"会莫名锁住课代表） ---- */
         await asAuth(U.room)
         rpcIs('🆕 拿对的口令录一条 ⇒ `{ok:true}`（顺带把计数清零）',
-          await callRpc(REP_SQL, [C.c1, '数学', 'math', '清零这一次', '1234']), true, null)
+          await callRpc(REP_SQL, [C.c1, '数学', 'math', '清零这一次', '123456']), true, null)
         await asOwner()
         eq('🆕 成功之后 `fails` 回到 0、锁定也撤掉',
           [Number((await failsRow())?.fails ?? -1), Boolean((await failsRow())?.locked)],
@@ -9730,7 +9738,7 @@ await withLock(async () => {
         rpcIs("🔴 第 6 次（此时已锁）⇒ `reason = 'locked'` —— 与 `bad-pin` **刻意分开**（前台要说\"等一会儿\"，不是\"口令改了\"）",
           await callRpc(REP_SQL, [C.c1, '数学', 'math', '锁定期内再试', '9999']), false, 'locked')
         rpcIs('🔴🔴 而且锁定期内**拿对的口令也拒**（否则"锁定"对爆破毫无意义）',
-          await callRpc(REP_SQL, [C.c1, '数学', 'math', '锁定期内拿对的', '1234']), false, 'locked')
+          await callRpc(REP_SQL, [C.c1, '数学', 'math', '锁定期内拿对的', '123456']), false, 'locked')
 
         await asOwner()
         eq('🆕 锁定是"从最后一次失败起算 600 秒"（阈值 5、时长 600 —— 与 §42 注释里那两个数同源）',
@@ -9743,7 +9751,7 @@ await withLock(async () => {
         await B.db.query(`update class_rep_pin_fails set locked_until = now() - interval '1 second' where class_id = $1`, [C.c1])
         await asAuth(U.room)
         rpcIs('🆕 锁定一过期、对的就对：`{ok:true}`（不会把课代表永久锁在门外）',
-          await callRpc(REP_SQL, [C.c1, '数学', 'math', '解锁后录的', '1234']), true, null)
+          await callRpc(REP_SQL, [C.c1, '数学', 'math', '解锁后录的', '123456']), true, null)
         await asOwner()
         eq('🆕 解锁那一次也把计数清零', Number((await failsRow())?.fails ?? -1), 0)
 
@@ -9755,6 +9763,46 @@ await withLock(async () => {
           [Boolean((await one(`select rowsecurity as v from pg_tables where schemaname='public' and tablename='class_rep_pin_fails'`)).v),
            Number((await one(`select count(*)::int as n from pg_policies where schemaname='public' and tablename='class_rep_pin_fails'`)).n)],
           [true, 0])
+
+        /* ============================================================
+           🆕 2026-10-14：**重设口令 = 唯一且有效的解锁入口**（`set_class_rep_pin` 里那句
+           `delete from class_rep_pin_fails where class_id = p_class_id;`）
+           ------------------------------------------------------------
+           为什么必须有这一节：`class_rep_pin_fails` 的唯一写入口是
+             `class_rep_pin_note_attempt()`（成功清零 / 失败累加），**没有任何清锁路径**；
+             而 §40.4b 的注释（`schema.sql:11010-11011`，改动前那句）写着
+             「重新设一次口令当场解锁」—— **与代码不符**（注释是错的）。
+           现在那句话由 `set_class_rep_pin()` 里那行 delete 兑现，这一节钉的就是它。
+           反向对照 = 把那行 delete 抠掉（**先数出现次数 = 1**）⇒ 这里必须红。
+           ============================================================ */
+
+        /* ---- ⑫ 先把 c1 连错 5 次顶到锁定（这一刻：口令仍是 `123456`、`locked_until` 在未来） ---- */
+        await asAuth(U.room)
+        for (let i = 1; i <= 5; i++) {
+          await callRpc(REP_SQL, [C.c1, '数学', 'math', `清锁前第${i}次错`, '9999'])
+        }
+        await asOwner()
+        ok('🆕 清锁前：连错 5 次之后 c1 **确实锁着**（`class_rep_pin_locked_until` 非 null，不是恒 null 的摆设）',
+          (await one(`select public.class_rep_pin_locked_until($1) as v`, [C.c1]))?.v != null)
+
+        /* ---- ⑬ 锁定期间班主任重设口令 ⇒ 成功，而且**当场解锁** ----
+           ⚠️ 换的是 `654321`（**不是 `1234`**）：4 位现在会被长度闸门拒 —— 那正是上面 ① 改的东西。 */
+        await asAuth(U.head)
+        rpcIs('🔴 锁定期间班主任重设口令 ⇒ `{ok:true}`（`can_manage_class` 那一档走得通）',
+          await callRpc(PIN_SQL, [C.c1, '654321']), true, null)
+        await asOwner()
+        eq('🔴🔴 重设**之前**锁着、重设**之后** `class_rep_pin_locked_until` **立刻是 null** ' +
+          '（`set_class_rep_pin` 里那句 `delete from class_rep_pin_fails` 是**全仓唯一的清锁路径** —— ' +
+          '删了它，班主任重设完还会被 §40.5 的锁定闸门拒掉，`schema.sql:11010-11011` 那句注释就又变成假话）',
+          (await one(`select public.class_rep_pin_locked_until($1) as v`, [C.c1]))?.v,
+          null)
+        eq('🔴 而且失败计数行**整行没了**（不是"只清 `locked_until`、留着 `fails = 5`" —— ' +
+          '留着的话下一次失败会立刻又锁，重设口令的语义是重新开始）',
+          (await failsRow()) ?? null,
+          null)
+        await asAuth(U.room)
+        rpcIs('🔴 解锁之后**新口令**当场能用（重设即解锁的那条链，最后一步走通）',
+          await callRpc(REP_SQL, [C.c1, '数学', 'math', '解锁后用新口令', '654321']), true, null)
       } catch (e) {
         /*
          * 🔴 这一节自己也要**能红**（`app/AGENTS.md` §三.1：异常一律记账，别让"这条没跑到"
@@ -9822,6 +9870,126 @@ await withLock(async () => {
         ok('🔴 §40.5b 的锁定时长是 600 秒：`make_interval(secs => 600)` 那一句在（恰好 1 处）',
           schemaCode.split('now() + make_interval(secs => 600)').length - 1 === 1)
       }
+    }
+
+    /* ============================================================
+       🆕 2026-10-14：**一条"天然覆盖未来"的强判据** —— `pg_proc` 问权限，不是文本匹配
+       ------------------------------------------------------------
+       为什么要单开一节、而且口径与 §39 / 二十六（A8）那套**故意不同**：
+         · 二十六 A 段那条（`ANON_EXEC_SQL`）是**同一口径的快照版**，它已经断言"anon 只调得动
+           `report_frontend_error` 一个" —— 但它是**逐名单排除式**的实现（`prosecdef` 且非触发器），
+           本节的写法是**同一条 SQL 的另一种口径**：直接问 `pg_proc` + `has_function_privilege`，
+           把"未来新加的那个 definer 函数忘了 revoke"这类**新口子**当场抓出来。
+         · 🔴 **与 §39 是两套口径**：§39 钉的是 `schema.sql` 末尾那段规则式收口的**源码文本**
+           （`revoke … on all functions` + 例外清单），本节钉的是**库里此刻的实际权限位**。
+           两套都要有：文本那套防"文件里改了、忘了跑"，这一套防"文件里没写、库里却有"。
+       ------------------------------------------------------------
+       为什么它"天然覆盖未来"：`where prosecdef and prorettype <> 'trigger'::regtype
+         and has_function_privilege('anon', oid, 'EXECUTE')` ——
+         明天谁新加一个 `security definer` 函数、忘了 `revoke from anon`，
+         **不需要改这一节**，它会自己多出一个名字 ⇒ 当场红。
+       ============================================================ */
+    section('🆕 匿名可达面（pg_proc 口径）：public 里 anon 只调得动 `report_frontend_error` 一个 · 带反向对照')
+    {
+      /**
+       * 🔴 这条 SQL 必须**逐字**是蓝队给的那一句的口径（`pg_proc` + `has_function_privilege`）——
+       *    `has_function_privilege` 会把 **PUBLIC 的默认授权**也算进去，正是"漏了 revoke"的现场。
+       *    （`prosecdef` = security definer；`prorettype <> 'trigger'` 排除触发器函数。）
+       */
+      const FUTURE_ANON_EXEC = `
+        select p.proname from pg_proc p
+         where p.prosecdef
+           and p.prorettype <> 'trigger'::regtype
+           and has_function_privilege('anon', p.oid, 'EXECUTE')
+         order by 1`
+
+      const anonNow = await B.db.query(FUTURE_ANON_EXEC)
+      eq(
+        '🔴 强判据（pg_proc 口径）：public 里 anon 调得动的 security definer 函数**恰好只有** `report_frontend_error` ' +
+          '（登录页 / 教室端 / `hydrate()` 失败这三个现场都没有会话，它是唯一**故意**给匿名的 definer 函数；' +
+          '§40 / §41 那些判据本就该 revoke ⇒ 多出一个名字就是"新函数忘了 revoke"）',
+        anonNow.rows.map((r) => r.proname),
+        ['report_frontend_error'],
+      )
+
+      /* 🧪 反向对照：**先数出现次数 = 1**，再在内存副本里删掉 §40.5 那条 revoke */
+      const stripSqlComments = (s) => s.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n]*/g, ' ')
+      const schemaCodeForAnon = stripSqlComments(RAW_SCHEMA)
+      const REVOKE_ANON = 'revoke all on function public.can_write_daily_homework(uuid, text, text) from public, anon;'
+
+      eq(
+        '🧪 反向对照的锚点：`schema.sql`（去注释后）里那条 `revoke all … can_write_daily_homework … from public, anon;` **恰好 1 处** ' +
+          '（照 `app/AGENTS.md` §三.2：不是 1 处就直接判红 —— `String.replace` 只换第一处，' +
+          '而目标串在注释里也常有一份 ⇒ 改了注释、判据纹丝不动 = 假绿）',
+        schemaCodeForAnon.split(REVOKE_ANON).length - 1,
+        1,
+      )
+
+      const mutatedAnon = schemaCodeForAnon.replace(REVOKE_ANON, ' ') /* 内存副本：文件一个字没动 */
+      eq(
+        '🧪 反向对照的"改"是真的：改过的内存副本里那句 revoke **0 处**（防"`replace` 其实没命中、原文照旧"那种假绿）',
+        mutatedAnon.split(REVOKE_ANON).length - 1,
+        0,
+      )
+
+      /* ⚠️ 上一节（口令那一段）跑完虽然 `rollback` 了，但**身份也一并滚回去**不可依赖：
+         这里显式 `reset role`，保证下面这串 DDL 是以**库属主**跑的。 */
+      await B.db.exec('reset role')
+      /*
+       * 🔴 为什么不"把改过的整份 schema 灌进库"（2026-10-14 **实测**，别重走）：
+       *    `RAW_SCHEMA` 里到处是注释，要"只少那一句"就得先 `stripSqlComments()` ——
+       *    而去注释会把 **SQL 字面量里的 `--`** 一起吃掉 ⇒ 整份灌进去报
+       *    `syntax error at or near "if"`，反向对照**根本没红成**（那次 exec 在隐式事务里，
+       *    报错即回滚：下面"复原之后又只剩一个"仍然绿，就是"库里没被弄脏"的现场证据）。
+       * ✅ 改成**语义等价**的就地改：删掉那句 revoke 的效果 = PUBLIC 保留 `create function`
+       *    的默认 EXECUTE（`has_function_privilege` 会把 PUBLIC 的授权算进去）
+       *    ⇒ 用 `grant … to public` 复现它。与"文件里少写那一句"是同一件事，
+       *      而且**只动一条语句**，不碰另外那 1100 多条。
+       */
+      let anonMutateErr = ''
+      try {
+        await B.db.exec(
+          'grant execute on function public.can_write_daily_homework(uuid, text, text) to public;',
+        )
+      } catch (e) {
+        anonMutateErr = shortErr(e)
+      }
+      ok('🧪 反向对照的就地改本身没报错（`grant … to public` 打进去了）', anonMutateErr === '', anonMutateErr || 'grant 进去了')
+
+      const anonAfter = await B.db.query(FUTURE_ANON_EXEC)
+      ok(
+        '🧪🧪 反向对照（**实测**）：撤掉那句 revoke 的作用 ⇒ 同一个口径下**多出一个** `can_write_daily_homework` ' +
+          `（它只靠 PUBLIC 的默认 EXECUTE 活着）⇒ 上面那条"恰好只有 report_frontend_error"此刻**判假**（实测名单 = ${JSON.stringify(anonAfter.rows.map((r) => r.proname))}）`,
+        anonAfter.rows.some((r) => r.proname === 'can_write_daily_homework'),
+        `就地改之后 = ${JSON.stringify(anonAfter.rows.map((r) => r.proname))}`,
+      )
+
+      /* 复原：把那一句 revoke **按 `schema.sql` 原文**打回去（幂等），权限位回到收口后的状态。
+         ⚠️ 复原的只是那一句，不是整份 schema —— "只删一句"的对照只需"只补一句"就能回到原状态。 */
+      let anonRestoreErr = ''
+      try {
+        await B.db.exec('reset role')
+        await B.db.exec(
+          'revoke all on function public.can_write_daily_homework(uuid, text, text) from public, anon;',
+        )
+      } catch (e) {
+        anonRestoreErr = shortErr(e)
+      }
+      await B.db.exec('reset role')
+      const anonRestored = await B.db.query(FUTURE_ANON_EXEC)
+      eq(
+        '🧪 反向对照的复原：把那句 revoke 打回去 ⇒ **又只剩 `report_frontend_error`**（证明上面那次变多确实是被删的那一句造成的）',
+        anonRestored.rows.map((r) => r.proname),
+        ['report_frontend_error'],
+      )
+      ok('§🆕 这一节收拾干净：复原那一步没报错（库里没留下"半复原"的状态）', anonRestoreErr === '', anonRestoreErr || 'revoke 打回去了')
+
+      eq(
+        '🔴 判据的"非空证明"：它真的在读库（此刻 anon 的可达面**不是 0** —— 那个故意的例外在）' +
+          '（若哪天有人把 `report_frontend_error` 也 revoke 掉，前面那两条会红、提醒"连该报错的那条路也断了"）',
+        anonRestored.rows.length,
+        1,
+      )
     }
 
     /* ============================================================
