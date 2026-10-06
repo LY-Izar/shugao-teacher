@@ -268,6 +268,61 @@ async function read(res: Response): Promise<Read> {
   return { ok: res.ok, status: res.status, rows, text }
 }
 
+/* ---------------- 操作留痕（`admin_audit`） ---------------- */
+
+/**
+ * 写一行操作留痕。
+ *
+ * 🔴 只给**重置密码**这类"不可逆、而且会把明文交出去"的动作用。
+ *    `teacher-delete.ts` 那条路用的是 `_lib/supa.ts` 里的同名函数；这里这一份是本文件自带的
+ *    （本文件刻意**不 import** 任何东西 —— 与 `classroom-account.ts` 同一个形状）。
+ *    ⚠️ 两次实现必须**逐字段相同**（列名 / 截断长度 / `affected` 的下限），
+ *       否则同一张表会长出两种写法。
+ * ⚠️ 它自己**绝不抛错**：留痕失败不该把一次已经成功的动作变成失败，
+ *    但也不假装成功 —— 返回值交给调用方放进回话里（与 teacher-delete 同一口径）。
+ */
+async function auditRow(
+  env: Env,
+  row: {
+    actorId: string | null
+    actorName?: string
+    action: string
+    target?: string
+    detail?: string
+    affected?: number
+  },
+): Promise<boolean> {
+  try {
+    const res = await read(
+      await sb(env, '/rest/v1/admin_audit', {
+        method: 'POST',
+        headers: { Prefer: 'return=minimal' },
+        body: JSON.stringify({
+          actor_id: row.actorId,
+          actor_name: (row.actorName ?? '').slice(0, 60),
+          action: row.action.slice(0, 60),
+          target: (row.target ?? '').slice(0, 120),
+          detail: (row.detail ?? '').slice(0, 300),
+          affected: Math.max(0, Math.trunc(row.affected ?? 0)),
+        }),
+      }),
+    )
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+/** 某位老师在 `teachers` 里的姓名（读不到就回空串 —— **不留假名字**） */
+async function nameOf(env: Env, id: string): Promise<string> {
+  try {
+    const r = await read(await sb(env, `/rest/v1/teachers?select=name&id=eq.${id}`))
+    return r.ok && r.rows.length ? String(r.rows[0].name ?? '').trim() : ''
+  } catch {
+    return ''
+  }
+}
+
 /**
  * 「**表**不在」—— 只认"表/relation 不在"本身：`42P01` / `PGRST205` /
  * 文案里限定过的 `Could not find the table` / `relation … does not exist`。
@@ -814,6 +869,65 @@ export async function onRequestPost(context: {
     if (room.ok && room.rows.length) {
       return json({ status: 'error', message: '这是教室端账号，不在这里重置' }, 400)
     }
+
+    /*
+     * 🔴 本轮（安全收紧第三批，schema.sql §43）：**目标闸** —— 这是唯一必须自己看目标身份的动作。
+     *
+     * 为什么：`mayCreate`（超管 / 教务处 / **办公室主任**）只是"能不能建号"这一档，
+     * 而 `reset` 会把**新密码的明文**交回调用者手里（`return json({ status:'ok', password })`）
+     * ⇒ 少了这一道，**办公室主任 / 教务处可以把最高管理员的密码重置成自己知道的值**，
+     *   然后以超管身份登录。那已经越过"建号"这一档了。
+     *
+     * 判据仍然只有一处（数据库的 `is_super_admin()`，§13.2）—— 这里拿**调用者自己的 JWT**
+     * 问它（不让前端传身份）；目标那一半读的是**目标本人**在 `teacher_roles` 里的行。
+     * ⚠️ 读不到身份表时**不放行**（fail-closed）：这一档"猜错"的代价是超管账号被顶掉。
+     */
+    const targetRoles = await read(
+      await sb(env, `/rest/v1/teacher_roles?select=role&teacher_id=eq.${teacherId}`),
+    )
+    if (!targetRoles.ok) {
+      return json(
+        {
+          status: 'error',
+          message: isMissing(targetRoles) ? NEED_STAGE10 : '读不到这位老师的身份，先不重置',
+          detail: targetRoles.text.slice(0, 200),
+        },
+        502,
+      )
+    }
+    const targetIsSuper = targetRoles.rows.some((r) => String(r.role) === 'super')
+    if (targetIsSuper) {
+      const isSuper = await rpcBool(env, me.token, 'is_super_admin')
+      if (isSuper === 'missing') return json({ status: 'error', message: NEED_STAGE13 }, 503)
+      if (!isSuper) {
+        return json(
+          {
+            status: 'error',
+            message:
+              '这是最高管理员账号，只有最高管理员能重置它的密码。重置之后新密码在操作者手里，等于把这个账号交出去。',
+          },
+          403,
+        )
+      }
+    }
+
+    /*
+     * 🔴 **留痕**：重置**前后各一条**（`admin_audit`）。
+     *    明文密码**可以**照旧回给调用者（重置之后要交给人）—— 但必须查得到"是谁、什么时候、
+     *    给谁重置了"。这也是"口令类动作"唯一能留下的证据。
+     */
+    const targetName = await nameOf(env, teacherId)
+    const actorName = await nameOf(env, me.id)
+    const targetLabel = `${targetName || '(没有姓名)'} · ${teacherId}`
+    const auditedBefore = await auditRow(env, {
+      actorId: me.id,
+      actorName,
+      action: 'teacher.reset',
+      target: targetLabel,
+      detail: '重置前：即将给这个账号生成一个新的随机密码，旧密码下一步会立刻失效',
+      affected: 1,
+    })
+
     const password = makePassword()
     const upd = await fetch(`${baseUrl(env)}/auth/v1/admin/users/${teacherId}`, {
       method: 'PUT',
@@ -825,12 +939,32 @@ export async function onRequestPost(context: {
       body: JSON.stringify({ password }),
     })
     if (!upd.ok) {
+      /* 失败也是写动作（试过一次），照旧留痕 —— 否则"重置失败"在流水里看不见 */
+      const code = upd.status
+      const detail = (await upd.text()).slice(0, 200)
+      const auditedFail = await auditRow(env, {
+        actorId: me.id,
+        actorName,
+        action: 'teacher.reset',
+        target: targetLabel,
+        detail: `重置失败（GoTrue HTTP ${code}）：密码没有改，旧密码照旧可用`,
+        affected: 0,
+      })
       return json(
-        { status: 'error', message: '重置密码失败', detail: (await upd.text()).slice(0, 200) },
+        { status: 'error', message: '重置密码失败', detail, audited: auditedBefore && auditedFail },
         502,
       )
     }
-    return json({ status: 'ok', password })
+
+    const auditedAfter = await auditRow(env, {
+      actorId: me.id,
+      actorName,
+      action: 'teacher.reset',
+      target: targetLabel,
+      detail: '重置后：新密码已在本次回话里交给操作者（库里只有哈希，找不回来），旧密码已失效',
+      affected: 1,
+    })
+    return json({ status: 'ok', password, audited: auditedBefore && auditedAfter })
   }
 
   /* ---------------- 🆕 rename：改**显示姓名**（不碰登录账号） ---------------- */
@@ -1238,6 +1372,34 @@ export async function onRequestPost(context: {
             message: `数据库里有 ${have.rows.length} 个最高管理员（约束没建起来或被人手工绕过了）—— 先在 SQL Editor 里撤到只剩一个，再指派。`,
           },
           409,
+        )
+      }
+    }
+
+    /*
+     * 🔴 本轮（安全收紧第三批，schema.sql §43.2）补的**目标闸**：撤 `super` 这一档
+     *    只有最高管理员能撤。
+     *
+     * 原来唯一的保护是下面那一条，而它**只挡"自己撤自己"**（`teacherId === me.id`）——
+     * 于是**教务处能把最后一个超管撤成 0 个**：`mayAssign` 那一档含 `admin`，
+     * 而"发 super"那道闸（`mayAssignSuper`，§13.2.2）只管"发"、不管"撤"。
+     * 撤成 0 之后 `can_assign_super_role_for()` 对所有人都是 false ⇒ 界面上再无入口。
+     *
+     * 判据仍是数据库（`is_super_admin()`，§13.2），这里不另写一套规则。
+     * 数据层那一半在 `schema.sql` §43.2（`before delete or update` 触发器）——
+     * 两处都要有：这一条给的是**人话 + 403**，触发器兜的是"绕过接口直接改库 / 走 service_role"。
+     */
+    if (!on && role === 'super') {
+      const isSuper = await rpcBool(env, me.token, 'is_super_admin')
+      if (isSuper === 'missing') return json({ status: 'error', message: NEED_STAGE13 }, 503)
+      if (!isSuper) {
+        return json(
+          {
+            status: 'error',
+            message:
+              '撤最高管理员这一档只有最高管理员能做。教务处能指派班主任 / 年级主任 / 组长，但撤不了这一档。',
+          },
+          403,
         )
       }
     }
