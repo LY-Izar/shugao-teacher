@@ -112,9 +112,41 @@ export function releaseTitle(force: boolean): string {
   return force ? RELEASE_TITLE_FORCE : RELEASE_TITLE_SOFT
 }
 
-/** 链接只接受 `https://`（`javascript:` / `http:` / 空串一律不算；施工单 §六的安全口径） */
+/* ------------------------------------------------------------
+   🔴 下载域名白名单（2026-10-05 加）
+   ------------------------------------------------------------
+   为什么除 `https://` 之外还要"只认自家域名"：这条链接是从 `site_state` 读出来、
+   **原样**交给系统浏览器打开的（`fileOut.ts` 把 url 原样递给壳），而两个 exe / apk
+   都是"老师自己下载后手动安装"—— 这条链上**没有任何校验位**（没有哈希、没有签名可比）。
+   ⇒ 那一行 `site_state` 一旦被写坏（超管面板 / Cloudflare 的 service_role secret /
+      供应链），**全校老师点下去就等于把任意域名交给系统浏览器**。所以"只认自家域名"
+   只能写在**这一个判据**里 —— 服务端 R5 与客户端那颗按钮走的是同一个函数。
+
+   🔴 **`gitee.com` 必须在名单里**：现在线上发的包就在 Gitee 发行版
+      （`https://gitee.com/LY-Izar/shugao-downloads/releases/download/...`）。
+      谁把它删掉，正常更新**当场失效** —— 那比少一层校验更糟。
+   ⚠️ 口径：**主机名逐字相等**（取 `new URL(...).hostname` 再转小写）；
+      **子域一律不认**（`a.gitee.com` 不在名单里 ⇒ 拒）。名单是拿来收紧的 ——
+      以后换下载站，改这一处，别绕过它。
+   ------------------------------------------------------------ */
+export const RELEASE_URL_HOSTS = [
+  'gitee.com',
+  'github.com',
+  'objects.githubusercontent.com',
+  'shugao-teacher.pages.dev',
+] as const
+
+/** 链接只接受 `https://` **且主机名在 `RELEASE_URL_HOSTS` 里**（`javascript:` / `http:` / 陌生域名 / 空串一律不算） */
 export function isReleaseUrl(s: string): boolean {
-  return /^https:\/\/\S+$/i.test(String(s ?? '').trim())
+  const t = String(s ?? '').trim()
+  if (!/^https:\/\/\S+$/i.test(t)) return false
+  let host = ''
+  try {
+    host = new URL(t).hostname.toLowerCase()
+  } catch {
+    return false
+  }
+  return (RELEASE_URL_HOSTS as readonly string[]).includes(host)
 }
 
 /** 正文的禁词体检：命中的**第一个**词（没命中 → `null`） */

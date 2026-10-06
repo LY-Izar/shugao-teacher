@@ -5434,6 +5434,177 @@ function sourceFileHealth(rel) {
     superValue = 'false'
   }
 
+  /* ============================================================
+     🆕 附节 · 更新链接的**下载域名白名单**（`isReleaseUrl` 的第二道闸门）
+     ------------------------------------------------------------
+     为什么单独立一节：`isReleaseUrl()` 从前**只验 `https://`**，而这条链接是从
+     `site_state` 读出来、**原样**交给系统浏览器打开的（`fileOut.ts` 把 url 原样递出去），
+     两个 exe / apk 又都是"老师手动下载安装"—— 链上**没有校验位**（没有哈希可比、
+     `downloadAndInstall()` 只在 apk 那一支）。⇒ 那一行被写坏（超管面板 /
+     Cloudflare 的 service_role secret / 供应链）就是**全校**的事，
+     所以"只认自家域名"必须落在**唯一那个判据**上。
+     🔴 白名单里**必须有 `gitee.com`**（线上正在用的发行版就在那儿）：写漏它 = 正常更新失效。
+     ------------------------------------------------------------
+     ⚠️ 三态纪律：这一节读的全是**仓库里**的东西（源码 + 真模块），没有一条依赖仓库外
+        ⇒ 每条**都能红**，一条灰都不留。
+     ============================================================ */
+  {
+    const REL_SRC = readFileSync(resolvePath(APP, 'src/lib/release.ts'), 'utf8')
+
+    /** 白名单里那几项（切不出数组字面量 → `null`，**不静默切空**） */
+    const parseHosts = (text) => {
+      const m = /export const RELEASE_URL_HOSTS = \[([\s\S]*?)\] as const/.exec(text)
+      return m ? [...m[1].matchAll(/'([^']*)'/g)].map((x) => x[1]) : null
+    }
+    /** `isReleaseUrl` 的函数体：两道闸门在不在（切不出 → 两道都算没有） */
+    const gateOf = (text) => {
+      const m = /export function isReleaseUrl\(s: string\): boolean \{([\s\S]*?)\n\}/.exec(text)
+      if (!m) return { https: false, hosts: false }
+      return {
+        https: m[1].includes('https:'),
+        hosts: m[1].includes('RELEASE_URL_HOSTS') && m[1].includes('.includes('),
+      }
+    }
+
+    const HOSTS = parseHosts(REL_SRC)
+    const GATE = gateOf(REL_SRC)
+
+    section('🆕 附节 · 更新链接的下载域名白名单（`isReleaseUrl` 不止 `https://`）')
+
+    /* ---- ① 除 `https://` 之外还有域名白名单 ---- */
+    ok(
+      '🔴 ① `isReleaseUrl()` 除 `https://` 之外**还有下载域名白名单**（不是只验协议）',
+      GATE.https && GATE.hosts && Array.isArray(HOSTS) && HOSTS.length > 0,
+      `函数体里 https=${GATE.https} · 引用了白名单=${GATE.hosts} · 名单 ${HOSTS ? HOSTS.length : 0} 项`,
+    )
+
+    /* ---- ② 白名单里必须含 gitee.com（线上发行版就在那儿） ---- */
+    ok(
+      '🔴 ② 白名单里**含 `gitee.com`**（线上发的包就在 Gitee 发行版 —— 写漏它，正常更新当场失效）',
+      Array.isArray(HOSTS) && HOSTS.includes('gitee.com'),
+      `名单 = ${JSON.stringify(HOSTS)}`,
+    )
+    const MUST = ['gitee.com', 'github.com', 'objects.githubusercontent.com', 'shugao-teacher.pages.dev']
+    ok(
+      '🔴 ②b 另外三路也得在（GitHub Releases 两个域 + 自家站点）',
+      Array.isArray(HOSTS) && MUST.every((h) => HOSTS.includes(h)),
+      `缺 ${JSON.stringify(MUST.filter((h) => !(HOSTS ?? []).includes(h)))}`,
+    )
+    ok(
+      '🔴 ②c 名单里每一条都是**纯主机名**（不带 scheme / 路径 / 通配 / 端口）',
+      Array.isArray(HOSTS) && HOSTS.length >= MUST.length && HOSTS.every((h) => /^[a-z0-9.-]+$/.test(h)),
+      `名单 = ${JSON.stringify(HOSTS)}`,
+    )
+
+    /* ---- ③ 两处调用点走的是同一个函数 ---- */
+    {
+      const defs = REL_SRC.split('export function isReleaseUrl').length - 1
+      const r5 =
+        REL_SRC.split('isReleaseUrl(urlApk)').length - 1 + REL_SRC.split('isReleaseUrl(urlExe)').length - 1
+      const client = REL_SRC.split('rows.filter((r) => isReleaseUrl(r.url))').length - 1
+      ok(
+        '🔴 ③ R5 那两处（`validateReleaseForm`）与客户端那颗按钮（`releaseDownloads`）走的是**同一个** `isReleaseUrl()`，且全文件**只有这一个定义**',
+        defs === 1 && r5 === 2 && client === 1,
+        `定义 ${defs} 处 · R5 调用 ${r5} 处 · 客户端过滤 ${client} 处`,
+      )
+    }
+
+    /* ---- ④ 真模块上的行为：放行自家域名、拒掉其余一切 ---- */
+    {
+      const rel = await import(mod('src/lib/release.ts'))
+      const GOOD = [
+        'https://gitee.com/LY-Izar/shugao-downloads/releases/download/v1.1.2/ShugaoTeacher.apk',
+        'https://github.com/x/y/releases/download/v1.1.2/ShugaoTeacher.exe',
+        'https://objects.githubusercontent.com/github-production-release-asset/1/ShugaoTeacher.exe',
+        'https://shugao-teacher.pages.dev/download/ShugaoTeacher.exe',
+      ]
+      const BAD = [
+        'http://gitee.com/x/y.apk',
+        'https://evil.example.com/x.exe',
+        'https://gitee.com.evil.com/x.exe',
+        'https://a.gitee.com/x.exe',
+        'https://gitee.com@evil.com/x.exe',
+        'javascript:alert(1)',
+        '',
+      ]
+      ok(
+        '🔴 ④ 真函数：白名单里那四个域**都放行**（含 Gitee 那条线上地址）',
+        GOOD.every((u) => rel.isReleaseUrl(u) === true),
+        GOOD.map((u) => `${u.slice(0, 34)}→${rel.isReleaseUrl(u)}`).join(' · '),
+      )
+      ok(
+        '🔴 ④b 真函数：`http:` / 陌生域名 / 子域 / 冒名主机 / `javascript:` / 空串 **一律拒**',
+        BAD.every((u) => rel.isReleaseUrl(u) === false),
+        BAD.map((u) => `${JSON.stringify(u.slice(0, 34))}→${rel.isReleaseUrl(u)}`).join(' · '),
+      )
+      const poisoned = {
+        teacher: null,
+        classroom: null,
+        read: 'ok',
+        reason: '',
+        downloads: {
+          teacher: { url_apk: 'https://evil.example.com/x.apk', url_exe: 'https://gitee.com/x/y.exe' },
+          classroom: { url_apk: '', url_exe: 'https://evil.example.com/c.exe' },
+        },
+      }
+      const laid = rel.releaseDownloads(poisoned).map((d) => d.key)
+      ok(
+        '🔴 ④c 客户端那颗按钮走的是**同一个**判据：坏域名那一颗不摆，Gitee 那一颗照摆',
+        JSON.stringify(laid) === JSON.stringify(['teacher-exe']),
+        `摆了 ${JSON.stringify(laid)}`,
+      )
+      const vBad = rel.validateReleaseForm({
+        target: 'teacher',
+        enabled: true,
+        version: '1.1.2',
+        force: true,
+        note: '建议更新。',
+        urlApk: 'https://evil.example.com/x.apk',
+        urlExe: '',
+      })
+      ok(
+        '🔴 ④d `validateReleaseForm`（服务端 R5 的**同一份实现**）对坏域名判 `R5`',
+        vBad.ok === false && vBad.rule === 'R5',
+        JSON.stringify(vBad),
+      )
+      const vGood = rel.validateReleaseForm({
+        target: 'teacher',
+        enabled: true,
+        version: '1.1.2',
+        force: true,
+        note: '建议更新。',
+        urlApk: GOOD[0],
+        urlExe: '',
+      })
+      ok(
+        '🔴 ④e 而 Gitee 那条线上地址**照旧通过**（别把正常更新一起挡掉）',
+        vGood.ok === true,
+        JSON.stringify(vGood),
+      )
+    }
+
+    /* ---- ⑤ 反向对照：两条断言各自**能红**（内存副本；`mutateOnce` 先数出现次数，≠1 就抛错） ---- */
+    {
+      const noHosts = mutateOnce(
+        REL_SRC,
+        'return (RELEASE_URL_HOSTS as readonly string[]).includes(host)',
+        'return true',
+      )
+      ok(
+        '🧪 ⑤ 反向对照 ⓐ：把白名单那一段抠掉（只剩 `https://`）⇒ 上面那条①**当场红**',
+        GATE.hosts === true && gateOf(noHosts).hosts === false,
+        `原文引用白名单=${GATE.hosts} · 抠掉后=${gateOf(noHosts).hosts}`,
+      )
+      const noGitee = mutateOnce(REL_SRC, "'gitee.com',", '')
+      const hostsAfter = parseHosts(noGitee)
+      ok(
+        '🧪 ⑤ 反向对照 ⓑ：把 `gitee.com` 从白名单里删掉 ⇒ 上面那条②**当场红**',
+        (HOSTS ?? []).includes('gitee.com') === true && (hostsAfter ?? []).includes('gitee.com') === false,
+        `原文含 gitee=${(HOSTS ?? []).includes('gitee.com')} · 删掉后=${(hostsAfter ?? []).includes('gitee.com')}`,
+      )
+    }
+  }
+
   /* ---------------- 收尾 ---------------- */
 
   server.close()
