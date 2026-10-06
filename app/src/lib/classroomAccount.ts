@@ -9,8 +9,8 @@
 
    🔴 为什么没有"查看原密码"这个动作（写给后人，别再来问一次）：
    Supabase 的密码是**哈希存储**的，服务端自己也拿不回原文 ——
-   所以这件事**不是没做，是做不成**。替代方案是「重置密码」：
-   生成一串新的、**当场显示一次**，要密码就重置。
+   所以这件事**不是没做，是做不成**。替代方案是「设置新密码」那两条路
+   （**随机重置** ／ **班主任自己定一个**）：新口令**当场显示一次**，要密码就换。
    这也是为什么界面上必须写清"只显示这一次"（照教师账号那块的既有写法）。
    ============================================================ */
 
@@ -82,9 +82,21 @@ export function apiCreateClassroomAccount(classId: string): Promise<ApiResult> {
   return postApi('/api/classroom-account', { action: 'create', classId })
 }
 
-/** 重置密码（新密码只在这一回合的回话里） */
+/** 重置密码（随机生成一串新密码，只在这一回合的回话里） */
 export function apiResetClassroomPassword(classId: string): Promise<ApiResult> {
   return postApi('/api/classroom-account', { action: 'reset', classId })
+}
+
+/**
+ * 🆕 **班主任自己定一个密码**（不是随机生成的那一串）。
+ *
+ * 🔴 口令**只进 `auth.users`**（GoTrue 存哈希），业务库一个字段都不写；
+ *    规则（6–12 位、字母和数字都要有、不许有空格）由**服务端**判 ——
+ *    前端只判"两次输入一不一样"，**不另抄一份**（抄了就会走散）。
+ * ⚠️ 不要求旧口令：班主任已经登录，而旧口令原文谁也拿不到。
+ */
+export function apiSetClassroomPassword(classId: string, password: string): Promise<ApiResult> {
+  return postApi('/api/classroom-account', { action: 'set', classId, password })
 }
 
 /** 停用 / 恢复这个班的教室端 */
@@ -100,6 +112,7 @@ export function apiSetClassroomDisabled(
 
 /**
  * 界面上必须照原样写出来的一句话 —— **只有这一处**。
- * 它是"为什么看不到原密码"的答案，也是用户点「重置密码」前该知道的代价。
+ * 它是"为什么看不到原密码"的答案，也是老师动手换密码前该知道的代价
+ * （两条路都一样：随机重置 与 自己设置，新密码都只在当场显示一次）。
  */
-export const PASSWORD_SHOWN_ONCE = '密码只在生成时显示这一次，关掉就看不到了。'
+export const PASSWORD_SHOWN_ONCE = '密码只在设置时显示这一次，关掉就看不到了。'

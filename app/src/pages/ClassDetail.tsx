@@ -70,6 +70,7 @@ import {
   apiCreateClassroomAccount,
   apiResetClassroomPassword,
   apiSetClassroomDisabled,
+  apiSetClassroomPassword,
   classroomAccountMessage,
   readAccount,
   readHasAccount,
@@ -227,8 +228,18 @@ export default function ClassDetail() {
   /** 刚生成的那一串（**只有这一回合有**，重进这一页就没有了） */
   const [roomPwd, setRoomPwd] = useState('')
   const [roomBusy, setRoomBusy] = useState(false)
-  /** 重置前的二次确认浮层 */
+  /** 换密码那张浮层（**两条路二选一**：随机重置 ／ 自己设置） */
   const [roomConfirmResetOpen, setRoomConfirmResetOpen] = useState(false)
+  /**
+   * 🆕 浮层里切到「自己设置」那一档（`false` = 先给两条路选）。
+   * 口令规则（6–12 位、字母和数字都要有）由**服务端**判 —— 这里只判"两次输入一不一样"。
+   */
+  const [roomSetForm, setRoomSetForm] = useState(false)
+  /** 自己设置那一路：新口令 / 再输一遍 */
+  const [roomPw1, setRoomPw1] = useState('')
+  const [roomPw2, setRoomPw2] = useState('')
+  /** 自己设置那一路失败的原因（**摆在浮层里**，不外抛） */
+  const [roomSetErr, setRoomSetErr] = useState('')
   /** 新密码那一张浮层（关掉还能用「看新密码」再打开一次；**重进这一页就没有了**） */
   const [roomPwdOpen, setRoomPwdOpen] = useState(false)
   /** 「为什么看不到原密码」那一页（块右上角那个 ⓘ） */
@@ -1013,11 +1024,31 @@ export default function ClassDetail() {
   }
 
   /**
-   * 重置密码：**先把代价说清再动手**（旧密码立刻失效 —— 教室那台机器下次登录要用新的）。
+   * 打开 / 关掉「设置新密码」那张浮层（**两条路二选一**：随机重置 ／ 自己设置）。
+   * 关掉时把两条路上的临时输入清干净 —— 口令是明文，留在 state 里没必要。
+   */
+  const openRoomPw = () => {
+    setRoomSetForm(false)
+    setRoomSetErr('')
+    setRoomPw1('')
+    setRoomPw2('')
+    setRoomConfirmResetOpen(true)
+  }
+
+  const closeRoomPw = () => {
+    setRoomConfirmResetOpen(false)
+    setRoomSetForm(false)
+    setRoomSetErr('')
+    setRoomPw1('')
+    setRoomPw2('')
+  }
+
+  /**
+   * 随机重置：**先把代价说清再动手**（旧密码立刻失效 —— 教室那台机器下次登录要用新的）。
    * 🔴 新密码只在这一回合的回话里，**再查一次也拿不到**（库里是哈希），所以浮层上写死那句话。
    */
   const resetRoomPassword = async () => {
-    setRoomConfirmResetOpen(false)
+    closeRoomPw()
     setRoomBusy(true)
     setRoomPwd('')
     const r = await apiResetClassroomPassword(roomId)
@@ -1026,6 +1057,34 @@ export default function ClassDetail() {
     setRoomPwd(readAccount(r)?.password ?? '')
     setRoomPwdOpen(true)
     push({ text: '密码已重置', tone: 'warn', desc: '旧密码立刻失效' })
+  }
+
+  /**
+   * 🆕 **自己设一个**：班主任已经登录，所以**不要求旧口令**（旧口令原文谁也拿不到）。
+   * ⚠️ 这里只判"两次输入一不一样"；规则（6–12 位、字母和数字都要有、不许有空格）**由服务端判**
+   *    —— 前端再抄一份就会与服务端走散。服务端回的那句人话原样摆进浮层（不静默）。
+   */
+  const submitRoomPassword = async () => {
+    if (roomPw1 !== roomPw2) {
+      setRoomSetErr('两次输入的不一样，再对一遍。')
+      return
+    }
+    setRoomSetErr('')
+    setRoomBusy(true)
+    setRoomPwd('')
+    const r = await apiSetClassroomPassword(roomId, roomPw1)
+    setRoomBusy(false)
+    if (!applyRoomResult(r)) {
+      setRoomSetErr(classroomAccountMessage(r, '这次操作没成功。'))
+      return
+    }
+    setRoomPwd(readAccount(r)?.password ?? '')
+    setRoomPw1('')
+    setRoomPw2('')
+    setRoomSetForm(false)
+    setRoomConfirmResetOpen(false)
+    setRoomPwdOpen(true)
+    push({ text: '密码已设好', tone: 'ok', desc: '旧密码立刻失效' })
   }
 
   const toggleRoomDisabled = async () => {
@@ -1450,9 +1509,9 @@ export default function ClassDetail() {
                       size="sm"
                       icon={<IconRefresh size={14} />}
                       disabled={roomBusy}
-                      onClick={() => setRoomConfirmResetOpen(true)}
+                      onClick={openRoomPw}
                     >
-                      重置密码
+                      设置新密码
                     </Button>
                     <Button size="sm" variant="ghost" disabled={roomBusy} onClick={() => void toggleRoomDisabled()}>
                       {roomAccount.disabled ? '恢复使用' : '停用'}
@@ -2058,35 +2117,97 @@ export default function ClassDetail() {
         <div style={{ fontSize: 12.5, color: 'var(--color-ink2)', lineHeight: 1.85 }}>
           <p>这个班的大屏用一个账号登录，学生能碰到那台机器。</p>
           <p className="mt-2">
-            密码存进去就取不出原文了，所以这里看不到。要密码就点「重置密码」——
-            会生成一串新的、当场显示一次，旧密码立刻失效。
+            密码存进去就取不出原文了，所以这里看不到。要密码就点「设置新密码」——
+            可以自己定一个，也可以让系统随机生成一个，当场显示一次，旧密码立刻失效。
           </p>
         </div>
       </Sheet>
 
-      {/* 重置密码：**先把代价说清再动手**（它会让教室那台机器下次登录要用新密码） */}
+      {/*
+        「设置新密码」：**先把代价说清再动手**（两条路都会让教室那台机器下次登录要用新密码），
+        然后**两条路二选一** —— 「随机重置」＝服务端 `makePassword()` 生成 12 位；
+        「自己设置」＝班主任自己定一个（6 到 12 位、字母和数字都要有）。
+      */}
       <Sheet
         open={roomConfirmResetOpen}
-        onClose={() => setRoomConfirmResetOpen(false)}
-        title="重置密码"
+        onClose={closeRoomPw}
+        title="设置新密码"
         footer={
-          <div className="flex gap-2">
-            <Button block onClick={() => setRoomConfirmResetOpen(false)}>
+          roomSetForm ? (
+            <div className="flex gap-2">
+              <Button block onClick={() => { setRoomSetForm(false); setRoomSetErr('') }}>
+                返回
+              </Button>
+              <Button block variant="primary" disabled={roomBusy} onClick={() => void submitRoomPassword()}>
+                确认设置
+              </Button>
+            </div>
+          ) : (
+            <Button block onClick={closeRoomPw}>
               取消
             </Button>
-            <Button block variant="primary" disabled={roomBusy} onClick={() => void resetRoomPassword()}>
-              确认重置
-            </Button>
-          </div>
+          )
         }
       >
-        <div style={{ fontSize: 12.5, color: 'var(--color-ink2)', lineHeight: 1.85 }}>
-          <p>旧密码立刻失效，教室那台大屏下次登录要用新密码。</p>
-          <p className="mt-2">新密码只显示一次，请当场抄下来。</p>
-        </div>
+        {roomSetForm ? (
+          <div className="flex flex-col gap-4">
+            <div style={{ fontSize: 12.5, color: 'var(--color-ink2)', lineHeight: 1.85 }}>
+              <p>6 到 12 位，字母和数字都要有，不能有空格。</p>
+              <p className="mt-2">设好之后旧密码立刻失效，教室那台大屏下次登录要用新的。</p>
+            </div>
+            <label>
+              <span className="label">新密码</span>
+              <input
+                className="input"
+                type="password"
+                autoComplete="new-password"
+                value={roomPw1}
+                onChange={(e) => setRoomPw1(e.target.value)}
+              />
+            </label>
+            <label>
+              <span className="label">再输一遍</span>
+              <input
+                className="input"
+                type="password"
+                autoComplete="new-password"
+                value={roomPw2}
+                onChange={(e) => setRoomPw2(e.target.value)}
+              />
+            </label>
+            {roomSetErr ? (
+              <div style={{ fontSize: 12.5, color: 'var(--color-bad, #c0392b)', lineHeight: 1.75 }}>
+                {roomSetErr}
+              </div>
+            ) : null}
+          </div>
+        ) : (
+          <div className="flex flex-col gap-2.5">
+            <div style={{ fontSize: 12.5, color: 'var(--color-ink2)', lineHeight: 1.85 }}>
+              <p>旧密码立刻失效，教室那台大屏下次登录要用新密码。</p>
+              <p className="mt-2">{PASSWORD_SHOWN_ONCE}</p>
+            </div>
+            <Button
+              size="sm"
+              icon={<IconRefresh size={14} />}
+              disabled={roomBusy}
+              onClick={() => void resetRoomPassword()}
+            >
+              随机重置
+            </Button>
+            <Button
+              size="sm"
+              icon={<IconPencil size={14} />}
+              disabled={roomBusy}
+              onClick={() => { setRoomSetErr(''); setRoomSetForm(true) }}
+            >
+              自己设置
+            </Button>
+          </div>
+        )}
       </Sheet>
 
-      {/* 重置结果：新密码**只在这里一次**（关掉就看不到了 —— 库里存的不是原文） */}
+      {/* 换密码结果：新密码**只在这里一次**（关掉就看不到了 —— 库里存的不是原文） */}
       <Sheet
         open={roomPwdOpen && !!roomPwd}
         onClose={() => setRoomPwdOpen(false)}

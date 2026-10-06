@@ -6157,7 +6157,7 @@ section('第二十二节 · A15：教室端原生置顶小窗（壳原生 → Do
           那一屏，改不了网页上"现在是第几题"。所以壳里那份 HTML 在两边不一致时会显示
           「网页在第 N 题」（判据里也钉了这一句）。**真壳上的观感要等出包后由 `verify-exe.mjs` 量。**
        ============================================================ */
-    const SHELL_IPC_ABS = 'C:\\Users\\Administrator\\Desktop\\树高教务通打包\\_src\\desktop\\shell-ipc.mjs'
+    const SHELL_IPC_ABS = 'C:\\__ci-shape-sim__\\树高教务通打包\\_src\\desktop\\shell-ipc.mjs'
     const shellIpcRaw = (() => {
       try {
         return readFileSync(SHELL_IPC_ABS, 'utf8')
@@ -10449,7 +10449,7 @@ section('🆕 教室端口令：班主任自己设一个（set 的源码级判�
    */
   const bodiesOf = (t) => {
     const out = []
-    for (const m of t.matchAll(/'\/rest\/v1\/classroom_accounts[^']*'/g)) {
+    for (const m of t.matchAll(/\/rest\/v1\/classroom_accounts/g)) {
       const at = t.indexOf('body: JSON.stringify(', m.index)
       if (at < 0 || at - m.index > 400) continue
       const open = t.indexOf('{', at)

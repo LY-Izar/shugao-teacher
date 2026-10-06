@@ -1,5 +1,5 @@
 /**
- * 教室端账号的创建 / 重置 / 停用。
+ * 教室端账号的创建 / 重置 / 自设 / 停用。
  *
  * 为什么必须放服务端：
  * 在浏览器里创建 Supabase 账号**必须**用管理员密钥（service_role），
@@ -29,11 +29,18 @@ type Env = {
 
 type Body = {
   /**
-   * create = 建账号；reset = 换密码；disable / enable = 停用或恢复；
+   * create = 建账号；reset = 随机换一串密码；🆕 set = **班主任自己定一个密码**；
+   * disable / enable = 停用或恢复；
    * 🆕 status = **只看一眼**这个班有没有账号（**只回账号，不回密码** —— 密码是哈希存的，拿不回原文）。
    */
-  action?: 'create' | 'reset' | 'disable' | 'enable' | 'status'
+  action?: 'create' | 'reset' | 'set' | 'disable' | 'enable' | 'status'
   classId?: string
+  /**
+   * 🔴 **只有 `set` 用它**（`reset` 自己 `makePassword()`）—— 口令从调用者手里来，
+   *    服务端**不校验旧口令**（班主任已经登录；旧口令原文谁也拿不到），只校验它合不合规。
+   * ⚠️ 它**只去 GoTrue**（`auth.users`，那边存哈希）：业务库 `classroom_accounts` 一个字段都不写。
+   */
+  password?: string
 }
 
 const EMAIL_DOMAIN = 'shugao.local'
@@ -147,6 +154,116 @@ function makePassword(len = 12): string {
   let out = ''
   for (const b of bytes) out += PW_ALPHABET[b % PW_ALPHABET.length]
   return out
+}
+
+/**
+ * 给这个教室端账号换口令 —— `set` 与 `reset` 走的**同一条路**
+ * （同一个 `existing.id`、同一个 `PUT /auth/v1/admin/users/{id}`）。
+ * 两条路的差别**只有一处**：`password` 是谁给的（`set` = 调用者传入，`reset` = `makePassword()`）。
+ */
+function putPassword(env: Env, userId: string, password: string): Promise<Response> {
+  const key = env.SUPABASE_SERVICE_ROLE_KEY ?? ''
+  return fetch(`${baseUrl(env)}/auth/v1/admin/users/${userId}`, {
+    method: 'PUT',
+    headers: {
+      apikey: key,
+      Authorization: `Bearer ${key}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ password }),
+  })
+}
+
+/** 「自己设置」那串口令的位数下限 / 上限（GoTrue 默认下限就是 6 位） */
+const PW_MIN = 6
+const PW_MAX = 12
+
+/**
+ * 班主任自己定的那串口令合不合规？不合规回**一句人话**，合规回 `null`（调用方据此回 400）。
+ *
+ * 🔴 规则（用户确认）：**6–12 位、字母和数字都要有、不许有空格**。
+ * ⚠️ **别把它和课代表口令那条混起来**：课代表口令是 4–12 位、纯数字也行
+ *    （那管的是班里的口令，和教室端大屏账号是两回事）。
+ * 🔴 规则**只有这一份**，在服务端：前端只判"两次输入一不一样"，**不另抄一份**（抄了就会走散）。
+ */
+function passwordProblem(pw: string): string | null {
+  if (!pw) return '请先填一个密码'
+  if (/\s/.test(pw)) return '密码里不能有空格'
+  if (pw.length < PW_MIN || pw.length > PW_MAX) return `密码要 ${PW_MIN} 到 ${PW_MAX} 位`
+  if (!/[A-Za-z]/.test(pw)) return '密码里要有字母'
+  if (!/[0-9]/.test(pw)) return '密码里要有数字'
+  return null
+}
+
+/**
+ * GoTrue 出错回话里那句**关键信息**（`msg` / `message` / `error_code`）；
+ * 认不出来就把原文截一段 —— 🔴 **不许静默**：调用方把这句话带回给老师。
+ */
+function goTrueReason(text: string): string {
+  try {
+    const o = JSON.parse(text) as Record<string, unknown>
+    for (const k of ['msg', 'message', 'error_code']) {
+      const v = o[k]
+      if (typeof v === 'string' && v.trim()) return v.trim().slice(0, 120)
+    }
+  } catch {
+    /* 不是 JSON —— 下面原样截一段 */
+  }
+  return (text || '').trim().slice(0, 120)
+}
+
+/* ---------------- 操作留痕（`admin_audit`） ---------------- */
+
+/**
+ * 写一行操作留痕。
+ *
+ * 🔴 只给"不可逆、而且会把明文交出去"的口令动作用：`reset`（随机换一串）与
+ *    `set`（班主任自己定一个）。仿 `teacher-account.ts` 里的同名函数
+ *    （本文件刻意**不 import** 任何东西，所以自带一份）——
+ *    ⚠️ 两处必须**逐字段相同**（列名 / 截断长度 / `affected` 的下限），否则同一张表会长出两种写法。
+ * ⚠️ 它自己**绝不抛错**：留痕失败不该把一次已经改成功的口令变成 500；
+ *    但也不假装成功 —— 返回值交给调用方放进回话里（`audited`）。
+ */
+async function auditRow(
+  env: Env,
+  row: {
+    actorId: string | null
+    actorName?: string
+    action: string
+    target?: string
+    detail?: string
+    affected?: number
+  },
+): Promise<boolean> {
+  try {
+    const res = await sb(env, '/rest/v1/admin_audit', {
+      method: 'POST',
+      headers: { Prefer: 'return=minimal' },
+      body: JSON.stringify({
+        actor_id: row.actorId,
+        actor_name: (row.actorName ?? '').slice(0, 60),
+        action: row.action.slice(0, 60),
+        target: (row.target ?? '').slice(0, 120),
+        detail: (row.detail ?? '').slice(0, 300),
+        affected: Math.max(0, Math.trunc(row.affected ?? 0)),
+      }),
+    })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+/** 某位老师在 `teachers` 里的姓名（读不到就回空串 —— **不留假名字**） */
+async function nameOf(env: Env, id: string): Promise<string> {
+  try {
+    const res = await sb(env, `/rest/v1/teachers?select=name&id=eq.${id}`)
+    if (!res.ok) return ''
+    const rows = (await res.json()) as { name?: string }[]
+    return String(rows?.[0]?.name ?? '').trim()
+  } catch {
+    return ''
+  }
 }
 
 type ClassRow = { id: string; name: string; grade_id: string | null; school_id: string | null }
@@ -327,26 +444,54 @@ export async function onRequestPost(context: {
 
   if (action === 'reset') {
     if (!existing) return json({ status: 'error', message: '这个班还没有教室端账号' }, 404)
-    const password = makePassword()
-    const upd = await fetch(`${baseUrl(env)}/auth/v1/admin/users/${existing.id}`, {
-      method: 'PUT',
-      headers: {
-        apikey: env.SUPABASE_SERVICE_ROLE_KEY,
-        Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ password }),
+    /*
+     * 🔴 **留痕**：口令这类动作**动手前后各一条**（照 `teacher-account.ts` 里那条先例）。
+     *    明文照旧只在回话里交给操作者一次（重置之后要交给人），但"是谁、什么时候、
+     *    给哪个班的哪个账号换的"必须查得到 —— 这是口令类动作唯一能留下的证据。
+     */
+    const actorName = await nameOf(env, uid)
+    const targetLabel = `${cls.name} · ${existing.email}`
+    const auditedBefore = await auditRow(env, {
+      actorId: uid,
+      actorName,
+      action: 'classroom.reset',
+      target: targetLabel,
+      detail: '重置前：即将给这个教室端账号生成一个新的随机密码，旧密码下一步立刻失效',
+      affected: 1,
     })
+
+    const password = makePassword()
+    const upd = await putPassword(env, existing.id, password)
     if (!upd.ok) {
+      /* 失败也是写动作（试过一次），照旧留痕 —— 否则"重置失败"在流水里看不见 */
+      const code = upd.status
+      const detail = (await upd.text()).slice(0, 200)
+      const auditedFail = await auditRow(env, {
+        actorId: uid,
+        actorName,
+        action: 'classroom.reset',
+        target: targetLabel,
+        detail: `重置失败（GoTrue HTTP ${code}）：密码没有改，旧密码照旧可用`,
+        affected: 0,
+      })
       return json(
         {
           status: 'error',
           message: '重置密码失败',
-          detail: (await upd.text()).slice(0, 200),
+          detail,
+          audited: auditedBefore && auditedFail,
         },
         502,
       )
     }
+    const auditedAfter = await auditRow(env, {
+      actorId: uid,
+      actorName,
+      action: 'classroom.reset',
+      target: targetLabel,
+      detail: '重置成功：新密码已在回话里交给操作者一次，库里不存原文',
+      affected: 1,
+    })
     if (existing.disabled) {
       await sb(env, `/rest/v1/classroom_accounts?id=eq.${existing.id}`, {
         method: 'PATCH',
@@ -356,6 +501,87 @@ export async function onRequestPost(context: {
     }
     return json({
       status: 'ok',
+      audited: auditedBefore && auditedAfter,
+      account: accountOf(cls, { ...existing, disabled: false }, password),
+    })
+  }
+
+  /*
+   * 🆕 `set` = **班主任自己定一个口令**（用户要的就是这一句："密码能不能由班主任自己设置"）。
+   *
+   * 🔴 与 `reset` 的差别**只有一处**：`password` 换成**调用者传进来的**那个值（不是 `makePassword()`）。
+   *    闸门还是上面那一刀 `mayManage()`（**不新写判据**）、账号还是 `existing.id`、
+   *    写入还是同一个 `putPassword()`。
+   * ⚠️ **不要求旧口令**：班主任已经登录（上面 `callerId` 那一步），而且旧口令原文
+   *    谁也拿不到（GoTrue 存的是哈希）—— "先输旧口令"这件事在原理上就做不到。
+   * ⚠️ 口令**只去 `auth.users`**：业务库 `classroom_accounts` 一个字段都不写
+   *    （那一行里没有任何一列等于新口令）。
+   */
+  if (action === 'set') {
+    if (!existing) return json({ status: 'error', message: '这个班还没有教室端账号' }, 404)
+    const password = typeof body.password === 'string' ? body.password : ''
+    const bad = passwordProblem(password)
+    // 不合规：400 + 说清哪一条不合规，**不静默、也不去打 GoTrue**
+    if (bad) return json({ status: 'error', message: bad }, 400)
+
+    const actorName = await nameOf(env, uid)
+    const targetLabel = `${cls.name} · ${existing.email}`
+    const auditedBefore = await auditRow(env, {
+      actorId: uid,
+      actorName,
+      action: 'classroom.set',
+      target: targetLabel,
+      detail: '自设口令前：班主任自己定的新密码即将生效，旧密码同时失效',
+      affected: 1,
+    })
+
+    const upd = await putPassword(env, existing.id, password)
+    if (!upd.ok) {
+      /*
+       * 🔴 失败**不许静默**：GoTrue 那句关键信息原样带回给调用者，状态码也照它来
+       *    （4xx 一律翻成 400，好让前端把这句话原样摆出来，而不是被翻译成"没权限"）。
+       * ⚠️ 这时**旧口令保持不变** —— PUT 没成功，GoTrue 那边一个字节都没改。
+       */
+      const code = upd.status
+      const raw = (await upd.text()).slice(0, 200)
+      const reason = goTrueReason(raw)
+      const auditedFail = await auditRow(env, {
+        actorId: uid,
+        actorName,
+        action: 'classroom.set',
+        target: targetLabel,
+        detail: `自设口令失败（GoTrue HTTP ${code}）：密码没有改，旧密码照旧可用`,
+        affected: 0,
+      })
+      return json(
+        {
+          status: 'error',
+          message: `设置密码失败（GoTrue HTTP ${code}）${reason ? `：${reason}` : ''}`,
+          detail: raw,
+          audited: auditedBefore && auditedFail,
+        },
+        code >= 400 && code < 500 ? 400 : 502,
+      )
+    }
+
+    const auditedAfter = await auditRow(env, {
+      actorId: uid,
+      actorName,
+      action: 'classroom.set',
+      target: targetLabel,
+      detail: '自设口令成功：新密码已在回话里交给操作者一次，库里不存原文',
+      affected: 1,
+    })
+    if (existing.disabled) {
+      await sb(env, `/rest/v1/classroom_accounts?id=eq.${existing.id}`, {
+        method: 'PATCH',
+        headers: { Prefer: 'return=minimal' },
+        body: JSON.stringify({ disabled: false }),
+      })
+    }
+    return json({
+      status: 'ok',
+      audited: auditedBefore && auditedAfter,
       account: accountOf(cls, { ...existing, disabled: false }, password),
     })
   }
