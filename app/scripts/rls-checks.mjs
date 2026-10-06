@@ -9870,6 +9870,116 @@ await withLock(async () => {
         ok('🔴 §40.5b 的锁定时长是 600 秒：`make_interval(secs => 600)` 那一句在（恰好 1 处）',
           schemaCode.split('now() + make_interval(secs => 600)').length - 1 === 1)
       }
+
+      /* ============================================================
+         🧪 反向对照（**不新增断言条数**）：§40 ⑫⑬「重设即解锁」那条链 ——
+         把 `set_class_rep_pin` 里那句 `delete from class_rep_pin_fails …` 从**内存副本**里抠掉，
+         ⑬「重设之后 `class_rep_pin_locked_until` **立刻是 null**」那条**必须红**；
+         复原之后再跑一次必须回绿。
+         ------------------------------------------------------------
+         为什么要做这一节：⑫⑬ 那几条断言此前只做过"锚点恰 1 处"的**静态计数** ——
+         静态计数只证明那句话在，**证明不了那几条断言真的盯着它**（`app/AGENTS.md` §三.2）。
+         为什么"就地重建这一个函数"、而不是"把去注释的整份 schema 灌进库"：
+         见 §39 那一段的实测（去注释会把 SQL 字面量里的 `--` 一起吃掉 ⇒ 整份灌进去
+         `syntax error at or near "if"`，对照根本没红成）⇒ 只动**一条语句**、不碰另外那 1100 多条。
+         ⚠️ 全程在 `begin` … `rollback` 里：文件一个字没动、库也不留痕。
+         ⚠️ 它**不调 `eq()`/`ok()`**（绿的那条路上一条断言都不加，`pass` 仍是 1116）——
+            "抠掉之后必须红"没红成、或"复原之后没回绿"，都会 throw ⇒ 由 catch 记成**一条红断言**。
+         ============================================================ */
+      {
+        const CLEAR_LOCK = 'delete from class_rep_pin_fails where class_id = p_class_id;'
+        const FN_RE = /create or replace function public\.set_class_rep_pin\([\s\S]*?\nend \$\$;/
+        const fnText = FN_RE.exec(SCHEMA_FULL)?.[0] ?? ''
+        const countIn = (s) => s.split(CLEAR_LOCK).length - 1
+        const PIN_SQL2 = 'select public.set_class_rep_pin($1, $2) as r'
+        const REP_SQL2 = 'select public.rep_set_daily_homework($1, $2, $3, $4, $5) as r'
+        let log = ''
+        try {
+          /* ① **先数出现次数**，不是 1 就抛错（照 §三.2：宁可报错，也不假绿） */
+          if (countIn(schemaCode) !== 1) {
+            throw new Error(`全仓（去注释后）那句清锁该恰好 1 处，实测 ${countIn(schemaCode)} 处`)
+          }
+          if (countIn(fnText) !== 1) {
+            throw new Error(`\`set_class_rep_pin\` 函数体里那句清锁该恰好 1 处，实测 ${countIn(fnText)} 处`)
+          }
+          if (!/length\(v_pin\) < 6/.test(fnText)) {
+            throw new Error('抽出来的函数体不对（里面没有 `length(v_pin) < 6`）')
+          }
+          const mutatedFn = fnText.replace(CLEAR_LOCK, ' ')
+          if (countIn(mutatedFn) !== 0) {
+            throw new Error('内存副本里那句清锁没被抠掉（`replace` 没命中 ⇒ 这就是假绿的样子）')
+          }
+
+          await B.db.exec('begin')
+          await B.db.exec('reset role')
+          const asAuth = async (uid) => {
+            await B.db.query(`select set_config('request.jwt.claims', $1, true)`, [claimsOf(uid)])
+            await B.db.exec('set local role authenticated')
+          }
+          const asOwner = () => B.db.exec('reset role')
+          const callRpc = async (sql, params) => {
+            try {
+              return (await B.db.query(sql, params)).rows[0].r ?? {}
+            } catch (e) {
+              return { __err: shortErr(e) }
+            }
+          }
+          const lockedUntil = async () =>
+            (await B.db.query(`select public.class_rep_pin_locked_until($1) as v`, [C.c1])).rows[0]?.v ?? null
+          /** 把 §40 ⑫⑬ 那条链原样重跑：设口令 → 连错 5 次锁住 → 班主任重设 → 读 locked_until */
+          const replay = async () => {
+            await asAuth(U.head)
+            await callRpc(PIN_SQL2, [C.c1, '123456'])
+            await asAuth(U.room)
+            for (let i = 1; i <= 5; i++) {
+              await callRpc(REP_SQL2, [C.c1, '数学', 'math', `反向对照第${i}次错`, '9999'])
+            }
+            await asOwner()
+            const before = await lockedUntil()
+            await asAuth(U.head)
+            const reset = await callRpc(PIN_SQL2, [C.c1, '654321'])
+            await asOwner()
+            return { before, reset, after: await lockedUntil() }
+          }
+
+          /* ② 抠掉那行 ⇒ ⑬ 那条断言**必须红**（`after` 非 null） */
+          await B.db.exec(mutatedFn)
+          const mut = await replay()
+          log = `抠掉那行 delete 之后：锁住时 locked_until=${JSON.stringify(mut.before)} · ` +
+            `重设回 ${JSON.stringify(mut.reset)} · 重设后 locked_until=${JSON.stringify(mut.after)}（⑬ 该红就是这条非 null）`
+          if (mut.before == null) throw new Error(`反向对照无效：连错 5 次没锁上（before=null）—— ${log}`)
+          /* ⑬ 那条断言期望的是 `null` ⇒ "该红"的样子就是这里**非 null**（还锁着）。 */
+          if (mut.after == null) {
+            throw new Error(
+              `🔴 反向对照**没有红**：抠掉那句 delete 之后重设完居然**当场就解锁了**（after=null）` +
+                ` ⇒ ⑬ 那条断言不是盯着这句 delete 的 —— ${log}`,
+            )
+          }
+
+          /* ③ 复原 ⇒ ⑬ 必须回来绿（`after` 又是 null） */
+          await B.db.exec(fnText)
+          const back = await replay()
+          log += ` ｜ 复原后：锁住时 locked_until=${JSON.stringify(back.before)} · ` +
+            `重设回 ${JSON.stringify(back.reset)} · 重设后 locked_until=${JSON.stringify(back.after)}（绿）`
+          if (back.before == null) throw new Error(`复原那一次没锁上（before=null）—— ${log}`)
+          if (back.after !== null) {
+            throw new Error(`复原之后没回到绿（after=${JSON.stringify(back.after)}）—— ${log}`)
+          }
+          console.log(`   🧪 反向对照（§40 重设即解锁 · 不增条数）：${log}`)
+        } catch (e) {
+          ok(
+            '🧪 反向对照（§40「重设即解锁」）：抠掉那句 `delete from class_rep_pin_fails` ⇒ ⑬ 必须红；复原后必须回绿',
+            false,
+            shortErr(e),
+          )
+        } finally {
+          try {
+            await B.db.exec('rollback')
+          } catch {
+            /* 抛在 `begin` 之前的话这里没有事务，忽略即可 */
+          }
+        }
+      }
     }
 
     /* ============================================================

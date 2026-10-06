@@ -480,7 +480,7 @@ export async function setClassRepPin(classId: string, pin: string): Promise<Dail
   if (error) return { ok: false, message: writeMessage(error) }
   return rpcResult(data, {
     forbidden: '只有管得着这个班的老师（班主任 / 教务处）能设口令。',
-    length: '口令要 4–12 位。',
+    length: '口令至少 6 位、最多 12 位。',
   })
 }
 

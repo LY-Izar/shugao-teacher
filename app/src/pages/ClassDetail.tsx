@@ -1672,12 +1672,12 @@ export default function ClassDetail() {
                     style={{ width: 'auto', maxWidth: 200 }}
                     value={pinInput}
                     onChange={(e) => setPinInput(e.target.value)}
-                    placeholder="4–12 位"
+                    placeholder="6–12 位"
                   />
                   <Button
                     size="sm"
                     variant="primary"
-                    disabled={pinBusy || pinInput.trim().length < 4 || pinInput.trim().length > 12}
+                    disabled={pinBusy || pinInput.trim().length < 6 || pinInput.trim().length > 12}
                     onClick={() => void savePin()}
                   >
                     设定 / 换口令

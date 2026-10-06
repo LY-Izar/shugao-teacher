@@ -3394,7 +3394,7 @@ function RepHomeworkSheet({
         className="input"
         value={pin}
         onChange={(e) => setPin(e.target.value)}
-        placeholder="问班主任要的 4–12 位口令"
+        placeholder="问班主任要的 6–12 位口令"
       />
     </Sheet>
   )
