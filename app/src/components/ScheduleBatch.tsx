@@ -12,6 +12,7 @@ import { Button, Sheet, Tag } from './ui'
 import type { Klass, ScheduleItem } from '../data/types'
 import { WEEKDAY_TEXT } from '../data/types'
 import { docxToText } from '../lib/docx'
+import { liveValue } from '../lib/liveInput'
 import { PERIOD_SLOTS, matchClassName, parseScheduleRows, parseScheduleText } from '../lib/scheduleParse'
 import { normalizeTime, toMinutes } from '../lib/schedule'
 import { xlsxToRows } from '../lib/xlsx'
@@ -80,6 +81,9 @@ export function ScheduleBatch({
   const [saving, setSaving] = useState(false)
   const [pasteOpen, setPasteOpen] = useState(false)
   const [paste, setPaste] = useState('')
+  /* 🔴 粘贴框**保持受控**（`disabled` 读 `paste.trim()` —— `lib/liveInput.ts` 边界②），
+     提交那一刻再从屏上读一次。 */
+  const pasteRef = useRef<HTMLTextAreaElement>(null)
 
   /* 每次打开都从一行空白开始 */
   const [wasOpen, setWasOpen] = useState(false)
@@ -253,6 +257,7 @@ export function ScheduleBatch({
         {pasteOpen ? (
           <>
             <textarea
+              ref={pasteRef}
               className="input mt-2"
               style={{ height: 96, fontSize: 12.5, lineHeight: 1.6, resize: 'vertical' }}
               placeholder={'每行一条，例如：\n周二 08:55-09:40 高二(3)班 语文\n周三 14:30-15:15 备课组活动 办公室'}
@@ -269,7 +274,10 @@ export function ScheduleBatch({
               className="mt-2"
               disabled={!paste.trim()}
               onClick={() => {
-                take(parseScheduleText(paste, classes))
+                /* 🔴 提交那一刻从屏上读回真实值（原来直接读 state —— 少一次 `input` 就少一行课） */
+                const livePaste = liveValue(pasteRef.current, paste)
+                setPaste(livePaste)
+                take(parseScheduleText(livePaste, classes))
                 setPasteOpen(false)
               }}
             >

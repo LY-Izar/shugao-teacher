@@ -478,6 +478,9 @@ export default function Classroom() {
   /** 粘贴课表 —— 学校发的电子表直接贴进来，比拍照准得多（也不会漏掉没写时间的节次） */
   const [pasteOpen, setPasteOpen] = useState(false)
   const [pasteText, setPasteText] = useState('')
+  /* 🔴 粘贴课表框**保持受控**（`disabled` 读 `pasteText.trim()` —— `lib/liveInput.ts` 边界②），
+     提交那一刻再从屏上读一次。 */
+  const pasteTextRef = useRef<HTMLTextAreaElement>(null)
   /**
    * 「按日期选作业」的展开面板。
    * 以前是平铺一排小日期按钮（最多 10 个）—— 挂墙上那块屏是**手指点的**，
@@ -1736,6 +1739,7 @@ export default function Classroom() {
           </p>
         ) : null}
         <textarea
+          ref={pasteTextRef}
           className="input"
           rows={11}
           value={pasteText}
@@ -1752,7 +1756,10 @@ export default function Classroom() {
             variant="primary"
             disabled={!pasteText.trim()}
             onClick={() => {
-              const parsed = parseScheduleText(pasteText, classes)
+              /* 🔴 提交那一刻从屏上读回真实值，**按读回来的那份解析**（原来读 state） */
+              const livePasteText = liveValue(pasteTextRef.current, pasteText)
+              setPasteText(livePasteText)
+              const parsed = parseScheduleText(livePasteText, classes)
               setPasteOpen(false)
               if (!parsed.items.length) {
                 setSchedErr(

@@ -1,4 +1,5 @@
-import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { liveValue } from '../lib/liveInput'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Page } from '../components/AppShell'
 import { IconAlert, IconCheck, IconPaste } from '../components/icons'
@@ -872,6 +873,9 @@ function RosterSheet({
   canSetup: boolean
   onDone: (plan: Extract<RosterPlan, { ok: true }>) => Promise<boolean>
 }) {
+  /* 🔴 名单框**保持受控**（「清空 / 看预览」两个按钮的 `disabled` 读 `text` —— `lib/liveInput.ts` 边界②），
+     按下"看预览"那一刻**从屏上读回真实值**。 */
+  const rosterTextRef = useRef<HTMLTextAreaElement>(null)
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
   /* 预览 = 每敲一个字都算一遍？不 —— 只在"点了预览"之后算（省得一边贴一边报错） */
@@ -879,13 +883,17 @@ function RosterSheet({
   const [showAll, setShowAll] = useState(false)
 
   const preview = () => {
-    setPlan(planRosterImport({ text, gradeName, classes: [], existing: classes }))
+    /* 🔴 读屏上那一份 + 写回 state：原来直接读 `text` ⇒ 安卓上少一次 `input` 就少几行 */
+    const liveText = liveValue(rosterTextRef.current, text)
+    setText(liveText)
+    setPlan(planRosterImport({ text: liveText, gradeName, classes: [], existing: classes }))
   }
 
   return (
     <div>
       <Sect>粘贴（四列：{ROSTER_HEADER.join(' / ')}）</Sect>
       <textarea
+        ref={rosterTextRef}
         className="input"
         rows={8}
         value={text}
@@ -1159,6 +1167,9 @@ function PickSheet({
 }) {
   void gradeName
   const [paste, setPaste] = useState('')
+  /* 🔴 差异名单框**保持受控**（`disabled` 读渲染期算出来的 `plan?.ok` —— `lib/liveInput.ts` 边界②），
+     但提交那一刻必须**从屏上读回真实值并重算**（`plan` 是按 state 算的 memo）。 */
+  const diffPasteRef = useRef<HTMLTextAreaElement>(null)
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
   /** 「一键全部按班型默认」的**预览**（按下按钮只算不写；再点一次「确认铺开」才落库） */
@@ -1295,6 +1306,7 @@ function PickSheet({
           合法组合只有 12 种；非法组合当场拦住。
         </div>
         <textarea
+          ref={diffPasteRef}
           className="input mt-2"
           rows={5}
           value={paste}
@@ -1328,6 +1340,14 @@ function PickSheet({
             size="sm"
             disabled={!canSetup || busy || !plan?.ok}
             onClick={async () => {
+              /* 🔴 提交那一刻从屏上读回真实值，并**按读回来的那份重算**（`plan` 是渲染期
+                 按 state 算的 memo —— 安卓上少一次 `input` 就会把旧的那份写进库）。
+                 下面沿用 `plan` 这个名字，用的就是刚重算出来的这一份。 */
+              const livePaste = liveValue(diffPasteRef.current, paste)
+              setPaste(livePaste)
+              const plan = livePaste.trim()
+                ? planSubjectPaste({ text: livePaste, classes, bySerial, byClassNoStudentNo })
+                : null
               if (!plan?.ok) return
               setBusy(true)
               const ok = await write(plan.rows)
@@ -1553,6 +1573,9 @@ function RolesSheet({
   const [bulkSubject, setBulkSubject] = useState('chinese')
   const [bulkSpec, setBulkSpec] = useState('')
   const [paste, setPaste] = useState('')
+  /* 🔴 三列框**保持受控**（`disabled` 读渲染期算出来的 `rolePlan?.ok`），
+     提交那一刻必须**从屏上读回真实值并重算**（`rolePlan` 是按 state 算的 memo）。 */
+  const rolePasteRef = useRef<HTMLTextAreaElement>(null)
   const [busy, setBusy] = useState(false)
 
   /**
@@ -1647,6 +1670,7 @@ function RolesSheet({
           认不出的班名 / 科目 / 老师会报行号，一行都不写。
         </div>
         <textarea
+          ref={rolePasteRef}
           className="input mt-2"
           rows={5}
           value={paste}
@@ -1686,6 +1710,13 @@ function RolesSheet({
             variant="primary"
             disabled={!canSetup || busy || !rolePlan?.ok}
             onClick={async () => {
+              /* 🔴 提交那一刻从屏上读回真实值，并**按读回来的那份重算**（同上：`rolePlan` 是 memo）。
+                 下面沿用 `rolePlan` 这个名字，用的就是刚重算出来的这一份。 */
+              const livePaste = liveValue(rolePasteRef.current, paste)
+              setPaste(livePaste)
+              const rolePlan = livePaste.trim()
+                ? planRolePaste({ text: livePaste, gradeName: grade.name, classes, teachers })
+                : null
               if (!rolePlan?.ok) return
               setBusy(true)
               await onBulkSubjects(rolePlan.rows.map((r) => ({ classId: r.classId, subjectCode: r.subjectCode, teacherId: r.teacherId })))

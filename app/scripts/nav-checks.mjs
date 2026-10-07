@@ -7145,12 +7145,12 @@ section('第二十五节 · A19：备份引导档四条事实 + ⑥ 档案解密
     /* 🧪 反向对照 B：往那张卡的副本里塞一句"把私钥 POST 出去" ⇒ 同一条判据当场假 */
     const leaky = oneEdit(
       SEAL_REGION,
-      'await openAdminSealed(doc, pem)',
-      "await fetch('/api/leak', { method: 'POST', body: pem })\n      await openAdminSealed(doc, pem)",
+      'await openAdminSealed(doc, livePem)',
+      "await fetch('/api/leak', { method: 'POST', body: livePem })\n      await openAdminSealed(doc, livePem)",
     )
     check(
       leaky.ok && !sealCardOk(leaky.text, leaky.text),
-      '🧪 A19 ⑤ 反向对照 B：往那张卡的副本里塞一句 `fetch(\'/api/leak\', { body: pem })` ⇒ 同一条判据当场判假（证明"钥匙不外送"真的在被判）',
+      '🧪 A19 ⑤ 反向对照 B：往那张卡的副本里塞一句 `fetch(\'/api/leak\', { body: livePem })` ⇒ 同一条判据当场判假（证明"钥匙不外送"真的在被判）',
       `目标出现 ${leaky.n} 处（须恰好 1）· 塞进去之后判据=${sealCardOk(leaky.text, leaky.text)}`,
     )
   }
@@ -10122,6 +10122,89 @@ section('第二十八节 · A23：公告「发布」吞字（正文非受控 + �
           n(bad3, /const liveContent = dhContent/g) === 1,
         '🧪 A26 ⑭ 反向对照：把它改回**读 state**（`const liveContent = dhContent`）⇒ 上面⑭那条"提交读屏上那一份"当场假',
         `原文 ${n(AS, /liveValue\(dhContentRef\.current, dhContent\)/g)} 处 · 改过 ${n(bad3, /liveValue\(dhContentRef\.current, dhContent\)/g)} 处`,
+      )
+    }
+
+    /* ============================================================
+       ⑮ / ⑯ / ⑰（2026-10-15 第三轮 · 最后 8 处）：**粘贴类**手输现场 ——
+         · ⑮ 粘贴课表：自己的排课表（`ScheduleBatch.tsx`）/ 教室端（`Classroom.tsx`）/
+           管理台录入（`CourseAdmin.tsx`）；
+         · ⑯ 粘贴名单 / 选科 / 任教关系：`ImportPaste.tsx` + `GradeSetup.tsx` 三处；
+         · ⑰ `/admin` 档案解密的私钥框（`SealDecryptCard`）。
+       口径与 A26 ④⑬⑭ 一致：这些框**都得保持受控**（`disabled` 读 state / 校验实时联动）
+       ⇒ **受控 + `ref` + 提交读 DOM（`liveValue`）+ 把读回的那份写回 state**，
+       提交用的一律是**读回来的值**。
+       ⚠️ 窗口按**真实 `ref` 名**钉住（`pasteRef` / `pasteTextRef` / `textRef` / `pemRef` /
+       `rosterTextRef` / `diffPasteRef` / `rolePasteRef`）—— 窗口取歪了这几条会假绿（§三.2）。
+       ============================================================ */
+    const schedSrc = readApp('src/components/ScheduleBatch.tsx')
+    const classroomSrc = readApp('src/pages/Classroom.tsx')
+    const courseAdminSrc = readApp('src/pages/CourseAdmin.tsx')
+    const importPasteSrc = readApp('src/pages/ImportPaste.tsx')
+    const gradeSetupSrc = readApp('src/pages/GradeSetup.tsx')
+    const pasteSpots = [
+      ['⑮① 自己的排课表（`ScheduleBatch.tsx`）', schedSrc, 'pasteRef', 'paste', 'take(parseScheduleText(livePaste, classes))'],
+      ['⑮② 教室端 · 粘贴课表（`Classroom.tsx`）', classroomSrc, 'pasteTextRef', 'pasteText', 'const parsed = parseScheduleText(livePasteText, classes)'],
+      ['⑮③ 管理台 · 录入课表（`CourseAdmin.tsx`）', courseAdminSrc, 'pasteRef', 'paste', 'const r = parseScheduleText(livePaste, classes)'],
+      ['⑯① 粘贴导入名单（`ImportPaste.tsx`）', importPasteSrc, 'textRef', 'text', 'validateRows(parseRosterText(liveText), klass.students)'],
+      ['⑯② 入学准备 · 录名单（`GradeSetup.tsx` 的 `RosterSheet`）', gradeSetupSrc, 'rosterTextRef', 'text', 'planRosterImport({ text: liveText,'],
+      ['⑯③ 入学准备 · 差异名单（`GradeSetup.tsx`）', gradeSetupSrc, 'diffPasteRef', 'paste', 'planSubjectPaste({ text: livePaste,'],
+      ['⑯④ 入学准备 · 任教关系三列（`GradeSetup.tsx`）', gradeSetupSrc, 'rolePasteRef', 'paste', 'planRolePaste({ text: livePaste,'],
+      ['⑰ `/admin` 档案解密私钥框（`Admin.tsx`）', AD, 'pemRef', 'pem', 'openAdminSealed(doc, livePem)'],
+    ]
+    for (const [spotLabel, spotSrc, refName, stateName, usedNeedle] of pasteSpots) {
+      const cap = stateName[0].toUpperCase() + stateName.slice(1)
+      const readT = `liveValue(${refName}.current, ${stateName})`
+      const writeT = `set${cap}(live${cap})`
+      const readAt = spotSrc.indexOf(readT)
+      const readWin = readAt < 0 ? '' : spotSrc.slice(Math.max(0, readAt - 400), readAt + 900)
+      const refAt = spotSrc.indexOf(`ref={${refName}}`)
+      const box = refAt < 0 ? '' : spotSrc.slice(Math.max(0, refAt - 200), refAt + 450)
+      const rd = cnt(spotSrc, readT)
+      const us = cnt(spotSrc, usedNeedle)
+      const wb = cnt(readWin, writeT)
+      const vl = cnt(box, `value={${stateName}}`)
+      const ml = cnt(box, 'maxLength={')
+      const sl = cnt(box, 'slice(0, ')
+      check(
+        rd === 1 && us === 1 && wb === 1 && vl === 1 && ml === 0 && sl === 0,
+        `🔴 A26 ${spotLabel}：**提交那一刻从屏上读回真实值**（\`${readT}\`）并把读回的那份**写回 state**（\`${writeT}\`），提交用的是**读回来的值**（\`${usedNeedle}\`）；这个框上没有 \`maxLength\`、\`onChange\` 里也没有静默 \`slice\`；⚠️ **保持受控**（\`disabled\` 读 state / 校验实时联动 —— \`liveInput.ts\` 边界②）`,
+        `读 DOM=${rd} 处 · 提交用读回值=${us} 处 · 提交处写回=${wb} 处 · 框内 value={${stateName}}=${vl} · maxLength=${ml} 处 · slice=${sl} 处`,
+      )
+    }
+
+    /* 🧪 两组反向对照（**先数"恰好 1 处"再替换** —— 只换第一处会假绿，`AGENTS.md` §三.2）：
+       任选两处（⑮① 排课表 / ⑯① 名单）在**内存副本**上改回**读 state** ⇒ 上面两条当场假；
+       ⚠️ 这一轮还在**真文件**上各做了同样的变异、实测这两条当场红、再逐字节还原（比副本更硬）。 */
+    {
+      const T = 'const livePaste = liveValue(pasteRef.current, paste)'
+      const c = cnt(schedSrc, T)
+      const bad = c === 1 ? schedSrc.replace(T, 'const livePaste = paste') : schedSrc
+      check(c === 1, '🧪 A26 ⑮① 对照前置：排课表那句"读 DOM" **恰好 1 处**', `命中 ${c} 处`)
+      check(
+        c === 1 && cnt(bad, 'liveValue(pasteRef.current, paste)') === 0 && cnt(bad, 'const livePaste = paste') === 1,
+        '🧪 A26 ⑮① 反向对照：把排课表那句改回**读 state**（`const livePaste = paste`）（副本）⇒ 上面⑮①那条"提交读屏上那一份"当场假',
+        `原文读 DOM ${cnt(schedSrc, 'liveValue(pasteRef.current, paste)')} 处 · 改过 ${cnt(bad, 'liveValue(pasteRef.current, paste)')} 处`,
+      )
+      const T2 = 'ref={pasteRef}'
+      const c2 = cnt(schedSrc, T2)
+      const bad2 = c2 === 1 ? schedSrc.replace(T2, T2 + ' maxLength={2000}') : schedSrc
+      check(c2 === 1, '🧪 A26 ⑮① 对照前置：排课表粘贴框的 `ref={pasteRef}` **恰好 1 处**', `命中 ${c2} 处`)
+      check(
+        c2 === 1 && cnt(bad2, 'maxLength={') === cnt(schedSrc, 'maxLength={') + 1,
+        '🧪 A26 ⑮① 反向对照：把 `maxLength` **塞回**排课表粘贴框（副本）⇒ 上面⑮①那条"没有 maxLength"当场假（组字期静默截断又回来了）',
+        `原文 maxLength ${cnt(schedSrc, 'maxLength={')} 处 · 改过 ${cnt(bad2, 'maxLength={')} 处`,
+      )
+    }
+    {
+      const T = 'const liveText = liveValue(textRef.current, text)'
+      const c = cnt(importPasteSrc, T)
+      const bad = c === 1 ? importPasteSrc.replace(T, 'const liveText = text') : importPasteSrc
+      check(c === 1, '🧪 A26 ⑯① 对照前置：名单页那句"读 DOM" **恰好 1 处**', `命中 ${c} 处`)
+      check(
+        c === 1 && cnt(bad, 'liveValue(textRef.current, text)') === 0 && cnt(bad, 'const liveText = text') === 1,
+        '🧪 A26 ⑯① 反向对照：把名单页那句改回**读 state**（`const liveText = text`）（副本）⇒ 上面⑯①那条"提交读屏上那一份"当场假',
+        `原文读 DOM ${cnt(importPasteSrc, 'liveValue(textRef.current, text)')} 处 · 改过 ${cnt(bad, 'liveValue(textRef.current, text)')} 处`,
       )
     }
 

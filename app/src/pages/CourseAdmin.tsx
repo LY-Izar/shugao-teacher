@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { liveValue } from '../lib/liveInput'
 import { IconCheck, IconChevronRight, IconGrid, IconStack, IconSwap } from '../components/icons'
 import { Button, Empty, Modal, Panel, Sect, Tag } from '../components/ui'
 import * as remote from '../data/remote'
@@ -516,6 +517,9 @@ export default function CourseAdmin() {
   )
   /** 录入模式：粘贴框里的原文 */
   const [paste, setPaste] = useState('')
+  /* 🔴 粘贴框**保持受控**（`disabled` 读 `paste.trim()` —— `lib/liveInput.ts` 边界②），
+     提交那一刻再从屏上读一次。 */
+  const pasteRef = useRef<HTMLTextAreaElement>(null)
   /** 录入模式：解析出来、等着核对的那一批（`null` = 还没解析） */
   const [parsed, setParsed] = useState<ParsedScheduleItem[] | null>(null)
   /** 核对模式：「我核对过了」 */
@@ -2070,6 +2074,7 @@ const planSlot = (m: SwapPlan, which: 'a' | 'b'): DaySlot | undefined => {
                     每行都要写上班名「{klass.name}」，教室端才认得出这节课是哪个班的。
                   </div>
                   <textarea
+                    ref={pasteRef}
                     className="input mt-2"
                     rows={8}
                     spellCheck={false}
@@ -2086,7 +2091,10 @@ const planSlot = (m: SwapPlan, which: 'a' | 'b'): DaySlot | undefined => {
                       disabled={!paste.trim() || busy}
                       data-course-parse="1"
                       onClick={() => {
-                        const r = parseScheduleText(paste, classes)
+                        /* 🔴 提交那一刻从屏上读回真实值，**按读回来的那份解析**（原来读 state） */
+                        const livePaste = liveValue(pasteRef.current, paste)
+                        setPaste(livePaste)
+                        const r = parseScheduleText(livePaste, classes)
                         if (!r.items.length) {
                           setParsed(null)
                           setNote(`没解析出课程。一行一条写最稳，例如「周一 08:00-08:40 ${klass.name} 语文」。`)

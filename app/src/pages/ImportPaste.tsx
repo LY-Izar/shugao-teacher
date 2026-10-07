@@ -1,4 +1,5 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
+import { liveValue } from '../lib/liveInput'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Page } from '../components/AppShell'
 import {
@@ -35,6 +36,9 @@ export default function ImportPaste() {
   const addStudents = useStore((s) => s.addStudents)
 
   const [text, setText] = useState('')
+  /* 🔴 下面的校验结果是**实时联动**算出来的（`useMemo` ⇒ 必须受控 —— `lib/liveInput.ts` 边界②），
+     提交那一刻再从屏上读一次。 */
+  const textRef = useRef<HTMLTextAreaElement>(null)
   const [mode, setMode] = useState<ImportMode>('merge')
 
   const parsed = useMemo(() => parseRosterText(text), [text])
@@ -79,6 +83,7 @@ export default function ImportPaste() {
           <Sect>第 1 步 · 粘贴内容</Sect>
           <Panel bodyClass="p-3">
             <textarea
+              ref={textRef}
               className="input"
               rows={7}
               placeholder={'每行一条，支持从 Excel 直接复制：\n1  王志远\n2  李思涵\n3,张雨欣\n4、刘佳怡'}
@@ -201,6 +206,12 @@ export default function ImportPaste() {
           disabled={rows.length === 0}
           icon={<IconChevronRight size={16} />}
           onClick={() => {
+            /* 🔴 提交那一刻从屏上读回真实值，并按读回来的那份**重新解析 / 校验**
+               （用的是上面预览同一对纯函数 —— 原来读 state，少一次 `input` 就少导入几行） */
+            const liveText = liveValue(textRef.current, text)
+            setText(liveText)
+            const rows = validateRows(parseRosterText(liveText), klass.students)
+            const bad = rows.filter((r) => r.flag).length
             const clean = rows.filter((r) => !r.flag).map((r) => ({ studentNo: r.studentNo, name: r.name }))
             if (clean.length === 0) {
               push({ text: '没有可导入的正常行', tone: 'bad' })

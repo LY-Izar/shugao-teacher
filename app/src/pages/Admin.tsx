@@ -684,6 +684,9 @@ function SealDecryptCard() {
   const [err, setErr] = useState('')
   const [out, setOut] = useState<AdminSealedPayload | null>(null)
   const pick = useRef<HTMLInputElement>(null)
+  /* 🔴 私钥框**保持受控**（`disabled` 读 `pem.trim()` —— `lib/liveInput.ts` 边界②），
+     但**提交那一刻从屏上读回真实值**：安卓上最后一次 `onChange` 可能排在点击之后。 */
+  const pemRef = useRef<HTMLTextAreaElement>(null)
 
   /* 档案里只有学生 uuid：屏上要给看得懂的东西（**班内学号** / 姓名，查不到就明写查不到）。
      ⚠️ 这里直接取 `studentNo`（= 界面上永远显示的那个号），**不许**自己写
@@ -715,11 +718,15 @@ function SealDecryptCard() {
 
   async function onOpen() {
     if (!doc) return
+    /* 🔴 读屏上那一份（只读不写）：屏上是什么就解什么；
+       读回的这份同时**写回 state** ⇒ 紧接着那次重渲染写回的就是屏上那一份（框里不会少字）。 */
+    const livePem = liveValue(pemRef.current, pem)
+    setPem(livePem)
     setBusy(true)
     setErr('')
     setOut(null)
     try {
-      setOut(await openAdminSealed(doc, pem))
+      setOut(await openAdminSealed(doc, livePem))
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
     } finally {
@@ -764,6 +771,7 @@ function SealDecryptCard() {
       <SubHead>第二步 · 私钥（只在这次解密的内存里过一遍：不写本机、不上传、不进日志）</SubHead>
       <div className="px-3.5 pb-2">
         <textarea
+          ref={pemRef}
           value={pem}
           onChange={(e) => setPem(e.target.value)}
           spellCheck={false}
