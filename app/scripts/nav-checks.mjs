@@ -3918,9 +3918,9 @@ section('第十五节 · D13：自己改密码（只作用自己 · 失败显式
     `服务端 NAME_MAX=${mServer ? mServer[1] : '（没抠到）'} · 我的页 SELF_NAME_MAX=${mClient ? mClient[1] : '（没抠到）'}`,
   )
   check(
-    /maxLength=\{NAME_MAX\}/.test(fSrc) && /maxLength=\{SELF_NAME_MAX\}/.test(SET_CODE),
-    '🔴 D13-F ② 两条路都把那个数**真的挂到了输入框上**（常量相等但没人用 = 摆设；`maxLength` 才是挡住超长那一格的东西）',
-    `行政管理挂上了 = ${/maxLength=\{NAME_MAX\}/.test(fSrc)} · 我的页挂上了 = ${/maxLength=\{SELF_NAME_MAX\}/.test(SET_CODE)}`,
+    /liveName\.trim\(\)\.length > NAME_MAX/.test(fSrc) && /maxLength=\{SELF_NAME_MAX\}/.test(SET_CODE),
+    '🔴 D13-F ② 两条路都把那个数**真的用上了**（常量相等但没人用 = 摆设）：行政管理那侧按 A26 ⑦ 的口径改成**提交时超长明确报错、一个字不发**（`liveName.trim().length > NAME_MAX`；原生 `maxLength` 已去掉 —— 它会在组字期**静默截断**用户正在打的字），我的页那侧仍是 `maxLength={SELF_NAME_MAX}`',
+    `行政管理用上了 = ${/liveName\.trim\(\)\.length > NAME_MAX/.test(fSrc)} · 我的页挂上了 = ${/maxLength=\{SELF_NAME_MAX\}/.test(SET_CODE)}`,
   )
   /* 🧪 反向对照：把服务端那个数改成 60 → ① 当场红（证明它真的在比那两个数，不是恒真） */
   const mServer60 = fnSrc.replace(/const NAME_MAX\s*=\s*24/, 'const NAME_MAX = 60')
@@ -9868,6 +9868,57 @@ section('第二十八节 · A23：公告「发布」吞字（正文非受控 + �
         '🧪 A26 ⑤ 反向对照：把 `maxLength` **塞回**标题框（组字期静默截断）⇒ 上面⑤那条当场假',
         `原文 maxLength ${cnt(NN, 'maxLength')} 处 · 改过 ${cnt(bad3, 'maxLength')} 处`,
       )
+    }
+
+    /* ---------------- ⑦ 本轮补的两处（2026-10-15）：教室端录作业 / 行政管理改名与教师档案 ----------------
+       口径同 ①-⑤：**受控 + 提交读 DOM + 写回 state**（这两个组件的按钮 `disabled` 与 `pDirty`
+       都读 state，不能改成非受控 —— `lib/liveInput.ts` 边界②），自由文本上的 `maxLength`
+       一律去掉、改成超长明确报错（原生上限会在组字期静默截断用户正在打的字）。 */
+    {
+      const CR = strip3(readApp('src/pages/Classroom.tsx'))
+      const TA = strip3(readApp('src/pages/TeacherAccounts.tsx'))
+      check(
+        n(CR, /liveValue\(contentRef\.current, content\)/g) === 1 &&
+          n(CR, /liveValue\(pinRef\.current, pin\)/g) === 1 &&
+          n(CR, /content: liveContent,/g) === 1 &&
+          n(CR, /pin: livePin,/g) === 1 &&
+          n(CR, /maxLength/g) === 0,
+        '🔴 A26 ⑦ 教室端「课代表录作业」：作业内容 + 班级口令**提交读屏上那一份**（`liveValue(contentRef/pinRef.current, …)`）并写回 state；自由文本上没有 `maxLength`',
+        `读 DOM=${n(CR, /liveValue\(contentRef\.current, content\)/g)}+${n(CR, /liveValue\(pinRef\.current, pin\)/g)} 处 · 提交用读回值=${n(CR, /content: liveContent,/g)}+${n(CR, /pin: livePin,/g)} 处 · maxLength=${n(CR, /maxLength/g)} 处`,
+      )
+      check(
+        n(TA, /liveValue\(nameRef\.current, name\)/g) === 1 &&
+          n(TA, /liveName\.trim\(\)\.length > NAME_MAX/g) === 1 &&
+          n(TA, /liveValue\(pRefs\.current\[f\.key\]/g) === 1 &&
+          n(TA, /pRefs\.current\[f\.key\] = el/g) === 1 &&
+          n(TA, /maxLength/g) === 0 &&
+          n(TA, /NAME_MAX/g) > 0,
+        '🔴 A26 ⑦ 行政管理「显示姓名 / 教师档案」：**提交读屏上那一份**（`liveName` / `live[pRefs]`）并写回 state；姓名超长**明确报错、一个字不发**（`NAME_MAX` 仍在用）；自由文本框上的 `maxLength` 全去掉（那条 120/40 的临时上限也一样，超长由服务端明确报错）',
+        `读 DOM=${n(TA, /liveValue\(nameRef\.current, name\)/g)}+${n(TA, /liveValue\(pRefs\.current\[f\.key\]/g)} 处 · 超长报错=${n(TA, /liveName\.trim\(\)\.length > NAME_MAX/g)} 处 · maxLength=${n(TA, /maxLength/g)} 处 · NAME_MAX=${n(TA, /NAME_MAX/g)} 处`,
+      )
+      /* 🧪 两条反向对照：塞回 `maxLength` / 改回读 state ⇒ 上面两条当场假（照 A26 ① ② ⑤ 的先例） */
+      {
+        const T = 'aria-label="显示姓名"'
+        const c1 = cnt(TA, T)
+        const bad1 = c1 === 1 ? TA.replace(T, `maxLength={NAME_MAX}\n              ${T}`) : TA
+        check(c1 === 1, '🧪 A26 ⑦ 对照前置：「显示姓名」那个框的 `aria-label="显示姓名"` **恰好 1 处**', `命中 ${c1} 处`)
+        check(
+          c1 === 1 && n(TA, /maxLength/g) === 0 && n(bad1, /maxLength/g) > 0,
+          '🧪 A26 ⑦ 反向对照：把 `maxLength={NAME_MAX}` **塞回**姓名框（副本）⇒ 上面那条"自由文本上没有 maxLength"当场假（组字期静默截断又回来了）',
+          `原文 maxLength ${n(TA, /maxLength/g)} 处 · 改过 ${n(bad1, /maxLength/g)} 处`,
+        )
+      }
+      {
+        const T = 'liveValue(contentRef.current, content)'
+        const c2 = cnt(CR, T)
+        const bad2 = CR.split(T).join('content')
+        check(c2 === 1, '🧪 A26 ⑦ 对照前置：教室端"提交读 DOM"那一句**恰好 1 处**', `命中 ${c2} 处`)
+        check(
+          c2 === 1 && cnt(bad2, 'liveValue(contentRef.current') === 0,
+          '🧪 A26 ⑦ 反向对照：把教室端的"读 DOM"改回**读 state**（`content`）⇒ 上面那条当场假',
+          `原文 ${cnt(CR, 'liveValue(contentRef.current')} 处 · 改过 ${cnt(bad2, 'liveValue(contentRef.current')} 处`,
+        )
+      }
     }
 
     /* ---------------- ⑧ 真机那条**未测**要写在源码注释里（照 A23 ⑦ 的先例；剥注释后就看不见了，所以用原始文本） ---------------- */

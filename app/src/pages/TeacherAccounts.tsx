@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { liveValue } from '../lib/liveInput'
 import { useNavigate } from 'react-router-dom'
 import { Page } from '../components/AppShell'
 import { IconAlert, IconCheck, IconPlus, IconRefresh, IconTrash, IconUser, IconX } from '../components/icons'
@@ -835,6 +836,15 @@ function TeacherSheet({
   const [pwd, setPwd] = useState('')
   /** 🆕 显示姓名：**跟着这个人挂载**（`key` 是人 id，换个人自然是空的 —— 不串到别人身上） */
   const [name, setName] = useState('')
+  /*
+   * 🔴 提交那一刻从屏上读回真实值（`lib/liveInput.ts`）：显示姓名 / 教师档案这两个「保存」
+   *    都读 state，而受控输入缺一次 `input` 事件（安卓自动填充 / 组字提交不发事件）时，
+   *    点保存那次重渲染会把旧 state 写回 DOM ⇒ 屏上那几个字**既存不进去、也被当场冲掉**。
+   * ⚠️ 两处都**保持受控**（按钮 `disabled` 要读 state / `pDirty` 也要读 state）——
+   *    照 `lib/liveInput.ts` 边界②：受控 + `ref` + 提交读 DOM + 写回 state。
+   */
+  const nameRef = useRef<HTMLInputElement | null>(null)
+  const pRefs = useRef<Record<string, HTMLInputElement | null>>({})
   /**
    * 🆕 教师档案的三个草稿值：同样**跟着这个人挂载**（`key` = 人 id）。
    * 初值来自上面读到的 `profile`（没录过 = 空串），编辑时就地改，保存后由回话覆盖。
@@ -917,17 +927,27 @@ function TeacherSheet({
           <div className="flex gap-2">
             <input
               className="input min-w-0 flex-1"
+              ref={nameRef}
               value={name}
-              maxLength={NAME_MAX}
               onChange={(e) => setName(e.target.value)}
               placeholder={teacher.name}
               aria-label="显示姓名"
             />
             <Button
               disabled={busy || !name.trim() || name.trim() === teacher.name}
-              onClick={() =>
+              onClick={() => {
+                /* 🔴 提交那一刻从屏上读回真实值（`lib/liveInput.ts`）并写回 state ——
+                   受控输入缺一次 `input` 事件时，读 state 会把屏上那几个字丢掉。
+                   自由文本上的 `maxLength` 按口径去掉（原生上限在组字期**静默截断**），
+                   超长改成**明确报错、一个字都不发**。 */
+                const liveName = liveValue(nameRef.current, name)
+                setName(liveName)
+                if (liveName.trim().length > NAME_MAX) {
+                  push({ text: `姓名最多 ${NAME_MAX} 个字（现在 ${liveName.trim().length} 个）—— 没有保存`, tone: 'bad' })
+                  return
+                }
                 void run(async () => {
-                  const r = await renameTeacher(teacher.id, name.trim())
+                  const r = await renameTeacher(teacher.id, liveName.trim())
                   if (!r.ok) return { ok: false, message: r.message, detail: r.detail }
                   /* 就地改那一行，**不重拉整张名单**（回话里就是新名字） */
                   onRenamed(teacher.id, r.data.teacher.name)
@@ -935,7 +955,7 @@ function TeacherSheet({
                   setName(r.data.teacher.name)
                   return { ok: true }
                 })
-              }
+              }}
             >
               保存
             </Button>
@@ -955,8 +975,10 @@ function TeacherSheet({
                 <span style={{ fontSize: 12, color: 'var(--color-ink3)' }}>{f.label}</span>
                 <input
                   className="input"
+                  ref={(el) => {
+                    pRefs.current[f.key] = el
+                  }}
                   value={pDraft[f.key] ?? ''}
-                  maxLength={f.key === 'homeAddress' || f.key === 'email' ? 120 : 40}
                   placeholder={f.hint}
                   aria-label={f.label}
                   onChange={(e) => setPDraft((prev) => ({ ...prev, [f.key]: e.target.value }))}
@@ -966,12 +988,20 @@ function TeacherSheet({
             <div className="flex justify-end">
               <Button
                 disabled={busy || !pDirty}
-                onClick={() =>
+                onClick={() => {
+                  /* 🔴 提交那一刻从屏上读回真实值（`lib/liveInput.ts`）并写回 state；
+                     三个框都是自由文本 ⇒ `maxLength` 去掉（那条 120/40 的临时上限也一样），
+                     超长由服务端那句明确报错挡住 —— 这里不另立第二套上限（一个字段只有一种语义）。 */
+                  const live = { ...pDraft }
+                  TEACHER_PROFILE_FIELDS.forEach((f) => {
+                    live[f.key] = liveValue(pRefs.current[f.key], pDraft[f.key] ?? '')
+                  })
+                  setPDraft(live)
                   void run(async () => {
                     const r = await saveTeacherProfile(teacher.id, {
-                      homeAddress: (pDraft.homeAddress ?? '').trim(),
-                      phone: (pDraft.phone ?? '').trim(),
-                      email: (pDraft.email ?? '').trim(),
+                      homeAddress: (live.homeAddress ?? '').trim(),
+                      phone: (live.phone ?? '').trim(),
+                      email: (live.email ?? '').trim(),
                     })
                     if (!r.ok) return { ok: false, message: r.message, detail: r.detail }
                     const saved = r.data.profile
@@ -979,7 +1009,7 @@ function TeacherSheet({
                     setPDraft({ homeAddress: saved.homeAddress, phone: saved.phone, email: saved.email })
                     return { ok: true }
                   })
-                }
+                }}
               >
                 保存
               </Button>

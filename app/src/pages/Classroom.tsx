@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { liveValue } from '../lib/liveInput'
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
 import { PipPanel } from '../components/PipPanel'
@@ -3325,17 +3326,29 @@ function RepHomeworkSheet({
   const [content, setContent] = useState('')
   const [pin, setPin] = useState('')
   const [busy, setBusy] = useState(false)
+  /*
+   * 🔴 提交那一刻从**屏上**读回真实值（`lib/liveInput.ts`）—— 受控输入只要缺一次 `input`
+   *    事件（安卓自动填充 / 组字提交就是不发事件），点「写进今天的作业」那次重渲染就会
+   *    把旧 state 写回 DOM：屏上那几个字**既提交不出去、也会被当场冲掉**。
+   */
+  const contentRef = useRef<HTMLTextAreaElement | null>(null)
+  const pinRef = useRef<HTMLInputElement | null>(null)
 
   const save = async () => {
     if (busy) return
+    const liveContent = liveValue(contentRef.current, content)
+    const livePin = liveValue(pinRef.current, pin)
+    /* 读回的那份**写回 state** ⇒ 紧接着那次重渲染写回的就是屏上那一份 */
+    setContent(liveContent)
+    setPin(livePin)
     setBusy(true)
     /* 老师那一条路直接写表（能不能写由 RLS 判）；课代表这一条**必须**走 RPC + 口令 */
     const r = await repSetDailyHomework({
       classId,
       subject: subjectName(subject),
       subjectCode: subject,
-      content,
-      pin,
+      content: liveContent,
+      pin: livePin,
     })
     setBusy(false)
     if (!r.ok) {
@@ -3383,6 +3396,7 @@ function RepHomeworkSheet({
       <textarea
         className="input"
         rows={4}
+        ref={contentRef}
         value={content}
         onChange={(e) => setContent(e.target.value)}
         placeholder="例：背《琵琶行》全文，明天早读抽查。"
@@ -3392,6 +3406,7 @@ function RepHomeworkSheet({
       </div>
       <input
         className="input"
+        ref={pinRef}
         value={pin}
         onChange={(e) => setPin(e.target.value)}
         placeholder="问班主任要的 6–12 位口令"
