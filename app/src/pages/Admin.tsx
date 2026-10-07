@@ -909,8 +909,15 @@ function SealDecryptCard() {
 function PanelLogin({ reason }: { reason: string }) {
   const hydrate = useStore((s) => s.hydrate)
   const navigate = useNavigate()
-  const [account, setAccount] = useState('')
-  const [pwd, setPwd] = useState('')
+  /*
+   * 🔴 非受控（`ref` + `liveValue`）—— 与 `Login.tsx` / `lib/liveInput.ts` 同一口径：
+   *   这块卡是**面板自己的登录**，同样是"手输密码 + 安卓自动填充"的现场。
+   *   受控输入只要缺一次 `input` 事件（自动填充直接写 DOM / 组字提交不发事件），
+   *   屏上就比 state 多几个字，而点「登录」的 `setBusy(true)` 一重渲染就把旧 state
+   *   写回 DOM ⇒ 字被吞掉、登录用的还是旧值。非受控从结构上不可能发生。
+   */
+  const accountRef = useRef<HTMLInputElement>(null)
+  const pwdRef = useRef<HTMLInputElement>(null)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
 
@@ -919,6 +926,9 @@ function PanelLogin({ reason }: { reason: string }) {
     if (busy) return
     setBusy(true)
     setErr('')
+    /* 🔴 提交那一刻读**屏上那一份**，不读 state */
+    const account = liveValue(accountRef.current, '')
+    const pwd = liveValue(pwdRef.current, '')
     const sb = getSupabase()
     if (!sb) {
       setBusy(false)
@@ -969,8 +979,8 @@ function PanelLogin({ reason }: { reason: string }) {
               <span className="label">邮箱 / 账号</span>
               <input
                 className="input"
-                value={account}
-                onChange={(e) => setAccount(e.target.value)}
+                ref={accountRef}
+                defaultValue=""
                 placeholder="最高管理员的账号"
                 autoComplete="username"
               />
@@ -980,8 +990,8 @@ function PanelLogin({ reason }: { reason: string }) {
               <input
                 className="input"
                 type="password"
-                value={pwd}
-                onChange={(e) => setPwd(e.target.value)}
+                ref={pwdRef}
+                defaultValue=""
                 autoComplete="current-password"
               />
             </label>

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { IconChevronRight, IconWifi } from '../components/icons'
 import { Emblem } from '../components/Emblem'
@@ -6,6 +6,8 @@ import { StarBorder } from '../components/StarBorder'
 import { Button } from '../components/ui'
 import { useStore, useToast } from '../data/store'
 import { loginFailText, toEmail } from '../lib/accounts'
+/* 🔴 「提交那一刻从屏上读回真实值」—— 见 `lib/liveInput.ts` 的文件头（登录页吞字的修法） */
+import { liveValue } from '../lib/liveInput'
 // 🔴 教室端"只让教室端账号登录"：判据与文案都在这一个文件里（见那里的说明）
 import { CLASSROOM_ONLY, isClassroomShell } from '../lib/classroomShell'
 import { signOutEverywhere } from '../hooks/useAuthBootstrap'
@@ -28,14 +30,30 @@ export default function Login() {
   const navigate = useNavigate()
   const loc = useLocation() as { state?: { from?: string; expired?: boolean } }
   const push = useToast((s) => s.push)
-  const [account, setAccount] = useState('')
-  const [pwd, setPwd] = useState('')
+  /*
+   * 🔴 账号 / 密码从**受控**改成**非受控**（`ref` + `liveValue`，提交时读 DOM）。
+   *
+   * 真机反馈「登录页还有吞字」，机制与上次公告发布框同源：
+   *   受控输入靠 `input` 事件才知道屏上变了 —— 而**这次事件可能不来**：
+   *     · 安卓自动填充（密码管理器）是**直接写 DOM** 的，不发 `input`；
+   *     · 有些输入法 / 老 WebView 在组字提交那一刻不发 `composition*` 也不发 `input`。
+   *   于是**屏上比 state 多几个字**，而点「进入平台」会 `setBusy(true)` ⇒ 一次重渲染
+   *   ⇒ React 把**旧 state 写回 DOM** ⇒ 屏上那几个字**当场消失**（就是"吞字"），
+   *   而且拿去登录的也是旧值。
+   *   非受控之后 React 再也不往这两个框里写值，"点一下把刚打的字冲掉"从结构上不可能；
+   *   提交走 `liveValue()` 读屏上那一份 —— 口径见 `lib/liveInput.ts` 文件头（含它的三条边界）。
+   */
+  const accountRef = useRef<HTMLInputElement>(null)
+  const pwdRef = useRef<HTMLInputElement>(null)
   const [busy, setBusy] = useState(false)
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (busy) return
     setBusy(true)
+    /* 🔴 只读屏上那一份（`liveValue` 只读不写，不与任何 `onChange` 打架） */
+    const account = liveValue(accountRef.current, '')
+    const pwd = liveValue(pwdRef.current, '')
 
     if (isRemote) {
       const sb = getSupabase()
@@ -174,8 +192,8 @@ export default function Login() {
               <span className="label">{isRemote ? '邮箱 / 账号' : '账号 / 工号'}</span>
               <input
                 className="input"
-                value={account}
-                onChange={(e) => setAccount(e.target.value)}
+                ref={accountRef}
+                defaultValue=""
                 placeholder={isRemote ? '邮箱，或直接敲 QQ 号 / 账号名' : '输入账号'}
                 autoComplete="username"
                 autoFocus
@@ -186,8 +204,8 @@ export default function Login() {
               <input
                 className="input"
                 type="password"
-                value={pwd}
-                onChange={(e) => setPwd(e.target.value)}
+                ref={pwdRef}
+                defaultValue=""
                 placeholder="输入密码"
                 autoComplete="current-password"
               />

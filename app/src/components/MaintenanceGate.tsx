@@ -27,6 +27,8 @@ import { Button } from './ui'
 import { Emblem } from './Emblem'
 import { IconAlert, IconCheck, IconClock, IconRefresh } from './icons'
 import { useMaintenanceStatus } from '../lib/useMaintenance'
+/* 🔴 「提交那一刻从屏上读回真实值」—— 见 `lib/liveInput.ts` 的文件头（登录卡吞字） */
+import { liveValue } from '../lib/liveInput'
 import { ReleaseGate } from './ReleaseGate'
 import { beijingNow } from '../lib/holiday'
 import { useStore } from '../data/store'
@@ -189,12 +191,27 @@ export function MaintenanceUnlock() {
     taps.current = []
   }
 
+  /*
+   * 🔴 这块卡是**登录卡**（手输账号密码 + 安卓自动填充），与 `Login.tsx` 同一个吞字现场。
+   *    这里**保持受控**：下面那个按钮的 `disabled` 要读 `email` / `password`（边界②，
+   *    见 `lib/liveInput.ts` 文件头）—— 所以按那里的口径：**提交那一刻读一次 DOM**，
+   *    并把读回的那份**写回 state** ⇒ 紧接着那次重渲染写回的就是屏上那一份，不是旧的。
+   * ⚠️ 真机未验（本机没有安卓设备）：这里能证明的只是"提交读的是屏上那一份"。
+   */
+  const emailRef = useRef<HTMLInputElement>(null)
+  const pwdRef = useRef<HTMLInputElement>(null)
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (busy) return
     setBusy(true)
     setErr('')
-    const r = await unlockMaintenance(email, password)
+    /* 🔴 提交读 DOM，不读 state */
+    const liveEmail = liveValue(emailRef.current, email)
+    const livePassword = liveValue(pwdRef.current, password)
+    setEmail(liveEmail)
+    setPassword(livePassword)
+    const r = await unlockMaintenance(liveEmail, livePassword)
     if (!r.ok) {
       setErr(r.message)
       setBusy(false)
@@ -238,6 +255,7 @@ export function MaintenanceUnlock() {
           <input
             className="input"
             autoFocus
+            ref={emailRef}
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             placeholder="管理员账号"
@@ -247,6 +265,7 @@ export function MaintenanceUnlock() {
           <input
             className="input"
             type="password"
+            ref={pwdRef}
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             placeholder="密码"

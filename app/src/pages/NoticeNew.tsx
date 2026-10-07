@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Page } from '../components/AppShell'
 import { IconAlert, IconSend } from '../components/icons'
@@ -7,6 +7,8 @@ import { useStore, useToast } from '../data/store'
 import { departmentName } from '../lib/departments'
 import { canPublishNotice, roleName } from '../lib/roles'
 import { subjectShort } from '../lib/subjects'
+/* 🔴 「提交那一刻从屏上读回真实值」—— 见 `lib/liveInput.ts` 的文件头（发布吞字） */
+import { liveValue } from '../lib/liveInput'
 import type { NoticeScopeOption } from '../data/types'
 
 const TITLE_MAX = 120
@@ -38,8 +40,15 @@ export default function NoticeNew() {
 
   const mayPublish = canPublishNotice(myRoles)
 
+  /*
+   * 🔴 这两个框**保持受控**（正文计数与"发出"按钮的 `disabled` 都要读 state）——
+   *    照 `lib/liveInput.ts` 文件头那条边界②：要实时联动的框照旧受控，
+   *    另在**每一次会触发重渲染的点击**上先从 DOM 读一次（见下面「发出」的 `onClick`）。
+   */
   const [title, setTitle] = useState('')
   const [body, setBody] = useState('')
+  const titleRef = useRef<HTMLInputElement>(null)
+  const bodyRef = useRef<HTMLTextAreaElement>(null)
   const [pick, setPick] = useState<string>('')
   const [days, setDays] = useState(0)
   const [sending, setSending] = useState(false)
@@ -228,8 +237,8 @@ export default function NoticeNew() {
               fontSize: 14.5,
               background: 'var(--color-surface)',
             }}
+            ref={titleRef}
             value={title}
-            maxLength={TITLE_MAX}
             placeholder="例如：本周三 16:30 全体教师会（报告厅）"
             onChange={(e) => setTitle(e.target.value)}
           />
@@ -247,8 +256,8 @@ export default function NoticeNew() {
               minHeight: 132,
               background: 'var(--color-surface)',
             }}
+            ref={bodyRef}
             value={body}
-            maxLength={BODY_MAX}
             placeholder="时间、地点、要带什么"
             onChange={(e) => setBody(e.target.value)}
           />
@@ -286,10 +295,30 @@ export default function NoticeNew() {
           disabled={sending || !chosen || !title.trim() || !body.trim()}
           onClick={async () => {
             if (!chosen) return
+            /*
+             * 🔴 提交那一刻读**屏上那一份**（`lib/liveInput.ts`）。这一页有吞字的**两个**成因：
+             *    ① 受控 + 组字（拼音还没选词）时缺一次 `input` ⇒ 屏上比 state 多几个字，
+             *       而这次点击的 `setSending(true)` 一重渲染就把旧 state 写回 DOM ⇒ 字被吞掉；
+             *    ② `maxLength` 在组字期间**静默截断**用户正在打的字 —— 那是我们自己造成的吞字。
+             *    ⇒ 读到之后**写回 state**（紧接着那次重渲染写回的就是屏上那一份），
+             *      并且超长不再静默截断，而是**明确报错、一个字都不发**（`AGENTS.md` §三.5）。
+             */
+            const liveTitle = liveValue(titleRef.current, title)
+            const liveBody = liveValue(bodyRef.current, body)
+            setTitle(liveTitle)
+            setBody(liveBody)
+            if (liveTitle.trim().length > TITLE_MAX || liveBody.trim().length > BODY_MAX) {
+              push({
+                text: `标题最多 ${TITLE_MAX} 字、正文最多 ${BODY_MAX} 字`,
+                tone: 'bad',
+                desc: '长了没人读 —— 现在一个字都没发出去，请删短一点再发。',
+              })
+              return
+            }
             setSending(true)
             const res = await publishNotice({
-              title: title.trim(),
-              body: body.trim(),
+              title: liveTitle.trim(),
+              body: liveBody.trim(),
               scopeKind: chosen.scopeKind,
               gradeId: chosen.gradeId ?? undefined,
               subjectCode: chosen.subjectCode ?? undefined,

@@ -9748,6 +9748,138 @@ section('第二十八节 · A23：公告「发布」吞字（正文非受控 + �
    *    ④ 反向：把正文改到 25 个字以上再点发布 ⇒ 应看到「公告正文最多 24 字 —— 长了没人读」
    *       这句**明确报错**，而**不是**"被悄悄截成 24 字发出去"。
    */
+
+  /* ============================================================
+     A26：**登录页 / 登录卡 / 通知发布**的吞字（2026-10-14 真机反馈）
+     ⚠️ 编号：本节**原本写成 A25**，与后面「第二十四节之四 · A25（/api/push）」**撞号**
+        —— 同号两节会让"看日志定位"当场失效（照本文件 A24 头部那条纪律）⇒ 改成 **A26**。
+     ------------------------------------------------------------
+     起因（用户原话）：「有人反应 apk 登录页部分还是有吞字现象，看一下**所有的输入框**
+                        还有没有这个问题，注意低版本安卓适配」。
+
+     🔴 **真浏览器复现读数**（临时用 `playwright` 起 Edge 跑完即删，驱动没留：
+        全量逐字输入 `delay: 0` + 直接写 `el.value` 不派发事件 = 安卓自动填充 / 组字提交不发 `input`）：
+        · ① **高速逐字输入在 Chromium/Edge 里不丢字**（`zhang.san2026` 逐字打完，DOM 完全一致）
+          —— ⇒ **"打字太快"本身不是根因**，别把锅扣给输入法速度（如实记）；
+        · ② 构造受控输入的真前提「**屏上有、state 没有**」（屏上 `zhang.sanXYZ`、React state `zhang.san`）
+          之后**点一下「进入平台」**：
+            · 受控版：点击后 DOM 从 `zhang.sanXYZ` **回退成 `zhang.san`** —— 3 个字**当场消失**（吞字），
+              而且提交用的就是旧值（`setBusy(true)` 那次重渲染把旧 state 写回了 DOM）；
+            · 非受控版：DOM 仍是 `zhang.sanXYZ`，提交的就是屏上那一份。
+        ⇒ 机制定性：**受控输入 + 缺一次 `input` 事件 + 一次重渲染**（点提交必然重渲染）。
+          与上次「公告发布框」同源，修法同口径：**非受控 + 提交读 DOM**（`lib/liveInput.ts`）。
+
+     ⚪ **三态**：本节的判据**全部**是仓库内的静态事实（源码文本），**没有一条**依赖仓库外的东西
+        ⇒ 不存在需要记「灰」的判据（既不假绿、也不假红）；真机那条**未测**照 A23 ⑦ 的先例
+        写进源码注释（⑧ 那条钉的就是"写着未测"这件事本身）。
+     ============================================================ */
+  {
+    const L = strip3(readApp('src/pages/Login.tsx'))
+    const MG = strip3(readApp('src/components/MaintenanceGate.tsx'))
+    const NN = strip3(readApp('src/pages/NoticeNew.tsx'))
+    const AD = strip3(readApp('src/pages/Admin.tsx'))
+    const n = (t, re) => (t.match(re) ?? []).length
+    const cnt = (t, s) => t.split(s).length - 1
+
+    /* ---------------- ① 登录页两个输入框**不是受控** ---------------- */
+    check(
+      n(L, /<input/g) === 2 && n(L, /defaultValue=""/g) === 2 && n(L, /value=\{/g) === 0 && n(L, /onChange=/g) === 0,
+      '🔴 A26 ① 登录页两个输入框**都是非受控**（`defaultValue` + `ref`，`value={` / `onChange=` 各 0 处）—— 受控时只要缺一次 `input` 事件，点「进入平台」那次重渲染就会把旧 state 写回 DOM（那就是"吞字"）',
+      `<input> ${n(L, /<input/g)} 处 · defaultValue="" ${n(L, /defaultValue=""/g)} 处 · value={ ${n(L, /value=\{/g)} 处 · onChange= ${n(L, /onChange=/g)} 处`,
+    )
+
+    /* ---------------- ② 提交读的是 **DOM 值**，不是 state ---------------- */
+    check(
+      n(L, /liveValue\(accountRef\.current, ''\)/g) === 1 &&
+        n(L, /liveValue\(pwdRef\.current, ''\)/g) === 1 &&
+        n(L, /useState\(''\)/g) === 0,
+      '🔴 A26 ② 登录页提交**读屏上那一份**（`liveValue(accountRef/pwdRef.current, \'\')` 各 1 处），账号/密码**不再是 state**（`useState(\'\')` 0 处）',
+      `liveValue(accountRef)=${n(L, /liveValue\(accountRef\.current, ''\)/g)} · liveValue(pwdRef)=${n(L, /liveValue\(pwdRef\.current, ''\)/g)} · useState('')=${n(L, /useState\(''\)/g)}`,
+    )
+
+    /* ---------------- ③ `/admin` 那张面板登录卡同口径 ---------------- */
+    check(
+      n(AD, /liveValue\(accountRef\.current, ''\)/g) === 1 && n(AD, /liveValue\(pwdRef\.current, ''\)/g) === 1,
+      '🔴 A26 ③ `/admin` 那张**面板自己的登录卡**同一口径：非受控 + 提交读 DOM（它同样是"手输密码 + 安卓自动填充"的现场）',
+      `accountRef=${n(AD, /liveValue\(accountRef\.current, ''\)/g)} 处 · pwdRef=${n(AD, /liveValue\(pwdRef\.current, ''\)/g)} 处`,
+    )
+
+    /* ---------------- ④ 维护解锁卡：受控（disabled 要读 state）但提交读 DOM 且写回 ---------------- */
+    check(
+      n(MG, /liveValue\(emailRef\.current, email\)/g) === 1 &&
+        n(MG, /unlockMaintenance\(liveEmail, livePassword\)/g) === 1 &&
+        n(MG, /setEmail\(liveEmail\)/g) === 1,
+      '🔴 A26 ④ 维护解锁那张登录卡：**保持受控**（按钮 `disabled` 要读 state，见 `liveInput.ts` 边界②）但**提交读 DOM**、并把读回的那份**写回 state** —— 紧接着那次重渲染写回的就是屏上那一份',
+      `读 DOM=${n(MG, /liveValue\(emailRef\.current, email\)/g)} 处 · 用读回值解锁=${n(MG, /unlockMaintenance\(liveEmail, livePassword\)/g)} 处 · 写回 state=${n(MG, /setEmail\(liveEmail\)/g)} 处`,
+    )
+
+    /* ---------------- ⑤ 通知发布：读 DOM + 去掉 maxLength（组字期静默截断也是吞字） ---------------- */
+    check(
+      n(NN, /liveValue\(titleRef\.current, title\)/g) === 1 &&
+        n(NN, /liveValue\(bodyRef\.current, body\)/g) === 1 &&
+        n(NN, /title: liveTitle\.trim\(\)/g) === 1 &&
+        n(NN, /body: liveBody\.trim\(\)/g) === 1 &&
+        n(NN, /maxLength/g) === 0 &&
+        n(NN, /TITLE_MAX/g) > 0,
+      '🔴 A26 ⑤ 通知发布：标题/正文**提交读 DOM**（`liveTitle`/`liveBody`）、`maxLength` **一律去掉**（组字期静默截断也是吞字，只不过是我们自己造成的）、超长改成**明确报错、一个字都不发**（`TITLE_MAX` 仍在用）',
+      `liveValue 两处=${n(NN, /liveValue\(titleRef\.current, title\)/g)}+${n(NN, /liveValue\(bodyRef\.current, body\)/g)} · 提交用读回值=${n(NN, /title: liveTitle\.trim\(\)/g)}+${n(NN, /body: liveBody\.trim\(\)/g)} · maxLength=${n(NN, /maxLength/g)} 处 · TITLE_MAX=${n(NN, /TITLE_MAX/g)} 处`,
+    )
+
+    /* ---------------- ⑥ 没有不必要的 `key=` 重挂载、没有节流 ---------------- */
+    check(
+      n(L, /key=/g) === 0 && n(L + MG + NN, /debounce|throttle/g) === 0,
+      '🔴 A26 ⑥ 登录页没有 `key=`（不因 key 变化重挂载），这几个输入路径上也没有 `debounce`/`throttle`（节流会把最后一次 `onChange` 推迟到点击**之后**，正是丢字的那一刻）',
+      `Login key= ${n(L, /key=/g)} 处 · debounce|throttle ${n(L + MG + NN, /debounce|throttle/g)} 处`,
+    )
+
+    /* ---------------- 🧪 三条反向对照：改回受控 / 改回读 state / 塞回 maxLength ⇒ 必须红 ---------------- */
+    {
+      const c1 = n(L, /defaultValue=""/g)
+      const bad1 = L.split('defaultValue=""').join('value={account}')
+      check(
+        c1 === 2,
+        '🧪 A26 ① 对照前置：`defaultValue=""` **恰好 2 处**（先数再换 —— 只换第一处会假绿，`AGENTS.md` §三.2）',
+        `命中 ${c1} 处`,
+      )
+      check(
+        c1 === 2 && n(bad1, /value=\{/g) === 2 && n(L, /value=\{/g) === 0,
+        '🧪 A26 ① 反向对照：把两个框改回**受控** `value={account}` ⇒ 上面①那条"都是非受控"当场假',
+        `原文 value={ ${n(L, /value=\{/g)} 处 · 改过 ${n(bad1, /value=\{/g)} 处`,
+      )
+    }
+    {
+      const T = "const account = liveValue(accountRef.current, '')"
+      const c2 = cnt(L, T)
+      const bad2 = L.split(T).join("const account = ''")
+      check(c2 === 1, '🧪 A26 ② 对照前置：登录页"提交读 DOM"那一句**恰好 1 处**', `命中 ${c2} 处`)
+      check(
+        c2 === 1 && cnt(bad2, 'liveValue(accountRef.current') === 0,
+        '🧪 A26 ② 反向对照：把"读 DOM"改回"读 state"（`const account = \'\'`）⇒ 上面②那条当场假',
+        `原文 ${cnt(L, 'liveValue(accountRef.current')} 处 · 改过 ${cnt(bad2, 'liveValue(accountRef.current')} 处`,
+      )
+    }
+    {
+      const T = 'value={title}'
+      const c3 = cnt(NN, T)
+      const bad3 = NN.split(T).join('value={title} maxLength={TITLE_MAX}')
+      check(c3 === 1, '🧪 A26 ⑤ 对照前置：通知标题框的 `value={title}` **恰好 1 处**', `命中 ${c3} 处`)
+      check(
+        c3 === 1 && cnt(NN, 'maxLength') === 0 && cnt(bad3, 'maxLength') > 0,
+        '🧪 A26 ⑤ 反向对照：把 `maxLength` **塞回**标题框（组字期静默截断）⇒ 上面⑤那条当场假',
+        `原文 maxLength ${cnt(NN, 'maxLength')} 处 · 改过 ${cnt(bad3, 'maxLength')} 处`,
+      )
+    }
+
+    /* ---------------- ⑧ 真机那条**未测**要写在源码注释里（照 A23 ⑦ 的先例；剥注释后就看不见了，所以用原始文本） ---------------- */
+    {
+      const rawMG = readApp('src/components/MaintenanceGate.tsx')
+      check(
+        /真机未验/.test(rawMG),
+        '🔴 A26 ⑧ 维护解锁卡的源码注释里照实写着「真机未验」（本机没有安卓设备 —— 能证明的只是"提交读的是屏上那一份"，安卓上的事件时序只能由用户真机复验）',
+        /真机未验/.test(rawMG) ? '写了' : '没写',
+      )
+    }
+  }
 }
 
 /* ============================================================
