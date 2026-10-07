@@ -9781,6 +9781,7 @@ section('第二十八节 · A23：公告「发布」吞字（正文非受控 + �
     const MG = strip3(readApp('src/components/MaintenanceGate.tsx'))
     const NN = strip3(readApp('src/pages/NoticeNew.tsx'))
     const AD = strip3(readApp('src/pages/Admin.tsx'))
+    const AS = strip3(readApp('src/pages/Assignments.tsx'))
     const n = (t, re) => (t.match(re) ?? []).length
     const cnt = (t, s) => t.split(s).length - 1
 
@@ -10038,6 +10039,90 @@ section('第二十八节 · A23：公告「发布」吞字（正文非受控 + �
           `原文 slice ${n(CD, /slice\(0, CUSTOM_MAX\)/g)} 处 · 改过 ${n(bad4, /slice\(0, CUSTOM_MAX\)/g)} 处`,
         )
       }
+    }
+
+    /* ============================================================
+       ⑬ / ⑭（2026-10-15 第二轮）：**手输**的两处高危现场 ——
+         · ⑬ `/admin` 全站公告的**标题 / 正文**（★ 最初那次"点发布吞字"的同族现场）；
+         · ⑭ 布置作业的**每日作业内容**（提交走 `saveDaily()`）。
+       口径与 A26 ④ 一致：这两个框**都得保持受控**（公告要实时算隐私提示、`startEdit`
+       要把旧公告填回框里；每日作业的按钮 `disabled` 读 `dhContent.trim()`）
+       ⇒ **受控 + `ref` + 提交读 DOM + 把读回的那份写回 state**。
+       判据三件套：①"提交读屏上那一份且提交用的是读回值"；②"自由文本上没有 `maxLength`"；
+       ③"`onChange` 里没有静默 `slice`"。
+       ============================================================ */
+    const annForm = AD.slice(
+      AD.indexOf('data-admin-ann-form'),
+      AD.indexOf('data-admin-ann-form') + 1400,
+    )
+    check(
+      n(AD, /liveValue\(titleRef\.current, title\)/g) === 1 &&
+        n(AD, /liveValue\(textRef\.current, text\)/g) === 1 &&
+        n(AD, /title: liveTitle/g) === 1 &&
+        n(AD, /body: liveText/g) === 1 &&
+        n(AD, /setTitle\(liveTitle\)/g) === 1 &&
+        n(AD, /setText\(liveText\)/g) === 1,
+      '🔴 A26 ⑬ `/admin` 全站公告（**手输** · 最初那次吞字的同族现场）：标题 / 正文**提交读屏上那一份**（`liveValue(titleRef/textRef.current, …)`），提交用的是**读回来的值**（`title: liveTitle` / `body: liveText`），并把读回的那份**写回 state**；⚠️ 它**保持受控**（隐私提示要实时联动、`startEdit` 要把旧公告填回框里 —— 非受控的 `defaultValue` 只在挂载时生效）',
+      `读 DOM=${n(AD, /liveValue\(titleRef\.current, title\)/g)}+${n(AD, /liveValue\(textRef\.current, text\)/g)} 处 · 提交用读回值=${n(AD, /title: liveTitle/g)}+${n(AD, /body: liveText/g)} 处 · 写回 state=${n(AD, /setTitle\(liveTitle\)/g)}+${n(AD, /setText\(liveText\)/g)} 处`,
+    )
+    check(
+      n(annForm, /ref=\{titleRef\}/g) === 1 &&
+        n(annForm, /ref=\{textRef\}/g) === 1 &&
+        n(annForm, /maxLength=\{/g) === 0,
+      '🔴 A26 ⑬ 全站公告这两个框上**没有 `maxLength`**（组字期静默截断也是吞字，只不过是我们自己造成的）—— 窗口里同时钉住两个 `ref`（窗口取歪了这条会假绿）',
+      `窗口内 ref={titleRef}=${n(annForm, /ref=\{titleRef\}/g)} · ref={textRef}=${n(annForm, /ref=\{textRef\}/g)} · maxLength={ ${n(annForm, /maxLength=\{/g)} 处`,
+    )
+
+    const dhRef = AS.indexOf('ref={dhContentRef}')
+    const dhBox = AS.slice(Math.max(0, dhRef - 300), dhRef + 900)
+    check(
+      n(AS, /liveValue\(dhContentRef\.current, dhContent\)/g) === 1 &&
+        n(AS, /content: liveContent/g) === 1 &&
+        n(AS, /setDhContent\(liveContent\)/g) === 1 &&
+        n(AS, /ref=\{dhContentRef\}/g) === 1 &&
+        n(dhBox, /value=\{dhContent\}/g) === 1 &&
+        n(dhBox, /maxLength=\{/g) === 0 &&
+        n(dhBox, /slice\(0, /g) === 0,
+      '🔴 A26 ⑭ 布置作业「每日作业内容」（**手输**）：**提交读屏上那一份**（`liveValue(dhContentRef.current, dhContent)`）并把读回的那份**写回 state**，落库用的就是读回来的那一份（`content: liveContent` —— 原来读 `dhContent`）；这个框上没有 `maxLength`、`onChange` 里也没有静默 `slice`；⚠️ **保持受控**（按钮 `disabled` 读 state —— 边界②）',
+      `读 DOM=${n(AS, /liveValue\(dhContentRef\.current, dhContent\)/g)} 处 · 提交用读回值=${n(AS, /content: liveContent/g)} 处 · 写回=${n(AS, /setDhContent\(liveContent\)/g)} 处 · 窗口内 value={dhContent}=${n(dhBox, /value=\{dhContent\}/g)} · maxLength=${n(dhBox, /maxLength=\{/g)} 处 · 静默 slice=${n(dhBox, /slice\(0, /g)} 处`,
+    )
+
+    /* 🧪 两组反向对照（副本；照 A26 ⑨⑩⑫ 的先例 —— 每组先数"恰好 1 处"再替换，
+       只换第一处会假绿，`AGENTS.md` §三.2）—— 改回**读 state** / 塞回 `maxLength` ⇒ 上面两条当场假 */
+    {
+      const T = 'const liveText = liveValue(textRef.current, text)'
+      const c1 = cnt(AD, T)
+      const bad1 = c1 === 1 ? AD.split(T).join('const liveText = text') : AD
+      check(c1 === 1, '🧪 A26 ⑬ 对照前置：公告正文那句"读 DOM" **恰好 1 处**', `命中 ${c1} 处`)
+      check(
+        c1 === 1 &&
+          n(bad1, /liveValue\(textRef\.current, text\)/g) === 0 &&
+          n(bad1, /const liveText = text/g) === 1,
+        '🧪 A26 ⑬ 反向对照：把它改回**读 state**（`const liveText = text`）⇒ 上面⑬那条"提交读屏上那一份"当场假',
+        `原文 ${n(AD, /liveValue\(textRef\.current, text\)/g)} 处 · 改过 ${n(bad1, /liveValue\(textRef\.current, text\)/g)} 处`,
+      )
+      const T2 = 'ref={textRef}'
+      const c2 = cnt(AD, T2)
+      const bad2 = c2 === 1 ? AD.replace(T2, `${T2}\n          maxLength={2000}`) : AD
+      check(c2 === 1, '🧪 A26 ⑬ 对照前置：公告正文框的 `ref={textRef}` **恰好 1 处**', `命中 ${c2} 处`)
+      check(
+        c2 === 1 && n(bad2, /maxLength=\{/g) === n(AD, /maxLength=\{/g) + 1,
+        '🧪 A26 ⑬ 反向对照：把 `maxLength` **塞回**公告正文框（副本）⇒ 上面⑬那条"没有 maxLength"当场假（组字期静默截断又回来了）',
+        `原文 maxLength ${n(AD, /maxLength=\{/g)} 处 · 改过 ${n(bad2, /maxLength=\{/g)} 处`,
+      )
+    }
+    {
+      const T = 'const liveContent = liveValue(dhContentRef.current, dhContent)'
+      const c3 = cnt(AS, T)
+      const bad3 = c3 === 1 ? AS.split(T).join('const liveContent = dhContent') : AS
+      check(c3 === 1, '🧪 A26 ⑭ 对照前置：每日作业那句"读 DOM" **恰好 1 处**', `命中 ${c3} 处`)
+      check(
+        c3 === 1 &&
+          n(bad3, /liveValue\(dhContentRef\.current, dhContent\)/g) === 0 &&
+          n(bad3, /const liveContent = dhContent/g) === 1,
+        '🧪 A26 ⑭ 反向对照：把它改回**读 state**（`const liveContent = dhContent`）⇒ 上面⑭那条"提交读屏上那一份"当场假',
+        `原文 ${n(AS, /liveValue\(dhContentRef\.current, dhContent\)/g)} 处 · 改过 ${n(bad3, /liveValue\(dhContentRef\.current, dhContent\)/g)} 处`,
+      )
     }
 
     /* ---------------- ⑧ 真机那条**未测**要写在源码注释里（照 A23 ⑦ 的先例；剥注释后就看不见了，所以用原始文本） ---------------- */

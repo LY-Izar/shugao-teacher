@@ -2993,6 +2993,16 @@ function AnnounceCard() {
 
   const [title, setTitle] = useState('')
   const [text, setText] = useState('')
+  /*
+   * 🔴 提交那一刻**从屏上读回真实值**（口径见 `lib/liveInput.ts`）—— 这就是最初那次
+   *    「点发布被吞字」的同族现场（公告正文是**手输**的自由文本）。
+   *   ⚠️ 这两个框**必须保持受控**：下面那句隐私提示 `announcementPrivacyHint(title, text)`
+   *      要实时联动（边界②），而且 `startEdit()` 要把旧公告填回框里
+   *      —— 非受控的 `defaultValue` 只在挂载时生效，填不回去。
+   *   ⇒ 照 A26 ④ 的口径：**受控 + `ref` + 提交读 DOM + 把读回的那份写回 state**。
+   */
+  const titleRef = useRef<HTMLInputElement>(null)
+  const textRef = useRef<HTMLTextAreaElement>(null)
   const [level, setLevel] = useState<AnnouncementLevel>('normal')
   const [popup, setPopup] = useState<AnnouncementPopup>('never')
   const [pin, setPin] = useState(false)
@@ -3068,12 +3078,22 @@ function AnnounceCard() {
   /** 提交：新建 / 更新**走同一个不变量**（同一个服务端动作组、同一个判据） */
   const submit = async () => {
     if (busy) return
+    /*
+     * 🔴 提交那一刻从屏上读回真实值并写回 state：安卓自动填充 / 组字提交可能**没发**那次
+     *    `input`（详见 `lib/liveInput.ts` 的文件头）⇒ 受控框的 state 会比屏上少几个字。
+     *    读回来的那一份**既用来提交、也写回 state** ⇒ 紧接着那次重渲染写回 DOM 的就是
+     *    屏上那一份，框里那几个字也不会被冲掉。
+     */
+    const liveTitle = liveValue(titleRef.current, title)
+    const liveText = liveValue(textRef.current, text)
+    setTitle(liveTitle)
+    setText(liveText)
     setBusy(true)
     setErr('')
     setMsg('')
     const input: AnnouncementInput = {
-      title,
-      body: text,
+      title: liveTitle,
+      body: liveText,
       level,
       popup,
       pin,
@@ -3261,6 +3281,7 @@ function AnnounceCard() {
       <SubHead>{editingId ? '编辑这条公告' : '发一条新公告'}</SubHead>
       <div className="px-3.5 pb-3" data-admin-ann-form>
         <input
+          ref={titleRef}
           className="input"
           style={{ height: 34, fontSize: 13 }}
           placeholder="标题，例如：系统维护：今晚 23:00–23:30"
@@ -3268,6 +3289,7 @@ function AnnounceCard() {
           onChange={(e) => setTitle(e.target.value)}
         />
         <textarea
+          ref={textRef}
           className="input mt-2"
           style={{ minHeight: 76, fontSize: 13, lineHeight: 1.7 }}
           placeholder="正文（纯文本）。⚠️ 这是全站都看得到的，不要写学生姓名 / 学号 / 成绩。"

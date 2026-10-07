@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Page } from '../components/AppShell'
 import {
@@ -17,6 +17,8 @@ import {
 } from '../components/icons'
 import { Button, Empty, PageHead, Panel, Sect, Sheet, Tag } from '../components/ui'
 import { useStore, useToast } from '../data/store'
+/* 「提交那一刻从屏上读回真实值」—— 见 `lib/liveInput.ts` 的文件头（点提交吞字的另一半） */
+import { liveValue } from '../lib/liveInput'
 import {
   STATUS_TEXT,
   type Assignment,
@@ -216,6 +218,13 @@ export default function Assignments() {
   const [dhClassId, setDhClassId] = useState('')
   const [dhDate, setDhDate] = useState(() => ymdOf(beijingNow()))
   const [dhSubject, setDhSubject] = useState('chinese')
+  /*
+   * 🔴 「每日作业内容」是**手输**的自由文本；提交那一刻**从屏上读回真实值**
+   *   （口径见 `lib/liveInput.ts`）。
+   *   ⚠️ 这个框**必须保持受控**：下面「留一条」按钮的 `disabled` 读 `dhContent.trim()`
+   *      （边界②）⇒ 受控 + `ref` + 提交读 DOM + 把读回的那份**写回 state**。
+   */
+  const dhContentRef = useRef<HTMLTextAreaElement>(null)
   const [dhContent, setDhContent] = useState('')
   const [dhBusy, setDhBusy] = useState(false)
   const [dhTick, setDhTick] = useState(0)
@@ -316,13 +325,18 @@ export default function Assignments() {
 
   const saveDaily = async () => {
     const name = SUBJECTS.find((s) => s.code === dhSubject)?.name ?? dhSubject
+    /* 🔴 提交那一刻从屏上读回真实值并写回 state：安卓自动填充 / 组字提交可能**没发**那次
+       `input` ⇒ 受控框的 state 会比屏上少几个字。屏上是什么就提交什么，读回的那份同时
+       写回 state ⇒ 紧接着那次重渲染写回 DOM 的也是屏上那一份（见 `lib/liveInput.ts`）。 */
+    const liveContent = liveValue(dhContentRef.current, dhContent)
+    setDhContent(liveContent)
     setDhBusy(true)
     const r = await addDailyHomework({
       classId: dhClass,
       onDate: dhDate,
       subject: name,
       subjectCode: dhSubject,
-      content: dhContent,
+      content: liveContent,
       authorId: teacher?.id ?? null,
       authorName: teacher?.name ?? '',
     })
@@ -657,6 +671,7 @@ export default function Assignments() {
                 })}
               </div>
               <textarea
+                ref={dhContentRef}
                 className="input"
                 rows={2}
                 placeholder={`${subjectName(dhSubject)}今天留了什么`}
