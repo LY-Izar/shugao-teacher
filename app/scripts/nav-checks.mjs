@@ -3918,9 +3918,11 @@ section('第十五节 · D13：自己改密码（只作用自己 · 失败显式
     `服务端 NAME_MAX=${mServer ? mServer[1] : '（没抠到）'} · 我的页 SELF_NAME_MAX=${mClient ? mClient[1] : '（没抠到）'}`,
   )
   check(
-    /liveName\.trim\(\)\.length > NAME_MAX/.test(fSrc) && /maxLength=\{SELF_NAME_MAX\}/.test(SET_CODE),
-    '🔴 D13-F ② 两条路都把那个数**真的用上了**（常量相等但没人用 = 摆设）：行政管理那侧按 A26 ⑦ 的口径改成**提交时超长明确报错、一个字不发**（`liveName.trim().length > NAME_MAX`；原生 `maxLength` 已去掉 —— 它会在组字期**静默截断**用户正在打的字），我的页那侧仍是 `maxLength={SELF_NAME_MAX}`',
-    `行政管理用上了 = ${/liveName\.trim\(\)\.length > NAME_MAX/.test(fSrc)} · 我的页挂上了 = ${/maxLength=\{SELF_NAME_MAX\}/.test(SET_CODE)}`,
+    /liveName\.trim\(\)\.length > NAME_MAX/.test(fSrc) &&
+      /liveName\.trim\(\)\.length > SELF_NAME_MAX/.test(SET_CODE) &&
+      !/maxLength=\{SELF_NAME_MAX\}/.test(SET_CODE),
+    '🔴 D13-F ② 两条路都把那个数**真的用上了**（常量相等但没人用 = 摆设）：**两条路都改成「提交时超长明确报错、一个字不发」**（行政管理 `liveName.trim().length > NAME_MAX` · 我的页 `liveName.trim().length > SELF_NAME_MAX`）；原生 `maxLength` **两边都去掉**了 —— 它在组字期**静默截断**用户正在打的字，那也是吞字',
+    `行政管理用上了 = ${/liveName\.trim\(\)\.length > NAME_MAX/.test(fSrc)} · 我的页用上了 = ${/liveName\.trim\(\)\.length > SELF_NAME_MAX/.test(SET_CODE)} · 我的页还有 maxLength = ${/maxLength=\{SELF_NAME_MAX\}/.test(SET_CODE)}`,
   )
   /* 🧪 反向对照：把服务端那个数改成 60 → ① 当场红（证明它真的在比那两个数，不是恒真） */
   const mServer60 = fnSrc.replace(/const NAME_MAX\s*=\s*24/, 'const NAME_MAX = 60')
@@ -3930,12 +3932,13 @@ section('第十五节 · D13：自己改密码（只作用自己 · 失败显式
     '🧪 D13-F 反向对照：把服务端改成 60 → ① 当场红（两个数一旦分家就会被抓住）',
     `改后 服务端=${server60 ? server60[1] : '（没抠到）'} vs 我的页=${mClient ? mClient[1] : '（没抠到）'}`,
   )
-  /* 🧪 反向对照②：把 `maxLength` 那一处摘掉 → ② 当场假（"挂上了没有"真的在读 JSX） */
-  const SET_NO_MAX = SET_CODE.replace(/maxLength=\{SELF_NAME_MAX\}/, '')
+  /* 🧪 反向对照②：把「提交时超长明确报错」那一句摘掉 → ② 当场假（那一条真的在读 JSX） */
+  const SET_NO_CHK = SET_CODE.replace(/liveName\.trim\(\)\.length > SELF_NAME_MAX/, 'false')
   check(
-    !/maxLength=\{SELF_NAME_MAX\}/.test(SET_NO_MAX) && /maxLength=\{SELF_NAME_MAX\}/.test(SET_CODE),
-    '🧪 D13-F 反向对照②：把 `maxLength={SELF_NAME_MAX}` 摘掉 → ② 当场假（那一条真的在读 JSX，不是恒真）',
-    `摘掉之后还在 = ${/maxLength=\{SELF_NAME_MAX\}/.test(SET_NO_MAX)}`,
+    !/liveName\.trim\(\)\.length > SELF_NAME_MAX/.test(SET_NO_CHK) &&
+      /liveName\.trim\(\)\.length > SELF_NAME_MAX/.test(SET_CODE),
+    '🧪 D13-F 反向对照②：把「我的页提交时超长明确报错」那一句摘掉 → ② 当场假（那一条真的在读 JSX，不是恒真）',
+    `摘掉之后还在 = ${/liveName\.trim\(\)\.length > SELF_NAME_MAX/.test(SET_NO_CHK)}`,
   )
 }
 
@@ -9917,6 +9920,122 @@ section('第二十八节 · A23：公告「发布」吞字（正文非受控 + �
           c2 === 1 && cnt(bad2, 'liveValue(contentRef.current') === 0,
           '🧪 A26 ⑦ 反向对照：把教室端的"读 DOM"改回**读 state**（`content`）⇒ 上面那条当场假',
           `原文 ${cnt(CR, 'liveValue(contentRef.current')} 处 · 改过 ${cnt(bad2, 'liveValue(contentRef.current')} 处`,
+        )
+      }
+    }
+
+    /* ---------------- ⑨ 本轮补的五处（2026-10-14）：呼叫文案 / 学生档案 / 我的页反馈与改名 / 布置作业呼叫 / 维护通告 ----------------
+       口径（`lib/liveInput.ts`）：受控输入 + 少一次 `input` 事件 = 提交那次重渲染把旧 state 写回 DOM（吞字）。
+         · 能改非受控的改非受控；**必须保持受控**的（`disabled` / 预览 / 校验读 state）
+           一律「保留受控 + `ref` + **提交读 DOM** + 把读回的那份写回 state」；
+         · 自由文本上的 `maxLength` 去掉；`onChange` 里的 `slice(0, MAX)` 静默截断也去掉
+           （它本身就是吞字的一种）；两者都改成**超长明确报错、一个字不发**。 */
+    {
+      const CD = strip3(readApp('src/pages/ClassDetail.tsx'))
+      const ST = strip3(readApp('src/pages/Settings.tsx'))
+      const AC = strip3(readApp('src/pages/AssignmentCall.tsx'))
+      const AD = strip3(readApp('src/pages/Admin.tsx'))
+      const ML = strip3(readApp('src/lib/maintenance.ts'))
+      const MF = strip3(readApp('functions/api/_lib/maintenance.ts'))
+      check(
+        n(CD, /liveValue\(callTextRef\.current, callText\)/g) === 1 &&
+          n(CD, /ref=\{callTextRef\}/g) === 1 &&
+          n(CD, /setCallText\(liveText\)/g) === 1 &&
+          n(CD, /liveText\.trim\(\)\.length > CUSTOM_MAX/g) === 1 &&
+          n(CD, /slice\(0, CUSTOM_MAX\)/g) === 0 &&
+          n(CD, /maxLength=\{/g) === 0,
+        '🔴 A26 ⑨ 班级页「呼叫自定义文案」：**提交读屏上那一份**（`liveValue(callTextRef.current, callText)`）并写回 state；`onChange` 里那句 `slice(0, CUSTOM_MAX)` **静默截断已去掉**，超长改成**明确报错、一个字不发**；自由文本上没有 `maxLength`',
+        `读 DOM=${n(CD, /liveValue\(callTextRef\.current, callText\)/g)} 处 · 写回=${n(CD, /setCallText\(liveText\)/g)} 处 · 超长报错=${n(CD, /liveText\.trim\(\)\.length > CUSTOM_MAX/g)} 处 · slice=${n(CD, /slice\(0, CUSTOM_MAX\)/g)} 处 · maxLength=${n(CD, /maxLength=\{/g)} 处`,
+      )
+      check(
+        n(CD, /profileRefs\.current\[f\.key\] = el/g) === 1 &&
+          n(CD, /liveValue\(profileRefs\.current\[f\.key\], profileForm\[f\.key\]\)/g) === 1 &&
+          n(CD, /const next = \{ \.\.\.live, studentId: profileFor \}/g) === 1,
+        '🔴 A26 ⑨ 班级页「学生档案」四个自由文本框：**保存那一刻读屏上那一份**（`profileRefs` + `liveValue`）并写回 state，落库用的就是读回来的那一份（原来读 state）',
+        `挂 ref=${n(CD, /profileRefs\.current\[f\.key\] = el/g)} 处 · 读 DOM=${n(CD, /liveValue\(profileRefs\.current\[f\.key\], profileForm\[f\.key\]\)/g)} 处 · 落库用读回值=${n(CD, /const next = \{ \.\.\.live, studentId: profileFor \}/g)} 处`,
+      )
+      check(
+        n(ST, /liveValue\(fbBodyRef\.current, fbBody\)/g) === 1 &&
+          n(ST, /liveValue\(fbContactRef\.current, fbContact\)/g) === 1 &&
+          n(ST, /body: liveBody,/g) === 1 &&
+          n(ST, /contact: liveContact,/g) === 1 &&
+          n(ST, /liveValue\(fNameRef\.current, fName\)/g) === 1 &&
+          n(ST, /liveValue\(fSchoolRef\.current, fSchool\)/g) === 1 &&
+          n(ST, /liveName\.trim\(\)\.length > SELF_NAME_MAX/g) === 1 &&
+          n(ST, /maxLength=\{/g) === 0,
+        '🔴 A26 ⑩ 我的页「反馈正文 / 联系方式 / 姓名 / 学校」：四个框**提交读屏上那一份**（反馈正文超长由 `lib/feedback.ts` 回明确报错）；姓名超长**明确报错、一个字不发**（`SELF_NAME_MAX` 仍在用）；`Settings.tsx` 里 `maxLength` **0 处**',
+        `读 DOM=${n(ST, /liveValue\(fbBodyRef\.current, fbBody\)/g)}+${n(ST, /liveValue\(fbContactRef\.current, fbContact\)/g)}+${n(ST, /liveValue\(fNameRef\.current, fName\)/g)}+${n(ST, /liveValue\(fSchoolRef\.current, fSchool\)/g)} 处 · 提交用读回值=${n(ST, /body: liveBody,/g)}+${n(ST, /contact: liveContact,/g)} 处 · 姓名超长报错=${n(ST, /liveName\.trim\(\)\.length > SELF_NAME_MAX/g)} 处 · maxLength=${n(ST, /maxLength=\{/g)} 处`,
+      )
+      check(
+        n(AC, /liveValue\(roomRef\.current, room\)/g) === 1 &&
+          n(AC, /liveValue\(customRef\.current, custom\)/g) === 1 &&
+          n(AC, /text: liveText,/g) === 1 &&
+          n(AC, /room: liveRoom,/g) === 1 &&
+          n(AC, /liveCustom\.length > CUSTOM_MAX/g) === 1 &&
+          n(AC, /maxLength=\{/g) === 0,
+        '🔴 A26 ⑪ 布置作业「呼叫」的到哪儿 / 自定义后缀：**发送那一刻读屏上那一份**（`liveValue(roomRef/customRef.current, …)`）并写回 state；那句播报文案**用读回来的值重拼**（`text: liveText` / `room: liveRoom`，不再用渲染期那份 `text`）；超长改成**明确报错、一个字不发**，原生 `maxLength` 去掉',
+        `读 DOM=${n(AC, /liveValue\(roomRef\.current, room\)/g)}+${n(AC, /liveValue\(customRef\.current, custom\)/g)} 处 · 重拼=${n(AC, /text: liveText,/g)}+${n(AC, /room: liveRoom,/g)} 处 · 超长报错=${n(AC, /liveCustom\.length > CUSTOM_MAX/g)} 处 · maxLength=${n(AC, /maxLength=\{/g)} 处`,
+      )
+      check(
+        n(AD, /liveValue\(msgRef\.current, message\)/g) === 1 &&
+          n(AD, /\{ \.\.\.form, message: liveMessage \}/g) === 1 &&
+          n(AD, /maxLength=\{/g) === 0 &&
+          n(ML, /slice\(0, MAINTENANCE_MESSAGE_MAX\)/g) === 0 &&
+          n(MF, /slice\(0, MAINTENANCE_MESSAGE_MAX\)/g) === 0 &&
+          n(ML, /rule: 'R1' \| 'R3' \| 'R4' \| 'R5'/g) === 1 &&
+          n(MF, /rule: 'R1' \| 'R3' \| 'R4' \| 'R5'/g) === 1 &&
+          n(ML, /message\.length > MAINTENANCE_MESSAGE_MAX/g) === 1 &&
+          n(MF, /message\.length > MAINTENANCE_MESSAGE_MAX/g) === 1,
+        '🔴 A26 ⑫ `/admin` 维护通告正文：**提交读屏上那一份**（`liveValue(msgRef.current, message)`）并写回 state（`{ ...form, message: liveMessage }` —— 校验判的就是屏上那一份）；`maxLength` 去掉；`src/lib/maintenance.ts` 与 `functions/api/_lib/maintenance.ts` **都不再静默 `slice`**，超长改成 R5 **明确报错**（两个副本同一口径）',
+        `读 DOM=${n(AD, /liveValue\(msgRef\.current, message\)/g)} 处 · 提交用读回值=${n(AD, /\{ \.\.\.form, message: liveMessage \}/g)} 处 · maxLength=${n(AD, /maxLength=\{/g)} 处 · slice=${n(ML, /slice\(0, MAINTENANCE_MESSAGE_MAX\)/g)}+${n(MF, /slice\(0, MAINTENANCE_MESSAGE_MAX\)/g)} 处 · R5=${n(ML, /message\.length > MAINTENANCE_MESSAGE_MAX/g)}+${n(MF, /message\.length > MAINTENANCE_MESSAGE_MAX/g)} 处 · rule 联合=${n(ML, /rule: 'R1' \| 'R3' \| 'R4' \| 'R5'/g)}+${n(MF, /rule: 'R1' \| 'R3' \| 'R4' \| 'R5'/g)} 处`,
+      )
+      /* 🧪 四条反向对照：塞回 `maxLength` / 改回读 state / 塞回静默 `slice` / 塞回 `onChange` 里的 `slice`
+         ⇒ 上面几条**必须当场假**。每条都先数出现次数（`AGENTS.md` §三.2：只换第一处会假绿）。 */
+      {
+        const T = 'data-feedback-input'
+        const c1 = cnt(ST, T)
+        const bad1 = c1 === 1 ? ST.replace(T, `${T}\n              maxLength={FEEDBACK_MAX}`) : ST
+        check(c1 === 1, '🧪 A26 ⑩ 对照前置：反馈正文框的 `data-feedback-input` **恰好 1 处**', `命中 ${c1} 处`)
+        check(
+          c1 === 1 && n(ST, /maxLength=\{/g) === 0 && n(bad1, /maxLength=\{/g) > 0,
+          '🧪 A26 ⑩ 反向对照：把 `maxLength` **塞回**反馈正文框（副本）⇒ 上面⑩那条"没有 maxLength"当场假（组字期静默截断又回来了）',
+          `原文 maxLength ${n(ST, /maxLength=\{/g)} 处 · 改过 ${n(bad1, /maxLength=\{/g)} 处`,
+        )
+      }
+      {
+        const T = 'liveValue(msgRef.current, message)'
+        const c2 = cnt(AD, T)
+        const bad2 = c2 === 1 ? AD.split(T).join('message') : AD
+        check(c2 === 1, '🧪 A26 ⑫ 对照前置：`/admin` 通告正文那句"读 DOM" **恰好 1 处**', `命中 ${c2} 处`)
+        check(
+          c2 === 1 && cnt(bad2, 'liveValue(msgRef.current') === 0,
+          '🧪 A26 ⑫ 反向对照：把它改回**读 state**（`message`）⇒ 上面⑫那条"提交读 DOM"当场假',
+          `原文 ${cnt(AD, 'liveValue(msgRef.current')} 处 · 改过 ${cnt(bad2, 'liveValue(msgRef.current')} 处`,
+        )
+      }
+      {
+        const T = "const message = (form.message ?? '').trim()"
+        const c3 = cnt(ML, T)
+        const bad3 =
+          c3 === 1 ? ML.replace(T, `${T}.slice(0, MAINTENANCE_MESSAGE_MAX)`) : ML
+        check(c3 === 1, '🧪 A26 ⑫ 对照前置：`src/lib/maintenance.ts` 里那句"读回正文" **恰好 1 处**', `命中 ${c3} 处`)
+        check(
+          c3 === 1 &&
+            n(ML, /slice\(0, MAINTENANCE_MESSAGE_MAX\)/g) === 0 &&
+            n(bad3, /slice\(0, MAINTENANCE_MESSAGE_MAX\)/g) > 0,
+          '🧪 A26 ⑫ 反向对照：把 `slice(0, MAINTENANCE_MESSAGE_MAX)` **塞回**（副本）⇒ 上面⑫那条"不再静默截断"当场假',
+          `原文 slice ${n(ML, /slice\(0, MAINTENANCE_MESSAGE_MAX\)/g)} 处 · 改过 ${n(bad3, /slice\(0, MAINTENANCE_MESSAGE_MAX\)/g)} 处`,
+        )
+      }
+      {
+        const T = 'setCallText(e.target.value)'
+        const c4 = cnt(CD, T)
+        const bad4 = c4 === 1 ? CD.replace(T, `${T}.slice(0, CUSTOM_MAX)`) : CD
+        check(c4 === 1, '🧪 A26 ⑨ 对照前置：班级页呼叫文案的 `onChange` 里 `setCallText(e.target.value)` **恰好 1 处**', `命中 ${c4} 处`)
+        check(
+          c4 === 1 && n(CD, /slice\(0, CUSTOM_MAX\)/g) === 0 && n(bad4, /slice\(0, CUSTOM_MAX\)/g) > 0,
+          '🧪 A26 ⑨ 反向对照：把 `slice(0, CUSTOM_MAX)` **塞回** `onChange`（副本）⇒ 上面⑨那条"静默截断已去掉"当场假',
+          `原文 slice ${n(CD, /slice\(0, CUSTOM_MAX\)/g)} 处 · 改过 ${n(bad4, /slice\(0, CUSTOM_MAX\)/g)} 处`,
         )
       }
     }

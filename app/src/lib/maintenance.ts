@@ -253,7 +253,7 @@ export type MaintenanceRow = {
 
 export type MaintenanceVerdict =
   | { ok: true; row: MaintenanceRow; downgraded: boolean; hours: number }
-  | { ok: false; rule: 'R1' | 'R3' | 'R4'; error: string }
+  | { ok: false; rule: 'R1' | 'R3' | 'R4' | 'R5'; error: string }
 
 /** 把小时数归一成四档之一（认不出 → 默认 4） */
 export function normalizeHours(v: number | null | undefined): number {
@@ -310,7 +310,19 @@ export function validateMaintenanceForm(
       ? (form.toMs ?? scheduledFrom + hours * 3_600_000)
       : nowMs + hours * 3_600_000
 
-  const message = (form.message ?? '').trim().slice(0, MAINTENANCE_MESSAGE_MAX)
+  /* ---- R5：通告正文超长 → **明确报错，不静默截断** ----
+     🔴 原来这一行是 `(form.message ?? '').trim().slice(0, MAINTENANCE_MESSAGE_MAX)`：
+        用户打了一屏字、存下去少一截，而**没有任何人知道** —— 那也是"吞字"，
+        只不过是我们自己造成的（`onChange` 里的 `slice` 与原生 `maxLength` 同源）。
+        口径：超长 ⇒ **一个字都不发**，并且明确说清现在多少个字。 */
+  const message = (form.message ?? '').trim()
+  if (message.length > MAINTENANCE_MESSAGE_MAX) {
+    return {
+      ok: false,
+      rule: 'R5',
+      error: `通告正文最多 ${MAINTENANCE_MESSAGE_MAX} 个字（现在 ${message.length} 个）`,
+    }
+  }
 
   return {
     ok: true,

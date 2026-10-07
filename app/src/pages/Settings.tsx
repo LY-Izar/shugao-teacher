@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { liveValue } from '../lib/liveInput'
 import { useNavigate } from 'react-router-dom'
 import { Page } from '../components/AppShell'
 import {
@@ -89,12 +90,14 @@ import {
  * 「姓名」那一格的字数上限 = 24 —— 🔴 与**另两条改名的路同一个数**：
  *   · `functions/api/teacher-account.ts` 的 `NAME_MAX = 24`（建号 / 行政管理改名共用，
  *     超了回一句「姓名最多 24 个字（现在 n 个）」）；
- *   · `TeacherAccounts.tsx` 那个输入框的 `maxLength={NAME_MAX}`。
+ *   · `TeacherAccounts.tsx` 那个姓名框 —— 那侧同样**提交时超长明确报错**（A26 ⑦）。
  *
  * 为什么这里必须有：一个字段只能有一种语义。老师在自己这一页能把名字填成 60 个字、
  * `teachers.name` 也真存进去，而行政管理那一页的同一个字段**不许**填那么长 ——
  * 同一个人同一个字段两套规矩，列表还会被那种行撑烂。
- * ⚠️ 只挡输入上限，**不加新校验**：空名仍然由那颗「保存」按钮的 `disabled` 管。
+ * ⚠️ 原生 `maxLength` **已去掉**（2026-10-14）：它在组字期**静默截断**用户正在打的字 ——
+ *    那也是"吞字"，只不过是我们自己造成的。口径改成**提交时超长明确报错、一个字都不发**。
+ * ⚠️ 空名仍然由那颗「保存」按钮的 `disabled` 管。
  */
 const SELF_NAME_MAX = 24
 
@@ -128,6 +131,15 @@ export default function Settings() {
   /* 🆕 反馈（2026-09-29 管理台第二期）—— 状态都在这一页里，不落 store（它是一次性的表单） */
   const [fbBody, setFbBody] = useState('')
   const [fbContact, setFbContact] = useState('')
+  /*
+   * 🔴 提交那一刻**从屏上读回真实值**的 ref（口径见 `lib/liveInput.ts`）：
+   * 反馈正文 / 联系方式 / 姓名 / 学校四个框都**保持受控**（提交按钮的 `disabled` 读 state，边界②）
+   * ⇒ 保留受控 + `ref` + **提交读 DOM** + 把读回的那份**写回 state**。
+   */
+  const fbBodyRef = useRef<HTMLTextAreaElement>(null)
+  const fbContactRef = useRef<HTMLInputElement>(null)
+  const fNameRef = useRef<HTMLInputElement>(null)
+  const fSchoolRef = useRef<HTMLInputElement>(null)
   const [fbBusy, setFbBusy] = useState(false)
   const [fbMsg, setFbMsg] = useState('')
   const [fbErr, setFbErr] = useState('')
@@ -160,12 +172,18 @@ export default function Settings() {
 
   const submitFb = async () => {
     if (fbBusy) return
+    /* 🔴 提交那一刻从屏上读回真实值并写回 state（口径见上面那几个 ref）。
+       超长这里不另立上限：`lib/feedback.ts` 已经回一句「最多 1000 个字（现在 n 个）」的**明确报错**。 */
+    const liveBody = liveValue(fbBodyRef.current, fbBody)
+    const liveContact = liveValue(fbContactRef.current, fbContact)
+    setFbBody(liveBody)
+    setFbContact(liveContact)
     setFbBusy(true)
     setFbErr('')
     setFbMsg('')
     const res = await submitFeedback({
-      body: fbBody,
-      contact: fbContact,
+      body: liveBody,
+      contact: liveContact,
       page: '/settings',
       authorRoles: currentIdentityLabel(myRoles, teacher),
     })
@@ -780,6 +798,7 @@ export default function Settings() {
               className="input mt-2.5"
               style={{ minHeight: 84, fontSize: 13, lineHeight: 1.75 }}
               placeholder={`${FEEDBACK_MIN}–${FEEDBACK_MAX} 个字。写清在哪个页面、点了什么、看到什么。`}
+              ref={fbBodyRef}
               value={fbBody}
               onChange={(e) => setFbBody(e.target.value)}
               data-feedback-input
@@ -788,6 +807,7 @@ export default function Settings() {
               className="input mt-2"
               style={{ height: 34, fontSize: 13 }}
               placeholder="要不要留个联系方式？（选填，方便回你）"
+              ref={fbContactRef}
               value={fbContact}
               onChange={(e) => setFbContact(e.target.value)}
               data-feedback-contact
@@ -925,9 +945,22 @@ export default function Settings() {
             variant="primary"
             disabled={!fName.trim()}
             onClick={() => {
+              /* 🔴 提交那一刻从屏上读回真实值并写回 state（口径见上面那几个 ref）。
+                 两个框都是自由文本 ⇒ 原生 `maxLength` 去掉，超长改成**明确报错、一个字都不发**。 */
+              const liveName = liveValue(fNameRef.current, fName)
+              const liveSchool = liveValue(fSchoolRef.current, fSchool)
+              setFName(liveName)
+              setFSchool(liveSchool)
+              if (liveName.trim().length > SELF_NAME_MAX) {
+                push({
+                  text: `姓名最多 ${SELF_NAME_MAX} 个字（现在 ${liveName.trim().length} 个）—— 没有保存`,
+                  tone: 'bad',
+                })
+                return
+              }
               updateTeacher({
-                name: fName.trim(),
-                school: fSchool.trim(),
+                name: liveName.trim(),
+                school: liveSchool.trim(),
                 // 显示名留空 = 跟主学科一致（不是"没填"，所以不留空串）
                 subject: fSubject.trim() || subjectName(fPrimary),
                 primarySubjectCode: fPrimary,
@@ -944,9 +977,9 @@ export default function Settings() {
           <span className="label">姓名</span>
           <input
             className="input"
+            ref={fNameRef}
             value={fName}
             onChange={(e) => setFName(e.target.value)}
-            maxLength={SELF_NAME_MAX}
             placeholder="例如 王老师"
           />
         </label>
@@ -957,6 +990,7 @@ export default function Settings() {
           <span className="label">学校</span>
           <input
             className="input"
+            ref={fSchoolRef}
             value={fSchool}
             onChange={(e) => setFSchool(e.target.value)}
             placeholder="例如 示例中学"

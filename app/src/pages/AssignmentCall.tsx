@@ -1,4 +1,5 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
+import { liveValue } from '../lib/liveInput'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Page } from '../components/AppShell'
 import {
@@ -62,6 +63,16 @@ export default function AssignmentCall() {
    */
   const [room, setRoom] = useState(() => roomOf(assignment?.subject))
   const [custom, setCustom] = useState('')
+  /*
+   * 🔴 发送那一刻**从屏上读回真实值**的 ref（口径见 `lib/liveInput.ts`）：
+   * 「到哪儿」和「自定义后缀」都要**实时拼出那句预览**（下面 `text`）⇒ 必须保持受控；
+   * 而受控输入缺一次 `input` 事件时读 state 会把屏上那几个字丢掉
+   * ⇒ 保留受控 + `ref` + **发送读 DOM** + 把读回的那份写回 state。
+   * 🔴 那句播报文案在 `doSend` 里**用读回来的值重拼一次** —— 渲染期算好的 `text`
+   *    可能是上一次 state 的产物（那正是"屏上有、state 没有"的现场）。
+   */
+  const roomRef = useRef<HTMLInputElement>(null)
+  const customRef = useRef<HTMLInputElement>(null)
   const [preview, setPreview] = useState(false)
 
   /**
@@ -149,7 +160,20 @@ export default function AssignmentCall() {
    * ⚠️ `selected` 里存的是**档案键**（迁移后 = 序列号），因为 `studentNos` 要落库；
    *    而喊出来的话里必须是**班内学号**（"请 12 号…"）→ 显示前换一次。
    */
-  const text = composeCallText(selected.map((k) => displayNoOfArchiveKey(students, k)), room, subject, custom)
+  /*
+   * 🔴 拼这句话**只有这一处**（`composeCallText` 在本文件只出现一次；D12-E 自证全平台 3 处）：
+   *    渲染期那份 `text` 用 state 拼（预览要跟着每个键实时变），
+   *    而**发送那一刻**用同一个函数、换**从屏上读回来的**那两个值重拼
+   *    （渲染期算好的那份可能是上一次 state 的产物 —— 那正是"屏上有、state 没有"的现场）。
+   */
+  const buildText = (liveRoomNo: string, liveCustomTail: string) =>
+    composeCallText(
+      selected.map((k) => displayNoOfArchiveKey(students, k)),
+      liveRoomNo,
+      subject,
+      liveCustomTail,
+    )
+  const text = buildText(room, custom)
   const atLimit = selected.length >= CALL_LIMIT
 
   const toggle = (no: string) => {
@@ -165,6 +189,24 @@ export default function AssignmentCall() {
 
   const doSend = async () => {
     if (selected.length === 0 || sending) return
+    /*
+     * 🔴 发送那一刻从屏上读回真实值（`liveValue`）并写回 state：
+     *   · 拼那句播报文案用**读回来的** `liveRoom` / `liveCustom`，不是渲染期算好的 `text`；
+     *   · 超长**明确报错、一个字都不发** —— 原来靠原生 `maxLength` 静默截断（组字期也截），
+     *     那也是吞字，只不过是我们自己造成的。
+     */
+    const liveRoom = liveValue(roomRef.current, room)
+    const liveCustom = liveValue(customRef.current, custom)
+    setRoom(liveRoom)
+    setCustom(liveCustom)
+    if (liveCustom.length > CUSTOM_MAX) {
+      push({
+        text: `自定义后缀最多 ${CUSTOM_MAX} 个字（现在 ${liveCustom.length} 个）—— 没有发送`,
+        tone: 'bad',
+      })
+      return
+    }
+    const liveText = buildText(liveRoom, liveCustom)
     setSending(true)
     try {
       /*
@@ -185,13 +227,13 @@ export default function AssignmentCall() {
         assignmentId: assignment.id,
         classId: assignment.classId,
         studentNos: selected,
-        text,
-        room,
+        text: liveText,
+        room: liveRoom,
       })
       push({
         text: online ? '已发送到教室端' : '已发送，但教室端当前离线',
         tone: online ? 'ok' : 'warn',
-        desc: online ? text : '刚才重新检测过：教室端不在线，学生可能听不到',
+        desc: online ? liveText : '刚才重新检测过：教室端不在线，学生可能听不到',
       })
       setSelected([])
     } finally {
@@ -608,6 +650,7 @@ export default function AssignmentCall() {
               <span className="label">到哪儿</span>
               <input
                 className="input"
+                ref={roomRef}
                 value={room}
                 onChange={(e) => setRoom(e.target.value)}
                 placeholder={roomOf(assignment.subject)}
@@ -619,8 +662,8 @@ export default function AssignmentCall() {
               </span>
               <input
                 className="input"
+                ref={customRef}
                 value={custom}
-                maxLength={CUSTOM_MAX}
                 onChange={(e) => setCustom(e.target.value)}
                 placeholder="带上作业本"
               />

@@ -119,7 +119,7 @@ export type MaintenanceVerdict =
       /** 归一化后真正生效的自动关闭小时数 */
       hours: number
     }
-  | { ok: false; rule: 'R1' | 'R3' | 'R4'; error: string }
+  | { ok: false; rule: 'R1' | 'R3' | 'R4' | 'R5'; error: string }
 
 /** 把小时数归一成四档之一（认不出 → 默认 4） */
 export function normalizeHours(v: number | null | undefined): number {
@@ -187,7 +187,17 @@ export function validateMaintenanceForm(
       ? (form.toMs ?? scheduledFrom + hours * 3_600_000)
       : nowMs + hours * 3_600_000
 
-  const message = (form.message ?? '').trim().slice(0, MAINTENANCE_MESSAGE_MAX)
+  /* ---- R5：通告正文超长 → **明确报错，不静默截断**（与 `src/lib/maintenance.ts` 同一口径）----
+     🔴 原来这一行是 `(form.message ?? '').trim().slice(0, MAINTENANCE_MESSAGE_MAX)`：
+        用户打了一屏字、存下去少一截，而**没有任何人知道**（前端那道 `maxLength` 也是同一个坏法）。 */
+  const message = (form.message ?? '').trim()
+  if (message.length > MAINTENANCE_MESSAGE_MAX) {
+    return {
+      ok: false,
+      rule: 'R5',
+      error: `通告正文最多 ${MAINTENANCE_MESSAGE_MAX} 个字（现在 ${message.length} 个）`,
+    }
+  }
 
   return {
     ok: true,

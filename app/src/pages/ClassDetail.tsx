@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { liveValue } from '../lib/liveInput'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Page } from '../components/AppShell'
 import {
@@ -163,6 +164,14 @@ export default function ClassDetail() {
   /** 自由播报 / 呼叫学生：教师自己输要念的话，不针对某次作业 */
   const [callOpen, setCallOpen] = useState(false)
   const [callText, setCallText] = useState('')
+  /*
+   * 🔴 提交那一刻**从屏上读回真实值**（`lib/liveInput.ts` 的 `liveValue`）——
+   * 受控输入只要缺一次 `input` 事件（安卓自动填充 / 组字提交不发），读 state 就会把屏上那几个字丢掉。
+   * 这几个框还得**保持受控**（播报按钮的 `disabled` / 档案编辑态读 state，见 `liveInput.ts` 边界②）
+   * ⇒ 保留受控 + `ref` + **提交读 DOM** + 把读回的那份**写回 state**。
+   */
+  const callTextRef = useRef<HTMLTextAreaElement>(null)
+  const profileRefs = useRef<Record<string, HTMLInputElement | null>>({})
   /** 被叫学生（`students.id`）；**事务性呼叫**可以不选人（整班播报） */
   const [callPicked, setCallPicked] = useState<string[]>([])
   const removeStudent = useStore((s) => s.removeStudent)
@@ -970,9 +979,16 @@ export default function ClassDetail() {
 
   const saveProfile = async () => {
     if (!profileFor) return
+    /* 🔴 提交那一刻从屏上读回真实值并写回 state（口径见 `profileRefs` 上面那段）——
+       四个框都是自由文本（本来就没有 `maxLength`），落库的那一份 = 屏上那一份。 */
+    const live = { ...profileForm }
+    PROFILE_FIELDS.forEach((f) => {
+      live[f.key] = liveValue(profileRefs.current[f.key], profileForm[f.key])
+    })
+    setProfileForm(live)
     setProfileSaving(true)
     setProfileSaveErr('')
-    const next = { ...profileForm, studentId: profileFor }
+    const next = { ...live, studentId: profileFor }
     const r = await saveStudentProfile(next)
     setProfileSaving(false)
     if (!r.ok) {
@@ -2588,6 +2604,9 @@ export default function ClassDetail() {
                 {profileEdit ? (
                   <input
                     className="input"
+                    ref={(el) => {
+                      profileRefs.current[f.key] = el
+                    }}
                     placeholder={f.hint}
                     value={profileForm[f.key]}
                     onChange={(e) => setField(f.key, e.target.value)}
@@ -2670,6 +2689,19 @@ export default function ClassDetail() {
               variant="primary"
               disabled={!callText.trim()}
               onClick={() => {
+                /* 🔴 提交那一刻从屏上读回真实值并写回 state（口径见 `callTextRef` 上面那段）——
+                   紧接着那次重渲染写回的就是屏上那一份，框里那几个字也不会被冲掉。 */
+                const liveText = liveValue(callTextRef.current, callText)
+                setCallText(liveText)
+                /* 🔴 超长**明确报错、一个字都不发**：原来 `onChange` 里 `slice(0, CUSTOM_MAX)`
+                   静默截断 —— 那也是吞字，只不过是我们自己造成的。 */
+                if (liveText.trim().length > CUSTOM_MAX) {
+                  push({
+                    text: `播报文案最多 ${CUSTOM_MAX} 个字（现在 ${liveText.trim().length} 个）—— 没有发送`,
+                    tone: 'bad',
+                  })
+                  return
+                }
                 const picked = klass.students.filter((s) => callPicked.includes(s.id))
                 const nos = picked.map((s) => archiveKeyOf(s))
                 /*
@@ -2685,7 +2717,7 @@ export default function ClassDetail() {
                     picked.map((s) => s.studentNo),
                     klass.name,
                     '',
-                    callText.trim(),
+                    liveText.trim(),
                   ),
                   room: klass.name,
                 })
@@ -2710,8 +2742,9 @@ export default function ClassDetail() {
         <textarea
           className="input"
           rows={3}
+          ref={callTextRef}
           value={callText}
-          onChange={(e) => setCallText(e.target.value.slice(0, CUSTOM_MAX))}
+          onChange={(e) => setCallText(e.target.value)}
           placeholder={`例如：带上作业本到办公室。`}
           style={{ width: '100%', fontFamily: 'inherit', lineHeight: 1.7, resize: 'vertical' }}
         />

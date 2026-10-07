@@ -3953,6 +3953,12 @@ function MaintenanceCard({
   busy: boolean
 }) {
   const [message, setMessage] = useState('')
+  /*
+   * 🔴 提交那一刻**从屏上读回真实值**的 ref（口径见 `lib/liveInput.ts`）：
+   * 这一屏的预览与四条校验都读 state ⇒ 通告正文**保持受控** + `ref` + 提交读 DOM + 写回 state。
+   * 「超长」不再由原生 `maxLength` 静默截断，改由 `validateMaintenanceForm` 明确报错（R5）。
+   */
+  const msgRef = useRef<HTMLTextAreaElement>(null)
   const [hours, setHours] = useState<number>(MAINTENANCE_DEFAULT_HOURS)
   const [scheduled, setScheduled] = useState(false)
   const [from, setFrom] = useState('')
@@ -3997,11 +4003,16 @@ function MaintenanceCard({
 
   const doSet = async (enabled: boolean) => {
     if (busy2) return
+    /* 🔴 提交那一刻从屏上读回真实值并写回 state（口径见 `msgRef` 上面那段）——
+       读回来的那一份进 `form.message` ⇒ 下面那次校验判的就是**屏上那一份**。 */
+    const liveMessage = liveValue(msgRef.current, message)
+    setMessage(liveMessage)
     setBusy2(true)
     setErr('')
     setMsg('')
+    const base = { ...form, message: liveMessage }
     const f = enabled
-      ? form
+      ? base
       : { enabled: false, message: '', hours, scheduled: false, fromMs: null, toMs: null }
     /*
      * ⚠️ 这里用的是**本屏共用的那一个「现在」**（`now`，一次取数的产物），
@@ -4117,8 +4128,8 @@ function MaintenanceCard({
           className="input"
           style={{ minHeight: 60, fontSize: 13, lineHeight: 1.7 }}
           placeholder={`给全校看的通告正文（最多 ${MAINTENANCE_MESSAGE_MAX} 字）。留空 = 用默认文案「${MAINTENANCE_DEFAULT_MESSAGE}」`}
+          ref={msgRef}
           value={message}
-          maxLength={MAINTENANCE_MESSAGE_MAX}
           onChange={(e) => setMessage(e.target.value)}
           data-maint-message
         />
