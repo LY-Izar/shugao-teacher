@@ -11922,7 +11922,15 @@ create policy teacher_profiles_visible on teacher_profiles for select to authent
 --        and policyname in ('teachers_self_select','teacher_roles_hide_super','teacher_profiles_visible')
 --      order by tablename;
 --     期望：
---       · teachers.teachers_self_select          → PERMISSIVE · SELECT · `(id = auth.uid()) OR is_super_admin()`
+--       · teachers.teachers_self_select          → PERMISSIVE · SELECT · `(id = auth.uid())`
+--         ⚠️ **只有 `id = auth.uid()`，没有 `OR is_super_admin()`** —— 这一点在
+--           上面 44.1 已经实测并写清了理由：① 非超管本来就读不到别人那一行，
+--           "读不到超管"这一半**已经成立**；② 超管"读得全"走的是
+--           `/api/teacher-account` 的 `list`（service_role 绕 RLS），与这条策略无关；
+--           ③ 曾经给超管开过 `or is_super_admin()` 又撤了，因为那会改动
+--           "8 身份 × 11 表"可见量基线里 `teachers` 那一列的读数（历史判据当场红）。
+--         ⇒ 本条**照抄上面 44.1 的结论**，不要因为看到"超管应该看得到所有人"
+--            就以为这里少了什么。
 --       · teacher_roles.teacher_roles_hide_super → RESTRICTIVE · SELECT
 --       · teacher_profiles.teacher_profiles_visible → PERMISSIVE · SELECT（含 `not is_super_admin_teacher`）
 --     ⚠️ 顺手确认**旧的 `teachers_hide_super` / `teacher_profiles_hide_super` 已经不在**（本块会 drop 它们）：

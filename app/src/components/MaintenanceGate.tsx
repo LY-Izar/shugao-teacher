@@ -167,7 +167,11 @@ export function MaintenanceUnlock() {
      */
     for (let i = 1; i < tail.length; i++) {
       if (tail[i][0] - tail[i - 1][tail[i - 1].length - 1] < UNLOCK_BETWEEN_MS) {
-        console.log('[unlock] 清②段间太密', tail[i][0] - tail[i - 1][tail[i - 1].length - 1])
+        // 🔴 2026-10-17：`console.log` → `console.warn`。
+        //   这条路是**超管解锁**用的，静默丢掉会让"为什么点了没反应"没法排查；
+        //   而 `console.log` 在生产控制台默认就被静音，等于什么都留不下。
+        //   （全项目其余诊断日志一律 `console.warn` / `console.error`，见 remote.ts、backup.ts。）
+        console.warn('[unlock] 清②段间太密', tail[i][0] - tail[i - 1][tail[i - 1].length - 1])
         taps.current = []
         setProgress(0)
         return
@@ -176,7 +180,7 @@ export function MaintenanceUnlock() {
     const lastLen = tail[tail.length - 1].length
     const wantLast = UNLOCK_PATTERN[UNLOCK_PATTERN.length - 1]
     if (lastLen > wantLast) {
-      console.log('[unlock] 清③末段超长', lastLen, '>', wantLast)
+      console.warn('[unlock] 清③末段超长', lastLen, '>', wantLast)
       taps.current = []
       setProgress(0)
       return

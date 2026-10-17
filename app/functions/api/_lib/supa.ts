@@ -320,6 +320,37 @@ export async function mailedInLastDay(env: Env): Promise<number | null> {
 }
 
 /**
+ * 配额判据（`ocr.ts` 用）：某位教师最近 N 秒做了几次某动作。（2026-10-17）
+ *
+ * 🔴 为什么问 `admin_audit` 而不建一张计数表：
+ *   · **跨 isolate 一致** —— in-memory Map 在 Cloudflare Worker 里随生随灭、横向不够用，
+ *     "关掉一个窗口再开"或"撞上另一个 isolate"就绕过去了。
+ *   · **零 schema 改动** —— 这张表本来就在（§23.2），且 `action` 代码本来就是
+ *     `点分动作名`。`rls-checks` 一个字都不用动。
+ *   · 记账（真正写入 `action='ocr.recognize'` 那一行）**在识别成功之后** ——
+ *     配额读数只看"已经成功过几次"，失败的那几次不让用户白背。
+ *
+ * ⚠️ 三态（`AGENTS.md` §三.4）：**表读不到/函数没跑 ⇒ `null` ⇒ 调用方必须放行**。
+ *    配额是收窄功能，不是安全边界 —— 读不到时把人挡住 = 把"以为有配额"当成事实。
+ *    （`mail.ts` 的 `sent !== null &&` 同一个形状。）
+ */
+export async function countRecentActions(
+  env: Env,
+  actorId: string | null,
+  action: string,
+  withinMs: number,
+): Promise<number | null> {
+  if (!actorId) return null
+  const since = new Date(Date.now() - withinMs).toISOString()
+  const url =
+    `/rest/v1/admin_audit?select=*&action=eq.${encodeURIComponent(action)}` +
+    `&actor_id=eq.${encodeURIComponent(actorId)}&at=gt.${encodeURIComponent(since)}`
+  const res = await read(await svc(env, url, { headers: { Prefer: 'count=exact' } }))
+  if (!res.ok) return null
+  return res.rows.length
+}
+
+/**
  * 数一个过滤条件下有几行（PostgREST 的 `Prefer: count=exact` + `Content-Range`）。
  *
  * ⚠️ **数不到就回 `null`，绝不回 0** —— "0 条错误"与"读不到"在面板上是两种颜色

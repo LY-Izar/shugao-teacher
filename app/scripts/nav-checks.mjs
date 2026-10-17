@@ -3994,6 +3994,71 @@ section('第十六节 · D14：安全加固 A 档（响应头 · CSP 哈希配�
   )
 
   /*
+   * 🔴 ① 只查"五个头名在不在**文本里**"，那是个**代理信号**（2026-10-17 审计补）。
+   *
+   * 坏法：Cloudflare Pages 的 `_headers` 用 `#` 作注释，**没有** C 风格块注释。
+   * 而本文件那条路径规则长得**就是** `/*`（它之所以生效，正是因为 Cloudflare
+   * 把它读成了"一条路径规则"）。于是：
+   *   · 谁哪天"顺手"补一个收尾的斜杠星号（见下面"落单的那个"）⇒ 整个文件解析失败
+   *     ⇒ **全站静态资源的安全头静默消失**，而 ① 照样绿（头名还在文本里）。
+   * 这正是 AGENTS.md §九.9 那条："验的是真信号还是代理信号"。
+   *
+   * ✅ 下面两条判"**能不能被 Cloudflare 解析成合法规则**"，而不是"文本里有没有那几个字"：
+   *   ② 那条路径规则**只有一个**，且它后面挂着头（形如斜杠星号、或一条 /path 的行）
+   *   ③ 文件里**没有落单**的"斜杠星号"（那正是"补收尾"坏法留下的痕迹）
+   *
+   * ⚠️ 这段注释本身刻意**不写出**那个两字符的收尾记号 ——
+   *    它一旦出现在块注释里就会**当场把注释关掉**，后面整段被当代码解析，
+   *    报出来的是一堆看不懂的错（真踩过：`AGENTS.md §九.8` 记的就是同一个坑）。
+   *    下面的判据用 `'/' + '*'` 拼出来，见 `STAR` 常量。
+   */
+  const hdrLines = S(HDR)
+    .split('\n')
+    .map((l) => l.replace(/\r$/, ''))
+  // 注释行（`#` 开头）与空行不算规则行
+  const ruleLines = hdrLines.filter((l) => l.trim() !== '' && !l.trim().startsWith('#'))
+  const pathRules = ruleLines.filter((l) => !/^\s+\S/.test(l) && !/:\s/.test(l))
+  check(
+    HDR !== null && pathRules.length === 1,
+    '🔴 D14-A ② `_headers` 里只有**一条**路径规则（多了/少了一条 = 有头挂错地方或漏挂）',
+    HDR === null ? '文件不在' : `找到 ${pathRules.length} 条：${pathRules.map((l) => l.trim()).join(' / ') || '（没有）'}`,
+  )
+  /*
+   * 🔴 下面判的**不是**"有没有那个记号"，而是"**关掉路径规则块的那一行落在哪**"。
+   *
+   * Cloudflare Pages 的 `_headers` 语法：`**path**` 单独一行，下面缩进的是挂在它
+   * 下面的响应头。它用 `#` 作注释，**没有** C 风格块注释。
+   * 于是那个"长得像块注释开头"的路径规则**自己就是块的开始**，而一个落单的收尾记号
+   * 会让解析器在**没有对应开头**的地方闭合 ⇒ 后续行被当成裸响应头/裸路径规则
+   * ⇒ **全站静态资源的安全头静默消失，没有任何报错**。
+   *
+   * ⚠️ 所以判据必须是"**成对**"：开头恰好 1 个、收尾恰好 0 个（未闭合才合法），
+   *    或者开收各 1 个（作者手写闭合）。光判"收尾为 0"会把**合法的开括号**也当成坏法。
+   */
+  const HDR_OPEN = '/' + '*'
+  const HDR_CLOSE = '*' + '/'
+  const countBare = (src, tok) => src.split('\n').filter((l) => l.trim() === tok).length
+  const openBare = countBare(S(HDR), HDR_OPEN)
+  const closeBare = countBare(S(HDR), HDR_CLOSE)
+  // Cloudflare 的解析器**没有**块注释这个概念：开记号自己就是"路径规则那一行"，
+  // 收记号是**另一条**规则行。所以正确的形态恒定是 **open=1 / close=0** ——
+  // 出现 close>=1 就是"多了一行解析器不认的东西"，头部就**不再挂在路径规则下**。
+  // （open=0 同样坏：那等于路径规则没了，头全部落空。）
+  check(
+    HDR !== null && openBare === 1 && closeBare === 0,
+    '🔴 D14-A ③ `_headers` 里路径规则**恰好一个开记号、零个收记号**（多一个收尾记号 = 解析器把它当另一条规则 ⇒ **全站安全头静默消失**）',
+    `实测：开记号 ${openBare} 个（期望 1）· 收记号 ${closeBare} 个（期望 0）`,
+  )
+  /* 🧪 反向对照③：模拟"补一个落单收尾"那个坏法 → ③ 必须在副本上变红（证明 ③ 不是恒真） */
+  const openInCopy = countBare(`${S(HDR)}\n${HDR_CLOSE}\n`, HDR_OPEN)
+  const closeInCopy = countBare(`${S(HDR)}\n${HDR_CLOSE}\n`, HDR_CLOSE)
+  check(
+    `${S(HDR)}\n${HDR_CLOSE}\n` !== S(HDR) && closeInCopy === closeBare + 1 && openInCopy === openBare,
+    '🧪 D14-A 反向对照③：追加一个落单收尾 → 配平被打破、③ 会红（"补收尾"那个坏法确实会被抓住）',
+    `副本里开头 ${openInCopy} / 收尾 ${closeInCopy}（收尾比原来 +1）· 原文件 ${openBare} / ${closeBare}`,
+  )
+
+  /*
    * CSP 的 sha256 必须与**内联脚本元素的文本内容**逐字对上（含首尾空白）。
    * ⚠️ 口径：浏览器算的是 `<script>` 与 `</script>` 之间的**全部字符** ——
    *    去掉首尾空白去算会得到一个**永远对不上**的哈希（本轮第一次就是这么算错的）。
@@ -10674,6 +10739,79 @@ section('第二十四节之四 · A25：/api/push 抛出的异常不许冲出函
       '🧪 A25 ④ 反向对照：把这个头换成 `return=minimal`（副本 = 真机那一版，插成功也只回空体）⇒ ④ 当场假',
       `目标 ${hits} 处 · 改完出现 ${countIn(PREFER, noPrefer)} 处（期望 0）`,
     )
+  }
+
+  /* ============================================================
+     🔴 A26：/api/pull 的钥匙**必须有一把会过期的**（2026-10-17 加）
+     ------------------------------------------------------------
+     这一节守的是"**唯一的非过期凭据**"那个缺口（§41 的 pull 用一把 UUID
+     直接换出整套 Supabase 会话，原来只有显式 revoke 才会失效）。
+     每一条都配反向对照 —— 把"写死的次数 / 判据"改回去必须红，否则它就是
+     AGENTS.md §三.2 说的"永远为绿的摆设"。
+     ============================================================ */
+  {
+    const IDLE = 'TOKEN_IDLE_MAX_MS'
+    check(
+      countIn(IDLE, PCODE) >= 2,
+      `🔴 A26-KEY ① \`X-Push-Token\` 那把钥匙有**一个"闲置上限"**（常量存在且被引用）—— 它是全系统唯一一把非过期凭据，改动前泄露 = 无限期读权`,
+      `目标出现 ${countIn(IDLE, PCODE)} 处（期望 ≥2：一次定义、一次读数）`,
+    )
+
+    /* ② pull 这一条**先判闲置再动手**（判据在 pull 分支里，锚的是那段真代码）。
+       反向对照：把"超过上限"改成"永不超过"⇒ ② 当场假。 */
+    const IDLE_IF_REG =
+      'const idle = Date.now() - lastUseOf(row)\n    if (idle > TOKEN_IDLE_MAX_MS)'
+    const idleHits = countIn(IDLE_IF_REG, PCODE)
+    check(
+      idleHits === 1,
+      '🔴 A26-KEY ② `pull` 在换出会话**之前**先判"这把钥匙闲置多久了"（判据用的是 last_pull_at / updated_at / created_at 的最晚一个）',
+      `该形状出现 ${idleHits} 处（期望恰好 1；多了 = 有分支漏判，0 = 判据不在真代码里）`,
+    )
+    const noIdle = PCODE.replace(IDLE_IF_REG, 'const idle = 0\n    if (idle > Number.MAX_SAFE_INTEGER)')
+    if (idleHits === 1) {
+      check(
+        noIdle !== PCODE && countIn('idle > TOKEN_IDLE_MAX_MS', noIdle) === 0,
+        '🧪 A26-KEY ② 反向对照：把"超过上限"改成"永不超过"（副本 = 改透露源算法之前的样子）⇒ ② 当场假',
+        `改后还判闲置 = ${countIn('idle > TOKEN_IDLE_MAX_MS', noIdle)} 处（期望 0）`,
+      )
+    }
+
+    /* ③ 失效时**真的写 revoked_at**（否则只是"这次拒绝、下次刚巧又能"）。
+       反向对照：把 PATCH 抽走 ⇒ ③ 当场假。 */
+    const PATCH_REG =
+      'const days = Math.floor(idle / 86_400_000)\n      await svc(env, \'/rest/v1/push_tokens?token=eq.\' + token, {\n        method: \'PATCH\',\n        body: JSON.stringify({ revoked_at: new Date().toISOString() }),\n      })'
+    const patchHits = countIn(PATCH_REG, PCODE)
+    check(
+      patchHits === 1,
+      '🔴 A26-KEY ③ 判定闲置后**写 `revoked_at` 作废那把钥匙**再回 `reauth: true`（只是"拒绝" = 那把钥匙下次还能换出会话 = 白判）',
+      `作废 PATCH 出现 ${patchHits} 处（期望恰好 1）`,
+    )
+    const REV_REG = "revoked_at: new Date().toISOString()"
+    if (patchHits === 1) {
+      check(
+        countIn(REV_REG, PCODE) === 3,
+        '🧪 A26-KEY ③ 反向对照：那一段作废 PATCH 里的 `revoked_at` 写入是这个文件里 3 处之一（revoke / pull 会话已死 / 闲置作废）—— 少一处就是判据撤离',
+        `出现 ${countIn(REV_REG, PCODE)} 处（期望 3）`,
+      )
+    }
+
+    /* ④ last_use 三选一兜底：三处都读不出 ⇒ 按"立即失效"。
+       反向对照：把 return 0 改成一万年 ⇒ ④ 当场假。 */
+    const FALLBACK_REG = 'function lastUseOf(row: PushRow): number'
+    const fbHits = countIn(FALLBACK_REG, PCODE)
+    check(
+      fbHits === 1 && PCODE.includes('return 0'),
+      '🔴 A26-KEY ④ 时间戳三处都读不出来 ⇒ **按立即失效**（宁可让这位老师重开一次应用，也不能让一把时间不明的钥匙永久有效）',
+      `lastUseOf 定义 ${fbHits} 处（期望 1）· 兜底 \`return 0\` 存在 = ${PCODE.includes('return 0')}`,
+    )
+    const noFallback = PCODE.replace('  return 0', '  return Date.now() + 100 * 365 * 86_400_000')
+    if (fbHits === 1) {
+      check(
+        noFallback !== PCODE,
+        '🧪 A26-KEY ④ 反向对照：把兜底从"立即失效"换成"再活一百年"（副本 = 改之前的形状）⇒ ④ 当场假',
+        `副本里兜底 = ${noFallback.includes('return 0') ? '仍是 return 0（没改到，判据假绿）' : '已改（判据会咬）'}`,
+      )
+    }
   }
 }
 

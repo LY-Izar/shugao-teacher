@@ -31,6 +31,9 @@
  *   SUPABASE_ANON_KEY / VITE_SUPABASE_ANON_KEY    同上（公开无妨）
  */
 
+import { audit, countRecentActions } from './_lib/supa'
+
+const OCR_DAILY_CAP = 40
 type Env = {
   DEEPSEEK_API_KEY?: string
   SUPABASE_URL?: string
@@ -331,6 +334,34 @@ export async function onRequestPost(context: {
   }
 
   const nos = normalizeNos(body.nos)
+
+  /*
+   * ---- 配额（打付费接口之前）----
+   * 🔴 2026-10-17 加：`/api/ocr` 打的是 **DeepSeek 的付费额度**，原来**一个字都不限**——
+   *    任一登录教师循环调用就能把全校的识别额度烧光，而且全程无告警。
+   *    （登录只挡"陌生人"，挡不住"自己人把按钮按爆"。）
+   *
+   * 🔴 判据问 `admin_audit`（**与 `_lib/mail.ts` 的 `MAIL_DAILY_CAP` 同一条路**）：
+   *    · **持久、跨 isolate**——in-memory Map 在 Cloudflare Worker 里横向扩 + 随生随灭，
+   *      撞别的 isolate 就绕过去了（`@@services/...` 那个老教训）。
+   *    · **不新增表**——复用已有的 `admin_audit` 与它的 `action` 点分代码，
+   *      `rls-checks` / `schema.sql` 一个字都不用动。
+   *    · `countRecentActions()` 读不到回 **`null`** ⇒ **放行**：跟 `AGENTS.md §三.4` 的三态口径一致，
+   *      没结论时**绝不把正常功能误杀**（灰 ≠ 红）。
+   *    · 上限宽松（`OCR_DAILY_CAP = 40`）：正常录一个班 60 个号的量级是 1–3 张图/天/人，
+   *      40 是"足以正常用、足以挡住循环"的档。
+   */
+  const used = await countRecentActions(env, me.id, 'ocr.recognize', 24 * 60 * 60)
+  if (used !== null && used >= OCR_DAILY_CAP) {
+    return json(
+      {
+        status: 'error',
+        message: `这台账号 24 小时内已经识别过 ${used} 张图（上限 ${OCR_DAILY_CAP}）—— 这是学校的付费额度，过一天再试`,
+      },
+      429,
+    )
+  }
+
   const prompt = buildPrompt(body, nos)
 
   let upstream: Response
@@ -422,6 +453,34 @@ export async function onRequestPost(context: {
   } catch {
     return json({ status: 'error', message: '识别结果不是合法 JSON', detail: cleaned.slice(0, 300) }, 502)
   }
+
+  /*
+   * 🔴 记账（只记**成功**的这一张）：配额读数看的就是这一行。
+   *    失败的那几种（502 / 网络挂 / 空返回）**不清耗**用户的额度 ——
+   *    那些时不花钱（请求没走到计费那一步）或重试是正常路径。
+   *    `recordAudit` 读不到/写不进时**静默吞掉**：记账失败不该让一次成功的识别
+   *    当场报错给老师（与 §三.5 不同的一条路 —— 这里的失败代价是"下一次多算一张"，
+   *    而不是"这次白干"）。
+   *
+   * ⚠️ 不放学生数据进 `target` / `detail`：这张表会跟着备份走（§二十四的同一句纪律）。
+   *    `target` 记的是**场景**（collect / roster / count / schedule）与题号个数，都是非 PII。
+   */
+  let backend = safeSubject(body.scene) || ''
+  if (!backend) {
+    const sbj = body.scene
+    backend = typeof sbj === 'string' && /^[\u4e00-\u9fa5A-Za-z]{1,20}$/.test(sbj) ? sbj : ''
+  }
+  // 🔴 **await**，不是 `void`：`audit()` 是发出去就忘（fire-and-forget）——
+  //   本地 / Cloudflare 里 ctx.waitUntil 会接住它，但**测试环境里**（ocr-checks 的假 fetch
+  //   在 `finally` 里还原）那个挂着的 POST 会在送达前被真 fetch 撤走 —— 正是
+  //   "`void` 的副作用在回归里被吃掉"那一类假绿（`AGENTS.md §三.1`：门禁自己也要能红）。
+  //   await 的代价只有几十毫秒，换回来的是"记账一定发生"。
+  await audit(env, {
+    actorId: me.id,
+    action: 'ocr.recognize',
+    target: `${backend || 'universal'} · ${normalizeNos(body.nos).length} 个号`,
+    detail: `usage=${usage.slice(0, 60)}`,
+  })
 
   return json({ status: 'ok', data })
 }

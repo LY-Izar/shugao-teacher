@@ -37,6 +37,7 @@ import {
   audit,
   baseUrl,
   caller,
+  countRecentActions,
   isMissing,
   json,
   mailedInLastDay,
@@ -82,6 +83,25 @@ const UNLOCK_LOCK_MS = 5 * 60 * 1000
 /** IP → { 失败次数, 锁定到什么时候 } */
 const unlockFails = new Map<string, { n: number; until: number }>()
 
+/*
+ * 🔴 2026-10-17 加：**壁纸的另一层** —— 为什么 in-memory Map 当不了真的闸门，以及补法。
+ *
+ *   · `unlockFails` 是**这个 isolate 自己的**模块级常量。Cloudflare Worker 的 isolate
+ *     随生随灭、横向扩展，失败计数**只在这一个 isolate 里算数**：
+ *     → "关掉浏览器再开"分到另一个 isolate → 计数从头算 → 绕过；
+ *     → 同一 IP 连续打 6 次，若被路由到 2 个 isolate → 各只攒 3 → 绕过。
+ *   · 还有 `'unknown'` 那一桶：两个头都取不到时**所有这类调用者共用一个桶**
+ *     （`:89` 的回落串）⇒ 少数几次误伤之外，还会反过来把**真的超管**锁在门外。
+ *
+ *   ✅ 补法（**不换技术**，只把判据从"内存"改成"库里 count"）：
+ *     `unlockFailures()` 问 `admin_audit`（§23.2，本来就在）——
+ *     `action='maintenance.unlock.fail'` 且 `actor_id IS NULL`（这条路径没有登录人）。
+ *     计数**跨 isolate 持久**，5 分钟窗口也照旧。
+ *     in-memory 那 3 个函数**保留**：它变成"快的一层"，库里的才是"硬的一层"；
+ *     读库失败回 `null` ⇒ **放行**（与 §三.4 三态一致：配额/闸门不是安全边界，
+ *     真正的安全判据仍是 `is_super_admin()`——`unlock` 那一步在 :228 还会再问一次）。
+ */
+
 function ipOf(request: Request): string {
   return (
     request.headers.get('CF-Connecting-IP')?.trim() ||
@@ -99,15 +119,32 @@ function unlockGate(request: Request): { ok: true } | { ok: false; message: stri
   return { ok: true }
 }
 
-function recordUnlockFailure(request: Request): void {
+function recordUnlockFailure(request: Request, env: Env): void {
   const ip = ipOf(request)
   const prev = unlockFails.get(ip)
   const n = (prev?.n ?? 0) + 1
   unlockFails.set(ip, n >= UNLOCK_MAX_FAILS ? { n: 0, until: Date.now() + UNLOCK_LOCK_MS } : { n, until: 0 })
+  void audit(env, {
+    actorId: null,
+    action: 'maintenance.unlock.fail',
+    target: ip.slice(0, 45),
+  }).catch(() => undefined)
 }
 
 function clearUnlockFailures(request: Request): void {
   unlockFails.delete(ipOf(request))
+}
+
+/** 🔴 硬闸门（库里的计数）：5 分钟内在 `admin_audit` 里有 ≥5 次失败 → 拒。
+ *    读不到回 `null` ⇒ extracted直接放行（是快层的收窄，不是安全边界）。 */
+async function unlockGateHard(env: Env, request: Request): Promise<{ ok: true } | { ok: false; message: string }> {
+  const soft = unlockGate(request)
+  if (!soft.ok) return soft
+  const used = await countRecentActions(env, null, 'maintenance.unlock.fail', UNLOCK_LOCK_MS)
+  if (used !== null && used >= UNLOCK_MAX_FAILS) {
+    return { ok: false, message: `这个地址短时间内试了太多次，过几分钟再试。` }
+  }
+  return { ok: true }
 }
 const NEED_STAGE23 = needStage('23', '平台设置（维护模式）')
 
@@ -186,13 +223,16 @@ export async function onRequestPost(context: { request: Request; env: Env }): Pr
      ⚠️ **限流**：这是唯一免登录的入口，🔴 必须限 —— 见 `unlockGate`。
   ═══════════════════════════════════════════════════════════════════════ */
   if (action === 'unlock') {
-    const gate = unlockGate(request)
+    const gate = await unlockGateHard(env, request)
     if (!gate.ok) return json({ status: 'error', message: gate.message }, 429)
 
     const raw = body as { email?: unknown; password?: unknown }
     const email = String(raw.email ?? '').trim()
     const password = String(raw.password ?? '')
     if (!email || !password) return json({ status: 'error', message: '账号和密码都要填。' }, 400)
+    // 下面无论走到"密码不对"还是"判据说不让"，都要在库里留下一次失败 ——
+    // 硬闸门（跨 isolate）拿的就是这一行。
+    const failOnce = () => recordUnlockFailure(request, env)
 
     /* ① 密码交给 Supabase 校验（用 anon key —— 它只能验证身份） */
     /*
@@ -210,7 +250,7 @@ export async function onRequestPost(context: { request: Request; env: Env }): Pr
         body: JSON.stringify({ email, password }),
       })
       if (!r.ok) {
-        recordUnlockFailure(request)
+        failOnce()
         /* 🔴 **不回显 Supabase 原文**：那会漏"账号在不在 / 有没有确认过 / 被限流了" */
         return json({ status: 'error', message: '账号或密码不对。' }, 401)
       }

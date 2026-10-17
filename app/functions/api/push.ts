@@ -104,12 +104,47 @@ async function caller(request: Request, env: Env): Promise<{ id: string; email: 
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
+/*
+ * 🔴 2026-10-17 加：**钥匙有"闲置即失效"这一次了** —— 原来它是全系统唯一的
+ *    非过期凭据（`X-Push-Token` 每次 pull 直接换出一整套会话），而且：
+ *      · **没有过期**（只有 revoke 那两个动作会写 `revoked_at`）
+ *      · **没有限流、没有设备绑定**
+ *      · 一次泄露 = 对那位老师的通知/公告**无限期**读权，老师自己毫无感知。
+ *
+ *    ✅ 为什么选"闲置 N 天"而不是"固定 TTL"：
+ *      · 前台服务**每 30 秒**拉一次 ⇒ 正在用的钥匙永远贴着"刚用过的"那一边，
+ *        真实的教室端**一个都不会被误杀**（§41 那条"手机重启后还在"照旧成立）；
+ *      · `last_pull_at` **本来就在写**（`:382`），判据**白拿**，一行 schema 都不用加；
+ *      · 失效走的就是**已存在的 `reauth: true` 那条协议** —— 原生侧拿到它
+ *        "让服务停拉、老师下次打开应用 register 一把新的"（`:370-374` 已经在用），
+ *        不需要动任何 `.java` / `.js` 桥接。
+ *      · 闲置 = 无人使用 = 攻击者手里那一把迟早被掐掉 ⇒ **泄露的窗口从"永远" 收到"30 天"**，
+ *        而正常用户**一次都不会碰到它**。
+ */
+const TOKEN_IDLE_MAX_MS = 30 * 24 * 60 * 60 * 1000
+
 type PushRow = {
   token: string
   teacher_id: string
   email: string | null
   refresh_token: string
   revoked_at: string | null
+  last_pull_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+/** 钥匙最后一次被使用的时间戳。写不出来的退回 `created_at` / `updated_at`（总有一个在）。 */
+function lastUseOf(row: PushRow): number {
+  for (const v of [row.last_pull_at, row.updated_at, row.created_at]) {
+    if (v) {
+      const t = Date.parse(v)
+      if (Number.isFinite(t)) return t
+    }
+  }
+  // 🔴 三处都读不出时间 = 按"立即失效"处理（宁可让这位老师重新打开应用一次，
+  //   也不能让一把时间不明的钥匙继续永久有效）。
+  return 0
 }
 
 async function findToken(env: Env, token: string): Promise<PushRow | null> {
@@ -358,6 +393,28 @@ async function handlePush(context: { request: Request; env: Env }): Promise<Resp
     if (!UUID_RE.test(token)) return json({ status: 'error', reauth: true, message: '钥匙格式不对' }, 401)
     const row = await findToken(env, token)
     if (!row) return json({ status: 'error', reauth: true, message: '钥匙不存在或已作废，重新打开应用再连。' }, 401)
+
+    /*
+     * 🔴 闲置即失效（2026-10-17）：这把钥匙最后一次被用距今已超 30 天 ⇒ 作废。
+     *    走**已存在的 `reauth: true` 协议**：原生侧停拉、老师下次打开应用 register 一把新的。
+     *    同时把 `revoked_at` 写上 —— 这把钥匙从这一刻起真的不能再换出会话，
+     *    不是"这次不放行、下次刚巧又能"。
+     *    ⚠️ 判据读的是 `last_pull_at`（pull 每次都会写，见下面 :382 那里）／
+     *       `updated_at` / `created_at`；三处都读不到 ⇒ **立即失效**
+     *       （宁要"重新打开一次"，不要"永不失效"）。
+     */
+    const idle = Date.now() - lastUseOf(row)
+    if (idle > TOKEN_IDLE_MAX_MS) {
+      const days = Math.floor(idle / 86_400_000)
+      await svc(env, '/rest/v1/push_tokens?token=eq.' + token, {
+        method: 'PATCH',
+        body: JSON.stringify({ revoked_at: new Date().toISOString() }),
+      })
+      return json(
+        { status: 'error', reauth: true, message: `推送钥匙闲置 ${days} 天没用了，重新打开应用即可恢复。` },
+        401,
+      )
+    }
 
     // ① 用存着的 refresh_token 换新会话（轮换：换完立刻写回，别丢）
     const refresh = await fetch(`${baseUrl(env)}/auth/v1/token?grant_type=refresh_token`, {

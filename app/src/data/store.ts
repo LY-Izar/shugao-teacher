@@ -1076,6 +1076,15 @@ export const useStore = create<State>()(
           //    与"这个账号看得到什么"无关 —— 所以这里不清它（清不清由 `clearAnnPreview` 决定）
           announcementsState: 'unknown',
           announcements: [],
+          // 🔴 两份档案也跟着会话走（2026-10-17 补）
+          //    `studentProfiles`（民族 / 出生年月 / **家长电话 / 家庭住址**）、
+          //    `teacherProfiles`（**家庭住址 / 电话 / 邮箱**）。
+          //    原来只在 `clearAll()` 里清，登出不清 ⇒ 恰好错过了「换账号」这条最常见的路径：
+          //    教室端那台大屏与老师自己的共用电脑上，前一个用户登出后，下一个登入的人
+          //    在 `hydrate()` 完成之前有机会看到上一位的监护人电话 / 家庭住址。
+          //    （排除在 `partialize` 之外只保住了"不落 localStorage"，防不住内存里的这一份。）
+          studentProfiles: [],
+          teacherProfiles: [],
           hydrated: !isRemote,
           // 身份跟着会话走，别把上一个账号的类型留在内存里
           accountKind: 'teacher',

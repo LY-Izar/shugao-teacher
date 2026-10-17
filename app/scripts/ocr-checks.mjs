@@ -17,6 +17,14 @@
 
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+// 🔴 2026-10-17：`ocr.ts` 现在 `import { audit, countRecentActions } from './_lib/supa'
+//   （为配额判据，见该文件 `OCR_DAILY_CAP`）。`ocr.ts` 里这是**第一条**相对导入，
+//   而 `_lib/supa.ts` 是无扩展名路径 —— Node 的 ESM 两样都不认 ⇒ 报 ERR_MODULE_NOT_FOUND。
+//   补上回归脚本通用的那个解析钩子（`grade-checks` / `shots` 已经在用它），
+//   让被测对象底下那一层跟着一起是真的，而不是复刻。
+import { registerTsResolve } from './lib/ts-resolve.mjs'
+
+registerTsResolve()
 
 const HERE = new URL('.', import.meta.url)
 const OCR_TS = new URL('../functions/api/ocr.ts', HERE).href
@@ -40,15 +48,22 @@ function section(t) {
  * 三个上游各有各的答案：
  *   /auth/v1/user        → 令牌认不认
  *   /rest/v1/teachers    → 这个 uid 是不是本校账号（RLS 那一句）
+ *   /rest/v1/admin_audit → 🔴 配额判据 / 成功后的记账（2026-10-17 加，随 `_lib/supa` 一起进来）
  *   api.deepseek.com     → 真的"识别"（这里只回一段合法 JSON）
  */
 const BASE = 'https://fake.supabase.co'
 const calls = []
-
-function makeFetch({ user = null, teachers = 'missing', deepseek = 'ok' } = {}) {
+/** 🔴 假的 `admin_audit`：配额读数与记账都落这一张。`scenario.audit` 决定"有多少行"（也就是"已经用了几张"）。 */
+function makeFetch({ user = null, teachers = 'missing', deepseek = 'ok', audit = null } = {}) {
   return async (url, init = {}) => {
     const u = String(url)
-    calls.push({ url: u, auth: init.headers?.Authorization ?? '', body: init.body ?? null })
+    calls.push({
+      // 🔴 method **必须真的记**（记账那一路是显式 POST、读数是缺省 GET）。
+      method: init.method ?? 'GET',
+      url: u,
+      auth: init.headers?.Authorization ?? '',
+      body: init.body ?? null,
+    })
 
     if (u.includes('/auth/v1/user')) {
       if (!user) return new Response('{"msg":"invalid token"}', { status: 401 })
@@ -66,6 +81,18 @@ function makeFetch({ user = null, teachers = 'missing', deepseek = 'ok' } = {}) 
       }
       if (teachers === 'none') return new Response('[]', { status: 200 })
       return new Response(`[{"id":"${teachers}"}]`, { status: 200 })
+    }
+    if (u.includes('/rest/v1/admin_audit')) {
+      // 两路都到这张表：读数（GET，count=exact）与记账（POST）。
+      const n = audit ?? 0
+      if (!init.method || init.method === 'GET') {
+        const rows = Array.from({ length: n }, (_, i) => ({ id: i + 1 }))
+        return new Response(JSON.stringify(rows), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      return new Response('[]', { status: 201, headers: { 'Content-Type': 'application/json' } })
     }
     if (u.includes('api.deepseek.com')) {
       if (deepseek === 'http500') return new Response('boom', { status: 500 })
@@ -101,11 +128,25 @@ async function callOcr({ env, headers = {}, body = {}, scenario = {} }) {
     } catch {
       payload = { raw: text }
     }
-    return { status: res.status, payload, deepseekCalls: calls.filter((c) => c.url.includes('deepseek')) }
+    return {
+      status: res.status,
+      payload,
+      deepseekCalls: calls.filter((c) => c.url.includes('deepseek')),
+      /* 🔴 2026-10-17：让第 4 节能看见 `admin_audit` 的读数（GET）与记账（POST）——
+         method 由假 fetch 一路记下来（سك выше），这里原样透传、不做推断。 */
+      /* 🔴🔴 必须是**快照**（2026-10-17 踩到真身才补上）：`calls` 是**模块级共享数组**，
+         而 `callOcr()` 每次开头 `calls.length = 0` —— 直接透传引用会把**上一个 caller**
+         的记录一起清掉 ⇒ q2/q3 跑完，q1 的 upstreamCalls 就是空数组 ⇒
+         "成功要记账" 那条判据**恒红**（且看起来像 Function 没记账 —— 极难分辨）。
+         断言时刻快照一份才有意义：`[...calls]`（浅拷贝够用，元素是只读对象）。 */
+      upstreamCalls: [...calls],
+    }
   } finally {
     globalThis.fetch = real
   }
 }
+
+
 
 const GOOD_ENV = {
   DEEPSEEK_API_KEY: 'sk-test',
@@ -239,6 +280,76 @@ const r10 = await callOcr({
   scenario: { user: 'u1', teachers: 'u1' },
 })
 ok('未登录 + 假图片 → 仍然只报 401（不给攻击者任何额外信息）', r10.status === 401 && r10.payload.status === 'error', `status=${r10.status} ${JSON.stringify(r10.payload)}`)
+
+/* ══════════════════════════════════════════════════════════════════════════
+   4. 配额（2026-10-17）：/api/ocr 打的是**付费**接口，原来一个字都不限。
+   三个方向都要断言 —— 挡得太松 = 配额不存在；挡得太紧 = 正常用一次就废；
+   不记账 = 下一轮读数永远 0 = 配额自己失灵。
+   ══════════════════════════════════════════════════════════════════════════ */
+section('4. 配额（付费接口的保护层）：读数 ≥ 上限 → 429 · 成功 → 记账 · 失败 → 不记账')
+
+const OCR_CAP_DIFFERENCE = 40 // 与 functions/api/ocr.ts 的 OCR_DAILY_CAP 对号（写死，便于跨文件信任）
+
+/** condition: 假 audit 表里有几行 = "这位老师已经用掉几张"。 */
+const q1 = await callOcr({
+  env: GOOD_ENV,
+  headers: { Authorization: `Bearer ${TOKEN}` },
+  body: { image: IMG, scene: 'collect', nos: ['1'] },
+  scenario: { user: 'teacher-1', teachers: 'teacher-1', audit: 0 },
+})
+ok('🔴 配额读数 0 → 照常识别（正常用量**一次都不会被误杀**）', q1.status === 200 && q1.payload.status === 'ok', `status=${q1.status}`)
+
+const q2 = await callOcr({
+  env: GOOD_ENV,
+  headers: { Authorization: `Bearer ${TOKEN}` },
+  body: { image: IMG, scene: 'collect', nos: ['1'] },
+  scenario: { user: 'teacher-1', teachers: 'teacher-1', audit: OCR_CAP_DIFFERENCE },
+})
+ok(
+  `🔴 读数已到上限（${OCR_CAP_DIFFERENCE}）→ 429 + **一个字节都不发给 DeepSeek**（付费额度不再可被一人烧光）`,
+  q2.status === 429 && q2.deepseekCalls.length === 0,
+  `status=${q2.status} · deepseek 调用 ${q2.deepseekCalls.length} 次（期望 0）`,
+)
+
+/* 反向对照（对**真源码**本身）：判据退化成 "used > CAP"（差一）或 "读不到也挡" 都要立刻被看出来 */
+const OCR_SRC = src // ← 第 0 节里读好的那段
+ok(
+  '🧪④ 对照① 判据用的是 `>=`（读数恰好等于上限就挡 —— 差一会让配额形同虚设）',
+  OCR_SRC.includes('used !== null && used >= OCR_DAILY_CAP') && !OCR_SRC.includes('used > OCR_DAILY_CAP)'),
+  `源码里 \`used >= OCR_DAILY_CAP\` = ${OCR_SRC.includes('used >= OCR_DAILY_CAP')}`,
+)
+ok(
+  '🧪④ 对照② 读不到时**放行**（`used !== null` 前置 —— §三.4 的三态，读不到 ≠ 读到 0）',
+  OCR_SRC.includes('if (used !== null && used >= OCR_DAILY_CAP)'),
+)
+
+/* 记账那一路是显式 POST —— `audit()` 里给的就是 `init.method`（下 `svc()` 透传），
+   假 fetch 已把 method 原样记下（不需要推断）。这里**避开已加过的 GET**（配额读数）。 */
+const POST_AUDIT = (q1.upstreamCalls ?? []).find(
+  (c) => c.method === 'POST' && c.url.includes('/rest/v1/admin_audit'),
+)
+ok(
+  '🔴 成功一次 → **记账**（POST admin_audit；漏了这一行，下一轮读数仍 0 ⇒ 配额永不挡人）',
+  POST_AUDIT !== undefined,
+  `记账：${POST_AUDIT ? '在' : '没有'} · q1 上游共 ${(q1.upstreamCalls ?? []).length} 次调用`,
+)
+ok(
+  '   记账里**没有四位数以上的号**（这张表会跟着备份走 —— §二十四的同一句纪律）',
+  !POST_AUDIT || !/[0-9]{4,}/.test(POST_AUDIT.body ?? ''),
+  `target 片段 = ${(POST_AUDIT?.body ?? '').slice(0, 80)}`,
+)
+
+// 🔴 失败不消耗额度：DeepSeek 挂（502）→ 那一行**不**写进去。
+const q4 = await callOcr({
+  env: GOOD_ENV,
+  headers: { Authorization: `Bearer ${TOKEN}` },
+  body: { image: IMG, scene: 'roster' },
+  scenario: { user: 'teacher-1', teachers: 'teacher-1', deepseek: 'http500', audit: 0 },
+})
+const failedRecords = (q4.upstreamCalls ?? []).filter(
+  (c) => c.method === 'POST' && c.url.includes('/rest/v1/admin_audit'),
+)
+ok('🔴 DeepSeek 挂掉（502）→ **不记账**（失败不该消耗额度）', q4.status === 502 && failedRecords.length === 0, `status=${q4.status} · 记账 ${failedRecords.length} 次（期望 0）`)
 
 console.log('')
 if (failures.length) {
