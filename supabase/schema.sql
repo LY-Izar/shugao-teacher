@@ -8311,7 +8311,7 @@ revoke all on grade_promotions, grade_removals from public, anon, authenticated;
 --     第一次真的去掉 `assignments_class_id_not_null`，之后每次都是 no-op。
 --     PostgreSQL 的列级 `not null` 在 `pg_constraint` 里就是一条名为
 --     `<表>_<列>_not_null` 的 check（`contype = 'c'`），所以这一句就是它。
-alter table assignments drop constraint if exists assignments_class_id_not_null;
+alter table assignments alter column class_id drop not null;
 
 --  ⚠️ **不要再补一条 `check (class_id is null or exists (select 1 from classes …))`** ——
 --     试过，PostgreSQL 直接回 `ERROR: cannot use subquery in check constraint`（CHECK 里不许有子查询）。
@@ -8904,13 +8904,23 @@ alter table subjects drop column if exists can_stream;
 
 -- -------- 33.1 🔴 `calls.assignment_id` 允许为空（**幂等**）--------
 --  ✅ **只需要一句，而且它天生幂等**（与 §31.2 完全同一手法）：
---     PostgreSQL 的列级 `not null` 在 `pg_constraint` 里就是一条名为
---     `<表>_<列>_not_null` 的 check，所以这一句就是它。
+--     🔴🔴 2026-10-17 修正（真实事故，线上撞到的）：
+--     这一段原来写的是 `alter table calls drop constraint if exists
+--     calls_assignment_id_not_null;`，而它在 PostgreSQL 上**是空操作** ——
+--     列级 `not null` **不是** `pg_constraint` 里的一条约束，它只体现在
+--     `pg_attribute.attnotnull`。（把 NOT NULL 表示成一条命名约束是 **PG 18**
+--     才做的事；本库是 **17** —— 见 `.github/workflows/backup.yml` 里
+--     「Supabase 的服务器是 17.6」那句。）⇒ `drop constraint if exists`
+--     匹配不到任何东西、**静默什么也不做**：不报错、不生效。
+--     ⇒ 症状：**用户跑完整段后 `attnotnull` 仍然是 `true`**，事务性呼叫照旧
+--       被数据库挡下，而面板上看不出任何异常（它只报 INSERT 那次失败，
+--       不报「你刚跑的那句没生效」）—— 整段看起来全绿。
+--  ✅ 正确写法是 `alter column … drop not null`：所有 PG 版本都对，且天然幂等。
 --  为什么必须放开：事务性呼叫（班主任 / 教导处从班级管理直接呼叫学生）**本来就不该**
 --     挂到某一份作业档案上 —— 它是"事务"，不是"作业的附属"。
 --     ⚠️ 改之前那套做法（`ClassDetail` 的自由播报挂到"该班最近的一份档案"上）
 --        会让呼叫的归属随作业的增删漂移，而且一次事务性呼叫**被记成作业的呼叫**。
-alter table calls drop constraint if exists calls_assignment_id_not_null;
+alter table calls alter column assignment_id drop not null;
 
 --  自检（**幂等**：跑两遍，`attnotnull` 必须是 false；第二遍不能报 42710/23514）：
 --  -- select a.attnotnull from pg_attribute a
@@ -10099,7 +10109,7 @@ create unique index if not exists schedule_temp_changes_slot_active
 --  ① 去掉 not null：PostgreSQL 把列级 `not null` 存成一条名为 `<表>_<列>_not_null` 的约束，
 --     所以这一句**天生幂等**（第一次真的去掉，之后每次都是 no-op）——
 --     与 `assignments.class_id` 那一处同一套写法（§31.2）。
-alter table schedule_temp_changes drop constraint if exists schedule_temp_changes_to_teacher_id_not_null;
+alter table schedule_temp_changes alter column to_teacher_id drop not null;
 
 --  ⚠️ **另外两张表也要一起放宽**（不是顺手，是"整份脚本必须幂等"这一条逼出来的）：
 --     · `schedule_temp_archive` 是**按临时表逐列抄一份**（清理过期时抄）—— 腾空那一行
@@ -10296,8 +10306,8 @@ create index if not exists schedule_perm_changes_slot_idx
 --     （清理过期时抄）—— 腾空那一行 `to_teacher_id` 是 null，抄档却撞上 not null，
 --     清理就**整条失败**（留档丢了还不知道）；`schedule_perm_changes` 与它逐列对应，
 --     两张留档表的形状**不许分叉**。
-alter table schedule_temp_archive drop constraint if exists schedule_temp_archive_to_teacher_id_not_null;
-alter table schedule_perm_changes drop constraint if exists schedule_perm_changes_to_teacher_id_not_null;
+alter table schedule_temp_archive alter column to_teacher_id drop not null;
+alter table schedule_perm_changes alter column to_teacher_id drop not null;
 
 -- -------- 38.6 这一天实际上什么课（临时调课**压在**周课表上面）--------
 --  🔴 **"过期不生效"就落在这一句 `sc.on_date = p_date` 上**：
