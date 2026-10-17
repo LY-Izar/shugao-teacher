@@ -15,6 +15,7 @@ import {
   isAdminClass,
   subjectAdvice,
   subjectCheck,
+  combinationName,   // 🆕 2026-10-17：卡片上那行「物化生」用它算，别自己拼字符串
   PRIMARY_CODES,
   SECOND_CODES,
   type StudentSubject,
@@ -636,7 +637,13 @@ export default function GradeSetup() {
               push({
                 text: `${r.failures.length} 条没写进去`,
                 tone: 'bad',
-                desc: r.failures[0]?.reason,
+                desc:
+                  /* 🔴 2026-10-17（用户报的不清晰之一）：原来只显示**第一条**失败原因 ——
+                     改了 40 个人、失败 3 个，老师只看到 1 条，等于不知道该查谁。 */
+                  r.failures
+                    .slice(0, 3)
+                    .map((f) => f.reason)
+                    .join('；') + (r.failures.length > 3 ? `；还有 ${r.failures.length - 3} 条` : ''),
               })
             } else if (r.ok) {
               push({ text: `已保存 ${r.written} 个学生的选科`, tone: 'ok' })
@@ -1145,6 +1152,239 @@ function TypeSheet({
   )
 }
 
+/** 🆕 2026-10-17（用户提出）：**按班分卡 + 两步点选**，替掉手打「班号 序列号 组合名」。
+ *
+ * 为什么换掉粘贴（不只是少打几个字，是三件事一起解决）：
+ *   ① 老师手上**没有序列号那张表** —— 粘贴要他去别的界面抄，抄错一个整批重贴；
+ *   ② 12 种组合靠记（物化政 / 史政地…），打错要重来；
+ *   ③ 整层**没有名单**，录到哪了看不见。
+ * 换掉之后组合由「首选 2 选 1 + 再选 4 选 2」点出来（2×C(4,2)=12，与 `lib/pick.ts`
+ * 的值域逐字对齐），卡头直接给「已录 12/40」，手风琴一次只展开一个班。
+ *
+ * 🔴 **判据一个字都不另写**：合不合法问 `subjectCheck()`，组合名问 `combinationName()`
+ *    —— 复制第二份就是第二个判定入口（AGENTS §四）。
+ * ⚠️ 「其他」的学生**不在这里点**（他们要手工选走班科目，见下面的 `OtherPicker`）：
+ *    这里只管标准组合那一种，别把两种手工流程混进一张卡。
+ */
+function ClassSubjectCards({
+  classes,
+  subjects,
+  canSetup,
+  write,
+}: {
+  classes: readonly Klass[]
+  subjects: ReadonlyMap<string, StudentSubject>
+  canSetup: boolean
+  write: (rows: SubjectWriteRow[]) => Promise<boolean>
+}) {
+  /** 同时只展开一个班（页面短、注意力集中） */
+  const [openId, setOpenId] = useState<string | null>(null)
+  /** 本卡里还没保存的编辑：`studentId → { primaryCode, secondCodes }` */
+  const [draft, setDraft] = useState<Record<string, { primaryCode: string; secondCodes: string[] }>>({})
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState<string | null>(null)
+
+  /**
+   * 点一下改一格。**回落到库里现值就把它从草稿里拿掉** —— 合法组合与现值等价时
+   * 必须清掉，否则「N 处改动」永远清不掉（老师会以为还有东西没存）。
+   */
+  const setPick = (id: string, next: { primaryCode: string; secondCodes: string[] }) => {
+    setDraft((prev) => {
+      const saved = subjects.get(id)
+      const same =
+        !!saved &&
+        next.primaryCode === saved.primaryCode &&
+        next.secondCodes.join() === (saved.secondCodes ?? []).join()
+      const out = { ...prev }
+      if (same) delete out[id]
+      else out[id] = next
+      return out
+    })
+  }
+
+  const dirtyIds = Object.keys(draft)
+  const rows: SubjectWriteRow[] = dirtyIds.map((id) => ({
+    studentId: id,
+    kind: 'standard',
+    primaryCode: draft[id].primaryCode,
+    secondCodes: draft[id].secondCodes,
+    note: '',
+  }))
+
+  return (
+    <div className="mt-4">
+      <Sect>一个班一张卡（点着选，不用手打字）</Sect>
+      <div style={{ fontSize: 12, color: 'var(--color-ink3)', lineHeight: 1.7 }}>
+        先点首选（物理 / 历史），再点两门再选；选齐两门这一行就亮了，卡尾一次保存整张卡的改动。
+      </div>
+
+      {classes.map((k) => {
+        const roster = k.students.filter((s) => s.status === 'active')
+        const std = roster.filter((s) => subjects.get(s.id)?.kind !== 'other')
+        const others = roster.length - std.length
+        const done = std.filter((s) => {
+          const cur = subjects.get(s.id)
+          return (
+            !!cur &&
+            !subjectCheck({
+              kind: 'standard',
+              primaryCode: cur.primaryCode,
+              secondCodes: cur.secondCodes ?? [],
+              note: '',
+            })
+          )
+        }).length
+        const open = openId === k.id
+        const cardDirty = open ? dirtyIds.filter((id) => roster.some((s) => s.id === id)).length : 0
+
+        return (
+          <div key={k.id} style={{ border: '1px solid var(--color-line2)', borderRadius: 6, marginTop: 10 }}>
+            <button
+              type="button"
+              style={{
+                display: 'flex', alignItems: 'center', gap: 8, width: '100%',
+                padding: '8px 10px', background: 'transparent', border: 0,
+                cursor: 'pointer', textAlign: 'left',
+              }}
+              onClick={() => {
+                setOpenId(open ? null : k.id)
+                setMsg(null)
+              }}
+            >
+              <b style={{ fontSize: 13 }}>{k.name}</b>
+              <Tag tone={done > 0 && done === std.length ? 'ok' : done > 0 ? 'accent' : 'idle'}>
+                已录 {done}/{std.length}
+              </Tag>
+              {others > 0 ? <Tag tone="warn">{others} 人走「其他」</Tag> : null}
+              <span style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--color-ink3)' }}>
+                {open ? '收起' : '展开'}
+              </span>
+            </button>
+
+            {open ? (
+              <div style={{ padding: '0 10px 10px' }}>
+                {std.map((s) => {
+                  const saved = subjects.get(s.id)
+                  const cur = draft[s.id] ?? {
+                    primaryCode: saved?.primaryCode ?? '',
+                    secondCodes: saved?.secondCodes ?? [],
+                  }
+                  const bad = subjectCheck({
+                    kind: 'standard',
+                    primaryCode: cur.primaryCode,
+                    secondCodes: cur.secondCodes,
+                    note: '',
+                  })
+                  const changed = !!draft[s.id]
+                  return (
+                    <div
+                      key={s.id}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 6,
+                        padding: '4px 0', borderTop: '1px solid var(--color-line1)', flexWrap: 'wrap',
+                      }}
+                    >
+                      <span style={{ fontSize: 12.5, minWidth: 96 }}>
+                        <span className="num">{s.serial}</span> {s.name}
+                      </span>
+                      <Tag tone={bad ? (changed ? 'warn' : 'idle') : changed ? 'accent' : 'ok'}>
+                        {bad ? (changed ? '没选齐' : '还没录') : combinationName(cur)}
+                      </Tag>
+                      {PRIMARY_CODES.map((c) => (
+                        <button
+                          key={c}
+                          type="button"
+                          aria-pressed={cur.primaryCode === c}
+                          style={pickBtn(cur.primaryCode === c)}
+                          onClick={() =>
+                            setPick(s.id, {
+                              primaryCode: cur.primaryCode === c ? '' : c,
+                              secondCodes: cur.secondCodes.filter((x) => x !== c),
+                            })
+                          }
+                        >
+                          {subjectName(c)}
+                        </button>
+                      ))}
+                      {SECOND_CODES.map((c) => {
+                        const on = cur.secondCodes.includes(c)
+                        return (
+                          <button
+                            key={c}
+                            type="button"
+                            aria-pressed={on}
+                            style={pickBtn(on)}
+                            title={cur.primaryCode === c ? `${subjectName(c)}已经是首选，不能同时当再选` : undefined}
+                            onClick={() =>
+                              setPick(s.id, {
+                                primaryCode: cur.primaryCode,
+                                secondCodes: on
+                                  ? cur.secondCodes.filter((x) => x !== c)
+                                  : [...cur.secondCodes, c].slice(-2),
+                              })
+                            }
+                          >
+                            {subjectName(c)}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  )
+                })}
+
+                <div className="mt-2" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    disabled={!canSetup || busy || cardDirty === 0}
+                    onClick={async () => {
+                      setBusy(true)
+                      const mine = rows.filter((r) => roster.some((s) => s.id === r.studentId))
+                      const ok = await write(mine)
+                      setBusy(false)
+                      if (ok) {
+                        setDraft((prev) => {
+                          const out = { ...prev }
+                          for (const id of Object.keys(out)) if (roster.some((s) => s.id === id)) delete out[id]
+                          return out
+                        })
+                        setMsg(`已保存 ${mine.length} 个学生的选科`)
+                      } else {
+                        setMsg('这张卡没存上，屏上看到的还是改动前的值')
+                      }
+                    }}
+                  >
+                    保存这张卡的 {cardDirty} 处改动
+                  </Button>
+                  <Button size="sm" variant="ghost" disabled={cardDirty === 0} onClick={() => setDraft({})}>
+                    放弃本卡改动
+                  </Button>
+                </div>
+                {msg ? (
+                  <p style={{ fontSize: 12.5, color: 'var(--color-ink2)', marginTop: 8, lineHeight: 1.7 }}>{msg}</p>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+/** 点选按钮的两种形态（选中实心、未选中描边）。首选/再选两组共用，别各写一份 */
+function pickBtn(on: boolean) {
+  return {
+    font: '600 12px/1 system-ui',
+    padding: '3px 7px',
+    borderRadius: 4,
+    cursor: 'pointer',
+    border: `1px solid ${on ? 'var(--color-brand)' : 'var(--color-line2)'}`,
+    background: on ? 'var(--color-brand)' : 'transparent',
+    color: on ? '#fff' : 'var(--color-ink2)',
+  }
+}
+
 /* ============================================================
    ④ 采选科那一层
    ============================================================ */
@@ -1214,6 +1454,10 @@ function PickSheet({
 
   return (
     <div>
+      {/* 🆕 2026-10-17：点选卡放在最上面 —— 它是日常主路径（逐班查漏），
+          下面那几块（一键默认 / 粘贴差异名单）保留成整批通道。 */}
+      <ClassSubjectCards classes={classes} subjects={subjects} canSetup={canSetup} write={write} />
+
       <Sect>一键全部按班型默认</Sect>
       <div style={{ fontSize: 12, color: 'var(--color-ink3)', lineHeight: 1.7 }}>
         理科班 → 物化生 · 文科班 → 史政地。未分科 / 还没设班型的班不动，「其他」的学生不动。
