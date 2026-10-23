@@ -156,3 +156,39 @@ export function bringToFront(ids: string[], id: string): string[] {
   rest.push(id)
   return rest
 }
+
+/**
+ * **默认模板**（2026-10-24 用户拍板：「内置一个默认的模板跟原版的布局一样就行」）。
+ *
+ * 旧教室屏是一屏两栏（`Classroom.tsx:1918` 的 `gridTemplateColumns: 'minmax(300px, 360px) 1fr'`），
+ * 所以模板也按两栏摆：左栏从上到下「大时钟课表」「呼叫播报」，右栏「老师传来的文件」，
+ * 右栏剩下的地方留给 P2 之后搬过来的作业/考试/讲评（那些是插件，**这里绝不预设** ——
+ * 没装就是没有，见交接文档 §7.1 第 3 条）。
+ *
+ * 🔴 只在"这个班还没有 `__framework` 布局行"时用一次；老师拖过之后以他存的那份为准。
+ * ⚠️ 所有坐标都过 `clampRect`（和拖拽、吸附同一套算术）—— 另写一套坐标就是两个真相。
+ */
+export function templateLayout(canvas: CanvasSize): ShellLayout {
+  const pad = 16
+  /* 左栏 4 格（旧屏是 300–360，取整到 96 的倍数，吸附才对得上） */
+  const leftW = GRID_PX * 4
+  const callsH = GRID_PX * 2
+  /* 左栏剩下的高度都给时钟：向下取整到整格，再夹进画布 */
+  const clockH = Math.max(GRID_PX * 3, Math.floor((canvas.h - pad * 3 - callsH) / GRID_PX) * GRID_PX)
+  const filesW = Math.max(GRID_PX * 3, Math.floor((canvas.w - pad * 3 - leftW) / GRID_PX) * GRID_PX)
+  const min = { w: GRID_PX, h: GRID_PX }
+  return {
+    snap: 'grid',
+    windows: [
+      { id: '__clock', mode: 'open', ...clampRect({ x: pad, y: pad, w: leftW, h: clockH }, canvas, min) },
+      { id: '__calls', mode: 'open', ...clampRect({ x: pad, y: pad + clockH + pad, w: leftW, h: callsH }, canvas, min) },
+      { id: '__files', mode: 'open', ...clampRect({ x: pad * 2 + leftW, y: pad, w: filesW, h: GRID_PX * 4 }, canvas, min) },
+      /* 备份是状态条性质的块：右栏**底部**——和旧屏"自动备份到本机"那张卡的阅读顺序一致 */
+      {
+        id: '__backup',
+        mode: 'open',
+        ...clampRect({ x: pad * 2 + leftW, y: canvas.h - pad - GRID_PX * 2, w: filesW, h: GRID_PX * 2 }, canvas, min),
+      },
+    ],
+  }
+}

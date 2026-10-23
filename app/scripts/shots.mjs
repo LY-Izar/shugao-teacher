@@ -13075,7 +13075,8 @@ await withLock(async () => {
               那个 px 边界**真的漏了东西**：`Admin.tsx` 里那个 `<summary>`（11.5px **借父级字号**，
               静态 grep 看不见 `fontSize`）与 13~13.5px 那几处。
               这一版按用户拍板**不再留 px 边界**：判据 = 全仓 `color:` 前景色的两半之和：
-                 · `var(--color-accenttext)` = **26 处**（2026-10-04 由 25 增至 26：日程表「今天」轴的「现在」标签）
+                 · `var(--color-accenttext)` = **27 处**（2026-10-24 由 26 增至 27：新壳「老师传来的文件」的「正在取回…」那一行
+                   —— 那是本体功能块，小字提示按口径用 `accenttext`；**变的是分母，不是口径**）
                  · `var(--color-accent)`   = **0 处**
            🔴 **为什么从 29 变成 25（2026-10-10 徽标轮）—— 不是为了让门禁变绿**：
               少掉的那 4 处（`AppShell.tsx` ×2 · `Login.tsx` ×1 · `Classroom.tsx` ×1）**不是小字**，
@@ -13100,8 +13101,8 @@ await withLock(async () => {
           if (n) perNext.push(`${f.split('/').pop()}=${n}`)
         }
         check(
-          textSites.next === 26 && textSites.old === 0,
-          '🔴 F6-H（**不再留 px 边界**）：全仓 `color:` 前景色 —— 用 `accenttext` 的**恰好 26 处**、还用 `accent` 的**恰好 0 处**（29 → 25 那 4 处是"给矢量图标上色"的容器，徽标轮换成校徽位图时整条删掉 —— 理由见上面那段注释；**25 → 26 是 2026-10-04**：日程表「今天」时间轴上那个 10.5px 的「现在」标签原本写成 `color: var(--color-accent)` —— 那**违反口径**（前景色一律走 `accenttext`），改成 `accenttext` 之后它是第 26 个合法站点。**变的是分母，不是口径**：`accent` 仍是 0 处）',
+          textSites.next === 27 && textSites.old === 0,
+          '🔴 F6-H（**不再留 px 边界**）：全仓 `color:` 前景色 —— 用 `accenttext` 的**恰好 27 处**、还用 `accent` 的**恰好 0 处**（29 → 25 那 4 处是"给矢量图标上色"的容器，徽标轮换成校徽位图时整条删掉 —— 理由见上面那段注释；**25 → 26 是 2026-10-04**、**26 → 27 是 2026-10-24**：新壳「老师传来的文件」的「正在取回…」提示行。**变的是分母，不是口径**：`accent` 仍是 0 处）',
           `accenttext=${textSites.next} 处（${perNext.join(' · ')}）· accent=${textSites.old} 处`,
           '反向对照：把其中任一处改回 `var(--color-accent)` → 两个数就不再是 26 / 0，必红',
         )

@@ -46,6 +46,9 @@ import { setDeviceRole } from '../lib/session'
 import * as remote from '../data/remote'
 import { useMaintenanceStatus } from '../lib/useMaintenance'
 import { MaintenanceScreen } from '../components/MaintenanceGate'
+/* 本体功能块（不是插件）：教师端传来的文件 —— 2026-10-24 用户改口，见交接文档 §二清单 11 */
+import { FilesBlock } from '../classroom/blocks/FilesBlock'
+import { BackupBlock } from '../classroom/blocks/BackupBlock'
 import {
   shellAutoplayAllowed,
   shellCloseAllFloating,
@@ -81,8 +84,8 @@ import {
   applySnap,
   bringToFront,
   cellsToPx,
-  defaultLayout,
   normalizeLayout,
+  templateLayout,
   type CanvasSize,
   type LayoutWin,
   type MinSize,
@@ -767,7 +770,7 @@ function PluginWindow({
 interface WinDef {
   id: string
   title: string
-  kind: 'clock' | 'calls' | 'closing' | 'plugin'
+  kind: 'clock' | 'calls' | 'closing' | 'files' | 'backup' | 'plugin'
   plugin?: AvailablePlugin
   min: MinSize
   suggest: { w: number; h: number }
@@ -1335,6 +1338,10 @@ export default function ClassroomPluginShell() {
     ]
     if (klass && !streamMode) {
       list.push({ id: '__calls', kind: 'calls', title: '呼叫播报', min: { w: 300, h: 200 }, suggest: { w: 432, h: 180 } })
+      /* 2026-10-24 用户改口：「教师端传文件」是教室屏的默认能力 ⇒ 本体功能块，不走插件 */
+      list.push({ id: '__files', kind: 'files', title: '老师传来的文件', min: { w: 288, h: 240 }, suggest: { w: 480, h: 384 } })
+      /* 备份同一天改口：本地自动备份也是本体（`lib/backup.ts` 现成，搬过来不改行为） */
+      list.push({ id: '__backup', kind: 'backup', title: '自动备份', min: { w: 288, h: 160 }, suggest: { w: 480, h: 192 } })
     }
     if (closing) {
       list.push({ id: '__closing', kind: 'closing', title: '今日收尾', min: { w: 320, h: 140 }, suggest: { w: 620, h: 180 } })
@@ -1364,7 +1371,7 @@ export default function ClassroomPluginShell() {
   const catalogById = useMemo(() => new Map(catalog.map((d) => [d.id, d])), [catalog])
   /* 布局归一化的"合法 id"要**稳定**（收尾语那扇时有时无，不能因为它把旧布局判成坏） */
   const stableIds = useMemo(
-    () => new Set(['__clock', '__calls', '__closing', ...plugins.map((p) => p.manifest.id)]),
+    () => new Set(['__clock', '__calls', '__closing', '__files', '__backup', ...plugins.map((p) => p.manifest.id)]),
     [plugins],
   )
 
@@ -1396,15 +1403,9 @@ export default function ClassroomPluginShell() {
       const raw = await fwSlot.get('layout')
       if (!alive) return
       const norm = normalizeLayout(raw, stableIds)
-      setLayout(norm ?? defaultLayout(
-        [
-          { id: '__clock', w: 432, h: 640 },
-          ...(!streamMode ? [{ id: '__calls', w: 432, h: 180 }] : []),
-          ...plugins.map((p) => ({ id: p.manifest.id, ...pluginSuggestOf(p.manifest) })),
-        ],
-        canvas,
-        'grid',
-      ))
+      /* 没有布局行 ⇒ 用默认模板（复刻旧屏两栏），而不是把窗口散在左上角。
+         模板本身在 `winman.templateLayout()`，坐标与吸附走同一套算术。 */
+      setLayout(norm ?? templateLayout(canvas))
     })()
     return () => {
       alive = false
@@ -1419,11 +1420,32 @@ export default function ClassroomPluginShell() {
       if (!prev) return prev
       const missing = catalog.filter((d) => !prev.windows.some((w) => w.id === d.id))
       if (!missing.length) return prev
+      /*
+       * 🔴 落在**已有窗口的下方/右侧的空位**，不是统统压回 (16,16)。
+       *   压回左上角 = 新挂上的插件窗口**盖住大时钟**（用户一眼看到的是"时钟不见了"）。
+       *   这里只做一次简单的"从右下角接着排"，不做真正的装箱：这是首次出现的落点，
+       *   老师拖一下就以他存的那份为准（模板/落点都只是默认值）。
+       */
+      let x = 16
+      let y = 16
+      for (const w of prev.windows) {
+        if (w.mode === 'closed') continue
+        x = Math.max(x, w.x + w.w + 16)
+        y = Math.max(y, w.y + w.h + 16)
+      }
       return {
         ...prev,
         windows: [
           ...prev.windows,
-          ...missing.map((d) => ({ id: d.id, mode: 'open' as const, x: 16, y: 16, ...clampInto(d.suggest, canvas, d.min) })),
+          ...missing.map((d) => {
+            const rect = clampInto(d.suggest, canvas, d.min)
+            const placed = {
+              x: Math.min(x, Math.max(16, canvas.w - rect.w - 16)),
+              y: Math.min(y, Math.max(16, canvas.h - rect.h - 16)),
+            }
+            x += rect.w + 16
+            return { id: d.id, mode: 'open' as const, ...rect, ...placed }
+          }),
         ],
       }
     })
@@ -1744,6 +1766,15 @@ export default function ClassroomPluginShell() {
                   />
                 ) : def.kind === 'closing' ? (
                   <ClosingPanel text={closing ?? ''} />
+                ) : def.kind === 'files' ? (
+                  <FilesBlock
+                    classId={klass.id}
+                    className={klassName}
+                    streamMode={streamMode}
+                    push={push}
+                  />
+                ) : def.kind === 'backup' ? (
+                  <BackupBlock push={push} />
                 ) : def.plugin ? (
                   def.blocked ? (
                     <div
