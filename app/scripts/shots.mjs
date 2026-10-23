@@ -189,6 +189,9 @@ const EXPECTED_FILES = [
   // 121 = 课代表在教室端录作业那张表（2026-10-03 补）—— 🔴 那条链原来零断言，
   //       而它是教室端**唯一的写入口**。详见教室端那一节的说明。
   '121-classroom-rep-sheet.png',
+  // 131 = 新教室壳（P0b 插件框架骨架）。旧 /classroom 的那一批（32/33/34/120/121）照旧跑旧壳；
+  //       新壳只在 ?newShell=1 下出现，这一张钉"它至少渲染出了窗口画布与假插件"。
+  '131-classroom-newshell.png',
   '35-nav-frost.png',
   '36-nav-travel.png',
   '37-nav-settled.png',
@@ -2737,6 +2740,129 @@ await withLock(async () => {
         )
       })
       await shotRaw(room, SR, '34-classroom-broadcast')
+
+      /* ============================================================
+       * P0b（2026-10-24）：**新教室壳**（插件框架骨架）—— 与旧教室端同一台 room 上切过去。
+       *
+       * 旧壳的 32/33/34 三张照旧跑旧 Classroom（默认路一个字没变）；新壳只在
+       * `?newShell=1` 下出现。这里钉四件事：
+       *   ① 恒亮：`<html data-theme>` 必须**不在**（F4 的硬规矩对新壳同样生效 ——
+       *      那条断言原来只盯着旧壳，新壳自己也得有一条，反向就是"它跟着暗了"）；
+       *   ② 新壳真的渲染了（画布 + 至少时钟/呼叫两扇内置窗口 + 窗口管理器的状态条）；
+       *   ③ `?demoPlugin=1` 的宿主自带假插件**真的被加载并画出了内容** ——
+       *      这是"加载器接得通"的直接证据（容器、能力注入、资源读一路走到屏上）；
+       *   ④ 壳侧四个新能力的判断函数在网页版必须全说"没有"（降级不撒谎：
+       *      悬浮钮置灰、弹出回 false —— 那一半由插件自己的降级文案呈现）。
+       * ⚠️ 演示插件里 `ctx.pip` 在网页预览下**不存在**（手册 §9 的表），是正确行为；
+       *    它 storage.set 落演示槽（localStorage），不影响别的用例。
+       * ============================================================ */
+      await step(SR, async () => {
+        /*
+         * 🔴 **另起一个干净 context**（照上面 ctxNoPip 的路数）—— 这一屏会在 localStorage
+         *    里写下 `shugao.classroom.newShell` 和插件槽的键；主 ctx 的**后面还有好几节**
+         *    要数 localStorage 的键（S22 的键表）、要用"没进壳"的教室端页面
+         *    （备份桥接那条）。就地主跑一次，这两批断言全部被毒倒 —— 2026-10-23 实测。
+         * ⚠️ 这个 context 只服务这一屏，跑完就关（不留下任何状态）。
+         */
+        const ctxNew = await browser.newContext({ viewport: { width: 1440, height: 900 }, locale: 'zh-CN' })
+        await ctxNew.clock.install({ time: new Date('2026-09-19T10:00:00') })
+        await ctxNew.addInitScript((s) => {
+          window.localStorage.setItem('shugao.teacher.v1', JSON.stringify(s))
+          window.localStorage.setItem('shugao.deviceRole', 'teacher')
+        }, TEACHER_STATE)
+        const np2 = await ctxNew.newPage()
+        np2.on('pageerror', (e) => errors.push(`PAGEERROR(新壳) :: ${e.message}`))
+        np2.on('console', (m) => {
+          if (m.type() === 'error') errors.push(`CONSOLE(新壳) :: ${m.text()}`)
+        })
+        try {
+          await np2.goto(`${BASE}/classroom?newShell=1&demoPlugin=1`, { waitUntil: 'networkidle' })
+          await waitPageSettled(np2)
+          await np2.waitForTimeout(1500)
+          const s = await np2.evaluate(() => ({
+            theme: document.documentElement.getAttribute('data-theme'),
+            root: document.querySelectorAll('[data-cps-root]').length,
+            wins: [...document.querySelectorAll('[data-cps-window]')].map((el) =>
+              el.getAttribute('data-cps-window'),
+            ),
+            pluginWin: document.querySelectorAll('[data-cps-plugin="demo.helloclock"]').length,
+            pluginText: document.querySelector('[data-cps-plugin-slot]')?.textContent ?? '',
+            snap: document.querySelector('[data-cps-snap]')?.getAttribute('data-cps-snap') ?? null,
+            launcher: document.querySelectorAll('[data-cps-launcher]').length,
+            /*
+             * 🆕 2026-10-24（用户截图报的"文字被切一半"）：窗口可以被拖到比内容还矮，
+             * 这时**要么内容装得下、要么看得见滚动条**，不许出现"静默裁切"。
+             * 浏览器默认的 overlay 滚动条"滚动时才出现"⇒ 老师一眼看过去就是字被切了。
+             */
+            bodies: [...document.querySelectorAll('[data-cps-window]')].map((w) => {
+              const b = w.querySelector('[data-cps-body]')
+              if (!b) return { id: w.getAttribute('data-cps-window'), missing: true }
+              const cs = getComputedStyle(b)
+              return {
+                id: w.getAttribute('data-cps-window'),
+                overflowY: cs.overflowY,
+                scrollbarWidth: cs.scrollbarWidth,
+                fits: b.scrollHeight <= b.clientHeight + 1,
+              }
+            }),
+          }))
+          check(
+            s.theme === null,
+            'P0b 新壳：`<html data-theme>` 不许在（#F4 恒亮，与旧壳同一条硬规矩）',
+            `data-theme = ${String(s.theme)}`,
+            '期望没有这个属性',
+          )
+          check(
+            s.root === 1,
+            'P0b 新壳：壳本体渲染了（画布在）',
+            `root ${s.root} 个`,
+          )
+          check(
+            s.wins.includes('__clock') && s.wins.includes('__calls'),
+            'P0b 新壳：两扇内置功能块窗口在（大时钟课表 + 呼叫播报）',
+            `窗口 = ${JSON.stringify(s.wins)}`,
+          )
+          check(
+            s.pluginWin === 1,
+            'P0b 新壳：演示插件窗口在（demoPlugin=1 → 加载器真的挂上了它）',
+            `data-cps-plugin ${s.pluginWin} 个`,
+          )
+          check(
+            /今天没课|到 \d{2}:\d{2}|下一节 /.test(s.pluginText),
+            'P0b 新壳：假插件**画出了当前课**（read → activate → 容器 → 屏上一路通的）',
+            `插件容器文本 = ${JSON.stringify(s.pluginText)}`,
+          )
+          check(
+            s.snap === 'grid' && s.launcher === 1,
+            'P0b 新壳：窗口管理器的吸附开关（默认网格）与功能块清单在',
+            `snap = ${String(s.snap)} · launcher ${s.launcher} 个`,
+          )
+          check(
+            s.bodies.length > 0 &&
+              s.bodies.every((b) => !b.missing && (b.fits ? true : b.overflowY === 'auto' && b.scrollbarWidth === 'thin')),
+            'P0b 新壳：窗口比内容矮时**看得见滚动条**（不许静默把字切一半）',
+            `窗口体 = ${JSON.stringify(s.bodies)}`,
+            '期望每扇窗：内容装得下，或 overflow-y:auto + scrollbar-width:thin',
+          )
+          /*
+           * 🧪 反向对照（静态，`AGENTS.md` §三.2）：上面那条"看得见滚动条"靠的就是那两行
+           * 显式样式。把它改回浏览器默认（`none`）之后，这里必须数不到原文 —— 数得到
+           * 就说明这条断言其实没钉住任何东西。
+           */
+          {
+            const shellSrc = readFileSync(join(HERE, '..', 'src', 'pages', 'ClassroomPluginShell.tsx'), 'utf8')
+            const anchor = "scrollbarWidth: 'thin'"
+            const n = shellSrc.split(anchor).length - 1
+            const mutated = shellSrc.replace(anchor, "scrollbarWidth: 'none'")
+            const nAfter = mutated.split(anchor).length - 1
+            check(n === 1, '🧪 反向对照前置：细滚动条那一行在源码里**恰好 1 处**', `原文 ${n} 处`, '期望 1 处')
+            check(nAfter === 0, '🧪 反向对照：把它改成 `none` 之后原文 0 处（= 上面那条会红）', `改过 ${nAfter} 处`, '期望 0 处')
+          }
+          await shotRaw(np2, SR, '131-classroom-newshell')
+        } finally {
+          await ctxNew.close()
+        }
+      })
 
       /*
        * ============================================================
@@ -9394,10 +9520,13 @@ await withLock(async () => {
         }))
         check(
           nav.segs.join(',').includes('overview') &&
-            nav.segs.length === 7 &&
+            /* 🆕 2026-10-24（P1 插件化）：第八格 'plugins'（版本审核与放行）——
+               与 admin-checks ⑦ / adminChart.ts 的登记表同一次变更，三处一起改的。 */
+            nav.segs.length === 8 &&
             nav.segs.includes('maintenance') &&
-            nav.segs.includes('feedback'),
-          `${S2}：面板**自己一套分区导航**（7 格：概览/健康/数据库/公告/维护/错误日志/反馈）`,
+            nav.segs.includes('feedback') &&
+            nav.segs.includes('plugins'),
+          `${S2}：面板**自己一套分区导航**（8 格：概览/健康/数据库/公告/维护/插件/错误日志/反馈）`,
           `分区：${nav.segs.join('、')}`,
         )
         check(
@@ -10148,7 +10277,8 @@ await withLock(async () => {
           }
         })
         check(
-          panes.panes === 7 && panes.cardCount >= 10,
+          /* 🆕 2026-10-24（P1 插件化）：7 → 8 栏（+ 'plugins'），卡数下限 10 → 11。 */
+          panes.panes === 8 && panes.cardCount >= 11,
           `🆕 ${S2} ⑨：**每个分区都摆着 data-admin-pane 标记**（${panes.panes} 个）—— "这一条在哪一栏"是**可核对的数据**，不是靠猜`,
           `${panes.panes} 栏 · 其中 ${panes.cardCount} 张卡`,
         )
@@ -13650,6 +13780,9 @@ await withLock(async () => {
         'shugao.chunkReloaded',
         'shugao.classroom',
         'shugao.classroom.classId',
+        /* 🆕 2026-10-24（P0b 教室端插件化）：新壳开关。`?newShell=1` 写入后一直生效，
+           教室端 exe 是 kiosk 敲不了参数，靠它记住走哪块本体（App.tsx 的 ClassroomSwitch）。 */
+        'shugao.classroom.newShell',
         'shugao.classroom.v1',
         'shugao.currentClass',
         'shugao.deviceRole',
@@ -13663,6 +13796,12 @@ await withLock(async () => {
         /* 🆕 2026-10-05（见上面那段：两个真实键，登记 ≠ 放水） */
         'shugao.notify.notices',
         'shugao.perms.done',
+        /* 🆕 2026-10-24（P0b）：插件数据槽的**键前缀**（`src/classroom/loader.ts` 的 LS_PREFIX），
+           完整键 = 前缀.班id.插件id —— 演示模式假槽落在这里，线上走 §45 的 RPC 不落本地。 */
+        'shugao.plugin.slot',
+        /* 🆕 2026-10-24（P1）：插件**启用清单**的演示模式落盘（`src/classroom/configs.ts`），
+           一个键装所有班：{ [classId]: { [pluginId]: { enabled, config } } }；线上走 §46 的表。 */
+        'shugao.plugin.configs',
         'shugao.remind.seen',
         'shugao.teacher.v1',
         'shugao.theme',

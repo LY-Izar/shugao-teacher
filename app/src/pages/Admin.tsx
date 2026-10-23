@@ -92,6 +92,7 @@ import {
 } from '../lib/release'
 /* 「提交那一刻从屏上读回真实值」—— 见 `lib/liveInput.ts` 的文件头（点发布吞字的另一半） */
 import { liveValue } from '../lib/liveInput'
+import { validateManifest } from '../lib/pluginHost'
 import { Button, Track } from '../components/ui'
 /* 🔴 2026-10-04：「导出档案备份（加密）」与「导出本机备份并发一封通知邮件」这两颗
    从「我的」撤下来、搬进「③ 备份（G2）」卡 —— **实现只有那一份文件**，
@@ -2892,6 +2893,9 @@ export default function Admin() {
           busy={opsBusy}
         />
       </div>
+      <div hidden={tab !== 'plugins'} data-admin-pane="plugins">
+        <PluginsCard />
+      </div>
       <div hidden={tab !== 'errors'} data-admin-pane="errors">
         <ErrorsCard
           report={errReport}
@@ -5397,6 +5401,285 @@ function FeedbackCard({
           </HintOnly>
         </>
       )}
+    </Card>
+  )
+}
+
+/* ============================================================
+   🆕 P1：插件版本审核（教室端插件化，交接文档 §八 P1 / §九风险 5）
+   ------------------------------------------------------------
+   "发布动作永远在超管手里"的那只手。流程 = 手册 §13 落到界面上：
+     开发者交三件套（manifest.json / index.js / index.js.sha256）
+     → 这里**当场重算** index.js 的 sha256，与交上来的 .sha256 对得上才允许发布
+     → 写 `plugin_registry`（RLS = `is_super_admin()`，schema.sql §45.5）。
+   写进去的 name / description / config_schema / permissions 是**审核快照** ——
+   插件事后改自己的 manifest 不经这里就不生效（防变脸，与 §45.1 的 permissions
+   同一条纪律）。撤版 = `revoked_at` 有值（不删行，教室端分得清"没发布"和"没连上"）。
+   ============================================================ */
+
+async function sha256Hex(buf: ArrayBuffer): Promise<string> {
+  const d = await crypto.subtle.digest('SHA-256', buf)
+  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+function PluginsCard() {
+  const [rows, setRows] = useState<Array<Record<string, unknown>> | null>(null)
+  const [err, setErr] = useState('')
+  const [msg, setMsg] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [tick, setTick] = useState(0)
+
+  /* 发布表单的三件套（都交给文件选择器，避免手抄指纹抄错一位） */
+  const [mText, setMText] = useState('')
+  const [jBuf, setJBuf] = useState<ArrayBuffer | null>(null)
+  const [hText, setHText] = useState('')
+  const [check, setCheck] = useState<{ ok: boolean; msg: string } | null>(null)
+
+  useEffect(() => {
+    /* 本地模式不取数（渲染时走 `!isRemote` 那一档的话术）—— 不在 effect 里同步 setState */
+    if (!isRemote) return
+    let alive = true
+    void (async () => {
+      const sb = getSupabase()
+      if (!sb) return
+      try {
+        const { data, error } = await sb.from('plugin_registry').select('*').order('plugin_id')
+        if (!alive) return
+        if (error) {
+          setErr(String(error.message ?? '清单没读出来'))
+          return
+        }
+        setRows(Array.isArray(data) ? (data as Array<Record<string, unknown>>) : [])
+        setErr('')
+      } catch (e) {
+        if (alive) setErr(e instanceof Error ? e.message : '清单没读出来')
+      }
+    })()
+    return () => {
+      alive = false
+    }
+  }, [tick])
+
+  /* 三件套的**当场校验**：manifest 合法（validateManifest，与教室端加载同一份判据）
+     + sha256(index.js) 与交上来的指纹一致。"对不上才不允许写"就是这条。 */
+  const verify = async () => {
+    setCheck(null)
+    if (!mText.trim() || !jBuf || !hText.trim()) {
+      setCheck({ ok: false, msg: '三件都给齐再核：manifest.json、index.js、index.js.sha256' })
+      return
+    }
+    let manifest: unknown
+    try {
+      manifest = JSON.parse(mText)
+    } catch {
+      setCheck({ ok: false, msg: 'manifest.json 不是合法 JSON' })
+      return
+    }
+    /* dirName 传空串：管理台没有"目录名"可比，逐字段校验照跑（id 一致性由 CF-01 在开发者那头管） */
+    const v = validateManifest('', manifest)
+    if (!v.ok) {
+      setCheck({ ok: false, msg: v.errors.join('；') })
+      return
+    }
+    const digest = await sha256Hex(jBuf)
+    const claimed = hText.trim().split(/\s+/)[0].toLowerCase()
+    if (digest !== claimed) {
+      setCheck({
+        ok: false,
+        msg: `指纹对不上：这份 index.js 实际是 ${digest.slice(0, 16)}…，交上来的指纹是 ${claimed.slice(0, 16)}… —— 拒绝发布`,
+      })
+      return
+    }
+    const m = manifest as Record<string, unknown>
+    setCheck({ ok: true, msg: `校验通过：${String(m.id)} v${String(m.version)} · 指纹一致 · ${String(m.name)}` })
+  }
+
+  const publish = async () => {
+    if (!check?.ok || !jBuf) return
+    const sb = getSupabase()
+    if (!sb) return
+    const m = JSON.parse(mText) as Record<string, unknown>
+    setBusy(true)
+    try {
+      const { error } = await sb.from('plugin_registry').upsert({
+        plugin_id: m.id,
+        stable_version: m.version,
+        entry_sha256: await sha256Hex(jBuf),
+        permissions: m.permissions ?? [],
+        min_shell: m.minShellVersion ?? '0.0.0',
+        name: m.name ?? '',
+        description: m.description ?? '',
+        config_schema: m.config ?? {},
+        released_at: new Date().toISOString(),
+        revoked_at: null,
+      })
+      if (error) {
+        setErr(`没存进去：${error.message}`)
+      } else {
+        setErr('')
+        setMsg(`已发布 ${String(m.id)} v${String(m.version)} —— 教室端按这张表拉版本`)
+        setTick((t) => t + 1)
+      }
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const setRevoked = async (pid: string, revoke: boolean) => {
+    const sb = getSupabase()
+    if (!sb) return
+    setBusy(true)
+    try {
+      const { error } = await sb
+        .from('plugin_registry')
+        .update({ revoked_at: revoke ? new Date().toISOString() : null })
+        .eq('plugin_id', pid)
+      if (error) setErr(`没改成：${error.message}`)
+      else {
+        setErr('')
+        setMsg(revoke ? `已撤下 ${pid}（数据保留，装回来不丢）` : `已恢复 ${pid}`)
+        setTick((t) => t + 1)
+      }
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const ready = rows !== null
+  const live = (rows ?? []).filter((r) => r.stable_version && !r.revoked_at).length
+  const revoked = (rows ?? []).filter((r) => !!r.revoked_at).length
+
+  return (
+    <Card
+      tone={err ? 'bad' : 'unknown'}
+      title="插件版本（教室端）"
+      headline={
+        err
+          ? `读不到插件登记：${err}`
+          : !isRemote
+            ? '本地模式没有插件库 —— 发布动作要连上服务器。'
+            : !ready
+              ? '正在读登记表…'
+              : `共 ${(rows ?? []).length} 个插件 · 放行 ${live} 个 · 已撤下 ${revoked} 个`
+      }
+      note="发布 = 版本钉死 + 指纹钉死。教室端只认这张表；撤版后各屏下个心跳周期自动回退。"
+      defaultOpen
+    >
+      {ready && isRemote ? (
+        <div className="flex flex-col gap-3">
+          {msg ? (
+            <div className="p-2" style={{ background: 'var(--color-oksoft)', borderRadius: 4, fontSize: 12.5, color: 'var(--color-okink)' }} data-admin-plugins-msg>
+              {msg}
+            </div>
+          ) : null}
+
+          {(rows ?? []).map((r) => {
+            const pid = String(r.plugin_id ?? '')
+            const version = typeof r.stable_version === 'string' && r.stable_version ? r.stable_version : null
+            const isRevoked = !!r.revoked_at
+            const perms = Array.isArray(r.permissions) ? (r.permissions as unknown[]).length : 0
+            return (
+              <div
+                key={pid}
+                data-admin-plugin-row={pid}
+                className="flex flex-wrap items-center gap-2 p-2.5"
+                style={{ border: '1px solid var(--color-line2)', borderRadius: 6 }}
+              >
+                <span style={{ fontSize: 13, fontWeight: 650 }}>{String(r.name ?? '') || pid}</span>
+                <span className="num" style={{ fontSize: 12, color: 'var(--color-ink3)' }}>
+                  {pid}
+                </span>
+                {version ? (
+                  <span className="tag tag-idle num">v{version}</span>
+                ) : (
+                  <span className="tag tag-warn">未放行</span>
+                )}
+                {isRevoked ? <span className="tag tag-bad">已撤下</span> : null}
+                <span className="num" style={{ fontSize: 11.5, color: 'var(--color-ink4)' }}>
+                  壳 ≥ {String(r.min_shell ?? '?')} · 能力 {perms} 项
+                </span>
+                <span className="flex-1" />
+                {version ? (
+                  <Button size="sm" variant={isRevoked ? 'ghost' : 'danger'} disabled={busy} onClick={() => void setRevoked(pid, !isRevoked)}>
+                    {isRevoked ? '恢复放行' : '撤下'}
+                  </Button>
+                ) : null}
+              </div>
+            )
+          })}
+
+          <div className="p-3" style={{ border: '1px dashed var(--color-line2)', borderRadius: 6 }} data-admin-plugins-publish>
+            <div style={{ fontSize: 13, fontWeight: 650 }}>发布一个新版本</div>
+            <div className="mt-1" style={{ fontSize: 12, color: 'var(--color-ink3)', lineHeight: 1.7 }}>
+              开发者交上来三件套（manifest.json、index.js、index.js.sha256），这里当场重算指纹 ——
+              对得上才允许写进登记表。发布的名字、说明、配置表单以这次交的 manifest 为准。
+            </div>
+            <div className="mt-2 flex flex-wrap items-center gap-2" style={{ fontSize: 12.5 }}>
+              <label>
+                manifest.json{' '}
+                <input
+                  type="file"
+                  accept=".json,application/json"
+                  onChange={(e) => {
+                    setCheck(null)
+                    const f = e.target.files?.[0]
+                    if (f) void f.text().then(setMText)
+                    e.target.value = ''
+                  }}
+                />
+              </label>
+              <label>
+                index.js{' '}
+                <input
+                  type="file"
+                  onChange={(e) => {
+                    setCheck(null)
+                    const f = e.target.files?.[0]
+                    if (f) void f.arrayBuffer().then(setJBuf)
+                    e.target.value = ''
+                  }}
+                />
+              </label>
+              <label>
+                index.js.sha256{' '}
+                <input
+                  type="file"
+                  accept=".sha256,.txt"
+                  onChange={(e) => {
+                    setCheck(null)
+                    const f = e.target.files?.[0]
+                    if (f) void f.text().then(setHText)
+                    e.target.value = ''
+                  }}
+                />
+              </label>
+              <Button size="sm" disabled={busy} onClick={() => void verify()}>
+                校验三件套
+              </Button>
+            </div>
+            {check ? (
+              <div
+                className="mt-2 p-2"
+                data-admin-plugins-check={check.ok ? 'ok' : 'bad'}
+                style={{
+                  borderRadius: 4,
+                  fontSize: 12.5,
+                  lineHeight: 1.7,
+                  background: check.ok ? 'var(--color-oksoft)' : 'var(--color-badsoft)',
+                  color: check.ok ? 'var(--color-okink)' : 'var(--color-badink)',
+                }}
+              >
+                {check.msg}
+              </div>
+            ) : null}
+            <div className="mt-2">
+              <Button size="sm" variant="primary" disabled={busy || !check?.ok} onClick={() => void publish()}>
+                发布这个版本
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </Card>
   )
 }

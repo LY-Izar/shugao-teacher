@@ -1,0 +1,599 @@
+/**
+ * 教室端插件宿主 · **纯逻辑核心**（P0）
+ *
+ * ============================================================================
+ * 为什么这里一行 DOM 都不碰
+ * ============================================================================
+ * 宿主要做的事分成两半：
+ *   · **可判定的一半**：manifest 校验、能力白名单、生命周期、崩溃熔断、配额码、
+ *     卡片该不该置灰 —— 这些不依赖浏览器，写在这里；
+ *   · **只能眼见的一半**：建窗口、拖动、渲染、声音解锁 —— 那些在 P0b 的界面层。
+ *
+ * 分开的直接理由：`scripts/plugin-framework-checks.mjs` 要在**纯 Node**里跑完
+ * 手册 §16 那 14 条（不启浏览器、不要 dev server）。宿主核心一旦 `import` 了
+ * `document`，那道门禁就只能变成一条 Playwright 冒烟，既慢又 flaky
+ * （本项目已有前车：`shots` 一次 7 分钟，调一条要跑很多次）。
+ *
+ * ⚠️ 因此本文件**不许 import 任何东西**（Node 的类型擦除只认相对路径带扩展名的
+ *    导入，而门禁脚本直接 `import('../src/lib/pluginHost.ts')`）—— 零依赖是刻意的。
+ *
+ * 契约出处：《教室端插件开发手册.md》§2.1 / §4 / §5 / §7.2 / §10。
+ * 线上实现的判据仍以数据库为准（§45 的 RPC 与 RLS）；这里只做**同一份口径的前端影子**
+ * —— 两边不一致时以数据库为准，并回来改这里。
+ */
+
+/* ============================================================================
+   一、常量：手册里写死的那些数，**只有这一处定义**
+   ============================================================================ */
+
+/** 能力枚举（手册 §5）。多一个少一个都要先改手册，再改这里 —— 两个真相的代价是插件装上才坏。 */
+export const PLUGIN_PERMISSIONS = [
+  'storage',
+  'data.roster',
+  'data.schedule',
+  'data.dailyHomework',
+  'data.duty',
+  'data.assignments',
+  'config',
+  'clock',
+  'bus',
+  'sound',
+  'pip',
+  'files',
+  'keepAwake',
+] as const
+
+export type Permission = (typeof PLUGIN_PERMISSIONS)[number]
+
+/** 只读资源 → 需要哪个能力（手册 §6.1）。资源名是**枚举**，不是自由字符串。 */
+export const RESOURCE_PERMISSION = {
+  'class.roster': 'data.roster',
+  'class.schedule': 'data.schedule',
+  'class.slotNow': 'data.schedule',
+  'class.dailyHomework': 'data.dailyHomework',
+  'class.duty': 'data.duty',
+  'class.assignments': 'data.assignments',
+} as const
+
+export type ResourceName = keyof typeof RESOURCE_PERMISSION
+
+/** 手册 §2.1 的命名空间正则。数据库 `plugin_registry_id_shape` 是同一份（§45.1）。 */
+export const MANIFEST_ID_RE = /^[a-z][a-z0-9-]{2,31}\.[a-z][a-z0-9-]{2,31}$/
+
+/** 手册 §7.1 的槽名正则。数据库 `plugin_data_key_shape` 是同一份（§45.2）。 */
+export const KEY_RE = /^[a-z0-9][a-z0-9_.-]{0,63}$/
+
+/** 框架自己的命名空间（窗口布局在这儿）。 */
+export const FRAMEWORK_PLUGIN_ID = '__framework'
+
+/** 手册 §7.2 / §9 / §10 的数字**全部集中在这儿**，门禁与界面都读它。 */
+export const LIMITS = {
+  rowsPerPluginPerClass: 500,
+  payloadBytes: 16384,
+  writesPerMinute: 60,
+  frameworkWritesPerMinute: 120,
+  readsPerMinute: 600,
+  floatingWindowsMax: 6,
+  activateTimeoutMs: 10_000,
+  deactivateMaxMs: 2_000,
+  crashWindowMs: 10 * 60 * 1000,
+  crashLimit: 3,
+  cleanResetMs: 30 * 60 * 1000,
+} as const
+
+/* ============================================================================
+   二、manifest 校验（CF-01 / CF-02）
+   ============================================================================ */
+
+export interface PluginManifest {
+  id: string
+  name: string
+  icon: string
+  description: string
+  version: string
+  entry: string
+  minShellVersion: string
+  permissions: Permission[]
+  requiresShell?: string[]
+  window?: { w: number; h: number; min?: { w: number; h: number } }
+  config?: { fields: ConfigField[] }
+}
+
+export interface ConfigField {
+  key: string
+  type: 'switch' | 'number' | 'enum' | 'text'
+  label: string
+  default?: unknown
+  min?: number
+  max?: number
+  options?: Array<[string, string]>
+  maxLength?: number
+}
+
+const SEMVER_RE = /^\d+\.\d+\.\d+$/
+
+/** 与 `plugin_registry_id_shape` 同一个判据 —— 目录名必须等于 id（手册 §2.1）。 */
+export function validateManifest(dirName: string, raw: unknown): { ok: boolean; errors: string[] } {
+  const errors: string[] = []
+  const m = (raw ?? {}) as Record<string, unknown>
+
+  const str = (k: string, max = 200) => {
+    const v = m[k]
+    if (typeof v !== 'string' || !v.trim()) {
+      errors.push(`缺少字段 ${k}`)
+      return ''
+    }
+    if (v.length > max) errors.push(`字段 ${k} 超长（>${max}）`)
+    return v
+  }
+
+  const id = str('id')
+  if (id && !MANIFEST_ID_RE.test(id)) errors.push(`id 不合命名空间（vendor.name，小写，各段 ≥3 字符）：${id}`)
+  if (id && dirName && id !== dirName) errors.push(`id 必须与目录名一致：目录 ${dirName} ≠ id ${id}`)
+
+  str('name', 24)
+  str('icon', 4096)
+  str('description', 80)
+
+  const version = str('version', 20)
+  if (version && !SEMVER_RE.test(version)) errors.push(`version 必须是 主.次.修：${version}`)
+
+  const minShell = str('minShellVersion', 20)
+  if (minShell && !SEMVER_RE.test(minShell)) errors.push(`minShellVersion 必须是 主.次.修：${minShell}`)
+
+  /* 🔴 入口只许相对路径：绝对路径 / `..` 会跳出插件目录（那是任意代码执行的口子） */
+  const entry = typeof m.entry === 'string' && m.entry.trim() ? m.entry : 'index.js'
+  if (entry.startsWith('/') || entry.includes('..') || /^[a-z]+:/i.test(entry)) {
+    errors.push(`entry 必须是插件目录内的相对路径：${entry}`)
+  }
+
+  const perms = m.permissions
+  if (!Array.isArray(perms) || perms.length === 0) {
+    errors.push('缺少 permissions（至少一项）')
+  } else {
+    for (const p of perms) {
+      if (typeof p !== 'string' || !(PLUGIN_PERMISSIONS as readonly string[]).includes(p)) {
+        errors.push(`permissions 里有不认识的能力：${String(p)}`)
+      }
+    }
+  }
+
+  /* v0 草案用的是 capabilities —— 写了要明确报错，别静默当成"没申请任何能力" */
+  if ('capabilities' in m) errors.push('字段名是 permissions（v0 草案的 capabilities 已废弃）')
+
+  const win = m.window
+  if (win !== undefined) {
+    const w = win as Record<string, unknown>
+    for (const k of ['w', 'h'] as const) {
+      const v = w[k]
+      if (v !== undefined && (typeof v !== 'number' || !Number.isFinite(v) || v <= 0)) {
+        errors.push(`window.${k} 必须是正数（单位=网格格数）`)
+      }
+    }
+  }
+
+  const cfg = m.config as { fields?: unknown } | undefined
+  if (cfg !== undefined) {
+    if (!cfg || !Array.isArray(cfg.fields)) errors.push('config 必须是 { fields: [...] }')
+    else {
+      for (const [i, f] of (cfg.fields as ConfigField[]).entries()) {
+        if (!f || typeof f.key !== 'string' || !f.key) errors.push(`config.fields[${i}].key 缺失`)
+        if (!f || !['switch', 'number', 'enum', 'text'].includes(f.type)) {
+          errors.push(`config.fields[${i}].type 只能是 switch/number/enum/text`)
+        }
+      }
+    }
+  }
+
+  return { ok: errors.length === 0, errors }
+}
+
+/* ============================================================================
+   三、取值与槽名（CF-07 / CF-08）
+   ============================================================================ */
+
+/** 手册 §6.5：只允许 JSON 能表达的值。`Date` 存进去读回来是字符串 —— 现场就崩在 `getTime()`。 */
+export function isJsonValue(v: unknown, seen: Set<object> = new Set()): boolean {
+  if (v === null) return true
+  const t = typeof v
+  if (t === 'string' || t === 'boolean') return true
+  if (t === 'number') return Number.isFinite(v as number)
+  if (t !== 'object') return false // undefined / function / symbol / bigint
+  if (v instanceof Date || v instanceof Map || v instanceof Set) return false
+  if (seen.has(v as object)) return false
+  seen.add(v as object)
+  try {
+    if (Array.isArray(v)) return v.every((x) => isJsonValue(x, seen))
+    const proto = Object.getPrototypeOf(v)
+    if (proto !== Object.prototype && proto !== null) return false // 类实例一律不认（含 Date 的兄弟）
+    return Object.values(v as Record<string, unknown>).every((x) => isJsonValue(x, seen))
+  } finally {
+    seen.delete(v as object)
+  }
+}
+
+/** 序列化后的字节数（手册 §7.2 的 16 KB 判据就是量这个，不是量字符数）。 */
+export function payloadBytes(v: unknown): number {
+  const text = JSON.stringify(v ?? null)
+  /* TextEncoder 在 Node 与浏览器里都在；不引 Buffer（浏览器没有） */
+  return new TextEncoder().encode(text).length
+}
+
+export function validateKey(key: string): { ok: true } | { ok: false; code: 'E_RESERVED_KEY' | 'E_BAD_KEY' } {
+  if (typeof key !== 'string' || !key) return { ok: false, code: 'E_BAD_KEY' }
+  if (key.startsWith('__')) return { ok: false, code: 'E_RESERVED_KEY' }
+  if (!KEY_RE.test(key)) return { ok: false, code: 'E_BAD_KEY' }
+  return { ok: true }
+}
+
+/**
+ * 写之前**在客户端先算一遍**（数据库那一份是最终判据，这里是让插件早点知道）。
+ * 顺序与 §45.4 的 `plugin_data_write()` 一致：身份 → 命名空间 → 取值 → 行数 → 频率。
+ * 返回值是 `null` 表示"客户端看不出问题，去问数据库"。
+ */
+export function preflightWrite(
+  pluginId: string,
+  key: string,
+  payload: unknown,
+  rows: number,
+): 'E_RESERVED_KEY' | 'E_BAD_KEY' | 'E_BAD_VALUE' | 'E_QUOTA_SIZE' | 'E_QUOTA_ROWS' | null {
+  /* 插件 id 自身也要合法：库里那两条同款 check 会拒，客户端先拒能给出更早的错。
+     `__framework` 是唯一例外（它不是插件，是宿主自己）。 */
+  if (pluginId !== FRAMEWORK_PLUGIN_ID && !MANIFEST_ID_RE.test(pluginId)) return 'E_BAD_KEY'
+
+  /* `__` 开头的 key 一律拒 —— 包括框架自己：框架的槽是
+     `plugin_id = '__framework'` + `key = 'layout'`，**不需要** `__` 开头的 key。
+     那一半命名空间靠 plugin_id 区分，库里的 `plugin_data_key_shape` 也是这么定的。 */
+  if (key.startsWith('__')) return 'E_RESERVED_KEY'
+  if (!KEY_RE.test(key)) return 'E_BAD_KEY'
+  if (!isJsonValue(payload)) return 'E_BAD_VALUE'
+  if (payloadBytes(payload) > LIMITS.payloadBytes) return 'E_QUOTA_SIZE'
+  if (rows >= LIMITS.rowsPerPluginPerClass) return 'E_QUOTA_ROWS'
+  return null
+}
+
+/* ============================================================================
+   四、能力注入（CF-06）
+   ============================================================================ */
+
+/** 宿主侧真实能力的登记表：能力 → ctx 上的属性名。没登记的能力，插件永远看不到。 */
+export const CAPABILITY_SLOTS: Record<Permission, readonly string[]> = {
+  storage: ['storage'],
+  'data.roster': ['data'],
+  'data.schedule': ['data', 'clock'],
+  'data.dailyHomework': ['data'],
+  'data.duty': ['data'],
+  'data.assignments': ['data'],
+  config: ['config'],
+  clock: ['clock'],
+  bus: ['bus'],
+  sound: ['sound'],
+  pip: ['pip'],
+  files: ['files'],
+  keepAwake: ['keepAwake'],
+}
+
+export interface HostPorts {
+  /** 只读资源；`stale` 由端口自己决定（断网时 true，且**不许 reject**） */
+  readResource(resource: ResourceName): Promise<{ value: unknown; stale: boolean; asOf: string }>
+  watchResource(resource: ResourceName, cb: () => void): () => void
+  storageGet(key: string): Promise<unknown>
+  storageSet(key: string, value: unknown): Promise<void>
+  storageKeys(): Promise<string[]>
+  /**
+   * 🆕 P1（配置通道，手册 §2.3）：`ctx.config.get()` 的后盾。
+   * **合并默认值是端口的事**（教师设置 ∪ manifest `config.fields[].default`）——
+   * 宿主核心不认识 config schema 的语义，只负责把"当前生效值"递出去。
+   */
+  configGet(): Record<string, unknown>
+  configOnChange(cb: (next: Record<string, unknown>) => void): () => void
+  onDispose(fn: () => void): void
+  toast(text: string): void
+  setTitle(text: string): void
+  /** 🆕 P0b 接上了窗口管理器：单位是**格数**（手册 §4），端口没接就是"这条路没有" */
+  setSize?(w: number, h: number): void
+  clockOnMinute(cb: (at: Date) => void): () => void
+  clockOnLesson(cb: (e: unknown) => void): () => void
+  busEmit(type: string, payload?: unknown): void
+  busOn(type: string, cb: (p: unknown, from: string) => void): () => void
+  soundPlay(kind: string): void
+  pipOpen(opts: Record<string, unknown>): Promise<boolean>
+  filesSave(name: string, blob: unknown): Promise<boolean>
+}
+
+export interface ContextOptions {
+  manifest: PluginManifest
+  classId: string
+  className: string
+  now: () => Date
+  container: unknown
+  ports: HostPorts
+  log: (...args: unknown[]) => void
+  /**
+   * 🆕 P0b：壳支不支持悬浮窗（手册 §5 的 `pip` 行："**且还要求壳支持**"、§9 的表：
+   * 网页版 `ctx.pip` **没有**）。缺省（undefined）按"支持"——那是纯 Node 门禁里的形状，
+   * 那边没有壳的概念，不该凭空少一个属性。
+   */
+  pipSupported?: boolean
+}
+
+/**
+ * 造 `ctx`。**只有申请过的能力才出现在对象上** —— 手册 §4 那条
+ * `'pip' in ctx === false`，靠的就是这里"不往上挂"，而不是挂上去再返回 undefined。
+ */
+export function buildContext(o: ContextOptions): Record<string, unknown> {
+  const perms = new Set<string>(o.manifest.permissions)
+  const ctx: Record<string, unknown> = {
+    plugin: { id: o.manifest.id, name: o.manifest.name, version: o.manifest.version },
+    class: { id: o.classId, name: o.className },
+    now: () => o.now(),
+    log: (...a: unknown[]) => o.log(`[${o.manifest.id}]`, ...a),
+    onDispose: (fn: () => void) => o.ports.onDispose(fn),
+    ui: {
+      container: o.container,
+      toast: (t: string) => o.ports.toast(t),
+      setTitle: (t: string) => o.ports.setTitle(t),
+      setSize: (w: number, h: number) => {
+        /* P0b：单位格数，落到窗口管理器（`ports.setSize`）；端口没接就当"窗口管理器管不了它"，
+           插件不必为这个写分支 —— 与手册 §4 `ui.setSize` 的"受窗口管理器约束"一致。 */
+        o.ports.setSize?.(w, h)
+      },
+    },
+  }
+
+  const hasAnyData = [...perms].some((p) => p.startsWith('data.'))
+  if (hasAnyData) {
+    ctx.data = {
+      /** 资源名必须**同时**在枚举里、且这个插件申请了对应能力 */
+      read: async (resource: ResourceName) => {
+        const need = RESOURCE_PERMISSION[resource]
+        if (!need) throw codeErr('E_BAD_RESOURCE')
+        if (!perms.has(need)) throw codeErr('E_NO_CAPABILITY')
+        const r = await o.ports.readResource(resource)
+        const base = r.value as Record<string, unknown>
+        /* `stale` / `asOf` 由宿主贴在最外层（手册 §6.4：空形状 + 两个字段，**不 reject**） */
+        return { ...base, stale: r.stale, asOf: r.asOf }
+      },
+      watch: (resource: ResourceName, cb: () => void) => {
+        const need = RESOURCE_PERMISSION[resource]
+        if (!need) throw codeErr('E_BAD_RESOURCE')
+        if (!perms.has(need)) throw codeErr('E_NO_CAPABILITY')
+        return o.ports.watchResource(resource, cb)
+      },
+      online: () => true,
+    }
+  }
+
+  if (perms.has('storage')) {
+    ctx.storage = {
+      get: (key: string, fallback: unknown) => {
+        const v = validateKey(key)
+        if (!v.ok) return Promise.reject(codeErr(v.code))
+        return o.ports.storageGet(key).then((x) => (x === undefined ? fallback : x))
+      },
+      set: (key: string, value: unknown) => {
+        const v = validateKey(key)
+        if (!v.ok) return Promise.reject(codeErr(v.code))
+        if (!isJsonValue(value)) return Promise.reject(codeErr('E_BAD_VALUE'))
+        if (payloadBytes(value) > LIMITS.payloadBytes) return Promise.reject(codeErr('E_QUOTA_SIZE'))
+        return o.ports.storageSet(key, value)
+      },
+      keys: () => o.ports.storageKeys(),
+      syncState: () => ({ pending: 0, lastError: null }),
+    }
+  }
+
+  if (perms.has('config')) {
+    /* P1：get 回**当前生效值**（端口已合并默认值），onChange 在教师改完配置时触发 ——
+       手册 §2.3 的"1 秒内要有可见响应"由插件自己兑现，宿主只保证把变化送进来。 */
+    ctx.config = {
+      get: () => o.ports.configGet(),
+      onChange: (cb: (next: Record<string, unknown>) => void) => o.ports.configOnChange(cb),
+    }
+  }
+  if (perms.has('clock')) {
+    ctx.clock = {
+      onMinute: (cb: (at: Date) => void) => o.ports.clockOnMinute(cb),
+      onLesson: (cb: (e: unknown) => void) => o.ports.clockOnLesson(cb),
+    }
+  }
+  if (perms.has('bus')) {
+    ctx.bus = { emit: o.ports.busEmit, on: o.ports.busOn }
+  }
+  if (perms.has('sound')) ctx.sound = { play: o.ports.soundPlay }
+  /* `pip` 是"能力 + 壳支持"两把闸（手册 §5 / §9）：网页预览下壳不支持 ⇒ 这个属性根本不出现，
+     插件的 `if (ctx.pip)` 自然走降级 —— 不是 open() 回 false 的那一种。 */
+  if (perms.has('pip') && o.pipSupported !== false) ctx.pip = { open: o.ports.pipOpen, close: () => {} }
+  if (perms.has('files')) {
+    ctx.files = { save: o.ports.filesSave, open: async () => null }
+  }
+  if (perms.has('keepAwake')) ctx.keepAwake = true
+
+  return Object.freeze(ctx)
+}
+
+export function codeErr(code: string): Error & { code: string } {
+  const e = new Error(code) as Error & { code: string }
+  e.code = code
+  return e
+}
+
+/* ============================================================================
+   五、生命周期与熔断（CF-05 / CF-11 / CF-12）
+   ============================================================================ */
+
+export type HostState = 'idle' | 'activating' | 'active' | 'disabled'
+
+export interface CrashRecord {
+  at: number
+  message: string
+}
+
+export interface PluginHostOptions {
+  manifest: PluginManifest
+  module: { activate?: (ctx: Record<string, unknown>) => unknown; deactivate?: () => unknown }
+  makeContext: () => Record<string, unknown>
+  now: () => number
+  onDispose: (fn: () => void) => void
+  onDisabled?: (reason: string) => void
+  /** 测试用：把超时调小；线上用 LIMITS 那两个数 */
+  activateTimeoutMs?: number
+  deactivateMaxMs?: number
+}
+
+/**
+ * 一个插件在本班的那一份运行状态。
+ *
+ * 🔴 三条口径（手册 §10，细则与 §45 无关，是宿主的账）：
+ *   · 「崩溃」只数**插件代码**抛出的错 —— 宿主自己的错传 `reportHostError()`，不计数；
+ *   · 窗口是 **10 分钟**，超窗的旧记录不算；连续正常 30 分钟清零；
+ *   · 到第 3 次 → **本班**停用，`disableReason` 写清楚，恢复只能由老师/管理员做
+ *     （`enable()` 是给界面用的入口，插件自己拿不到这个对象）。
+ */
+export class PluginHost {
+  state: HostState = 'idle'
+  crashes: CrashRecord[] = []
+  disableReason: string | null = null
+  private cleanSince: number | null = null
+  private disposers: Array<() => void> = []
+  private o: Required<Pick<PluginHostOptions, 'activateTimeoutMs' | 'deactivateMaxMs'>> & PluginHostOptions
+
+  constructor(o: PluginHostOptions) {
+    this.o = { activateTimeoutMs: LIMITS.activateTimeoutMs, deactivateMaxMs: LIMITS.deactivateMaxMs, ...o }
+  }
+
+  /** 崩溃窗口内的次数（超窗的旧记录直接不算，也不清表 —— 表大小对诊断有用） */
+  crashCount(): number {
+    const t = this.o.now()
+    return this.crashes.filter((c) => t - c.at <= LIMITS.crashWindowMs).length
+  }
+
+  async activate(): Promise<{ ok: boolean; code?: string }> {
+    if (this.state === 'disabled') return { ok: false, code: 'E_DISABLED' }
+    if (this.state === 'active') return { ok: true }
+    this.state = 'activating'
+    const ctx = this.o.makeContext()
+    try {
+      await withTimeout(
+        Promise.resolve(this.o.module.activate?.(ctx)),
+        this.o.activateTimeoutMs,
+        'E_ACTIVATE_TIMEOUT',
+      )
+      this.state = 'active'
+      this.cleanSince = this.o.now()
+      return { ok: true }
+    } catch (e) {
+      this.state = 'idle'
+      await this.noteCrash(e)
+      return { ok: false, code: (e as { code?: string })?.code ?? 'E_CRASH' }
+    }
+  }
+
+  /** `deactivate` 超 2 秒算一次失败（**不是**崩溃：屏在等人，不该把插件停掉） */
+  async deactivate(): Promise<{ ok: boolean; code?: string }> {
+    if (this.state !== 'active' && this.state !== 'activating') return { ok: true }
+    let ok = true
+    let code: string | undefined
+    try {
+      await withTimeout(
+        Promise.resolve(this.o.module.deactivate?.()),
+        this.o.deactivateMaxMs,
+        'E_DEACTIVATE_SLOW',
+      )
+    } catch (e) {
+      ok = false
+      code = (e as { code?: string })?.code ?? 'E_DEACTIVATE'
+    }
+    for (const d of this.disposers.splice(0)) {
+      try {
+        d()
+      } catch (e) {
+        ok = false
+        code = (e as { code?: string })?.code ?? 'E_DISPOSE'
+      }
+    }
+    this.state = 'idle'
+    return { ok, code }
+  }
+
+  /** 插件回调里抛出来的错（宿主代为捕获后调它） */
+  async noteCrash(e: unknown): Promise<void> {
+    const msg = String((e as { message?: string })?.message ?? e)
+    this.crashes.push({ at: this.o.now(), message: msg })
+    if (this.crashCount() >= LIMITS.crashLimit) {
+      this.disableReason = `连崩 ${LIMITS.crashLimit} 次：${msg}`
+      this.state = 'disabled'
+      this.o.onDisabled?.(this.disableReason)
+      await this.deactivate()
+    }
+  }
+
+  /** 长跑清零：连续正常 30 分钟后，崩溃计数不再算旧账 */
+  tickClean(): void {
+    if (this.state !== 'active' || this.cleanSince === null) return
+    if (this.o.now() - this.cleanSince >= LIMITS.cleanResetMs) {
+      this.crashes = []
+      this.cleanSince = this.o.now()
+    }
+  }
+
+  /** 恢复入口：**只在界面层**（老师/管理员点），插件拿不到 */
+  enable(): void {
+    if (this.state !== 'disabled') return
+    this.state = 'idle'
+    this.disableReason = null
+    this.crashes = []
+  }
+
+  addDisposer(fn: () => void): void {
+    this.disposers.push(fn)
+  }
+}
+
+async function withTimeout<T>(p: Promise<T>, ms: number, code: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null
+  try {
+    return await Promise.race([
+      p,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(codeErr(code)), ms)
+        /* Node 里别让这个定时器把进程挂住；浏览器忽略这两个方法 */
+        ;(timer as unknown as { unref?: () => void })?.unref?.()
+      }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
+/* ============================================================================
+   六、卡片：什么情况下要置灰（CF-13）
+   ============================================================================ */
+
+/**
+ * 教师端卡片 / 教室端插件列表用。返回 `reason` 时界面必须**照实说**，
+ * 不许"看起来能点、点了没反应"（手册 §1 第 4 条：降级不撒谎）。
+ */
+export function planCard(
+  m: PluginManifest,
+  env: { shellSupportsPip: boolean; shellVersion: string },
+): { enabled: boolean; reason: string | null } {
+  if (compareSemver(env.shellVersion, m.minShellVersion) < 0) {
+    return { enabled: false, reason: '需要更新的教室版程序' }
+  }
+  if ((m.permissions as string[]).includes('pip') && !env.shellSupportsPip) {
+    return { enabled: false, reason: '要教室版程序' }
+  }
+  return { enabled: true, reason: null }
+}
+
+/** 语义化版本比较（只认 `主.次.修`；认不出的一律当 0，别猜） */
+export function compareSemver(a: string, b: string): number {
+  const pa = SEMVER_RE.test(a) ? a.split('.').map(Number) : [0, 0, 0]
+  const pb = SEMVER_RE.test(b) ? b.split('.').map(Number) : [0, 0, 0]
+  for (let i = 0; i < 3; i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0)
+    if (d !== 0) return d > 0 ? 1 : -1
+  }
+  return 0
+}

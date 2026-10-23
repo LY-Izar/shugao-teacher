@@ -4515,9 +4515,12 @@ await withLock(async () => {
   /* ---------------- ⑦ 面板新结构（静态：分区表 / 导航在面板内部） ---------------- */
   {
     eq(
-      '🔴 ⑦ 分区就是那七个（概览 / 健康 / 数据库 / 公告 / 维护 / 错误日志 / 反馈）',
+      /* 🆕 2026-10-24（P1 插件化）：'plugins' 一段加入 —— 交接文档 §八 P1 要求超管在
+         /admin 审核并钉全局稳定版，发布动作只在超管手里（§九风险 5）。
+         改这条是**登记表跟着产品走**，不是放水：八个 key 的顺序与 label 仍然钉死。 */
+      '🔴 ⑦ 分区就是那八个（概览 / 健康 / 数据库 / 公告 / 维护 / 插件 / 错误日志 / 反馈）',
       C.ADMIN_SECTIONS.map((s) => s.key).join(','),
-      'overview,health,db,announce,maintenance,errors,feedback',
+      'overview,health,db,announce,maintenance,plugins,errors,feedback',
     )
     eq(
       '⑦ 每个分区都有显示名与一句说明（登记表要能被人读）',

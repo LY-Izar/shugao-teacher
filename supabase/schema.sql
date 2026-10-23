@@ -11952,3 +11952,462 @@ create policy teacher_profiles_visible on teacher_profiles for select to authent
 --     -- select count(*) from teachers where id = '<教务处 id>';          -- 期望 1（自己那行照旧）
 --  ④ 超管自己（请求头带**超管的** JWT）：上面三条依次是 1 / 1 / 1（一个字都没少）
 --  ⑤ 匿名：上面三条**连表权限都没有**（报 `permission denied for table teachers` —— 这是对的）
+
+-- ============================================================
+-- §45 教室端插件化（P0 · **数据层**）—— 通用数据槽 / 版本登记 / 限额计数器
+--  出处：《教室端插件化改版-交接与施工.md》§二决策 3（先只做通用数据槽）· §六（两表 + RLS 模板）
+--        ＋《教室端插件开发手册.md》§6.3 / §7（列名 `key`、500 行、16 KB、60 次每分钟、写走 RPC）
+--
+--  🔴 三条与交接文档**刻意不同**的地方，理由都在这儿（改之前先读）：
+--   ① 交接文档写「教室端只读写自己班的行，且 `plugin_id` 必须已发布」——
+--      本段把"已发布"**只放在写**那一侧，读不要求。原因：超管一撤版，若读也要求已发布，
+--      那个班的 `plugin_data` 当场**读不到了**（数据还在，但屏上是空白）——
+--      "撤版"是下架，不是删数据（手册 §7.4）。撤版真正的效果是**不能再写、不能再激活**。
+--   ② 交接文档只写了两张表。本段多了 `plugin_quota` —— 限额要"每分钟 N 次"，
+--      RLS 是**逐行**执行的，数不出"这一分钟已经写了几次"；而把 insert/update 权限
+--      开给客户端，配额就只是"插件自觉"。⇒ 客户端**一个表权限都不给**，
+--      写读都走 §45.4 的安全定义函数，计数落在 `plugin_quota`。
+--   ③ 交接文档的 `plugin_data` 是 `id + unique(class_id, plugin_id, key)`；
+--      本段直接用 `(class_id, plugin_id, key)` 当主键 —— 槽的语义就是"一格里只有一行"，
+--      多一个代理主键只会多一处能写错的地方。
+--
+--  🔴 与 §40 同款三条纪律：判据以数据库为准 · 读得宽写得窄 · 整段幂等（可重复跑）。
+-- ============================================================
+
+-- -------- 45.1 版本登记（超管写，全员读）--------
+--  🔴 为什么要有"撤下"这一列，而不是删行：教室端手里有缓存，删行之后它**什么都查不到**，
+--     分不清"这个插件没发布过"和"数据库没连上"——两种情况在屏上长得一样。
+--     `revoked_at` 有值 = 明确告知"已撤下，别激活"，`stable_version` 保留着还能回滚。
+--  ⚠️ `stable_version is null` 也当"未发布"（新插件的出生状态：登记了、还没放行）。
+create table if not exists plugin_registry (
+  plugin_id      text primary key,
+  /* 当前放行的版本号（semver）。null = 还没放行；撤版 = 指回旧版或置 null，都不删行 */
+  stable_version text,
+  /* 入口文件指纹：教室端下载后必须核对（手册附录 A 第 1 条） */
+  entry_sha256   text,
+  /* 审核那一刻的权限快照 —— 防"manifest 事后变脸"（交接文档 §五.4） */
+  permissions    jsonb not null default '[]'::jsonb,
+  /* 需要的最低壳版本；壳太老就不加载（手册 §2.1） */
+  min_shell      text not null default '0.0.0',
+  /* 🆕 P1：发布那一刻从 manifest 一起快照下来的三样 —— 教师端卡片要拿它们说人话
+     （名字 / 一句话说明 / 配置表单的 schema）。**审核时定死**，插件事后改 manifest
+     不改这里就不会生效（与 permissions 同一条"防变脸"纪律）。 */
+  name           text not null default '',
+  description    text not null default '',
+  config_schema  jsonb not null default '{}'::jsonb,
+  released_at    timestamptz,
+  revoked_at     timestamptz,
+  updated_at     timestamptz not null default now(),
+  updated_by     uuid references teachers (id) on delete set null,
+  /* 与手册 §2.1 同一个正则。⚠️ 两处必须同时改：这里是"库里的最后一道"，手册是"给人看的" */
+  constraint plugin_registry_id_shape
+    check (plugin_id ~ '^[a-z][a-z0-9-]{2,31}\.[a-z][a-z0-9-]{2,31}$'),
+  constraint plugin_registry_permissions_array
+    check (jsonb_typeof(permissions) = 'array')
+);
+
+/* P1 加的三列：老库（已经跑过 §45 的）用 if not exists 补上，整份脚本照旧幂等 */
+alter table plugin_registry add column if not exists name text not null default '';
+alter table plugin_registry add column if not exists description text not null default '';
+alter table plugin_registry add column if not exists config_schema jsonb not null default '{}'::jsonb;
+
+-- -------- 45.2 通用数据槽（键值对，按 班级 × 插件 隔离）--------
+--  ⚠️ `plugin_id` **故意不建外键**：撤版/删登记不该连带删掉一个班的现场数据
+--     （交接文档 §六 原话"无外键，框架校验拼写"）。班级被删走 `on delete cascade`，
+--     那是"这个班没了"，与"插件下架"是两件事。
+--  ⚠️ `key = '__framework'` 是留给框架自己的命名空间（窗口布局 `__framework` / `layout`），
+--     插件写它会被 §45.4 的函数拒（手册 §7.1）。
+create table if not exists plugin_data (
+  class_id   uuid not null references classes (id) on delete cascade,
+  plugin_id  text not null,
+  key        text not null default '',
+  payload    jsonb not null default '{}'::jsonb,
+  updated_at timestamptz not null default now(),
+  updated_by uuid,
+  primary key (class_id, plugin_id, key),
+  /* 插件 id：要么是框架命名空间，要么走 §45.1 那个同款正则 */
+  constraint plugin_data_id_shape
+    check (plugin_id = '__framework'
+           or plugin_id ~ '^[a-z][a-z0-9-]{2,31}\.[a-z][a-z0-9-]{2,31}$'),
+  /* 槽名正则（手册 §7.1：小写字母数字开头，可含 `_.-`，最长 64） */
+  constraint plugin_data_key_shape
+    check (key ~ '^[a-z0-9][a-z0-9_.-]{0,63}$'),
+  /* 单行 16 KB（手册 §7.2）。用 `::text` 量的是**存储后**的字节数，不是 JSON 字符串长度 */
+  constraint plugin_data_payload_size
+    check (octet_length(payload::text) <= 16384)
+);
+
+-- -------- 45.3 限额计数器（每分钟一桶，两分钟后自己过期）--------
+--  🔴 为什么要落表：见本段开头 ② 。桶的起点 = `floor(epoch/60)*60`，
+--     这样"同一分钟内第 61 次"一定落在同一个桶里，不依赖两台机器的时钟对齐。
+--  ⚠️ 计的是**尝试次数**（被拒的那次也算）——否则"被拒→重试"就是一条免费通道。
+create table if not exists plugin_quota (
+  class_id     uuid not null references classes (id) on delete cascade,
+  plugin_id    text not null,
+  window_start timestamptz not null,
+  writes       int not null default 0,
+  reads        int not null default 0,
+  primary key (class_id, plugin_id, window_start)
+);
+create index if not exists plugin_quota_window_idx on plugin_quota (window_start);
+
+-- -------- 45.4 判据与两个入口（安全定义函数）--------
+--  ⚠️ 与 §40.5 同一条纪律：不需要给客户端开的函数一律 revoke 到干净。
+
+-- 这个插件现在能不能被**激活 / 写**：登记了、放行了、没撤下。
+-- ⚠️ 读不用它（见段首 ①）。
+create or replace function public.plugin_live(p_plugin_id text)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1 from plugin_registry r
+     where r.plugin_id = p_plugin_id
+       and r.stable_version is not null
+       and r.revoked_at is null
+  );
+$$;
+
+revoke all on function public.plugin_live(text) from public, anon, authenticated;
+
+-- 记一次并回**本分钟累计**。`p_kind`：'w' 写 / 'r' 读。
+-- 🔴 只能被 §45.4 的两个入口调用（客户端无权限）—— 但它本身**不判谁有资格**，
+--    资格在调用方的函数里判。这样"计一次"与"准不准"只有一个地方各自负责。
+create or replace function public.plugin_quota_hit(
+  p_class_id uuid,
+  p_plugin_id text,
+  p_kind text
+) returns int
+language plpgsql
+volatile
+security definer
+set search_path = public
+as $$
+declare
+  v_window timestamptz := to_timestamp(floor(extract(epoch from now()) / 60) * 60);
+  v_n int;
+begin
+  insert into plugin_quota as q (class_id, plugin_id, window_start, writes, reads)
+  values (p_class_id, p_plugin_id, v_window,
+          case when p_kind = 'w' then 1 else 0 end,
+          case when p_kind = 'r' then 1 else 0 end)
+  on conflict (class_id, plugin_id, window_start) do update
+    set writes = q.writes + case when p_kind = 'w' then 1 else 0 end,
+        reads  = q.reads  + case when p_kind = 'r' then 1 else 0 end
+  returning case when p_kind = 'w' then writes else reads end into v_n;
+
+  /* 长跑的屏会一直写：只留两分钟的桶，这张表的大小与"跑了多少天"无关 */
+  delete from plugin_quota where window_start < now() - interval '2 minutes';
+  return v_n;
+end $$;
+
+revoke all on function public.plugin_quota_hit(uuid, text, text) from public, anon, authenticated;
+
+-- 写一格。返回 `{ok:true}` 或 `{ok:false, code}`（码表在手册 §4.3）。
+--  🔴 顺序**刻意如此**：先判身份（谁能写这个班）→ 再判命名空间 → 再判值 →
+--     再判行数与频率。反过来会让"没资格的人"也能把配额刷满（那是对别人的 DoS）。
+create or replace function public.plugin_data_write(
+  p_class_id uuid,
+  p_plugin_id text,
+  p_key text,
+  p_payload jsonb
+) returns jsonb
+language plpgsql
+volatile
+security definer
+set search_path = public
+as $$
+declare
+  v_uid uuid := auth.uid();
+  v_rows int;
+  v_n int;
+  v_limit int;
+  v_is_framework boolean := (p_plugin_id = '__framework');
+begin
+  /* ① 身份：**本班的教室端账号**（屏上那台机器）才有资格写。
+        教师端这一轮不写插件数据（教师只读配置，P1 才接），所以这里不加教师那一支 ——
+        加了就等于"任课老师能替插件写数据"，与"插件数据只由屏产生"这条分叉。 */
+  if v_uid is null or not public.is_classroom_of_class_for(v_uid, p_class_id) then
+    return jsonb_build_object('ok', false, 'code', 'E_FORBIDDEN');
+  end if;
+
+  /* ② 命名空间：插件不许碰框架槽；框架自己也不许借用插件的 id */
+  if v_is_framework then
+    null;  -- 框架写 `__framework` / `layout`，不需要登记表
+  else
+    if left(coalesce(p_key, ''), 2) = '__' then
+      return jsonb_build_object('ok', false, 'code', 'E_RESERVED_KEY');
+    end if;
+    if not public.plugin_live(p_plugin_id) then
+      return jsonb_build_object('ok', false, 'code', 'E_PLUGIN_NOT_LIVE');
+    end if;
+  end if;
+
+  if p_key is null or p_key !~ '^[a-z0-9][a-z0-9_.-]{0,63}$' then
+    return jsonb_build_object('ok', false, 'code', 'E_BAD_KEY');
+  end if;
+
+  /* ③ 值：只允许 JSON 能表达的（`jsonb` 本身已经保证了这一点），再挡一道大小 */
+  if p_payload is null then
+    return jsonb_build_object('ok', false, 'code', 'E_BAD_VALUE');
+  end if;
+  if octet_length(p_payload::text) > 16384 then
+    return jsonb_build_object('ok', false, 'code', 'E_QUOTA_SIZE');
+  end if;
+
+  /* ④ 行数：只有"新开一格"才数；改已有那格不受上限影响（否则到了 500 就再也改不动） */
+  if not exists (
+    select 1 from plugin_data
+     where class_id = p_class_id and plugin_id = p_plugin_id and key = p_key
+  ) then
+    select count(*) into v_rows
+      from plugin_data where class_id = p_class_id and plugin_id = p_plugin_id;
+    if v_rows >= 500 then
+      return jsonb_build_object('ok', false, 'code', 'E_QUOTA_ROWS');
+    end if;
+  end if;
+
+  /* ⑤ 频率：框架的布局写入比插件密（拖动去抖后仍然一秒可能几次），给它两倍额度；
+        这两个数字就是手册 §7.2 那两个，改一处必须改手册。 */
+  v_limit := case when v_is_framework then 120 else 60 end;
+  v_n := public.plugin_quota_hit(p_class_id, p_plugin_id, 'w');
+  if v_n > v_limit then
+    return jsonb_build_object('ok', false, 'code', 'E_QUOTA_RATE');
+  end if;
+
+  insert into plugin_data as d (class_id, plugin_id, key, payload, updated_by)
+  values (p_class_id, p_plugin_id, p_key, p_payload, v_uid)
+  on conflict (class_id, plugin_id, key) do update
+    set payload = excluded.payload,
+        updated_at = now(),
+        updated_by = excluded.updated_by;
+
+  return jsonb_build_object('ok', true, 'updated_at', now());
+end $$;
+
+revoke all on function public.plugin_data_write(uuid, text, text, jsonb) from public, anon;
+grant execute on function public.plugin_data_write(uuid, text, text, jsonb) to authenticated;
+
+-- 读：一格（`p_key` 给值）或整包（`p_key` 为 null）。
+--  🔴 **不要求插件已发布**：撤版只是不能再写、不能再激活，那个班原来的数据照旧读得到。
+--  🔴 读也走函数而不是直接 select：读频率要限额（手册 §7.2 的 600/分钟），
+--     而 `select` 是数不出来的。
+create or replace function public.plugin_data_read(
+  p_class_id uuid,
+  p_plugin_id text,
+  p_key text default null
+) returns jsonb
+language plpgsql
+volatile
+security definer
+set search_path = public
+as $$
+declare
+  v_uid uuid := auth.uid();
+  v_n int;
+  v_rows jsonb;
+begin
+  if v_uid is null then
+    return jsonb_build_object('ok', false, 'code', 'E_FORBIDDEN');
+  end if;
+  /* 看得见这个班的人都能读（教务处全校 · 年级主任本年级 · 班主任 / 任课老师本班 ·
+     教室端本班）—— 与 §40.6 的读策略同源，**只放宽到"看得见"，不另立一套** */
+  if p_class_id not in (select visible_class_ids()) then
+    return jsonb_build_object('ok', false, 'code', 'E_FORBIDDEN');
+  end if;
+
+  v_n := public.plugin_quota_hit(p_class_id, p_plugin_id, 'r');
+  if v_n > 600 then
+    return jsonb_build_object('ok', false, 'code', 'E_QUOTA_RATE');
+  end if;
+
+  select coalesce(jsonb_agg(jsonb_build_object(
+           'key', d.key, 'payload', d.payload, 'updated_at', d.updated_at)
+           order by d.key), '[]'::jsonb)
+    into v_rows
+    from plugin_data d
+   where d.class_id = p_class_id
+     and d.plugin_id = p_plugin_id
+     and (p_key is null or d.key = p_key);
+
+  return jsonb_build_object('ok', true, 'rows', v_rows);
+end $$;
+
+revoke all on function public.plugin_data_read(uuid, text, text) from public, anon;
+grant execute on function public.plugin_data_read(uuid, text, text) to authenticated;
+
+-- -------- 45.5 RLS 与表权限 --------
+alter table plugin_registry enable row level security;
+alter table plugin_data     enable row level security;
+alter table plugin_quota    enable row level security;
+
+-- 登记表：**全员可读**（教师端要列已发布的、教室端要按它拉版本），只有超管能写。
+--   ⚠️ 表里没有个人信息，也没有"谁装了什么"——它只是版本目录。
+grant select, insert, update, delete on plugin_registry to authenticated;
+revoke all on plugin_registry from anon;
+
+drop policy if exists plugin_registry_read on plugin_registry;
+create policy plugin_registry_read on plugin_registry for select to authenticated
+  using (true);
+
+-- 写：**只有最高管理员**（`is_super_admin()`，与 §44 那条同源）。
+--   交接文档 §九风险 5：发布动作永远在超管手里，开发者不能自审自发。
+drop policy if exists plugin_registry_write on plugin_registry;
+create policy plugin_registry_write on plugin_registry for all to authenticated
+  using (is_super_admin())
+  with check (is_super_admin());
+
+-- 数据槽：🔴 **一条策略都不建**（与 §40.4 的 `class_rep_pins` 同款）——
+--   客户端连 select/insert/update 的表权限都没有（见段首 ②），读写只走
+--   `plugin_data_write()` / `plugin_data_read()`。
+--   ⚠️ 这里**刻意不留**那条 `class_id in (select visible_class_ids())` 的读策略：
+--     没有任何客户端能 select 这张表，那条策略**永远不会被执行** ——
+--     一条谁也无法让它变红的策略就是摆设（`AGENTS.md` §三.2）。
+--     "看得见这个班"这半边判据落在 `plugin_data_read()` 的正文里，由 §45 的断言盯着它变红。
+--   RLS 仍必须开：§14 那条自检要求 public 下"没有一张表漏开 RLS"。
+revoke all on plugin_data from anon, authenticated;
+revoke all on plugin_quota from anon, authenticated;
+
+comment on table plugin_data is
+  '教室端插件通用数据槽（§45）：按 班级 × 插件 × 槽名 隔离。客户端无表权限，读写只走 plugin_data_write / plugin_data_read。';
+comment on table plugin_registry is
+  '插件版本登记（§45）：超管放行 stable_version；撤版 = revoked_at 有值，不删行（删行会让教室端分不清"没发布"和"没连上"）。';
+comment on table plugin_quota is
+  '插件读写的分钟桶（§45.3）：只由 plugin_quota_hit() 写，两分钟自动过期。计的是尝试次数。';
+
+-- -------- 45.6 核对（把下面整段粘进 SQL 编辑器；以**有权限的人**的 JWT 跑）--------
+--  ① 三张表 + 列都在：
+--  -- select table_name, column_name, data_type from information_schema.columns
+--  --  where table_schema='public' and table_name in ('plugin_registry','plugin_data','plugin_quota')
+--  --  order by 1, ordinal_position;
+--  ② 策略清单（期望 **2** 条，都在登记表上：读 1 + 写 1；数据槽与计数器**一条都没有**——那是刻意的，
+--     客户端零表权限 ⇒ 建了也永远跑不到，只会变成永远为绿的摆设）：
+--  -- select tablename, policyname, cmd, permissive from pg_policies
+--  --  where schemaname='public' and tablename in ('plugin_registry','plugin_data','plugin_quota')
+--  --  order by 1, 3;
+--  ③ 三张表的 RLS 都开着（期望 3 行全是 true）：
+--  -- select relname, relrowsecurity from pg_class
+--  --  where relname in ('plugin_registry','plugin_data','plugin_quota');
+--  ④ 客户端没有数据槽的表权限（期望 0 行；`plugin_data_read` 是**函数**权限，不是表权限）：
+--  -- select grantee, privilege_type from information_schema.role_table_grants
+--  --  where table_schema='public' and table_name='plugin_data';
+--  ⑤ 写一次（把 `<班 id>` 换成真实值，用**该班教室端**的 JWT）：
+--  -- select public.plugin_data_write('<班 id>', '__framework', 'layout', '{"windows":[]}'::jsonb);
+--  --   → {"ok": true, "updated_at": ...}
+--  -- select public.plugin_data_write('<班 id>', 'demo.x', 'k', '{}'::jsonb);
+--  --   → {"ok": false, "code": "E_PLUGIN_NOT_LIVE"}（还没登记 = 不能写，这是对的）
+--  ⑥ 读回来（同上 JWT）：`select public.plugin_data_read('<班 id>', '__framework', 'layout');`
+--  --   → 一行，`payload` 原样
+--  ⑦ 整份脚本跑两遍都不该报错（幂等；第二遍表与 3 条策略的数量不变）。
+-- ============================================================
+
+-- ============================================================
+-- §46 教室端插件化（P1 · **管理面数据层**）—— 按班的插件启用清单与配置
+--  出处：《教室端插件化改版-交接与施工.md》§八 P1（plugin_configs 通道接通）· §六 RLS 模板
+--        ＋《教室端插件开发手册.md》§2.3（"配置值存在 plugin_configs（教师端那块），
+--        **不是** plugin_data；插件只读不写"）
+--
+--  🔴 两条口径（改之前先读）：
+--   ① **写 = `can_manage_class_for()`**（校级 ∪ 本年级年级主任 ∪ 本班班主任），
+--      **故意不含任课老师** —— 与"加删学生 / 改班级课表"同一档（`schema.sql` §10.3 那条
+--      2026-09-27 用户口径）。开哪个插件跑在教室大屏上是**管班**的事，不是备课的事；
+--      任课老师照旧**读得到**（读 = `visible_class_ids()`，"看得见就能读"）。
+--   ② 教室端**只读不写**：启用清单由教师决定，屏只是执行者。
+--      屏上的写权限仍然只有 §45 的数据槽那一条路。
+--
+--  🔴 与 §45 同款三条纪律：判据以数据库为准 · 读得宽写得窄 · 整段幂等（可重复跑）。
+-- ============================================================
+
+-- -------- 46.1 表 --------
+--  一行 = 一个班对一个插件的态度：开没开（enabled）+ 配置值（config，manifest `config`
+--  schema 的**当前生效值**，已被默认值合并 —— 合并发生在教室端读的那一刻，见 loader）。
+create table if not exists plugin_configs (
+  class_id   uuid not null references classes (id) on delete cascade,
+  plugin_id  text not null,
+  enabled    boolean not null default false,
+  config     jsonb not null default '{}'::jsonb,
+  updated_at timestamptz not null default now(),
+  /* 谁最后动的它。⚠️ 与 §45.2 的 `plugin_data.updated_by` 同款：**不带外键**
+     （教室端账号在 `teachers` 里也有一行，外键在这里没有判别力，只是个 uid 记录）。 */
+  updated_by uuid,
+  primary key (class_id, plugin_id),
+  /* 插件 id 与 §45 同一个正则 —— 但**不许** `__framework`：框架不是教师配置的对象 */
+  constraint plugin_configs_id_shape
+    check (plugin_id ~ '^[a-z][a-z0-9-]{2,31}\.[a-z][a-z0-9-]{2,31}$'),
+  /* 配置值 16 KB（与 §45.2 的单行 payload 同一个量法） */
+  constraint plugin_configs_config_size
+    check (octet_length(config::text) <= 16384)
+);
+
+/* `updated_at` / `updated_by` 由**数据库**盖戳：客户端传什么都不算数 ——
+   否则"教师端 A 改完，教师端 B 的旧值晚到一秒把新值盖回去"这种事查无对证。 */
+create or replace function public.plugin_configs_touch()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+begin
+  new.updated_at := now();
+  new.updated_by := auth.uid();
+  return new;
+end $$;
+
+drop trigger if exists plugin_configs_touch on plugin_configs;
+create trigger plugin_configs_touch
+  before insert or update on plugin_configs
+  for each row execute function public.plugin_configs_touch();
+
+-- -------- 46.2 RLS 与表权限 --------
+alter table plugin_configs enable row level security;
+
+/* 读 = "看得见这个班"（§45.4 的 `plugin_data_read` 同一个判据，别另立一套）：
+   任课 / 班主任 / 教务处 / 教室端本班。 */
+grant select, insert, update on plugin_configs to authenticated;
+revoke all on plugin_configs from anon;
+
+drop policy if exists plugin_configs_read on plugin_configs;
+create policy plugin_configs_read on plugin_configs for select to authenticated
+  using (class_id in (select visible_class_ids()));
+
+/* 写 = `can_manage_class_for()` 那一档（§10.3：校级 ∪ 本年级年级主任 ∪ 本班班主任）。
+   ⚠️ 策略里调的是**包装** `can_manage_class(class_id)`（自己读 auth.uid()）——
+   `_for` 变体被 revoke 到干净（§10.3 的纪律），策略以调用者权限解析函数名，
+   直接调它会 "permission denied"（第一次实测就是这么红的）。
+   ⚠️ upsert（insert … on conflict do update）会**同时**过 insert 的 with check
+   与 update 的 using/with check —— 两条都得建，少一条教师端就存不进去。 */
+drop policy if exists plugin_configs_insert on plugin_configs;
+create policy plugin_configs_insert on plugin_configs for insert to authenticated
+  with check (public.can_manage_class(class_id));
+
+drop policy if exists plugin_configs_update on plugin_configs;
+create policy plugin_configs_update on plugin_configs for update to authenticated
+  using (public.can_manage_class(class_id))
+  with check (public.can_manage_class(class_id));
+
+comment on table plugin_configs is
+  '教室端插件启用清单与配置（§46）：按 班级 × 插件 一行。读 = 看得见这个班；写 = can_manage_class_for（班主任那一档，不含任课）。教室端只读不写。';
+
+-- -------- 46.3 Realtime --------
+--  教室端订阅它来实现"教师端点启动 → 教室端出现/消失"（交接文档 §八 P1 验收）。
+--  ⚠️ Realtime 走 RLS：教室端只会收到自己班那些行（读策略那一条在起作用）。
+do $$
+begin
+  begin
+    alter publication supabase_realtime add table plugin_configs;
+  exception when duplicate_object then null;
+  end;
+end $$;
+
+-- -------- 46.4 核对（把下面整段粘进 SQL 编辑器；以**有权限的人**的 JWT 跑）--------
+--  ① 表在、RLS 开：`select relname, relrowsecurity from pg_class where relname='plugin_configs';`
+--  ② 策略恰好 **3** 条：read(SELECT) / insert(INSERT) / update(UPDATE)。
+--  ③ 班主任写一次（`<班 id>` 换真实值）：
+--  -- insert into plugin_configs (class_id, plugin_id, enabled) values ('<班 id>','demo.helloclock', true)
+--  --  on conflict (class_id, plugin_id) do update set enabled = true;
+--  ④ 读回来；再换**别班教师**的 JWT 读 → 0 行（读策略那半边）。
+--  ⑤ 教室端账号的 JWT：读 → 1 行；**写 → 被拒**（policy 不给它写那一档）。
+--  ⑥ 幂等：整份脚本跑两遍，表 / 3 条策略 / 触发器数量不变。
+-- ============================================================

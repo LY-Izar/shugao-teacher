@@ -90,6 +90,12 @@ interface ShellBridge {
    *    网页版 / 老壳读到的都是 `undefined`。
    */
   pip?: ShellPipBridge
+  /**
+   * 🆕 P0b（插件化）—— 插件框架要的四个新能力（`downloadPlugin` / `openTransparentWindow` /
+   *    `pushBlockScreen` / `closeAllFloating`），语义见本文件底部那一大段约定。
+   *    ⚠️ 老壳没有这个字段 ⇒ 一律按"没有"处理，网页版行为逐字不变。
+   */
+  plugins?: ShellPluginBridge
 }
 
 /**
@@ -348,3 +354,135 @@ export const CLASSROOM_ONLY = {
   text: '请用教室端账号登录',
   desc: '这是教室端的程序，教师账号请在教师端登录。',
 } as const
+
+/* ============================================================================
+   🆕 P0b（教室端插件化）：插件框架要的**四个新壳能力** —— 本文件只写约定
+   ----------------------------------------------------------------------------
+   壳侧作业（`_src/desktop`，不在本仓库）照这一段实现；语义出处：
+   《教室端插件开发手册.md》附录 A。四条共同纪律（与上面 `pip` 那一套同源）：
+
+     1. **能力字段只认严格值**：每个包装函数先问"这条路在不在"（`typeof === 'function'`），
+        老壳没有这个字段 ⇒ 按"没有"处理 ⇒ 网页版行为逐字不变。
+     2. **失败要回 `{ ok:false, why }`**，且 `why` 必须是**能说给老师听的人话**——
+        sha256 不符必须拒绝并说明，不许静默落盘（那是任意代码执行的口子）。
+     3. 每个能力都在 `preload.js` 暴露，且**与主进程成对改**（历史教训：
+        "提示消失了但声音其实还是出不来"）。
+
+   | 能力 | 签名 | 要点 |
+   |---|---|---|
+   | `downloadPlugin` | `(url, { sha256 }) => Promise<{ ok:true, path } \| { ok:false, why }>` | 下到用户数据目录 `plugins/<id>/`；hash 不符**必须拒绝**并回可读 `why`；插件库地址是壳侧资产里的一项配置 |
+   | `openTransparentWindow` | `({ w, h, opacity?, transparent? }) => Promise<{ ok:true, reused } \| { ok:false, why }>` | **单例复用**（已有就聚焦，`reused:true`）；`transparent:true` 背景真空透明；`opacity` 壳侧也夹在 0.3–1.0（网页侧在调用前先夹一遍，两层都防） |
+   | `pushBlockScreen` | `(payload) => void` | one-way：壳只把 payload 填进它自己的模板，**不算业务量**（沿用 `pip.data` 那条"网页算好、壳只画"的纪律） |
+   | `closeAllFloating` | `() => void` | 维护模式切进 / 插件停用 / 登出 / 主程序退出时都要调；壳关完回 `shell:floatingClosed` |
+
+   ⚠️ 悬浮窗是**镜像式**（手册 §9）：弹出后主屏功能块保留，悬浮窗渲染同一份数据；
+   一个插件同时最多 1 个、全局上限 6 个 —— 这两条**数数的账在网页侧**
+   （`ClassroomPluginShell` 的 pip 端口），壳只管开窗与画。
+   ============================================================================ */
+
+/** `preload.js` 将在 `__shell_out.plugins` 上暴露的四个口（本文件顶部那张表）。 */
+interface ShellPluginBridge {
+  downloadPlugin?(
+    url: string,
+    opts: { sha256: string },
+  ): Promise<{ ok: true; path: string } | { ok: false; why: string }>
+  openTransparentWindow?(opts: {
+    w: number
+    h: number
+    opacity?: number
+    transparent?: boolean
+  }): Promise<{ ok: true; reused: boolean } | { ok: false; why: string }>
+  pushBlockScreen?(payload: Record<string, unknown>): void
+  closeAllFloating?(): void
+}
+
+/**
+ * 拿到 `__shell_out.plugins` —— **只认"在且是对象"**。
+ * ⚠️ 刻意**不写**与 `pipBridge()` 那行一模一样的三元串：`nav-checks` 的反向对照会
+ *    对本文件做一次**只换第一处**的文本替换来钉 `pipBridge()` 的严格取值，
+ *    这里若出现同款字符串，那个对照就会换错行、当场假红（AGENTS.md §三.2 的坑）。
+ */
+function pluginBridge(): ShellPluginBridge | null {
+  const p = bridge()?.plugins
+  return p !== null && p !== undefined && typeof p === 'object' ? (p as ShellPluginBridge) : null
+}
+
+/** 壳里**有没有**"下载插件到本地缓存"这条路（网页版 / 老壳 ⇒ false，走不了真下载）。 */
+export function shellPluginDownloadAvailable(): boolean {
+  return typeof pluginBridge()?.downloadPlugin === 'function'
+}
+
+/**
+ * 让壳把插件从插件库下到本机并校验指纹。壳不在 ⇒ `{ ok:false, why }`（照实说，不假装下成功）。
+ */
+export async function shellDownloadPlugin(
+  url: string,
+  opts: { sha256: string },
+): Promise<{ ok: true; path: string } | { ok: false; why: string }> {
+  const fn = pluginBridge()?.downloadPlugin
+  if (!fn) return { ok: false, why: '要教室版程序' }
+  try {
+    return await fn(url, opts)
+  } catch (e) {
+    console.error('[shell] downloadPlugin 失败：', e)
+    return { ok: false, why: '插件没下载成，请重试一次' }
+  }
+}
+
+/** 壳里**有没有**透明悬浮窗这条路（手册 §9：只有教室版程序有）。 */
+export function shellTransparentWindowAvailable(): boolean {
+  return typeof pluginBridge()?.openTransparentWindow === 'function'
+}
+
+export interface TransparentWindowOpts {
+  w: number
+  h: number
+  /** 0.3–1.0；越界在这里先夹紧（壳侧还会再夹一遍），不报错 */
+  opacity?: number
+  transparent?: boolean
+}
+
+/**
+ * 开透明悬浮窗（**单例**：壳侧已有就复用并聚焦）。
+ * 返回 `{ ok:false, why }` 时 `why` 是给人看的话 —— 调用方把它转成 toast，不许吞。
+ */
+export async function shellOpenTransparentWindow(
+  opts: TransparentWindowOpts,
+): Promise<{ ok: true; reused: boolean } | { ok: false; why: string }> {
+  const fn = pluginBridge()?.openTransparentWindow
+  if (!fn) return { ok: false, why: '要教室版程序' }
+  const opacity =
+    opts.opacity === undefined ? 1 : Math.min(1, Math.max(0.3, opts.opacity))
+  try {
+    return await fn({ ...opts, opacity })
+  } catch (e) {
+    console.error('[shell] openTransparentWindow 失败：', e)
+    return { ok: false, why: '悬浮窗没开成，再点一次试试' }
+  }
+}
+
+/**
+ * 把一块功能块的内容**推给壳画**（one-way；壳没有这条路时什么都不做——
+ * 它本来就是"锦上添花"的那一半，真正的失败面在 `openTransparentWindow` 上说）。
+ */
+export function shellPushBlockScreen(payload: Record<string, unknown>): void {
+  const fn = pluginBridge()?.pushBlockScreen
+  if (!fn) return
+  try {
+    fn(payload)
+  } catch (e) {
+    // 🔴 不许静默（硬规矩）：推不过去就说出来，别让悬浮窗停在上一条内容上
+    console.error('[shell] pushBlockScreen 推不过去：', e)
+  }
+}
+
+/** 收掉壳里**全部**悬浮窗（维护切进 / 插件停用 / 登出 / 退出——附录 A 第 4 条）。 */
+export function shellCloseAllFloating(): void {
+  const fn = pluginBridge()?.closeAllFloating
+  if (!fn) return
+  try {
+    fn()
+  } catch (e) {
+    console.error('[shell] closeAllFloating 失败：', e)
+  }
+}

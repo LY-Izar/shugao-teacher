@@ -1,0 +1,16 @@
+{
+  "id": "demo.helloclock",
+  "name": "示例时钟",
+  "icon": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\"><circle cx=\"12\" cy=\"12\" r=\"9\"/><path d=\"M12 7v5l3 2\"/></svg>",
+  "description": "显示当前这节课与下一节",
+  "version": "1.0.0",
+  "entry": "index.js",
+  "minShellVersion": "1.1.5",
+  "permissions": ["data.schedule", "clock", "storage", "config", "pip"],
+  "window": { "w": 3, "h": 2 },
+  "config": {
+    "fields": [
+      { "key": "showNext", "type": "switch", "label": "显示下一节", "default": true }
+    ]
+  }
+}

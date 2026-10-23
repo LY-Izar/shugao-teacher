@@ -443,6 +443,61 @@ await withLock(async () => {
          */
         return text
       }
+      if (mode === 'plugin-read-wider') {
+        /*
+         * 🆕 2026-10-24（§42 插件数据层）：把 `plugin_data_read()` 里"看得见这个班"那半边判据
+         * **拿掉**（改成 `if false then`）。
+         *
+         * 🔴 为什么负向对照打的是**函数**而不是策略：§42 的数据槽**一条策略都没有**
+         *    （客户端零表权限，读写只走 RPC）。策略在这个模型里永远跑不到 ——
+         *    拿它做对照只会得到一个"改坏了也不变红"的假对照（`AGENTS.md` §三.2）。
+         *
+         * 锚点先数出现次数（必须恰好 1 次）：`String.replace` 只换第一处。
+         * 期望：「语文老师读 4 班插件数据 → E_FORBIDDEN」那一条**必须变红**。
+         */
+        const anchor = 'if p_class_id not in (select visible_class_ids()) then'
+        const n = text.split(anchor).length - 1
+        if (n !== 1) throw new Error(`负向对照锚点出现 ${n} 次（要求恰好 1 次）：${anchor}`)
+        return text.replace(anchor, 'if false then  /* 负向对照：拿掉"看得见这个班" */')
+      }
+      if (mode === 'plugin-registry-open') {
+        /*
+         * 🆕 2026-10-24：把登记表的写策略放宽成 `true`（= 谁都能发布插件版本）。
+         * 这是"发布动作永远在超管手里"（交接文档 §九风险 5）最真实的坏法：
+         * 策略还在、名字还在，只把 `using (is_super_admin())` 换成 `using (true)`。
+         * 期望：「普通教师写 plugin_registry → 被拒」那一条**必须变红**。
+         */
+        /* ⚠️ 锚点必须**连 `with check` 一起换**：INSERT 只看 `with check`，
+           只换 `using` 的话策略"看起来放宽了"，插进去照样被拒 —— 那会造出一个假对照。 */
+        const anchor =
+          'create policy plugin_registry_write on plugin_registry for all to authenticated\n  using (is_super_admin())\n  with check (is_super_admin());'
+        const n = text.split(anchor).length - 1
+        if (n !== 1) throw new Error(`负向对照锚点出现 ${n} 次（要求恰好 1 次）：plugin_registry_write 的正文`)
+        return text.replace(
+          anchor,
+          'create policy plugin_registry_write on plugin_registry for all to authenticated\n  using (true)\n  with check (true);',
+        )
+      }
+      if (mode === 'plugin-configs-open') {
+        /*
+         * 🆕 2026-10-24（§46 配置通道）：把启用清单的**两条写策略都放宽成 `true`**
+         * （= 任意登录教师都能开关任何班的插件）。两条都要换：upsert 会同时过
+         * insert 的 with check 与 update 的 using/with check —— 只宽一条，另一条
+         * 照样拒，对照就是假的。
+         * 期望：「任课老师开插件 → 被拒」那一条**必须变红**。
+         */
+        const anchorIns =
+          'create policy plugin_configs_insert on plugin_configs for insert to authenticated\n  with check (public.can_manage_class(class_id));'
+        const nIns = text.split(anchorIns).length - 1
+        if (nIns !== 1) throw new Error(`负向对照锚点出现 ${nIns} 次（要求恰好 1 次）：plugin_configs_insert 的正文`)
+        const anchorUpd =
+          'create policy plugin_configs_update on plugin_configs for update to authenticated\n  using (public.can_manage_class(class_id))\n  with check (public.can_manage_class(class_id));'
+        const nUpd = text.split(anchorUpd).length - 1
+        if (nUpd !== 1) throw new Error(`负向对照锚点出现 ${nUpd} 次（要求恰好 1 次）：plugin_configs_update 的正文`)
+        return text
+          .replace(anchorIns, 'create policy plugin_configs_insert on plugin_configs for insert to authenticated\n  with check (true);')
+          .replace(anchorUpd, 'create policy plugin_configs_update on plugin_configs for update to authenticated\n  using (true)\n  with check (true);')
+      }
       /*
        * 手工负向对照（`RLS_NEGATIVE=direct-revert:crack-a` 这种）：把 §17 的收紧改回去。
        * 与下面的 `crack-a` 模式**同一套锚点**，只是名字不同、好认。
@@ -7809,7 +7864,7 @@ await withLock(async () => {
         RESTRICT_EXPECT.map((k) => `${k}(a)`).sort(),
       )
       ok(
-        '🔴 ① 另外 **22** 条是 `on delete set null`（数据库自己置空，**不拦人**）—— 别把它们也算进"要手工清"里' +
+        '🔴 ① 另外 **23** 条是 `on delete set null`（数据库自己置空，**不拦人**）—— 别把它们也算进"要手工清"里' +
           '（🆕课程管理那三张表加进来 11 条：改课的人 / 原来那位老师 / 撤回人 / 清理人 …）',
         // 🆕 17 → 21（教室端改造 `schema.sql` §40 又加进来 4 条，全是 `on delete set null`）：
         //    `class_rep_pins.updated_by` / `daily_homework.author_id` /
@@ -7817,7 +7872,11 @@ await withLock(async () => {
         //    —— 删老师不会拦人，那几行只是把"谁写的"置空。
         // 🆕 21 → 22（2026-10-13 `schema.sql` §10.1 给 `classroom_accounts.created_by` 补了 set null）：
         //    它原本在**拦人**那一份里，补上之后归到这一边 —— 正是 `rls-checks` §43.4 那两条要盯的。
-        setNull(toTeachers).length === 22,
+        // 🆕 22 → 23（2026-10-24 `schema.sql` §42 插件登记表的 `updated_by`）：
+        //    那只是"谁最后放的版本"，删老师不该拦住放版本这个动作 ⇒ 归到 set null 这一边。
+        //    ⚠️ 同段的 `plugin_data.updated_by` **不带外键**（它记的是"哪台屏写的"，
+        //    而屏是 `classroom_accounts` 那一侧、也可能已经不存在）—— 所以这里只多 1 条。
+        setNull(toTeachers).length === 23,
         `${setNull(toTeachers).length} 条 set null · ${setNull(toTeachers).join(' / ')}`,
       )
       ok(
@@ -11186,6 +11245,407 @@ await withLock(async () => {
           await countAs(db, U.admin, `select count(*)::int as n from teachers where id = $1`, [U.super]),
         ],
         [1, 0, 0],
+      )
+    }
+
+    /* ============================================================
+       §42 教室端插件化（P0 数据层）—— 版本登记 / 通用数据槽 / 限额
+       ------------------------------------------------------------
+       与别的节不同，这一节**大部分断言打在函数上**：§42 的数据槽客户端零表权限，
+       读写只走 `plugin_data_write()` / `plugin_data_read()`。所以这里数的是
+       "RPC 回了哪个 code"，而不是"策略筛掉几行"。
+       ============================================================ */
+    {
+      const db = B.db
+      section('§45 插件数据层：版本登记 / 通用数据槽 / 限额')
+
+      const rlsRows = (
+        await db.query(
+          `select relname, relrowsecurity from pg_class
+            where relname in ('plugin_registry','plugin_data','plugin_quota','plugin_configs') order by relname`,
+        )
+      ).rows
+      eq(
+        '§45/§46 四张表都在、且**都开着 RLS**（§14 那条"没有一张表漏开 RLS"的自检）',
+        rlsRows.map((r) => `${r.relname}:${r.relrowsecurity}`),
+        ['plugin_configs:true', 'plugin_data:true', 'plugin_quota:true', 'plugin_registry:true'],
+      )
+
+      const pol = (
+        await db.query(
+          `select tablename, policyname, cmd from pg_policies
+            where schemaname = 'public'
+              and tablename in ('plugin_registry','plugin_data','plugin_quota','plugin_configs')
+            order by 1, 2`,
+        )
+      ).rows
+      eq(
+        '§45/§46 策略**恰好 4 条**（登记表 2 + 配置表 3 中的读/写两条按名排；数据槽与计数器零策略 —— 客户端零表权限，策略建了也跑不到）',
+        pol.map((p) => `${p.tablename}.${p.policyname}.${p.cmd}`),
+        [
+          'plugin_configs.plugin_configs_insert.INSERT',
+          'plugin_configs.plugin_configs_read.SELECT',
+          'plugin_configs.plugin_configs_update.UPDATE',
+          'plugin_registry.plugin_registry_read.SELECT',
+          'plugin_registry.plugin_registry_write.ALL',
+        ],
+      )
+
+      /* ⚠️ 这一节必须**真的提交**（`asUser` 结尾是 rollback）：写进去的行要能读回来，
+         否则"读回来 0 行"看起来像功能坏了，其实是夹具被回滚了。 */
+      const runAs = async (uid, fn) => {
+        await db.query(`select set_config('request.jwt.claims', $1, false)`, [claimsOf(uid)])
+        await db.exec('set role authenticated')
+        try {
+          return await fn()
+        } finally {
+          await db.exec('reset role')
+          await db.query(`select set_config('request.jwt.claims', '', false)`)
+        }
+      }
+      const asWrite = (uid, cls, pid, key, payload) =>
+        runAs(uid, async () => {
+          try {
+            const r = await db.query(`select public.plugin_data_write($1,$2,$3,$4::jsonb) as r`, [
+              cls,
+              pid,
+              key,
+              JSON.stringify(payload),
+            ])
+            return r.rows[0].r
+          } catch (e) {
+            return { ok: false, code: `ERR:${shortErr(e)}` }
+          }
+        })
+      const asRead = (uid, cls, pid, key = null) =>
+        runAs(uid, async () => {
+          try {
+            const r = await db.query(`select public.plugin_data_read($1,$2,$3) as r`, [cls, pid, key])
+            return r.rows[0].r
+          } catch (e) {
+            return { ok: false, code: `ERR:${shortErr(e)}` }
+          }
+        })
+      const tryExec = (uid, sql, params = []) =>
+        runAs(uid, async () => {
+          try {
+            const r = await db.query(sql, params)
+            return { ok: Number(r.affectedRows ?? r.rows.length) > 0, detail: `${r.rows.length} 行` }
+          } catch (e) {
+            return { ok: false, detail: shortErr(e) }
+          }
+        })
+
+      /* ---- ① 表权限：客户端一个都碰不到 ---- */
+      denied(
+        '§45 教师直接 `select plugin_data`（表权限已 revoke，只能走 RPC）',
+        await attempt(db, U.phy, `select count(*)::int as n from plugin_data`),
+      )
+      denied(
+        '§45 教师直接 `insert into plugin_data`（写只走 RPC —— 否则配额就成了插件自觉）',
+        await attempt(db, U.phy, `insert into plugin_data (class_id, plugin_id, key) values ($1,'demo.abc','k')`, [C.c1]),
+      )
+      denied(
+        '§45 客户端调不到额度计数器（`plugin_quota_hit` revoke 到干净）',
+        await attempt(db, U.phy, `select public.plugin_quota_hit($1,'demo.abc','w')`, [C.c1]),
+      )
+
+      /* ---- ② 框架自己的槽：本班教室端写得进、读得回 ---- */
+      const wLayout = await asWrite(U.room, C.c1, '__framework', 'layout', { windows: [{ id: 'clock' }] })
+      eq('§45 本班教室端写框架布局 → ok（`__framework` 不走登记表）', wLayout?.ok, true)
+      const rLayout = await asRead(U.room, C.c1, '__framework', 'layout')
+      eq(
+        '§45 读回来就是刚写的那一份（槽的语义 = 一格一行）',
+        [rLayout?.ok, rLayout?.rows?.length, rLayout?.rows?.[0]?.payload?.windows?.[0]?.id],
+        [true, 1, 'clock'],
+      )
+      eq(
+        '§45 别班的教室端读不到这一格（`plugin_data_read` 里"看得见这个班"那一半）',
+        (await asRead(U.room, C.c2, '__framework', 'layout'))?.code,
+        'E_FORBIDDEN',
+      )
+      eq(
+        '🔴 §45 语文老师（只教 1 班）读 4 班的插件数据 → E_FORBIDDEN',
+        (await asRead(U.chn, C.c2, '__framework', 'layout'))?.code,
+        'E_FORBIDDEN',
+      )
+      eq(
+        '§45 语文老师读**自己教的** 1 班 → ok（读得宽：看得见就能读）',
+        (await asRead(U.chn, C.c1, '__framework', 'layout'))?.ok,
+        true,
+      )
+      eq(
+        '§45 教师端**不写**插件数据（这一轮插件数据只由屏产生）',
+        (await asWrite(U.chn, C.c1, '__framework', 'layout', {}))?.code,
+        'E_FORBIDDEN',
+      )
+
+      /* ---- ③ 未登记 / 未放行：不能写 ---- */
+      eq(
+        '§45 未登记的插件 → 写被拒 `E_PLUGIN_NOT_LIVE`（登记表是版本唯一闸门）',
+        (await asWrite(U.room, C.c1, 'demo.unregistered', 'k', {}))?.code,
+        'E_PLUGIN_NOT_LIVE',
+      )
+
+      /* ---- ④ 登记表：超管才能写 ---- */
+      denied(
+        '🔴 §45 普通教师写 `plugin_registry` → 被拒（发布动作只在超管手里）',
+        await attempt(
+          db,
+          U.phy,
+          `insert into plugin_registry (plugin_id, stable_version, entry_sha256) values ('demo.abc','1.0.0','x')`,
+        ),
+      )
+      {
+        const reg = await tryExec(
+          U.super,
+          `insert into plugin_registry (plugin_id, stable_version, entry_sha256, permissions)
+           values ('demo.abc','1.0.0','x','[]'::jsonb)`,
+        )
+        ok('§45 超管写 `plugin_registry` → 通过', reg.ok, reg.detail)
+      }
+      eq(
+        '§45 放行之后同一个槽写得进了（`plugin_live` 放行的是"能不能写"，不是"能不能读"）',
+        (await asWrite(U.room, C.c1, 'demo.abc', 'k', { a: 1 }))?.ok,
+        true,
+      )
+
+      /* ---- ⑤ 命名空间与取值 ---- */
+      eq(
+        '§45 插件写 `__` 开头的槽 → `E_RESERVED_KEY`（框架槽是框架的）',
+        (await asWrite(U.room, C.c1, 'demo.abc', '__x', {}))?.code,
+        'E_RESERVED_KEY',
+      )
+      eq(
+        '§45 槽名不合规（大写 / 空格）→ `E_BAD_KEY`',
+        (await asWrite(U.room, C.c1, 'demo.abc', 'Bad Key', {}))?.code,
+        'E_BAD_KEY',
+      )
+      eq(
+        '§45 单行超过 16 KB → `E_QUOTA_SIZE`',
+        (await asWrite(U.room, C.c1, 'demo.abc', 'big', { s: 'x'.repeat(17000) }))?.code,
+        'E_QUOTA_SIZE',
+      )
+
+      /* ---- ⑥ 撤版：**不能写**，但**照样读得到** ---- */
+      // 这一条是 §42 与交接文档 §六 唯一一处刻意不同的口径（schema.sql 段首 ①）
+      await db.query(`update plugin_registry set revoked_at = now() where plugin_id = 'demo.abc'`)
+      eq(
+        '§45 撤版后写 → `E_PLUGIN_NOT_LIVE`',
+        (await asWrite(U.room, C.c1, 'demo.abc', 'k2', {}))?.code,
+        'E_PLUGIN_NOT_LIVE',
+      )
+      const revokedRead = await asRead(U.room, C.c1, 'demo.abc', 'k')
+      eq(
+        '🔴 §45 撤版后**读照旧读得到**（撤版 = 下架，不是删数据；读策略里不许带"已发布"）',
+        [revokedRead?.ok, revokedRead?.rows?.length, revokedRead?.rows?.[0]?.payload?.a],
+        [true, 1, 1],
+      )
+
+      /* ---- ⑦ 行数上限：第 501 格写不进，但已存在的格子照旧能改 ---- */
+      await db.query(
+        `insert into plugin_data (class_id, plugin_id, key, payload)
+         select $1, 'demo.cap', 'k' || g, '{}'::jsonb from generate_series(1,500) g`,
+        [C.c1],
+      )
+      await db.query(
+        `insert into plugin_registry (plugin_id, stable_version, entry_sha256, permissions)
+         values ('demo.cap','1.0.0','y','[]'::jsonb)`,
+      )
+      eq(
+        '§45 每班每插件 500 行封顶：第 501 格 → `E_QUOTA_ROWS`',
+        (await asWrite(U.room, C.c1, 'demo.cap', 'k501', {}))?.code,
+        'E_QUOTA_ROWS',
+      )
+      eq(
+        '§45 但**已存在**的那一格照旧能改（到顶不该让布局再也存不下来）',
+        (await asWrite(U.room, C.c1, 'demo.cap', 'k1', { v: 2 }))?.ok,
+        true,
+      )
+
+      /* ---- ⑧ 写限频：同一分钟第 61 次被拒，另开一个插件不受影响 ---- */
+      await db.query(
+        `insert into plugin_registry (plugin_id, stable_version, entry_sha256, permissions)
+         values ('demo.rate','1.0.0','z','[]'::jsonb), ('demo.rate2','1.0.0','z','[]'::jsonb)`,
+      )
+      const rateRes = []
+      for (let i = 0; i < 61; i++) {
+        rateRes.push(await asWrite(U.room, C.c1, 'demo.rate', `k${i + 1}`, { i }))
+      }
+      eq(
+        '§45 每秒不限、每分钟 60 次：前 60 次 ok，第 61 次 `E_QUOTA_RATE`',
+        [rateRes.filter((r) => r?.ok === true).length, rateRes[60]?.code],
+        [60, 'E_QUOTA_RATE'],
+      )
+      eq(
+        '§45 而另一个插件在同一分钟照旧能写（桶的键是 班级 × 插件，不是全局）',
+        (await asWrite(U.room, C.c1, 'demo.rate2', 'k1', {}))?.ok,
+        true,
+      )
+
+      /* ---- ⑨ 匿名：连函数执行权都没有（`grant execute` 只给了 authenticated） ---- */
+      const anonOutcome = await (async () => {
+        await db.exec('begin')
+        try {
+          await db.exec(`set local role anon`)
+          const r = await db.query(`select public.plugin_data_read($1,'demo.abc',null) as r`, [C.c1])
+          return { kind: 'value', value: r.rows[0].r }
+        } catch (e) {
+          return { kind: 'denied', detail: shortErr(e) }
+        } finally {
+          await db.exec('rollback')
+        }
+      })()
+      ok(
+        '§45 匿名读插件数据 → 被拒（`plugin_data_read` 的 execute 只给了 authenticated）',
+        anonOutcome.kind === 'denied',
+        anonOutcome.kind === 'value' ? `竟然回了 ${JSON.stringify(anonOutcome.value)}` : anonOutcome.detail,
+      )
+    }
+
+    /* ============================================================
+       §46 插件配置通道（P1 管理面）—— 按班的启用清单
+       ------------------------------------------------------------
+       这张表**有**客户端表权限（教师端要写），所以断言打在**策略**上：
+       读 = `visible_class_ids()`（看得见就能读）；写 = `can_manage_class_for()`
+       （校级 ∪ 本年级年级主任 ∪ 本班班主任，**故意不含任课**——§10.3 用户口径）。
+       教室端账号：只读，写那一档**不建**。
+       ============================================================ */
+    {
+      const db = B.db
+      section('§46 插件配置通道：启用清单（教师写 / 教室端只读）')
+
+      const runAs = async (uid, fn) => {
+        await db.query(`select set_config('request.jwt.claims', $1, false)`, [claimsOf(uid)])
+        await db.exec('set role authenticated')
+        try {
+          return await fn()
+        } finally {
+          await db.exec('reset role')
+          await db.query(`select set_config('request.jwt.claims', '', false)`)
+        }
+      }
+      const asExec = (uid, sql, params = []) =>
+        runAs(uid, async () => {
+          try {
+            const r = await db.query(sql, params)
+            return { ok: true, rows: r.rows }
+          } catch (e) {
+            return { ok: false, detail: shortErr(e) }
+          }
+        })
+      const upsert = (uid, cls, pid, patch) =>
+        asExec(
+          uid,
+          `insert into plugin_configs (class_id, plugin_id, enabled, config)
+           values ($1, $2, $3, $4::jsonb)
+           on conflict (class_id, plugin_id)
+           do update set enabled = excluded.enabled, config = excluded.config`,
+          [cls, pid, patch.enabled ?? true, JSON.stringify(patch.config ?? {})],
+        )
+      const readRows = (uid, cls, pid) =>
+        asExec(uid, `select enabled, config, updated_by, updated_at from plugin_configs
+                      where class_id = $1 and plugin_id = $2`, [cls, pid])
+
+      /* ---- ① 写 = 管得着这个班 ---- */
+      eq(
+        '🔴 §46 任课老师（教 1 班、不是班主任）开插件 → 被拒（can_manage_class_for 故意不含任课，§10.3 用户口径）',
+        (await upsert(U.chn, C.c1, 'demo.helloclock', {})).ok,
+        false,
+      )
+      {
+        const headUp = await upsert(U.head, C.c1, 'demo.helloclock', { enabled: true })
+        ok('§46 本班班主任开插件 → 通过', headUp.ok === true, headUp.ok ? 'ok' : headUp.detail)
+      }
+      {
+        const supUp = await upsert(U.super, C.c2, 'demo.helloclock', { enabled: true })
+        ok('§46 校级（超管）给**别的班**开 → 通过（校级管得着所有班）', supUp.ok === true, supUp.ok ? 'ok' : supUp.detail)
+      }
+      eq(
+        '§46 别班的班主任给 1 班开 → 被拒（管不着这个班）',
+        (await upsert(U.head2, C.c1, 'demo.helloclock', {})).ok,
+        false,
+      )
+      eq(
+        '🔴 §46 教室端账号写配置 → 被拒（启用清单由教师决定，屏只是执行者）',
+        (await upsert(U.room, C.c1, 'demo.helloclock', {})).ok,
+        false,
+      )
+
+      /* ---- ② 读 = 看得见这个班 ---- */
+      const head = await readRows(U.head, C.c1, 'demo.helloclock')
+      eq(
+        '§46 班主任读回自己写的那一行 → 开着',
+        [head.rows?.length ?? -1, head.rows?.[0]?.enabled ?? null],
+        [1, true],
+      )
+      const chnRead = await readRows(U.chn, C.c1, 'demo.helloclock')
+      eq(
+        '§46 任课老师读本班 → 读得到（读得宽：看得见就能读，与 §45.4 同一判据）',
+        chnRead.rows?.length ?? -1,
+        1,
+      )
+      eq(
+        '§46 教室端读本班 → 读得到（屏要按它决定装哪块）',
+        (await readRows(U.room, C.c1, 'demo.helloclock')).rows?.length ?? -1,
+        1,
+      )
+      eq(
+        '§46 教室端读**别班**的启用清单 → 0 行（Realtime 也吃这条 RLS，推不出去）',
+        (await readRows(U.room, C.c2, 'demo.helloclock')).rows?.length ?? -1,
+        0,
+      )
+
+      /* ---- ③ 盖戳：updated_at / updated_by 由数据库写，客户端说了不算 ---- */
+      eq(
+        '§46 盖戳生效：updated_by = 最后动它的那个人（触发器盖的，不是客户端传的）',
+        head.rows?.[0]?.updated_by ?? null,
+        U.head,
+      )
+      await new Promise((r) => setTimeout(r, 5))
+      await upsert(U.head, C.c1, 'demo.helloclock', { enabled: false })
+      const head2 = await readRows(U.head, C.c1, 'demo.helloclock')
+      eq(
+        '§46 改一次：enabled 翻转、updated_at 往前走（"谁在什么时候改的"查得到）',
+        [head2.rows?.[0]?.enabled ?? null, (head2.rows?.[0]?.updated_at ?? 0) > (head.rows?.[0]?.updated_at ?? 0)],
+        [false, true],
+      )
+
+      /* ---- ④ 形状：id 正则与 16 KB 与 §45 同源 ---- */
+      eq(
+        '§46 插件 id 不合命名空间（大写）→ check 拒（与 §45.1 同一个正则）',
+        (
+          await asExec(
+            U.head,
+            `insert into plugin_configs (class_id, plugin_id, enabled) values ($1, 'Demo.Bad', true)`,
+            [C.c1],
+          )
+        ).ok,
+        false,
+      )
+      eq(
+        '§46 框架命名空间 `__framework` 不是教师配置的对象 → check 拒',
+        (
+          await asExec(
+            U.head,
+            `insert into plugin_configs (class_id, plugin_id, enabled) values ($1, '__framework', true)`,
+            [C.c1],
+          )
+        ).ok,
+        false,
+      )
+      eq(
+        '§46 配置值超 16 KB → check 拒（与 §45.2 的单行 payload 同一个量法）',
+        (
+          await asExec(
+            U.head,
+            `insert into plugin_configs (class_id, plugin_id, enabled, config)
+             values ($1, 'demo.helloclock', true, $2::jsonb)
+             on conflict (class_id, plugin_id) do update set config = excluded.config`,
+            [C.c1, JSON.stringify({ s: 'x'.repeat(17000) })],
+          )
+        ).ok,
+        false,
       )
     }
 

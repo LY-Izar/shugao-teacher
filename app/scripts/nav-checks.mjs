@@ -10009,9 +10009,15 @@ section('第二十八节 · A23：公告「发布」吞字（正文非受控 + �
           n(CD, /setCallText\(liveText\)/g) === 1 &&
           n(CD, /liveText\.trim\(\)\.length > CUSTOM_MAX/g) === 1 &&
           n(CD, /slice\(0, CUSTOM_MAX\)/g) === 0 &&
-          n(CD, /maxLength=\{/g) === 0,
-        '🔴 A26 ⑨ 班级页「呼叫自定义文案」：**提交读屏上那一份**（`liveValue(callTextRef.current, callText)`）并写回 state；`onChange` 里那句 `slice(0, CUSTOM_MAX)` **静默截断已去掉**，超长改成**明确报错、一个字不发**；自由文本上没有 `maxLength`',
-        `读 DOM=${n(CD, /liveValue\(callTextRef\.current, callText\)/g)} 处 · 写回=${n(CD, /setCallText\(liveText\)/g)} 处 · 超长报错=${n(CD, /liveText\.trim\(\)\.length > CUSTOM_MAX/g)} 处 · slice=${n(CD, /slice\(0, CUSTOM_MAX\)/g)} 处 · maxLength=${n(CD, /maxLength=\{/g)} 处`,
+          /* 🆕 2026-10-24（P1 插件化）：ClassDetail 里多了「教室端插件」的**配置表单** ——
+             text 控件的 `maxLength={f.maxLength}` 是 schema 驱动的有界输入
+             （上限由插件作者在 manifest 里声明，手册 §2.3），不是"自由文本静默截断"那回事。
+             ⇒ 期望值从 0 改成 1，并且**钉死它只能出现在配置表单那一处**
+             （`f.maxLength` 那个形状）；呼叫文案 / 学生档案这些自由文本仍然一个没有。 */
+          n(CD, /maxLength=\{/g) === 1 &&
+          n(CD, /maxLength=\{f\.maxLength\}/g) === 1,
+        '🔴 A26 ⑨ 班级页「呼叫自定义文案」：**提交读屏上那一份**（`liveValue(callTextRef.current, callText)`）并写回 state；`onChange` 里那句 `slice(0, CUSTOM_MAX)` **静默截断已去掉**，超长改成**明确报错、一个字不发**；自由文本上没有 `maxLength`（P1 起仅插件配置表单那 1 处，schema 驱动）',
+        `读 DOM=${n(CD, /liveValue\(callTextRef\.current, callText\)/g)} 处 · 写回=${n(CD, /setCallText\(liveText\)/g)} 处 · 超长报错=${n(CD, /liveText\.trim\(\)\.length > CUSTOM_MAX/g)} 处 · slice=${n(CD, /slice\(0, CUSTOM_MAX\)/g)} 处 · maxLength=${n(CD, /maxLength=\{/g)} 处（其中配置表单 ${n(CD, /maxLength=\{f\.maxLength\}/g)} 处）`,
       )
       check(
         n(CD, /profileRefs\.current\[f\.key\] = el/g) === 1 &&

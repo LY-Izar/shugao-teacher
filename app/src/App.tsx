@@ -38,6 +38,7 @@ const Assignments = lazy(() => import('./pages/Assignments'))
 const Calls = lazy(() => import('./pages/Calls'))
 const ClassDetail = lazy(() => import('./pages/ClassDetail'))
 const Classroom = lazy(() => import('./pages/Classroom'))
+const ClassroomPluginShell = lazy(() => import('./pages/ClassroomPluginShell'))
 const Classes = lazy(() => import('./pages/Classes'))
 const ExamGrade = lazy(() => import('./pages/ExamGrade'))
 const ExamNew = lazy(() => import('./pages/ExamNew'))
@@ -109,6 +110,44 @@ function ClassroomShellOnly() {
       </div>
     </div>
   )
+}
+
+/**
+ * 🔴 P0b（教室端插件化）：教室端那块屏现在有**两块本体**，在这里二选一。
+ *
+ * · 默认 = 旧 `Classroom`（行为一个字没变 —— 门禁里那一大批"网页版一字不变"的
+ *   断言钉的就是它）；
+ * · 新壳 `ClassroomPluginShell`（插件框架骨架）：`?newShell=1` 打开一次就**写进
+ *   localStorage 并一直生效**，`?newShell=0` 切回来。
+ *
+ * 🔴 为什么必须能"记住"：教室端 exe 是全屏 kiosk，没人能往地址栏敲参数 ——
+ *    只认参数的话新壳在真机上永远进不去（施工交接 §5.2）。
+ *
+ * ⚠️ **路由条数与每条路由的形状一个字没动**（nav-checks 数的就是这个）：
+ *    切换发生在教室端那条路由的**内部**，也不给新壳开任何子路由
+ *    （新地址会破掉维护模式的精确路径豁免）。
+ */
+const NEW_SHELL_KEY = 'shugao.classroom.newShell'
+function newShellPreferred(): boolean {
+  try {
+    const q = new URLSearchParams(window.location.search).get('newShell')
+    if (q === '1') {
+      localStorage.setItem(NEW_SHELL_KEY, '1')
+      return true
+    }
+    if (q === '0') {
+      localStorage.removeItem(NEW_SHELL_KEY)
+      return false
+    }
+    return localStorage.getItem(NEW_SHELL_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+function ClassroomSwitch() {
+  const [newShell] = useState(newShellPreferred)
+  return newShell ? <ClassroomPluginShell /> : <Classroom />
 }
 
 function Guard({ children }: { children: React.ReactNode }) {
@@ -549,12 +588,13 @@ export default function App() {
                （那个含教导处，见方案 §5.5 T7）。前端只是"摆不摆入口"。
         */}
         <Route path="/admin" element={<Admin />} />
-        {/* 教室端：独立的一整屏，不套教师端应用壳；但要登录（见 ClassroomGate） */}
+        {/* 教室端：独立的一整屏，不套教师端应用壳；但要登录（见 ClassroomGate）。
+            壳切换在 ClassroomSwitch 里二选一，默认仍是旧教室端（见上面那段注释） */}
         <Route
           path="/classroom"
           element={
             <ClassroomGate>
-              <Classroom />
+              <ClassroomSwitch />
             </ClassroomGate>
           }
         />

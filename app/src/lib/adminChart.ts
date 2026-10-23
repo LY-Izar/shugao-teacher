@@ -705,6 +705,8 @@ export const SCHEMA_STAGES: readonly SchemaStage[] = [
   { n: 42, title: '🔴 维护模式 = **服务端真的禁写**（2026-10-14 安全审计之后用户拍板）', from: 11455, to: 11613, sql: 76, targets: [{ kind: 'fn', name: 'is_maintenance' }] },
   { n: 43, title: '🔴 安全收紧第三批（本轮）：超管撤不成 0 个 · 教师自己删不掉自己那行 · 错误上报限洪', from: 11615, to: 11811, sql: 83, targets: [{ kind: 'col', table: 'frontend_errors', column: 'source_digest' }] },
   { n: 44, title: '🔴 超管隐身（本轮）：**非超管读者在任何入口都读不到超管的任何信息**', from: 11813, to: 11955, sql: 19, targets: [{ kind: 'policy', table: 'teacher_roles', name: 'teacher_roles_hide_super' }, { kind: 'policy', table: 'teacher_profiles', name: 'teacher_profiles_visible' }] },
+  { n: 45, title: '教室端插件化（P0 · **数据层**）—— 通用数据槽 / 版本登记 / 限额计数器', from: 11957, to: 12306, sql: 232, targets: [{ kind: 'table', name: 'plugin_registry' }, { kind: 'table', name: 'plugin_data' }, { kind: 'table', name: 'plugin_quota' }, { kind: 'col', table: 'plugin_registry', column: 'name' }, { kind: 'col', table: 'plugin_registry', column: 'description' }, { kind: 'col', table: 'plugin_registry', column: 'config_schema' }, { kind: 'policy', table: 'plugin_registry', name: 'plugin_registry_read' }, { kind: 'policy', table: 'plugin_registry', name: 'plugin_registry_write' }] },
+  { n: 46, title: '教室端插件化（P1 · **管理面数据层**）—— 按班的插件启用清单与配置', from: 12308, to: 12414, sql: 63, targets: [{ kind: 'table', name: 'plugin_configs' }, { kind: 'policy', table: 'plugin_configs', name: 'plugin_configs_read' }, { kind: 'policy', table: 'plugin_configs', name: 'plugin_configs_insert' }, { kind: 'policy', table: 'plugin_configs', name: 'plugin_configs_update' }] },
 ]
 /* @gen:schema-stages END */
 
@@ -1413,9 +1415,9 @@ export function judgeR2(f: SecretFacts): { tone: Tone; text: string; notes: stri
    它放在这个纯逻辑文件里（而不是 `Admin.tsx`）有两个理由：
      · `react(only-export-components)`：组件文件里导出一张常量表会让 Fast Refresh 失效；
      · 它是**可被断言的数据**：`admin-checks` 直接 import 它，逐条核对
-       "分区是不是这七个、label 有没有重复" —— 比读源码文本稳。
+       "分区是不是这八个、label 有没有重复" —— 比读源码文本稳。
    ⚠️ 分区**不是路由**（`/admin` 仍然只有一条裸路由，I41）——
-      这七个 key 只是面板内部的一排标签页。
+      这八个 key 只是面板内部的一排标签页。
    ============================================================ */
 
 export const ADMIN_SECTIONS = [
@@ -1424,6 +1426,9 @@ export const ADMIN_SECTIONS = [
   { key: 'db', label: '数据库', hint: '用量、逐表体积、单份档案排行' },
   { key: 'announce', label: '公告', hint: '全站公告（关于平台本身）' },
   { key: 'maintenance', label: '维护', hint: '开关、定时、自动关闭' },
+  /* 🆕 P1（教室端插件化）：插件的版本审核与放行 —— 交接文档 §九风险 5：
+     "发布动作永远在超管手里"，这里就是那个"手里"。 */
+  { key: 'plugins', label: '插件', hint: '教室端插件版本审核' },
   { key: 'errors', label: '错误日志', hint: '前端异常流水（B 类隐私）' },
   { key: 'feedback', label: '反馈', hint: '老师提的意见与邮件留痕' },
 ] as const

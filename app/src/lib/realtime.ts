@@ -15,6 +15,10 @@ export type BusMessage =
   | { type: 'heartbeat'; classroomId: string; at: number }
   | { type: 'classroom'; classroom: ClassroomClient }
   | { type: 'slide'; assignmentId: string; seq: number }
+  /* 🆕 P1（插件化）：某班的插件启用清单变了（教师端开/关/改配置）→ 教室端重读。
+     只带 classId 不带清单本身 —— 清单由收方自己重读（`loadPluginConfigs`），
+     消息只当"门铃"用：两个真相源（教师端写、教室端读）各走各的权限。 */
+  | { type: 'pluginConfigs'; classId: string }
 
 const CHANNEL = 'shugao.classroom.v1'
 const LOCAL_EVENT = 'shugao-bus'
@@ -78,6 +82,17 @@ export function subscribe(fn: (m: BusMessage) => void): () => void {
         'postgres_changes',
         { event: '*', schema: 'public', table: 'classrooms' },
         (p) => fn({ type: 'classroom', classroom: rowToClassroom(p.new as never) }),
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'plugin_configs' },
+        /* 🆕 P1：教师端开/关/改配置 → 门铃。Realtime 吃 RLS：教室端只会收到
+           自己班那些行（§46.2 的读策略在起作用），所以这里不用再筛权限 ——
+           但**要不要响应这个班**仍由收方判（教师端也订着同一条）。 */
+        (p) => {
+          const row = (p.new ?? {}) as { class_id?: string }
+          if (typeof row.class_id === 'string') fn({ type: 'pluginConfigs', classId: row.class_id })
+        },
       )
       .subscribe((status) => {
         if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {

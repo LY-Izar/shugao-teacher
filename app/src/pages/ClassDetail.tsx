@@ -36,6 +36,9 @@ import { classKindOf } from '../lib/pick'
 import { PERIOD_SLOTS, splitLessonTitle } from '../lib/scheduleParse'
 import { checkScheduleConflicts } from '../lib/schedule'
 import { canEditClassFor } from '../lib/roles'
+import { loadPluginConfigs, savePluginConfig } from '../classroom/configs'
+import { DEMO_MANIFEST } from '../classroom/demoPlugin'
+import { getSupabase } from '../lib/supabase'
 import { SUBJECTS, subjectCodeOfName, subjectName } from '../lib/subjects'
 import {
   PROFILE_FIELDS,
@@ -1562,6 +1565,22 @@ export default function ClassDetail() {
         ) : null}
 
         {/*
+          🆕 P1 教室端插件（交接文档 §八：班级详情页内嵌「教室端插件」区）。
+          🔴 摆不摆 = 同一个 `canManageThis` —— 开哪个插件跑在教室大屏上是"管班"的事，
+             与"改学生档案"同档（写判据在 §46.2 的 RLS：`can_manage_class()`）。
+          🔴 这里**只列登记表里放行的**（stable_version 有值且没撤下）—— 未放行的插件
+             连屏上那边的加载闸都过不了，摆一个永远开不动的开关是骗人。
+          ⚠️ 配置表单按登记时快照的 `config_schema` 自动生成（四种控件，手册 §2.3）；
+             schema 不在库里就说明那个插件没有配置项。
+        */}
+        {canManageThis ? (
+          <div className="mt-6">
+            <Sect>教室端插件</Sect>
+            <ClassroomPluginsPanel classId={klass?.id ?? ''} />
+          </div>
+        ) : null}
+
+        {/*
           🆕 值日生 + 课代表口令（用户口径 ⑧ + 追问 5）。
           🔴 摆不摆 = 上面那一个 `canManageThis`（与「教室端账号」同一档判据）——
              科任老师看不到这一块；真正那一刀在数据库（`duty_assignments_write`
@@ -2843,6 +2862,431 @@ function RoomRow({
       >
         复制
       </Button>
+    </div>
+  )
+}
+
+/* ============================================================
+   🆕 P1：教室端插件卡（登记表 × 本班启用清单，交接文档 §八）
+   ------------------------------------------------------------
+   · 列表来源：线上 = `plugin_registry`（全员读，只列**放行且没撤下**的）；
+     本地演示 = 宿主自带的演示插件（那样整条链在演示模式也能走通）。
+   · 启用/配置：写 `plugin_configs`（RLS：班主任那一档）；写完教室端那边靠
+     Realtime 门铃 + 30s 轮询自己跟上，这里不需要"通知"它。
+   · 唤起按钮的离线态：心跳判据用 store 里现成的 `classrooms.online` ——
+     不在线也要能让老师启动（先存上，屏上线后自己拉起来）。
+   ============================================================ */
+
+/** 手册 §5 "教师端卡片上的人话"那一列 —— 能力 → 一句话。keepAwake 是实现细节，不翻。 */
+const PLUGIN_PERMISSION_TEXT: Record<string, string> = {
+  storage: '可保存设置',
+  'data.roster': '可看本班名单',
+  'data.schedule': '可看本班课表',
+  'data.dailyHomework': '可看每日作业',
+  'data.duty': '可看值日生',
+  'data.assignments': '可看作业收发情况',
+  config: '可在教师端设置',
+  clock: '可跟随上下课',
+  bus: '可与其他功能块联动',
+  sound: '可播报，上下课与考试期间自动静音',
+  pip: '可弹成桌面小窗',
+  files: '可存文件到本机',
+}
+
+type RegistryCard = {
+  pluginId: string
+  name: string
+  description: string
+  /** 放行的版本号；null = 还没放行（不能启动） */
+  version: string | null
+  revoked: boolean
+  permissions: string[]
+  configFields: Array<{ key: string; type: string; label: string; default?: unknown; min?: number; max?: number; options?: Array<[string, string]>; maxLength?: number }>
+}
+
+function ClassroomPluginsPanel({ classId }: { classId: string }) {
+  const push = useToast((s) => s.push)
+  const classrooms = useStore((s) => s.classrooms)
+  const client = classrooms.find((c) => c.classId === classId)
+  const online = client?.online === true
+
+  /*
+   * 🔴 取数结果都带 `forClass` 标记，渲染时只认**当前班**的那一份 ——
+   *    换班时旧班的数据自然失效（读成"正在读…"），不需要在 effect 里
+   *    同步 setState 清场（那条 lint 会抓：set-state-in-effect）。
+   */
+  const [loaded, setLoaded] = useState<{
+    forClass: string
+    cards: RegistryCard[]
+    enabled: Record<string, boolean>
+    config: Record<string, Record<string, unknown>>
+    notice: string
+  } | null>(null)
+  const [err, setErr] = useState<{ forClass: string; msg: string } | null>(null)
+  /** 表单草稿：改了没存的那些值（只对**当前班**有效）。 */
+  const [drafts, setDrafts] = useState<{
+    forClass: string
+    map: Record<string, Record<string, unknown>>
+  }>({ forClass: '', map: {} })
+  const [busyId, setBusyId] = useState('')
+  const isRemoteMode = isRemote
+
+  useEffect(() => {
+    let alive = true
+    const load = async () => {
+      // 启用清单两个模式都要读；登记表只有线上有（本地模式拿演示插件顶上）
+      const cfgs = await loadPluginConfigs(classId)
+      if (!alive) return
+      let list: RegistryCard[]
+      if (!isRemoteMode) {
+        list = [
+          {
+            pluginId: DEMO_MANIFEST.id,
+            name: DEMO_MANIFEST.name,
+            description: DEMO_MANIFEST.description,
+            version: DEMO_MANIFEST.version,
+            revoked: false,
+            permissions: [...DEMO_MANIFEST.permissions],
+            configFields: [...(DEMO_MANIFEST.config?.fields ?? [])],
+          },
+        ]
+      } else {
+        const sb = getSupabase()
+        if (!sb) {
+          if (alive) setErr({ forClass: classId, msg: '没有可用的数据库连接。' })
+          return
+        }
+        try {
+          const { data, error } = await sb
+            .from('plugin_registry')
+            .select(
+              'plugin_id, name, description, stable_version, revoked_at, permissions, config_schema',
+            )
+            .order('plugin_id')
+          if (!alive) return
+          if (error) {
+            const msg = String(error.message ?? '')
+            setErr({
+              forClass: classId,
+              msg: /does not exist/i.test(msg)
+                ? '数据库还没跑 supabase/schema.sql 第 45 段（插件登记），这一块先看不了。'
+                : msg,
+            })
+            return
+          }
+          list = (Array.isArray(data) ? (data as Array<Record<string, unknown>>) : [])
+            .filter((r) => r?.plugin_id)
+            .map((r) => {
+              const schema = (r.config_schema ?? {}) as { fields?: RegistryCard['configFields'] }
+              return {
+                pluginId: String(r.plugin_id),
+                name: String(r.name ?? '') || String(r.plugin_id),
+                description: String(r.description ?? ''),
+                version: typeof r.stable_version === 'string' && r.stable_version ? r.stable_version : null,
+                revoked: !!r.revoked_at,
+                permissions: Array.isArray(r.permissions) ? (r.permissions as string[]) : [],
+                configFields: Array.isArray(schema.fields) ? schema.fields : [],
+              }
+            })
+        } catch (e) {
+          if (alive) setErr({ forClass: classId, msg: e instanceof Error ? e.message : '插件清单没读出来。' })
+          return
+        }
+      }
+      if (!alive) return
+      const en: Record<string, boolean> = {}
+      const cf: Record<string, Record<string, unknown>> = {}
+      let notice = ''
+      if (cfgs.state === 'ok') {
+        for (const row of cfgs.rows) {
+          en[row.pluginId] = row.enabled
+          cf[row.pluginId] = row.config
+        }
+      } else {
+        notice = cfgs.notice ?? ''
+      }
+      setLoaded({ forClass: classId, cards: list, enabled: en, config: cf, notice })
+    }
+    void load()
+    return () => {
+      alive = false
+    }
+  }, [classId, isRemoteMode])
+
+  const cards = loaded?.forClass === classId ? loaded.cards : null
+  const enabledMap = loaded?.forClass === classId ? loaded.enabled : {}
+  const configMap = loaded?.forClass === classId ? loaded.config : {}
+  const errText = err?.forClass === classId ? err.msg : ''
+  const noticeText = loaded?.forClass === classId ? loaded.notice : ''
+  const draftMap = drafts.forClass === classId ? drafts.map : {}
+
+  const toggle = async (card: RegistryCard) => {
+    const next = !(enabledMap[card.pluginId] === true)
+    setBusyId(card.pluginId)
+    const r = await savePluginConfig(classId, card.pluginId, { enabled: next })
+    setBusyId('')
+    if (!r.ok) {
+      push({ text: r.message, tone: 'bad' })
+      return
+    }
+    setLoaded((l) =>
+      l && l.forClass === classId ? { ...l, enabled: { ...l.enabled, [card.pluginId]: next } } : l,
+    )
+    if (next && !online) {
+      push({ text: '教室端不在线，将在其上线后启动', tone: 'warn' })
+    } else {
+      push({ text: next ? '已启动，教室端马上跟上' : '已停用', tone: 'ok' })
+    }
+  }
+
+  const saveDraft = async (card: RegistryCard) => {
+    const draft = draftMap[card.pluginId]
+    if (!draft) return
+    setBusyId(card.pluginId)
+    const r = await savePluginConfig(classId, card.pluginId, { config: draft })
+    setBusyId('')
+    if (!r.ok) {
+      push({ text: r.message, tone: 'bad' })
+      return
+    }
+    setLoaded((l) =>
+      l && l.forClass === classId ? { ...l, config: { ...l.config, [card.pluginId]: draft } } : l,
+    )
+    // 存成功 = 草稿转正，草稿层清掉（"保存配置"按钮随之消失）
+    setDrafts({ forClass: classId, map: {} })
+    push({ text: '配置已保存，教室端实时跟上', tone: 'ok' })
+  }
+
+  /** 没被教师改过时的生效值 = manifest 字段默认值（与 configs.ts 的 configDefaults 同一条算式） */
+  const defaultsOf = (card: RegistryCard): Record<string, unknown> => {
+    const out: Record<string, unknown> = {}
+    for (const f of card.configFields) {
+      if (f.default !== undefined) out[f.key] = f.default
+    }
+    return out
+  }
+  const draftOf = (card: RegistryCard): Record<string, unknown> =>
+    draftMap[card.pluginId] ?? configMap[card.pluginId] ?? defaultsOf(card)
+  const draftDirty = (card: RegistryCard): boolean => draftMap[card.pluginId] !== undefined
+
+  if (!classId) return null
+  if (errText) {
+    return (
+      <Panel bodyClass="p-3">
+        <div style={{ fontSize: 12.5, color: 'var(--color-warn)', lineHeight: 1.8 }}>{errText}</div>
+      </Panel>
+    )
+  }
+  if (!cards) {
+    return (
+      <Panel bodyClass="p-3">
+        <div style={{ fontSize: 12.5, color: 'var(--color-ink3)' }}>正在读…</div>
+      </Panel>
+    )
+  }
+  if (!cards.length) {
+    return (
+      <Panel bodyClass="p-3">
+        <div style={{ fontSize: 12.5, color: 'var(--color-ink3)', lineHeight: 1.8 }}>
+          还没有放行的插件 —— 版本由最高管理员在平台运维里审核发布。
+        </div>
+      </Panel>
+    )
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-wrap items-center gap-2" style={{ fontSize: 11.5, color: 'var(--color-ink3)' }}>
+        <span
+          className="inline-flex items-center gap-1.5"
+          data-classroom-plugins-online={online ? '1' : '0'}
+        >
+          <span
+            className={online ? 'live-dot' : ''}
+            style={{
+              width: 7,
+              height: 7,
+              borderRadius: 99,
+              background: online ? 'var(--color-ok)' : 'var(--color-warn)',
+              display: 'inline-block',
+            }}
+          />
+          {online ? '教室端在线' : '教室端不在线'}
+        </span>
+        <span>改完它会自己跟上（在线几秒内，离线等上线）。</span>
+      </div>
+
+      {noticeText ? (
+        <div style={{ fontSize: 11.5, color: 'var(--color-warn)', lineHeight: 1.7 }}>{noticeText}</div>
+      ) : null}
+
+      {cards.map((card) => {
+        const enabled = enabledMap[card.pluginId] === true
+        const dirty = draftDirty(card)
+        return (
+          <div
+            key={card.pluginId}
+            data-classroom-plugin-card={card.pluginId}
+            className="p-3"
+            style={{
+              border: '1px solid var(--color-line2)',
+              borderRadius: 6,
+              background: 'var(--color-surface)',
+            }}
+          >
+            <div className="flex flex-wrap items-center gap-2">
+              <span style={{ fontSize: 13.5, fontWeight: 650 }}>{card.name}</span>
+              {card.version ? (
+                <Tag tone="idle">v{card.version}</Tag>
+              ) : (
+                <Tag tone="warn">还没有放行版本</Tag>
+              )}
+              {card.revoked ? <Tag tone="bad">已撤下</Tag> : null}
+              <span className="flex-1" />
+              <Button
+                size="sm"
+                variant={enabled ? 'ghost' : 'primary'}
+                disabled={busyId === card.pluginId || !card.version || card.revoked}
+                onClick={() => void toggle(card)}
+              >
+                {enabled ? '停用' : '启动'}
+              </Button>
+            </div>
+            {card.description ? (
+              <div className="mt-1" style={{ fontSize: 12, color: 'var(--color-ink2)', lineHeight: 1.7 }}>
+                {card.description}
+              </div>
+            ) : null}
+            {(() => {
+              const perms = card.permissions
+                .map((p) => PLUGIN_PERMISSION_TEXT[p])
+                .filter(Boolean)
+              if (!perms.length) return null
+              return (
+                <div className="mt-1" style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.7 }}>
+                  {perms.join(' · ')}
+                </div>
+              )
+            })()}
+
+            {card.configFields.length ? (
+              <div className="mt-3 flex flex-col gap-2" data-plugin-config-form>
+                {card.configFields.map((f) => {
+                  const draft = draftOf(card)
+                  const val = draft[f.key]
+                  const setVal = (v: unknown) =>
+                    setDrafts({
+                      forClass: classId,
+                      map: { ...draftMap, [card.pluginId]: { ...draftOf(card), [f.key]: v } },
+                    })
+                  if (f.type === 'switch') {
+                    const on = val === true
+                    return (
+                      <button
+                        key={f.key}
+                        type="button"
+                        data-cfg-field={f.key}
+                        onClick={() => setVal(!on)}
+                        className="flex items-center gap-2 text-left"
+                        style={{ fontSize: 12.5 }}
+                      >
+                        <span
+                          style={{
+                            width: 30,
+                            height: 17,
+                            borderRadius: 99,
+                            background: on ? 'var(--color-accent)' : 'var(--color-line2)',
+                            position: 'relative',
+                            flexShrink: 0,
+                          }}
+                        >
+                          <i
+                            style={{
+                              position: 'absolute',
+                              top: 2,
+                              left: on ? 15 : 2,
+                              width: 13,
+                              height: 13,
+                              borderRadius: 99,
+                              background: '#fff',
+                            }}
+                          />
+                        </span>
+                        {f.label}
+                      </button>
+                    )
+                  }
+                  if (f.type === 'number') {
+                    return (
+                      <label key={f.key} className="flex items-center gap-2" style={{ fontSize: 12.5 }}>
+                        <span style={{ color: 'var(--color-ink2)' }}>{f.label}</span>
+                        <input
+                          className="input num"
+                          data-cfg-field={f.key}
+                          type="number"
+                          style={{ width: 90 }}
+                          min={f.min}
+                          max={f.max}
+                          value={typeof val === 'number' ? val : ''}
+                          onChange={(e) => {
+                            const n = Number(e.target.value)
+                            if (Number.isFinite(n)) setVal(n)
+                          }}
+                        />
+                      </label>
+                    )
+                  }
+                  if (f.type === 'enum') {
+                    return (
+                      <label key={f.key} className="flex items-center gap-2" style={{ fontSize: 12.5 }}>
+                        <span style={{ color: 'var(--color-ink2)' }}>{f.label}</span>
+                        <select
+                          className="input"
+                          data-cfg-field={f.key}
+                          style={{ width: 'auto', height: 32, fontSize: 12.5 }}
+                          value={typeof val === 'string' ? val : ''}
+                          onChange={(e) => setVal(e.target.value)}
+                        >
+                          {(f.options ?? []).map(([v, label]) => (
+                            <option key={v} value={v}>
+                              {label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    )
+                  }
+                  return (
+                    <label key={f.key} className="flex items-center gap-2" style={{ fontSize: 12.5 }}>
+                      <span style={{ color: 'var(--color-ink2)', flexShrink: 0 }}>{f.label}</span>
+                      <input
+                        className="input"
+                        data-cfg-field={f.key}
+                        style={{ flex: 1, minWidth: 0 }}
+                        maxLength={f.maxLength}
+                        value={typeof val === 'string' ? val : ''}
+                        onChange={(e) => setVal(e.target.value)}
+                      />
+                    </label>
+                  )
+                })}
+                {dirty ? (
+                  <div>
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      disabled={busyId === card.pluginId}
+                      onClick={() => void saveDraft(card)}
+                    >
+                      保存配置
+                    </Button>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+        )
+      })}
     </div>
   )
 }
