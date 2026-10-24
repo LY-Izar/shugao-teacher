@@ -1,7 +1,7 @@
 {
   "name": "shugao-teacher-console",
   "private": true,
-  "version": "1.1.5",
+  "version": "1.1.6",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -15,6 +15,7 @@
     "grade-checks": "node scripts/grade-checks.mjs",
     "backup-checks": "node scripts/backup-checks.mjs",
     "rls-checks": "node scripts/rls-checks.mjs",
+    "realtime-checks": "node scripts/realtime-checks.mjs",
     "admin-checks": "node scripts/admin-checks.mjs",
     "ocr-checks": "node scripts/ocr-checks.mjs",
     "plugin-framework-checks": "node scripts/plugin-framework-checks.mjs",

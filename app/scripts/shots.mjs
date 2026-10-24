@@ -15002,9 +15002,18 @@ await withLock(async () => {
         '反向对照：往 `1.0.0` 那一段塞一句含该词的文案 → 这一条当场判假（对照 B 实测跑过）',
       )
       /* 同一句话要写进**内部**文档（给后来的 agent 看），两边分工不许串 */
+      /*
+       * ⚠️ 2026-10-24 目录整理：`功能设计与不变量.md` 从**仓库根**挪进 `docs\design\`。
+       *   这里原来写的是 `join(root25, '..', '功能设计与不变量.md')`（= 仓库根下的那一份），
+       *   挪完之后读不到 ⇒ `docSrc` 恒空 ⇒ 这一条**恒红**。
+       *   与 `nav-checks` 那次是同一个病：**脚本还在往老位置读文档**（那次是静默少测，这次是恒红）。
+       *   ⇒ 路径改成新位置，并且下面那句 detail 要**说清是"读不到文件"**，
+       *     别让人以为"文档里没写这句话"。
+       */
+      const DESIGN_DOC = join(root25, '..', 'docs', 'design', '功能设计与不变量.md')
       const docSrc = (() => {
         try {
-          return readFileSync(join(root25, '..', '功能设计与不变量.md'), 'utf8').replace(/\r\n/g, '\n')
+          return readFileSync(DESIGN_DOC, 'utf8').replace(/\r\n/g, '\n')
         } catch {
           return ''
         }
@@ -15012,7 +15021,9 @@ await withLock(async () => {
       check(
         docSrc.includes(banned[0]) && docSrc.includes(banned[1]) && docSrc.includes('1.0.0'),
         'S25 ⑦：`1.0.0 = 内测转公测、第一次小范围公测` 这句写在**内部**文档（`功能设计与不变量.md` §15.6）里 —— 内部话归内部，界面话归界面',
-        `功能设计与不变量.md：字数 ${docSrc.length} · 两个词 ${banned.map((w) => (docSrc.includes(w) ? '有' : '没有')).join('/')}`,
+        `功能设计与不变量.md：字数 ${docSrc.length}${
+          docSrc.length ? '' : `（🔴 读不到 ${DESIGN_DOC} —— 路径失效，不是文档里没写）`
+        } · 两个词 ${banned.map((w) => (docSrc.includes(w) ? '有' : '没有')).join('/')}`,
       )
 
       /* ============================================================

@@ -97,6 +97,13 @@ export type ChangeLogEntry = {
 
 export const CHANGELOG: ChangeLogEntry[] = [
   {
+    v: '1.1.6',
+    at: '2026年10月24日',
+    items: [
+      '修复：教室端实时通道重复订阅导致首页整屏报错',
+    ],
+  },
+  {
     v: '1.1.5',
     at: '2026年10月24日',
     items: [

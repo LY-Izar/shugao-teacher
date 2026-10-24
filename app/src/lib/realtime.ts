@@ -1,6 +1,8 @@
+import type { RealtimeChannel } from '@supabase/supabase-js'
 import type { CallRecord, ClassroomClient } from '../data/types'
 import { rowToCall, rowToClassroom } from '../data/remote'
 import { getSupabase, isRemote } from './supabase'
+import { createFanout, type Fanout } from './realtimeFanout'
 
 /* ============================================================
    教师端 ←→ 教室端 的实时通道
@@ -58,51 +60,67 @@ export function emit(m: BusMessage) {
   if (m.type !== 'heartbeat') window.dispatchEvent(new CustomEvent(LOCAL_EVENT, { detail: m }))
 }
 
+/*
+ * 后端模式的那一条通道：**全页只有一条**，订阅者往这里登记 ——
+ * 为什么不能"一个订阅者开一条"（会抛 cannot add postgres_changes callbacks …）
+ * 写在 `realtimeFanout.ts` 顶上，那是 2026-10-24 教室端首页报错的根因。
+ *
+ * 三个 `.on` 在这里**一次挂完**；挂完之后任何地方都不许再往上追加。
+ */
+const remoteBus: Fanout<BusMessage> | null = isRemote
+  ? createFanout<BusMessage, RealtimeChannel>({
+      baseTopic: 'shugao-classroom',
+      open: (topic) => {
+        const sb = getSupabase()
+        if (!sb) throw new Error('[realtime] 后端模式却拿不到 Supabase 客户端')
+        return sb
+          .channel(topic)
+          .on(
+            'postgres_changes',
+            { event: '*', schema: 'public', table: 'calls' },
+            /*
+             * 这里必须是 `*` 而不是 `INSERT`。
+             * 「再播一遍」不改行数，它是**追加一个 sent_at 时间戳**（UPDATE）——
+             * 只订阅 INSERT 的话，教师点了重播、教室端什么都不会发生，
+             * 而教师界面上写着"已重播一遍"。DELETE 没有可播的新行，跳过即可。
+             */
+            (p) => {
+              if (p.eventType === 'DELETE') return
+              remoteBus?.emit({ type: 'call', call: rowToCall(p.new as never) })
+            },
+          )
+          .on(
+            'postgres_changes',
+            { event: '*', schema: 'public', table: 'classrooms' },
+            (p) =>
+              remoteBus?.emit({ type: 'classroom', classroom: rowToClassroom(p.new as never) }),
+          )
+          .on(
+            'postgres_changes',
+            { event: '*', schema: 'public', table: 'plugin_configs' },
+            /* 🆕 P1：教师端开/关/改配置 → 门铃。Realtime 吃 RLS：教室端只会收到
+               自己班那些行（§46.2 的读策略在起作用），所以这里不用再筛权限 ——
+               但**要不要响应这个班**仍由收方判（教师端也订着同一条）。 */
+            (p) => {
+              const row = (p.new ?? {}) as { class_id?: string }
+              if (typeof row.class_id === 'string')
+                remoteBus?.emit({ type: 'pluginConfigs', classId: row.class_id })
+            },
+          )
+          .subscribe((status) => {
+            if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+              console.warn('[realtime] 频道异常:', status)
+            }
+          })
+      },
+      close: (ch) => {
+        void getSupabase()?.removeChannel(ch)
+      },
+    })
+  : null
+
 export function subscribe(fn: (m: BusMessage) => void): () => void {
-  if (isRemote) {
-    const sb = getSupabase()
-    if (!sb) return () => {}
-    const ch = sb
-      .channel('shugao-classroom')
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'calls' },
-        /*
-         * 这里必须是 `*` 而不是 `INSERT`。
-         * 「再播一遍」不改行数，它是**追加一个 sent_at 时间戳**（UPDATE）——
-         * 只订阅 INSERT 的话，教师点了重播、教室端什么都不会发生，
-         * 而教师界面上写着"已重播一遍"。DELETE 没有可播的新行，跳过即可。
-         */
-        (p) => {
-          if (p.eventType === 'DELETE') return
-          fn({ type: 'call', call: rowToCall(p.new as never) })
-        },
-      )
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'classrooms' },
-        (p) => fn({ type: 'classroom', classroom: rowToClassroom(p.new as never) }),
-      )
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'plugin_configs' },
-        /* 🆕 P1：教师端开/关/改配置 → 门铃。Realtime 吃 RLS：教室端只会收到
-           自己班那些行（§46.2 的读策略在起作用），所以这里不用再筛权限 ——
-           但**要不要响应这个班**仍由收方判（教师端也订着同一条）。 */
-        (p) => {
-          const row = (p.new ?? {}) as { class_id?: string }
-          if (typeof row.class_id === 'string') fn({ type: 'pluginConfigs', classId: row.class_id })
-        },
-      )
-      .subscribe((status) => {
-        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
-          console.warn('[realtime] 频道异常:', status)
-        }
-      })
-    return () => {
-      void sb.removeChannel(ch)
-    }
-  }
+  if (isRemote) return remoteBus ? remoteBus.subscribe(fn) : () => {}
 
   const bc = getChannel()
   const onMsg = (e: MessageEvent) => fn(e.data as BusMessage)
