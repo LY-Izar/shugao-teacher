@@ -515,6 +515,14 @@ function useDevInjection() {
  * 所以那 141 张截图里不会出现开屏）。
  */
 function bootSplash() {
+  /*
+   * 🆕 2026-10-24：**浮窗那一屏不要开屏**。
+   *   壳给每个插件开一扇窗时，那扇窗里跑的是同一个应用 ⇒ 每次点「弹出」都会先播一遍
+   *   校徽开屏动画（用户：「启动小窗的时候为什么会有网页的开屏动画」）。
+   *   浮窗是"随时开、随时关"的，等一遍动画就是纯延迟。
+   *   ⚠️ 只按**路由**判，不看 query：`/popup/*` 这一屏永远不需要开屏。
+   */
+  if (typeof window !== 'undefined' && window.location.pathname.startsWith('/popup/')) return false
   if (isRemote) return true
   try {
     return new URLSearchParams(window.location.search).has('boot')

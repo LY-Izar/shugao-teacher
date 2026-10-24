@@ -20,8 +20,8 @@
 import { useMemo, type CSSProperties } from 'react'
 import { useParams } from 'react-router-dom'
 import ClassroomPluginShell from './ClassroomPluginShell'
+import ReviewPipPage from './ReviewPipPage'
 import { availablePlugins } from '../classroom/demoPlugin'
-import { shellPlatform } from '../lib/classroomShell'
 
 /**
  * Electron 的窗口拖拽区不是 React 认识的 CSS 属性
@@ -78,17 +78,12 @@ const CONTENT: CSSProperties = {
   color: 'var(--color-ink)',
 }
 
-/**
- * 这扇窗自己能不能关掉 —— 判据是**在不在桌面壳里**（走 `shellPlatform()`）。
- *
- * 🔴 为什么不直接看 `__shell_out`：全仓读那个对象的文件有白名单（`nav-checks` A21 ⑩），
- *    多一个就红。也不该由一页去拆壳的桥 —— 桥只有 `lib/classroomShell.ts` 一处入口。
- * ⚠️ 不用 `shellRole()`：它在"网页版"和"没带 appRole 的老壳"上都回 `'unknown'`，
- *    分不出"有没有壳"，而这里要答的正是"`window.close()` 有没有人接"。
+/*
+ * 🔴 原来这里有个 `closableWindow()`（按 `shellPlatform() === 'electron'` 判"这颗 ✕ 有没有人接"），
+ *    2026-10-24 删掉：浮窗**没有 preload**，`shellPlatform()` 在窗里恒为 null ⇒ 它把真正的浮窗
+ *    判成"没有壳"，于是窗里显示一句「这一屏要教室版程序才有」（而它就是那个浮窗）。
+ *    `window.close()` 自己关自己不需要 preload，所以 ✕ 一律摆出来。
  */
-function closableWindow(): boolean {
-  return shellPlatform() === 'electron'
-}
 
 /**
  * 顶栏上的插件名。
@@ -108,7 +103,22 @@ function pluginName(pluginId: string): string {
 export default function PluginPopup() {
   const { pluginId = '' } = useParams<{ pluginId: string }>()
   const name = useMemo(() => pluginName(pluginId), [pluginId])
-  const closable = closableWindow()
+  /*
+   * 🔴 作业讲评那一扇是**置顶小窗**，不是"能弹出的一块功能块"：
+   *    用户 2026-10-24：「要原来固定版的那种」。所以它走自己那一屏（深色题号条面板），
+   *    不套这层玻璃卡 —— 玻璃卡 + 整块插件界面会把「启动置顶小窗」那颗按钮也画进来，
+   *    小窗里套一个小窗的按钮，正是这一版要消掉的东西。
+   */
+  const isPipPanel = pluginId === 'shugao.review'
+
+  if (isPipPanel) {
+    return (
+      <div className="h-full w-full overflow-hidden" style={{ background: 'transparent' }}>
+        <style>{BASE_CSS}</style>
+        <ReviewPipPage />
+      </div>
+    )
+  }
 
   return (
     <div
@@ -124,20 +134,20 @@ export default function PluginPopup() {
         >
           <span className="truncate text-[13px] font-semibold">{name}</span>
           <div className="ml-auto flex items-center gap-1" style={NO_DRAG}>
-            {closable ? (
-              <button
-                type="button"
-                aria-label="关闭"
-                onClick={() => window.close()}
-                className="grid h-5 w-5 place-items-center rounded-md text-[11px] leading-none text-white/70 transition-colors hover:bg-white/15 hover:text-white"
-              >
-                ✕
-              </button>
-            ) : (
-              <span className="whitespace-nowrap text-[11px] text-white/75">
-                这一屏要教室版程序才有
-              </span>
-            )}
+            {/*
+              这一屏只有壳会开（`/popup/*`），所以那颗 ✕ 一律摆出来：
+              窗口**没有 preload** ⇒ `shellPlatform()` 在窗里恒为 null，原来按它判就会
+              在真正的浮窗里显示一句「这一屏要教室版程序才有」—— 而它**就是**那个浮窗。
+              `window.close()` 自己关自己不需要 preload（壳那边也照 `closed` 事件收尾）。
+            */}
+            <button
+              type="button"
+              aria-label="关闭"
+              onClick={() => window.close()}
+              className="grid h-5 w-5 place-items-center rounded-md text-[11px] leading-none text-white/70 transition-colors hover:bg-white/15 hover:text-white"
+            >
+              ✕
+            </button>
           </div>
         </header>
         {/* 内容区：插件自己的真实界面（`popupId` = 只画这一块，不画工具栏/画布） */}
