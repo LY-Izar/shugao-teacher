@@ -1,0 +1,11 @@
+{
+  "id": "shugao.exams",
+  "name": "本班考试",
+  "icon": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\"><path d=\"M5 3h11l3 3v15H5z\"/><path d=\"M9 9h6M9 13h6M9 17h4\"/></svg>",
+  "description": "最近六场考试的日期、学科与批阅状态",
+  "version": "1.0.0",
+  "entry": "index.js",
+  "minShellVersion": "1.1.5",
+  "permissions": ["data.exams"],
+  "window": { "w": 4, "h": 3, "min": { "w": 3, "h": 2 } }
+}

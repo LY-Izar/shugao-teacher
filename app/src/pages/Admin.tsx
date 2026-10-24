@@ -98,6 +98,9 @@ import { Button, Track } from '../components/ui'
    从「我的」撤下来、搬进「③ 备份（G2）」卡 —— **实现只有那一份文件**，
    这里只 import、不复制（同一个东西两套实现是这个仓库反复栽过的坑）。 */
 import { BackupExtraActions } from '../components/BackupExtraActions'
+/* 🆕 2026-10-24：插件库待审列表（服务端探针 + 点一下发布）。单独一个文件，
+   免得这一页继续往 6000 行涨。 */
+import { PluginRepoPending } from '../components/PluginRepoPending'
 import { downloadJson, readJsonFile } from '../lib/backup'
 import {
   isAdminSealed,
@@ -5572,6 +5575,10 @@ function PluginsCard() {
               {msg}
             </div>
           ) : null}
+
+          {/* 🆕 2026-10-24：从插件库待审（服务端探针 → 点一下发布）。
+              手动上传三件套那一段**保留**：断网/紧急时它是唯一兜底。 */}
+          <PluginRepoPending onPublished={() => setTick((t) => t + 1)} />
 
           {(rows ?? []).map((r) => {
             const pid = String(r.plugin_id ?? '')

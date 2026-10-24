@@ -115,8 +115,24 @@ const C = await import(mod('src/lib/adminChart.ts'))
        🔴 **策略排在最后压进 `targets`**：`PROBES_PER_STAGE` 只取前 2 个，不能让策略把
           "表 / 无参函数"这些**真能探的**挤出探针位。
        ⚠️ 带参数的函数**一律不进清单** —— 探它要伪造实参，而 `grade_delete` /
-       `migrate_nos_to_serial` 那些**会写库**，面板是只读的；
-       `_for` 变体与 `returns trigger` 的触发器函数也不进（它们本来就不可 RPC 调用）。
+          `migrate_nos_to_serial` 那些**会写库**，面板是只读的；
+          `_for` 变体与 `returns trigger` 的触发器函数也不进（它们本来就不可 RPC 调用）。
+       ⓒ 🆕 2026-10-23 · **零表权限的表**换成「RPC 存在性预言」target（`rpc-oracle`）——
+          §45 的 `plugin_data`：本段把它 `revoke all … from anon, authenticated`（**刻意的**，
+          读写只走 §45.4 的安全定义函数），普通表探针的 `select('*')` 在真库上只会撞
+          `42501 permission denied` —— 既证明不了"在"也证明不了"不在"，那一格永远灰，
+          §45 永远绿不了。判据全部**从 schema.sql 本身推**（不另抄一份名单，重生成不丢）：
+            · 本段有 `revoke all on <表> from anon, authenticated;`（**且没有**再
+              `grant … select … on <表>` 找回来 —— §27 `class_members` / §34
+              `student_subject_changes` 就是"先 revoke 后 grant select"的形状，不许误伤）；
+            · **且**本段 `grant execute on function public.<表>_read(…) to authenticated;`
+              —— §45.4 的 `plugin_data_read` 恰好是"读也走函数"的那个读入口（读频率要限额），
+              它的身份判据在函数体最前，探针这一问无副作用（为何无副作用见
+              `adminChart.ts` 的 `probeRpcOracle()`）。
+          两条都满足才换（§45.3 `plugin_quota` 没有可调用函数 → 照旧留在清单里当普通表
+          target，只是没有诚实探法，由 `NO_PROBE_REASON['§45']` 记账）；
+          只满足一条的（§23 `admin_audit` / §40 `class_rep_pins` 那批零表权限表）**不动** ——
+          它们的探法是另一轮的事，本轮不许顺手改。
    ============================================================ */
 
 const SCHEMA_FILE = resolvePath(APP, '..', 'supabase', 'schema.sql')
@@ -200,6 +216,39 @@ function parseSchemaStages(text) {
         targets.push({ kind: 'policy', table, name })
       }
     }
+    /*
+     * 🆕 2026-10-23 · 零表权限的表 → 换成「RPC 存在性预言」target（`rpc-oracle`）。
+     * 规则与"为什么不另抄一份名单"见本文件头那段解析规则 ⓒ；三条都要从**本段的
+     * `flat` 文本**里推，重生成（`--gen-stages`）与门禁的当场重解析（补〇ⓐ）走的是
+     * 同一份代码，所以永不失同步。
+     */
+    const grantedSelectTables = new Set()
+    for (const m of flat.matchAll(
+      /grant ([a-z]+(?:\s*,\s*[a-z]+)*) on (?:public\.)?([a-z_][a-z_0-9]*) to/gi,
+    )) {
+      if (m[1].toLowerCase().split(/\s*,\s*/).includes('select')) {
+        grantedSelectTables.add(m[2].toLowerCase())
+      }
+    }
+    const revokedFromClients = new Set()
+    for (const m of flat.matchAll(/revoke all on ([a-z_][a-z_0-9]*) from anon, authenticated/gi)) {
+      const t = m[1].toLowerCase()
+      /* "先 revoke 后又 grant select 找回来"的（§27 class_members / §34 student_subject_changes）不算零表权限 */
+      if (!grantedSelectTables.has(t)) revokedFromClients.add(t)
+    }
+    const grantedRpcFns = new Set()
+    for (const m of flat.matchAll(
+      /grant execute on function (?:public\.)?([a-z_][a-z_0-9]*)\s*\([^)]*\)\s+to authenticated/gi,
+    )) {
+      grantedRpcFns.add(m[1].toLowerCase())
+    }
+    for (let i = 0; i < targets.length; i++) {
+      const t = targets[i]
+      if (t.kind === 'table' && revokedFromClients.has(t.name)) {
+        const fn = `${t.name}_read`
+        if (grantedRpcFns.has(fn)) targets[i] = { kind: 'rpc-oracle', table: t.name, fn }
+      }
+    }
     return { n: h.n, title: h.title, from: h.line, to, sql, targets }
   })
 }
@@ -239,7 +288,10 @@ function renderStagesBlock(stages) {
               ? `{ kind: 'col', table: '${t.table}', column: '${t.column}' }`
               : t.kind === 'policy'
                 ? `{ kind: 'policy', table: '${t.table}', name: '${t.name}' }`
-                : `{ kind: 'fn', name: '${t.name}' }`,
+                : t.kind === 'rpc-oracle'
+                  ? /* 🆕 2026-10-23：零表权限表的 RPC 存在性预言（见解析规则 ⓒ） */
+                    `{ kind: 'rpc-oracle', table: '${t.table}', fn: '${t.fn}' }`
+                  : `{ kind: 'fn', name: '${t.name}' }`,
         )
         .join(', ')
       return (
@@ -257,6 +309,17 @@ const GEN_END = '/* @gen:schema-stages END */'
 /** 用解析出来的清单**就地替换**标记之间那一段（其余一个字不动） */
 function writeStagesBlock(stages) {
   const src = readFileSync(ADMIN_CHART_FILE, 'utf8')
+  /* 🔴 🆕 2026-10-23：替换前先断言两个标记**各恰好出现 1 次**（照 `mutateOnce` 的纪律）。
+   * `indexOf` 只认第一处 —— 标记要是被复制成两份，这一刀会静默切错位置，
+   * 把生成的清单写进半截注释里。宁可当场抛错，也不盲写。 */
+  const countOf = (s) => src.split(s).length - 1
+  const nBegin = countOf(GEN_BEGIN)
+  const nEnd = countOf(GEN_END)
+  if (nBegin !== 1 || nEnd !== 1) {
+    throw new Error(
+      `adminChart.ts 里 @gen:schema-stages 标记必须各恰好 1 次（实为 BEGIN ${nBegin} 次 / END ${nEnd} 次），拒绝盲改`,
+    )
+  }
   const i = src.indexOf(GEN_BEGIN)
   const j = src.indexOf(GEN_END)
   if (i < 0 || j < 0 || j < i) throw new Error('adminChart.ts 里找不到 @gen:schema-stages 标记')
@@ -382,6 +445,17 @@ await withLock(async () => {
    */
   let publishValue = 'false'
   /** 假 `db_usage_report()` 的回话（第七节·补二 要造"读不到"那一支） */
+  /**
+   * 🆕 2026-10-23 · §45 的 RPC 存在性预言（`plugin_data_read`）在假库里怎么答。
+   *
+   * 🔴 默认按**真函数的形状**答：`{ ok:false, code:'E_FORBIDDEN' }` —— 真库上探针那一问
+   *    （全零班 + `__probe__`）在函数体第一行的身份判据就被拒了，不发生任何写读
+   *    （为什么这是无副作用的，见 `adminChart.ts` 的 `probeRpcOracle()`）。
+   *    `pluginDataReadMissing = true` 是**造出来的世界**（"§45.4 没跑"）：回 `PGRST202`，
+   *    C1 的预言探针必须据此把 §45 判成"未跑"（红）—— 证明这个预言不是摆设。
+   */
+  let pluginDataReadMissing = false
+  /** 假 `db_usage_report()` 的回话（第七节·补二 要造"读不到"那一支） */
   let dbReportValue = {
     totalBytes: 300 * 1024 * 1024,
     tables: [{ name: 'assignments', bytes: 200 * 1024 * 1024, rowsEstimate: 9 }],
@@ -494,6 +568,21 @@ await withLock(async () => {
       if (fn === 'can_create_teacher_accounts') return send(200, createAcctValue)
       /** 🆕 2026-10-06：`role`（指派 / 撤销身份）的判据 —— 见 `assignRolesValue` 的注释 */
       if (fn === 'can_assign_roles') return send(200, assignRolesValue)
+      /**
+       * 🆕 2026-10-23 · §45 的存在性预言（C1 对零表权限的 `plugin_data` 的探针，
+       * 见 `adminChart.ts` 的 `probeRpcOracle()`）。默认回**真函数的形状**
+       * `{ok:false, code:'E_FORBIDDEN'}`；`pluginDataReadMissing` 造"§45.4 没跑"的世界。
+       */
+      if (fn === 'plugin_data_read') {
+        if (pluginDataReadMissing) {
+          return send(404, {
+            code: 'PGRST202',
+            message:
+              'Could not find the function public.plugin_data_read(uuid, text, text) in the schema cache',
+          })
+        }
+        return send(200, { ok: false, code: 'E_FORBIDDEN' })
+      }
       // §16 / §15 的裸版判据：对未登录调用者恒为 false（这就是"函数在"的正面证据）
       return send(200, 'false')
     }
@@ -1944,6 +2033,84 @@ await withLock(async () => {
       missingPolicies.clear()
       pgPoliciesExposed = false
     }
+  }
+
+  /* ============================================================
+     🆕 2026-10-23 · 补〇三 · §45 `plugin_data` 的 RPC 存在性预言 + `plugin_quota` 的无探法
+     ------------------------------------------------------------
+     病灶：`plugin_data` 客户端**零表权限**（§45.5 `revoke all … from anon, authenticated`
+     是刻意的）—— 旧的表探针 `select('*')` 在真库上只会撞 `42501`，那一格永远灰，
+     §45 永远绿不了。改成调 §45.4 `plugin_data_read()`（读也走函数，§45 自带的存在性预言）：
+     PGRST202 ⇒ 未跑（红）；调到 ⇒ 在（绿）；其他 ⇒ 灰（三态分得开，见 `probeRpcOracle()`）。
+     `plugin_quota` 零权限且零可调用函数 → 没有诚实探法，进 `NO_PROBE_REASON['§45']`。
+
+     断言：
+       ⓐ 清单形状：`plugin_data` 在 §45 的 targets 里是 `rpc-oracle`、**不再是**普通表 target；
+          而 §46 的 `plugin_configs`（authenticated 有 select）**照旧**是普通表 target（不许误伤）；
+       ⓑ 默认世界（假库按真函数形状答 `E_FORBIDDEN`）→ §45 判"已跑"，证据点名 E_FORBIDDEN；
+       ⓒ 反向对照：函数不存在（PGRST202）→ §45 必须红"未跑"、卡跟着变红、证据带原文；
+       ⓓ `NO_PROBE_REASON['§45']` 点名 `plugin_quota` 与去处（自检.sql / §45.6）。
+     ============================================================ */
+  {
+    const byN45 = new Map(C.SCHEMA_STAGES.map((s) => [s.n, s]))
+    ok(
+      '补〇三ⓐ §45 清单里 `plugin_data` 是 **rpc-oracle**（零表权限 ⇒ select 探针不诚实）',
+      (() => {
+        const ts = byN45.get(45).targets
+        return (
+          ts.some((t) => t.kind === 'rpc-oracle' && t.table === 'plugin_data' && t.fn === 'plugin_data_read') &&
+          !ts.some((t) => t.kind === 'table' && t.name === 'plugin_data')
+        )
+      })(),
+      JSON.stringify(byN45.get(45).targets.slice(0, 4)),
+    )
+    ok(
+      '补〇三ⓐ §46 的 `plugin_configs`（authenticated 有 select）**照旧**是普通表 target，不许被误伤',
+      (() => {
+        const ts = byN45.get(46).targets
+        return ts.some((t) => t.kind === 'table' && t.name === 'plugin_configs') && ts.every((t) => t.kind !== 'rpc-oracle')
+      })(),
+      JSON.stringify(byN45.get(46).targets),
+    )
+    missingTables.clear()
+    missingCols.clear()
+    flakyTables.clear()
+    missingPolicies.clear()
+    pluginDataReadMissing = false
+    {
+      const r = await C.probeSchemaDrift()
+      const s45 = r.sections.find((x) => x.stage === '§45')
+      eq('补〇三ⓑ 假库按真函数形状答（E_FORBIDDEN）→ §45 判"已跑"', s45.state, 'present')
+      ok(
+        '补〇三ⓑ 证据里点名 E_FORBIDDEN（为什么这个绿是诚实的，要写在屏上）',
+        s45.cells.some((c) => c.state === 'present' && c.evidence.includes('E_FORBIDDEN')),
+        JSON.stringify(s45.cells),
+      )
+      ok(
+        '补〇三ⓑ 假库确实收到过 `plugin_data_read` 这一次调用（探针真的走了预言，不是绕回 select）',
+        seen.some((x) => x.path === '/rest/v1/rpc/plugin_data_read'),
+        seen.filter((x) => x.path.includes('plugin')).map((x) => x.path).join(' · '),
+      )
+    }
+    /* 反向对照：§45.4 没跑（函数不在）→ 探针必须红，不许灰、更不许绿（否则预言是摆设） */
+    pluginDataReadMissing = true
+    {
+      const r = await C.probeSchemaDrift()
+      const s45 = r.sections.find((x) => x.stage === '§45')
+      eq('补〇三ⓒ 反向对照：函数不存在（PGRST202）→ §45 必须"未跑"', s45.state, 'missing')
+      ok(
+        '补〇三ⓒ 证据带着 PGRST202 原文（不是只给一个红点）',
+        s45.cells.some((c) => c.state === 'missing' && c.evidence.includes('PGRST202')),
+        JSON.stringify(s45.cells),
+      )
+      eq('补〇三ⓒ 而且卡跟着变红', C.driftSummary(r.sections).state, 'missing')
+    }
+    pluginDataReadMissing = false
+    ok(
+      '补〇三ⓓ `plugin_quota`（零权限零可调用函数）的无探法进了 NO_PROBE_REASON，点名表名与去处',
+      ['plugin_quota', '自检', '§45.6'].every((k) => (C.NO_PROBE_REASON['§45'] ?? '').includes(k)),
+      C.NO_PROBE_REASON['§45'],
+    )
   }
 
   /* ① 库"全跑过" → 有探针的段全绿；登记节单独一档；只加策略的那几段是"探不到" */

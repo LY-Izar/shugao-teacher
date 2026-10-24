@@ -1,5 +1,5 @@
 /**
- * 宿主自带的**演示插件**（手册 §12：`?demoPlugin=1` 时加载它）。
+ * 宿主**内置插件**（P0b 起步是演示插件，P2 起正式插件在真下载落地前也走这里）。
  *
  * 它与 `scripts/fixtures/demo.helloclock/`（契约自检 CF-01…CF-14 的夹具）是**同一份
  * 契约的两个载体**：夹具在纯 Node 里钉"宿主核心判得对不对"，这一份在真浏览器里钉
@@ -7,7 +7,8 @@
  * 🔴 两份的 manifest 字段保持一致 —— 改一份要想着另一份（它们各自被两道门禁盯）。
  *
  * ⚠️ 走 `import()` 的真下载要等壳侧的 `downloadPlugin`（`classroomShell.ts` 顶部那四条
- *    约定）；P0b 能在网页里演示的就是这一份内置的。
+ *    约定）；在那之前，正式插件（P2 首批）与本演示插件一样以内置副本进教室端，
+ *    三件套照常放在 `app/plugins/<id>/` 供契约自检与发布。
  */
 
 import type { PluginManifest } from '../lib/pluginHost'
@@ -114,7 +115,341 @@ export const DEMO_PLUGIN: AvailablePlugin = {
   source: 'bundled',
 }
 
-/** P0b 的插件来源就这一个；`demoPlugin=1` 才把它列进加载清单（手册 §12 的那条地址）。 */
-export function availablePlugins(demoPlugin: boolean): AvailablePlugin[] {
-  return demoPlugin ? [DEMO_PLUGIN] : []
+/* ============================================================================
+   P2 首批搬运 ①：祝福语（shugao.quote）
+   ----------------------------------------------------------------------------
+   真下载（壳侧 `downloadPlugin`）落地之前，教室端要能跑的插件只能**内置** ——
+   与演示插件同一个"双载体"约定：`app/plugins/shugao.quote/` 三件套是给契约自检
+   与发布用的那份，这里的 TS 副本与之**逐行为同源**（改一处想着另一处）。
+   出现条件与真插件完全一致：教师启用（plugin_configs.enabled）＋登记表放行；
+   `?demoPlugin=1` 的演示直通对它同样生效（手册 §12 的演示地址）。
+   ============================================================================ */
+
+export const QUOTE_MANIFEST: PluginManifest = {
+  id: 'shugao.quote',
+  name: '每日祝福语',
+  icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 3l2.3 5 5.4.6-4 3.7 1.1 5.3L12 14.9l-4.8 2.7 1.1-5.3-4-3.7 5.4-.6z"/></svg>',
+  description: '教室大屏上给学生看的那一句，按日期轮换，同一天固定',
+  version: '1.0.0',
+  entry: 'index.js',
+  minShellVersion: '1.1.5',
+  permissions: ['data.quote', 'clock'],
+  window: { w: 4, h: 2, min: { w: 2, h: 1 } },
+}
+
+type QuoteCtx = {
+  ui: { container: HTMLElement }
+  data: {
+    read(resource: string): Promise<{ text?: string; from?: string; stale?: boolean }>
+    watch(resource: string, cb: () => void): () => void
+  }
+  clock?: { onMinute(cb: () => void): () => void }
+  now(): Date
+  onDispose(fn: () => void): void
+}
+
+const quoteModule = {
+  async activate(rawCtx: Record<string, unknown>) {
+    const ctx = rawCtx as unknown as QuoteCtx
+    const wrap = document.createElement('div')
+    wrap.setAttribute('data-quote-slot', '')
+    wrap.style.cssText =
+      'height:100%;box-sizing:border-box;padding:16px;display:flex;flex-direction:column;' +
+      'justify-content:center;text-align:center;font-family:system-ui'
+    const text = document.createElement('div')
+    text.style.cssText =
+      'font-weight:620;font-size:clamp(19px, 1.7vw, 27px);line-height:1.55;' +
+      'letter-spacing:.01em;color:var(--color-ink)'
+    const from = document.createElement('div')
+    from.style.cssText = 'margin-top:7px;font-size:13px;color:var(--color-ink3)'
+    wrap.append(text, from)
+    ctx.ui.container.append(wrap)
+
+    const paint = async () => {
+      const q = await ctx.data.read('class.quote')
+      text.textContent = q.text ?? ''
+      from.textContent = q.text ? `—— ${q.from ?? ''}` : ''
+    }
+
+    await paint()
+    ctx.onDispose(ctx.data.watch('class.quote', () => void paint()))
+    if (ctx.clock) {
+      // 与旧教室端同一口径：每分钟重画一次，0 点翻天的时候句子跟着换
+      ctx.onDispose(ctx.clock.onMinute(() => void paint()))
+    }
+  },
+
+  async deactivate() {},
+}
+
+export const QUOTE_PLUGIN: AvailablePlugin = {
+  dirName: QUOTE_MANIFEST.id,
+  manifest: QUOTE_MANIFEST,
+  module: quoteModule,
+  source: 'bundled',
+}
+
+/* ============================================================================
+   P2 首批搬运 ②：每日作业与值日（shugao.daily）—— 与 `app/plugins/shugao.daily/`
+   三件套逐行为同源（分组顺序照宿主 subjects 字典、空态与「课代表」标签照旧页话术）。
+   ============================================================================ */
+
+export const DAILY_MANIFEST: PluginManifest = {
+  id: 'shugao.daily',
+  name: '每日作业与值日',
+  icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>',
+  description: '今天各科留的作业按学科分组，配今天的值日生',
+  version: '1.0.0',
+  entry: 'index.js',
+  minShellVersion: '1.1.5',
+  permissions: ['data.dailyHomework', 'data.duty', 'clock'],
+  window: { w: 4, h: 4, min: { w: 3, h: 2 } },
+}
+
+/* 学科字典的顺序照抄宿主 `lib/subjects.ts`（语文数学英语…）—— 单文件插件里
+   无法 import 宿主模块（手册 §11.3），这份顺序副本与三件套里那份同轮维护。 */
+const DAILY_SUBJECT_ORDER: ReadonlyArray<readonly [string, string]> = [
+  ['chinese', '语文'], ['math', '数学'], ['english', '英语'], ['physics', '物理'],
+  ['chemistry', '化学'], ['biology', '生物'], ['politics', '政治'], ['history', '历史'],
+  ['geography', '地理'], ['it', '信息技术'], ['general_tech', '通用技术'], ['pe', '体育'],
+  ['music', '音乐'], ['art', '美术'], ['mental_health', '心理健康'],
+]
+
+type DailyHwRow = { subject: string; subjectCode: string; content: string; onDate: string; source: string }
+type DutyData = { today: { no: string; name: string } | null; roster: Array<{ no: string; name: string }> }
+
+type DailyCtx = {
+  ui: { container: HTMLElement }
+  data: {
+    read(resource: string): Promise<{ rows?: DailyHwRow[]; today?: DutyData['today']; notice?: string; stale?: boolean }>
+    watch(resource: string, cb: () => void): () => void
+  }
+  clock?: { onMinute(cb: () => void): () => void }
+  now(): Date
+  onDispose(fn: () => void): void
+}
+
+function dailyGroupBy(rows: DailyHwRow[]) {
+  const order = new Map(DAILY_SUBJECT_ORDER.map(([c], i) => [c, i]))
+  const names = new Map(DAILY_SUBJECT_ORDER)
+  const groups: Array<{ key: string; label: string; code: string; rep: boolean; items: DailyHwRow[] }> = []
+  const byKey = new Map<string, (typeof groups)[number]>()
+  for (const h of rows) {
+    const code = h.subjectCode || ''
+    const key = code || h.subject || '其他'
+    let g = byKey.get(key)
+    if (!g) {
+      g = { key, label: code ? (names.get(code) ?? code) : h.subject || '其他', code, rep: false, items: [] }
+      byKey.set(key, g)
+      groups.push(g)
+    }
+    if (h.source === 'rep') g.rep = true
+    g.items.push(h)
+  }
+  groups.sort((a, b) => (order.get(a.code) ?? 99) - (order.get(b.code) ?? 99))
+  return groups
+}
+
+const dailyModule = {
+  async activate(rawCtx: Record<string, unknown>) {
+    const ctx = rawCtx as unknown as DailyCtx
+    const el = (tag: string, css: string, text?: string) => {
+      const e = document.createElement(tag)
+      if (css) e.style.cssText = css
+      if (text !== undefined) e.textContent = text
+      return e
+    }
+
+    const wrap = el('div', '')
+    wrap.setAttribute('data-daily-slot', '')
+    wrap.style.cssText =
+      'height:100%;box-sizing:border-box;padding:12px 16px;overflow:auto;' +
+      'scrollbar-width:thin;scrollbar-color:var(--color-line2) transparent;' +
+      'font-family:system-ui;color:var(--color-ink)'
+    const head = el('div', 'display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--color-ink3)')
+    const title = el('span', 'font-weight:700;font-size:14.5px;color:var(--color-ink)', '每日作业')
+    const duty = el('span', '')
+    const count = el('span', 'flex:1;text-align:right;font-size:11.5px', '')
+    head.append(title, duty, count)
+    const body = el('div', 'margin-top:10px;display:flex;flex-direction:column;gap:12px')
+    const empty = el('div', 'font-size:13px;color:var(--color-ink3);line-height:1.8;display:none', '今天还没有人留作业。')
+    const notice = el('div', 'font-size:12px;color:var(--color-warn);line-height:1.7;display:none')
+    wrap.append(head, body, empty, notice)
+    ctx.ui.container.append(wrap)
+
+    /* 日期口径：今天 = `ctx.now()`（宿主 beijingNow）的年月日 —— 与旧页 friendlyDate 同判据 */
+    const isoOf = (d: Date) =>
+      `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+
+    const paint = async () => {
+      const iso = isoOf(ctx.now())
+      const [hw, dutyData] = await Promise.all([
+        ctx.data.read('class.dailyHomework'),
+        ctx.data.read('class.duty'),
+      ])
+      const rows = (hw.rows ?? []).filter((h) => h.onDate === iso)
+      const wd = '日一二三四五六'[ctx.now().getDay()]
+      count.textContent = `${ctx.now().getMonth() + 1} 月 ${ctx.now().getDate()} 日 · 周${wd}${rows.length ? ` · 共 ${rows.length} 条` : ''}`
+
+      const t = dutyData.today ?? null
+      duty.textContent = t ? `今天值日生 · ${t.name}` : ''
+      duty.style.cssText = t ? 'font-size:13px;color:var(--color-ink3)' : 'display:none'
+
+      body.innerHTML = ''
+      const groups = dailyGroupBy(rows)
+      if (!groups.length) {
+        empty.style.display = 'block'
+      } else {
+        empty.style.display = 'none'
+        for (const g of groups) {
+          const box = el('div', '')
+          box.setAttribute('data-daily-subject', g.code || g.key)
+          const gh = el('div', 'display:flex;align-items:center;gap:8px')
+          gh.append(el('span', 'font-size:12.5px;font-weight:700', g.label))
+          if (g.rep) {
+            gh.append(el('span',
+              'font-size:10.5px;padding:1px 7px;border-radius:999px;' +
+              'border:1px solid var(--color-line2);background:var(--color-surface);color:var(--color-ink2)',
+              '课代表'))
+          }
+          box.append(gh)
+          for (const h of g.items) {
+            box.append(el('div',
+              'font-size:13px;color:var(--color-ink2);line-height:1.75;margin-top:2px;word-break:break-word',
+              h.content))
+          }
+          body.append(box)
+        }
+      }
+      notice.textContent = hw.notice || ''
+      notice.style.display = hw.notice ? 'block' : 'none'
+    }
+
+    await paint()
+    ctx.onDispose(ctx.data.watch('class.dailyHomework', () => void paint()))
+    ctx.onDispose(ctx.data.watch('class.duty', () => void paint()))
+    if (ctx.clock) {
+      ctx.onDispose(ctx.clock.onMinute(() => void paint()))
+    }
+  },
+
+  async deactivate() {},
+}
+
+export const DAILY_PLUGIN: AvailablePlugin = {
+  dirName: DAILY_MANIFEST.id,
+  manifest: DAILY_MANIFEST,
+  module: dailyModule,
+  source: 'bundled',
+}
+
+/* ============================================================================
+   P2 首批搬运 ③：本班考试（shugao.exams）—— 与 `app/plugins/shugao.exams/` 同源。
+   旧页 0 场时整块不摆；插件模型里块由教师启用，空清单给一句空态（唯一形态差异）。
+   ============================================================================ */
+
+export const EXAMS_MANIFEST: PluginManifest = {
+  id: 'shugao.exams',
+  name: '本班考试',
+  icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M5 3h11l3 3v15H5z"/><path d="M9 9h6M9 13h6M9 17h4"/></svg>',
+  description: '最近六场考试的日期、学科与批阅状态',
+  version: '1.0.0',
+  entry: 'index.js',
+  minShellVersion: '1.1.5',
+  permissions: ['data.exams'],
+  window: { w: 4, h: 3, min: { w: 3, h: 2 } },
+}
+
+type ExamsCtx = {
+  ui: { container: HTMLElement }
+  data: {
+    read(resource: string): Promise<{ rows?: Array<{ examDate: string; subject: string; status: string }> }>
+    watch(resource: string, cb: () => void): () => void
+  }
+  now(): Date
+  onDispose(fn: () => void): void
+}
+
+const examsModule = {
+  async activate(rawCtx: Record<string, unknown>) {
+    const ctx = rawCtx as unknown as ExamsCtx
+    const el = (css: string, text?: string) => {
+      const e = document.createElement('div')
+      if (css) e.style.cssText = css
+      if (text !== undefined) e.textContent = text
+      return e
+    }
+
+    const wrap = el('')
+    wrap.setAttribute('data-exams-slot', '')
+    wrap.style.cssText =
+      'height:100%;box-sizing:border-box;padding:12px 16px;overflow:auto;' +
+      'scrollbar-width:thin;scrollbar-color:var(--color-line2) transparent;' +
+      'font-family:system-ui;color:var(--color-ink)'
+    const head = el('display:flex;align-items:center;gap:8px')
+    const headTitle = el('font-weight:700;font-size:14.5px;color:var(--color-ink)', '本班考试')
+    const count = el('flex:1;text-align:right;font-size:11.5px;color:var(--color-ink3)', '')
+    head.append(headTitle, count)
+    const list = el('margin-top:8px')
+    const empty = el('font-size:13px;color:var(--color-ink3);line-height:1.8;display:none', '最近没有排考试。')
+    wrap.append(head, list, empty)
+    ctx.ui.container.append(wrap)
+
+    const paint = async () => {
+      const { rows } = await ctx.data.read('class.exams')
+      count.textContent = rows?.length ? `共 ${rows.length} 场` : ''
+      list.innerHTML = ''
+      if (!rows?.length) {
+        empty.style.display = 'block'
+        return
+      }
+      empty.style.display = 'none'
+      for (const e of rows) {
+        const row = el('display:flex;align-items:center;gap:8px;padding:6px 0')
+        const date = el(
+          "flex:none;width:48px;font-size:12.5px;color:var(--color-ink2);fontVariantNumeric:'tabular-nums'",
+          String(e.examDate ?? '').slice(5).replace('-', '/'))
+        const subject = el(
+          'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13.5px;font-weight:550',
+          e.subject ?? '')
+        const tag = el(
+          'flex:none;font-size:10.5px;padding:1px 7px;border-radius:999px;' +
+          (e.status === 'graded'
+            ? 'border:1px solid var(--color-line2);background:var(--color-surface);color:var(--color-ink2)'
+            : 'border:1px solid var(--color-accent);background:var(--color-accentsoft);color:var(--color-accentink)'),
+          e.status === 'graded' ? '已定稿' : '批阅中')
+        row.append(date, subject, tag)
+        list.append(row)
+      }
+    }
+
+    await paint()
+    ctx.onDispose(ctx.data.watch('class.exams', () => void paint()))
+  },
+
+  async deactivate() {},
+}
+
+export const EXAMS_PLUGIN: AvailablePlugin = {
+  dirName: EXAMS_MANIFEST.id,
+  manifest: EXAMS_MANIFEST,
+  module: examsModule,
+  source: 'bundled',
+}
+
+/**
+ * 教师端**本地演示模式**的插件卡清单（线上模式读 `plugin_registry`，不经这里）。
+ * P2 搬一个加一个：新插件的三件套 + 这里的 manifest 同轮落。
+ */
+export const BUNDLED_MANIFESTS: PluginManifest[] = [DEMO_MANIFEST, QUOTE_MANIFEST, DAILY_MANIFEST, EXAMS_MANIFEST]
+
+/**
+ * 教室端可加载的内置插件清单：**全部在列**，挂不挂由壳的 catalog 闸决定
+ * （教师启用 + 登记表放行；`?demoPlugin=1` 是演示直通，对清单里每一个都生效）。
+ * 🔴 不能只带演示插件：否则教师在班级详情里启用"示例时钟"、屏上却永远不出现 ——
+ *    那张启用开关就成了骗子（P2 祝福语进场时当场纠正）。
+ * P2 搬一个加一个：三件套 + 这里的清单同轮落。
+ */
+export function availablePlugins(): AvailablePlugin[] {
+  return [DEMO_PLUGIN, QUOTE_PLUGIN, DAILY_PLUGIN, EXAMS_PLUGIN]
 }

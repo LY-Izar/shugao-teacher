@@ -25,6 +25,7 @@ import { ranked } from '../lib/wrongbook'
 import { loadDailyBundle, toDutyInput, todayDuty } from '../lib/daily'
 import { isoOffset } from '../lib/date'
 import { beijingNow } from '../lib/holiday'
+import { pickDailyQuote } from '../lib/quotes'
 import { isRemote } from '../lib/supabase'
 import type { ResourceName } from '../lib/pluginHost'
 import type { ScheduleItem } from '../data/types'
@@ -168,6 +169,35 @@ export async function readResource(resource: ResourceName, classId: string): Pro
         })
       return { value: { rows }, stale, asOf }
     }
+
+    /*
+     * 🆕 P2 首批搬运（考试板插件）：与旧教室端 `classExams` 同一条筛选与排序 ——
+     * `classIds` 含本班的最近 6 场、按日期倒序。教室端对 exams 是**零写**
+     * （§15.3），这里纯读 store（远程模式由 hydrateExams 灌着）。
+     * 没有考试 ⇒ 回空数组：那是"没排考试"，不是错误（§6.4）。
+     */
+    case 'class.exams': {
+      const rows = s.exams
+        .filter((e) => (e.classIds ?? []).includes(classId))
+        .sort((a, b) => (a.examDate < b.examDate ? 1 : -1))
+        .slice(0, 6)
+        .map((e) => ({
+          examDate: e.examDate,
+          subject: e.subject || e.title,
+          status: e.status === 'graded' ? 'graded' : 'pending',
+        }))
+      return { value: { rows }, stale, asOf }
+    }
+
+    /*
+     * 🆕 P2 首批搬运（祝福语插件）：宿主侧唯一话术源是 `lib/quotes.ts` 的 43 句
+     *    （用户 2026-09-29 拍板的"每条能考据"那批）—— 插件不许 import 宿主内部模块
+     *    （手册 §11.3），所以走资源口把**当天的那一句**递出去。`pickDailyQuote`
+     *    用北京时间日期做种子，同一天固定，跨时区不串天 —— 与旧教室端
+     *    `DailyQuote` 同一条判据，一个字没改。
+     */
+    case 'class.quote':
+      return { value: { ...pickDailyQuote(beijingNow()) }, stale, asOf }
   }
 }
 

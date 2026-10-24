@@ -48,7 +48,8 @@ import { useMaintenanceStatus } from '../lib/useMaintenance'
 import { MaintenanceScreen } from '../components/MaintenanceGate'
 /* 本体功能块（不是插件）：教师端传来的文件 —— 2026-10-24 用户改口，见交接文档 §二清单 11 */
 import { FilesBlock } from '../classroom/blocks/FilesBlock'
-import { BackupBlock } from '../classroom/blocks/BackupBlock'
+/* 自动备份：壳侧底层能力，没有窗口（2026-10-24 用户拍板），但**照跑** */
+import { useAutoBackupTicker } from '../classroom/useAutoBackup'
 import {
   shellAutoplayAllowed,
   shellCloseAllFloating,
@@ -444,7 +445,7 @@ function BlockWindow({
   win,
   title,
   z,
-  floatAvailable,
+  floatReason,
   onFocus,
   onRect,
   onMode,
@@ -454,7 +455,13 @@ function BlockWindow({
   win: LayoutWin
   title: string
   z: number
-  floatAvailable: boolean
+  /**
+   * 不能弹时的**原因**（能弹就是 null）。两种原因别混：
+   * · 「要教室版程序」= 网页/老壳没有这个能力；
+   * · 「这一块还不支持弹出」= 有能力，但这一块的内容还推不过去（壳窗只填模板，
+   *   我们不推内容它就是一屏空白 —— 空白比置灰更糟，手册 §1 第 4 条）。
+   */
+  floatReason: string | null
   onFocus: (id: string) => void
   onRect: (id: string, rect: WinRect) => void
   /** 传的是**补丁**（`{ mode: … }`）—— 收口在壳的 patchWin，别在这里再造一种写法 */
@@ -521,10 +528,10 @@ function BlockWindow({
         <span className="flex-1" />
         <button
           type="button"
-          disabled={!floatAvailable}
-          title={floatAvailable ? undefined : '要教室版程序'}
+          disabled={!!floatReason}
+          title={floatReason ?? undefined}
           onClick={() => onFloat(win.id)}
-          style={{ fontSize: 11, color: floatAvailable ? 'var(--color-accenttext)' : 'var(--color-ink4)' }}
+          style={{ fontSize: 11, color: floatReason ? 'var(--color-ink4)' : 'var(--color-accenttext)' }}
         >
           弹出
         </button>
@@ -796,6 +803,8 @@ export default function ClassroomPluginShell() {
   const teacher = useStore((s) => s.teacher)
   const schedule = useStore((s) => s.schedule)
   const push = useToast((s) => s.push)
+  /* 自动备份：**没有窗口**，挂一次就开始跑（5 分钟一个 tick）。失败才弹吐司。 */
+  useAutoBackupTicker(push)
   const navigate = useNavigate()
 
   /*
@@ -1181,7 +1190,7 @@ export default function ClassroomPluginShell() {
   const [demoPlugin] = useState(
     () => typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('demoPlugin'),
   )
-  const plugins = useMemo(() => availablePlugins(demoPlugin), [demoPlugin])
+  const plugins = useMemo(() => availablePlugins(), [])
   const bus = useMemo(() => new LocalBus(), [])
 
   const streamMode = klass ? isStreamClass(klass) : false
@@ -1301,11 +1310,65 @@ export default function ClassroomPluginShell() {
   }, [])
 
   const floatAvailable = shellTransparentWindowAvailable()
+  /**
+   * 弹到桌面小窗时推过去的内容。
+   * 🔴 壳窗**只填模板**（`title/body/rows`），业务量全在这里算好 —— 壳里再算一遍就是两个真相
+   *    （附录 A 第 3 条）。2026-10-24 之前只推 `{pluginId,w,h}`，弹出来是一屏「还没有内容」，
+   *    比按钮置灰更糟。
+   */
+  const blockScreen = useCallback(
+    (id: string): { title: string; body: string; rows: string[] } | null => {
+      const hh = String(now.getHours()).padStart(2, '0')
+      const mm = String(now.getMinutes()).padStart(2, '0')
+      const stamp = `${ymdOf(now)} · ${WEEKDAY_TEXT[weekdayOf(now) - 1]} · ${klassName}`
+      if (id === '__clock') {
+        const cur = day.current as { subject?: string; end?: string } | null
+        const nxt = day.next as { subject?: string; start?: string } | null
+        return {
+          title: '大时钟课表',
+          body: `${hh}:${mm}`,
+          rows: [
+            stamp,
+            cur?.subject
+              ? `现在 ${cur.subject} 到 ${cur.end}`
+              : nxt?.subject
+                ? `下一节 ${nxt.subject} ${nxt.start}`
+                : '今天没课',
+          ],
+        }
+      }
+      if (id === '__calls') {
+        const head = queue[0]
+        return {
+          title: '呼叫播报',
+          body: head ? head.text : '呼叫播报已就绪',
+          rows: [queue.length > 1 ? `还有 ${queue.length - 1} 条排队` : '按顺序播报，不互相顶掉'],
+        }
+      }
+      return null
+    },
+    [now, day, klassName, queue],
+  )
+  /** 不能弹的两种原因别混：没能力 vs 有能力但这一块内容推不过去 */
+  const floatReasonOf = useCallback(
+    (id: string): string | null => {
+      if (!floatAvailable) return '要教室版程序'
+      if (!blockScreen(id)) return '这一块还不支持弹出'
+      return null
+    },
+    [floatAvailable, blockScreen],
+  )
   const floatingCountRef = useRef(0)
   const pipOpen = useCallback(
     async (pluginId: string, opts: Record<string, unknown>) => {
       if (!floatAvailable) {
         push({ text: '要教室版程序', tone: 'warn', desc: '悬浮窗要在教室版程序里才能弹' })
+        return false
+      }
+      const payload = blockScreen(pluginId)
+      if (!payload) {
+        /* 推不出内容就不弹：壳窗只填模板，空白屏比置灰更糟 */
+        push({ text: '这一块还不支持弹出', tone: 'warn', desc: '下一轮补内容推送' })
         return false
       }
       if (floatingCountRef.current >= LIMITS.floatingWindowsMax) {
@@ -1324,11 +1387,11 @@ export default function ClassroomPluginShell() {
         return false
       }
       floatingCountRef.current += 1
-      // 壳只画模板（one-way）；内容镜像由壳侧模板决定（附录 A 第 3 条）
-      shellPushBlockScreen({ pluginId, w: o.w ?? 360, h: o.h ?? 220 })
+      // 壳只画模板（one-way）：内容在这里算好推过去（附录 A 第 3 条）
+      shellPushBlockScreen({ pluginId, ...payload, w: o.w ?? 360, h: o.h ?? 220 })
       return true
     },
-    [floatAvailable, push],
+    [floatAvailable, push, blockScreen],
   )
 
   /** 加载前的两道闸在这里过：不合的进目录但**不 activate**，窗口里只说原因。 */
@@ -1340,8 +1403,8 @@ export default function ClassroomPluginShell() {
       list.push({ id: '__calls', kind: 'calls', title: '呼叫播报', min: { w: 300, h: 200 }, suggest: { w: 432, h: 180 } })
       /* 2026-10-24 用户改口：「教师端传文件」是教室屏的默认能力 ⇒ 本体功能块，不走插件 */
       list.push({ id: '__files', kind: 'files', title: '老师传来的文件', min: { w: 288, h: 240 }, suggest: { w: 480, h: 384 } })
-      /* 备份同一天改口：本地自动备份也是本体（`lib/backup.ts` 现成，搬过来不改行为） */
-      list.push({ id: '__backup', kind: 'backup', title: '自动备份', min: { w: 288, h: 160 }, suggest: { w: 480, h: 192 } })
+      /* 🔴 自动备份**不再是一个窗口**（2026-10-24 用户拍板）：它是壳侧底层能力，
+         不占屏、不进功能块清单。备份本身照跑，见 `useAutoBackupTicker`。 */
     }
     if (closing) {
       list.push({ id: '__closing', kind: 'closing', title: '今日收尾', min: { w: 320, h: 140 }, suggest: { w: 620, h: 180 } })
@@ -1371,7 +1434,7 @@ export default function ClassroomPluginShell() {
   const catalogById = useMemo(() => new Map(catalog.map((d) => [d.id, d])), [catalog])
   /* 布局归一化的"合法 id"要**稳定**（收尾语那扇时有时无，不能因为它把旧布局判成坏） */
   const stableIds = useMemo(
-    () => new Set(['__clock', '__calls', '__closing', '__files', '__backup', ...plugins.map((p) => p.manifest.id)]),
+    () => new Set(['__clock', '__calls', '__closing', '__files', ...plugins.map((p) => p.manifest.id)]),
     [plugins],
   )
 
@@ -1426,24 +1489,28 @@ export default function ClassroomPluginShell() {
        *   这里只做一次简单的"从右下角接着排"，不做真正的装箱：这是首次出现的落点，
        *   老师拖一下就以他存的那份为准（模板/落点都只是默认值）。
        */
-      let x = 16
+      /*
+       * 🔴 落点：在**所有已有窗口的右边**开一列，从上往下依次排。
+       *
+       * 为什么不是"右下角接着排 + 夹进画布"（那是上一版，2026-10-24 截图里两个插件窗口
+       * 叠在一起就是这个原因）：`Math.min(x, canvas.w - w - 16)` 会把每个新窗口都夹到
+       * 同一个右边界、`y` 也夹到同一个下边界 ⇒ 第二扇直接盖在第一扇上。
+       * 现在画布可以滚（见画布那段的注释），所以**不再夹回可视区**：坐标可以超出，
+       * 滚过去就能看见；叠在一起才是真的坏。
+       */
+      const right = prev.windows.reduce(
+        (m, w) => (w.mode === 'closed' ? m : Math.max(m, w.x + w.w + 16)),
+        16,
+      )
       let y = 16
-      for (const w of prev.windows) {
-        if (w.mode === 'closed') continue
-        x = Math.max(x, w.x + w.w + 16)
-        y = Math.max(y, w.y + w.h + 16)
-      }
       return {
         ...prev,
         windows: [
           ...prev.windows,
           ...missing.map((d) => {
             const rect = clampInto(d.suggest, canvas, d.min)
-            const placed = {
-              x: Math.min(x, Math.max(16, canvas.w - rect.w - 16)),
-              y: Math.min(y, Math.max(16, canvas.h - rect.h - 16)),
-            }
-            x += rect.w + 16
+            const placed = { x: right, y }
+            y += rect.h + 16
             return { id: d.id, mode: 'open' as const, ...rect, ...placed }
           }),
         ],
@@ -1706,13 +1773,25 @@ export default function ClassroomPluginShell() {
           </span>
         </div>
 
-        {/* 画布：窗口随便摆，基建不占格 */}
+        {/* 画布：窗口随便摆，基建不占格。
+            🔴 2026-10-24（用户截图报"下面还是被切"）：原来这里是 `overflow: hidden`，
+            而窗口是**绝对定位**、不会撑开容器 ⇒ 画布比"最下面那扇窗"矮时，窗口直接被切掉，
+            连滚都滚不到。现在按窗口底边撑出一个撑高块 + 画布可滚：
+            矮屏（笔记本 / 缩放 150%）能滚到下面的窗口，而不再看到"半块"。 */}
         <div
           ref={canvasRef}
           className="relative w-full flex-1"
-          style={{ height: 'calc(100vh - 62px)', minHeight: 360, overflow: 'hidden' }}
+          style={{ height: 'calc(100vh - 62px)', minHeight: 360, overflow: 'auto' }}
         >
           <SyncBannerOverlay />
+          {/* 撑高块：绝对定位的子元素不参与布局，得给它一个"内容有多高"的占位 */}
+          <div
+            aria-hidden
+            style={{
+              width: `${Math.max(canvas.w, ...shown.map((w) => w.x + w.w), 0) + 8}px`,
+              height: `${Math.max(canvas.h, ...shown.map((w) => w.y + (w.mode === 'collapsed' ? WIN_TITLE_H : w.h)), 0) + 16}px`,
+            }}
+          />
 
           {shown.map((w) => {
             const def = catalogById.get(w.id)
@@ -1723,7 +1802,7 @@ export default function ClassroomPluginShell() {
                 win={w}
                 title={winTitles[w.id] ?? def.title}
                 z={10 + shown.indexOf(w)}
-                floatAvailable={floatAvailable}
+                floatReason={floatReasonOf(w.id)}
                 onFocus={focusWin}
                 onRect={moveRect}
                 onMode={patchWin}
@@ -1774,7 +1853,9 @@ export default function ClassroomPluginShell() {
                     push={push}
                   />
                 ) : def.kind === 'backup' ? (
-                  <BackupBlock push={push} />
+                  /* 备份已经不是窗口了（2026-10-24 用户拍板：壳侧底层能力）。
+                     这一支留着只为兼容老布局里残留的 `__backup` 行：什么都不画。 */
+                  null
                 ) : def.plugin ? (
                   def.blocked ? (
                     <div

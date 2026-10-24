@@ -69,7 +69,14 @@ function makeWorld({ offline = false, pipOk = true, rateLimitAfter = Infinity } 
   let cfg = {}
   const ports = {
     readResource: async () => ({
-      value: { current: { subject: '物理', end: '08:40' }, next: null },
+      /* 固定假值同时盖住两类消费形状：`class.slotNow`（current/next）与
+         `class.quote`（text/from，P2 祝福语插件）—— 行为测试只关心"宿主递得出值"。 */
+      value: {
+        current: { subject: '物理', end: '08:40' },
+        next: null,
+        text: '问渠那得清如许？为有源头活水来。',
+        from: '朱熹《观书有感》',
+      },
       stale: offline,
       asOf: '2026-10-24T00:00:00.000Z',
     }),
@@ -207,12 +214,23 @@ async function runChecks(dir, { quiet = false } = {}) {
 
   /* ---- 🆕 P1（§2.3）：教师改配置 → `config.onChange` 到达 → 插件 1 秒内重画 ----
      可观察的信号不是文字（夹具的 readResource 恒有 current，showNext 分支看不见），
-     而是重画会再走一次 `storage.set('last_paint')` ⇒ `writes` 计数往上前进一步。 */
+     而是重画会再走一次 `storage.set('last_paint')` ⇒ `writes` 计数往上前进一步。
+     🆕 2026-10-24（P2 祝福语）：按**被测插件自己申请的能力**分档 —— 申请了 config 才有
+     "改配置要重画"这条义务；没申请的话 `ctx.config` 根本不注入（CF-06 的正确行为），
+     验它才是假的。这一档改验宿主侧：世界里的配置变化不再叫醒任何人。 */
   {
-    const beforeCfg = w.writes()
-    w.setConfig({ showNext: false })
-    await new Promise((r) => setTimeout(r, 30))
-    ok('CF-06', '申请了 config ⇒ 教师改配置后插件重画（onChange 链路通到屏上）', w.writes() > beforeCfg, `writes ${beforeCfg} → ${w.writes()}`)
+    const wantsConfig = (manifest.permissions ?? []).includes('config')
+    if (wantsConfig) {
+      const beforeCfg = w.writes()
+      w.setConfig({ showNext: false })
+      await new Promise((r) => setTimeout(r, 30))
+      ok('CF-06', '申请了 config ⇒ 教师改配置后插件重画（onChange 链路通到屏上）', w.writes() > beforeCfg, `writes ${beforeCfg} → ${w.writes()}`)
+    } else {
+      const beforeCfg = w.writes()
+      w.setConfig({ anything: 1 })
+      await new Promise((r) => setTimeout(r, 30))
+      ok('CF-06', '没申请 config ⇒ 配置变化不叫醒插件（未申请能力不注入，也不许有隐藏监听）', w.writes() === beforeCfg, `writes ${beforeCfg} → ${w.writes()}`)
+    }
   }
 
   /* ---- CF-06：没申请的能力，属性根本不出现 ---- */
@@ -246,7 +264,12 @@ async function runChecks(dir, { quiet = false } = {}) {
     ok('CF-07', '`Date` 不算 JSON 值（读回来是字符串，`getTime()` 会崩）', isJsonValue(new Date()) === false)
     ok('CF-07', '`undefined` / 函数 / 循环引用都不算', !isJsonValue(undefined) && !isJsonValue(() => 1) && (() => { const a = {}; a.self = a; return !isJsonValue(a) })())
     ok('CF-07', 'payloadBytes 量的是字节数（中文 3 字节）', payloadBytes({ s: '课' }) === JSON.stringify({ s: '课' }).length + 3 - 1 || payloadBytes({ s: '课' }) >= 22, String(payloadBytes({ s: '课' })))
-    const ctx = buildContext({ manifest, classId: 'c1', className: '高二(1)班', now: () => new Date(), container: { append() {} }, ports: makeWorld().ports, log: () => {} })
+    /* 🆕 2026-10-24（P2 祝福语）：这三条测的是**宿主**对写槽的判定，不是被测插件的能力清单 ——
+       第一个不申请 `storage` 的插件（shugao.quote）当场把这里踩崩（ctx.storage 是 undefined，
+       因为未申请的能力根本不注入，那正是 CF-06 要的正确行为）。
+       ⇒ 行为测试一律用脚本自己的 manifest（申请 storage / data.schedule），与被测插件解耦。 */
+    const hostWriteManifest = baseManifest({ permissions: ['storage'] })
+    const ctx = buildContext({ manifest: hostWriteManifest, classId: 'c1', className: '高二(1)班', now: () => new Date(), container: { append() {} }, ports: makeWorld().ports, log: () => {} })
     let code = null
     try {
       await ctx.storage.set('k', { at: new Date() })
@@ -271,8 +294,9 @@ async function runChecks(dir, { quiet = false } = {}) {
   {
     ok('CF-09', `单行超 ${LIMITS.payloadBytes} 字节 ⇒「E_QUOTA_SIZE」`, preflightWrite(manifest.id, 'big', { s: 'x'.repeat(LIMITS.payloadBytes) }, 0) === 'E_QUOTA_SIZE')
     ok('CF-09', `第 ${LIMITS.rowsPerPluginPerClass + 1} 行 ⇒「E_QUOTA_ROWS」`, preflightWrite(manifest.id, 'k', {}, LIMITS.rowsPerPluginPerClass) === 'E_QUOTA_ROWS')
+    /* 与 CF-07 同一条理由：测宿主的写限频，用脚本自己的 storage 清单，不借被测插件的 */
     const w2 = makeWorld({ rateLimitAfter: LIMITS.writesPerMinute })
-    const ctx = buildContext({ manifest, classId: 'c1', className: '高二(1)班', now: () => new Date(), container: { append() {} }, ports: w2.ports, log: () => {} })
+    const ctx = buildContext({ manifest: baseManifest({ permissions: ['storage'] }), classId: 'c1', className: '高二(1)班', now: () => new Date(), container: { append() {} }, ports: w2.ports, log: () => {} })
     for (let i = 0; i < LIMITS.writesPerMinute; i++) await ctx.storage.set('k', { i })
     let code = null
     try {
@@ -286,7 +310,8 @@ async function runChecks(dir, { quiet = false } = {}) {
   /* ---- CF-10：断网 ---- */
   {
     const w3 = makeWorld({ offline: true })
-    const ctx = buildContext({ manifest, classId: 'c1', className: '高二(1)班', now: () => new Date(), container: { append() {} }, ports: w3.ports, log: () => {} })
+    /* 与 CF-07 同一条理由：测宿主的离线读形状，用脚本自己的 data.schedule 清单 */
+    const ctx = buildContext({ manifest: baseManifest({ permissions: ['data.schedule'] }), classId: 'c1', className: '高二(1)班', now: () => new Date(), container: { append() {} }, ports: w3.ports, log: () => {} })
     let got = null
     let threw = null
     try {
@@ -336,19 +361,48 @@ async function runChecks(dir, { quiet = false } = {}) {
 
   /* ---- CF-13：pip 拿不到 / 没开成时必须说人话 ---- */
   {
-    const w6 = makeWorld({ pipOk: false })
-    const mod2 = (await import(pathToFileURL(entryPath).href + `?n=${Date.now()}`)).default
-    const h = new PluginHost({
-      manifest,
-      module: mod2,
-      makeContext: () =>
-        buildContext({ manifest, classId: 'c1', className: '高二(1)班', now: () => new Date(), container: w6.container, ports: w6.ports, log: () => {} }),
-      now: () => 0,
-      onDispose: (fn) => w6.ports.onDispose(fn),
-    })
-    await h.activate()
-    ok('CF-13', '`pip.open()` 回 false 时插件有降级文案', /教室版/.test(w6.container.text()), w6.container.text())
-    ok('CF-13', '网页预览下卡片直接说明原因，而不是"点了没反应"', planCard(manifest, { shellSupportsPip: false, shellVersion: '1.1.5' }).reason === '要教室版程序')
+    const wantsPip = (manifest.permissions ?? []).includes('pip')
+    if (wantsPip) {
+      const w6 = makeWorld({ pipOk: false })
+      const mod2 = (await import(pathToFileURL(entryPath).href + `?n=${Date.now()}`)).default
+      const h = new PluginHost({
+        manifest,
+        module: mod2,
+        makeContext: () =>
+          buildContext({ manifest, classId: 'c1', className: '高二(1)班', now: () => new Date(), container: w6.container, ports: w6.ports, log: () => {} }),
+        now: () => 0,
+        onDispose: (fn) => w6.ports.onDispose(fn),
+      })
+      await h.activate()
+      ok('CF-13', '`pip.open()` 回 false 时插件有降级文案', /教室版/.test(w6.container.text()), w6.container.text())
+    } else {
+      /* 🆕 2026-10-24（P2 祝福语）：插件没申请 pip ⇒ `ctx.pip` 根本不注入（CF-06 那条正确行为），
+         "open 回 false 的降级"分支**结构上不可达**，验它才是假的。这一档改验
+         "宿主没把没申请的能力塞给它" —— 与 CF-06 同一条边界，在这里对被测插件再核一遍。 */
+      const w6 = makeWorld()
+      const mod2 = (await import(pathToFileURL(entryPath).href + `?n=${Date.now()}`)).default
+      const h = new PluginHost({
+        manifest,
+        module: mod2,
+        makeContext: () =>
+          buildContext({ manifest, classId: 'c1', className: '高二(1)班', now: () => new Date(), container: w6.container, ports: w6.ports, log: () => {} }),
+        now: () => 0,
+        onDispose: (fn) => w6.ports.onDispose(fn),
+      })
+      await h.activate()
+      ok('CF-13', '没申请 pip ⇒ 激活路径上不出现 pip 分支（容器不写"教室版"兜底话）', !/教室版/.test(w6.container.text()), w6.container.text() || '（容器无文本，正常）')
+    }
+    /* planCard 是**能力一致**判据：申请了 pip 而壳不支持 ⇒ 说"要教室版程序"；
+       没申请 ⇒ 卡片就该是可用的（reason null）——两档都是"照实说"。 */
+    const cardNoPip = planCard(manifest, { shellSupportsPip: false, shellVersion: '1.1.5' })
+    ok(
+      'CF-13',
+      '网页预览下卡片照实说：申请 pip ⇒「要教室版程序」，没申请 ⇒ 可用',
+      wantsPip
+        ? cardNoPip.reason === '要教室版程序'
+        : cardNoPip.reason === null && cardNoPip.enabled === true,
+      `reason=${JSON.stringify(cardNoPip.reason)}`,
+    )
     ok('CF-13', '壳版本不够时也不许装作能用', planCard(manifest, { shellSupportsPip: true, shellVersion: '1.0.9' }).reason === '需要更新的教室版程序')
     ok('CF-13', '版本比较认 `主.次.修`', compareSemver('1.1.5', '1.1.4') === 1 && compareSemver('1.1.5', '1.1.5') === 0)
   }

@@ -34,6 +34,8 @@ export const PLUGIN_PERMISSIONS = [
   'data.dailyHomework',
   'data.duty',
   'data.assignments',
+  'data.quote',
+  'data.exams',
   'config',
   'clock',
   'bus',
@@ -53,6 +55,8 @@ export const RESOURCE_PERMISSION = {
   'class.dailyHomework': 'data.dailyHomework',
   'class.duty': 'data.duty',
   'class.assignments': 'data.assignments',
+  'class.quote': 'data.quote',
+  'class.exams': 'data.exams',
 } as const
 
 export type ResourceName = keyof typeof RESOURCE_PERMISSION
@@ -264,6 +268,8 @@ export const CAPABILITY_SLOTS: Record<Permission, readonly string[]> = {
   'data.dailyHomework': ['data'],
   'data.duty': ['data'],
   'data.assignments': ['data'],
+  'data.quote': ['data'],
+  'data.exams': ['data'],
   config: ['config'],
   clock: ['clock'],
   bus: ['bus'],

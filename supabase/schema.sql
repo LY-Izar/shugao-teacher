@@ -11995,6 +11995,10 @@ create table if not exists plugin_registry (
   name           text not null default '',
   description    text not null default '',
   config_schema  jsonb not null default '{}'::jsonb,
+  /* 🆕 2026-10-24（方案 A）：发布那一刻的 git commit。教室端下载按
+     `.../plugins/<id>/index.js?ref=<这一列>` 取，旧版本才不会跟着 main 漂
+     （不带 ref 就只能拿到最新内容，撤版回退 = 回退到新版，那就不叫钉死）。 */
+  source_commit  text,
   released_at    timestamptz,
   revoked_at     timestamptz,
   updated_at     timestamptz not null default now(),
@@ -12010,6 +12014,8 @@ create table if not exists plugin_registry (
 alter table plugin_registry add column if not exists name text not null default '';
 alter table plugin_registry add column if not exists description text not null default '';
 alter table plugin_registry add column if not exists config_schema jsonb not null default '{}'::jsonb;
+/* 🆕 2026-10-24：方案 A 的"发布钉 commit"。老库同样用 if not exists 补，整份脚本照旧幂等 */
+alter table plugin_registry add column if not exists source_commit text;
 
 -- -------- 45.2 通用数据槽（键值对，按 班级 × 插件 隔离）--------
 --  ⚠️ `plugin_id` **故意不建外键**：撤版/删登记不该连带删掉一个班的现场数据

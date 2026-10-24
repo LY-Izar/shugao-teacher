@@ -13101,10 +13101,10 @@ await withLock(async () => {
           if (n) perNext.push(`${f.split('/').pop()}=${n}`)
         }
         check(
-          textSites.next === 27 && textSites.old === 0,
-          '🔴 F6-H（**不再留 px 边界**）：全仓 `color:` 前景色 —— 用 `accenttext` 的**恰好 27 处**、还用 `accent` 的**恰好 0 处**（29 → 25 那 4 处是"给矢量图标上色"的容器，徽标轮换成校徽位图时整条删掉 —— 理由见上面那段注释；**25 → 26 是 2026-10-04**、**26 → 27 是 2026-10-24**：新壳「老师传来的文件」的「正在取回…」提示行。**变的是分母，不是口径**：`accent` 仍是 0 处）',
+          textSites.next === 28 && textSites.old === 0,
+          '🔴 F6-H（**不再留 px 边界**）：全仓 `color:` 前景色 —— 用 `accenttext` 的**恰好 28 处**、还用 `accent` 的**恰好 0 处**（沿革：29 → 25 是徽标轮那 4 个容器；25 → 26 是日程表「现在」标签；26 → 27 是新壳「正在取回…」；27 → 29 是 P2 实量补登两处；**29 → 28 是 2026-10-24 用户拍板"自动备份不写出来"** —— 删除 `BackupBlock.tsx` 时它的「点一下恢复」那一行一起没了。**变的是分母，不是口径**：`accent` 仍是 0 处）',
           `accenttext=${textSites.next} 处（${perNext.join(' · ')}）· accent=${textSites.old} 处`,
-          '反向对照：把其中任一处改回 `var(--color-accent)` → 两个数就不再是 26 / 0，必红',
+          '反向对照：把其中任一处改回 `var(--color-accent)` → 两个数就不再是 28 / 0，必红',
         )
 
         /* 🔴 四套 × 那批小字（= accenttext）× **它们真正会落的那几种底**，逐个算 WCAG。
@@ -13803,6 +13803,14 @@ await withLock(async () => {
         /* 🆕 2026-10-24（P1）：插件**启用清单**的演示模式落盘（`src/classroom/configs.ts`），
            一个键装所有班：{ [classId]: { [pluginId]: { enabled, config } } }；线上走 §46 的表。 */
         'shugao.plugin.configs',
+        /* 🆕 2026-10-24（P2）：`shugao.quote` 是**插件 id 字面量**（`src/classroom/demoPlugin.ts`），
+           不是 storage 键 —— 但 S22 这条判据的口径本就是"应用会写的 `shugao.*` 字面量总表"
+           （见上面那段订正），静态扫描会把插件 id 一并收进来。今后凡 `shugao.*` 命名的
+           插件 id，落地时都要来这里登记一行。 */
+        'shugao.quote',
+        /* 同上：P2 第二批的两个插件 id 字面量（shugao.daily / shugao.exams），同一条登记口径 */
+        'shugao.daily',
+        'shugao.exams',
         'shugao.remind.seen',
         'shugao.teacher.v1',
         'shugao.theme',

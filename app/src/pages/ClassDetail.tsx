@@ -37,7 +37,7 @@ import { PERIOD_SLOTS, splitLessonTitle } from '../lib/scheduleParse'
 import { checkScheduleConflicts } from '../lib/schedule'
 import { canEditClassFor } from '../lib/roles'
 import { loadPluginConfigs, savePluginConfig } from '../classroom/configs'
-import { DEMO_MANIFEST } from '../classroom/demoPlugin'
+import { BUNDLED_MANIFESTS } from '../classroom/demoPlugin'
 import { getSupabase } from '../lib/supabase'
 import { SUBJECTS, subjectCodeOfName, subjectName } from '../lib/subjects'
 import {
@@ -2934,22 +2934,21 @@ function ClassroomPluginsPanel({ classId }: { classId: string }) {
   useEffect(() => {
     let alive = true
     const load = async () => {
-      // 启用清单两个模式都要读；登记表只有线上有（本地模式拿演示插件顶上）
+      // 启用清单两个模式都要读；登记表只有线上有（本地模式拿**全部内置插件**顶上，
+      // 线上那一份来自 plugin_registry —— 没发布的插件在教师端本来就看不到）
       const cfgs = await loadPluginConfigs(classId)
       if (!alive) return
       let list: RegistryCard[]
       if (!isRemoteMode) {
-        list = [
-          {
-            pluginId: DEMO_MANIFEST.id,
-            name: DEMO_MANIFEST.name,
-            description: DEMO_MANIFEST.description,
-            version: DEMO_MANIFEST.version,
-            revoked: false,
-            permissions: [...DEMO_MANIFEST.permissions],
-            configFields: [...(DEMO_MANIFEST.config?.fields ?? [])],
-          },
-        ]
+        list = BUNDLED_MANIFESTS.map((m) => ({
+          pluginId: m.id,
+          name: m.name,
+          description: m.description,
+          version: m.version,
+          revoked: false,
+          permissions: [...m.permissions],
+          configFields: [...(m.config?.fields ?? [])],
+        }))
       } else {
         const sb = getSupabase()
         if (!sb) {

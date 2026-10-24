@@ -583,6 +583,9 @@ async function probeColumn(table: string, column: string): Promise<DriftCell> {
  *      有 `grade_delete(...)` / `migrate_nos_to_serial()` / `promote_grades(...)` /
  *      `purge_old_subject_data(...)` 这些**会写库**的 —— 面板是只读的，
  *      **绝不做有副作用的探测**（这条纪律比"多探一段"重要得多）。
+ *      ⚠️ 🆕 2026-10-23 这条纪律的**唯一白名单例外**是 `probeRpcOracle()`（§45 的
+ *      `plugin_data_read`）：纪律的本意是"**无副作用**"，不是"不许传参" ——
+ *      那一个函数的身份判据在函数体最前、探针这问走不到任何写读，见它的注释。
  *    无参裸版则在 §13 那句 `grant execute` 之后是可调的，且**对未登录调用恒为 false**，
  *    所以"调到并返回 false"本身就是"函数存在且判据正确"的证据。
  *
@@ -623,6 +626,81 @@ async function probeRpc(fn: string, args: Record<string, unknown> = {}): Promise
   }
 }
 
+/**
+ * 🆕 2026-10-23 · 「**零表权限的表**」的存在性预言 —— §45 的 `plugin_data` 走这条路。
+ *
+ * 病灶：`plugin_data` 客户端**一个表权限都没有**（§45.5 `revoke all on plugin_data
+ * from anon, authenticated` —— 段首 ② 写明是刻意的：开给客户端，配额就只是"插件自觉"）。
+ * 普通"表探针"（`probeTable` 的 `select('*')`）在它身上只会撞 `42501 permission denied`，
+ * 那一格**永远是灰的** —— §45 跑没跑，面板永远给不出结论。
+ *
+ * 预言：§45.4 的 `plugin_data_read()`。**读也走函数**（读频率要限额，`select` 数不出来，
+ * 所以 §45 本来就把读做成了 RPC）—— 于是"函数在不在"就是"§45.4 跑没跑"的诚实判据，
+ * 而函数在不在恰好是客户端探得到的：
+ *   · `PGRST202`（PostgREST 的 schema cache 里没有它）→ **§45.4 未跑**（红）；
+ *   · 调到了 → 函数在 → 绿；
+ *   · 网络 / 认不出的错 → 灰（没结论）。**三态必须分得开。**
+ *
+ * 🔴 **为什么这个预言是无副作用的**（面板只读，这条纪律比多探一段重要得多）：
+ *   · 探针用**全零 uuid** 当 `p_class_id` —— `classes.id` 由 `gen_random_uuid()` 生成
+ *     （§2.1），没有任何真实班是这个 id；
+ *   · 函数体**最前面**就是身份判据：`v_uid` 为空 → 当场回 `{ok:false,code:'E_FORBIDDEN'}`；
+ *     班不在 `visible_class_ids()` 里 → 同样当场拒（§45.4 原文）——
+ *     探针这一问**走不到** `plugin_quota_hit()`（那一步才会写库）**也走不到**
+ *     `select plugin_data`，所以不发生任何写读；
+ *   · `p_plugin_id: '__probe__'` 不指向任何真插件，`p_key: null` 只是"读整包"的形状。
+ *
+ * 🔴 **判据刻意比 `probeRpc()` 窄**：这里只认 `PGRST202` 一族，**不带**那条泛化的
+ *    `/does not exist/i` —— 函数**体里面**的依赖（如 `visible_class_ids()`）缺位时，
+ *    Postgres 抛的是 `42883 function … does not exist`，那说明 §45.4 **跑过**、
+ *    只是更早的段没跑，把它当成"§45 未跑"就是**红错方向**。宁可灰（兜底那一支）。
+ */
+async function probeRpcOracle(table: string, fn: string): Promise<DriftCell> {
+  const sb = getSupabase()
+  const what = `\`${table}\` 表（经 \`${fn}()\` 存在性预言）`
+  if (!sb) return { what, state: 'indeterminate', evidence: '本地模式：没有云端连接' }
+  try {
+    const { data, error } = await sb.rpc(fn as never, {
+      p_class_id: '00000000-0000-0000-0000-000000000000',
+      p_plugin_id: '__probe__',
+      p_key: null,
+    } as never)
+    if (!error) {
+      /*
+       * 调到了 = 函数在 = §45.4 已跑。期望形状是 `{ok:false, code:'E_FORBIDDEN'}`
+       * （身份判据第一行就拒了这个探针）；形状哪怕是别的，"调到了"这件事本身就是
+       * "在"的证据 —— 原样亮出来，不编。
+       */
+      const replyCode = (data as { code?: unknown } | null)?.code
+      const evidence =
+        replyCode === 'E_FORBIDDEN'
+          ? `返回 {ok:false, code:'E_FORBIDDEN'}（**函数在**：身份判据在函数体第一行就拒了这个探针 —— 全零班不在任何人的可见班里，这一问不写不读任何数据）`
+          : `返回 ${JSON.stringify(data)}（**函数在**：调到了就说明 §45.4 已跑）`
+      return { what, state: 'present', evidence }
+    }
+    const code = String((error as { code?: string }).code ?? '')
+    const msg = String(error.message ?? '')
+    if (code === 'PGRST202' || /could not find the function|schema cache/i.test(msg)) {
+      return { what, state: 'missing', evidence: `${code || '?'} ${msg}`.trim() }
+    }
+    /*
+     * `42501 permission denied for function` ⇒ **函数在**（与 `probeRpc()` 同一条纪律：
+     * PostgREST 先查 schema cache，找不到才是 `PGRST202`；找到了、当前角色没有
+     * execute 权限才是 `42501` —— 匿名会话探这段时走的就是这一支）。
+     */
+    if (code === '42501' || /permission denied for function/i.test(msg)) {
+      return {
+        what,
+        state: 'present',
+        evidence: `${code || '?'} ${msg}（**函数在**：能被 PostgREST 找到，只是当前角色没有 execute 权限）`.trim(),
+      }
+    }
+    return { what, state: 'indeterminate', evidence: `${code || '?'} ${msg}`.trim() }
+  } catch (e) {
+    return { what, state: 'indeterminate', evidence: String(e) }
+  }
+}
+
 /* ============================================================
    段清单 · 🔴 **自动生成**（`app/scripts/admin-checks.mjs --gen-stages`）
    ------------------------------------------------------------
@@ -630,7 +708,8 @@ async function probeRpc(fn: string, args: Record<string, unknown> = {}): Promise
      · `n` / `title` / `from` / `to` —— 段号、标题、**行号区间**（行号也跟着走，
         所以不会再出现"锚点行号过期"）；
      · `sql` —— 这一段**去掉 `--` 注释与空行之后还剩几行**（`0` = **登记节**）；
-     · `targets` —— 这一段建出来的、**anon 会话探得到**的东西（表 / 列 / 无参函数）。
+     · `targets` —— 这一段建出来的、**anon 会话探得到**的东西（表 / 列 / 无参函数 / 策略 /
+       🆕 2026-10-23 起还有「零表权限表」的 RPC 存在性预言 `rpc-oracle`，见 `probeRpcOracle()`）。
    ⚠️ **不许手动改这一段**：手改了就与 `schema.sql` 对不上，`admin-checks` 第七节当场红。
        要更新清单：改完 `schema.sql` 之后跑 `node scripts/admin-checks.mjs --gen-stages`
    ============================================================ */
@@ -648,6 +727,19 @@ export type StageTarget =
    *    （库到 §37，面板说 §34）。
    */
   | { kind: 'policy'; table: string; name: string }
+  /**
+   * 🆕 **零表权限的表 + RPC 存在性预言**（第四类产物，2026-10-23 补，§45 的 `plugin_data`）。
+   *
+   * 🔴 为什么它必须单独一类：这一类表客户端**一个表权限都没有**
+   *    （§45.5 `revoke all on plugin_data from anon, authenticated`，那是**刻意的**，
+   *    读写只走 §45.4 的安全定义函数）—— 普通"表探针"的 `select('*')` 撞回来的只会是
+   *    `42501 permission denied`，既证明不了"在"也证明不了"不在"，那一格就**永远是灰**，
+   *    整段 §45 永远绿不了。所以生成器（`admin-checks.mjs` 的解析器）在认出
+   *    「本段 revoke 干净 + 本段又 `grant execute` 了同名 `<表>_read` 函数」时，
+   *    把这个 target 换成预言探针：调 `plugin_data_read()` 问在不在 ——
+   *    判据与"为什么无副作用"见 `probeRpcOracle()`。
+   */
+  | { kind: 'rpc-oracle'; table: string; fn: string }
 
 export type SchemaStage = {
   n: number
@@ -705,8 +797,8 @@ export const SCHEMA_STAGES: readonly SchemaStage[] = [
   { n: 42, title: '🔴 维护模式 = **服务端真的禁写**（2026-10-14 安全审计之后用户拍板）', from: 11455, to: 11613, sql: 76, targets: [{ kind: 'fn', name: 'is_maintenance' }] },
   { n: 43, title: '🔴 安全收紧第三批（本轮）：超管撤不成 0 个 · 教师自己删不掉自己那行 · 错误上报限洪', from: 11615, to: 11811, sql: 83, targets: [{ kind: 'col', table: 'frontend_errors', column: 'source_digest' }] },
   { n: 44, title: '🔴 超管隐身（本轮）：**非超管读者在任何入口都读不到超管的任何信息**', from: 11813, to: 11955, sql: 19, targets: [{ kind: 'policy', table: 'teacher_roles', name: 'teacher_roles_hide_super' }, { kind: 'policy', table: 'teacher_profiles', name: 'teacher_profiles_visible' }] },
-  { n: 45, title: '教室端插件化（P0 · **数据层**）—— 通用数据槽 / 版本登记 / 限额计数器', from: 11957, to: 12306, sql: 232, targets: [{ kind: 'table', name: 'plugin_registry' }, { kind: 'table', name: 'plugin_data' }, { kind: 'table', name: 'plugin_quota' }, { kind: 'col', table: 'plugin_registry', column: 'name' }, { kind: 'col', table: 'plugin_registry', column: 'description' }, { kind: 'col', table: 'plugin_registry', column: 'config_schema' }, { kind: 'policy', table: 'plugin_registry', name: 'plugin_registry_read' }, { kind: 'policy', table: 'plugin_registry', name: 'plugin_registry_write' }] },
-  { n: 46, title: '教室端插件化（P1 · **管理面数据层**）—— 按班的插件启用清单与配置', from: 12308, to: 12414, sql: 63, targets: [{ kind: 'table', name: 'plugin_configs' }, { kind: 'policy', table: 'plugin_configs', name: 'plugin_configs_read' }, { kind: 'policy', table: 'plugin_configs', name: 'plugin_configs_insert' }, { kind: 'policy', table: 'plugin_configs', name: 'plugin_configs_update' }] },
+  { n: 45, title: '教室端插件化（P0 · **数据层**）—— 通用数据槽 / 版本登记 / 限额计数器', from: 11957, to: 12312, sql: 238, targets: [{ kind: 'table', name: 'plugin_registry' }, { kind: 'rpc-oracle', table: 'plugin_data', fn: 'plugin_data_read' }, { kind: 'table', name: 'plugin_quota' }, { kind: 'col', table: 'plugin_registry', column: 'name' }, { kind: 'col', table: 'plugin_registry', column: 'description' }, { kind: 'col', table: 'plugin_registry', column: 'config_schema' }, { kind: 'col', table: 'plugin_registry', column: 'source_commit' }, { kind: 'policy', table: 'plugin_registry', name: 'plugin_registry_read' }, { kind: 'policy', table: 'plugin_registry', name: 'plugin_registry_write' }] },
+  { n: 46, title: '教室端插件化（P1 · **管理面数据层**）—— 按班的插件启用清单与配置', from: 12314, to: 12420, sql: 63, targets: [{ kind: 'table', name: 'plugin_configs' }, { kind: 'policy', table: 'plugin_configs', name: 'plugin_configs_read' }, { kind: 'policy', table: 'plugin_configs', name: 'plugin_configs_insert' }, { kind: 'policy', table: 'plugin_configs', name: 'plugin_configs_update' }] },
 ]
 /* @gen:schema-stages END */
 
@@ -777,7 +869,8 @@ function builtText(s: SchemaStage): string {
   const fns: string[] = []
   const policies: string[] = []
   for (const t of s.targets) {
-    if (t.kind === 'table') tables.push(`\`${t.name}\``)
+    /* `rpc-oracle` 也是这一段**建出来的表**（只是探它的路子不同）—— 屏上照常报"建表" */
+    if (t.kind === 'table' || t.kind === 'rpc-oracle') tables.push(`\`${t.kind === 'rpc-oracle' ? t.table : t.name}\``)
     else if (t.kind === 'col') cols.push(`\`${t.table}.${t.column}\``)
     else if (t.kind === 'policy') policies.push(`\`${t.name}\``)
     else fns.push(`\`${t.name}()\``)
@@ -828,13 +921,16 @@ function policyNoProbeText(s: SchemaStage): string {
   )
 }
 
-/** 一个探针目标 → 一次只读探测（判据仍是那三套：表 `42P01` / 列 `42703` / 函数 `PGRST202`；策略 `pg_policies`） */
+/** 一个探针目标 → 一次只读探测（判据仍是那三套：表 `42P01` / 列 `42703` / 函数 `PGRST202`；策略 `pg_policies`；🆕 零表权限表 → `probeRpcOracle()`） */
 function targetProbe(t: StageTarget): { what: string; run: () => Promise<DriftCell | null> } {
   if (t.kind === 'table') return { what: `\`${t.name}\``, run: () => probeTable(t.name) }
   if (t.kind === 'col')
     return { what: `\`${t.table}.${t.column}\``, run: () => probeColumn(t.table, t.column) }
   if (t.kind === 'policy')
     return { what: `策略 \`${t.name}\``, run: () => probePolicy(t.table, t.name) }
+  /* 🆕 2026-10-23：零表权限的表（§45 的 `plugin_data`）—— select 探针不诚实，走 RPC 存在性预言 */
+  if (t.kind === 'rpc-oracle')
+    return { what: `\`${t.table}\``, run: () => probeRpcOracle(t.table, t.fn) }
   return { what: `\`${t.name}()\``, run: () => probeRpc(t.name) }
 }
 
@@ -907,6 +1003,16 @@ export const NO_PROBE_REASON: Record<string, string> = {
     '这一段是**登记节**（0 行可执行 SQL），产出的是 13 个 `_for` 变体，' +
     '而它们**全部 `revoke` 掉了 anon / authenticated** —— 拿面板的会话去调只会得到 ' +
     '`permission denied`，既不能证明在、也不能证明不在。要确认请跑 `supabase/自检.sql` 第 3/4 段。',
+  /* 🆕 2026-10-23 · §45（教室端插件四表）—— `plugin_quota` 那一张没有诚实探法。
+   *  ⚠️ §45 另两张表**有**探针（`plugin_registry` 直接 select；`plugin_data` 走
+   *  `probeRpcOracle()` 的 RPC 存在性预言），所以这一段平时是绿的、这句话不出场 ——
+   *  它在"这一段落到灰/探不到那一档"时（比如探测本身没结论）顶上来把话说全。 */
+  '§45':
+    '这一段建了三张表，其中 **`plugin_quota` 本面板没有诚实探法**：客户端对它**零表权限**' +
+    '（§45.5 `revoke all on plugin_quota from anon, authenticated`，读写只走 §45.4 的函数），' +
+    '唯一会写它的 `plugin_quota_hit()` 也被 `revoke` 到 anon / authenticated **调不着**，' +
+    '而且调它本身就会写计数 —— 那是有副作用的探测，面板不做。零权限 + 零可调用函数 = 客户端无诚实探法' +
+    '（硬探只会得到 `42501`，既非红也非绿）。要确认请跑 `supabase/自检.sql` 或 §45.6 那份核对清单。',
 }
 
 /**

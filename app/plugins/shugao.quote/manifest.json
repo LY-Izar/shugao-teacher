@@ -1,0 +1,11 @@
+{
+  "id": "shugao.quote",
+  "name": "每日祝福语",
+  "icon": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\"><path d=\"M12 3l2.3 5 5.4.6-4 3.7 1.1 5.3L12 14.9l-4.8 2.7 1.1-5.3-4-3.7 5.4-.6z\"/></svg>",
+  "description": "教室大屏上给学生看的那一句，按日期轮换，同一天固定",
+  "version": "1.0.0",
+  "entry": "index.js",
+  "minShellVersion": "1.1.5",
+  "permissions": ["data.quote", "clock"],
+  "window": { "w": 4, "h": 2, "min": { "w": 2, "h": 1 } }
+}

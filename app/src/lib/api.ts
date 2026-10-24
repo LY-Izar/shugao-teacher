@@ -79,3 +79,30 @@ export function apiMessage(r: ApiResult, fallback: string): string {
   const m = r.data?.message
   return typeof m === 'string' && m ? m : r.status ? `${fallback}（HTTP ${r.status}）` : fallback
 }
+
+/**
+ * GET 一个 JSON 接口 —— 与 `postApi` 同一套纪律：**本地模式一个请求都不发**
+ * （没有服务端时 `/api/*` 回 404，控制台会脏，`shots` 会因为"运行时错误"抓它）。
+ *
+ * 为什么要有它：插件库待审列表是**只读**查询，用 POST 会让人误以为"刷新一下就写了什么"。
+ */
+export async function getApi(path: string): Promise<ApiResult> {
+  if (!isRemote) {
+    return {
+      ok: false,
+      status: 0,
+      data: { message: '本地模式：这一条要服务端（/api/*），先把后端配上再看。' },
+    }
+  }
+  try {
+    const res = await fetch(apiUrl(path), { method: 'GET', headers: await authHeaders() })
+    const data = (await res.json().catch(() => ({}))) as Record<string, unknown>
+    return { ok: res.ok, status: res.status, data }
+  } catch (e) {
+    return {
+      ok: false,
+      status: 0,
+      data: { message: `连不上服务器（${e instanceof Error ? e.message : String(e)}）` },
+    }
+  }
+}

@@ -42,7 +42,18 @@ export interface LayoutWin extends WinRect {
 export interface ShellLayout {
   snap: SnapMode
   windows: LayoutWin[]
+  /**
+   * 布局**代数**。换默认模板 = 换代数 ⇒ 旧布局整份丢弃回默认。
+   *
+   * 🔴 为什么非得有这个：老师机器上存着按旧模板摆的布局（时钟只有 370 高），
+   *    而新模板把时钟抬到 480 —— 不换代数的话，老机器永远用旧的、屏幕上永远是"切一半"，
+   *    改模板等于没改（2026-10-24 用户第二次截图报的就是这个：我改完模板，他刷新还是切）。
+   *    `2` 起：2 = 时钟 ≥5 格、呼叫播报排在其下方、画布可滚。
+   */
+  v: number
 }
+
+export const LAYOUT_VERSION = 3
 
 /** 画布尺寸（px）。 */
 export interface CanvasSize {
@@ -100,6 +111,8 @@ export function cellsToPx(cells: number): number {
 export function normalizeLayout(raw: unknown, validIds: ReadonlySet<string>): ShellLayout | null {
   if (!raw || typeof raw !== 'object') return null
   const o = raw as Record<string, unknown>
+  /* 代数不对 = 旧模板摆的那份 ⇒ 整份丢回默认（理由见 `ShellLayout.v` 的注释） */
+  if (o.v !== LAYOUT_VERSION) return null
   if (o.snap !== 'grid' && o.snap !== 'free') return null
   if (!Array.isArray(o.windows)) return null
   const windows: LayoutWin[] = []
@@ -120,7 +133,7 @@ export function normalizeLayout(raw: unknown, validIds: ReadonlySet<string>): Sh
       h: r.h as number,
     })
   }
-  return { snap: o.snap, windows }
+  return { snap: o.snap, windows, v: LAYOUT_VERSION }
 }
 
 /**
@@ -147,7 +160,7 @@ export function defaultLayout(
     colW = Math.max(colW, rect.w)
     return { id, mode: 'open' as const, ...rect }
   })
-  return { snap, windows }
+  return { snap, windows, v: LAYOUT_VERSION }
 }
 
 /** 把一扇窗口挪到最前面之后，整叠窗口的 z 顺序就是数组顺序（后来者居上）。 */
@@ -173,22 +186,27 @@ export function templateLayout(canvas: CanvasSize): ShellLayout {
   /* 左栏 4 格（旧屏是 300–360，取整到 96 的倍数，吸附才对得上） */
   const leftW = GRID_PX * 4
   const callsH = GRID_PX * 2
-  /* 左栏剩下的高度都给时钟：向下取整到整格，再夹进画布 */
-  const clockH = Math.max(GRID_PX * 3, Math.floor((canvas.h - pad * 3 - callsH) / GRID_PX) * GRID_PX)
+  /*
+   * 🔴 时钟**至少 5 格（480px）**：它里面是"大钟 + 日期 + 这个班的课"三段，
+   *    低于 480 就必然要把"今天放假"那张卡切一半（2026-10-24 用户两次截图都是这个）。
+   *    画布更矮时不再压缩它 —— 下面的窗口靠画布滚动看见（见 ClassroomPluginShell 的撑高块）。
+   */
+  const clockH = Math.max(GRID_PX * 5, Math.floor((canvas.h - pad * 3 - callsH) / GRID_PX) * GRID_PX)
   const filesW = Math.max(GRID_PX * 3, Math.floor((canvas.w - pad * 3 - leftW) / GRID_PX) * GRID_PX)
   const min = { w: GRID_PX, h: GRID_PX }
+  const filesH = GRID_PX * 4
   return {
     snap: 'grid',
+    v: LAYOUT_VERSION,
     windows: [
       { id: '__clock', mode: 'open', ...clampRect({ x: pad, y: pad, w: leftW, h: clockH }, canvas, min) },
-      { id: '__calls', mode: 'open', ...clampRect({ x: pad, y: pad + clockH + pad, w: leftW, h: callsH }, canvas, min) },
-      { id: '__files', mode: 'open', ...clampRect({ x: pad * 2 + leftW, y: pad, w: filesW, h: GRID_PX * 4 }, canvas, min) },
-      /* 备份是状态条性质的块：右栏**底部**——和旧屏"自动备份到本机"那张卡的阅读顺序一致 */
-      {
-        id: '__backup',
-        mode: 'open',
-        ...clampRect({ x: pad * 2 + leftW, y: canvas.h - pad - GRID_PX * 2, w: filesW, h: GRID_PX * 2 }, canvas, min),
-      },
+      /* 呼叫播报排在时钟**正下方**（旧屏左栏的阅读顺序）。它可能落到画布可视区之外 ——
+         那是有意的：宁可让老师滚一下，也不要把时钟压到装不下内容。 */
+      { id: '__calls', mode: 'open', x: pad, y: pad + clockH + pad, w: leftW, h: callsH },
+      { id: '__files', mode: 'open', ...clampRect({ x: pad * 2 + leftW, y: pad, w: filesW, h: filesH }, canvas, min) },
+      /* 🔴 自动备份不再占一格（2026-10-24 用户拍板：壳侧底层能力，不写出来）。
+         以前这里有一扇 `__backup` 窗口 —— 删掉之后老布局会被 `normalizeLayout` 判成坏布局
+         （`validIds` 里没有它），自动回默认模板，正是想要的结果。 */
     ],
   }
 }
