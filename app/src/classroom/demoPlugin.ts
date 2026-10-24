@@ -12,6 +12,9 @@
  */
 
 import type { PluginManifest } from '../lib/pluginHost'
+import { createElement } from 'react'
+import { createRoot } from 'react-dom/client'
+import { ReviewBlock, ScheduleBlock, type ReviewCtx, type ScheduleCtx } from './blocks/pluginViews'
 
 export interface AvailablePlugin {
   /** 插件目录名（= manifest.id，校验就是查这两个相等）。 */
@@ -437,11 +440,121 @@ export const EXAMS_PLUGIN: AvailablePlugin = {
   source: 'bundled',
 }
 
+/* ============================================================================
+   P2 收尾 ①：作业讲评（shugao.review）
+   ----------------------------------------------------------------------------
+   与 `app/plugins/shugao.review/` 三件套**逐行为同源**：同一份只读资源
+   （`class.gradedHomework` / `class.roster` / `class.dailyHomework` / `class.duty`）、
+   同一套话术、同一条「点一行切题」、同一个置顶小窗降级口径。
+   差别只在渲染层：内置副本直接复用旧页那两个**真组件**（`components/PipPanel.tsx`
+   与 `lib/homeworkImage.ts`，视图在 `blocks/pluginViews.tsx`），三件套里是等价的
+   单文件原生 DOM 回填（插件不许 import 宿主模块，手册 §11.3）。
+   ============================================================================ */
+
+export const REVIEW_MANIFEST: PluginManifest = {
+  id: 'shugao.review',
+  name: '作业讲评',
+  icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M7 9h5M7 13h3"/><path d="M15 13l2 2 3-4"/><path d="M9 21h6"/></svg>',
+  description: '已批改作业的逐题正确率，点一行切题，可推成置顶小窗',
+  version: '1.0.0',
+  entry: 'index.js',
+  minShellVersion: '1.1.5',
+  permissions: ['data.gradedHomework', 'data.roster', 'data.dailyHomework', 'data.duty', 'pip'],
+  window: { w: 5, h: 4, min: { w: 3, h: 2 } },
+}
+
+const reviewModule = {
+  async activate(rawCtx: Record<string, unknown>) {
+    const ctx = rawCtx as unknown as {
+      ui: { container: HTMLElement }
+      onDispose(fn: () => void): void
+    }
+    const host = document.createElement('div')
+    host.setAttribute('data-review-slot', '')
+    host.style.cssText = 'height:100%;box-sizing:border-box'
+    ctx.ui.container.append(host)
+    const root = createRoot(host)
+    ctx.onDispose(() => {
+      root.unmount()
+      host.remove()
+    })
+    root.render(createElement(ReviewBlock, { ctx: rawCtx as unknown as ReviewCtx }))
+  },
+
+  async deactivate() {
+    /* 宿主会拆容器与 onDispose 登记的卸载；这里只做自己那份 */
+  },
+}
+
+export const REVIEW_PLUGIN: AvailablePlugin = {
+  dirName: REVIEW_MANIFEST.id,
+  manifest: REVIEW_MANIFEST,
+  module: reviewModule,
+  source: 'bundled',
+}
+
+/* ============================================================================
+   P2 收尾 ②：班级课表（shugao.schedule）—— 与 `app/plugins/shugao.schedule/`
+   三件套**逐行为同源**。
+   🔴 2026-10-24 用户拍板（第二次改口）：**课表不由教室端录入** —— 录入在教师端
+   「班级管理 → 本班课表」（早就有了），教室屏只负责**显示**。所以它只读：清单里
+   没有 `write`、没有 `writes`，`version` 1.0.0 → **1.1.0**（行为从"录入"改成"只读显示"）。
+   ============================================================================ */
+
+export const SCHEDULE_MANIFEST: PluginManifest = {
+  id: 'shugao.schedule',
+  name: '班级课表',
+  icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M3 9h18M8 3v4M16 3v4"/><path d="M7 13h4M7 17h7"/></svg>',
+  description: '在教室屏上显示本班今天有哪些课，标出正在上的那一节',
+  version: '1.1.0',
+  entry: 'index.js',
+  minShellVersion: '1.1.5',
+  permissions: ['data.schedule', 'clock'],
+  window: { w: 4, h: 3, min: { w: 3, h: 2 } },
+}
+
+const scheduleModule = {
+  async activate(rawCtx: Record<string, unknown>) {
+    const ctx = rawCtx as unknown as {
+      ui: { container: HTMLElement }
+      onDispose(fn: () => void): void
+    }
+    const host = document.createElement('div')
+    host.setAttribute('data-schedule-slot', '')
+    host.style.cssText = 'height:100%;box-sizing:border-box'
+    ctx.ui.container.append(host)
+    const root = createRoot(host)
+    ctx.onDispose(() => {
+      root.unmount()
+      host.remove()
+    })
+    root.render(createElement(ScheduleBlock, { ctx: rawCtx as unknown as ScheduleCtx }))
+  },
+
+  async deactivate() {
+    /* 宿主会拆容器与 onDispose 登记的卸载；这里只做自己那份 */
+  },
+}
+
+export const SCHEDULE_PLUGIN: AvailablePlugin = {
+  dirName: SCHEDULE_MANIFEST.id,
+  manifest: SCHEDULE_MANIFEST,
+  module: scheduleModule,
+  source: 'bundled',
+}
+
 /**
  * 教师端**本地演示模式**的插件卡清单（线上模式读 `plugin_registry`，不经这里）。
  * P2 搬一个加一个：新插件的三件套 + 这里的 manifest 同轮落。
  */
-export const BUNDLED_MANIFESTS: PluginManifest[] = [DEMO_MANIFEST, QUOTE_MANIFEST, DAILY_MANIFEST, EXAMS_MANIFEST]
+export const BUNDLED_MANIFESTS: PluginManifest[] = [
+  DEMO_MANIFEST,
+  QUOTE_MANIFEST,
+  DAILY_MANIFEST,
+  EXAMS_MANIFEST,
+  REVIEW_MANIFEST,
+  SCHEDULE_MANIFEST,
+]
 
 /**
  * 教室端可加载的内置插件清单：**全部在列**，挂不挂由壳的 catalog 闸决定
@@ -451,5 +564,5 @@ export const BUNDLED_MANIFESTS: PluginManifest[] = [DEMO_MANIFEST, QUOTE_MANIFES
  * P2 搬一个加一个：三件套 + 这里的清单同轮落。
  */
 export function availablePlugins(): AvailablePlugin[] {
-  return [DEMO_PLUGIN, QUOTE_PLUGIN, DAILY_PLUGIN, EXAMS_PLUGIN]
+  return [DEMO_PLUGIN, QUOTE_PLUGIN, DAILY_PLUGIN, EXAMS_PLUGIN, REVIEW_PLUGIN, SCHEDULE_PLUGIN]
 }

@@ -7864,7 +7864,7 @@ await withLock(async () => {
         RESTRICT_EXPECT.map((k) => `${k}(a)`).sort(),
       )
       ok(
-        '🔴 ① 另外 **23** 条是 `on delete set null`（数据库自己置空，**不拦人**）—— 别把它们也算进"要手工清"里' +
+        '🔴 ① 另外 **24** 条是 `on delete set null`（数据库自己置空，**不拦人**）—— 别把它们也算进"要手工清"里' +
           '（🆕课程管理那三张表加进来 11 条：改课的人 / 原来那位老师 / 撤回人 / 清理人 …）',
         // 🆕 17 → 21（教室端改造 `schema.sql` §40 又加进来 4 条，全是 `on delete set null`）：
         //    `class_rep_pins.updated_by` / `daily_homework.author_id` /
@@ -7876,7 +7876,9 @@ await withLock(async () => {
         //    那只是"谁最后放的版本"，删老师不该拦住放版本这个动作 ⇒ 归到 set null 这一边。
         //    ⚠️ 同段的 `plugin_data.updated_by` **不带外键**（它记的是"哪台屏写的"，
         //    而屏是 `classroom_accounts` 那一侧、也可能已经不存在）—— 所以这里只多 1 条。
-        setNull(toTeachers).length === 23,
+        // 🆕 23 → 24（2026-10-24 校历事件 `school_calendar_events.updated_by`）：
+        //    那只是"谁最后加了一条活动/考试"，删老师不该拦住这条记录 ⇒ 同样归到 set null。
+        setNull(toTeachers).length === 24,
         `${setNull(toTeachers).length} 条 set null · ${setNull(toTeachers).join(' / ')}`,
       )
       ok(
@@ -11647,6 +11649,24 @@ await withLock(async () => {
         ).ok,
         false,
       )
+    }
+
+    /*
+     * 🆕 2026-10-24：每日作业的写判据（§40.5 `can_write_daily_homework_for`）。
+     * 用户这天拍板「超管也能写」，所以要钉住**加了谁、没加谁**：
+     *   超管 ✔ / 班主任 ✔ / 任课老师本科 ✔ / 教务处 ✘ / 年级主任 ✘ / 别班老师 ✘。
+     * ✘ 那三条是 2026-10-02 需求⑦ 的口径（教务处只读），不许被这次改动顺手放宽。
+     */
+    {
+      const canWrite = async (uid, cls, code, subj) =>
+        (await B.db.query(`select public.can_write_daily_homework_for($1,$2,$3,$4) as b`, [uid, cls, code, subj]))
+          .rows[0].b
+      eq('X1：班主任能写本班任意科', await canWrite(U.head, C.c1, 'physics', '物理'), true)
+      eq('X2：任课老师能写自己那一科', await canWrite(U.phy, C.c1, 'physics', '物理'), true)
+      eq('🔴 X3：**超管能写**（2026-10-24 拍板，只加 super）', await canWrite(U.super, C.c1, 'physics', '物理'), true)
+      eq('🔴 X4：教务处仍然只读（需求⑦ 的口径没被这次改动破掉）', await canWrite(U.admin, C.c1, 'physics', '物理'), false)
+      eq('X5：年级主任仍然不能写', await canWrite(U.grade, C.c1, 'physics', '物理'), false)
+      eq('X6：别班的任课老师写不了这个班', await canWrite(U.chn, C.c2, 'chinese', '语文'), false)
     }
 
     await B.db.close()

@@ -113,12 +113,12 @@ function ClassroomShellOnly() {
 }
 
 /**
- * 🔴 P0b（教室端插件化）：教室端那块屏现在有**两块本体**，在这里二选一。
+ * 🔴 教室端那块屏现在有**两块本体**，在这里二选一。
  *
- * · 默认 = 旧 `Classroom`（行为一个字没变 —— 门禁里那一大批"网页版一字不变"的
- *   断言钉的就是它）；
- * · 新壳 `ClassroomPluginShell`（插件框架骨架）：`?newShell=1` 打开一次就**写进
- *   localStorage 并一直生效**，`?newShell=0` 切回来。
+ * · 默认 = 新壳 `ClassroomPluginShell`（2026-10-24 用户拍板：重新出包后旧版固定界面不再使用）；
+ * · 回退 = 旧 `Classroom`：`?newShell=0` 打开一次就**写进 localStorage 并一直生效**，
+ *   `?newShell=1` 切回来。留着它只是"新壳出问题时还能退回旧屏"的一条后路，
+ *   等这一版跑稳再整块删 —— 删了就没退路了，所以不在这一轮删。
  *
  * 🔴 为什么必须能"记住"：教室端 exe 是全屏 kiosk，没人能往地址栏敲参数 ——
  *    只认参数的话新壳在真机上永远进不去（施工交接 §5.2）。
@@ -136,10 +136,12 @@ function newShellPreferred(): boolean {
       return true
     }
     if (q === '0') {
-      localStorage.removeItem(NEW_SHELL_KEY)
+      localStorage.setItem(NEW_SHELL_KEY, '0')
       return false
     }
-    return localStorage.getItem(NEW_SHELL_KEY) === '1'
+    /* 🔴 2026-10-24 用户拍板：**默认新壳**（重新出包后旧版固定界面不再使用）。
+       回退判据是 `=== '0'` 才关 —— 老机器上残留的 `'1'` 仍然是新壳。 */
+    return localStorage.getItem(NEW_SHELL_KEY) !== '0'
   } catch {
     return false
   }

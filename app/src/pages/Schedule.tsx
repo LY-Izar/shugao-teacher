@@ -25,6 +25,9 @@ import {
   shellCanScheduleAlarms,
 } from '../lib/notify'
 import { shellPlatform } from '../lib/classroomShell'
+import { loadSchoolCalendar } from '../lib/daily'
+import { EVENT_KIND_TEXT, loadCalendarEvents, type CalendarEvent } from '../lib/calendarEvents'
+import { beijingNow, dayKind, ymdOf } from '../lib/holiday'
 import {
   REMIND_BEFORE,
   checkScheduleConflicts,
@@ -137,6 +140,35 @@ const [perm, setPerm] = useState<
   const mine = useMemo(() => schedule.filter((s) => s.scope !== 'class'), [schedule])
   const state = useMemo(() => dayState(mine), [mine])
 
+  /**
+   * 🆕 2026-10-24（用户提的）：「正常工作日学校不上课的话，老师的排课表也不会提醒」——
+   * 提醒已经按校历掐掉了（`useScheduleReminder`），但**屏上得说一句**，
+   * 否则老师看到"今天 3 项"却一整天没响，只会以为提醒坏了。
+   *
+   * 三层口径与提醒那一侧**同源**：学校写 `off` ⇒ 不上课；写 `school` ⇒ 上课；
+   * 没写 ⇒ 看法定节假日（`dayKind`）。本地演示模式没有校历库，只用法定层。
+   */
+  const [dayInfo, setDayInfo] = useState<{ off: boolean; why: string; events: CalendarEvent[] } | null>(null)
+  useEffect(() => {
+    let alive = true
+    const iso = ymdOf(beijingNow())
+    const official = dayKind(iso) === 'holiday'
+    void (async () => {
+      const [cal, ev] = await Promise.all([
+        loadSchoolCalendar(iso, iso).catch(() => null),
+        loadCalendarEvents(iso, iso).catch(() => null),
+      ])
+      if (!alive) return
+      const k = cal?.days.find((d) => d.onDate === iso)?.kind
+      const off = k === 'off' ? true : k === 'school' ? false : official
+      const why = k === 'off' ? '学校把这一天改成了不上课' : official ? '法定节假日' : ''
+      setDayInfo({ off, why, events: ev?.rows ?? [] })
+    })()
+    return () => {
+      alive = false
+    }
+  }, [])
+
   const startNew = (weekday = today) => {
     setEditing(null)
     setForm({ ...BLANK, weekday })
@@ -219,6 +251,30 @@ const [perm, setPerm] = useState<
       />
 
       <Page>
+        {/* 🆕 今天不上课 / 今天有安排 —— 与提醒那一侧同源（学校校历 > 法定节假日） */}
+        {dayInfo && (dayInfo.off || dayInfo.events.length > 0) ? (
+          <div
+            className="anim-in mb-3 p-3.5"
+            data-day-banner={dayInfo.off ? 'off' : 'events'}
+            style={{
+              background: dayInfo.off ? 'var(--color-warnsoft)' : 'var(--color-accentsoft)',
+              border: `1px solid ${dayInfo.off ? 'var(--color-warnline)' : 'var(--color-infoline)'}`,
+              borderRadius: 6,
+            }}
+          >
+            <div style={{ fontSize: 13, fontWeight: 650, color: dayInfo.off ? 'var(--color-warnink)' : 'var(--color-accentink)' }}>
+              {dayInfo.off ? '今天不上课' : '今天有安排'}
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--color-ink2)', marginTop: 3, lineHeight: 1.75 }}>
+              {dayInfo.off ? `${dayInfo.why} · 这一天的上课提醒不会响。` : ''}
+              {dayInfo.events.length
+                ? `${dayInfo.off ? ' ' : ''}${dayInfo.events
+                    .map((e) => `${EVENT_KIND_TEXT[e.kind]}${e.atText ? ` ${e.atText}` : ''} · ${e.title}`)
+                    .join('；')}`
+                : ''}
+            </div>
+          </div>
+        ) : null}
         {/* 提醒权限 */}
         {showPermBanner ? (
           <div

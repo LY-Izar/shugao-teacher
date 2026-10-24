@@ -16,6 +16,15 @@ import {
   type DailyTables,
 } from '../lib/daily'
 import type { SchoolCalendarDay } from '../data/types'
+import {
+  EVENT_KIND_TEXT,
+  addCalendarEvent,
+  loadCalendarEvents,
+  removeCalendarEvent,
+  type CalendarEvent,
+  type CalendarEventKind,
+  type EventsState,
+} from '../lib/calendarEvents'
 import { saveBlob } from '../lib/fileOut'
 import { addDays, beijingNow, dayKind, holidayOn, weekdayOfISO, ymdOf } from '../lib/holiday'
 import type { DayKind } from '../lib/holiday'
@@ -113,6 +122,13 @@ export default function SchoolCalendar() {
   const [editKind, setEditKind] = useState<Kind>('off')
   const [editNote, setEditNote] = useState('')
   const [busy, setBusy] = useState(false)
+  /* 🆕 2026-10-24：当天的活动 / 考试（`school_calendar_events`，一天可多件） */
+  const [events, setEvents] = useState<CalendarEvent[]>([])
+  const [evState, setEvState] = useState<EventsState>('present')
+  const [evNotice, setEvNotice] = useState('')
+  const [evKind, setEvKind] = useState<CalendarEventKind>('activity')
+  const [evTitle, setEvTitle] = useState('')
+  const [evAt, setEvAt] = useState('')
 
   const lastDay = lastDayOfMonth(anchor)
 
@@ -124,10 +140,26 @@ export default function SchoolCalendar() {
       setProbe(r.state)
       setNotice(r.notice)
     })
+    void loadCalendarEvents(anchor, lastDay).then((r) => {
+      if (!alive) return
+      setEvents(r.rows)
+      setEvState(r.state)
+      setEvNotice(r.notice)
+    })
     return () => {
       alive = false
     }
   }, [anchor, lastDay, tick])
+
+  const evByDay = useMemo(() => {
+    const m = new Map<string, CalendarEvent[]>()
+    for (const e of events) {
+      const list = m.get(e.onDate) ?? []
+      list.push(e)
+      m.set(e.onDate, list)
+    }
+    return m
+  }, [events])
 
   const overMap = useMemo(() => new Map(overrides.map((d) => [d.onDate, d])), [overrides])
 
@@ -200,7 +232,17 @@ export default function SchoolCalendar() {
 
   const exportCsv = async (from: string, to: string) => {
     const r = await loadSchoolCalendar(from, to)
-    const lines: string[][] = [['日期', '星期', '是否上课', '这一天是什么', '说明']]
+    /* 🆕 2026-10-24：活动 / 考试也进表（用户要"校历能编辑活动、考试"，
+       导出里当然也得带上，否则印出来给老师的表就少一半信息） */
+    const ev = await loadCalendarEvents(from, to)
+    const evMap = new Map<string, string>()
+    for (const e of ev.rows) {
+      const line = `${EVENT_KIND_TEXT[e.kind]}${e.atText ? ` ${e.atText}` : ''}·${e.title}`
+      evMap.set(e.onDate, evMap.has(e.onDate) ? `${evMap.get(e.onDate)}；${line}` : line)
+    }
+    const lines: string[][] = [
+      ['日期', '星期', '是否上课', '这一天是什么', '说明', '活动 / 考试'],
+    ]
     const map = new Map(r.days.map((d) => [d.onDate, d]))
     for (let iso = from; iso <= to; iso = addDays(iso, 1)) {
       const c = cellOf(iso, map.get(iso) ?? null)
@@ -210,6 +252,7 @@ export default function SchoolCalendar() {
         c.school ? '上课' : '放假',
         c.label,
         c.over?.note ?? '',
+        evMap.get(iso) ?? '',
       ])
     }
     const csv = lines.map((row) => row.map(csvCell).join(',')).join('\r\n')
@@ -318,6 +361,21 @@ export default function SchoolCalendar() {
                     {Number(c.iso.slice(8, 10))}
                     {c.over ? (
                       <span style={{ fontSize: 10, color: 'var(--color-ink4)' }}>校</span>
+                    ) : null}
+                    {/* 🆕 有活动/考试的那天点一个点（只有这一天有事件才画，不占版面） */}
+                    {evByDay.has(c.iso) ? (
+                      <span
+                        aria-hidden
+                        data-cal-event-dot={c.iso}
+                        title={(evByDay.get(c.iso) ?? []).map((e) => `${EVENT_KIND_TEXT[e.kind]}·${e.title}`).join('；')}
+                        style={{
+                          width: 5,
+                          height: 5,
+                          borderRadius: 999,
+                          background: 'var(--color-warn)',
+                          display: 'inline-block',
+                        }}
+                      />
                     ) : null}
                   </span>
                   <span
@@ -449,6 +507,124 @@ export default function SchoolCalendar() {
           />
           <div className="mt-2" style={{ fontSize: 11.5, color: 'var(--color-ink4)', lineHeight: 1.7 }}>
             说明是给老师看的（导出表格里也带着它）；不写也行。
+          </div>
+
+          {/* 🆕 2026-10-24：当天还有什么（活动 / 考试）。⚠️ 它**不改**上面"上不上课"那一档 */}
+          <div className="mt-4" data-cal-events>
+            <div className="flex items-center gap-2">
+              <span style={{ fontSize: 12.5, fontWeight: 650 }}>当天的活动 / 考试</span>
+              <span className="flex-1" />
+              {evState === 'missing' ? (
+                <span style={{ fontSize: 11.5, color: 'var(--color-badink)' }}>库里还没有这张表</span>
+              ) : null}
+            </div>
+            {evNotice ? (
+              <div className="mt-1" style={{ fontSize: 11.5, color: 'var(--color-ink3)', lineHeight: 1.7 }}>
+                {evNotice}
+              </div>
+            ) : null}
+
+            {(editIso ? evByDay.get(editIso) ?? [] : []).map((e) => (
+              <div
+                key={e.id}
+                className="mt-1.5 flex items-center gap-2"
+                data-cal-event={e.id}
+                style={{ fontSize: 12.5 }}
+              >
+                <span className="tag tag-warn">{EVENT_KIND_TEXT[e.kind]}</span>
+                {e.atText ? <span style={{ color: 'var(--color-ink3)' }}>{e.atText}</span> : null}
+                <span className="min-w-0 flex-1 truncate">{e.title}</span>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={async () => {
+                    const r = await removeCalendarEvent(e.id)
+                    if (!r.ok) {
+                      push({ text: '没删掉', tone: 'bad', desc: r.why })
+                      return
+                    }
+                    setTick((t) => t + 1)
+                  }}
+                  style={{ color: 'var(--color-bad)', fontSize: 11.5 }}
+                >
+                  删除
+                </button>
+              </div>
+            ))}
+
+            <div className="mt-2 flex flex-wrap items-center gap-1.5" data-cal-event-kinds>
+              {(['activity', 'exam', 'other'] as CalendarEventKind[]).map((k) => (
+                <button
+                  key={k}
+                  type="button"
+                  data-cal-event-kind={k}
+                  data-on={evKind === k}
+                  onClick={() => setEvKind(k)}
+                  style={{
+                    padding: '3px 9px',
+                    borderRadius: 999,
+                    fontSize: 11.5,
+                    border: `1px solid ${evKind === k ? 'var(--color-accent)' : 'var(--color-line2)'}`,
+                    background: evKind === k ? 'var(--color-accentsoft)' : 'var(--color-surface)',
+                    color: evKind === k ? 'var(--color-accentink)' : 'var(--color-ink2)',
+                  }}
+                >
+                  {EVENT_KIND_TEXT[k]}
+                </button>
+              ))}
+            </div>
+            <div className="mt-1.5 flex flex-wrap gap-1.5">
+              <input
+                className="input"
+                style={{ flex: '1 1 200px' }}
+                placeholder="是什么（期中考试 / 校庆 / 运动会）"
+                value={evTitle}
+                maxLength={60}
+                onChange={(e) => setEvTitle(e.target.value)}
+                aria-label="活动或考试的名称"
+                data-cal-event-title
+              />
+              <input
+                className="input"
+                style={{ flex: '0 1 130px' }}
+                placeholder="时间（上午 8:00）"
+                value={evAt}
+                maxLength={30}
+                onChange={(e) => setEvAt(e.target.value)}
+                aria-label="时间"
+                data-cal-event-at
+              />
+              <Button
+                size="sm"
+                disabled={busy || !editIso}
+                onClick={async () => {
+                  if (!editIso) return
+                  setBusy(true)
+                  const r = await addCalendarEvent({
+                    onDate: editIso,
+                    kind: evKind,
+                    title: evTitle,
+                    atText: evAt,
+                    authorId: teacher?.id ?? null,
+                    authorName: teacher?.name ?? '',
+                  })
+                  setBusy(false)
+                  if (!r.ok) {
+                    push({ text: '没加上', tone: 'bad', desc: r.why })
+                    return
+                  }
+                  setEvTitle('')
+                  setEvAt('')
+                  setTick((t) => t + 1)
+                }}
+                data-cal-event-add="1"
+              >
+                加一条
+              </Button>
+            </div>
+            <div className="mt-1" style={{ fontSize: 11, color: 'var(--color-ink4)', lineHeight: 1.7 }}>
+              事件只是"这一天有什么事"。要让它**不上课**，上面选「按放假算」。
+            </div>
           </div>
         </Sheet>
       </Page>

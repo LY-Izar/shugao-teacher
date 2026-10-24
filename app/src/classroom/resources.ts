@@ -1,5 +1,5 @@
 /**
- * 插件的**只读资源**（手册 §6.1 那六张表）—— 宿主代理读，插件拿不到数据库客户端。
+ * 插件的**只读资源**（手册 §6.1 那张表）—— 宿主代理读，插件拿不到数据库客户端。
  *
  * ============================================================================
  * 口径
@@ -21,6 +21,7 @@ import { dayState, nowMinutes, toMinutes, weekdayOf } from '../lib/schedule'
 import { splitLessonTitle } from '../lib/scheduleParse'
 import { subjectCodeOf, subjectCodeOfName, subjectName } from '../lib/subjects'
 import { collectStats } from '../lib/assignments'
+import { BAND_META, gradeStats } from '../lib/grading'
 import { ranked } from '../lib/wrongbook'
 import { loadDailyBundle, toDutyInput, todayDuty } from '../lib/daily'
 import { isoOffset } from '../lib/date'
@@ -186,6 +187,54 @@ export async function readResource(resource: ResourceName, classId: string): Pro
           subject: e.subject || e.title,
           status: e.status === 'graded' ? 'graded' : 'pending',
         }))
+      return { value: { rows }, stale, asOf }
+    }
+
+    /*
+     * 🆕 P2 收尾（讲评插件）：已批改作业 + 逐题正确率。
+     *
+     * 判据全部**照旧页那一份**，一个字没改：
+     *   · 「已批改」= `ranked(a)`（不是 `status === 'graded'`）—— 极简模式的档案没有逐题
+     *     数据，自己写状态判断会让它混进来，然后被渲染成「全班全对 + 错误率 0%」
+     *     （W16 的教室端那一半，见旧页 `graded` 的注释）；
+     *   · 逐题统计 = `gradeStats(本班在读学生, 档案)`，错误率 = 错的人数 ÷ 应交人数；
+     *   · 排序 = 布置日倒序（旧页 `graded` 的同一行）。
+     *
+     * ⚠️ 为什么把**所有**已批改档案的逐题统计一次递出去：`data.read` 没有参数
+     *    （手册 §4.1），插件选不了"只读第 N 份"。本班 ~45 人 × 一学期几十份作业，
+     *    一次算完是毫秒级；真到算不动的时候再拆资源，别现在把接口改成带参数的。
+     * ⚠️ `bandLabel` / `bandColor` 也由宿主递（`BAND_META` 里只有一份）：插件是单文件、
+     *    不许 import 宿主模块（手册 §11.3），让它自己抄一张分档表就是两个真相。
+     */
+    case 'class.gradedHomework': {
+      const students = klass?.students ?? []
+      const rows = s.assignments
+        .filter((a) => a.classId === classId && ranked(a))
+        .sort((x, y) => (x.assignDate < y.assignDate ? 1 : -1))
+        .map((a) => {
+          const st = gradeStats(students, a)
+          const cs = collectStats(students, a)
+          return {
+            id: a.id,
+            title: a.title,
+            subject: subjectName(subjectCodeOf(a), a.subject),
+            assignDate: a.assignDate,
+            total: cs.total,
+            submitted: cs.submitted,
+            missing: cs.missing,
+            questions: st.questions.map((q) => ({
+              seq: q.seq,
+              wrongCount: q.wrongCount,
+              rate: q.rate,
+              band: q.band,
+              bandLabel: BAND_META[q.band].label,
+              bandColor: BAND_META[q.band].color,
+              /* 学号（不是姓名）：与旧页 `PipPanel` 的 `wrongNos` 同一口径，
+                 姓名由插件经 `class.roster` 自己配（名单是另一个能力）。 */
+              wrongNos: q.wrongNos,
+            })),
+          }
+        })
       return { value: { rows }, stale, asOf }
     }
 

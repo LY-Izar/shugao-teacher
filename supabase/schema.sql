@@ -10990,6 +10990,47 @@ create table if not exists school_calendar (
   updated_by_name text not null default ''
 );
 
+-- -------- 40.3b 🆕 校历上的**事件**（活动 / 考试）—— 一天可以有多件 --------
+--  用户口径（2026-10-24）：「校历得支持编辑，例如当天学校有什么活动、要考试之类的，
+--  这些只有学校自行设置。」⇒ 与 `school_calendar` 是**两件事**，别合并：
+--    · `school_calendar` = 那一天**上不上课**（覆盖层，一天一行，主键就是日期）；
+--    · 这张表 = 那一天**还有什么事**（校庆 / 运动会 / 期中考试…），一天可以好几件。
+--  ⚠️ 事件**不改变**"上不上课"的判定 —— 想让某天不上课，仍要在 `school_calendar` 里写 `off`
+--     （提醒链读的是 `school_calendar`，不是这张表；见 `useScheduleReminder`）。
+create table if not exists school_calendar_events (
+  id              uuid primary key default gen_random_uuid(),
+  on_date         date not null,
+  /* 活动 / 考试 / 其他。用 check 钉死，前端只认这三个字面量 */
+  kind            text not null check (kind in ('activity', 'exam', 'other')),
+  title           text not null,
+  /* 时间写成**人话**（"上午 8:00" / "下午第三节" / "全天"）：校历不是课表，
+     没有硬结构的起止时刻，硬拆成 time 反而要老师做算术 */
+  at_text         text not null default '',
+  note            text not null default '',
+  created_at      timestamptz not null default now(),
+  updated_at      timestamptz not null default now(),
+  updated_by      uuid references teachers (id) on delete set null,
+  updated_by_name text not null default ''
+);
+create index if not exists school_calendar_events_day_idx on school_calendar_events (on_date);
+
+alter table school_calendar_events enable row level security;
+/* 全校可读（每个班都要知道今天有考试），只有管校历的那一档能写（与 `school_calendar_write` 同源） */
+grant select, insert, update, delete on school_calendar_events to authenticated;
+revoke all on school_calendar_events from anon;
+
+drop policy if exists school_calendar_events_read on school_calendar_events;
+create policy school_calendar_events_read on school_calendar_events for select to authenticated
+  using (true);
+
+drop policy if exists school_calendar_events_write on school_calendar_events;
+create policy school_calendar_events_write on school_calendar_events for all to authenticated
+  using (is_school_admin())
+  with check (is_school_admin());
+
+comment on table school_calendar_events is
+  '校历事件（§40.3b）：某天的活动 / 考试，一天可以多件。不改变"上不上课"的判定 —— 那仍由 school_calendar.kind 说了算。';
+
 -- -------- 40.4 课代表口令（一班一条，只存哈希）--------
 --  🔴 口令**明文不落库**：存 `sha256(<班 id>:<口令>)`（盐就是班 id —— 一个班的哈希
 --     在另一个班身上无效，也防止同一口令在不同班之间"通用"）。
@@ -11078,7 +11119,13 @@ as $$
     exists (select 1 from teacher_roles r
              where r.teacher_id = p_uid and r.role = 'head_teacher'
                and r.scope_type = 'class' and r.scope_id = p_class_id)
-    or teaches_subject_for(p_uid, p_class_id, p_subject_code, p_subject);
+    or teaches_subject_for(p_uid, p_class_id, p_subject_code, p_subject)
+    /* 🆕 2026-10-24 用户拍板：**最高管理员也能写**。
+       🔴 只加 `super`，**不加** `admin` / `grade_head`：需求⑦（2026-10-02）那句
+          「教务处只读」仍然成立 —— 超管是平台管理员，不是教务处的第三个身份。
+          「一个字段一种语义」：这条函数的语义是"谁能替这个班留今天的作业"，
+          超管被明确授予了这件事，教务处没有。 */
+    or is_super_admin_for(p_uid);
 $$;
 
 revoke all on function public.can_write_daily_homework_for(uuid, uuid, text, text)

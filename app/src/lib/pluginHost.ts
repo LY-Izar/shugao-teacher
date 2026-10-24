@@ -36,6 +36,9 @@ export const PLUGIN_PERMISSIONS = [
   'data.assignments',
   'data.quote',
   'data.exams',
+  /* 🆕 P2 收尾（讲评插件）：已批改作业 + 逐题正确率。**不可**由它推出别的资源 ——
+     名单（姓名）仍要单独的 `data.roster`，值日/每日作业仍要各自的能力。 */
+  'data.gradedHomework',
   'config',
   'clock',
   'bus',
@@ -43,7 +46,53 @@ export const PLUGIN_PERMISSIONS = [
   'pip',
   'files',
   'keepAwake',
+  /**
+   * 🆕 2026-10-24 用户拍板：**开通用写入，但必须可审计**。
+   *
+   * 与 `storage`（写自己的槽）是两件事：`write` = **写平台业务表**。
+   * 🔴 三个前提，缺一不给：
+   *   ① 申请了这个能力；
+   *   ② manifest 的 `writes` **逐张声明**了要动的表（声明本身就是审核材料）；
+   *   ③ 只放行 `WRITABLE_TABLES` 里的表 —— 用户表/权限表/审计表一律不在此列。
+   * 写入走**调用者自己的会话**（RLS 仍是边界），插件依旧拿不到 supabase 客户端。
+   * 超管在 /admin 审核时会看到"这插件要写哪些表、每张表对应平台的什么功能"。
+   */
+  'write',
 ] as const
+
+/**
+ * 允许插件申请写入的业务表白名单。
+ * ⚠️ 与 `functions/api/_lib/pluginRepo.ts` 的 `WRITABLE_TABLES` 是**同一份**（服务端探针要独立判一次，
+ *    两边不能只信客户端）。加表要同时加两处 + 手册 §5/§6.3。
+ * 🔴 刻意**不**包含：teachers / teacher_roles / teacher_profiles / classroom_accounts /
+ *    plugin_registry / plugin_configs / audit 类 —— 那些是账号、权限与审核本身，
+ *    让插件写它们等于把"谁能审谁"交给插件。
+ */
+export const WRITABLE_TABLES = [
+  'schedule_items',
+  'classes',
+  'students',
+  'class_subjects',
+  'assignments',
+  'daily_homework',
+  'duty_assignments',
+  'school_calendar',
+  'school_calendar_events',
+  'calls',
+  'shared_files',
+  'exams',
+  'score_rows',
+  'wrongbook',
+] as const
+
+export type WritableTable = (typeof WRITABLE_TABLES)[number]
+
+export interface PluginWriteDecl {
+  table: WritableTable | string
+  /** 为什么非写不可，≤40 字，给超管看的人话 */
+  why: string
+}
+
 
 export type Permission = (typeof PLUGIN_PERMISSIONS)[number]
 
@@ -57,6 +106,7 @@ export const RESOURCE_PERMISSION = {
   'class.assignments': 'data.assignments',
   'class.quote': 'data.quote',
   'class.exams': 'data.exams',
+  'class.gradedHomework': 'data.gradedHomework',
 } as const
 
 export type ResourceName = keyof typeof RESOURCE_PERMISSION
@@ -98,6 +148,8 @@ export interface PluginManifest {
   entry: string
   minShellVersion: string
   permissions: Permission[]
+  /** 🆕 2026-10-24：申请 `write` 能力时**必须**逐张声明要写的表（审核材料，见 `Permission` 的注释） */
+  writes?: PluginWriteDecl[]
   requiresShell?: string[]
   window?: { w: number; h: number; min?: { w: number; h: number } }
   config?: { fields: ConfigField[] }
@@ -164,6 +216,37 @@ export function validateManifest(dirName: string, raw: unknown): { ok: boolean; 
 
   /* v0 草案用的是 capabilities —— 写了要明确报错，别静默当成"没申请任何能力" */
   if ('capabilities' in m) errors.push('字段名是 permissions（v0 草案的 capabilities 已废弃）')
+
+  /*
+   * 🆕 `write` 能力的三道校验（用户 2026-10-24 的口径：审核页要能看懂它要动哪些表）：
+   *   ① 申请了 `write` 却没写 `writes` ⇒ 拒（"想写但不说写什么"比不申请更可疑）；
+   *   ② `writes` 里有白名单外的表 ⇒ 拒（那份白名单见 `WRITABLE_TABLES`）；
+   *   ③ `why` 空着或太长 ⇒ 拒（审核页要给人看，不是给机器看）。
+   */
+  const wantsWrite = Array.isArray(perms) && (perms as unknown[]).includes('write')
+  const writes = m.writes
+  if (wantsWrite) {
+    if (!Array.isArray(writes) || writes.length === 0) {
+      errors.push('申请了 write 能力却没有 writes（必须逐张声明要写的表）')
+    }
+  }
+  if (writes !== undefined) {
+    if (!Array.isArray(writes)) errors.push('writes 必须是数组')
+    else {
+      for (const [i, w] of (writes as PluginWriteDecl[]).entries()) {
+        if (!w || typeof w.table !== 'string' || !w.table) {
+          errors.push(`writes[${i}].table 缺失`)
+          continue
+        }
+        if (!(WRITABLE_TABLES as readonly string[]).includes(w.table)) {
+          errors.push(`writes[${i}].table 不在可写白名单里：${w.table}`)
+        }
+        if (typeof w.why !== 'string' || !w.why.trim()) errors.push(`writes[${i}].why 缺失（给审核看的一句人话）`)
+        else if (w.why.length > 40) errors.push(`writes[${i}].why 超过 40 字`)
+      }
+      if (!wantsWrite) errors.push('声明了 writes 但没申请 write 能力')
+    }
+  }
 
   const win = m.window
   if (win !== undefined) {
@@ -270,6 +353,7 @@ export const CAPABILITY_SLOTS: Record<Permission, readonly string[]> = {
   'data.assignments': ['data'],
   'data.quote': ['data'],
   'data.exams': ['data'],
+  'data.gradedHomework': ['data'],
   config: ['config'],
   clock: ['clock'],
   bus: ['bus'],
@@ -277,7 +361,15 @@ export const CAPABILITY_SLOTS: Record<Permission, readonly string[]> = {
   pip: ['pip'],
   files: ['files'],
   keepAwake: ['keepAwake'],
+  write: ['write'],
 }
+
+/**
+ * 🆕 写业务表的端口（2026-10-24）。壳/页面负责接上它；没接 ⇒ `ctx.write` 一律回 `E_OFFLINE_WRITE`。
+ * 🔴 `op` 只有三种，且**表名已经在建 ctx 时校验过**（这里不再信任调用方）。
+ */
+export type WriteTableOp = 'insert' | 'update' | 'delete'
+export type WriteTableResult = { ok: true } | { ok: false; code: string; why: string }
 
 export interface HostPorts {
   /** 只读资源；`stale` 由端口自己决定（断网时 true，且**不许 reject**） */
@@ -305,6 +397,8 @@ export interface HostPorts {
   soundPlay(kind: string): void
   pipOpen(opts: Record<string, unknown>): Promise<boolean>
   filesSave(name: string, blob: unknown): Promise<boolean>
+  /** 🆕 写业务表（能力 `write`）。**没接就是没有**：`ctx.write` 的调用会回 `E_OFFLINE_WRITE`。 */
+  writeTable?(op: WriteTableOp, table: string, payload: unknown): Promise<WriteTableResult>
 }
 
 export interface ContextOptions {
@@ -414,6 +508,26 @@ export function buildContext(o: ContextOptions): Record<string, unknown> {
     ctx.files = { save: o.ports.filesSave, open: async () => null }
   }
   if (perms.has('keepAwake')) ctx.keepAwake = true
+
+  /*
+   * 🆕 `ctx.write`：**只放行 manifest 声明过的表**。
+   * 越权不是"让数据库拒"，而是**宿主这一层就拒**（`E_TABLE_NOT_DECLARED`）——
+   * 理由：把"插件偷偷写别的表"变成一条开发期就能看见的错，而不是等 RLS 静默筛成 0 行
+   * （那正是本项目反复踩的"失败了没人知道"）。
+   */
+  if (perms.has('write') && Array.isArray(o.manifest.writes) && o.manifest.writes.length) {
+    const declared = new Set(o.manifest.writes.map((w) => w.table))
+    const call = (op: 'insert' | 'update' | 'delete') => async (table: string, payload: unknown) => {
+      if (!declared.has(table)) {
+        return { ok: false as const, code: 'E_TABLE_NOT_DECLARED', why: `manifest.writes 里没有声明 ${table}` }
+      }
+      if (!o.ports.writeTable) {
+        return { ok: false as const, code: 'E_OFFLINE_WRITE', why: '这台设备不能写库（演示模式或壳没接）' }
+      }
+      return o.ports.writeTable(op, table, payload)
+    }
+    ctx.write = Object.freeze({ insert: call('insert'), update: call('update'), delete: call('delete') })
+  }
 
   return Object.freeze(ctx)
 }

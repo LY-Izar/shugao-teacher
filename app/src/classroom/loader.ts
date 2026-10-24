@@ -23,6 +23,7 @@ import {
   preflightWrite,
   validateManifest,
   compareSemver,
+  WRITABLE_TABLES,
   type HostPorts,
   type PluginHost,
   type ResourceName,
@@ -420,6 +421,41 @@ export function makeHostPorts(d: PortDeps): HostPorts {
       // 壳侧 `files` 走 IPC（附录 A 之外的一项，P2 文件共享插件才用）；网页里就是没有
       d.toast('要教室版程序')
       return false
+    },
+    /*
+     * 🆕 写业务表（能力 `write`，2026-10-24 用户拍板「开通用写入但必须可审计」）。
+     *
+     * 🔴 三条纪律：
+     *   ① 用**调用者自己的会话**写 —— RLS 仍是边界，插件依旧拿不到 supabase 客户端；
+     *   ② 表名在这里**再核一遍**白名单（纵深防御：万一 ctx 被别处拼出来也绕不过去）；
+     *   ③ 失败必须回 `{ok:false, code, why}`，不许静默 —— 课表写失败时老师会以为录进去了。
+     */
+    writeTable: async (op, table, payload) => {
+      /* 适配器未接完：这两个参数先显式 void 掉，等写入适配落地时再用 */
+      void op
+      void payload
+      if (!(WRITABLE_TABLES as readonly string[]).includes(table)) {
+        return { ok: false, code: 'E_TABLE_NOT_DECLARED', why: `${table} 不在可写白名单里` }
+      }
+      /*
+       * 🔴 2026-10-24：**适配器还没写完，先如实拒绝，不要拿原始列插入去撞库**。
+       *
+       * 已知两件事（子智能体交活时点出来的，都是真的）：
+       *   ① 插件交的是**平台业务对象**（`ScheduleItem` 样子），不是表行；要过
+       *      `data/remote.ts` 的 `scheduleToRow(s, teacherId)` 才落得进 `schedule_items`；
+       *   ② `schedule_items.teacher_id` 是 `not null references teachers(id)`，而**教室端账号的 uid
+       *      不在 `teachers` 里** ⇒ 从教室屏写"班级课表"时会撞 not null，而不是"写进去看不见"。
+       * ⇒ 在"班级课表的归属人"这条定下来之前（见报告：借班主任 vs 允许 scope='class' 的 teacher_id 为空），
+       *    这里返回一个**说得出口的错**，让插件的降级分支去提示，而不是把 Postgres 的原文甩到屏上。
+       */
+      if (table === 'schedule_items') {
+        return {
+          ok: false,
+          code: 'E_WRITE_UNSUPPORTED',
+          why: '课表的写入适配还没接（这条课表要记在谁名下还没定），先在宿主页面导入',
+        }
+      }
+      return { ok: false, code: 'E_WRITE_UNSUPPORTED', why: `${table} 还没接写入适配` }
     },
   }
 }

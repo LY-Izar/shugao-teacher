@@ -4855,6 +4855,69 @@ $$;`
 
   /* ---------------- 收尾 ---------------- */
 
+  /*
+   * 🆕 2026-10-24：作业档案导出的**纯逻辑**（`src/lib/assignmentExport.ts`）。
+   *
+   * 为什么放在这一门：它读的是 `Assignment.statsMode / wrong / grades / missingNos / correctedNos`，
+   * 全是批改域的数据；而"极简模式照普通模式渲染"正是档案域踩过最深的坑（§九 W16）。
+   * 这里钉四件事，都是**看起来对、其实错**的那种：
+   *   ① 普通模式表头必须逐题（第1题…第N题）+ 改错列；
+   *   ② 极简模式**不许**出现逐题列（它的 questionCount 只是个残留默认值）；
+   *   ③ 缺交的人逐题格必须留空 —— 写「对」等于替他答对；
+   *   ④ 全对的写「不用改」（用户口径）。
+   */
+  {
+    const EXP = await import(pathToFileURL(resolvePath(APP, 'src/lib/assignmentExport.ts')).href)
+    const students = [
+      { id: 's1', studentNo: '1', name: '甲', status: 'active', createdAt: 0 },
+      { id: 's2', studentNo: '2', name: '乙', status: 'active', createdAt: 0 },
+      { id: 's3', studentNo: '3', name: '丙', status: 'active', createdAt: 0 },
+    ]
+    const base = {
+      id: 'a1',
+      classId: 'c1',
+      teacherId: 't1',
+      title: '练习一',
+      subject: '数学',
+      assignDate: '2026-10-24',
+      questionCount: 3,
+      status: 'graded',
+      createdAt: 0,
+      collected: true,
+      missingNos: ['3'],
+      lateNos: [],
+      wrong: { '2': ['2'] },
+      confirmedNos: ['1', '2'],
+      correctionNos: ['2'],
+      correctedNos: [],
+    }
+    const lines = (r) => r.csv.split('\r\n')
+
+    const normal = EXP.buildAssignmentCsv({ assignment: base, students, className: '高二(1)班' })
+    eq('X1：普通模式表头 = 学号/姓名/状态 + 逐题 + 错题数/改错', lines(normal)[0], '学号,姓名,状态,第1题,第2题,第3题,错题数,改错')
+    ok('X2：有错题的学生改错列写「未改」', lines(normal)[2].endsWith(',未改'), lines(normal)[2])
+    ok('X3：全对的学生改错列写「不用改」', lines(normal)[1].endsWith(',不用改'), lines(normal)[1])
+    ok('X4：缺交的人逐题格**留空**（不写「对」）', lines(normal)[3] === '3,丙,缺交,,,,0,不用改', lines(normal)[3])
+
+    const simple = EXP.buildAssignmentCsv({
+      assignment: { ...base, statsMode: 'simple', grades: { '1': '优', '2': '差' }, wrong: {} },
+      students,
+      className: '高二(1)班',
+    })
+    const headS = lines(simple)[0]
+    eq('X5：极简模式表头 = 学号/姓名/状态/等级/改错（**没有**逐题列）', headS, '学号,姓名,状态,等级,改错')
+    ok('X6：极简模式里等级「优」⇒ 不用改', lines(simple)[1].endsWith(',优,不用改'), lines(simple)[1])
+    ok('X7：极简模式里等级「差」且没点过 ⇒ 未改', lines(simple)[2].endsWith(',差,未改'), lines(simple)[2])
+
+    /* 🧪 反向对照：把同一份数据按普通模式导 ⇒ 表头**当场变样**，X5 会红（不是恒真） */
+    const wrongMode = EXP.buildAssignmentCsv({
+      assignment: { ...base, statsMode: 'normal', grades: { '1': '优' }, wrong: {} },
+      students,
+      className: '高二(1)班',
+    })
+    ok('🧪 X5 反向对照：同一份数据按普通模式导出时表头与极简模式**不同**', lines(wrongMode)[0] !== headS, lines(wrongMode)[0])
+  }
+
   await db.close()
 
   console.log('\n================ 结果 ================')

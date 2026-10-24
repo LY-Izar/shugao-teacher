@@ -4,15 +4,18 @@ import { Page } from '../components/AppShell'
 import {
   IconAlert,
   IconCheck,
+  IconDownload,
   IconMegaphone,
   IconRefresh,
   IconTarget,
 } from '../components/icons'
 import { Button, PageHead, Panel, Sect, StatStrip, Tag } from '../components/ui'
-import { useStore } from '../data/store'
+import { useStore, useToast } from '../data/store'
 import { BAND_META, gradeStats, humanDuration } from '../lib/grading'
 import { friendlyDate } from '../lib/date'
 import { archiveValue } from '../lib/keys'
+import { buildAssignmentCsv, exportModeOf } from '../lib/assignmentExport'
+import { saveBlob } from '../lib/fileOut'
 
 export default function AssignmentGradeDone() {
   const { id = '' } = useParams()
@@ -20,6 +23,7 @@ export default function AssignmentGradeDone() {
   const assignment = useStore((s) => s.assignments.find((a) => a.id === id))
   const klass = useStore((s) => s.classes.find((c) => c.id === assignment?.classId))
   const streakDays = useStore((s) => s.streakDays)
+  const push = useToast((s) => s.push)
 
   const students = useMemo(
     () =>
@@ -150,6 +154,56 @@ export default function AssignmentGradeDone() {
             </div>
           </div>
         ) : null}
+
+        {/* 导出（2026-10-24 用户提出）：**两种模式分开**——普通模式逐题、极简模式只写等级；
+            「改错」列两种都有，全对的写「不用改」。一张表里同时给完成情况与改错情况。 */}
+        <Panel className="anim-in mb-4" bodyClass="p-3.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <span style={{ fontSize: 13.5, fontWeight: 650 }}>导出本次作业</span>
+            <span className="flex-1" />
+            <Tag tone="idle">
+              {exportModeOf(assignment) === 'simple' ? '极简模式 · 只写等级' : '普通模式 · 逐题'}
+            </Tag>
+          </div>
+          <div
+            className="mt-1.5"
+            style={{ fontSize: 12, color: 'var(--color-ink3)', lineHeight: 1.7 }}
+          >
+            表里同时有完成情况与改错情况：普通模式逐题写对错，极简模式只写等级；
+            「改错」列里全对的写「不用改」。CSV，Excel 直接打开。
+          </div>
+          <Button
+            block
+            className="mt-2.5"
+            icon={<IconDownload size={16} />}
+            onClick={async () => {
+              const { filename, csv, counts } = buildAssignmentCsv({
+                assignment,
+                students,
+                className: klass?.name ?? '',
+              })
+              const saved = await saveBlob(
+                filename,
+                new Blob([`\ufeff${csv}`], { type: 'text/csv;charset=utf-8' }),
+              )
+              if (saved === 'failed') {
+                push({ text: '表格没保存下来', tone: 'bad', desc: '这台设备存不了文件，换个方式导出。' })
+                return
+              }
+              if (saved === 'cancelled') {
+                push({ text: '已取消保存', tone: 'warn' })
+                return
+              }
+              push({
+                text: '已导出完成情况',
+                tone: 'ok',
+                desc: `应交 ${counts.total} · 已交 ${counts.handed} · 缺交 ${counts.missing} · 需改错 ${counts.needCorrect} 人（已改 ${counts.corrected}）`,
+              })
+            }}
+          >
+            导出完成情况 CSV
+          </Button>
+        </Panel>
 
         {/* 讲评重点（普通模式）／最该面批的名单（极简模式） */}
         <div className="mb-4">

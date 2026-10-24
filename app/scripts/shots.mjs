@@ -190,7 +190,9 @@ const EXPECTED_FILES = [
   //       而它是教室端**唯一的写入口**。详见教室端那一节的说明。
   '121-classroom-rep-sheet.png',
   // 131 = 新教室壳（P0b 插件框架骨架）。旧 /classroom 的那一批（32/33/34/120/121）照旧跑旧壳；
-  //       新壳只在 ?newShell=1 下出现，这一张钉"它至少渲染出了窗口画布与假插件"。
+  //  ⚠️ 2026-10-24 起**默认壳改成新壳**（用户拍板：重新出包后旧版固定界面不用了）⇒ 旧壳那几批
+  //     必须显式带 `?newShell=0`，否则它们会打到新壳上（首跑就是这样红的：等不到课表面板）。
+  //  ⚠️ 新壳只在 `?newShell=1` 下出现，这一张钉"它至少渲染出了窗口画布与假插件"。
   '131-classroom-newshell.png',
   '35-nav-frost.png',
   '36-nav-travel.png',
@@ -2284,9 +2286,9 @@ await withLock(async () => {
 
       await step(SR, async () => {
         await room.setViewportSize({ width: 1440, height: 900 })
-        await room.goto(`${BASE}/classroom`, { waitUntil: 'networkidle' })
+        await room.goto(`${BASE}/classroom?newShell=0`, { waitUntil: 'networkidle' })
         await room.waitForTimeout(1200)
-        check(room.url().endsWith('/classroom'), `${SR}：教室端 URL 正确`, `url = ${room.url()}`)
+        check(room.url().includes('/classroom'), `${SR}：教室端 URL 正确`, `url = ${room.url()}`)
         await expectRoom(SR)
       })
       await shotRaw(room, SR, '32-classroom')
@@ -2309,7 +2311,7 @@ await withLock(async () => {
        *       所以这一节走的是"有 API"那一支（解锁那一步在、"开不了"横幅 0 个）。
        */
       await step(SR, async () => {
-        await room.goto(`${BASE}/classroom`, { waitUntil: 'networkidle' })
+        await room.goto(`${BASE}/classroom?newShell=0`, { waitUntil: 'networkidle' })
         await waitPageSettled(room)
         await room.waitForTimeout(900)
         /** 这一屏的两块横幅 + 环境真值（本节的读数口） */
@@ -2393,7 +2395,7 @@ await withLock(async () => {
           if (m.type() === 'error') errors.push(`CONSOLE(无 PiP) :: ${m.text()}`)
         })
         try {
-          await np.goto(`${BASE}/classroom`, { waitUntil: 'networkidle' })
+          await np.goto(`${BASE}/classroom?newShell=0`, { waitUntil: 'networkidle' })
           await waitPageSettled(np)
           await np.waitForTimeout(900)
           const B = await np.evaluate(() => {
@@ -3459,7 +3461,7 @@ await withLock(async () => {
           TEACHER_STATE.state,
         )
         const probePage = await probeCtx.newPage()
-        await probePage.goto(`${BASE}/classroom`, { waitUntil: 'networkidle' })
+        await probePage.goto(`${BASE}/classroom?newShell=0`, { waitUntil: 'networkidle' })
         await probePage.waitForTimeout(600)
         const probeBody = await bodyText(probePage)
         const probeShowsClass = probeBody.includes(demo.name)
@@ -10511,7 +10513,7 @@ await withLock(async () => {
           )
 
           // ⑤ 教室端那一支**不许**有这个入口（那块屏是给学生看的）
-          await mp.goto(`${BASE}/classroom`, { waitUntil: 'networkidle' })
+          await mp.goto(`${BASE}/classroom?newShell=0`, { waitUntil: 'networkidle' })
           await mp.waitForTimeout(700)
           const inClassroom = await mp.evaluate(
             () => document.querySelectorAll('[data-maintenance-unlock-tapzone]').length,
@@ -10551,7 +10553,7 @@ await withLock(async () => {
               backupDir: async () => 'D:\\验包用的假路径',
             }
           })
-          await bkPage.goto(`${BASE}/classroom`, { waitUntil: 'networkidle' })
+          await bkPage.goto(`${BASE}/classroom?newShell=0`, { waitUntil: 'networkidle' })
           await bkPage.waitForTimeout(2600)
           const bkProbe = await bkPage.evaluate(() => ({
             calls: Array.isArray(window.__bkCalls) ? window.__bkCalls : [],
@@ -10599,7 +10601,7 @@ await withLock(async () => {
         })
 
           /* ---- ② 教室端：全屏维护画面 + 数据清空 + 心跳照发 ---- */
-          await mp.goto(`${BASE}/classroom`, { waitUntil: 'networkidle' })
+          await mp.goto(`${BASE}/classroom?newShell=0`, { waitUntil: 'networkidle' })
           await mp.waitForTimeout(700)
           const clsNormal = await mp.evaluate(() => ({
             cls: document.body.innerText.includes('高二(3)班'),
@@ -12672,7 +12674,7 @@ await withLock(async () => {
         p.on('console', (m) => {
           if (m.type() === 'error') errors.push(`CONSOLE(dark:classroom) :: ${m.text()}`)
         })
-        await p.goto(`${BASE}/classroom`, { waitUntil: 'networkidle' })
+        await p.goto(`${BASE}/classroom?newShell=0`, { waitUntil: 'networkidle' })
         await p.waitForTimeout(1200)
         const b = await bodyText(p)
         check(
@@ -13401,7 +13403,7 @@ await withLock(async () => {
           `data-theme=${eHome.theme} · data-accent=${eHome.accent} · accent=${eHome.tok.accent}`,
           '两边用同一套判据：教师端认、教室端不认 —— "教室端恒亮+默认蓝"才是有内容的断言',
         )
-        await ep.goto(`${BASE}/classroom`, { waitUntil: 'networkidle' })
+        await ep.goto(`${BASE}/classroom?newShell=0`, { waitUntil: 'networkidle' })
         await ep.waitForTimeout(1200)
         const eText = await bodyText(ep)
         check(
@@ -13811,6 +13813,9 @@ await withLock(async () => {
         /* 同上：P2 第二批的两个插件 id 字面量（shugao.daily / shugao.exams），同一条登记口径 */
         'shugao.daily',
         'shugao.exams',
+        /* 同上：P2 收尾的两个插件 id 字面量（shugao.review / shugao.schedule），同一条登记口径 */
+        'shugao.review',
+        'shugao.schedule',
         'shugao.remind.seen',
         'shugao.teacher.v1',
         'shugao.theme',

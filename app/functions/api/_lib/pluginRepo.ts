@@ -194,7 +194,52 @@ export const PERMS = [
   'pip',
   'files',
   'keepAwake',
+  'write',
 ] as const
+
+/**
+ * 🆕 可写业务表白名单（2026-10-24 用户拍板「开通用写入但必须可审计」）。
+ * ⚠️ 与 `src/lib/pluginHost.ts` 的 `WRITABLE_TABLES` **同一份** —— 服务端独立判一次，
+ *    不能只信客户端。加表两处一起加。
+ */
+export const WRITABLE_TABLES = [
+  'schedule_items',
+  'classes',
+  'students',
+  'class_subjects',
+  'assignments',
+  'daily_homework',
+  'duty_assignments',
+  'school_calendar',
+  'school_calendar_events',
+  'calls',
+  'shared_files',
+  'exams',
+  'score_rows',
+  'wrongbook',
+] as const
+
+/**
+ * 表 → **平台里的哪个功能**（给超管看的那一列）。
+ * 用户原话：「审核探针里面写清楚这个插件要动哪些表，这些表对应的数据是哪些功能调用的」。
+ * 漏登记的会显示「（未登记功能）」—— 那比不显示更醒目，是刻意的。
+ */
+export const TABLE_FEATURE: Record<string, string> = {
+  schedule_items: '课表 / 日程（我的日程表、班级课表）',
+  classes: '班级档案',
+  students: '学生名单',
+  class_subjects: '任课关系（谁教哪个班哪一科）',
+  assignments: '作业档案（收缴与批改）',
+  daily_homework: '每日作业（教室屏上"今天各科留了什么"）',
+  duty_assignments: '值日生',
+  school_calendar: '校历（某天放不放假）',
+  school_calendar_events: '校历上的活动 / 考试',
+  calls: '呼叫播报（教室屏叫学生）',
+  shared_files: '老师传给教室屏的文件',
+  exams: '考试档案',
+  score_rows: '成绩明细',
+  wrongbook: '错题本',
+}
 
 /** 剥注释再扫：插件里写「不碰 window.__shell_out」这种说明也会被正则命中（2026-10-24 真踩过） */
 export function stripComments(s: string): string {
@@ -267,6 +312,44 @@ export function probe(files: PluginFiles, prevVersion: string | null): CheckLine
   const piiHits = pii.filter(([re]) => re.test(files.indexSource) || re.test(JSON.stringify(files.manifest))).map(([, why]) => why)
   lines.push({ id: 'CF-09', name: '没有个人信息样式串', ok: piiHits.length === 0, detail: piiHits.join('；') })
   lines.push({ id: 'CF-10', name: '入口不超过 512 KB（单文件约定）', ok: new TextEncoder().encode(files.indexSource).length <= 512 * 1024, detail: `${Math.round(new TextEncoder().encode(files.indexSource).length / 1024)} KB` })
+
+  /*
+   * 🆕 CF-11（2026-10-24 用户拍板）：**这个插件要动哪些表、这些表对应平台的哪个功能**。
+   *
+   * 用户原话：「审核探针里面写清楚这个插件要动哪些表，这些表对应的数据是哪些功能调用的，
+   * 我根据这个插件实现的功能判断这个请求是否合理再决定上架」。
+   * ⇒ 这一行就是那句话的落地：**写不写**、**写哪几张**、**每张是什么功能**、**为什么**。
+   *    白名单外的表直接判红；`why` 空着也判红（没有理由的写请求不该被通过）。
+   */
+  {
+    const writes = Array.isArray(m.writes) ? (m.writes as Array<{ table?: string; why?: string }>) : []
+    const hasPerm = perms?.includes('write') ?? false
+    if (writes.length === 0) {
+      lines.push({
+        id: 'CF-11',
+        name: hasPerm ? '写了 write 能力但没声明要写哪张表' : '不写任何业务表',
+        ok: !hasPerm,
+        detail: hasPerm ? '必须逐张声明（writes），否则审核时无法判断' : '',
+      })
+    } else {
+      const bad = writes.filter(
+        (w) => !w?.table || !(WRITABLE_TABLES as readonly string[]).includes(w.table) || !w.why?.trim(),
+      )
+      const detail = writes
+        .map((w) => {
+          const t = String(w?.table ?? '')
+          const feat = TABLE_FEATURE[t] ?? '（未登记功能，白名单外的表）'
+          return `${t} → ${feat}｜理由：${w?.why ?? '（没写）'}`
+        })
+        .join(' ; ')
+      lines.push({
+        id: 'CF-11',
+        name: `声明要写 ${writes.length} 张表（逐张看下面）`,
+        ok: bad.length === 0,
+        detail,
+      })
+    }
+  }
   return lines
 }
 

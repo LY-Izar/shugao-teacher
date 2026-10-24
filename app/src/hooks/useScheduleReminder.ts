@@ -13,6 +13,7 @@ import {
 } from '../lib/notify'
 import { REMIND_BEFORE, dueRemindersWithSnooze, toMinutes, weekdayOf } from '../lib/schedule'
 import { beijingNow, dayKind, ymdOf } from '../lib/holiday'
+import { loadSchoolCalendar } from '../lib/daily'
 
 const SEEN_KEY = 'shugao.remind.seen'
 
@@ -111,6 +112,12 @@ export function useScheduleReminder() {
    *    放成 state 就得进 effect 依赖 ⇒ 每次说完话 effect 重跑 ⇒ 又排一遍闹钟。
    */
   const warnedNoNative = useRef(false)
+
+  /**
+   * 今天学校有没有改过校历（`school_calendar` 覆盖层）—— 一天只查一次。
+   * `null` = 学校没写过这一天（沿用法定节假日判断）。
+   */
+  const schoolDayRef = useRef<{ day: string; kind: 'off' | 'school' | null } | null>(null)
 
   /**
    * 「已经因为这个把老师送去系统设置、他还没回来」——`useRef` 同理（不是要画出来的东西）。
@@ -339,9 +346,27 @@ export function useScheduleReminder() {
       const now = beijingNow()
       const today = ymdOf(now)
 
-      // 法定假期不上课，别在假期里提醒上课
-      // （调休上班日照常提醒 —— 那天确实要上课）
-      if (dayKind(today) === 'holiday') return
+      /*
+       * 🆕 2026-10-24（用户提的）：「正常工作日学校不上课的话，老师的排课表也不会提醒」。
+       *
+       * 原来这里只看**法定节假日**（`dayKind`），不看**学校自己改过的那份校历**。
+       * 于是"周三被学校改成不上课"那天，老师照样收到「5 分钟后上课」。
+       *
+       * 判据顺序（学校口径优先，与 `lib/duty.ts` 的"覆盖层在前"同源）：
+       *   · 学校写 `off`    ⇒ **不提醒**（哪怕今天是工作日）；
+       *   · 学校写 `school` ⇒ **照常提醒**（哪怕是法定假期 / 周末 —— 那天确实要上课）；
+       *   · 学校没写        ⇒ 沿用既有的 `dayKind` 判断（调休上班日仍提醒）。
+       * ⚠️ 一天只查一次库（跨天时重查）：校历一天里不会变，没必要每分钟打一次。
+       */
+      const cached = schoolDayRef.current
+      if (!cached || cached.day !== today) {
+        const r = await loadSchoolCalendar(today, today).catch(() => null)
+        const k = r?.days.find((d) => d.onDate === today)?.kind
+        schoolDayRef.current = { day: today, kind: k === 'off' || k === 'school' ? k : null }
+      }
+      const schoolKind = schoolDayRef.current?.kind ?? null
+      if (schoolKind === 'off') return
+      if (schoolKind !== 'school' && dayKind(today) === 'holiday') return
 
       // 只提醒教师自己的课；班级课表里别的科目不归他管
       const due = dueRemindersWithSnooze(
