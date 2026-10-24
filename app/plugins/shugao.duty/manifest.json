@@ -1,0 +1,11 @@
+{
+  "id": "shugao.duty",
+  "name": "值日生",
+  "icon": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\"><circle cx=\"12\" cy=\"8\" r=\"3.2\"/><path d=\"M5 21c0-4 3.1-6.5 7-6.5s7 2.5 7 6.5\"/></svg>",
+  "description": "今天轮到谁值日",
+  "version": "1.0.0",
+  "entry": "index.js",
+  "minShellVersion": "1.1.5",
+  "permissions": ["data.duty", "clock"],
+  "window": { "w": 3, "h": 2, "min": { "w": 2, "h": 1 } }
+}

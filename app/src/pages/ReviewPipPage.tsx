@@ -39,6 +39,20 @@ function readClassId(): string {
   }
 }
 
+/**
+ * 这扇窗要能**拖着走**（用户 2026-10-24：「讲评的这个置顶小窗应该可以拖动」）。
+ *
+ * 无边框窗没有系统标题栏，拖动只能靠页面里的 `-webkit-app-region: drag`（老 PiP 的
+ * `data:` 模板也是这么做的：`html,body{-webkit-app-region:drag}` + `button{no-drag}`）。
+ * 整页设成拖动区，再把**可点的东西**排除掉 —— 否则点题号条、点上一题/下一题
+ * 全会被窗口当成"开始拖窗口"，一个都点不动。
+ * ⚠️ 滚轮不受影响：拖动区只吃"按下-移动"，不吃滚轮。
+ */
+const DRAG_CSS = `
+  html, body { -webkit-app-region: drag; background: transparent !important; }
+  button, a, input, select, textarea { -webkit-app-region: no-drag; }
+`
+
 export default function ReviewPipPage() {
   const classId = readClassId()
   const [rows, setRows] = useState<PipRow[]>([])
@@ -94,6 +108,7 @@ export default function ReviewPipPage() {
           padding: 16,
         }}
       >
+        <style>{DRAG_CSS}</style>
         <div>
           还没有可讲评的档案
           <div style={{ marginTop: 6, fontSize: 12, color: 'rgb(255 255 255 / .5)' }}>
@@ -105,18 +120,21 @@ export default function ReviewPipPage() {
   }
 
   return (
-    <PipPanel
-      tone="pip"
-      seq={seq}
-      total={total}
-      rate={cur.rate}
-      band={cur.band}
-      wrongNos={cur.wrongNos}
-      nameOf={nameOf}
-      all={all}
-      onPick={(n) => go(n)}
-      onPrev={() => go(seq - 1)}
-      onNext={() => go(seq + 1)}
-    />
+    <>
+      <style>{DRAG_CSS}</style>
+      <PipPanel
+        tone="pip"
+        seq={seq}
+        total={total}
+        rate={cur.rate}
+        band={cur.band}
+        wrongNos={cur.wrongNos}
+        nameOf={nameOf}
+        all={all}
+        onPick={(n) => go(n)}
+        onPrev={() => go(seq - 1)}
+        onNext={() => go(seq + 1)}
+      />
+    </>
   )
 }

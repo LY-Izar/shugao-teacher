@@ -13816,6 +13816,9 @@ await withLock(async () => {
         /* 同上：P2 收尾的两个插件 id 字面量（shugao.review / shugao.schedule），同一条登记口径 */
         'shugao.review',
         'shugao.schedule',
+        /* 🆕 2026-10-25：值日生从「每日作业与值日」拆出来单独成插件（用户：「作业和值日不要混成一个插件」）
+           ⇒ 新 id 字面量，同一条登记口径。 */
+        'shugao.duty',
         'shugao.remind.seen',
         'shugao.teacher.v1',
         'shugao.theme',

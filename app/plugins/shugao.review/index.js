@@ -2,7 +2,8 @@
  * 作业讲评插件（P2 收尾 ①：旧教室端「作业讲评」块 → 插件）
  *
  * 搬自 `app/src/pages/Classroom.tsx` 的那一串：
- *   已批改列表 → 逐题正确率 → 点行切题 → 当前题目大屏 → 置顶小窗推屏 → 作业图片生成。
+ *   已批改列表 → 逐题正确率 → 点行切题 → 当前题目大屏 → 置顶小窗推屏。
+ *   （「存成图片」2026-10-25 挪去每日作业插件 `shugao.daily`，讲评不再出图。）
  *
  * 判据与话术**一个字没改**（逐条对应写在下面各行）：
  *   · 「已批改」不是 status 判断，是宿主的 `ranked()`（资源 `class.gradedHomework` 已经照它筛好，
@@ -10,7 +11,7 @@
  *   · 错误率 = 错的人数 ÷ 应交人数；分档、档名、「N 人错」、「全对」全部来自宿主
  *     `BAND_META`（资源随题递 `bandLabel` / `bandColor`，插件不抄第二张分档表）；
  *   · 题号条 / 当前题 / 名单 / 上一题下一题 —— 与旧页 `components/PipPanel.tsx` 同一套交互；
- *   · 空态两句、置顶小窗的降级话术、存图片的三句提示，逐字照旧页。
+ *   · 空态两句、置顶小窗的降级话术，逐字照旧页。
  *
  * 与旧页只有一处形态差异（插件模型本身带来的）：它渲染在自己那块功能块窗口里，
  * 老师启用才出现。旧界面那一块**原样留着**（P2 收尾才整块删）。
@@ -98,147 +99,6 @@ const mk = (tag, css, text) => {
 }
 
 /* ============================================================
-   作业图片（搬自 `src/lib/homeworkImage.ts`，版式与颜色照那份壁纸工具）
-   ------------------------------------------------------------
-   🔴 宿主那份是 TS 且插件不许 import 宿主模块（手册 §11.3），所以这里是一份逐行副本。
-      两份**同轮维护**：改版式的时候两处一起改，别以为那边跟着变了。
-   ============================================================ */
-const IMG = {
-  W: 800,
-  H: 600,
-  /** 与那份壁纸工具同一对颜色（`FromArgb(130,29,190)` → `FromArgb(164,138,186)`） */
-  FROM: [130, 29, 190],
-  TO: [164, 138, 186],
-  /** 版心：左边留 1/3 白，正文从 x=270 起（照那张图的观感） */
-  X: 270,
-  LINE_H: 40,
-  FONT: '"Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif',
-}
-
-/** 学科短名（搬自 `src/lib/subjects.ts` 的 `short` 列；单文件插件不许 import 宿主模块） */
-const SUBJECT_SHORT = {
-  chinese: '语',
-  math: '数',
-  english: '英',
-  physics: '物',
-  chemistry: '化',
-  biology: '生',
-  politics: '政',
-  history: '史',
-  geography: '地',
-  it: '信',
-  general_tech: '通',
-  pe: '体',
-  music: '音',
-  art: '美',
-  mental_health: '心',
-}
-
-/** 日期画成 `M.d`（与那份壁纸工具的 `"        M.d"` 同一个口径） */
-const imgTitleOf = (iso) => {
-  const [, m, d] = String(iso).split('-')
-  if (!m || !d) return String(iso)
-  return `${Number(m)}.${Number(d)}`
-}
-
-/** 一科一行：`语：第一条；第二条` */
-const imgLinesOf = (rows) => {
-  const bySubject = new Map()
-  for (const r of rows) {
-    const label = SUBJECT_SHORT[r.subjectCode] || r.subject || '其他'
-    const list = bySubject.get(label) ?? []
-    list.push(r.content)
-    bySubject.set(label, list)
-  }
-  return [...bySubject.entries()].map(([label, list]) => `${label}：${list.join('；')}`)
-}
-
-/** 按宽度折行（中文没有词边界，逐字量最稳） */
-const imgWrap = (c2d, text, maxWidth) => {
-  const out = []
-  let cur = ''
-  for (const ch of text) {
-    if (c2d.measureText(cur + ch).width > maxWidth && cur) {
-      out.push(cur)
-      cur = ch
-    } else {
-      cur += ch
-    }
-  }
-  if (cur) out.push(cur)
-  return out
-}
-
-/** 画一张 800×600：紫到紫灰渐变、左上日期、一科一行、右下角值日生与班名 */
-function drawHomeworkImage(className, onDate, rows, duty) {
-  const cv = globalThis.document.createElement('canvas')
-  cv.width = IMG.W
-  cv.height = IMG.H
-  const c2d = cv.getContext('2d')
-  if (!c2d) return cv
-
-  const g = c2d.createLinearGradient(0, 0, IMG.W, IMG.H)
-  g.addColorStop(0, `rgb(${IMG.FROM[0]}, ${IMG.FROM[1]}, ${IMG.FROM[2]})`)
-  g.addColorStop(1, `rgb(${IMG.TO[0]}, ${IMG.TO[1]}, ${IMG.TO[2]})`)
-  c2d.fillStyle = g
-  c2d.fillRect(0, 0, IMG.W, IMG.H)
-
-  c2d.textBaseline = 'top'
-  c2d.fillStyle = 'rgb(255 255 255)'
-  c2d.font = `700 36px ${IMG.FONT}`
-  c2d.fillText(imgTitleOf(onDate), IMG.X, 46)
-
-  c2d.font = `400 22px ${IMG.FONT}`
-  let y = 116
-  const lines = imgLinesOf(rows)
-  const pad = IMG.W - IMG.X - 30
-  if (!lines.length) {
-    c2d.fillStyle = 'rgb(255 255 255 / .75)'
-    c2d.fillText('今天还没有人留作业', IMG.X, y)
-  } else {
-    for (const line of lines) {
-      for (const part of imgWrap(c2d, line, pad)) {
-        c2d.fillText(part, IMG.X, y)
-        y += IMG.LINE_H
-      }
-      y += 6
-    }
-  }
-
-  c2d.font = `500 17px ${IMG.FONT}`
-  c2d.fillStyle = 'rgb(255 255 255 / .82)'
-  c2d.textAlign = 'right'
-  if (duty) c2d.fillText(`今天的值日生 · ${duty}`, IMG.W - 30, IMG.H - 66)
-  c2d.font = `500 15px ${IMG.FONT}`
-  c2d.fillStyle = 'rgb(255 255 255 / .62)'
-  c2d.fillText(className, IMG.W - 30, IMG.H - 40)
-  c2d.textAlign = 'left'
-  return cv
-}
-
-/** 画好 → 交给浏览器下载（教室端那块屏上点的，不写本机文件夹） */
-const saveImage = async (className, onDate, rows, duty) => {
-  const cv = drawHomeworkImage(className, onDate, rows, duty)
-  const blob = await new Promise((resolve) => {
-    try {
-      cv.toBlob((b) => resolve(b), 'image/png')
-    } catch {
-      resolve(null)
-    }
-  })
-  if (!blob) return false
-  const url = URL.createObjectURL(blob)
-  const a = globalThis.document.createElement('a')
-  a.href = url
-  a.download = `${className}-每日作业-${onDate}.png`
-  globalThis.document.body.appendChild(a)
-  a.click()
-  a.remove()
-  setTimeout(() => URL.revokeObjectURL(url), 60_000)
-  return true
-}
-
-/* ============================================================
    插件本体
    ============================================================ */
 export default {
@@ -254,8 +114,6 @@ export default {
       const s = roster.find((x) => x.no === no)
       return s ? s.name : ''
     }
-    const isoOf = (d) =>
-      `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 
     /* ---------------- 骨架 ---------------- */
     const root = mk(
@@ -371,17 +229,7 @@ export default {
     const rowsBody = mk('div', '')
     rowsPanel.append(rowsHead, rowsBody)
 
-    /* 作业图片：与旧页「存成图片」同一个动作、同一句话术 */
-    const imageRow = mk('div', 'display:flex;align-items:center;gap:10px;display:none')
-    const imageBtn = mk('button', '', '存成图片')
-    imageBtn.style.cssText =
-      'height:34px;padding:0 14px;font-size:14px;font-family:inherit;font-weight:600;cursor:pointer;' +
-      'border-radius:var(--radius-sm);border:1px solid var(--color-line2);' +
-      'background:var(--color-surface);color:var(--color-ink2)'
-    const imageNote = mk('span', 'font-size:13px;color:var(--color-ink3)')
-    imageRow.append(imageBtn, imageNote)
-
-    root.append(head, pipNote, empty, curPanel, rowsPanel, imageRow)
+    root.append(head, pipNote, empty, curPanel, rowsPanel)
 
     /* ---------------- 选中的那一份 / 当前那一题 ---------------- */
     const current = () => rows[idx] ?? rows[0] ?? null
@@ -538,7 +386,6 @@ export default {
       const has = rows.length > 0
       empty.style.display = has ? 'none' : 'block'
       curPanel.style.display = has ? 'flex' : 'none'
-      imageRow.style.display = has ? 'flex' : 'none'
       head.style.display = has ? 'flex' : 'none'
       if (!has) {
         rowsPanel.style.display = 'none'
@@ -608,28 +455,6 @@ export default {
         return
       }
       await openPip()
-    })
-
-    /* ---------------- 存成图片 ---------------- */
-    imageBtn.addEventListener('click', async () => {
-      const [hw, duty] = await Promise.all([
-        ctx.data.read('class.dailyHomework'),
-        ctx.data.read('class.duty'),
-      ])
-      const today = isoOf(ctx.now())
-      const todayHw = (hw.rows ?? []).filter((h) => h.onDate === today)
-      imageNote.textContent = ''
-      const ok = await saveImage(
-        ctx.class.name,
-        today,
-        todayHw,
-        duty.today ? duty.today.name : null,
-      )
-      if (!ok) {
-        ctx.ui.toast('这张图没画出来')
-        return
-      }
-      ctx.ui.toast('作业图片已生成，去浏览器的下载里拿')
     })
 
     await paint()

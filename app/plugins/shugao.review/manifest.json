@@ -6,6 +6,6 @@
   "version": "1.0.0",
   "entry": "index.js",
   "minShellVersion": "1.1.5",
-  "permissions": ["data.gradedHomework", "data.roster", "data.dailyHomework", "data.duty", "pip"],
+  "permissions": ["data.gradedHomework", "data.roster", "pip"],
   "window": { "w": 5, "h": 4, "min": { "w": 3, "h": 2 } }
 }

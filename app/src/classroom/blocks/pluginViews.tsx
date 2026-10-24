@@ -12,16 +12,15 @@
  * 与三件套的关系（`app/plugins/shugao.review/` · `app/plugins/shugao.schedule/`）
  * ============================================================================
  * **逐行为同源**。差别只在渲染层 —— 这里直接复用旧页的真组件
- * （`components/PipPanel.tsx`、`lib/homeworkImage.ts`），三件套里是等价的单文件原生
- * DOM 回填（插件不许 import 宿主模块，手册 §11.3）。
+ * （`components/PipPanel.tsx`），三件套里是等价的单文件原生 DOM 回填
+ * （插件不许 import 宿主模块，手册 §11.3）。「存成图片」2026-10-25 挪去每日作业
+ * （`demoPlugin.ts` 的 `dailyModule` / `plugins/shugao.daily/`），讲评不再出图。
  * 🔴 改行为时两处一起改：这里改完，`plugins/<id>/index.js` 那份也要跟，反之亦然。
  */
 
 import { useEffect, useState } from 'react'
 import { PipPanel } from '../../components/PipPanel'
 import { BAND_META, type Band } from '../../lib/grading'
-import { downloadBlob, homeworkImageBlob, homeworkImageName } from '../../lib/homeworkImage'
-import type { DailyHomework } from '../../data/types'
 
 /* ============================================================================
    ① 作业讲评
@@ -59,9 +58,6 @@ export type ReviewCtx = {
   onDispose(fn: () => void): void
 }
 
-const isoOfDay = (d: Date) =>
-  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-
 const PIP_MISSING = '这台机器上开不了置顶小窗。讲评时请用手机或平板看题号与正确率。'
 const PIP_FAILED = '置顶小窗要教室版程序才能开。讲评时看屏上这一份，或者用手机和平板。'
 
@@ -72,7 +68,6 @@ export function ReviewBlock({ ctx }: { ctx: ReviewCtx }) {
   const [seq, setSeq] = useState(1)
   const [pipOn, setPipOn] = useState(false)
   const [pipNote, setPipNote] = useState('')
-  const [imgMsg, setImgMsg] = useState('')
 
   const row = rows[idx] ?? rows[0] ?? null
   const questions = row?.questions ?? []
@@ -137,29 +132,6 @@ export function ReviewBlock({ ctx }: { ctx: ReviewCtx }) {
     const ok = await ctx.pip.open({ w: 360, h: 220, opacity: 1 })
     setPipOn(ok)
     setPipNote(ok ? '' : PIP_FAILED)
-  }
-
-  /** 作业图片：与旧页「存成图片」同一个动作、同一句话术（版式在 `lib/homeworkImage.ts`） */
-  const saveImage = async () => {
-    const [hw, duty] = await Promise.all([
-      ctx.data.read('class.dailyHomework') as Promise<{ rows?: DailyHomework[] }>,
-      ctx.data.read('class.duty') as Promise<{ today?: { name: string } | null }>,
-    ])
-    const today = isoOfDay(ctx.now())
-    const todayHw = (hw.rows ?? []).filter((h) => h.onDate === today)
-    /* ⚠️ 资源只带 subject / subjectCode / content / onDate —— 出图只读这四列，别的字段不参与版式 */
-    const blob = await homeworkImageBlob({
-      className: ctx.class.name,
-      onDate: today,
-      rows: todayHw as DailyHomework[],
-      duty: duty.today ? duty.today.name : null,
-    })
-    if (!blob) {
-      setImgMsg('这张图没画出来')
-      return
-    }
-    downloadBlob(blob, homeworkImageName(ctx.class.name, today))
-    setImgMsg('作业图片已生成，去浏览器的下载里拿')
   }
 
   if (!row) {
@@ -374,28 +346,6 @@ export function ReviewBlock({ ctx }: { ctx: ReviewCtx }) {
             )
           })}
         </div>
-      </div>
-
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        <button
-          type="button"
-          onClick={() => void saveImage()}
-          style={{
-            height: 34,
-            padding: '0 14px',
-            fontSize: 14,
-            fontFamily: 'inherit',
-            fontWeight: 600,
-            cursor: 'pointer',
-            borderRadius: 'var(--radius-sm)',
-            border: '1px solid var(--color-line2)',
-            background: 'var(--color-surface)',
-            color: 'var(--color-ink2)',
-          }}
-        >
-          存成图片
-        </button>
-        <span style={{ fontSize: 13, color: 'var(--color-ink3)' }}>{imgMsg}</span>
       </div>
     </div>
   )
