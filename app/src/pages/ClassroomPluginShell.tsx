@@ -644,7 +644,7 @@ function PluginWindow({
   /** P1 配置通道：壳侧算好的"当前生效值"与变化叫醒（手册 §2.3）。 */
   getConfig: (pluginId: string) => Record<string, unknown>
   onConfigChange: (pluginId: string, cb: (next: Record<string, unknown>) => void) => () => void
-  pipOpen: (pluginId: string, opts: Record<string, unknown>) => Promise<boolean>
+  pipOpen: (pluginId: string, opts: Record<string, unknown>, topmost?: boolean) => Promise<boolean>
   /** 这个插件被停用/熔断时要收掉**它自己**那扇悬浮窗（同层别的插件不许连坐）。 */
   onFloatingClose: (pluginId: string) => void
   onStatus: (pluginId: string, st: { ui: PluginUiState; reason: string | null }) => void
@@ -696,7 +696,11 @@ function PluginWindow({
               setSize: (w, h) => onSize(id, w, h),
               getConfig: () => getConfig(id),
               onConfigChange: (cb) => onConfigChange(id, cb),
-              pipOpen: (opts) => pipOpen(id, opts),
+              /* 🔴 插件自己调 `ctx.pip.open` = 「启动置顶小窗」（目前只有作业讲评用）⇒
+                 **绝对置顶**那一档；而功能块角上那颗「弹出」走的是同一扇窗但**不置顶**
+                 （用户 2026-10-24：「只有讲评那一块启动置顶小窗才是绝对置顶，
+                  其他的插件弹窗都是仅在桌面上」）。 */
+              pipOpen: (opts) => pipOpen(id, opts, true),
               log: (...a: unknown[]) => console.log('[plugin]', ...a),
             }),
             log: (...a: unknown[]) => console.log('[plugin]', ...a),
@@ -1618,7 +1622,7 @@ function ClassroomShellMain() {
    *    与"没开成"同义。内容由壳里的插件页按 pluginId 自己渲染，这里**不再推模板**。
    */
   const pipOpen = useCallback(
-    async (pluginId: string, opts: Record<string, unknown>) => {
+    async (pluginId: string, opts: Record<string, unknown>, topmost = false) => {
       const def = catalogById.get(pluginId)
       /* 只有插件能弹：宿主块没有对应的桌面页面 */
       if (def?.kind !== 'plugin') {
@@ -1652,6 +1656,7 @@ function ClassroomShellMain() {
         w: o.w ?? 360,
         h: o.h ?? 220,
         opacity: o.opacity,
+        topmost,
       })
       if (!r.ok) {
         push({ text: r.why ?? '悬浮窗没开成，再点一次试试', tone: 'warn' })
