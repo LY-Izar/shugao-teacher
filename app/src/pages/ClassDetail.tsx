@@ -2914,8 +2914,13 @@ type RegistryCard = {
  *    从插件库装的（`plugin_registry` 里那些）仍然缺省 **关**（要老师自己开）。
  * ⚠️ 这条与教室端 `ClassroomPluginShell` 的判定必须是**同一条**，否则老师在这里看到"启动"、
  *    屏上却已经显示了。改一处必须同时改另一处。
+ * ⚠️ 两个例外与教室端一致：`demo.helloclock`（只服务 `?demoPlugin=1`，且会自弹小窗）、
+ *    `shugao.exams`（旧固定版没有这一块，默认开它会多占一扇窗）。
  */
-const BUNDLED_PLUGIN_IDS = new Set(BUNDLED_MANIFESTS.map((m) => m.id))
+const DEFAULT_OFF_BUNDLED = new Set(['demo.helloclock', 'shugao.exams'])
+const BUNDLED_PLUGIN_IDS = new Set(
+  BUNDLED_MANIFESTS.map((m) => m.id).filter((id) => !DEFAULT_OFF_BUNDLED.has(id)),
+)
 
 function ClassroomPluginsPanel({ classId }: { classId: string }) {
   const push = useToast((s) => s.push)

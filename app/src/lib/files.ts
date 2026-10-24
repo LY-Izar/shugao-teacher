@@ -69,13 +69,12 @@ function sb() {
   return c
 }
 
-/** 文件名里可能有中文、空格、括号，统一洗成安全的键 */
-function safeName(name: string): string {
-  const dot = name.lastIndexOf('.')
-  const base = (dot > 0 ? name.slice(0, dot) : name).replace(/[^\w\u4e00-\u9fa5-]+/g, '_').slice(0, 60)
-  const ext = dot > 0 ? name.slice(dot).replace(/[^\w.]/g, '') : ''
-  return `${base || 'file'}${ext}`
-}
+/*
+ * 🔴 2026-10-24：这里原来有个 `safeName()`，把文件名"洗成安全的键"，但它**故意保留中文** ——
+ *    而中文键正是上传失败的根因（`Invalid key: …-芯创社团经费申报书.docx`）。
+ *    现在存储键只用 `uuid + 扩展名`（见 `uploadFile`），显示名存 `shared_files.name`，
+ *    所以这个函数没有调用方了，删掉免得下一个人再把它拼回键里。
+ */
 
 export function humanSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
@@ -292,7 +291,16 @@ export async function uploadFile(file: File, teacherId: string, classIds: string
   const cols = await ensureFileClassCols()
   const classCols = fileClassColumns(classIds, cols.classIds)
 
-  const path = `${teacherId}/${uuid()}-${safeName(file.name)}`
+  /*
+   * 🔴 2026-10-24：**存储键一律 ASCII**。
+   *   真的踩过：文件名是中文（`芯创社团经费申报书.docx`）时，Supabase Storage 直接回
+   *   `Invalid key: <teacherId>/<uuid>-芯创社团经费申报书.docx` —— 上传当场失败。
+   *   而**中文名照旧要显示给老师**（`shared_files.name` 那一列存的就是原文件名），
+   *   所以只把**键**换成 `uuid + 扩展名`：键是内部标识，名字是给人的。
+   * ⚠️ 别再把 `safeName()` 拼回键里：那个函数是**故意**保留中文的（它管的是下载时的文件名）。
+   */
+  const extMatch = /\.[A-Za-z0-9]{1,8}$/.exec(file.name)
+  const path = `${teacherId}/${uuid()}${extMatch ? extMatch[0].toLowerCase() : ''}`
 
   /*
    * 🔴 A6：**不信浏览器报的类型**。`.html/.svg` 与认不出的一律存成

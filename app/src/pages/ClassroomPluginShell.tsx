@@ -137,9 +137,13 @@ const HOST_BLOCK_IDS = new Set(['__clock', '__calls', '__files', '__closing'])
  *    现在只有教师端**显式**写成 `enabled: false` 才关；远程插件仍然默认关。
  * ⚠️ 演示插件例外：它只服务 `?demoPlugin=1`（那条直通逻辑一个字没动），而且它的
  *    activate 里会**自己弹一扇小窗** —— 默认开它等于每台教室屏开机就多一扇示例时钟。
+ * ⚠️ **「本班考试」也例外**（2026-10-24 用户：「默认有原来固定版本有的那几个功能块」）：
+ *    旧固定版没有这一块，默认开它就多占一扇窗。想用就去教师端把它启动起来。
  */
+const DEFAULT_OFF_BUNDLED = new Set([DEMO_MANIFEST.id, 'shugao.exams'])
+
 const isBundledPlugin = (p: AvailablePlugin): boolean =>
-  p.source === 'bundled' && p.manifest.id !== DEMO_MANIFEST.id
+  p.source === 'bundled' && !DEFAULT_OFF_BUNDLED.has(p.manifest.id)
 
 type TempDayCell = { subject: string; teacherId: string | null; end: string }
 
@@ -1550,7 +1554,16 @@ function ClassroomShellMain() {
        */
       const configured = configsMap[p.manifest.id]?.enabled
       const on = configured ?? isBundledPlugin(p)
-      const enabled = demoPlugin || (on && (liveIds === null || liveIds.has(p.manifest.id)))
+      /*
+       * 🔴 登记表（`plugin_registry`）只管**从插件库装的**那些：随包内置的插件是跟着 exe 来的，
+       *    没有"发布/撤下"这回事 —— 原来把内置的也拿 `liveIds` 筛，而线上登记表里只有
+       *    从插件库发布过的那几条 ⇒ **内置四块全被筛掉**，教室屏上只剩宿主三块
+       *    （用户 2026-10-24 截图：「怎么还是只有这几个」）。
+       *    远程插件照旧：`liveIds === null`（没读到）放行，读到了且没有它就不放行。
+       */
+      const bundled = p.source === 'bundled'
+      const live = bundled || liveIds === null || liveIds.has(p.manifest.id)
+      const enabled = demoPlugin || (on && live)
       if (!enabled) continue
       const gate = preflightPlugin(p)
       list.push({
