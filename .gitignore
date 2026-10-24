@@ -50,3 +50,7 @@ _archive/
 # 给 AI 的协作纪律（token 教训 / agent 犯过的错 / 学校规模）—— 同属内部文档。
 # 留在本地：工具链照旧会读它、agent 照旧会守；但 git 永远看不到。
 app/AGENTS.md
+# 🆕 2026-10-24：根目录的 *.md 已按**时效**分到 docs\rules / docs\design / docs\archive
+# （索引见 docs\README.md）。它们与根目录那份一样是**内部文档**：公开仓库不装。
+# ⚠️ 所以整个 docs\ 一律忽略 —— 新增文档直接放对应子目录，别在根目录摊。
+/docs/

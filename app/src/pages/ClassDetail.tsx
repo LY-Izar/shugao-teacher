@@ -3087,7 +3087,7 @@ function ClassroomPluginsPanel({ classId }: { classId: string }) {
     return (
       <Panel bodyClass="p-3">
         <div style={{ fontSize: 12.5, color: 'var(--color-ink3)', lineHeight: 1.8 }}>
-          还没有放行的插件 —— 版本由最高管理员在平台运维里审核发布。
+          还没有插件
         </div>
       </Panel>
     )
