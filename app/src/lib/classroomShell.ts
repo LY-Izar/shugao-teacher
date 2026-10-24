@@ -91,8 +91,9 @@ interface ShellBridge {
    */
   pip?: ShellPipBridge
   /**
-   * 🆕 P0b（插件化）—— 插件框架要的四个新能力（`downloadPlugin` / `openTransparentWindow` /
-   *    `pushBlockScreen` / `closeAllFloating`），语义见本文件底部那一大段约定。
+   * 🆕 P0b（插件化）—— 插件框架要的那一组新能力（`downloadPlugin` / `openTransparentWindow` /
+   *    `closeTransparentWindow` / `onFloatingClosed` / `pushBlockScreen` / `closeAllFloating`），
+   *    语义见本文件底部那一大段约定。
    *    ⚠️ 老壳没有这个字段 ⇒ 一律按"没有"处理，网页版行为逐字不变。
    */
   plugins?: ShellPluginBridge
@@ -356,7 +357,7 @@ export const CLASSROOM_ONLY = {
 } as const
 
 /* ============================================================================
-   🆕 P0b（教室端插件化）：插件框架要的**四个新壳能力** —— 本文件只写约定
+   🆕 P0b（教室端插件化）：插件框架要的**那一组新壳能力** —— 本文件只写约定
    ----------------------------------------------------------------------------
    壳侧作业（`_src/desktop`，不在本仓库）照这一段实现；语义出处：
    《教室端插件开发手册.md》附录 A。四条共同纪律（与上面 `pip` 那一套同源）：
@@ -371,27 +372,38 @@ export const CLASSROOM_ONLY = {
    | 能力 | 签名 | 要点 |
    |---|---|---|
    | `downloadPlugin` | `(url, { sha256 }) => Promise<{ ok:true, path } \| { ok:false, why }>` | 下到用户数据目录 `plugins/<id>/`；hash 不符**必须拒绝**并回可读 `why`；插件库地址是壳侧资产里的一项配置 |
-   | `openTransparentWindow` | `({ w, h, opacity?, transparent? }) => Promise<{ ok:true, reused } \| { ok:false, why }>` | **单例复用**（已有就聚焦，`reused:true`）；`transparent:true` 背景真空透明；`opacity` 壳侧也夹在 0.3–1.0（网页侧在调用前先夹一遍，两层都防） |
+   | `openTransparentWindow` | `({ pluginId, w, h, opacity? }) => Promise<{ ok, reused?, why? }>` | **一个插件一扇窗**（同一个 `pluginId` 已有就聚焦，`reused:true`）；窗里加载应用内路由 `app://-/popup/<pluginId>`；`opacity` 壳侧夹在 0.3–1.0（网页侧在调用前也夹一遍，两层都防） |
+   | `closeTransparentWindow` | `(pluginId) => void` | 🆕 2026-10-24：关**那一个**插件的窗；找不到就什么都不做（不是错误） |
+   | `onFloatingClosed` | `(cb: (pluginId) => void) => () => void` | 🆕 2026-10-24：某一扇浮窗被关掉（谁关的都算）时回调，**载荷是 `pluginId`**；返回注销函数 |
    | `pushBlockScreen` | `(payload) => void` | one-way：壳只把 payload 填进它自己的模板，**不算业务量**（沿用 `pip.data` 那条"网页算好、壳只画"的纪律） |
    | `closeAllFloating` | `() => void` | 维护模式切进 / 插件停用 / 登出 / 主程序退出时都要调；壳关完回 `shell:floatingClosed` |
 
+   🔴🆕 2026-10-24（**浮窗不再是 `data:` 纸条窗**）：壳侧改成**每个插件一个真实窗口**，
+   加载应用内路由 `app://-/popup/<pluginId>`（网页侧那一屏 = `src/pages/PluginPopup.tsx`）。
+   ⇒ 三件事跟着变：① `openTransparentWindow` 收 `pluginId`（窗口的身份、复用的判据）；
+   ② 窗里的内容**由那一屏自己渲染**（真实界面），不再靠 `pushBlockScreen` 填模板；
+   ③ 关窗有了单扇的 `closeTransparentWindow(pluginId)`，被关时回 `shell:floatingClosed`，
+     网页侧用 `onFloatingClosed` 收，**载荷是 `pluginId`**（不再是无参）。
+
    ⚠️ 悬浮窗是**镜像式**（手册 §9）：弹出后主屏功能块保留，悬浮窗渲染同一份数据；
    一个插件同时最多 1 个、全局上限 6 个 —— 这两条**数数的账在网页侧**
-   （`ClassroomPluginShell` 的 pip 端口），壳只管开窗与画。
+   （`ClassroomPluginShell` 的 pip 端口），壳只管开窗。
    ============================================================================ */
 
-/** `preload.js` 将在 `__shell_out.plugins` 上暴露的四个口（本文件顶部那张表）。 */
+/** `preload.js` 将在 `__shell_out.plugins` 上暴露的那几个口（本文件顶部那张表）。 */
 interface ShellPluginBridge {
   downloadPlugin?(
     url: string,
     opts: { sha256: string },
   ): Promise<{ ok: true; path: string } | { ok: false; why: string }>
   openTransparentWindow?(opts: {
+    pluginId: string
     w: number
     h: number
     opacity?: number
-    transparent?: boolean
-  }): Promise<{ ok: true; reused: boolean } | { ok: false; why: string }>
+  }): Promise<FloatingWindowResult>
+  closeTransparentWindow?(pluginId: string): void
+  onFloatingClosed?(cb: (pluginId: string) => void): unknown
   pushBlockScreen?(payload: Record<string, unknown>): void
   closeAllFloating?(): void
 }
@@ -434,30 +446,84 @@ export function shellTransparentWindowAvailable(): boolean {
   return typeof pluginBridge()?.openTransparentWindow === 'function'
 }
 
+/**
+ * 开一扇浮窗的回话（**扁平形状**，壳侧原样给）。
+ *
+ * · `ok:true` → `reused` 说明这扇窗本来就在（聚焦复用），不是新开的；
+ * · `ok:false` → `why` 是**能说给老师听的人话**，调用方转 toast，不许吞。
+ * ⚠️ 老壳没有这条路 ⇒ 包装函数自己回 `{ ok:false, why:'要教室版程序' }`（不假装开成功）。
+ */
+export interface FloatingWindowResult {
+  ok: boolean
+  reused?: boolean
+  why?: string
+}
+
 export interface TransparentWindowOpts {
+  /**
+   * 哪个插件的窗（= `manifest.id`；壳用它当窗口身份，也是"已有就复用"的判据）。
+   * 🔴 必填：没有它，壳既认不出该复用哪扇窗，窗里的 `/popup/<pluginId>` 也没了主键。
+   */
+  pluginId: string
   w: number
   h: number
   /** 0.3–1.0；越界在这里先夹紧（壳侧还会再夹一遍），不报错 */
   opacity?: number
-  transparent?: boolean
 }
 
 /**
- * 开透明悬浮窗（**单例**：壳侧已有就复用并聚焦）。
- * 返回 `{ ok:false, why }` 时 `why` 是给人看的话 —— 调用方把它转成 toast，不许吞。
+ * 给某个插件开浮窗（**一个插件一扇窗**：壳侧已有就复用并聚焦）。
+ * 返回 `ok:false` 时 `why` 是给人看的话 —— 调用方把它转成 toast，不许吞。
  */
 export async function shellOpenTransparentWindow(
   opts: TransparentWindowOpts,
-): Promise<{ ok: true; reused: boolean } | { ok: false; why: string }> {
+): Promise<FloatingWindowResult> {
   const fn = pluginBridge()?.openTransparentWindow
   if (!fn) return { ok: false, why: '要教室版程序' }
   const opacity =
     opts.opacity === undefined ? 1 : Math.min(1, Math.max(0.3, opts.opacity))
   try {
-    return await fn({ ...opts, opacity })
+    const r = await fn({ ...opts, opacity })
+    /* 🔴 只认 `=== true`：老壳回 `undefined` / 半个对象都算"没开成"，别把空窗当成功 */
+    if (r && r.ok === true) return { ok: true, reused: r.reused === true }
+    return {
+      ok: false,
+      why: r && typeof r.why === 'string' && r.why ? r.why : '悬浮窗没开成，再点一次试试',
+    }
   } catch (e) {
     console.error('[shell] openTransparentWindow 失败：', e)
     return { ok: false, why: '悬浮窗没开成，再点一次试试' }
+  }
+}
+
+/**
+ * 关掉**某一个**插件的浮窗（🆕 2026-10-24）。
+ * 壳侧找不到那扇窗就什么都不做 —— 那不是错误（主屏在"开一半失败"之后也会来这里收）。
+ */
+export function shellCloseTransparentWindow(pluginId: string): void {
+  const fn = pluginBridge()?.closeTransparentWindow
+  if (!fn) return
+  try {
+    fn(pluginId)
+  } catch (e) {
+    console.error('[shell] closeTransparentWindow 失败：', e)
+  }
+}
+
+/**
+ * 有浮窗被关掉时的回调（**谁关的都算**：窗里那颗 ✕ / 主屏关的 / 系统别的路）。
+ * 载荷是 `pluginId` —— 主屏据此只复位那一块，不用把六扇窗全当关了。
+ * @returns 注销函数（组件卸载时要调它 —— 不然热更新会叠一堆监听）
+ */
+export function shellOnFloatingClosed(cb: (pluginId: string) => void): () => void {
+  const fn = pluginBridge()?.onFloatingClosed
+  if (!fn) return () => {}
+  try {
+    const off = fn(cb)
+    return typeof off === 'function' ? (off as () => void) : () => {}
+  } catch (e) {
+    console.error('[shell] onFloatingClosed 失败：', e)
+    return () => {}
   }
 }
 

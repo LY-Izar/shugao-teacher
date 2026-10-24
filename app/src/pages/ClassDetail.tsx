@@ -2904,6 +2904,19 @@ type RegistryCard = {
   configFields: Array<{ key: string; type: string; label: string; default?: unknown; min?: number; max?: number; options?: Array<[string, string]>; maxLength?: number }>
 }
 
+/**
+ * 🔴 **随包内置的插件默认就是开着的**（2026-10-24 用户拍板）。
+ *
+ * 依据：用户看到教室端默认只有三块宿主窗口，问「默认视图不是应该有原来固定版的那几个功能块吗」——
+ * 根因之一是内置插件"没有配置行就算关"，于是随包搬过来的那几块（班级课表 / 每日作业 /
+ * 每日祝福语 / 作业讲评）在新机器上一扇都不出现。
+ * ⇒ 内置插件的缺省值改成 **开**，只有教师显式点过「停用」才关；
+ *    从插件库装的（`plugin_registry` 里那些）仍然缺省 **关**（要老师自己开）。
+ * ⚠️ 这条与教室端 `ClassroomPluginShell` 的判定必须是**同一条**，否则老师在这里看到"启动"、
+ *    屏上却已经显示了。改一处必须同时改另一处。
+ */
+const BUNDLED_PLUGIN_IDS = new Set(BUNDLED_MANIFESTS.map((m) => m.id))
+
 function ClassroomPluginsPanel({ classId }: { classId: string }) {
   const push = useToast((s) => s.push)
   const classrooms = useStore((s) => s.classrooms)
@@ -2934,27 +2947,36 @@ function ClassroomPluginsPanel({ classId }: { classId: string }) {
   useEffect(() => {
     let alive = true
     const load = async () => {
-      // 启用清单两个模式都要读；登记表只有线上有（本地模式拿**全部内置插件**顶上，
-      // 线上那一份来自 plugin_registry —— 没发布的插件在教师端本来就看不到）
+      // 启用清单两个模式都要读；登记表只有线上有
+      /*
+       * 🔴 2026-10-24 修（用户：「这里我根本看不见插件有什么，即便是默认官方插件」）：
+       *   原来**只有本地模式**拿 `BUNDLED_MANIFESTS` 顶上，线上模式**只读 `plugin_registry`** ——
+       *   而随包内置的那几个（班级课表 / 每日作业 / 每日祝福语 / 作业讲评）根本没进登记表，
+       *   于是线上这一块永远是「还没有插件」，老师既看不见也开不了，教室端自然只剩宿主那三块。
+       *   ⇒ 内置插件**两个模式都要列**，而且排在前面（它们是随包来的，与"装没装"无关）；
+       *      线上登记表里**多出来的**（从插件库装的）接在后面，同一个 id 不重复列。
+       */
       const cfgs = await loadPluginConfigs(classId)
       if (!alive) return
+      const bundled: RegistryCard[] = BUNDLED_MANIFESTS.map((m) => ({
+        pluginId: m.id,
+        name: m.name,
+        description: m.description,
+        version: m.version,
+        revoked: false,
+        permissions: [...m.permissions],
+        configFields: [...(m.config?.fields ?? [])],
+      }))
       let list: RegistryCard[]
       if (!isRemoteMode) {
-        list = BUNDLED_MANIFESTS.map((m) => ({
-          pluginId: m.id,
-          name: m.name,
-          description: m.description,
-          version: m.version,
-          revoked: false,
-          permissions: [...m.permissions],
-          configFields: [...(m.config?.fields ?? [])],
-        }))
+        list = bundled
       } else {
         const sb = getSupabase()
         if (!sb) {
-          if (alive) setErr({ forClass: classId, msg: '没有可用的数据库连接。' })
-          return
-        }
+          // 没有数据库连接：随包内置的那几个照常列（它们不需要数据库）
+          list = bundled
+          if (alive) setErr({ forClass: classId, msg: '没有可用的数据库连接，装的插件列不出来。' })
+        } else
         try {
           const { data, error } = await sb
             .from('plugin_registry')
@@ -2965,31 +2987,40 @@ function ClassroomPluginsPanel({ classId }: { classId: string }) {
           if (!alive) return
           if (error) {
             const msg = String(error.message ?? '')
+            list = bundled
             setErr({
               forClass: classId,
               msg: /does not exist/i.test(msg)
-                ? '数据库还没跑 supabase/schema.sql 第 45 段（插件登记），这一块先看不了。'
+                ? '数据库还没跑 supabase/schema.sql 第 45 段（插件登记），从插件库装的先列不出来。'
                 : msg,
             })
-            return
+          } else {
+            const bundledIds = new Set(bundled.map((c) => c.pluginId))
+            list = [
+              ...bundled,
+              ...(Array.isArray(data) ? (data as Array<Record<string, unknown>>) : [])
+                .filter((r) => r?.plugin_id && !bundledIds.has(String(r.plugin_id)))
+                .map((r) => {
+                  const schema = (r.config_schema ?? {}) as { fields?: RegistryCard['configFields'] }
+                  return {
+                    pluginId: String(r.plugin_id),
+                    name: String(r.name ?? '') || String(r.plugin_id),
+                    description: String(r.description ?? ''),
+                    version:
+                      typeof r.stable_version === 'string' && r.stable_version
+                        ? r.stable_version
+                        : null,
+                    revoked: !!r.revoked_at,
+                    permissions: Array.isArray(r.permissions) ? (r.permissions as string[]) : [],
+                    configFields: Array.isArray(schema.fields) ? schema.fields : [],
+                  }
+                }),
+            ]
           }
-          list = (Array.isArray(data) ? (data as Array<Record<string, unknown>>) : [])
-            .filter((r) => r?.plugin_id)
-            .map((r) => {
-              const schema = (r.config_schema ?? {}) as { fields?: RegistryCard['configFields'] }
-              return {
-                pluginId: String(r.plugin_id),
-                name: String(r.name ?? '') || String(r.plugin_id),
-                description: String(r.description ?? ''),
-                version: typeof r.stable_version === 'string' && r.stable_version ? r.stable_version : null,
-                revoked: !!r.revoked_at,
-                permissions: Array.isArray(r.permissions) ? (r.permissions as string[]) : [],
-                configFields: Array.isArray(schema.fields) ? schema.fields : [],
-              }
-            })
         } catch (e) {
-          if (alive) setErr({ forClass: classId, msg: e instanceof Error ? e.message : '插件清单没读出来。' })
-          return
+          list = bundled
+          if (alive)
+            setErr({ forClass: classId, msg: e instanceof Error ? e.message : '插件清单没读出来。' })
         }
       }
       if (!alive) return
@@ -3020,7 +3051,9 @@ function ClassroomPluginsPanel({ classId }: { classId: string }) {
   const draftMap = drafts.forClass === classId ? drafts.map : {}
 
   const toggle = async (card: RegistryCard) => {
-    const next = !(enabledMap[card.pluginId] === true)
+    /* 当前生效值必须与卡片上那颗按钮显示的**同一个口径**（内置缺省开），否则点「停用」会写成"开" */
+    const nowOn = enabledMap[card.pluginId] ?? BUNDLED_PLUGIN_IDS.has(card.pluginId)
+    const next = !nowOn
     setBusyId(card.pluginId)
     const r = await savePluginConfig(classId, card.pluginId, { enabled: next })
     setBusyId('')
@@ -3120,7 +3153,8 @@ function ClassroomPluginsPanel({ classId }: { classId: string }) {
       ) : null}
 
       {cards.map((card) => {
-        const enabled = enabledMap[card.pluginId] === true
+        /* 内置插件缺省"开"，从插件库装的缺省"关" —— 与教室端同一条规则（见 BUNDLED_PLUGIN_IDS） */
+        const enabled = enabledMap[card.pluginId] ?? BUNDLED_PLUGIN_IDS.has(card.pluginId)
         const dirty = draftDirty(card)
         return (
           <div

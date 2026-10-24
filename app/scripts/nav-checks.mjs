@@ -215,7 +215,7 @@ if (process.env.SHUGAO_NAV_FORCE) {
   console.log(`\n🧪🧪 负向对照模式：entryVisible 恒 ${process.env.SHUGAO_NAV_FORCE === 'all' ? '真' : '假'}（下面**必须**有红）\n`)
 }
 const roles = await import('../src/lib/roles.ts')
-const { PAGES, PLANNED_PAGE_COUNT, MATRIX_SHAPE, MATRIX_SHAPE_13 } = await import('../src/lib/pages.ts')
+const { PAGES, PLANNED_PAGE_COUNT, MATRIX_SHAPE, MATRIX_SHAPE_13, WINDOW_ROUTES } = await import('../src/lib/pages.ts')
 
 /** 矩阵里的 6 列（顺序 = 方案 §2.2 表头里的顺序，不许改） */
 const ROLES6 = [
@@ -1335,10 +1335,23 @@ const realRoutes = routes.filter((p) => p !== '*')
     MATRIX_SHAPE.rows,
     `MATRIX_PATHS=${MATRIX_PATHS.length} 条 · PAGES=${PAGES.length} 条`,
   )
+  /*
+   * 🆕 2026-10-24：**豁免的两类**（都写在下面这一条断言里，改动必须来这儿改）
+   *   · 通知两行：`按身份显示导航方案.md` §2.2 那张表里本来就没有它们（D9 里另有说明）；
+   *   · `WINDOW_ROUTES`：`/popup/:pluginId` 这种"窗口地址"——壳开的一扇浮窗加载它，
+   *     谁都没有入口，矩阵量的是"哪个身份看得到哪个页面"，它 13 格一模一样，进表纯噪音。
+   */
+  const EXEMPT_FROM_MATRIX = ['/notices', '/notices/new', ...WINDOW_ROUTES]
   eqSet(
-    'D1：PAGES 里**不在** `按身份显示导航方案.md` §2.2 矩阵里的路径 —— 恰好是通知那两行',
+    'D1：PAGES 里**不在** §2.2 矩阵里的路径 —— 恰好是通知那两行 + 窗口地址白名单',
     PAGES.map((p) => p.path).filter((p) => !MATRIX_PATHS.includes(p)),
-    ['/notices', '/notices/new'],
+    EXEMPT_FROM_MATRIX,
+  )
+  eq(
+    'D1：白名单就是那 3 条（多一条、少一条都红 —— 豁免要有痕迹）',
+    EXEMPT_FROM_MATRIX.length,
+    3,
+    `EXEMPT_FROM_MATRIX=${EXEMPT_FROM_MATRIX.join(' / ')}`,
   )
 }
 
@@ -1653,7 +1666,13 @@ d9Matrix: {
       '/notices',
       '/notices/new',
     ])
-    eqSet('D9：13 列矩阵的路径 ↔ PAGES 的路径（每加一条路由都要登记）', mx.paths, PAGES.map((p) => p.path))
+    /* 🆕 2026-10-24：窗口地址（`WINDOW_ROUTES`）**不进**任何角色矩阵 —— 理由见 `pages.ts` 那个常量的注释。
+       这里只把它们从"PAGES 的路径"那一侧排掉，矩阵那一侧本来就没有它们。 */
+    eqSet(
+      'D9：13 列矩阵的路径 ↔ PAGES 的路径（每加一条路由都要登记，窗口地址白名单除外）',
+      mx.paths,
+      PAGES.map((p) => p.path).filter((p) => !WINDOW_ROUTES.includes(p)),
+    )
 
     /*
      * 🔴 **逐格核对**：矩阵里写的字母 == `ENTRIES` 真算出来的值。

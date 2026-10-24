@@ -53,6 +53,7 @@ const ImportPhoto = lazy(() => import('./pages/ImportPhoto'))
 const ManageCourse = lazy(() => import('./pages/ManageCourse'))
 const NoticeNew = lazy(() => import('./pages/NoticeNew'))
 const Notices = lazy(() => import('./pages/Notices'))
+const PluginPopup = lazy(() => import('./pages/PluginPopup'))
 const WrongBook = lazy(() => import('./pages/WrongBook'))
 const WrongBookClass = lazy(() => import('./pages/WrongBookClass'))
 const AssignmentCorrect = lazy(() => import('./pages/AssignmentCorrect'))
@@ -600,6 +601,12 @@ export default function App() {
             </ClassroomGate>
           }
         />
+        {/* 插件浮窗（2026-10-24）：教室端里**每个插件一扇真实窗口**，壳把窗指向这条地址。
+            🔴 不套 `AppShell`（那是教师端左栏），也不套 `ClassroomGate` ——
+               这一屏是主屏开出来的第二扇窗，登录/心跳都在主屏那条链上；
+               这里再拦一道就等于"主屏好好的、浮窗自己跳去登录页"。
+            ⚠️ 壳不在（网页版直接开这条地址）时照常渲染，只是关不掉 —— 见 `PluginPopup` 文件头。 */}
+        <Route path="/popup/:pluginId" element={<PluginPopup />} />
         <Route
           path="/"
           element={

@@ -137,19 +137,19 @@ export function normalizeLayout(raw: unknown, validIds: ReadonlySet<string>): Sh
 }
 
 /**
- * 默认布局：给一批"要开着的窗口"（id + 建议宽高 px），从左上角开始**先竖着排一列**，
- * 放不下一列就往右挪一列。它只在"这个班还没有布局"时用一次；之后全靠人拖。
+ * 游标：从 `start` 开始**先竖着排一列**，放不下就往右挪一列。
+ * 🔴 `defaultLayout`（新出现的窗口）与 `templateLayout`（默认模板里的插件块）**共用这一份**
+ *    —— 另写一套坐标就是两个真相（`templateLayout` 的时钟/呼叫/文件那三扇是手工定的，
+ *    它们的位置是模板的"骨架"，不走这里）。
  */
-export function defaultLayout(
+function flowWindows(
   opens: Array<{ id: string; w: number; h: number }>,
   canvas: CanvasSize,
-  snap: SnapMode = 'grid',
-): ShellLayout {
+  start: { x: number; y: number; colW: number },
+): LayoutWin[] {
   const pad = 16
-  let x = pad
-  let y = pad
-  let colW = 0
-  const windows: LayoutWin[] = opens.map(({ id, w, h }) => {
+  let { x, y, colW } = start
+  return opens.map(({ id, w, h }) => {
     if (y + h > canvas.h && colW > 0) {
       x += colW + pad
       y = pad
@@ -160,7 +160,19 @@ export function defaultLayout(
     colW = Math.max(colW, rect.w)
     return { id, mode: 'open' as const, ...rect }
   })
-  return { snap, windows, v: LAYOUT_VERSION }
+}
+
+/**
+ * 默认布局：给一批"要开着的窗口"（id + 建议宽高 px），从左上角开始**先竖着排一列**，
+ * 放不下一列就往右挪一列。它只在"这个班还没有布局"时用一次；之后全靠人拖。
+ */
+export function defaultLayout(
+  opens: Array<{ id: string; w: number; h: number }>,
+  canvas: CanvasSize,
+  snap: SnapMode = 'grid',
+): ShellLayout {
+  const pad = 16
+  return { snap, windows: flowWindows(opens, canvas, { x: pad, y: pad, colW: 0 }), v: LAYOUT_VERSION }
 }
 
 /** 把一扇窗口挪到最前面之后，整叠窗口的 z 顺序就是数组顺序（后来者居上）。 */
@@ -174,14 +186,27 @@ export function bringToFront(ids: string[], id: string): string[] {
  * **默认模板**（2026-10-24 用户拍板：「内置一个默认的模板跟原版的布局一样就行」）。
  *
  * 旧教室屏是一屏两栏（`Classroom.tsx:1918` 的 `gridTemplateColumns: 'minmax(300px, 360px) 1fr'`），
- * 所以模板也按两栏摆：左栏从上到下「大时钟课表」「呼叫播报」，右栏「老师传来的文件」，
- * 右栏剩下的地方留给 P2 之后搬过来的作业/考试/讲评（那些是插件，**这里绝不预设** ——
- * 没装就是没有，见交接文档 §7.1 第 3 条）。
+ * 所以模板也按两栏摆：左栏从上到下「大时钟课表」「呼叫播报」，右栏「老师传来的文件」。
+ * ⚠️ §7.1 第 3 条原来写的是"插件绝不预设"—— 2026-10-24 用户改口：默认视图要看得见
+ *    原固定版的那几个插件 ⇒ 改成由调用方把**当次目录里真实存在、能渲染的**插件传进来
+ *    （`extra`），没装/被拒的仍然不会有（判据在调用方，模板只负责摆）。
  *
  * 🔴 只在"这个班还没有 `__framework` 布局行"时用一次；老师拖过之后以他存的那份为准。
  * ⚠️ 所有坐标都过 `clampRect`（和拖拽、吸附同一套算术）—— 另写一套坐标就是两个真相。
+ *
+ * `extra`（2026-10-24 第三次改口）：默认视图要摆上**原固定版的全部功能块**，所以模板
+ * 除了三扇宿主块，还接一列**随包内置的插件**（调用方只传当次目录里能渲染的那些）。
+ * 它们从**左栏呼叫播报的正下方**接着往下排，用 `flowWindows` 那份游标（与"新出现的窗口"
+ * 同一套"排不下就开新列"的算术）。
+ *
+ * 🔴 **不升 `LAYOUT_VERSION`**：它管的是"老布局还能不能读"，与模板内容无关。老机器上
+ *    已经存过 `__framework` 布局 ⇒ 看不到这份新默认模板，**这是预期**（要新模板就清掉
+ *    那个班的布局行）。这里升代数反而会把老师拖好的布局整份丢掉。
  */
-export function templateLayout(canvas: CanvasSize): ShellLayout {
+export function templateLayout(
+  canvas: CanvasSize,
+  extra: Array<{ id: string; w: number; h: number }> = [],
+): ShellLayout {
   const pad = 16
   /* 左栏 4 格（旧屏是 300–360，取整到 96 的倍数，吸附才对得上） */
   const leftW = GRID_PX * 4
@@ -195,18 +220,28 @@ export function templateLayout(canvas: CanvasSize): ShellLayout {
   const filesW = Math.max(GRID_PX * 3, Math.floor((canvas.w - pad * 3 - leftW) / GRID_PX) * GRID_PX)
   const min = { w: GRID_PX, h: GRID_PX }
   const filesH = GRID_PX * 4
-  return {
-    snap: 'grid',
-    v: LAYOUT_VERSION,
-    windows: [
-      { id: '__clock', mode: 'open', ...clampRect({ x: pad, y: pad, w: leftW, h: clockH }, canvas, min) },
-      /* 呼叫播报排在时钟**正下方**（旧屏左栏的阅读顺序）。它可能落到画布可视区之外 ——
-         那是有意的：宁可让老师滚一下，也不要把时钟压到装不下内容。 */
-      { id: '__calls', mode: 'open', x: pad, y: pad + clockH + pad, w: leftW, h: callsH },
-      { id: '__files', mode: 'open', ...clampRect({ x: pad * 2 + leftW, y: pad, w: filesW, h: filesH }, canvas, min) },
-      /* 🔴 自动备份不再占一格（2026-10-24 用户拍板：壳侧底层能力，不写出来）。
-         以前这里有一扇 `__backup` 窗口 —— 删掉之后老布局会被 `normalizeLayout` 判成坏布局
-         （`validIds` 里没有它），自动回默认模板，正是想要的结果。 */
-    ],
+  const windows: LayoutWin[] = [
+    { id: '__clock', mode: 'open', ...clampRect({ x: pad, y: pad, w: leftW, h: clockH }, canvas, min) },
+    /* 呼叫播报排在时钟**正下方**（旧屏左栏的阅读顺序）。它可能落到画布可视区之外 ——
+       那是有意的：宁可让老师滚一下，也不要把时钟压到装不下内容。 */
+    { id: '__calls', mode: 'open', x: pad, y: pad + clockH + pad, w: leftW, h: callsH },
+    { id: '__files', mode: 'open', ...clampRect({ x: pad * 2 + leftW, y: pad, w: filesW, h: filesH }, canvas, min) },
+    /* 🔴 自动备份不再占一格（2026-10-24 用户拍板：壳侧底层能力，不写出来）。
+       以前这里有一扇 `__backup` 窗口 —— 删掉之后老布局会被 `normalizeLayout` 判成坏布局
+       （`validIds` 里没有它），自动回默认模板，正是想要的结果。 */
+  ]
+  if (extra.length) {
+    /*
+     * 插件的落点 = 左栏（时钟 + 呼叫）**下面**接着排。
+     * ⚠️ 这里把"可用高度"按这批内容的总高撑开：画布本来就能滚（撑高块），而按可视高度算的话
+     *    第一块就必然"排不下"⇒ 当场开一列到右边界外（1280 屏上只露几十像素）或压住文件块
+     *    —— 用户看到仍会是"只有三块"。撑开之后它们在同一列里依次往下，滚一下就能看全。
+     */
+    const top = pad + clockH + pad + callsH + pad
+    const contentH = extra.reduce((sum, e) => sum + e.h + pad, top)
+    windows.push(
+      ...flowWindows(extra, { w: canvas.w, h: Math.max(canvas.h, contentH) }, { x: pad, y: top, colW: leftW }),
+    )
   }
+  return { snap: 'grid', v: LAYOUT_VERSION, windows }
 }

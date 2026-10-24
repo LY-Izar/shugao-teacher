@@ -53,8 +53,9 @@ import { useAutoBackupTicker } from '../classroom/useAutoBackup'
 import {
   shellAutoplayAllowed,
   shellCloseAllFloating,
+  shellCloseTransparentWindow,
+  shellOnFloatingClosed,
   shellOpenTransparentWindow,
-  shellPushBlockScreen,
   shellTransparentWindowAvailable,
 } from '../lib/classroomShell'
 import {
@@ -103,7 +104,7 @@ import {
   preflightPlugin,
   type PluginSlot,
 } from '../classroom/loader'
-import { availablePlugins, type AvailablePlugin } from '../classroom/demoPlugin'
+import { DEMO_MANIFEST, availablePlugins, type AvailablePlugin } from '../classroom/demoPlugin'
 import { toSlot } from '../classroom/resources'
 import { configDefaults, loadPluginConfigs } from '../classroom/configs'
 import { getSupabase } from '../lib/supabase'
@@ -121,6 +122,24 @@ const CLOSE_GUARD_MS = 1200
 
 const lastAt = (c: CallRecord) => Math.max(0, ...(c.sentAt ?? []))
 const callKey = (c: CallRecord) => `${c.id}:${lastAt(c)}`
+
+/**
+ * 宿主自带的块 —— **不是插件**，桌面小窗里没有它们的页面，一律不许弹。
+ * （`__backup` 已经不占窗口了；这里留的是目录里真会出现的那几扇。）
+ */
+const HOST_BLOCK_IDS = new Set(['__clock', '__calls', '__files', '__closing'])
+
+/**
+ * 随包内置的插件 = `source === 'bundled'`（从插件库装进来的会标 `'downloaded'`）。
+ *
+ * 🔴 2026-10-24：内置插件**默认启用**。以前判的是 `configsMap[id]?.enabled === true`，
+ *    没有配置行就是关的 ⇒ 新机器上一扇插件都不出现（用户：「这上面怎么只有三个？」）。
+ *    现在只有教师端**显式**写成 `enabled: false` 才关；远程插件仍然默认关。
+ * ⚠️ 演示插件例外：它只服务 `?demoPlugin=1`（那条直通逻辑一个字没动），而且它的
+ *    activate 里会**自己弹一扇小窗** —— 默认开它等于每台教室屏开机就多一扇示例时钟。
+ */
+const isBundledPlugin = (p: AvailablePlugin): boolean =>
+  p.source === 'bundled' && p.manifest.id !== DEMO_MANIFEST.id
 
 type TempDayCell = { subject: string; teacherId: string | null; end: string }
 
@@ -446,6 +465,7 @@ function BlockWindow({
   title,
   z,
   floatReason,
+  floating,
   onFocus,
   onRect,
   onMode,
@@ -456,12 +476,13 @@ function BlockWindow({
   title: string
   z: number
   /**
-   * 不能弹时的**原因**（能弹就是 null）。两种原因别混：
+   * 不能弹时的**原因**（能弹就是 null）。两类原因别混：
    * · 「要教室版程序」= 网页/老壳没有这个能力；
-   * · 「这一块还不支持弹出」= 有能力，但这一块的内容还推不过去（壳窗只填模板，
-   *   我们不推内容它就是一屏空白 —— 空白比置灰更糟，手册 §1 第 4 条）。
+   * · 「这一块不能单独弹出」= 宿主块（时钟/呼叫/文件/今日收尾），它不是插件。
    */
   floatReason: string | null
+  /** 这一块**现在**有没有一扇桌面小窗开着（按钮跟着变：弹出 ⇄ 收回） */
+  floating: boolean
   onFocus: (id: string) => void
   onRect: (id: string, rect: WinRect) => void
   /** 传的是**补丁**（`{ mode: … }`）—— 收口在壳的 patchWin，别在这里再造一种写法 */
@@ -529,11 +550,11 @@ function BlockWindow({
         <button
           type="button"
           disabled={!!floatReason}
-          title={floatReason ?? undefined}
+          title={floatReason ?? (floating ? '收掉这块的小窗' : undefined)}
           onClick={() => onFloat(win.id)}
           style={{ fontSize: 11, color: floatReason ? 'var(--color-ink4)' : 'var(--color-accenttext)' }}
         >
-          弹出
+          {floating ? '收回' : '弹出'}
         </button>
         <button
           type="button"
@@ -608,6 +629,7 @@ function PluginWindow({
   getConfig,
   onConfigChange,
   pipOpen,
+  onFloatingClose,
   onStatus,
 }: {
   plugin: AvailablePlugin
@@ -623,6 +645,8 @@ function PluginWindow({
   getConfig: (pluginId: string) => Record<string, unknown>
   onConfigChange: (pluginId: string, cb: (next: Record<string, unknown>) => void) => () => void
   pipOpen: (pluginId: string, opts: Record<string, unknown>) => Promise<boolean>
+  /** 这个插件被停用/熔断时要收掉**它自己**那扇悬浮窗（同层别的插件不许连坐）。 */
+  onFloatingClose: (pluginId: string) => void
   onStatus: (pluginId: string, st: { ui: PluginUiState; reason: string | null }) => void
 }) {
   const [ui, setUi] = useState<PluginUiState>('booting')
@@ -682,8 +706,8 @@ function PluginWindow({
         onDisabled: (why) => {
           markDisabled(why)
           void saveCrashRecord(slot, id, { reason: why, at: Date.now() })
-          // 停用要收掉悬浮窗（classroomShell.ts 顶部约定第 4 条的那一行）
-          shellCloseAllFloating()
+          // 停用要收掉**这个插件自己**的悬浮窗（一个插件一扇；别把别人的也收了）
+          onFloatingClose(id)
         },
       })
       hostRef.current = host
@@ -794,7 +818,178 @@ const pluginSuggestOf = (m: PluginManifest) => ({
   h: cellsToPx(m.window?.h ?? 3),
 })
 
-export default function ClassroomPluginShell() {
+/* ============================================================================
+   插件浮窗那一份（路由 `/popup/:pluginId`，壳里**一个插件一扇真窗口**）
+   ----------------------------------------------------------------------------
+   🔴 它不是主屏的副本：主屏那五样会"重复"的东西一样都不在这里跑 ——
+      ① 心跳与自我登记（`HEARTBEAT_MS` / `ensureClassroom`）
+      ② 呼叫播报（`subscribe` + 轮询 + `speak`/`chime`，弹窗里绝不出声）
+      ③ 自动备份 ticker（`useAutoBackupTicker`，跑两份就是双份写盘）
+      ④ 窗口布局的落盘（`__framework` 的 `layout`）
+      ⑤ 插件登记表 / 启用清单的定时轮询（这里**只读一次**配置）
+   ✅ 保留的是插件活下去必需的那套：班级与班级名、插件清单、本班配置（首读一次）、
+      `clockBus` / `bus`、以及 `PluginWindow` 要的全部端口。
+   ⚠️ 主屏的 `ClassroomShellMain` 一行没动 —— 不传 `popupId` 时行为与以前完全一致。
+   ============================================================================ */
+function PluginPopupBody({ pluginId }: { pluginId: string }) {
+  /*
+   * 🔴 教室端恒亮（#F4）对**浮窗这一扇**同样成立：`lib/theme.ts` 的 `isClassroom()` 只认
+   *    `/classroom`，这条路由是 `/popup/…` ⇒ 首帧那段内联脚本**会**按设备偏好写
+   *    `data-theme`（暗色机器上插件界面就是浅字压浅底）。主屏在 `ClassroomShellMain` 里
+   *    清一次，这一份自己也要清；强调色同理（教室端是默认蓝）。
+   */
+  useEffect(() => {
+    document.documentElement.removeAttribute('data-theme')
+    document.documentElement.removeAttribute('data-accent')
+  }, [])
+  const classes = useStore((s) => s.classes)
+  const hydrated = useStore((s) => s.hydrated)
+  const [classId] = useState(() => {
+    try {
+      return localStorage.getItem(CLASS_KEY) ?? ''
+    } catch {
+      return ''
+    }
+  })
+  const klass = classes.find((c) => c.id === classId) ?? classes[0]
+  const plugin = useMemo(
+    () => availablePlugins().find((p) => p.manifest.id === pluginId) ?? null,
+    [pluginId],
+  )
+
+  /* 本班配置：**只读一次**（弹窗里不轮询；实时跟随由主屏那一份负责） */
+  const [configs, setConfigs] = useState<Record<string, { enabled: boolean; config: Record<string, unknown> }>>({})
+  /* 与主屏同一理由：`PluginWindow` 在 activate 时把 `getConfig` 闭包交给插件，
+     只读 state 会永远停在挂载那一刻 ⇒ 用 ref 给端口读"此刻"，state 只管叫醒渲染。 */
+  const configsRef = useRef(configs)
+  configsRef.current = configs
+  const listenersRef = useRef(new Map<string, Set<(v: Record<string, unknown>) => void>>())
+  useEffect(() => {
+    if (!klass?.id) return
+    let alive = true
+    void loadPluginConfigs(klass.id).then((r) => {
+      if (!alive || r.state !== 'ok') return
+      const next: Record<string, { enabled: boolean; config: Record<string, unknown> }> = {}
+      for (const row of r.rows) next[row.pluginId] = { enabled: row.enabled, config: row.config }
+      setConfigs(next)
+      /* 读回来晚于 activate 时，按主屏同一条口径叫醒一次（合并默认值后再比） */
+      for (const [pid, listeners] of listenersRef.current) {
+        if (!listeners.size) continue
+        const merged = { ...configDefaults(plugin?.manifest), ...(next[pid]?.config ?? {}) }
+        for (const cb of [...listeners]) cb(merged)
+      }
+    })
+    return () => {
+      alive = false
+    }
+    // listenersRef 是 ref；plugin 随 pluginId 稳定
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [klass?.id])
+
+  const bus = useMemo(() => new LocalBus(), [])
+  const clockBus = useMemo(() => new ClockBus(), [])
+  /*
+   * 弹窗里也要喂 `clock.onMinute`（插件靠它整分重画）：主屏那条 1s interval 不会跑在
+   * 这一份里，所以这里自己起一条**同口径**的（整分才 emit，理由见主屏那一处注释）。
+   */
+  const lastMinuteRef = useRef('')
+  useEffect(() => {
+    const t = window.setInterval(() => {
+      const d = beijingNow()
+      const key = `${d.getHours()}:${d.getMinutes()}`
+      if (lastMinuteRef.current === key) return
+      lastMinuteRef.current = key
+      clockBus.emitMinute(d)
+    }, 1000)
+    return () => window.clearInterval(t)
+  }, [clockBus])
+  /* 弹窗里不弹吐司（那一层在 PluginPopup 里没有）；但**不许让它抛** —— 插件失败路径会调它 */
+  const push = useCallback(() => {}, [])
+  const getConfig = useCallback(
+    (pid: string) => ({ ...configDefaults(plugin?.manifest), ...(configsRef.current[pid]?.config ?? {}) }),
+    [plugin],
+  )
+  const onConfigChange = useCallback(
+    (pid: string, cb: (next: Record<string, unknown>) => void) => {
+      const set = listenersRef.current.get(pid) ?? new Set()
+      set.add(cb)
+      listenersRef.current.set(pid, set)
+      return () => {
+        set.delete(cb)
+      }
+    },
+    [],
+  )
+  /** 弹窗里的 `ctx.pip.open`：壳里那扇窗就是它自己（同 id ⇒ 复用并聚焦），不会真再开一扇 */
+  const pipOpen = useCallback(async (pid: string, opts: Record<string, unknown>) => {
+    if (!shellTransparentWindowAvailable()) return false
+    const o = opts as { w?: number; h?: number; opacity?: number }
+    const r = await shellOpenTransparentWindow({
+      pluginId: pid,
+      w: o.w ?? 360,
+      h: o.h ?? 220,
+      opacity: o.opacity,
+    })
+    return r.ok
+  }, [])
+  const onFloatingClose = useCallback((pid: string) => shellCloseTransparentWindow(pid), [])
+
+  if (!klass) {
+    return (
+      <div className="grid h-full w-full place-items-center p-4 text-center" style={{ fontSize: 13, color: 'var(--color-ink2)' }}>
+        {hydrated ? '还没选好这个班的教室屏' : '正在准备…'}
+      </div>
+    )
+  }
+  if (!plugin) {
+    return (
+      <div className="grid h-full w-full place-items-center p-4 text-center" style={{ fontSize: 13, color: 'var(--color-ink2)' }}>
+        这一块现在开不了
+      </div>
+    )
+  }
+  /* 与主屏同一道加载前闸：清单不合法 / 壳版本不够 —— 窗里只说原因，不 activate */
+  const gate = preflightPlugin(plugin)
+  if (!gate.ok) {
+    return (
+      <div className="grid h-full w-full place-items-center p-4 text-center" style={{ fontSize: 13, color: 'var(--color-ink2)', lineHeight: 1.8 }}>
+        {gate.reason}
+      </div>
+    )
+  }
+  return (
+    <div data-cps-popup={pluginId} className="h-full w-full overflow-auto">
+      <PluginWindow
+        plugin={plugin}
+        classId={klass.id}
+        className={klass.name}
+        clockBus={clockBus}
+        bus={bus}
+        push={push}
+        /* 主屏的布局不归弹窗管：调大小 / 标题 / 状态上报都留在主屏那一份 */
+        onSize={() => {}}
+        onTitle={() => {}}
+        getConfig={getConfig}
+        onConfigChange={onConfigChange}
+        pipOpen={pipOpen}
+        onFloatingClose={onFloatingClose}
+        onStatus={() => {}}
+      />
+    </div>
+  )
+}
+
+/**
+ * 教室壳入口。`popupId` 有值 = **插件浮窗那一份**（路由 `/popup/:pluginId`）：
+ * 只画那个插件的一块，**完全不挂主屏**（所以主屏的心跳 / 播报 / 备份 / 布局落盘 /
+ * 定时轮询一份都不会在弹窗里跑第二遍）。不传 = 主屏，行为与以前完全一致。
+ */
+export default function ClassroomPluginShell({ popupId }: { popupId?: string } = {}) {
+  if (popupId) return <PluginPopupBody pluginId={popupId} />
+  return <ClassroomShellMain />
+}
+
+function ClassroomShellMain() {
   const classes = useStore((s) => s.classes)
   const classrooms = useStore((s) => s.classrooms)
   const setClassroomOnline = useStore((s) => s.setClassroomOnline)
@@ -1174,12 +1369,28 @@ export default function ClassroomPluginShell() {
   /* ============================================================
      维护模式：这一屏**自己**渲染维护画面（心跳照发；注释全文在旧页）
      ============================================================ */
+  /**
+   * 每个插件**各自**一扇悬浮窗（2026-10-24 用户：「一个插件最多弹出一个，而不是同时只能
+   * 存在一个弹窗」）。这里是"哪几个插件现在开着"的唯一真相 —— 按钮要跟着它变，所以必须
+   * 是 React state（不是 ref）。维护模式那条 effect 也要清它，所以声明放在这里。
+   */
+  const [openPopups, setOpenPopups] = useState<Set<string>>(() => new Set())
+  /*
+   * ⚠️ 再镜像一份到 ref：`PluginWindow` 在 activate 时把 `pipOpen` 这个**闭包**交给插件端口
+   *    （`makeHostPorts`），而那条 effect 只在挂载时跑一次 —— 闭包里的 state 永远停在挂载
+   *    那一刻（空集合）。只读 state 的话，插件的 `ctx.pip.open` 会把"已有就收掉"和 6 扇
+   *    上限都判错。state 仍然是 UI 的唯一真相（按钮跟着它变），ref 只给事件处理读"此刻"。
+   */
+  const openPopupsRef = useRef(openPopups)
+  openPopupsRef.current = openPopups
   const maint = useMaintenanceStatus()
   const maintOn = maint.enabled
   useEffect(() => {
     if (!maintOn) return
     stopSpeaking()
     shellCloseAllFloating()
+    /* 壳把悬浮窗全收了 ⇒ 网页侧的"哪几个开着"也要清（按钮跟着变） */
+    setOpenPopups(new Set())
     setExam(false)
     mutateQueue(() => [])
   }, [maintOn, mutateQueue])
@@ -1309,91 +1520,6 @@ export default function ClassroomPluginShell() {
     setWinTitles((prev) => (prev[id] === t ? prev : { ...prev, [id]: t }))
   }, [])
 
-  const floatAvailable = shellTransparentWindowAvailable()
-  /**
-   * 弹到桌面小窗时推过去的内容。
-   * 🔴 壳窗**只填模板**（`title/body/rows`），业务量全在这里算好 —— 壳里再算一遍就是两个真相
-   *    （附录 A 第 3 条）。2026-10-24 之前只推 `{pluginId,w,h}`，弹出来是一屏「还没有内容」，
-   *    比按钮置灰更糟。
-   */
-  const blockScreen = useCallback(
-    (id: string): { title: string; body: string; rows: string[] } | null => {
-      const hh = String(now.getHours()).padStart(2, '0')
-      const mm = String(now.getMinutes()).padStart(2, '0')
-      const stamp = `${ymdOf(now)} · ${WEEKDAY_TEXT[weekdayOf(now) - 1]} · ${klassName}`
-      if (id === '__clock') {
-        const cur = day.current as { subject?: string; end?: string } | null
-        const nxt = day.next as { subject?: string; start?: string } | null
-        return {
-          title: '大时钟课表',
-          body: `${hh}:${mm}`,
-          rows: [
-            stamp,
-            cur?.subject
-              ? `现在 ${cur.subject} 到 ${cur.end}`
-              : nxt?.subject
-                ? `下一节 ${nxt.subject} ${nxt.start}`
-                : '今天没课',
-          ],
-        }
-      }
-      if (id === '__calls') {
-        const head = queue[0]
-        return {
-          title: '呼叫播报',
-          body: head ? head.text : '呼叫播报已就绪',
-          rows: [queue.length > 1 ? `还有 ${queue.length - 1} 条排队` : '按顺序播报，不互相顶掉'],
-        }
-      }
-      return null
-    },
-    [now, day, klassName, queue],
-  )
-  /** 不能弹的两种原因别混：没能力 vs 有能力但这一块内容推不过去 */
-  const floatReasonOf = useCallback(
-    (id: string): string | null => {
-      if (!floatAvailable) return '要教室版程序'
-      if (!blockScreen(id)) return '这一块还不支持弹出'
-      return null
-    },
-    [floatAvailable, blockScreen],
-  )
-  const floatingCountRef = useRef(0)
-  const pipOpen = useCallback(
-    async (pluginId: string, opts: Record<string, unknown>) => {
-      if (!floatAvailable) {
-        push({ text: '要教室版程序', tone: 'warn', desc: '悬浮窗要在教室版程序里才能弹' })
-        return false
-      }
-      const payload = blockScreen(pluginId)
-      if (!payload) {
-        /* 推不出内容就不弹：壳窗只填模板，空白屏比置灰更糟 */
-        push({ text: '这一块还不支持弹出', tone: 'warn', desc: '下一轮补内容推送' })
-        return false
-      }
-      if (floatingCountRef.current >= LIMITS.floatingWindowsMax) {
-        push({ text: '悬浮窗到上限了', tone: 'warn', desc: '先收掉几块再弹' })
-        return false
-      }
-      const o = opts as { w?: number; h?: number; opacity?: number; transparent?: boolean }
-      const r = await shellOpenTransparentWindow({
-        w: o.w ?? 360,
-        h: o.h ?? 220,
-        opacity: o.opacity,
-        transparent: o.transparent,
-      })
-      if (!r.ok) {
-        push({ text: r.why, tone: 'warn' })
-        return false
-      }
-      floatingCountRef.current += 1
-      // 壳只画模板（one-way）：内容在这里算好推过去（附录 A 第 3 条）
-      shellPushBlockScreen({ pluginId, ...payload, w: o.w ?? 360, h: o.h ?? 220 })
-      return true
-    },
-    [floatAvailable, push, blockScreen],
-  )
-
   /** 加载前的两道闸在这里过：不合的进目录但**不 activate**，窗口里只说原因。 */
   const catalog: WinDef[] = useMemo(() => {
     const list: WinDef[] = [
@@ -1414,8 +1540,13 @@ export default function ClassroomPluginShell() {
        * 🔴 P1 的开关链：`?demoPlugin=1` 是**演示直通**（不管配置硬上 —— 那是手册 §12
        *    的演示地址）；真开关在教师端：启用（plugin_configs.enabled）**且**登记表放行
        *    （stable_version 有值、没撤下）。两个条件缺一个就不进目录 —— 窗口随之消失。
+       * 🆕 2026-10-24：**没有配置行 = 没被教师改过 ⇒ 随包内置的默认开**（远程插件默认关）；
+       *    只有显式 `enabled: false` 才关。判定见 `isBundledPlugin()` 的注释。
+       * ⚠️ 登记表那条**照旧判**：`liveIds === null`（没读到）放行；读到了且没有它就不放行。
        */
-      const enabled = demoPlugin || (configsMap[p.manifest.id]?.enabled === true && (liveIds === null || liveIds.has(p.manifest.id)))
+      const configured = configsMap[p.manifest.id]?.enabled
+      const on = configured ?? isBundledPlugin(p)
+      const enabled = demoPlugin || (on && (liveIds === null || liveIds.has(p.manifest.id)))
       if (!enabled) continue
       const gate = preflightPlugin(p)
       list.push({
@@ -1436,6 +1567,104 @@ export default function ClassroomPluginShell() {
   const stableIds = useMemo(
     () => new Set(['__clock', '__calls', '__closing', '__files', ...plugins.map((p) => p.manifest.id)]),
     [plugins],
+  )
+
+  const floatAvailable = shellTransparentWindowAvailable()
+  /* 壳里那扇窗被关掉（老师点系统关闭 / 停用时壳自己收）⇒ 把 id 从集合里删掉。
+     载荷是 pluginId（`classroomShell.ts` 的契约），不是"还有没有开着"的布尔。
+     （集合本身在上面声明 —— 维护模式那条 effect 也要清它。） */
+  useEffect(
+    () =>
+      shellOnFloatingClosed((pluginId) => {
+        setOpenPopups((prev) => {
+          if (!prev.has(pluginId)) return prev
+          const next = new Set(prev)
+          next.delete(pluginId)
+          return next
+        })
+      }),
+    [],
+  )
+
+  /** 不能弹的原因：宿主块永远不能弹；被拒的插件照它自己的原因；其余缺的是壳能力。 */
+  const floatReasonOf = useCallback(
+    (id: string): string | null => {
+      const def = catalogById.get(id)
+      if (HOST_BLOCK_IDS.has(id) || def?.kind !== 'plugin') return '这一块不能单独弹出'
+      /* 加载前就被拒的插件：窗口里画的是原因，桌面小窗里同样画不出来 */
+      if (def.blocked) return def.blocked
+      if (!floatAvailable) return '要教室版程序'
+      return null
+    },
+    [catalogById, floatAvailable],
+  )
+
+  /** 收掉**某个插件自己**那扇小窗（停用 / 熔断时用；同层别的插件不许连坐）。 */
+  const closeFloatingOf = useCallback((pluginId: string) => {
+    shellCloseTransparentWindow(pluginId)
+    setOpenPopups((prev) => {
+      if (!prev.has(pluginId)) return prev
+      const next = new Set(prev)
+      next.delete(pluginId)
+      return next
+    })
+  }, [])
+
+  /**
+   * 弹 / 收**这一个插件**的桌面小窗：同一个按钮第二次点 = 收掉（toggle）。
+   * 🔴 壳侧从 2026-10-24 起按 `pluginId` 一插件一窗；全局只剩一个上限
+   *    `LIMITS.floatingWindowsMax`（6，老机器保护）。
+   * ⚠️ 返回值 = "这次有没有开出一扇窗"（`ctx.pip.open` 用的就是它）：收掉时回 false，
+   *    与"没开成"同义。内容由壳里的插件页按 pluginId 自己渲染，这里**不再推模板**。
+   */
+  const pipOpen = useCallback(
+    async (pluginId: string, opts: Record<string, unknown>) => {
+      const def = catalogById.get(pluginId)
+      /* 只有插件能弹：宿主块没有对应的桌面页面 */
+      if (def?.kind !== 'plugin') {
+        push({ text: '这一块不能单独弹出', tone: 'warn' })
+        return false
+      }
+      /* blocked 的插件画不出内容，不摆一扇永远报错的窗 */
+      if (def.blocked) {
+        push({ text: def.blocked, tone: 'warn' })
+        return false
+      }
+      if (openPopupsRef.current.has(pluginId)) {
+        closeFloatingOf(pluginId)
+        return false
+      }
+      if (!floatAvailable) {
+        push({ text: '要教室版程序', tone: 'warn', desc: '悬浮窗要在教室版程序里才能弹' })
+        return false
+      }
+      if (openPopupsRef.current.size >= LIMITS.floatingWindowsMax) {
+        push({
+          text: '悬浮窗到上限了',
+          tone: 'warn',
+          desc: `最多 ${LIMITS.floatingWindowsMax} 扇，先收掉几扇再弹`,
+        })
+        return false
+      }
+      const o = opts as { w?: number; h?: number; opacity?: number }
+      const r = await shellOpenTransparentWindow({
+        pluginId,
+        w: o.w ?? 360,
+        h: o.h ?? 220,
+        opacity: o.opacity,
+      })
+      if (!r.ok) {
+        push({ text: r.why ?? '悬浮窗没开成，再点一次试试', tone: 'warn' })
+        return false
+      }
+      setOpenPopups((prev) => {
+        const next = new Set(prev)
+        next.add(pluginId)
+        return next
+      })
+      return true
+    },
+    [catalogById, closeFloatingOf, floatAvailable, push],
   )
 
   /* 画布尺寸（窗口摆位与吸附都要它） */
@@ -1466,9 +1695,34 @@ export default function ClassroomPluginShell() {
       const raw = await fwSlot.get('layout')
       if (!alive) return
       const norm = normalizeLayout(raw, stableIds)
-      /* 没有布局行 ⇒ 用默认模板（复刻旧屏两栏），而不是把窗口散在左上角。
-         模板本身在 `winman.templateLayout()`，坐标与吸附走同一套算术。 */
-      setLayout(norm ?? templateLayout(canvas))
+      /*
+       * 没有布局行 ⇒ 用默认模板，并把**当次目录里真实存在、能渲染的内置插件**一起摆上
+       * （2026-10-24 用户：「我说的默认视图应该是默认有原来固定版本有的那几个功能插件」）。
+       * 模板本身在 `winman.templateLayout()`，坐标与吸附走同一套算术。
+       * ⚠️ 只传 `blocked` 为空的那几扇 —— 否则会摆出一扇永远报错的窗。
+       * ⚠️ 这里拿的是**首帧**的目录：内置插件默认开（不等配置读回来就有）；
+       *    老师显式关掉的在后续 `catalog` 变化里会把窗口撤掉，但不会重写模板（只生成一次）。
+       */
+      /*
+       * 🔴 默认模板就是**旧固定版那七块**，多一块都不放（2026-10-24 用户原话：
+       *    「默认有原来固定版本有的那几个功能插件」）：
+       *    宿主三块（大时钟 / 呼叫播报 / 老师传来的文件）+ 内置四块（班级课表 / 每日作业 /
+       *    每日祝福语 / 作业讲评）。
+       * ⚠️ `shugao.exams`（本班考试）**也是内置的，但旧固定版没有这一块** ⇒ 默认不摆；
+       *    它仍然默认启用，老师想用就从「功能块」清单里打开（`:1955` 那一块）——
+       *    "默认不占屏"与"用不了"是两件事。
+       */
+      const NOT_IN_DEFAULT_TEMPLATE = new Set(['shugao.exams'])
+      const extra = catalog
+        .filter(
+          (d) =>
+            d.kind === 'plugin' &&
+            !d.blocked &&
+            d.plugin?.source === 'bundled' &&
+            !NOT_IN_DEFAULT_TEMPLATE.has(d.id),
+        )
+        .map((d) => ({ id: d.id, w: d.suggest.w, h: d.suggest.h }))
+      setLayout(norm ?? templateLayout(canvas, extra))
     })()
     return () => {
       alive = false
@@ -1803,11 +2057,12 @@ export default function ClassroomPluginShell() {
                 title={winTitles[w.id] ?? def.title}
                 z={10 + shown.indexOf(w)}
                 floatReason={floatReasonOf(w.id)}
+                floating={openPopups.has(w.id)}
                 onFocus={focusWin}
                 onRect={moveRect}
                 onMode={patchWin}
                 onFloat={(id) => {
-                  // 框架自己的弹出与插件同一扇透明窗（附录 A：单例复用）
+                  /* 一个插件一扇：同一个按钮再点一次就是收掉（toggle，见 pipOpen） */
                   void pipOpen(id, { w: Math.round(w.w * 0.8), h: Math.round(w.h * 0.8) })
                 }}
               >
@@ -1880,6 +2135,7 @@ export default function ClassroomPluginShell() {
                       getConfig={getConfig}
                       onConfigChange={onConfigChange}
                       pipOpen={pipOpen}
+                      onFloatingClose={closeFloatingOf}
                       onStatus={onStatus}
                     />
                   )
