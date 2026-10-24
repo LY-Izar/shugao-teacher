@@ -1349,7 +1349,7 @@ const realRoutes = routes.filter((p) => p !== '*')
 section('第八节 · D2：方案 §2.2 矩阵（第二个单元格）↔ PAGES — 37 行 / V154 / E33 / B35')
 
 function parseMatrix() {
-  const doc = readRepo('按身份显示导航方案.md')
+  const doc = readRepo('docs/archive/按身份显示导航方案.md')
   const at = doc.indexOf('### 2.2')
   if (at < 0) throw new Error('找不到 `### 2.2`（锚点变了）')
   /*
@@ -1407,7 +1407,7 @@ d2Matrix: {
    * CI 的 checkout 里没有它。没结论必须灰、绝不红：文档不在就打印说明、整节跳过
    * （与 exam-checks 三之二那份本机 xlsx 同一模式）；文档在的地方下面一条断言都不变。
    */
-  if (!existsSync(join(REPO, '按身份显示导航方案.md'))) {
+  if (!existsSync(join(REPO, 'docs/archive/按身份显示导航方案.md'))) {
     console.log('  ⏭ 按身份显示导航方案.md 不在（它不进 git，只在维护者机器上）—— D2 整节跳过')
     break d2Matrix
   }
@@ -1529,7 +1529,7 @@ section('第八节之二 · D9：管理架构方案 §4.2 的 13 列矩阵（39 
  * 从 `### 4.2 ` 切到下一个 `###` 为止，再在这一段里找表行。
  */
 function parseMatrix13() {
-  const doc = readRepo('管理架构与角色权限方案.md')
+  const doc = readRepo('docs/design/管理架构与角色权限方案.md')
   const at = doc.indexOf('### 4.2 ')
   if (at < 0) throw new Error('找不到 `### 4.2 `（锚点变了）')
   const rest = doc.slice(at + 4)
@@ -1599,7 +1599,7 @@ d9Matrix: {
    * 🆕 2026-10-02（E1 CI 轮）：这份方案**不进 git**（同 D2 的口径）—— CI 的 checkout
    * 里没有它。文档不在就打印说明、整节跳过（灰），绝不红；文档在的地方一条断言都不变。
    */
-  if (!existsSync(join(REPO, '管理架构与角色权限方案.md'))) {
+  if (!existsSync(join(REPO, 'docs/design/管理架构与角色权限方案.md'))) {
     console.log('  ⏭ 管理架构与角色权限方案.md 不在（它不进 git，只在维护者机器上）—— D9 整节跳过')
     break d9Matrix
   }
@@ -11304,6 +11304,30 @@ section('🆕 教室端口令：班主任自己设一个（set 的源码级判�
     '🧪 ⑤ 反向对照：把留痕那层 `try`/`catch` 换成 `try`/`finally`（副本）⇒ 「留痕被包住、失败回 false」**当场假** —— 证明⑤咬的是那层兜底',
     `原文 ${auditOk(naked)} · 副本 ${rcAudit === null ? '锚点不是恰好 1 处（对照自己红）' : auditOk(rcAudit)}`,
   )
+}
+
+/*
+ * 🆕 2026-10-24：**文档时效** —— 不变量速查页那句"对应版本"必须等于 `APP_VERSION`。
+ *
+ * 为什么用门禁钉这个：这个项目的文档栽就栽在"看起来权威、其实缺了一整轮"上
+ * （`功能设计与不变量.md` 停在 §94，隔着十天跨了一整轮插件化，而 AGENTS 还写着"最权威"）。
+ * 光靠"记得改"没用 —— 发版时改版本号是机械动作，最容易漏的就是回头改文档。
+ * ⇒ 把"版本号"和"速查页"绑在一起：漏改就红，红了就必须回来看一眼。
+ *
+ * 三态：速查页**不在**（docs/ 不进公开仓库，CI 干净检出里没有）⇒ 说明一句跳过，不算红。
+ */
+{
+  const QUICK = join(REPO, 'docs', 'rules', '不变量速查.md')
+  if (!existsSync(QUICK)) {
+    console.log('⏭ 文档时效：`docs/rules/不变量速查.md` 不在（docs 不进公开仓库）—— 跳过')
+  } else {
+    const appVer = /APP_VERSION\s*=\s*'([^']+)'/.exec(readApp('src/lib/version.ts'))?.[1] ?? ''
+    const quick = readFileSync(QUICK, 'utf8')
+    const claimed = /对应版本：v(\d+\.\d+\.\d+)/.exec(quick)?.[1] ?? ''
+    eq('D19：`不变量速查` 的「对应版本」= `version.ts` 的 `APP_VERSION`（发版忘了回写就红）', claimed, appVer)
+    eq('D19b：速查页里没有「待补 / TODO」这类占位（占位等于没写）', /待补|TODO/.test(quick), false)
+    eq('D19c：速查页写了「最后核对」的日期（不是空着）', /最后核对：\d{4}-\d{2}-\d{2}/.test(quick), true)
+  }
 }
 
 /* ---------------- 结果 ---------------- */
