@@ -394,7 +394,7 @@ async function runChecks(dir, { quiet = false } = {}) {
     }
     /* planCard 是**能力一致**判据：申请了 pip 而壳不支持 ⇒ 说"要教室版程序"；
        没申请 ⇒ 卡片就该是可用的（reason null）——两档都是"照实说"。 */
-    const cardNoPip = planCard(manifest, { shellSupportsPip: false, shellVersion: '1.1.5' })
+    const cardNoPip = planCard(manifest, { shellSupportsPip: false, shellVersion: '1.1.6' })
     ok(
       'CF-13',
       '网页预览下卡片照实说：申请 pip ⇒「要教室版程序」，没申请 ⇒ 可用',

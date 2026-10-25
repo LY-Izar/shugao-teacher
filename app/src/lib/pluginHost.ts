@@ -100,6 +100,7 @@ export type Permission = (typeof PLUGIN_PERMISSIONS)[number]
 export const RESOURCE_PERMISSION = {
   'class.roster': 'data.roster',
   'class.schedule': 'data.schedule',
+  'class.todaySchedule': 'data.schedule',
   'class.slotNow': 'data.schedule',
   'class.dailyHomework': 'data.dailyHomework',
   'class.duty': 'data.duty',

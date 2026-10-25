@@ -4,9 +4,9 @@
  * ============================================================================
  * 口径
  * ============================================================================
- * · 数据源是**本机的 store**（`useStore`）—— 它在远程模式由 `hydrate()` + Realtime
- *   灌着，在演示模式是种子数据。插件读到的永远是"这块屏已经同步到的那一份"，
- *   与大屏自己显示的同源；不另开一条查库的路（那会变成第二套数据真相）。
+ * · 通常数据源是**本机的 store**（`useStore`）—— 它在远程模式由 `hydrate()` + Realtime
+ *   灌着，在演示模式是种子数据。`class.todaySchedule` 是例外：优先取主屏算好的
+ *   投影；独立弹窗没有新鲜投影时，沿用主屏的 `schedule_day_cells` 读取与合并函数。
  * · `stale`（手册 §6.4）：远程模式断网时 `true`（这份可能是旧缓存）；演示模式恒
  *   `false` —— 数据就在本机，没有"旧"可言。`read` **任何情况下都不 reject**：
  *   没数据回空形状，读不出来回空形状 + `stale:true`。
@@ -17,7 +17,7 @@
  */
 
 import { useStore } from '../data/store'
-import { dayState, nowMinutes, toMinutes, weekdayOf } from '../lib/schedule'
+import { dayState, nowMinutes, toMinutes, weekdayOf, type DayState } from '../lib/schedule'
 import { splitLessonTitle } from '../lib/scheduleParse'
 import { subjectCodeOf, subjectCodeOfName, subjectName } from '../lib/subjects'
 import { collectStats } from '../lib/assignments'
@@ -25,11 +25,13 @@ import { BAND_META, gradeStats } from '../lib/grading'
 import { ranked } from '../lib/wrongbook'
 import { loadDailyBundle, toDutyInput, todayDuty } from '../lib/daily'
 import { isoOffset } from '../lib/date'
-import { beijingNow } from '../lib/holiday'
+import { beijingNow, dayKind, holidayOn, isRestDay, ymdOf } from '../lib/holiday'
 import { pickDailyQuote } from '../lib/quotes'
 import { isRemote } from '../lib/supabase'
 import type { ResourceName } from '../lib/pluginHost'
 import type { ScheduleItem } from '../data/types'
+import * as remote from '../data/remote'
+import { readTodayWeekOverride, resolveTodaySchedule, type TempDayCell } from './todaySchedule'
 
 export interface ResourceResult {
   value: unknown
@@ -42,6 +44,111 @@ const DAILY_FROM = -14
 const DAILY_TO = 1
 
 const noOf = (s: { studentNo: string; serial?: string }): string => s.studentNo || s.serial || ''
+
+type TodayScheduleValue = {
+  date: string
+  weekday: number
+  isMakeup: boolean
+  restDay: boolean
+  restName: string
+  items: Array<{ id: string; start: string; end: string; subject: string; teacherName: string; adjusted: boolean; current: boolean; next: boolean }>
+  conflicts: string[]
+}
+
+export function todayScheduleValue(input: {
+  date: string; weekday: number; isMakeup: boolean; restDay: boolean; restName: string
+  day: DayState; adjustedIds: ReadonlySet<string>; conflicts: string[]
+}): TodayScheduleValue {
+  return {
+    date: input.date,
+    weekday: input.weekday,
+    isMakeup: input.isMakeup,
+    restDay: input.restDay,
+    restName: input.restName,
+    items: input.day.items.map((it) => {
+      const parsed = splitLessonTitle(it.title)
+      return {
+        id: it.id, start: it.start, end: it.end,
+        subject: parsed.subject, teacherName: parsed.teacher,
+        adjusted: input.adjustedIds.has(it.id),
+        current: input.day.current?.id === it.id,
+        next: input.day.next?.id === it.id,
+      }
+    }),
+    conflicts: input.conflicts,
+  }
+}
+
+const TODAY_SNAPSHOT_TTL_MS = 90_000
+const snapshotKey = (classId: string) => `shugao.classroom.todaySchedule.${classId}`
+const todaySnapshots = new Map<string, { value: TodayScheduleValue; at: number }>()
+const resourceListeners = new Set<() => void>()
+
+/** 主屏投影供内嵌插件和同源的独立弹窗读取；弹窗失去主屏心跳后自己重算。 */
+export function publishTodaySchedule(classId: string, value: TodayScheduleValue): void {
+  const previous = todaySnapshots.get(classId)
+  const changed = !previous || JSON.stringify(previous.value) !== JSON.stringify(value)
+  if (!changed && Date.now() - previous.at < 30_000) return
+  const at = Date.now()
+  todaySnapshots.set(classId, { value, at })
+  try {
+    localStorage.setItem(snapshotKey(classId), JSON.stringify({ value, at }))
+  } catch {
+    /* 禁用存储时，同页插件仍从内存拿到同一份投影。 */
+  }
+  if (!changed) return
+  for (const cb of resourceListeners) cb()
+}
+
+/** 独立弹窗有自己的 JS 上下文，按同一函数重算投影。 */
+async function readTodaySchedule(classId: string, className: string): Promise<{ value: TodayScheduleValue; stale: boolean }> {
+  const now = beijingNow()
+  const date = ymdOf(now)
+  let snapshot = todaySnapshots.get(classId)
+  if (!snapshot) {
+    try {
+      snapshot = JSON.parse(localStorage.getItem(snapshotKey(classId)) ?? 'null') ?? undefined
+    } catch { /* 没有跨窗口快照就走同源重算。 */ }
+  }
+  if (snapshot?.value?.date === date && Date.now() - snapshot.at < TODAY_SNAPSHOT_TTL_MS) {
+    return { value: snapshot.value, stale: false }
+  }
+  const weekday = weekdayOf(now)
+  const isMakeup = dayKind(date) === 'makeup'
+  const override = isMakeup ? readTodayWeekOverride(classId, date) : null
+  const useWeekday = override ?? weekday
+  const temp: Record<string, TempDayCell> = {}
+  let stale = false
+  if (isRemote) {
+    const result = await remote.loadScheduleDay(date)
+    if (result.status === 'present') {
+      for (const c of result.cells) {
+        if (c.changed && c.classId === classId) {
+          temp[c.start] = { subject: c.subject, teacherId: c.teacherId, end: c.end }
+        }
+      }
+    } else stale = true
+  } else {
+    for (const c of useStore.getState().tempScheduleChanges) {
+      if (c.date === date && c.classId === classId) {
+        temp[c.start] = { subject: c.toSubject, teacherId: c.toTeacherId ?? null, end: c.end }
+      }
+    }
+  }
+  const { dayItems, adjustedIds } = resolveTodaySchedule(
+    useStore.getState().schedule, classId, className, useWeekday, weekday, temp,
+  )
+  const restDay = isRestDay(date)
+  return {
+    value: todayScheduleValue({
+      date, weekday: useWeekday, isMakeup, restDay,
+      restName: restDay ? holidayOn(date)?.name ?? '' : '',
+      day: dayState(dayItems.items, now, useWeekday), adjustedIds,
+      conflicts: dayItems.conflicts,
+    }),
+    stale,
+  }
+}
 
 /** 一节课对外的形状（手册 §4.1 的 `Slot`）。`current` 的 minutesLeft 是距**结束**。
  *  导出：壳发 `clock.onLesson` 事件（lessonStart/lessonEnd）用**同一条**换算 ——
@@ -91,6 +198,15 @@ export async function readResource(resource: ResourceName, classId: string): Pro
         },
         stale,
         asOf,
+      }
+    }
+
+    case 'class.todaySchedule': {
+      try {
+        const result = await readTodaySchedule(classId, klass?.name ?? '')
+        return { value: result.value, stale: stale || result.stale, asOf }
+      } catch {
+        return { value: { date: ymdOf(beijingNow()), weekday: weekdayOf(beijingNow()), isMakeup: false, restDay: false, restName: '', items: [], conflicts: [] }, stale: true, asOf }
       }
     }
 
@@ -256,5 +372,11 @@ export async function readResource(resource: ResourceName, classId: string): Pro
  * 按资源做细粒度 diff 是 P2 有真插件之后的事，别提前做。
  */
 export function watchResource(cb: () => void): () => void {
-  return useStore.subscribe(() => cb())
+  resourceListeners.add(cb)
+  const unsub = useStore.subscribe(() => cb())
+  const onStorage = (event: StorageEvent) => {
+    if (event.key?.startsWith('shugao.classroom.todaySchedule.') || event.key?.startsWith('shugao.classroom.weekOverride.')) cb()
+  }
+  window.addEventListener('storage', onStorage)
+  return () => { resourceListeners.delete(cb); unsub(); window.removeEventListener('storage', onStorage) }
 }

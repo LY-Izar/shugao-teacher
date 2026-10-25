@@ -3,7 +3,8 @@
  *
  * 搬自旧教室端 `Classroom.tsx` 的「每日作业」块与值日生行：
  *   · 数据源 = 宿主资源 `class.dailyHomework`（今天的条目，按学科分组）与
- *     `class.duty`（今天值日生）。分组顺序照宿主 `lib/subjects.ts` 那张字典
+ *     `class.duty`（今天值日生）、`class.todaySchedule`（与主屏同口径的今日课表）。
+ *     分组顺序照宿主 `lib/subjects.ts` 那张字典
  *     （语文数学英语…），这里照抄一份 code→序号表，不由插入顺序决定；
  *   · 话术照旧页：组头「学科」+「课代表」标签；空态「今天还没有人留作业。」；
  *   · 日期窗（今天/昨天/前天…）与"共 N 条"照 `friendlyDate` 的写法；
@@ -37,18 +38,6 @@ const noDom = () => {
   const sink = { style: {}, textContent: '', append() {}, setAttribute() {} }
   const anyEl = () => ({ ...sink, style: {}, append(...xs) { void xs } })
   return { el: anyEl, wrap: { ...sink, append() {} }, body: { innerHTML: '', append() {} } }
-}
-
-const friendlyDate = (iso) => {
-  const d = new Date(`${iso}T12:00:00+08:00`)
-  const now = new Date()
-  const dayMs = 86400000
-  const diff = Math.round((new Date(`${iso}T00:00:00+08:00`).getTime() - new Date(`${now.toISOString().slice(0, 10)}T00:00:00+08:00`).getTime()) / dayMs)
-  if (diff === 0) return '今天'
-  if (diff === -1) return '昨天'
-  if (diff === -2) return '前天'
-  const wd = '日一二三四五六'[d.getDay()]
-  return `${d.getMonth() + 1} 月 ${d.getDate()} 日 · 周${wd}`
 }
 
 const groupBy = (rows) => {
@@ -91,28 +80,63 @@ export default {
     const count = mk('span', 'flex:1;text-align:right;font-size:11.5px', '')
     head.append(title, duty, count)
 
-    const body = mk('div', 'margin-top:10px;display:flex;flex-direction:column;gap:12px')
+    const schedule = mk('div',
+      'margin-top:12px;padding:10px 12px;border:1px solid var(--color-line2);' +
+      'border-radius:6px;background:var(--color-surface)')
+    const scheduleTitle = mk('div', 'font-size:12.5px;font-weight:700;color:var(--color-ink)')
+    const scheduleBody = mk('div', 'margin-top:7px;display:flex;flex-direction:column;gap:5px')
+    schedule.append(scheduleTitle, scheduleBody)
+    const body = mk('div', 'margin-top:12px;display:flex;flex-direction:column;gap:12px')
     const empty = mk('div', 'font-size:13px;color:var(--color-ink3);line-height:1.8;display:none',
       '今天还没有人留作业。')
     const notice = mk('div', 'font-size:12px;color:var(--color-warn);line-height:1.7;display:none')
-    wrap.append(head, body, empty, notice)
+    wrap.append(head, schedule, body, empty, notice)
     ctx.ui.container.append(wrap)
 
+    let paintToken = 0
     const paint = async () => {
+      const token = ++paintToken
       const today = new Date(ctx.now())
       const iso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
-      const [hw, dutyData] = await Promise.all([
+      const [hw, dutyData, timetable] = await Promise.all([
         ctx.data.read('class.dailyHomework'),
         ctx.data.read('class.duty'),
+        ctx.data.read('class.todaySchedule'),
       ])
+      if (token !== paintToken) return
       const rows = (hw.rows ?? []).filter((h) => h.onDate === iso)
-      count.textContent = `${friendlyDate(iso)}${rows.length ? ` · 共 ${rows.length} 条` : ''}`
+      count.textContent = `${today.getMonth() + 1} 月 ${today.getDate()} 日 · 周${'日一二三四五六'[today.getDay()]}${rows.length ? ` · 共 ${rows.length} 条` : ''}`
 
       const t = dutyData.today
       duty.textContent = t ? `今天值日生 · ${t.name}` : ''
       duty.style.cssText = t
         ? 'font-size:13px;color:var(--color-ink3)'
         : 'display:none'
+
+      scheduleTitle.textContent = `今日课表 · ${'一二三四五六日'[(timetable.weekday || 1) - 1]}`
+      scheduleBody.innerHTML = ''
+      if (timetable.restDay) {
+        scheduleBody.append(mk('div', 'font-size:12px;color:var(--color-ink3)',
+          timetable.restName ? `今天放假 · ${timetable.restName}` : '今天放假'))
+      } else if (!timetable.items?.length) {
+        scheduleBody.append(mk('div', 'font-size:12px;color:var(--color-ink3)', '今天没有排课'))
+      } else {
+        for (const it of timetable.items) {
+          const row = mk('div', 'display:flex;align-items:center;gap:8px;font-size:12px;line-height:1.5')
+          row.append(mk('span', 'flex:none;font-variant-numeric:tabular-nums;color:var(--color-ink3)',
+            `${it.start}–${it.end}`))
+          row.append(mk('span',
+            `flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;${it.current ? 'font-weight:700;color:var(--color-accent)' : 'color:var(--color-ink)'}`,
+            it.subject))
+          if (it.current) row.append(mk('span', 'color:var(--color-accent);flex:none', '上课中'))
+          else if (it.next) row.append(mk('span', 'color:var(--color-accent);flex:none', '下一节'))
+          if (it.adjusted) row.append(mk('span', 'color:var(--color-warn);flex:none', '已调整'))
+          scheduleBody.append(row)
+        }
+      }
+      for (const conflict of timetable.conflicts ?? []) {
+        scheduleBody.append(mk('div', 'font-size:11px;color:var(--color-warn);line-height:1.4', `⚠ ${conflict}`))
+      }
 
       body.innerHTML = ''
       const groups = groupBy(rows)
@@ -146,10 +170,17 @@ export default {
     }
 
     await paint()
-    ctx.onDispose(ctx.data.watch('class.dailyHomework', () => void paint()))
-    ctx.onDispose(ctx.data.watch('class.duty', () => void paint()))
+    let queued = false
+    const refresh = () => {
+      if (queued) return
+      queued = true
+      queueMicrotask(() => { queued = false; void paint() })
+    }
+    ctx.onDispose(ctx.data.watch('class.dailyHomework', refresh))
+    ctx.onDispose(ctx.data.watch('class.duty', refresh))
+    ctx.onDispose(ctx.data.watch('class.todaySchedule', refresh))
     if (ctx.clock) {
-      ctx.onDispose(ctx.clock.onMinute(() => void paint()))
+      ctx.onDispose(ctx.clock.onMinute(refresh))
     }
   },
 

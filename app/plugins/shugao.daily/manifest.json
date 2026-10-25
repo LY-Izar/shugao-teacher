@@ -2,10 +2,10 @@
   "id": "shugao.daily",
   "name": "每日作业与值日",
   "icon": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\"><rect x=\"4\" y=\"3\" width=\"16\" height=\"18\" rx=\"2\"/><path d=\"M8 8h8M8 12h8M8 16h5\"/></svg>",
-  "description": "今天各科留的作业按学科分组，配今天的值日生",
-  "version": "1.0.0",
+  "description": "今天的作业、值日生与课表",
+  "version": "1.1.0",
   "entry": "index.js",
-  "minShellVersion": "1.1.5",
-  "permissions": ["data.dailyHomework", "data.duty", "clock"],
-  "window": { "w": 4, "h": 4, "min": { "w": 3, "h": 2 } }
+  "minShellVersion": "1.1.6",
+  "permissions": ["data.dailyHomework", "data.duty", "data.schedule", "clock"],
+  "window": { "w": 4, "h": 5, "min": { "w": 3, "h": 3 } }
 }

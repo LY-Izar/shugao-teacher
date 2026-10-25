@@ -61,7 +61,6 @@ import {
 import {
   awayText,
   dayState,
-  maybeShift,
   toMinutes,
   weekdayOf,
 } from '../lib/schedule'
@@ -79,7 +78,7 @@ import {
   stopSpeaking,
   unlockAudio,
 } from '../lib/tts'
-import { WEEKDAY_TEXT, type CallRecord, type ScheduleItem } from '../data/types'
+import { WEEKDAY_TEXT, type CallRecord } from '../data/types'
 import { buildContext, PluginHost, LIMITS, type PluginManifest } from '../lib/pluginHost'
 import {
   GRID_PX,
@@ -105,7 +104,8 @@ import {
   type PluginSlot,
 } from '../classroom/loader'
 import { DEMO_MANIFEST, availablePlugins, type AvailablePlugin } from '../classroom/demoPlugin'
-import { toSlot } from '../classroom/resources'
+import { publishTodaySchedule, toSlot, todayScheduleValue } from '../classroom/resources'
+import { readTodayWeekOverride, resolveTodaySchedule, saveTodayWeekOverride, type TempDayCell } from '../classroom/todaySchedule'
 import { configDefaults, loadPluginConfigs } from '../classroom/configs'
 import { getSupabase } from '../lib/supabase'
 
@@ -144,8 +144,6 @@ const DEFAULT_OFF_BUNDLED = new Set([DEMO_MANIFEST.id, 'shugao.exams'])
 
 const isBundledPlugin = (p: AvailablePlugin): boolean =>
   p.source === 'bundled' && !DEFAULT_OFF_BUNDLED.has(p.manifest.id)
-
-type TempDayCell = { subject: string; teacherId: string | null; end: string }
 
 /* ============================================================================
    大时钟（从旧 Classroom.tsx 原样搬来 —— 它自己的 1 秒 tick 只重渲染自己）
@@ -1078,14 +1076,22 @@ function ClassroomShellMain() {
   const useWeekday = isMakeup && weekOverride !== null ? weekOverride : weekdayOf(now)
   const todayIso = ymdOf(now)
   const nowWeekday = weekdayOf(now)
+  useEffect(() => {
+    setWeekOverride(klass?.id ? readTodayWeekOverride(klass.id, todayIso) : null)
+  }, [klass?.id, todayIso])
+  const changeWeekOverride = useCallback((weekday: number | null) => {
+    if (klass?.id) saveTodayWeekOverride(klass.id, todayIso, weekday)
+    setWeekOverride(weekday)
+  }, [klass?.id, todayIso])
 
   /* 今天有临时调整的那几格（数据源 = §38.6 的 `schedule_day_cells`；注释全文在旧页） */
   const localTempChanges = useStore((s) => s.tempScheduleChanges)
-  const [dbTempCells, setDbTempCells] = useState<Record<string, TempDayCell>>({})
+  const [dbTempCells, setDbTempCells] = useState<{ key: string; cells: Record<string, TempDayCell> }>({ key: '', cells: {} })
   const klassName = klass?.name ?? ''
   useEffect(() => {
     if (!isRemote || !klass?.id) return
     let alive = true
+    const key = `${klass.id}:${todayIso}`
     const load = () => {
       void remote.loadScheduleDay(todayIso).then((r) => {
         if (!alive || r.status !== 'present') return
@@ -1095,7 +1101,7 @@ function ClassroomShellMain() {
             m[c.start] = { subject: c.subject, teacherId: c.teacherId, end: c.end }
           }
         }
-        setDbTempCells(m)
+        setDbTempCells({ key, cells: m })
       })
     }
     load()
@@ -1107,7 +1113,7 @@ function ClassroomShellMain() {
   }, [klass?.id, todayIso])
 
   const tempOfDay = useMemo(() => {
-    if (isRemote) return dbTempCells
+    if (isRemote) return dbTempCells.key === `${klass?.id}:${todayIso}` ? dbTempCells.cells : {}
     const m: Record<string, TempDayCell> = {}
     for (const c of localTempChanges ?? []) {
       if (c.date === todayIso && c.classId === klass?.id) {
@@ -1118,64 +1124,30 @@ function ClassroomShellMain() {
   }, [dbTempCells, localTempChanges, todayIso, klass?.id])
 
   /* 今天的课（临时层合并 + 周一顺延）—— 与旧教室端逐行同源，别在此改口径 */
-  const dayItems = useMemo(() => {
-    const raw = schedule.filter(
-      (s) => s.scope === 'class' && s.classId === klass?.id && s.weekday === useWeekday,
-    )
-    const used = new Set<string>()
-    const merged: ScheduleItem[] = []
-    for (const it of raw) {
-      const t = tempOfDay[it.start]
-      if (!t || used.has(it.start)) {
-        merged.push(it)
-        continue
-      }
-      used.add(it.start)
-      if (!t.subject) continue
-      merged.push({ ...it, title: `${klassName} ${t.subject}`.trim(), teacherId: t.teacherId ?? undefined })
-    }
-    for (const [start, t] of Object.entries(tempOfDay)) {
-      if (!t.subject || used.has(start)) continue
-      merged.push({
-        id: `temp-${start}`,
-        weekday: useWeekday,
-        start,
-        end: t.end,
-        title: `${klassName} ${t.subject}`.trim(),
-        kind: 'class',
-        notify: false,
-        scope: 'class',
-        classId: klass?.id,
-        teacherId: t.teacherId ?? undefined,
-      })
-    }
-    merged.sort((a, b) => toMinutes(a.start) - toMinutes(b.start))
-    return maybeShift(merged, nowWeekday)
-  }, [schedule, klass?.id, klassName, useWeekday, nowWeekday, tempOfDay])
-
-  const adjustedIds = useMemo(() => {
-    const ids = new Set<string>()
-    const rows = schedule.filter(
-      (s) => s.scope === 'class' && s.classId === klass?.id && s.weekday === useWeekday,
-    )
-    const used = new Set<string>()
-    for (const it of rows) {
-      const t = tempOfDay[it.start]
-      if (!t || used.has(it.start)) continue
-      used.add(it.start)
-      if (t.subject) ids.add(it.id)
-    }
-    for (const [start, t] of Object.entries(tempOfDay)) {
-      if (t.subject && !used.has(start)) ids.add(`temp-${start}`)
-    }
-    return ids
-  }, [schedule, klass?.id, useWeekday, tempOfDay])
+  const { dayItems, adjustedIds } = useMemo(
+    () => resolveTodaySchedule(schedule, klass?.id ?? '', klassName, useWeekday, nowWeekday, tempOfDay),
+    [schedule, klass?.id, klassName, useWeekday, nowWeekday, tempOfDay],
+  )
 
   const day = useMemo(() => dayState(dayItems.items, now, useWeekday), [dayItems.items, now, useWeekday])
 
   const restDay = isRestDay(todayIso)
   const restName = restDay ? (holidayOn(todayIso)?.name ?? '') : ''
   const nowMin = now.getHours() * 60 + now.getMinutes()
+
+  useEffect(() => {
+    if (!klass?.id) return
+    publishTodaySchedule(klass.id, todayScheduleValue({
+      date: todayIso,
+      weekday: useWeekday,
+      isMakeup,
+      restDay,
+      restName,
+      day,
+      adjustedIds,
+      conflicts: dayItems.conflicts,
+    }))
+  }, [klass?.id, todayIso, useWeekday, isMakeup, restDay, restName, day, adjustedIds, dayItems.conflicts])
 
   /* 19:20 收尾语（与旧教室端同一份措辞与分档） */
   const closing = useMemo(() => {
@@ -2096,7 +2068,7 @@ function ClassroomShellMain() {
                     isMakeup={isMakeup}
                     useWeekday={useWeekday}
                     weekOverride={weekOverride}
-                    setWeekOverride={setWeekOverride}
+                    setWeekOverride={changeWeekOverride}
                     nowMin={nowMin}
                   />
                 ) : def.kind === 'calls' ? (

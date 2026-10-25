@@ -41,7 +41,7 @@ import type { AvailablePlugin } from './demoPlugin'
  *    定 1.1.5（假插件的 `minShellVersion` 就是照它写的）；等壳侧作业落地，exe 的
  *    preload 会用真值盖掉它（严格值纪律：壳说了算，这里只是网页预览的兜底）。
  */
-export const PLUGIN_SHELL_VERSION = '1.1.5'
+export const PLUGIN_SHELL_VERSION = '1.1.6'
 
 /** 手册 §2.1：壳版本不够 ⇒ 不加载，只显示这一句。导出成常量让界面与判据同源。 */
 export const NEED_NEWER_SHELL = '需要更新的教室版程序'

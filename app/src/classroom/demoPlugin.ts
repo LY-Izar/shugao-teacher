@@ -201,12 +201,12 @@ export const DAILY_MANIFEST: PluginManifest = {
   id: 'shugao.daily',
   name: '每日作业与值日',
   icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>',
-  description: '今天各科留的作业按学科分组，配今天的值日生',
-  version: '1.0.0',
+  description: '今天的作业、值日生与课表',
+  version: '1.1.0',
   entry: 'index.js',
-  minShellVersion: '1.1.5',
-  permissions: ['data.dailyHomework', 'data.duty', 'clock'],
-  window: { w: 4, h: 4, min: { w: 3, h: 2 } },
+  minShellVersion: '1.1.6',
+  permissions: ['data.dailyHomework', 'data.duty', 'data.schedule', 'clock'],
+  window: { w: 4, h: 5, min: { w: 3, h: 3 } },
 }
 
 /* 学科字典的顺序照抄宿主 `lib/subjects.ts`（语文数学英语…）—— 单文件插件里
@@ -220,11 +220,15 @@ const DAILY_SUBJECT_ORDER: ReadonlyArray<readonly [string, string]> = [
 
 type DailyHwRow = { subject: string; subjectCode: string; content: string; onDate: string; source: string }
 type DutyData = { today: { no: string; name: string } | null; roster: Array<{ no: string; name: string }> }
+type TodayScheduleData = {
+  weekday: number; restDay: boolean; restName: string; conflicts: string[]
+  items: Array<{ start: string; end: string; subject: string; adjusted: boolean; current: boolean; next: boolean }>
+}
 
 type DailyCtx = {
   ui: { container: HTMLElement }
   data: {
-    read(resource: string): Promise<{ rows?: DailyHwRow[]; today?: DutyData['today']; notice?: string; stale?: boolean }>
+    read(resource: string): Promise<{ rows?: DailyHwRow[]; today?: DutyData['today']; notice?: string; stale?: boolean } & Partial<TodayScheduleData>>
     watch(resource: string, cb: () => void): () => void
   }
   clock?: { onMinute(cb: () => void): () => void }
@@ -274,29 +278,65 @@ const dailyModule = {
     const duty = el('span', '')
     const count = el('span', 'flex:1;text-align:right;font-size:11.5px', '')
     head.append(title, duty, count)
+    const schedule = el('div',
+      'margin-top:12px;padding:10px 12px;border:1px solid var(--color-line2);' +
+      'border-radius:6px;background:var(--color-surface)')
+    const scheduleTitle = el('div', 'font-size:12.5px;font-weight:700;color:var(--color-ink)')
+    const scheduleBody = el('div', 'margin-top:7px;display:flex;flex-direction:column;gap:5px')
+    schedule.append(scheduleTitle, scheduleBody)
     const body = el('div', 'margin-top:10px;display:flex;flex-direction:column;gap:12px')
     const empty = el('div', 'font-size:13px;color:var(--color-ink3);line-height:1.8;display:none', '今天还没有人留作业。')
     const notice = el('div', 'font-size:12px;color:var(--color-warn);line-height:1.7;display:none')
-    wrap.append(head, body, empty, notice)
+    wrap.append(head, schedule, body, empty, notice)
     ctx.ui.container.append(wrap)
 
     /* 日期口径：今天 = `ctx.now()`（宿主 beijingNow）的年月日 —— 与旧页 friendlyDate 同判据 */
     const isoOf = (d: Date) =>
       `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 
+    let paintToken = 0
     const paint = async () => {
-      const iso = isoOf(ctx.now())
-      const [hw, dutyData] = await Promise.all([
+      const token = ++paintToken
+      const today = ctx.now()
+      const iso = isoOf(today)
+      const [hw, dutyData, timetable] = await Promise.all([
         ctx.data.read('class.dailyHomework'),
         ctx.data.read('class.duty'),
+        ctx.data.read('class.todaySchedule'),
       ])
+      if (token !== paintToken) return
       const rows = (hw.rows ?? []).filter((h) => h.onDate === iso)
-      const wd = '日一二三四五六'[ctx.now().getDay()]
-      count.textContent = `${ctx.now().getMonth() + 1} 月 ${ctx.now().getDate()} 日 · 周${wd}${rows.length ? ` · 共 ${rows.length} 条` : ''}`
+      const wd = '日一二三四五六'[today.getDay()]
+      count.textContent = `${today.getMonth() + 1} 月 ${today.getDate()} 日 · 周${wd}${rows.length ? ` · 共 ${rows.length} 条` : ''}`
 
       const t = dutyData.today ?? null
       duty.textContent = t ? `今天值日生 · ${t.name}` : ''
       duty.style.cssText = t ? 'font-size:13px;color:var(--color-ink3)' : 'display:none'
+
+      scheduleTitle.textContent = `今日课表 · ${'一二三四五六日'[(timetable.weekday || 1) - 1]}`
+      scheduleBody.innerHTML = ''
+      if (timetable.restDay) {
+        scheduleBody.append(el('div', 'font-size:12px;color:var(--color-ink3)',
+          timetable.restName ? `今天放假 · ${timetable.restName}` : '今天放假'))
+      } else if (!timetable.items?.length) {
+        scheduleBody.append(el('div', 'font-size:12px;color:var(--color-ink3)', '今天没有排课'))
+      } else {
+        for (const it of timetable.items) {
+          const row = el('div', 'display:flex;align-items:center;gap:8px;font-size:12px;line-height:1.5')
+          row.append(el('span', 'flex:none;font-variant-numeric:tabular-nums;color:var(--color-ink3)',
+            `${it.start}–${it.end}`))
+          row.append(el('span',
+            `flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;${it.current ? 'font-weight:700;color:var(--color-accent)' : 'color:var(--color-ink)'}`,
+            it.subject))
+          if (it.current) row.append(el('span', 'color:var(--color-accent);flex:none', '上课中'))
+          else if (it.next) row.append(el('span', 'color:var(--color-accent);flex:none', '下一节'))
+          if (it.adjusted) row.append(el('span', 'color:var(--color-warn);flex:none', '已调整'))
+          scheduleBody.append(row)
+        }
+      }
+      for (const conflict of timetable.conflicts ?? []) {
+        scheduleBody.append(el('div', 'font-size:11px;color:var(--color-warn);line-height:1.4', `⚠ ${conflict}`))
+      }
 
       body.innerHTML = ''
       const groups = dailyGroupBy(rows)
@@ -329,10 +369,17 @@ const dailyModule = {
     }
 
     await paint()
-    ctx.onDispose(ctx.data.watch('class.dailyHomework', () => void paint()))
-    ctx.onDispose(ctx.data.watch('class.duty', () => void paint()))
+    let queued = false
+    const refresh = () => {
+      if (queued) return
+      queued = true
+      queueMicrotask(() => { queued = false; void paint() })
+    }
+    ctx.onDispose(ctx.data.watch('class.dailyHomework', refresh))
+    ctx.onDispose(ctx.data.watch('class.duty', refresh))
+    ctx.onDispose(ctx.data.watch('class.todaySchedule', refresh))
     if (ctx.clock) {
-      ctx.onDispose(ctx.clock.onMinute(() => void paint()))
+      ctx.onDispose(ctx.clock.onMinute(refresh))
     }
   },
 
