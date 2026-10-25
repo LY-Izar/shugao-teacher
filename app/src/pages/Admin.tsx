@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useStore } from '../data/store'
 import { getSupabase, isRemote, connectionMode, SUPABASE_URL } from '../lib/supabase'
+import { postApi, apiMessage } from '../lib/api'
 import { apiUrl } from '../lib/apiBase'
 import { APP_VERSION, APP_VERSION_LABEL, BUILD_HASH } from '../lib/version'
 import { deviceRole, deviceRoleAt, authDaysLeft } from '../lib/session'
@@ -5528,21 +5529,27 @@ function PluginsCard() {
     }
   }
 
+  /*
+   * 撤下 / 恢复放行。
+   *
+   * 🔴 2026-10-25 改（用户：「面板里我似乎没法把这个旧的插件撤下来」）：
+   *   原来这里是**浏览器直接** `update plugin_registry …`，而 PostgREST 在 RLS 挡住时
+   *   回的是 **204 + 0 行、没有任何 error** —— 界面只看 `error` 就显示"已撤下"，
+   *   实际一行都没改。症状就是"点了没反应、也不报错"。
+   *   ⇒ 改走服务端 `/api/admin/plugins/revoke`（服务角色 + 回读确认改了 1 行），
+   *     改不到就**明说**原因，不再假装成功。
+   */
   const setRevoked = async (pid: string, revoke: boolean) => {
-    const sb = getSupabase()
-    if (!sb) return
     setBusy(true)
     try {
-      const { error } = await sb
-        .from('plugin_registry')
-        .update({ revoked_at: revoke ? new Date().toISOString() : null })
-        .eq('plugin_id', pid)
-      if (error) setErr(`没改成：${error.message}`)
-      else {
-        setErr('')
-        setMsg(revoke ? `已撤下 ${pid}（数据保留，装回来不丢）` : `已恢复 ${pid}`)
-        setTick((t) => t + 1)
+      const r = await postApi('/api/admin/plugins/revoke', { id: pid, revoke })
+      if (!r.ok) {
+        setErr(`没改成：${apiMessage(r, revoke ? '撤下失败' : '恢复失败')}`)
+        return
       }
+      setErr('')
+      setMsg(revoke ? `已撤下 ${pid}（数据保留，装回来不丢）` : `已恢复 ${pid}`)
+      setTick((t) => t + 1)
     } finally {
       setBusy(false)
     }
