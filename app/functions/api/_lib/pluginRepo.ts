@@ -80,6 +80,28 @@ export type PendingPlugin = {
 }
 
 /**
+ * 从分支名推出**插件 id**（`plugin/<id>`）。
+ *
+ * 🔴 2026-10-25 修（面板上真踩到）：有人把分支开成了 `plugin/ruofeng.class-attendance-2.0.4`
+ *    —— 带了个版本尾巴。原来直接 `slice('plugin/'.length)` 当 id ⇒ `ruofeng.class-attendance-2.0.4`
+ *    不合命名空间正则 ⇒ 面板只写一句「插件 id 不合法」，**检查都点不了**，那个人的 PR 就卡住了。
+ *    而分支里的目录其实还叫 `plugins/ruofeng.class-attendance`（目录名才是 id）。
+ *
+ * 规则（宽进严出，宁可多认一种写法，也不要让人卡在分支命名上）：
+ *  ① 原名就合法 ⇒ 用它；
+ *  ② 去掉末尾的 `-1.2.3` 之后合法 ⇒ 用去掉后的；
+ *  ③ 都不合法 ⇒ 原样返回（面板照旧会报"不合法"，那是真不该猜的情况）。
+ * ⚠️ 只认 `-主.次.修` 这一种尾巴；别加"去掉任何后缀"这种模糊规则 —— 那会把
+ *    `a.b-c` 与 `a.b` 认成同一个插件。
+ */
+export function pluginIdFromBranch(branch: string): string {
+  const raw = branch.startsWith('plugin/') ? branch.slice('plugin/'.length) : branch
+  if (ID_RE.test(raw)) return raw
+  const noVer = raw.replace(/-\d+\.\d+\.\d+$/, '')
+  return ID_RE.test(noVer) ? noVer : raw
+}
+
+/**
  * `plugin/<id>` 分支 = 待审的插件。**一个插件一个分支**（交接文档 / 插件库 README）
  * ⇒ 同一个 id 出现多次是不可能的；出现多次说明有人乱建分支，这里**如实全列**，
  * 让人看见，而不是替它挑一个。
@@ -91,7 +113,8 @@ export async function listPending(env: PluginEnv): Promise<{ ok: true; rows: Pen
   const mine = branches.filter((b) => b.name.startsWith('plugin/'))
   const rows: PendingPlugin[] = []
   for (const b of mine) {
-    const id = b.name.slice('plugin/'.length)
+    /* 分支名 → 插件 id：有人会写成 `plugin/<id>-<版本>`，见 `pluginIdFromBranch` 的注释 */
+    const id = pluginIdFromBranch(b.name)
     let message = ''
     let at = ''
     const c = await gh(env, `/commits/${b.commit.sha}`)
