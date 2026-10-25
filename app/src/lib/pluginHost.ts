@@ -14,13 +14,20 @@
  * `document`，那道门禁就只能变成一条 Playwright 冒烟，既慢又 flaky
  * （本项目已有前车：`shots` 一次 7 分钟，调一条要跑很多次）。
  *
- * ⚠️ 因此本文件**不许 import 任何东西**（Node 的类型擦除只认相对路径带扩展名的
- *    导入，而门禁脚本直接 `import('../src/lib/pluginHost.ts')`）—— 零依赖是刻意的。
+ * ⚠️ 因此本文件**只许 import 一个零依赖的纯数据模块** `./pluginTables.ts`（读表目录）。
+ *    它不碰 DOM、不读环境、没有副作用；写成带 `.ts` 扩展名的相对导入 —— 门禁脚本直接
+ *    `import('../src/lib/pluginHost.ts')` 时，Node 的类型擦除认的就是这个形状。
+ *    其余任何 import 都别加：加一个依赖，这道纯 Node 门禁就废了。
  *
- * 契约出处：《教室端插件开发手册.md》§2.1 / §4 / §5 / §7.2 / §10。
+ * 📌 读表目录的静态自查在 `pluginTables.ts` 的 `selfCheckReadCatalog()`（不查库、不联网）。
+ *    这一轮**不动 `scripts/`**，所以门禁还没接它；将来接 `plugin-framework-checks` 时直接调。
+ *
+ * 契约出处：《教室端插件开发手册.md》§2.1 / §4 / §5 / §6.1.1 / §7.2 / §10。
  * 线上实现的判据仍以数据库为准（§45 的 RPC 与 RLS）；这里只做**同一份口径的前端影子**
  * —— 两边不一致时以数据库为准，并回来改这里。
  */
+
+import { PLUGIN_READ_TABLES } from './pluginTables.ts'
 
 /* ============================================================================
    一、常量：手册里写死的那些数，**只有这一处定义**
@@ -58,6 +65,18 @@ export const PLUGIN_PERMISSIONS = [
    * 超管在 /admin 审核时会看到"这插件要写哪些表、每张表对应平台的什么功能"。
    */
   'write',
+  /**
+   * 🆕 2026-10-25 用户要求：「除了隐私信息类的，其他每一个的表数据读取权限都预留个接口」。
+   *
+   * 与 9 个"语义资源"（`data.*`）是两条路：
+   *   · `data.*` = 宿主**算好形状**的结果（名单、课表、作业…），插件要什么给什么；
+   *   · `read`   = **逐张表**读目录允许的列（`PLUGIN_READ_TABLES`），manifest 的
+   *                `reads` 逐张声明，最多 12 张。这是"预留接口"，不是"开整库"。
+   * 🔴 前提：① 申请了这个能力；② `reads` 声明了这张表；③ 表在目录里且不是 `deny`。
+   * 三点缺一，`ctx.data.readTable()` 都回 `E_TABLE_NOT_READABLE`。
+   * 实现只 select 白名单列、class 域强制按本班过滤，**不接受任何调用方过滤条件**。
+   */
+  'read',
 ] as const
 
 /**
@@ -93,6 +112,13 @@ export interface PluginWriteDecl {
   why: string
 }
 
+/**
+ * 🆕 读表声明。**与 `PluginWriteDecl` 是同一个形状**（`{ table, why }`）——
+ * 审核页看的是同一件事："这插件要动哪张表、对应平台的什么功能"。
+ * 单独起个名字只是为了在 manifest 与审核页里分得清"读"与"写"。
+ */
+export type PluginReadDecl = PluginWriteDecl
+
 
 export type Permission = (typeof PLUGIN_PERMISSIONS)[number]
 
@@ -127,6 +153,10 @@ export const LIMITS = {
   writesPerMinute: 60,
   frameworkWritesPerMinute: 120,
   readsPerMinute: 600,
+  /** 🆕 读表：一次最多回多少行（超了截断，结果里带 `truncated: true`） */
+  readTableRows: 2000,
+  /** 🆕 一个插件最多声明几张可读表（手册 §6.1.1 的 12） */
+  readTablesPerPlugin: 12,
   floatingWindowsMax: 6,
   activateTimeoutMs: 10_000,
   deactivateMaxMs: 2_000,
@@ -150,6 +180,8 @@ export interface PluginManifest {
   permissions: Permission[]
   /** 🆕 2026-10-24：申请 `write` 能力时**必须**逐张声明要写的表（审核材料，见 `Permission` 的注释） */
   writes?: PluginWriteDecl[]
+  /** 🆕 2026-10-25：申请 `read` 能力时**必须**逐张声明要读的表（最多 12 张，见 `Permission`） */
+  reads?: PluginReadDecl[]
   requiresShell?: string[]
   window?: { w: number; h: number; min?: { w: number; h: number } }
   config?: { fields: ConfigField[] }
@@ -245,6 +277,49 @@ export function validateManifest(dirName: string, raw: unknown): { ok: boolean; 
         else if (w.why.length > 40) errors.push(`writes[${i}].why 超过 40 字`)
       }
       if (!wantsWrite) errors.push('声明了 writes 但没申请 write 能力')
+    }
+  }
+
+  /*
+   * 🆕 `read` 能力的六道校验（2026-10-25，与 `write` 同一个审核口径）：
+   *   ① 申请了 `read` 却没写 `reads` ⇒ 拒；
+   *   ② 表不在 `PLUGIN_READ_TABLES` ⇒ 拒（"目录里没有"就是没有，没有通配）；
+   *   ③ 表在目录里但是 `deny` ⇒ 拒，**并把这句理由写进 errors** ——
+   *      审核页要能解释"为什么这张表不给"，而不是只回一句"不合法"；
+   *   ④ `why` 必填且 ≤40 字；⑤ 同一张表只许声明一次；⑥ 最多 12 张。
+   */
+  const wantsRead = Array.isArray(perms) && (perms as unknown[]).includes('read')
+  const reads = m.reads
+  if (wantsRead) {
+    if (!Array.isArray(reads) || reads.length === 0) {
+      errors.push('申请了 read 能力却没有 reads（必须逐张声明要读的表）')
+    }
+  }
+  if (reads !== undefined) {
+    if (!Array.isArray(reads)) errors.push('reads 必须是数组')
+    else {
+      const seen = new Set<string>()
+      for (const [i, r] of (reads as PluginReadDecl[]).entries()) {
+        if (!r || typeof r.table !== 'string' || !r.table) {
+          errors.push(`reads[${i}].table 缺失`)
+          continue
+        }
+        const def = PLUGIN_READ_TABLES[r.table]
+        if (!def) {
+          errors.push(`reads[${i}].table 不在可读目录里：${r.table}`)
+        } else if (def.deny) {
+          errors.push(`reads[${i}].table 是隐私 / 内部表，不给插件读：${r.table}（${def.deny}）`)
+        } else if (seen.has(r.table)) {
+          errors.push(`reads 里重复声明了 ${r.table}`)
+        }
+        seen.add(r.table)
+        if (typeof r.why !== 'string' || !r.why.trim()) errors.push(`reads[${i}].why 缺失（给审核看的一句人话）`)
+        else if (r.why.length > 40) errors.push(`reads[${i}].why 超过 40 字`)
+      }
+      if (reads.length > LIMITS.readTablesPerPlugin) {
+        errors.push(`reads 最多声明 ${LIMITS.readTablesPerPlugin} 张表（现在 ${reads.length} 张）`)
+      }
+      if (!wantsRead) errors.push('声明了 reads 但没申请 read 能力')
     }
   }
 
@@ -362,14 +437,41 @@ export const CAPABILITY_SLOTS: Record<Permission, readonly string[]> = {
   files: ['files'],
   keepAwake: ['keepAwake'],
   write: ['write'],
+  read: ['data'],
 }
+
+/**
+ * 宿主端口回给插件的错误码（手册 §4.3）。
+ *
+ * 🆕 2026-10-25 加 `E_TABLE_NOT_READABLE`：读表时
+ *   · 表不在 `PLUGIN_READ_TABLES` 里 / 是 `deny` 的表 / 没在 `manifest.reads` 里声明
+ *   —— 三种情况收成**一个码**（对插件来说处置方式相同：回去改 manifest，或别读）。
+ * 其余几个是 `write` 端口已经在用的码，收在一处避免"读一个码、写一个码"两套字符串。
+ */
+export type PluginErrorCode =
+  | 'E_TABLE_NOT_READABLE'
+  | 'E_TABLE_NOT_DECLARED'
+  | 'E_WRITE_UNSUPPORTED'
+  | 'E_OFFLINE_WRITE'
 
 /**
  * 🆕 写业务表的端口（2026-10-24）。壳/页面负责接上它；没接 ⇒ `ctx.write` 一律回 `E_OFFLINE_WRITE`。
  * 🔴 `op` 只有三种，且**表名已经在建 ctx 时校验过**（这里不再信任调用方）。
  */
 export type WriteTableOp = 'insert' | 'update' | 'delete'
-export type WriteTableResult = { ok: true } | { ok: false; code: string; why: string }
+export type WriteTableResult = { ok: true } | { ok: false; code: PluginErrorCode; why: string }
+
+/**
+ * 🆕 读表端口的结果（2026-10-25）。
+ *
+ * 成功形状就是手册 §6.1.1 那一个 `{ rows, truncated?, stale, asOf }`；失败回**码**而不是抛，
+ * 与 `WriteTableResult` 同一套写法 —— 这样"端口没接"也能回一个说得出口的码，
+ * 而不是在插件里炸出一个 `undefined is not a function`。
+ */
+export type ReadTableResult =
+  | { ok: true; rows: unknown[]; truncated: boolean; stale: boolean; asOf: string }
+  | { ok: false; code: PluginErrorCode; why: string }
+
 
 export interface HostPorts {
   /** 只读资源；`stale` 由端口自己决定（断网时 true，且**不许 reject**） */
@@ -399,6 +501,13 @@ export interface HostPorts {
   filesSave(name: string, blob: unknown): Promise<boolean>
   /** 🆕 写业务表（能力 `write`）。**没接就是没有**：`ctx.write` 的调用会回 `E_OFFLINE_WRITE`。 */
   writeTable?(op: WriteTableOp, table: string, payload: unknown): Promise<WriteTableResult>
+  /**
+   * 🆕 读平台表（能力 `read`，手册 §6.1.1）。**没接就回 `E_TABLE_NOT_READABLE`**。
+   * 🔴 `table` 已在建 ctx 时校验过"在目录里且 manifest 声明过"；这里的实现只负责
+   *    "按目录的列取本班（或全校可见）行"，**不接受 `select` / `filter` / `order`**。
+   *    `opts.classId` 由宿主递入，插件改不了它。
+   */
+  readPluginTable?(table: string, opts: { classId: string }): Promise<ReadTableResult>
 }
 
 export interface ContextOptions {
@@ -441,28 +550,77 @@ export function buildContext(o: ContextOptions): Record<string, unknown> {
     },
   }
 
-  const hasAnyData = [...perms].some((p) => p.startsWith('data.'))
-  if (hasAnyData) {
-    ctx.data = {
-      /** 资源名必须**同时**在枚举里、且这个插件申请了对应能力 */
-      read: async (resource: ResourceName) => {
-        const need = RESOURCE_PERMISSION[resource]
-        if (!need) throw codeErr('E_BAD_RESOURCE')
-        if (!perms.has(need)) throw codeErr('E_NO_CAPABILITY')
-        const r = await o.ports.readResource(resource)
-        const base = r.value as Record<string, unknown>
-        /* `stale` / `asOf` 由宿主贴在最外层（手册 §6.4：空形状 + 两个字段，**不 reject**） */
-        return { ...base, stale: r.stale, asOf: r.asOf }
-      },
-      watch: (resource: ResourceName, cb: () => void) => {
-        const need = RESOURCE_PERMISSION[resource]
-        if (!need) throw codeErr('E_BAD_RESOURCE')
-        if (!perms.has(need)) throw codeErr('E_NO_CAPABILITY')
-        return o.ports.watchResource(resource, cb)
-      },
-      online: () => true,
+  /*
+   * `ctx.data`：语义资源（`data.*`）与读表（`read`）**共用这个命名空间**，
+   * 但各自只挂自己那一半 —— 只申请 `read` 的插件拿不到 `data.read`（那是别的能力），
+   * 只申请 `data.*` 的插件也拿不到 `readTable`（CF-06 的"未申请的能力属性不存在"）。
+   */
+  const reads = perms.has('read') && Array.isArray(o.manifest.reads) ? o.manifest.reads : []
+  const data: Record<string, unknown> = {}
+  if ([...perms].some((p) => p.startsWith('data.'))) {
+    data.read = async (resource: ResourceName) => {
+      const need = RESOURCE_PERMISSION[resource]
+      if (!need) throw codeErr('E_BAD_RESOURCE')
+      if (!perms.has(need)) throw codeErr('E_NO_CAPABILITY')
+      const r = await o.ports.readResource(resource)
+      const base = r.value as Record<string, unknown>
+      /* `stale` / `asOf` 由宿主贴在最外层（手册 §6.4：空形状 + 两个字段，**不 reject**） */
+      return { ...base, stale: r.stale, asOf: r.asOf }
+    }
+    data.watch = (resource: ResourceName, cb: () => void) => {
+      const need = RESOURCE_PERMISSION[resource]
+      if (!need) throw codeErr('E_BAD_RESOURCE')
+      if (!perms.has(need)) throw codeErr('E_NO_CAPABILITY')
+      return o.ports.watchResource(resource, cb)
+    }
+    data.online = () => true
+  }
+
+  /*
+   * 🆕 `ctx.data.readTable`（能力 `read`，2026-10-25）—— 用户要求：
+   * 「除了隐私信息类的，其他每一个的表数据读取权限都预留个接口……并确保这些端口仅有插件能调用」。
+   *
+   * 🔴 这条通路**真实边界**有三层，别把它当沙箱（手册 §6.1.2 逐字同一段）：
+   *   ① **端口不在全局**：`ctx` 是这里当场建的对象，只作为 `activate(ctx)` 的参数交出去，
+   *      **不挂 `window` / `globalThis` / 模块级单例**。页面里别的脚本拿不到它 ——
+   *      这一层拦的是"顺手就能调"。
+   *   ② **真正的门是 RLS + 列白名单**：插件与宿主同页面（手册 §1），一个**故意**作恶的
+   *      插件本来就能碰到宿主能碰的一切，这条通路拦不住它。所以即便它绕过端口直接问数据库，
+   *      RLS 也只会给出"当前登录这位老师能看的那几行"，而列白名单在宿主这一侧再砍一刀
+   *      （`PLUGIN_READ_TABLES[table].cols`，不是"读回来再删字段"）。
+   *   ③ **没有"整表"这个口**：`readTable(table)` 只收表名，`select` / `filter` / `order`
+   *      一概不接；class 域的表由宿主按**本班**钉死 `classCol`。所以拿不到"别人班的行"，
+   *      也拿不到"全库导一份"。
+   */
+  if (reads.length) {
+    const declaredRead = new Set(reads.map((r) => r.table))
+    const fail = (code: PluginErrorCode, why: string) => {
+      const e = codeErr(code)
+      e.message = `${code}: ${why}`
+      return e
+    }
+    data.readTable = async (table: string) => {
+      /* 只认 manifest.reads 里声明过的表；目录与 deny 在这里再核一遍（纵深防御：
+         万一 manifest 被别处拼出来，也绕不过这一层）。 */
+      if (typeof table !== 'string' || !declaredRead.has(table)) {
+        throw fail('E_TABLE_NOT_READABLE', `manifest.reads 里没有声明 ${String(table)}`)
+      }
+      const def = PLUGIN_READ_TABLES[table]
+      if (!def) throw fail('E_TABLE_NOT_READABLE', `可读目录里没有 ${table}`)
+      if (def.deny) throw fail('E_TABLE_NOT_READABLE', def.deny)
+      if (!o.ports.readPluginTable) throw fail('E_TABLE_NOT_READABLE', '这台设备没有接读表端口')
+      const r = await o.ports.readPluginTable(table, { classId: o.classId })
+      if (!r.ok) throw fail(r.code, r.why)
+      return {
+        rows: r.rows,
+        ...(r.truncated ? { truncated: true } : {}),
+        stale: r.stale,
+        asOf: r.asOf,
+      }
     }
   }
+
+  if (Object.keys(data).length) ctx.data = data
 
   if (perms.has('storage')) {
     ctx.storage = {

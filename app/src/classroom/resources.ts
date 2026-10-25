@@ -14,6 +14,17 @@
  * · `class.assignments` 的 `dueDate`：本平台的作业档案今天只有**布置日**这一列
  *   （`Assignment.assignDate`），先按它给；手册 §6.1 的字段名是契约、保持不变，
  *   将来平台真出现"截止日"再换数据源（P2 首个用它的插件落地时一起核）。
+ *
+ * ============================================================================
+ * 🆕 2026-10-25：`readPluginTable()` —— 能力 `read` 的**逐张表**通路
+ * ============================================================================
+ * 上面那 9 个是"语义资源"（宿主算好形状）；这个函数是"读表"：
+ *   · 表与列都来自 `lib/pluginTables.ts` 的 `PLUGIN_READ_TABLES`，**目录里没有的一律拒**；
+ *   · 线上只 select 白名单那几列，`class` 域强制 `.eq(classCol, classId)`（数组列用 `contains`），
+ *     **不接受调用方传任何过滤条件** —— 拿不到整表、也拿不到别人班的行；
+ *   · 一次最多 `LIMITS.readTableRows` 行，超了截断并回 `truncated: true`；
+ *   · 本地演示模式从 `useStore` 取切片，取不到回空数组（**不抛**）；
+ *   · 目录外 / deny 的表抛 `E_TABLE_NOT_READABLE`（这是 bug 或越权，必须说出来）。
  */
 
 import { useStore } from '../data/store'
@@ -27,7 +38,9 @@ import { loadDailyBundle, toDutyInput, todayDuty } from '../lib/daily'
 import { isoOffset } from '../lib/date'
 import { beijingNow } from '../lib/holiday'
 import { pickDailyQuote } from '../lib/quotes'
-import { isRemote } from '../lib/supabase'
+import { isRemote, getSupabase } from '../lib/supabase'
+import { codeErr, LIMITS } from '../lib/pluginHost'
+import { PLUGIN_READ_TABLES } from '../lib/pluginTables'
 import type { ResourceName } from '../lib/pluginHost'
 import type { ScheduleItem } from '../data/types'
 
@@ -247,6 +260,233 @@ export async function readResource(resource: ResourceName, classId: string): Pro
      */
     case 'class.quote':
       return { value: { ...pickDailyQuote(beijingNow()) }, stale, asOf }
+  }
+}
+
+/**
+ * 读表通路（能力 `read`，手册 §6.1.1）。返回形状与语义资源一致：
+ * `{ value: { rows, truncated? }, stale, asOf }`。
+ *
+ * 🔴 目录外的表 / `deny` 的表 ⇒ **抛** `E_TABLE_NOT_READABLE`（带一句人话 why）。
+ *    其余读不到（断网、库还没跑这一段 SQL）一律回空数组 + `stale: true`，**不 reject** ——
+ *    与 `readResource` 同一条口径（手册 §6.4：没数据不是错误）。
+ */
+export async function readPluginTable(table: string, classId: string): Promise<ResourceResult> {
+  const asOf = beijingNow().toISOString()
+  const def = PLUGIN_READ_TABLES[table]
+  if (!def) throw tableErr(`可读目录里没有这张表：${table}`)
+  if (def.deny) throw tableErr(def.deny)
+  if (!def.cols.length) throw tableErr(`这张表没给任何列：${table}`)
+
+  const stale = isRemote ? !navigator.onLine : false
+  if (!isRemote) {
+    /* 演示模式也守同一个行数上限：本地少给几行没关系，形状不能与线上不一样。 */
+    const all = localRows(table, classId)
+    const truncated = all.length > LIMITS.readTableRows
+    return {
+      value: truncated ? { rows: all.slice(0, LIMITS.readTableRows), truncated: true } : { rows: all },
+      stale: false,
+      asOf,
+    }
+  }
+
+  const sb = getSupabase()
+  if (!sb) return { value: { rows: [], truncated: false }, stale: true, asOf }
+
+  /* 只读白名单列 —— 隐私列不是"读回来再删"，是压根不在 select 里。
+     class 域强制按本班过滤；`class_ids` 是数组列（一场考试覆盖多个班），用 contains。 */
+  let q = sb.from(table).select(def.cols.join(','))
+  if (def.scope === 'class' && def.classCol) {
+    q =
+      def.classCol.endsWith('_ids')
+        ? q.contains(def.classCol, [classId])
+        : q.eq(def.classCol, classId)
+  }
+
+  const { data, error } = await q.limit(LIMITS.readTableRows + 1)
+  if (error) {
+    /* 库还没跑这一段 SQL / 断网：回空形状 + stale，别把插件炸掉（与语义资源同一条纪律）。
+       但要留一条日志 —— "失败了没人知道"是这个项目反复踩的坑。 */
+    console.warn('[plugin] 读表失败：', table, error.message)
+    return { value: { rows: [], truncated: false }, stale: true, asOf }
+  }
+
+  const all = (data ?? []) as unknown[]
+  const truncated = all.length > LIMITS.readTableRows
+  const rows = truncated ? all.slice(0, LIMITS.readTableRows) : all
+  return { value: truncated ? { rows, truncated: true } : { rows }, stale, asOf }
+}
+
+/** 目录外 / 隐私表的错：带 `code`，`why` 写进 message（审核与排错都要能读到这句）。 */
+function tableErr(why: string): Error & { code: string } {
+  const e = codeErr('E_TABLE_NOT_READABLE')
+  e.message = `E_TABLE_NOT_READABLE: ${why}`
+  return e
+}
+
+/**
+ * 本地演示模式：从 `useStore` 取对应切片，**按表列名**投影（线上由 PostgREST 的列投影做同一件事）。
+ * 取不到的切片就回空数组 —— 演示模式少一块数据，不该让插件以为"发生了错误"。
+ */
+function localRows(table: string, classId: string): unknown[] {
+  const s = useStore.getState()
+  const klass = s.classes.find((c) => c.id === classId)
+  const iso = (t: number | null | undefined) => (typeof t === 'number' ? new Date(t).toISOString() : null)
+
+  switch (table) {
+    case 'classes':
+      return s.classes
+        .filter((c) => c.id === classId)
+        .map((c) => ({ id: c.id, name: c.name, grade: c.grade, year: c.year }))
+
+    case 'students':
+      return (klass?.students ?? []).map((st) => ({
+        id: st.id,
+        class_id: classId,
+        student_no: noOf(st),
+        name: st.name,
+        status: st.status,
+      }))
+
+    case 'assignments':
+      return s.assignments
+        .filter((a) => a.classId === classId)
+        .map((a) => ({
+          id: a.id,
+          class_id: a.classId,
+          title: a.title,
+          subject: a.subject,
+          assign_date: a.assignDate,
+          question_count: a.questionCount,
+          status: a.status,
+        }))
+
+    case 'schedule_items':
+      return s.schedule
+        .filter((it) => it.scope === 'class' && it.classId === classId)
+        .map((it) => ({
+          id: it.id,
+          class_id: it.classId ?? '',
+          weekday: it.weekday,
+          start_time: it.start,
+          end_time: it.end,
+          title: it.title,
+          room: it.room ?? '',
+          kind: it.kind,
+          scope: it.scope,
+        }))
+
+    case 'classrooms':
+      return s.classrooms
+        .filter((c) => c.classId === classId)
+        .map((c) => ({
+          id: c.id,
+          class_id: c.classId,
+          name: c.name,
+          online: c.online,
+          last_seen_at: iso(c.lastSeenAt),
+        }))
+
+    case 'calls':
+      return s.calls
+        .filter((c) => c.classId === classId)
+        .map((c) => ({
+          id: c.id,
+          class_id: c.classId,
+          assignment_id: c.assignmentId,
+          student_nos: c.studentNos,
+          text: c.text,
+          room: c.room,
+          sent_at: c.sentAt.map((t) => new Date(t).toISOString()),
+        }))
+
+    case 'exams':
+      return s.exams
+        .filter((e) => e.classIds.includes(classId))
+        .map((e) => ({
+          id: e.id,
+          title: e.title,
+          subject: e.subject,
+          subject_code: e.subjectCode,
+          scope: e.scope,
+          grade: e.grade,
+          exam_date: e.examDate,
+          question_count: e.questionCount,
+          class_ids: e.classIds,
+          status: e.status,
+          graded_at: iso(e.gradedAt),
+        }))
+
+    case 'exam_scores':
+      /* 只投影判定列：本地也不许把 scores / answers / total 顺手递出去。 */
+      return s.examScores
+        .filter((r) => r.classId === classId)
+        .map((r) => ({
+          exam_id: r.examId,
+          class_id: r.classId,
+          student_no: r.studentNo,
+          graded: r.graded,
+          absent: r.absent,
+        }))
+
+    case 'grades':
+      return s.grades.map((g) => ({ id: g.id, name: g.name, year: g.year }))
+
+    case 'terms':
+      return s.terms.map((t) => ({
+        id: t.id,
+        half: t.half,
+        start_date: t.startDate,
+        end_date: t.endDate,
+      }))
+
+    case 'notices':
+      return s.notices.map((n) => ({
+        id: n.id,
+        title: n.title,
+        body: n.body,
+        scope_kind: n.scopeKind,
+        expires_at: iso(n.expiresAt),
+        pinned: n.pinned,
+        revoked_at: iso(n.revokedAt),
+        created_at: iso(n.createdAt),
+      }))
+
+    case 'announcements':
+      return s.announcements.map((a) => ({
+        id: a.id,
+        title: a.title,
+        body: a.body,
+        level: a.level,
+        popup: a.popup,
+        pin: a.pin,
+        active_from: iso(a.activeFrom),
+        active_to: iso(a.activeTo),
+        revoked_at: iso(a.revokedAt),
+        created_at: iso(a.createdAt),
+      }))
+
+    case 'schedule_temp_changes':
+      return s.tempScheduleChanges
+        .filter((c) => c.classId === classId)
+        .map((c) => ({
+          id: c.id,
+          on_date: c.date,
+          weekday: c.weekday,
+          class_id: c.classId,
+          start_time: c.start,
+          end_time: c.end,
+          from_subject: c.fromSubject,
+          to_subject: c.toSubject,
+          kind: c.kind,
+          status: 'active',
+          revoked_at: null,
+        }))
+
+    /* 其余表（通知投递范围、选科、校历、每日作业…）在演示模式下没有 store 切片，
+       或者是服务端算出来的 —— 回空数组，**不抛**。 */
+    default:
+      return []
   }
 }
 

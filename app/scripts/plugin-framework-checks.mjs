@@ -477,6 +477,105 @@ function publishPathChecks() {
 }
 
 /* ============================================================
+   读表镜像（2026-10-25）—— 探针侧副本必须与源头逐项一致
+   ------------------------------------------------------------
+   源头：`src/lib/pluginTables.ts`（唯一真相）
+   副本：`functions/api/_lib/pluginTables.ts`（Functions 不能 import src）
+   两边漂移 = 发布闸门与运行时判据分叉 ⇒ 必须红。
+   ============================================================ */
+async function readTablesMirrorChecks() {
+  const SRC = await import(pathToFileURL(resolve(HERE, '../src/lib/pluginTables.ts')).href)
+  const MIRROR = await import(
+    pathToFileURL(resolve(HERE, '../functions/api/_lib/pluginTables.ts')).href
+  )
+  const src = SRC.PLUGIN_READ_TABLES
+  const mirror = MIRROR.READ_TABLE_MIRROR
+  const srcNames = Object.keys(src).sort()
+  const mirrorNames = Object.keys(mirror).sort()
+
+  const missing = srcNames.filter((n) => !(n in mirror))
+  const extra = mirrorNames.filter((n) => !(n in src))
+  ok(
+    'RT-01',
+    '镜像与源头表名集合相等（一张不漏、一张不多）',
+    missing.length === 0 && extra.length === 0,
+    [
+      missing.length ? `镜像缺：${missing.join('、')}` : '',
+      extra.length ? `镜像多：${extra.join('、')}` : '',
+    ]
+      .filter(Boolean)
+      .join('；'),
+  )
+
+  const colsBad = srcNames.filter(
+    (n) => mirror[n] && JSON.stringify(mirror[n].cols) !== JSON.stringify(src[n].cols),
+  )
+  ok('RT-02', '每张表的 cols 逐项一致（顺序也算）', colsBad.length === 0, colsBad.slice(0, 5).join('、'))
+
+  const denyBad = srcNames.filter((n) => mirror[n] && (mirror[n].deny ?? '') !== (src[n].deny ?? ''))
+  ok('RT-03', '每张表的 deny 字符串一致（有值 = 拒，原文也要一样）', denyBad.length === 0, denyBad.slice(0, 5).join('、'))
+
+  const whatBad = srcNames.filter((n) => mirror[n] && mirror[n].what !== src[n].what)
+  ok('RT-04', '每张表的 what 一致（审核页显示的就是这句人话）', whatBad.length === 0, whatBad.slice(0, 5).join('、'))
+
+  ok(
+    'RT-05',
+    '总条数 = 49（源头与镜像各 49）',
+    srcNames.length === 49 && mirrorNames.length === 49,
+    `源头 ${srcNames.length} / 镜像 ${mirrorNames.length}`,
+  )
+
+  /* `pluginRepo.ts` 不能直接 import（它引 './supa'，纯 Node 解析不了无扩展名导入），
+     所以照本项目习惯从源码里取 `PERMS` 数组体再找 'read'。 */
+  const repoCode = readFileSync(resolve(HERE, '../functions/api/_lib/pluginRepo.ts'), 'utf8')
+  const permsBody = /export const PERMS = \[([\s\S]*?)\] as const/.exec(repoCode)?.[1] ?? ''
+  ok(
+    'RT-06',
+    "PERMS 里有 'read'（不然所有声明 read 的插件都会被 CF-05 判红）",
+    /'read'/.test(permsBody),
+    permsBody.replace(/\s+/g, ' ').trim().slice(0, 100),
+  )
+
+  const hostPerms = Array.isArray(HOST.PLUGIN_PERMISSIONS) ? HOST.PLUGIN_PERMISSIONS : []
+  ok(
+    'RT-07',
+    "PLUGIN_PERMISSIONS 里也有 'read'（宿主与探针同一套能力枚举）",
+    hostPerms.includes('read'),
+    hostPerms.join(','),
+  )
+
+  /* 反向对照（本项目 §三.2）：改一处就必须变假；先数出现次数，不是 1 就报错，别假绿。 */
+  const countOf = (s, sub) => s.split(sub).length - 1
+
+  const victim = srcNames.find((n) => (mirror[n]?.cols?.length ?? 0) > 0)
+  if (!victim) {
+    ok('RT-02b', '反向对照：把镜像里某张表的 cols 改一项 ⇒ RT-02 必须变假', false, '镜像里没有带 cols 的表，对照无从做起')
+  } else {
+    const mutatedMirror = JSON.parse(JSON.stringify(mirror))
+    mutatedMirror[victim].cols[0] = `${mutatedMirror[victim].cols[0]}__mutated__`
+    const changed = JSON.stringify(mutatedMirror[victim].cols) !== JSON.stringify(mirror[victim].cols)
+    const mutatedColsBad = srcNames.filter(
+      (n) => mutatedMirror[n] && JSON.stringify(mutatedMirror[n].cols) !== JSON.stringify(src[n].cols),
+    )
+    ok(
+      'RT-02b',
+      '反向对照：把镜像里某张表的 cols 改一项 ⇒ RT-02 必须变假',
+      changed && mutatedColsBad.length > 0,
+      `${victim}：改动后 ${mutatedColsBad.length} 张不一致`,
+    )
+  }
+
+  const readCount = countOf(permsBody, "'read'")
+  const mutatedPerms = readCount === 1 ? permsBody.replace("'read'", '') : permsBody
+  ok(
+    'RT-06b',
+    "反向对照：从 PERMS 删掉 'read' ⇒ RT-06 必须变假",
+    readCount === 1 && !/'read'/.test(mutatedPerms),
+    readCount === 1 ? '删掉后不再命中' : `'read' 出现 ${readCount} 次（应恰好 1 次，对照不成立）`,
+  )
+}
+
+/* ============================================================
    自检：故意写错的插件必须被挡住（CF 自己也要能红）
    ============================================================ */
 function selftest() {
@@ -516,6 +615,7 @@ const target = argOf('--plugin') ? resolve(process.cwd(), argOf('--plugin')) : F
 
 const { failures: f } = await runChecks(target)
 publishPathChecks()
+await readTablesMirrorChecks()
 let selfBad = 0
 if (argv.includes('--selftest')) selfBad = selftest()
 
@@ -525,4 +625,4 @@ if (f.length || selfBad) {
   for (const x of f) console.log(`   · ${x}`)
   process.exit(1)
 }
-console.log(`✅ 全过：${pass} 条断言（CF-01…CF-14 + PUB-01…03）`)
+console.log(`✅ 全过：${pass} 条断言（CF-01…CF-14 + PUB-01…03 + RT-01…07）`)

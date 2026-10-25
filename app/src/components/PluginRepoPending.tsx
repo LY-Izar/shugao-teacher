@@ -16,7 +16,7 @@ import { apiMessage, getApi, postApi } from '../lib/api'
  *   ③ **探针没全过不许出现发布按钮**：不给"明知红还点得下去"的机会。
  */
 type PendingRow = { id: string; branch: string; commit: string; message: string; at: string }
-type CheckLine = { id: string; name: string; ok: boolean; detail?: string }
+type CheckLine = { id: string; name: string; ok: boolean; detail?: string; hint?: string }
 type Inspect = {
   ok: boolean
   version?: string
@@ -188,12 +188,42 @@ export function PluginRepoPending({ onPublished }: { onPublished?: () => void })
                   <span className="num">{String(res.sha256 ?? '').slice(0, 12)}…</span>
                   {res.permissions?.length ? ` · 能力 ${res.permissions.join('、')}` : ''}
                 </div>
-                {res.lines.map((l) => (
-                  <div key={l.id} style={{ fontSize: 11.5, color: l.ok ? 'var(--color-okink)' : 'var(--color-badink)' }}>
-                    {l.ok ? '✅' : '❌'} <span className="num">{l.id}</span> {l.name}
-                    {l.detail ? ` —— ${l.detail}` : ''}
-                  </div>
-                ))}
+                {res.lines.map((l) => {
+                  /* CF-12 是"读表清单"：一行一张表，长文本要能整段读，不能挤成一行被截掉。 */
+                  const multi = l.id === 'CF-12'
+                  return (
+                    <div
+                      key={l.id}
+                      style={{
+                        fontSize: 11.5,
+                        color: l.ok ? 'var(--color-okink)' : 'var(--color-badink)',
+                        overflowWrap: 'anywhere',
+                      }}
+                    >
+                      <div>
+                        {l.ok ? '✅' : '❌'} <span className="num">{l.id}</span> {l.name}
+                        {!multi && l.detail ? ` —— ${l.detail}` : ''}
+                      </div>
+                      {l.hint ? (
+                        <div style={{ marginLeft: 16, fontSize: 11, color: 'var(--color-ink4)' }}>{l.hint}</div>
+                      ) : null}
+                      {multi && l.detail ? (
+                        <div
+                          style={{
+                            marginLeft: 16,
+                            marginTop: 2,
+                            fontFamily: 'var(--font-mono)',
+                            fontSize: 11,
+                            lineHeight: 1.7,
+                            whiteSpace: 'pre-wrap',
+                          }}
+                        >
+                          {l.detail}
+                        </div>
+                      ) : null}
+                    </div>
+                  )
+                })}
                 <div style={{ fontSize: 11, color: 'var(--color-ink4)', lineHeight: 1.7 }}>{res.note}</div>
               </div>
             ) : null}

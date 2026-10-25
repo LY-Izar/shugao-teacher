@@ -2891,6 +2891,10 @@ const PLUGIN_PERMISSION_TEXT: Record<string, string> = {
   sound: '可播报，上下课与考试期间自动静音',
   pip: '可弹成桌面小窗',
   files: '可存文件到本机',
+  /* 🆕 2026-10-25（读表端口）：`read` 只说明"能读清单里的基础数据"，
+     具体哪几张在卡片下面逐张列（`manifest.reads` 的 `why`）——
+     这一行别罗列表名，表名会变，能力串不会。 */
+  read: '可读课表、名单等基础数据',
 }
 
 type RegistryCard = {

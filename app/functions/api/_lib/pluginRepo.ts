@@ -22,6 +22,7 @@
  */
 
 import { type Env as BaseEnv, json } from './supa'
+import { READ_TABLE_MIRROR } from './pluginTables'
 
 export type PluginEnv = BaseEnv & {
   PLUGIN_REPO?: string
@@ -174,7 +175,14 @@ export async function fetchPlugin(env: PluginEnv, id: string, ref: string): Prom
    三、静态探针（能静态判的那些；运行期仍由提交方自检）
    ============================================================================ */
 
-export type CheckLine = { id: string; name: string; ok: boolean; detail?: string }
+export type CheckLine = {
+  id: string
+  name: string
+  ok: boolean
+  detail?: string
+  /** 检查行下面的一行小字（CF-12 用它显示"壳 ≥ x · 能力 n 项"） */
+  hint?: string
+}
 
 const ID_RE = /^[a-z][a-z0-9-]{2,31}\.[a-z][a-z0-9-]{2,31}$/
 const SEMVER = /^(\d+)\.(\d+)\.(\d+)$/
@@ -195,6 +203,12 @@ export const PERMS = [
   'files',
   'keepAwake',
   'write',
+  /*
+   * 🆕 2026-10-25：逐张读目录允许的表（manifest.reads，最多 12 张）。
+   * 与 `src/lib/pluginHost.ts` 的 PLUGIN_PERMISSIONS 是同一套枚举 ——
+   * 少这一项，所有声明 read 的插件都会被 CF-05 判红。
+   */
+  'read',
 ] as const
 
 /**
@@ -349,6 +363,67 @@ export function probe(files: PluginFiles, prevVersion: string | null): CheckLine
         detail,
       })
     }
+  }
+
+  /*
+   * 🆕 CF-12（2026-10-25 用户要求）：**读表清单** —— 这个插件要读哪些库里的数据。
+   *
+   * 与 CF-11 同一个审核口径：读不读、读哪几张、每张是什么功能、为什么。
+   * 判据以探针侧镜像 `./pluginTables.ts` 为准（它是 `src/lib/pluginTables.ts` 的副本，
+   * 两边漂移由 `plugin-framework-checks` 的 RT-01…RT-05 挡住）。
+   * 全绿时 `detail` 逐行写「表 → 这张表是什么数据 ｜ 申请人的理由」。
+   */
+  {
+    const rawReads = m.reads
+    const reads = Array.isArray(rawReads) ? (rawReads as Array<{ table?: string; why?: string }>) : []
+    const hasPerm = perms?.includes('read') ?? false
+    const names = reads.map((r) => String(r?.table ?? ''))
+    const bad: string[] = []
+
+    if (rawReads !== undefined && !Array.isArray(rawReads)) bad.push('reads 必须是数组')
+    if (rawReads !== undefined && !hasPerm) bad.push('声明了 reads，但没申请 read 能力')
+    if (hasPerm && reads.length === 0) bad.push('申请了 read 能力，却没写 reads（必须逐张声明要读的表）')
+    if (reads.length > 12) bad.push(`声明了 ${reads.length} 张表，最多 12 张`)
+
+    for (const r of reads) {
+      const t = String(r?.table ?? '')
+      if (!t) {
+        bad.push('有一条没写表名')
+        continue
+      }
+      const def = READ_TABLE_MIRROR[t]
+      if (!def) {
+        bad.push(`${t} → 目录里没有这张表`)
+        continue
+      }
+      if (def.deny) {
+        bad.push(`${t} → ${def.deny}`)
+        continue
+      }
+      const why = typeof r?.why === 'string' ? r.why : ''
+      if (!why.trim()) bad.push(`${t} → 没写 why（给审核看的一句人话）`)
+      else if (why.length > 40) bad.push(`${t} → why 超过 40 字`)
+    }
+
+    const detail = bad.length
+      ? bad.join('\n')
+      : reads
+          .map((r) => {
+            const t = String(r?.table ?? '')
+            return `${t} → ${READ_TABLE_MIRROR[t]?.what ?? ''} ｜ ${r?.why ?? ''}`
+          })
+          .join('\n')
+
+    lines.push({
+      id: 'CF-12',
+      name: reads.length ? `读 ${reads.length} 张表：${names.join('、')}` : '不读任何表',
+      ok: bad.length === 0,
+      detail,
+      /* 壳要求与能力数：审核时和"读了什么"挨着看（界面拿不到 manifest，只能由探针带过去） */
+      hint: `壳 ≥ ${
+        typeof m.minShellVersion === 'string' && m.minShellVersion ? m.minShellVersion : '?'
+      } · 能力 ${perms?.length ?? 0} 项`,
+    })
   }
   return lines
 }

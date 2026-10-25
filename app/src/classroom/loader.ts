@@ -30,7 +30,7 @@ import {
 } from '../lib/pluginHost'
 import { getSupabase, isRemote } from '../lib/supabase'
 import { chime, isSilenced, softChime } from '../lib/tts'
-import { readResource, watchResource } from './resources'
+import { readPluginTable, readResource, watchResource } from './resources'
 import type { AvailablePlugin } from './demoPlugin'
 
 /**
@@ -456,6 +456,35 @@ export function makeHostPorts(d: PortDeps): HostPorts {
         }
       }
       return { ok: false, code: 'E_WRITE_UNSUPPORTED', why: `${table} 还没接写入适配` }
+    },
+    /*
+     * 🆕 读表端口（能力 `read`，2026-10-25）。与 `writeTable` 同一套写法：
+     * 读不了就回错误码，不让插件炸在 `undefined is not a function` 上。
+     *
+     * 🔴 班级以**端口自己的绑定**为准（`d.classId`），调用方递的 `opts.classId` 覆盖不了它 ——
+     *    这样 `ctx.data.readTable()` 永远只可能读到本班那一份。列白名单与行数上限在
+     *    `resources.readPluginTable()` 里（目录见 `lib/pluginTables.ts`），这一层只接线。
+     */
+    readPluginTable: async (table, _opts) => {
+      try {
+        const r = await readPluginTable(table, d.classId)
+        const v = r.value as { rows?: unknown[]; truncated?: boolean }
+        return {
+          ok: true as const,
+          rows: v.rows ?? [],
+          truncated: v.truncated === true,
+          stale: r.stale,
+          asOf: r.asOf,
+        }
+      } catch (e) {
+        /* 目录外 / deny / 没声明：码是同一个，`why` 原样带出去（手册 §4.3）。
+           不重试、不静默 —— 这是插件该回去改 manifest 的那一类错。 */
+        return {
+          ok: false as const,
+          code: 'E_TABLE_NOT_READABLE' as const,
+          why: String((e as { message?: string })?.message ?? e),
+        }
+      }
     },
   }
 }
