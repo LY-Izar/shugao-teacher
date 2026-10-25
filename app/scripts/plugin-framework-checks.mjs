@@ -421,6 +421,62 @@ async function runChecks(dir, { quiet = false } = {}) {
 }
 
 /* ============================================================
+   发布落库（2026-10-25）—— 探针全绿 ≠ 写得进库
+   ------------------------------------------------------------
+   首次真实发布踩到：manifest 没写 `config` 时 `publish.ts` 写入
+   `config_schema: null`，而 schema §45.1 是 `not null default '{}'`，
+   显式 null 不走默认值 ⇒ PostgreSQL 23502 ⇒ HTTP 500。
+   这里同时钉住"前端要把 `why` 显示出来"，否则真实原因永远被吞。
+   ============================================================ */
+function publishPathChecks() {
+  /** 只许看**真代码**，注释里提到坏写法不算数 */
+  const strip = (s) =>
+    String(s)
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/(^|[^:])\/\/[^\n]*/gm, '$1')
+
+  const publishCode = strip(
+    readFileSync(resolve(HERE, '../functions/api/admin/plugins/publish.ts'), 'utf8'),
+  )
+  const apiCode = strip(readFileSync(resolve(HERE, '../src/lib/api.ts'), 'utf8'))
+  const pendingCode = strip(
+    readFileSync(resolve(HERE, '../src/components/PluginRepoPending.tsx'), 'utf8'),
+  )
+
+  const GOOD = 'config_schema: (f.files.manifest.config as unknown) ?? {}'
+  const BAD = 'config_schema: (f.files.manifest.config as unknown) ?? null'
+  ok(
+    'PUB-01',
+    '发布写库：manifest 没有 config 时写 `{}`，不是 null（schema §45.1 是 not null default）',
+    publishCode.includes(GOOD) && !publishCode.includes(BAD),
+  )
+  const mutatedPublish = publishCode.replace(GOOD, BAD)
+  ok(
+    'PUB-01b',
+    '反向对照：把 `{}` 改回 null ⇒ PUB-01 必须变假（证明它咬的是真代码）',
+    mutatedPublish !== publishCode && !mutatedPublish.includes(GOOD),
+  )
+
+  ok(
+    'PUB-02',
+    '前端 `apiMessage()` 读服务端的 `why`（插件的发布/检查用它，原来只读 message）',
+    /r\.data\?\.why/.test(apiCode),
+  )
+  const noWhy = apiCode.replace(/r\.data\?\.why/g, 'undefined')
+  ok(
+    'PUB-02b',
+    '反向对照：把 `why` 从 apiMessage 拿掉 ⇒ PUB-02 必须变假',
+    noWhy !== apiCode && !/r\.data\?\.why/.test(noWhy),
+  )
+
+  ok(
+    'PUB-03',
+    '发布失败用失败色渲染（不能把 HTTP 500 画成绿色成功）',
+    /msgBad \? 'var\(--color-badink\)' : 'var\(--color-okink\)'/.test(pendingCode),
+  )
+}
+
+/* ============================================================
    自检：故意写错的插件必须被挡住（CF 自己也要能红）
    ============================================================ */
 function selftest() {
@@ -459,6 +515,7 @@ const argOf = (k) => {
 const target = argOf('--plugin') ? resolve(process.cwd(), argOf('--plugin')) : FIXTURE
 
 const { failures: f } = await runChecks(target)
+publishPathChecks()
 let selfBad = 0
 if (argv.includes('--selftest')) selfBad = selftest()
 
@@ -468,4 +525,4 @@ if (f.length || selfBad) {
   for (const x of f) console.log(`   · ${x}`)
   process.exit(1)
 }
-console.log(`✅ 全过：${pass} 条断言（CF-01…CF-14）`)
+console.log(`✅ 全过：${pass} 条断言（CF-01…CF-14 + PUB-01…03）`)

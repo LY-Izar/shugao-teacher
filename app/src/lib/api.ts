@@ -76,8 +76,14 @@ export async function postApi(path: string, body: Record<string, unknown>): Prom
 
 /** 从回话里取人话（服务端每一条错误都写了人话；没写就给一个诚实的兜底） */
 export function apiMessage(r: ApiResult, fallback: string): string {
-  const m = r.data?.message
-  return typeof m === 'string' && m ? m : r.status ? `${fallback}（HTTP ${r.status}）` : fallback
+  /*
+   * 🔴 服务端的错误字段不统一：多数接口写 `message`，插件的发布/检查写 `why`
+   *    （`functions/api/admin/plugins/publish.ts` / `inspect.ts`）。
+   *    原来只读 `message` ⇒ 发布失败时真实原因被吞掉，屏上只剩一句
+   *    「发布失败（HTTP 500）」，把排查方向直接带偏（2026-10-25 真踩过）。
+   */
+  const m = [r.data?.message, r.data?.why].find((v) => typeof v === 'string' && v.trim())
+  return typeof m === 'string' ? m : r.status ? `${fallback}（HTTP ${r.status}）` : fallback
 }
 
 /**

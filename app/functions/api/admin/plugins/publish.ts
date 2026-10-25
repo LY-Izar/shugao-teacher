@@ -59,7 +59,13 @@ export const onRequestPost: PagesFunction<PluginEnv> = async ({ request, env }) 
     min_shell: String(f.files.manifest.minShellVersion ?? '0.0.0'),
     name: String(f.files.manifest.name ?? ''),
     description: String(f.files.manifest.description ?? ''),
-    config_schema: (f.files.manifest.config as unknown) ?? null,
+    /*
+     * 🔴 manifest 没写 `config` 时给 `{}`，**不能给 null**：
+     *    `plugin_registry.config_schema` 是 `not null default '{}'`（schema §45.1），
+     *    显式 null 不会走默认值 ⇒ PostgreSQL 23502 ⇒ 发布接口 500。
+     *    （2026-10-25 首次真实发布踩到：探针全绿，点发布必炸。）
+     */
+    config_schema: (f.files.manifest.config as unknown) ?? {},
     source_commit: commit,
     released_at: new Date().toISOString(),
     revoked_at: null,

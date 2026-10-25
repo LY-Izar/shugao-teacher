@@ -36,6 +36,8 @@ export function PluginRepoPending({ onPublished }: { onPublished?: () => void })
   const [busy, setBusy] = useState('')
   const [seen, setSeen] = useState<Record<string, Inspect>>({})
   const [msg, setMsg] = useState('')
+  /** 🔴 失败也必须一眼看出是失败：`msg` 原来固定用成功色渲染（2026-10-25 改） */
+  const [msgBad, setMsgBad] = useState(false)
 
   /**
    * 只取数据、**不 setState** —— 这样 effect 里调它不会触发
@@ -89,8 +91,10 @@ export function PluginRepoPending({ onPublished }: { onPublished?: () => void })
     async (row: PendingRow) => {
       setBusy(row.id)
       setMsg('')
+      setMsgBad(false)
       const r = await postApi('/api/admin/plugins/publish', { id: row.id, commit: row.commit })
       if (r.ok) {
+        setMsgBad(false)
         setMsg(`已发布 ${String(r.data.name ?? row.id)} v${String(r.data.version ?? '')} —— 教室端下个轮询周期生效`)
         setSeen((prev) => {
           const next = { ...prev }
@@ -101,6 +105,7 @@ export function PluginRepoPending({ onPublished }: { onPublished?: () => void })
         onPublished?.()
       } else {
         const lines = (r.data.lines as CheckLine[] | undefined) ?? []
+        setMsgBad(true)
         setMsg(
           `${apiMessage(r, '发布失败')}${lines.length ? `（${lines.filter((l) => !l.ok).map((l) => l.id).join('、')} 没过）` : ''}`,
         )
@@ -129,7 +134,12 @@ export function PluginRepoPending({ onPublished }: { onPublished?: () => void })
         </div>
       ) : null}
       {msg ? (
-        <div className="mt-2" style={{ fontSize: 12, color: 'var(--color-okink)' }} data-admin-plugins-repo-msg>
+        <div
+          className="mt-2"
+          style={{ fontSize: 12, color: msgBad ? 'var(--color-badink)' : 'var(--color-okink)' }}
+          data-admin-plugins-repo-msg
+          data-bad={msgBad ? '1' : '0'}
+        >
           {msg}
         </div>
       ) : null}
