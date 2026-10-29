@@ -60,6 +60,8 @@
  *   SUPABASE_SERVICE_ROLE_KEY                        （🔴 Secret，绝不能进前端、绝不能进仓库）
  */
 
+import { SYSTEM_MAIL_BODIES, beijingStamp, sendAuditedMail } from './_lib/mail'
+
 type Env = {
   SUPABASE_URL?: string
   VITE_SUPABASE_URL?: string
@@ -275,7 +277,8 @@ async function read(res: Response): Promise<Read> {
  *
  * 🔴 只给**重置密码**这类"不可逆、而且会把明文交出去"的动作用。
  *    `teacher-delete.ts` 那条路用的是 `_lib/supa.ts` 里的同名函数；这里这一份是本文件自带的
- *    （本文件刻意**不 import** 任何东西 —— 与 `classroom-account.ts` 同一个形状）。
+ *    （与 `classroom-account.ts` 同一个形状；本文件只是为了发欢迎邮件才引入 `_lib/mail`，
+ *    留痕这一小块仍然不依赖 `_lib/supa`）。
  *    ⚠️ 两次实现必须**逐字段相同**（列名 / 截断长度 / `affected` 的下限），
  *       否则同一张表会长出两种写法。
  * ⚠️ 它自己**绝不抛错**：留痕失败不该把一次已经成功的动作变成失败，
@@ -880,11 +883,66 @@ export async function onRequestPost(context: {
       )
     }
 
+    /*
+     * ---- ④ 欢迎邮件（🆕 2026-10-29）----
+     *
+     * 🔴 **发失败绝不影响建号成功**：账号、密码、任课关系都已经建好并要交回调用者了 —
+     *    这时候回滚等于把"已经能登录的人"删掉，只因为一封信没发出去。
+     *    所以这里**只有留痕 + 明说**（回话里的 `mail.reason` + `admin_audit`），**绝不 rollback**。
+     *
+     * 🔴 **收件人恒为管理员**（`_lib/mail.ts` 的 `mailTo(env)`）：Resend 没验域名时只能发给
+     *    账号所有者本人。所以 `welcome()` 的 `to` / `account` 传的是**这位新老师的登录邮箱** —
+     *    那一块在信里写着"这封信本来应该发给谁"，管理员可以照着转发。
+     *    这里传错了，信就变成"一封看不出该给谁的欢迎信"（这正是这一条要守的东西）。
+     *
+     * ⚠️ `roleText` 只写**身份人话**：建号这一支不指派 14 档身份（那是 `role` 动作），
+     *    新账号此刻就是"任课教师"；别在这里猜班主任 / 年级主任。
+     * ⚠️ `sendAuditedMail()` 自己会写 `admin_audit`（成功与失败都写）；只有它**抛错**时
+     *    （邮件模板还没部署、网络炸了）才由下面补一条 —— 否则同一封信会有两条留痕。
+     */
+    const sendWelcome = async (): Promise<{ ok: boolean; reason?: string; message?: string }> => {
+      try {
+        return await sendAuditedMail(env, {
+          action: 'mail.welcome',
+          subject: `欢迎使用树高教务通 · ${name}`,
+          doc: SYSTEM_MAIL_BODIES.welcome({
+            stamp: beijingStamp(),
+            sentToday: null,
+            to: email,
+            account: email,
+            roleText: '任课教师',
+            loginUrl: 'https://shugao-teacher.pages.dev/login',
+          }),
+          actorId: me.id,
+          actorName: (await nameOf(env, me.id)) || undefined,
+        })
+      } catch (e) {
+        const why = e instanceof Error ? e.message : String(e)
+        await auditRow(env, {
+          actorId: me.id,
+          actorName: await nameOf(env, me.id),
+          action: 'mail.welcome',
+          target: email,
+          detail: `未发出（failed）：${why.slice(0, 200)}`,
+          affected: 0,
+        })
+        return { ok: false, reason: 'failed', message: why }
+      }
+    }
+    const mail = await sendWelcome()
+
     return json({
       status: 'ok',
       account: { id: uid, name, email, password, subjectCode: code, subject: subjectLabel },
       relations,
       warnings,
+      /*
+       * 邮件结果**照实说**：建号已经是 ok 了，这一栏只回答"提醒信有没有发出去"。
+       * `reason` 直接给面板用（`no_key` / `no_to` / `pii_blocked` / `quota` / `failed`）。
+       */
+      mail: mail.ok
+        ? { sent: true }
+        : { sent: false, reason: mail.reason ?? 'failed', message: mail.message ?? '' },
     })
   }
 

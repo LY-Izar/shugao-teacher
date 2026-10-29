@@ -315,7 +315,7 @@ export async function onRequestPost(context: { request: Request; env: Env }): Pr
       actorId: me.id,
       subject: `【树高教务通】${name} 毕业备份 · ${beijingStamp()}`,
       /* 正文在 `SYSTEM_MAIL_BODIES.gradeBackup`（唯一一处构造；自测逐条喂它） */
-      text: SYSTEM_MAIL_BODIES.gradeBackup({
+      doc: SYSTEM_MAIL_BODIES.gradeBackup({
         stamp: beijingStamp(),
         gradeName: name,
         /* ⚠️ 下面三行都是**已经处理过形状**的（`sizeText()` 防 7 位连号、`checksumText()` 每 4 位断开） */

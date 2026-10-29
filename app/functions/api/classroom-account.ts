@@ -19,6 +19,8 @@
  *   SUPABASE_SERVICE_ROLE_KEY   （🔴 Secret，绝不能进前端、绝不能进仓库）
  */
 
+import { SYSTEM_MAIL_BODIES, beijingStamp, sendAuditedMail } from './_lib/mail'
+
 type Env = {
   SUPABASE_URL?: string
   VITE_SUPABASE_URL?: string
@@ -664,8 +666,55 @@ export async function onRequestPost(context: {
     )
   }
 
+  /*
+   * ---- 欢迎邮件（🆕 2026-10-29）----
+   *
+   * 🔴 与教师端建号同一条纪律：**发失败不影响建号成功**。`classroom_accounts` 那一行
+   *    已经写进去了，这时回滚 auth 用户等于"建了又删"，而失败原因只是一封信没发出去。
+   *    → 只留痕 + 在回话里明说（`mail.reason`），**绝不回滚**。
+   *
+   * ⚠️ 教室端账号用的是内部域名下的登录名（`EMAIL_DOMAIN`），**本来就没有收信的地方** —
+   *    所以这封信的读者是管理员，`to` / `account` 写的是这个班的登录邮箱，
+   *    让管理员一眼看出"这封信本来该发给哪个班的哪台机器"。
+   * ⚠️ 实际收件人恒为 `ADMIN_NOTIFY_EMAIL`（见 `_lib/mail.ts` 文件头）。
+   */
+  const sendWelcome = async (): Promise<{ ok: boolean; reason?: string; message?: string }> => {
+    try {
+      return await sendAuditedMail(env, {
+        action: 'mail.welcome',
+        subject: `欢迎使用树高教务通 · ${displayName}`,
+        doc: SYSTEM_MAIL_BODIES.welcome({
+          stamp: beijingStamp(),
+          sentToday: null,
+          to: email,
+          account: email,
+          roleText: '教室端一体机',
+          loginUrl: 'https://shugao-teacher.pages.dev/login',
+        }),
+        actorId: uid,
+        actorName: (await nameOf(env, uid)) || undefined,
+      })
+    } catch (e) {
+      const why = e instanceof Error ? e.message : String(e)
+      await auditRow(env, {
+        actorId: uid,
+        actorName: await nameOf(env, uid),
+        action: 'mail.welcome',
+        target: email,
+        detail: `未发出（failed）：${why.slice(0, 200)}`,
+        affected: 0,
+      })
+      return { ok: false, reason: 'failed', message: why }
+    }
+  }
+  const mail = await sendWelcome()
+
   return json({
     status: 'ok',
     account: accountOf(cls, { id: newUser.id, email, disabled: false }, password),
+    /* 邮件只是提醒；`reason` 照实给（`no_key` / `no_to` / `pii_blocked` / `quota` / `failed`） */
+    mail: mail.ok
+      ? { sent: true }
+      : { sent: false, reason: mail.reason ?? 'failed', message: mail.message ?? '' },
   })
 }

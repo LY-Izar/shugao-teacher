@@ -21,6 +21,8 @@
    ============================================================ */
 
 import { getSupabase, isRemote } from './supabase'
+import { postApi } from './api'
+import { logIssue } from './log'
 import { useStore } from '../data/store'
 
 /**
@@ -112,6 +114,52 @@ export function reportFrontendError(input: ReportInput): void {
       () => undefined,
       () => undefined,
     )
+
+    /*
+     * 🔴 **为什么两条都要**（顺序也是刻意的）：
+     *   · 先走 RPC 落库 —— 那是**权威**：`frontend_errors` 里有没有这一条，
+     *     不取决于邮件通道通不通（`报告` 这件事本身与"有没有人收到信"是两件事）；
+     *   · 再 `POST /api/frontend-error` —— 它只负责**提醒**（服务端用 `sendAuditedMail`
+     *     发一封给管理员，顺带做 30 分钟节流）。
+     *
+     *   ⚠️ 反过来的顺序不行：先发信再落库的话，一次发信超时会把"这条报错存在过"
+     *      也一起拖没；而"库里有、信没发出去"只是通知慢了一步，排查时照样查得到。
+     *   ⚠️ 端点 404（旧部署）/ 网络失败 / 没登录：**照旧只落库**，这里只记一句日志，
+     *      绝不再弹窗、绝不把上报变成用户的问题（本文件的第 ② 条边界）。
+     *   ⚠️ 不 `await`：上报发生在 `window.onerror` 里，不让它拖住页面；
+     *      `postApi()` 自己也不抛错（失败回 `{ok:false}`）。
+     *   ⚠️ 匿名现场（登录页 / 教室端还没会话）服务端会回 401 —— 那是设计，不是故障，
+     *      所以那一条**不记日志**（否则登录页崩一次就刷一屏）。
+     */
+    void postApi('/api/frontend-error', {
+      page: args.p_view,
+      message: args.p_message,
+      stack: args.p_stack,
+      browser: args.p_ua,
+      at: new Date().toISOString(),
+    }).then((r) => {
+      if (r.status === 401) return
+      const mail = (r.data?.mail ?? {}) as {
+        sent?: boolean
+        reason?: string
+        message?: string
+      }
+      /* 30 分钟节流是**正常**结果，不是失败 —— 不往控制台写 */
+      if (mail.reason === 'throttled') return
+      if (r.ok && mail.sent === true) return
+      logIssue(
+        'frontend-error',
+        '前端报错邮件没发出去',
+        {
+          page: args.p_view,
+          message: args.p_message.slice(0, 120),
+          status: r.status,
+          reason: mail.reason ?? (typeof r.data?.message === 'string' ? r.data.message : ''),
+        },
+        '报错已经存进数据库了，但你没有收到邮件 —— 所以"没人知道"是假象，只是通知慢了一步',
+        '看 /admin 的「错误日志」卡片；若长期发不出去，去 Cloudflare 查 RESEND_API_KEY / ADMIN_NOTIFY_EMAIL',
+      )
+    })
   } catch {
     /* 🔴 静默：上报失败绝不许变成用户的问题（也不能抛回给 window.onerror） */
   }

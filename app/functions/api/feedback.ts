@@ -226,7 +226,7 @@ export async function onRequestPost(context: { request: Request; env: Env }): Pr
       actorId: me.id,
       actorName: authorName,
       subject: `【树高教务通】${String(body.authorRoles ?? '').slice(0, 40) || authorName || '教师'} · ${beijingStamp()}`,
-      text: SYSTEM_MAIL_BODIES.feedback({
+      doc: SYSTEM_MAIL_BODIES.feedback({
         stamp: beijingStamp(),
         authorName,
         authorId: me.id,

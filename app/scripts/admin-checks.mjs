@@ -3705,10 +3705,16 @@ await withLock(async () => {
         mailsSent[0]?.body?.to?.[0],
         FIXTURE_MAIL_TO,
       )
-      eq('④ 发件人是未验域名时唯一允许的那个', mailsSent[0]?.body?.from, 'onboarding@resend.dev')
+      eq(
+        '④ 发件人是「显示名 + 未验域名时唯一允许的地址」（用户点名要显示名「树高教务助手」）',
+        mailsSent[0]?.body?.from,
+        MAILLIB.MAIL_FROM,
+      )
       ok(
-        '④ 而且用的是纯文本（`text`，**没有** `html` —— 与本仓库"通知不做富文本"同一条判断）',
-        typeof mailsSent[0]?.body?.text === 'string' && !('html' in (mailsSent[0]?.body ?? {})),
+        '④ 而且 `text` 与 `html` **两份都在**（同一份 `MailDoc` 同源渲染；HTML 是用户点名要的排版）',
+        typeof mailsSent[0]?.body?.text === 'string' &&
+          typeof mailsSent[0]?.body?.html === 'string' &&
+          mailsSent[0]?.body?.html.includes('#0B5CF0'),
         JSON.stringify(Object.keys(mailsSent[0]?.body ?? {})),
       )
     }
@@ -3780,9 +3786,16 @@ await withLock(async () => {
 
   /* ---------------- ⑤ 邮件助手的三条硬要求 ---------------- */
   {
+    /**
+     * ⑤ 的探针正文：只为了让 `sendMail` 走到"发 / 不发"那一步。
+     * 🆕 2026-10-29：`sendMail` 的入参从 `text` 变成 `doc: MailDoc`
+     * （纯文本与 HTML 同源渲染），所以这里给一个最小的合法模型。
+     */
+    const probeDoc = () => ({ title: '通道自检', body: 'y' })
+
     /* ① 没配 key → **显式报错**（人话 + 去处），绝不静默失败 */
     {
-      const r = await MAILLIB.sendMail(ENV, { subject: 'x', text: 'y' })
+      const r = await MAILLIB.sendMail(ENV, { subject: 'x', doc: probeDoc() })
       eq('🔴 ⑤ 没配 `RESEND_API_KEY` → `ok=false` + `reason=no_key`', [r.ok, r.reason], [false, 'no_key'])
       ok(
         '🔴 ⑤ 而且给的是**人话 + 去处**（不是一句 "failed"）',
@@ -3804,7 +3817,7 @@ await withLock(async () => {
     {
       const r = await MAILLIB.sendMail(
         { ...ENV, RESEND_API_KEY: 'k', ADMIN_NOTIFY_EMAIL: '' },
-        { subject: 'x', text: 'y' },
+        { subject: 'x', doc: probeDoc() },
       )
       eq(
         '🔴 ⑤ 配了 key 但**没配收件人**（`ADMIN_NOTIFY_EMAIL`）→ `ok=false` + `reason=no_to`',
@@ -3824,7 +3837,7 @@ await withLock(async () => {
       )
       /* 反向对照：把收件人配回来 → 必须能发（证明上面那条 no_to 不是恒真） */
       resendStatus = 200
-      const okr = await MAILLIB.sendMail({ ...ENV, RESEND_API_KEY: 'k' }, { subject: 'x', text: 'y' })
+      const okr = await MAILLIB.sendMail({ ...ENV, RESEND_API_KEY: 'k' }, { subject: 'x', doc: probeDoc() })
       eq(
         '⑤ 反向对照：把收件人配回来 → `ok=true`，而且 `to` 就是配的那个（不是别的默认值）',
         [okr.ok, okr.ok ? okr.to : ''],
@@ -3846,11 +3859,11 @@ await withLock(async () => {
     /* ② 失败留痕：Resend 4xx/5xx → reason=failed + 原文（调用方把它写进库） */
     {
       resendStatus = 500
-      const r = await MAILLIB.sendMail({ ...ENV, RESEND_API_KEY: 'k' }, { subject: 'x', text: 'y' })
+      const r = await MAILLIB.sendMail({ ...ENV, RESEND_API_KEY: 'k' }, { subject: 'x', doc: probeDoc() })
       eq('🔴 ⑤ Resend 500 → `reason=failed`', [r.ok, r.reason], [false, 'failed'])
       ok('🔴 ⑤ 而且把 Resend 的状态码与原文带回来（要落进库里的那一句）', String(r.message).includes('500'), r.message)
       resendStatus = 200
-      const okr = await MAILLIB.sendMail({ ...ENV, RESEND_API_KEY: 'k' }, { subject: 'x', text: 'y' })
+      const okr = await MAILLIB.sendMail({ ...ENV, RESEND_API_KEY: 'k' }, { subject: 'x', doc: probeDoc() })
       eq('⑤ 反向对照：Resend 200 → `ok=true`（上面那条 failed 不是恒真）', okr.ok, true)
     }
 
@@ -3897,8 +3910,16 @@ await withLock(async () => {
     {
       const stamp = '2026-10-06 21:30'
       const ctx = { stamp, sentToday: 3 }
-      /** 每一类系统邮件一份**真实形状**的正文（与线上调用处同款入参） */
-      const bodies = {
+      /**
+       * 每一类系统邮件一份**真实形状**的 `MailDoc`（与线上调用处同款入参）。
+       *
+       * 🆕 2026-10-29：目录项从"返回字符串"改成"返回 `MailDoc`"，
+       * 所以体检前要先 `renderText()` 渲染成纯文本 —— **但必须用 `piiCheckText()`**：
+       * 它才是 `sendMail()` 真正喂给 `looksLikeStudentData()` 的那一份
+       * （把 `intendedTo` 转发块整段排除，见 `_lib/mail.ts` 里那段结构性豁免）。
+       * 这里如果自己复刻一份"摘掉转发块"的逻辑，就会与线上那条路分叉。
+       */
+      const docs = {
         测试邮件: MAILLIB.SYSTEM_MAIL_BODIES.test(ctx),
         备份通知: MAILLIB.SYSTEM_MAIL_BODIES.backup({
           ...ctx,
@@ -3914,6 +3935,8 @@ await withLock(async () => {
           from: null,
           to: null,
           text: '周五下午三节课改为两节，放学时间提前 30 分钟。',
+          /* 故意给一个**真实形状**的转发目标：验证它只豁免那一块、不是把判据关掉 */
+          intendedTo: ['teacher@school.edu.cn'],
         }),
         反馈回执: MAILLIB.SYSTEM_MAIL_BODIES.feedback({
           stamp,
@@ -3933,29 +3956,75 @@ await withLock(async () => {
           checksumLine: 'd41d 8cd9 8f00 b204',
           tokenPath: '/api/grade-promote?token=abc123',
         }),
+        欢迎信: MAILLIB.SYSTEM_MAIL_BODIES.welcome({
+          stamp,
+          sentToday: null,
+          to: 'new.teacher@example.com',
+          account: 'new.teacher@example.com',
+          roleText: '任课教师 · 语文',
+          loginUrl: '/login',
+        }),
+        前端报错汇总: MAILLIB.SYSTEM_MAIL_BODIES.frontendError({
+          stamp,
+          sentToday: null,
+          count: 3,
+          items: [
+            {
+              page: '/assignments/x/grade',
+              who: '甲老师',
+              at: '2026-10-06 21:20',
+              message: '导出按钮点了没反应',
+              stack: 'at foo (app.js:1)\nat bar (app.js:2)',
+              browser: 'Chrome 130',
+            },
+          ],
+        }),
       }
+      const bodies = Object.fromEntries(
+        Object.entries(docs).map(([name, doc]) => [name, MAILLIB.piiCheckText(doc)]),
+      )
       eq(
-        '🔴 ⑤ 系统正文共 5 类（**有几类就体检几类**；新加一处发信 = 这里加一条）',
+        '🔴 ⑤ 系统正文共 7 类（**有几类就体检几类**；新加一处发信 = 这里加一条）',
         Object.keys(bodies).length,
-        5,
+        7,
       )
       for (const [name, text] of Object.entries(bodies)) {
-        const hit = MAILLIB.looksLikeStudentData(text)
-        /*
-         * ⚠️ 判据跑的是 `sendMail()` 里**洗过一遍**的那份（`scrubSecrets()` 在体检之前），
-         *    所以这里也洗一遍 —— 否则断言与线上不是同一条正文。
-         */
-        const afterScrub = MAILLIB.looksLikeStudentData(MAILLIB.scrubSecrets(text))
         eq(
           `🔴 ⑤ 系统正文「${name}」→ **判据放行**（它结构上不可能带学生数据，被拦下就是判据误伤自己）`,
-          [hit, afterScrub],
-          [null, null],
+          MAILLIB.looksLikeStudentData(text),
+          null,
         )
       }
-      /* 反向对照：**真地址**塞回去 → 必须红（证明上面那 5 条不是"判据睡着了"） */
+      /*
+       * 🔴 转发块的结构性豁免**正反两面都要验**（只验一面就会变成"判据睡着了"）：
+       *   · 正面：纯文本里确实有【这封信本来应该发给】+ 那个地址；
+       *   · 反面：把 `intendedTo` 摘掉之后，正文里**不含**那个地址
+       *     ⇒ 豁免确实只覆盖那一块，不是把整个邮箱判据关掉。
+       */
+      {
+        const ann = docs.公告通知
+        const full = MAILLIB.renderText(ann)
+        const without = MAILLIB.renderText({ ...ann, intendedTo: [] })
+        ok(
+          '🔴 ⑤ 转发块：纯文本里出现「这封信本来应该发给」与那个地址（能照着转发）',
+          full.includes('本来应该发给') && full.includes('teacher@school.edu.cn'),
+          JSON.stringify(full.split('\n').filter((x) => x.includes('本来应该发给') || x.includes('school.edu.cn'))),
+        )
+        ok(
+          '🔴 ⑤ 转发块之外**不含**那个地址（豁免范围只有那一块，不是放宽判据）',
+          !/teacher@school\.edu\.cn/.test(without),
+          JSON.stringify(without.split('\n').filter((x) => x.includes('school.edu.cn'))),
+        )
+        ok(
+          '🔴 ⑤ 反向对照：把同一个地址塞进普通正文 → 判据仍然命中（`PII_PATTERNS` 一个字没动）',
+          Boolean(MAILLIB.looksLikeStudentData(`${without}\n抄送：teacher@school.edu.cn`)),
+          MAILLIB.looksLikeStudentData(`${without}\n抄送：teacher@school.edu.cn`) ?? '(没命中 —— 判据睡着了)',
+        )
+      }
+      /* 反向对照：**真地址**塞回去 → 必须红（证明上面那 7 条不是"判据睡着了"） */
       const withAddr = `${bodies.测试邮件}\n备用联系方式：onboarding@resend.dev`
       ok(
-        '🔴 ⑤ 反向对照：往测试邮件正文里塞回一个**真地址** → 判据必须命中（上面那 5 条不是恒绿）',
+        '🔴 ⑤ 反向对照：往测试邮件正文里塞回一个**真地址** → 判据必须命中（上面那 7 条不是恒绿）',
         Boolean(MAILLIB.looksLikeStudentData(withAddr)),
         MAILLIB.looksLikeStudentData(withAddr) ?? '(没命中 —— 判据睡着了)',
       )
@@ -4005,20 +4074,20 @@ await withLock(async () => {
       /** 第 1 列：这段文本；第 2 列：期望判据说什么（`null` = 放行） */
       const BLOCKLIST = [
         /* ---- A 类：会**发出去**的系统正文（必须全放行） ---- */
-        ['A 系统正文`测试邮件`', MAILLIB.SYSTEM_MAIL_BODIES.test({ stamp: '2026-10-06 21:30', sentToday: 3 }), null],
+        ['A 系统正文`测试邮件`', MAILLIB.piiCheckText(MAILLIB.SYSTEM_MAIL_BODIES.test({ stamp: '2026-10-06 21:30', sentToday: 3 })), null],
         [
           'A 系统正文`备份通知`',
-          MAILLIB.SYSTEM_MAIL_BODIES.backup({
+          MAILLIB.piiCheckText(MAILLIB.SYSTEM_MAIL_BODIES.backup({
             stamp: '2026-10-06 21:30',
             sentToday: null,
             summary: '3 个班级 · 128 名学生',
             detail: '文件：树高备份-2026-09-29.json',
-          }),
+          })),
           null,
         ],
         [
           'A 系统正文`公告通知`（🔴 第 3 处误伤，本次修掉）',
-          MAILLIB.SYSTEM_MAIL_BODIES.announcement({
+          MAILLIB.piiCheckText(MAILLIB.SYSTEM_MAIL_BODIES.announcement({
             stamp: '2026-10-06 21:30',
             sentToday: null,
             title: '周五下午调课',
@@ -4028,12 +4097,14 @@ await withLock(async () => {
             from: null,
             to: null,
             text: '周五下午三节课改为两节。',
-          }),
+            /* 转发目标在这里**被 `piiCheckText` 豁免**；别在别处塞地址（那一条是 D 类） */
+            intendedTo: ['teacher@school.edu.cn'],
+          })),
           null,
         ],
         [
           'A 系统正文`反馈回执`（联系方式留空时）',
-          MAILLIB.SYSTEM_MAIL_BODIES.feedback({
+          MAILLIB.piiCheckText(MAILLIB.SYSTEM_MAIL_BODIES.feedback({
             stamp: '2026-10-06 21:30',
             authorName: '王老师',
             authorId: 't-1',
@@ -4042,19 +4113,50 @@ await withLock(async () => {
             env: 'web',
             contact: '',
             text: '作业导入的图太大。',
-          }),
+          })),
           null,
         ],
         [
           'A 系统正文`毕业备份通知`',
-          MAILLIB.SYSTEM_MAIL_BODIES.gradeBackup({
+          MAILLIB.piiCheckText(MAILLIB.SYSTEM_MAIL_BODIES.gradeBackup({
             stamp: '2026-10-06 21:30',
             gradeName: '2026 届',
             countsLine: '班级 3 个',
             sizeLine: '2.3 MB',
             checksumLine: 'd41d 8cd9',
             tokenPath: '/api/grade-promote?token=abc',
-          }),
+          })),
+          null,
+        ],
+        [
+          'A 系统正文`欢迎信`（登录账号只出现在转发块豁免里）',
+          MAILLIB.piiCheckText(MAILLIB.SYSTEM_MAIL_BODIES.welcome({
+            stamp: '2026-10-06 21:30',
+            sentToday: null,
+            to: 'new.teacher@example.com',
+            account: 'new.teacher@example.com',
+            roleText: '任课教师 · 语文',
+            loginUrl: '/login',
+          })),
+          null,
+        ],
+        [
+          'A 系统正文`前端报错汇总`',
+          MAILLIB.piiCheckText(MAILLIB.SYSTEM_MAIL_BODIES.frontendError({
+            stamp: '2026-10-06 21:30',
+            sentToday: null,
+            count: 2,
+            items: [
+              {
+                page: '/assignments/x/grade',
+                who: '甲老师',
+                at: '2026-10-06 21:20',
+                message: '导出按钮点了没反应',
+                stack: 'at foo (app.js:1)',
+                browser: 'Chrome 130',
+              },
+            ],
+          })),
           null,
         ],
         /* ---- B 类：会**显示给用户**的错误消息（同上，都是服务端自己写的字） ---- */
@@ -4097,7 +4199,7 @@ await withLock(async () => {
       for (const [name, text, want] of BLOCKLIST) {
         eq(`🔴 ⑤ 体检清单：${name}`, MAILLIB.looksLikeStudentData(text) ?? null, want)
       }
-      eq('🔴 ⑤ 清单条数（**增删都要动这一条**，免得清单被悄悄缩短）', BLOCKLIST.length, 25)
+      eq('🔴 ⑤ 清单条数（**增删都要动这一条**，免得清单被悄悄缩短）', BLOCKLIST.length, 27)
     }
 
     /* ④ 洗凭据：URL 的 query string / Bearer / 长串一律抹掉（邮件会离开系统） */
@@ -4183,8 +4285,8 @@ await withLock(async () => {
         JSON.stringify({ sent: mailsSent.length, text: String(mailsSent[0]?.body?.text ?? '').slice(0, 120) }),
       )
       ok(
-        '🔴 ⑤-B 但**发件人字段照旧**是那个地址（正文里不印 ≠ 发件人不发）',
-        mailsSent[0]?.body?.from === 'onboarding@resend.dev',
+        '🔴 ⑤-B 但**发件人字段照旧**是「树高教务助手 <那个地址>」（正文里不印 ≠ 发件人不写）',
+        mailsSent[0]?.body?.from === MAILLIB.MAIL_FROM,
         String(mailsSent[0]?.body?.from ?? '(没发出去)'),
       )
 

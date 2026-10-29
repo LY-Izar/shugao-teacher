@@ -146,6 +146,47 @@ const isMissing = (r: Read) =>
   r.status === 404 ||
   /42P01|42703|PGRST20[45]|PGRST202|does not exist|schema cache/i.test(r.text)
 
+/**
+ * 🆕 2026-10-29「**这封信本来应该发给**」—— 平台上老师们的登录地址。
+ *
+ * 🔴 为什么需要它：Resend 没验域名，邮件**只能先发到管理员自己那个地址**，
+ *    而公告的真实读者是每位老师。管理员要的是"一份能照着逐个转发的清单"，
+ *    所以他点勾选框时，这封信下面得写清"本来该发给谁"。
+ *
+ * 地址从 **GoTrue 的管理员清单**来（`auth.users.email` 才是登录账号；
+ * `teacher_profiles.email` 是联系邮箱，不一定是登录名）。教室端账号也在这个清单里，
+ * 但它不是老师（公告不该转给一台班牌），所以按 `classroom_accounts` 的 id 剔掉。
+ *
+ * ⚠️ 读不到就回空数组：这是**附加信息**，不许因为它把公告本身或那封留档信弄失败。
+ *    （空数组 = 模板不渲染那一块，界面上也不会出现半截清单。）
+ */
+async function teacherEmails(env: Env): Promise<string[]> {
+  const key = env.SUPABASE_SERVICE_ROLE_KEY ?? ''
+  if (!baseUrl(env) || !key) return []
+  try {
+    const rooms = await read(await sb(env, '/rest/v1/classroom_accounts?select=id'))
+    const classroomIds = new Set((rooms.ok ? rooms.rows : []).map((r) => String(r.id)))
+    const emails: string[] = []
+    /* GoTrue 一页最多 200 个账号；按 5 页封顶（这所学校远到不了 1000 个账号） */
+    for (let page = 1; page <= 5; page++) {
+      const res = await fetch(`${baseUrl(env)}/auth/v1/admin/users?page=${page}&per_page=200`, {
+        headers: { apikey: key, Authorization: `Bearer ${key}` },
+      })
+      if (!res.ok) break
+      const json = (await res.json()) as { users?: Array<{ id?: string; email?: string }> }
+      const users = Array.isArray(json.users) ? json.users : []
+      for (const u of users) {
+        const email = String(u.email ?? '').trim()
+        if (email && !classroomIds.has(String(u.id ?? ''))) emails.push(email)
+      }
+      if (users.length < 200) break
+    }
+    return [...new Set(emails)]
+  } catch {
+    return []
+  }
+}
+
 /* ---------------- 调用者是谁 ---------------- */
 
 async function caller(request: Request, env: Env): Promise<{ id: string; token: string } | null> {
@@ -377,8 +418,10 @@ export async function onRequestPost(context: {
          *    ⚠️ 这里原来在正文里印 `MAIL_FROM` 的值 —— 2026-10-06 逐条体检当场抓到：
          *       它会被自己的"邮箱形状"判据拦下（`pii_blocked`），公告那一半永远发不出去。
          *       地址只在服务端常量里，正文不复述（见 `_lib/mail.ts` 那段说明）。
+         * 🆕 `intendedTo` = 这封信本来该发给谁（老师们的登录地址）：
+         *    它由 `piiCheckText()` 结构性豁免，不受"邮箱形状"判据影响（见 `_lib/mail.ts`）。
          */
-        text: SYSTEM_MAIL_BODIES.announcement({
+        doc: SYSTEM_MAIL_BODIES.announcement({
           stamp: beijingStamp(),
           sentToday: null,
           title: f.title,
@@ -388,6 +431,7 @@ export async function onRequestPost(context: {
           from: f.from,
           to: f.to,
           text: f.text,
+          intendedTo: await teacherEmails(env),
         }),
       })
       mail = { ok: r.ok, reason: r.ok ? '' : r.reason }
