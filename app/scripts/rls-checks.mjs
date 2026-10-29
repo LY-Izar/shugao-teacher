@@ -54,7 +54,15 @@
  *   （改的全是**内存里的 SQL 文本**，仓库文件一个字节都不动。）
  */
 
-import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync } from 'node:fs'
+import {
+  readFileSync,
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  rmSync,
+  readdirSync,
+  cpSync,
+} from 'node:fs'
 /*
  * 🆕 2026-10-04：第二十七节（课代表口令）要拿**同一段文本**自己算一遍 sha256 ——
  * 用的是 Node 内核的 `node:crypto`，**不是**手抄一个期望哈希。
@@ -7299,6 +7307,16 @@ await withLock(async () => {
         }
         const modSrc = NEGATIVE === 'room-account-wider' ? widened : src
         const tmpDir = mkdtempSync(join(tmpdir(), 'shugao-roomacct-'))
+        /*
+         * 🔴 把 `functions/api/_lib` 整份复制过去（2026-10-29 修）：
+         *    `classroom-account.ts` 现在 `import { … } from './_lib/mail'`（欢迎信），
+         *    而临时目录里只放了一个文件 ⇒ 动态 import 当场
+         *    `ERR_MODULE_NOT_FOUND ... _lib/mail`。
+         * ⚠️ 复制的是**目录**而不是逐个文件：以后它在 `_lib` 里多引一个，
+         *    这里不用再改一次（逐个列文件名 = 每加一个依赖就要修一次门禁）。
+         * ⚠️ 这一条**只影响探针的临时副本**：被测仍是从仓库读出来的那份源码文本。
+         */
+        cpSync(resolvePath(APP, 'functions/api/_lib'), join(tmpDir, '_lib'), { recursive: true })
         const tmpFile = join(tmpDir, 'classroom-account.ts')
         writeFileSync(tmpFile, modSrc, 'utf8')
         let mod
