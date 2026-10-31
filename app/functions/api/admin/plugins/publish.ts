@@ -30,7 +30,8 @@ export const onRequestPost: PagesFunction<PluginEnv> = async ({ request, env }) 
   }
   const id = (body.id ?? '').trim()
   const commit = (body.commit ?? '').trim()
-  if (!id || !commit) return json({ ok: false, why: '缺 id 或 commit' }, 400)
+  if (!id || !/^[a-f0-9]{40}$/i.test(commit))
+    return json({ ok: false, why: '需要插件 Git 提交的完整 40 位 SHA' }, 400)
 
   /* ① 当前放行版本（也是"两个人同时点"的对照） */
   const reg = await read(await svc(env, `/rest/v1/plugin_registry?select=stable_version&plugin_id=eq.${encodeURIComponent(id)}`))
@@ -67,6 +68,11 @@ export const onRequestPost: PagesFunction<PluginEnv> = async ({ request, env }) 
      */
     config_schema: (f.files.manifest.config as unknown) ?? {},
     source_commit: commit,
+    approved_reads: Array.isArray(f.files.manifest.reads)
+      ? (f.files.manifest.reads as Array<{ table: string }>).map((r) => r.table)
+      : [],
+    results_schema: Array.isArray(f.files.manifest.teacherResults)
+      ? f.files.manifest.teacherResults : [],
     released_at: new Date().toISOString(),
     revoked_at: null,
     updated_at: new Date().toISOString(),
@@ -82,7 +88,9 @@ export const onRequestPost: PagesFunction<PluginEnv> = async ({ request, env }) 
   if (!out.ok) {
     const why = /source_commit/.test(out.text)
       ? '数据库还没有 source_commit 这一列 —— 先把 supabase/schema.sql §45 补跑一次'
-      : `写登记表失败：${out.text.slice(0, 160)}`
+      : /results_schema/.test(out.text)
+        ? '数据库还没有 results_schema 这一列 —— 先把 supabase/schema.sql §45 补跑一次'
+        : `写登记表失败：${out.text.slice(0, 160)}`
     return json({ ok: false, why }, 500)
   }
 

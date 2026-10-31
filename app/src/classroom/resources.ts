@@ -4,9 +4,8 @@
  * ============================================================================
  * 口径
  * ============================================================================
- * · 数据源是**本机的 store**（`useStore`）—— 它在远程模式由 `hydrate()` + Realtime
- *   灌着，在演示模式是种子数据。插件读到的永远是"这块屏已经同步到的那一份"，
- *   与大屏自己显示的同源；不另开一条查库的路（那会变成第二套数据真相）。
+ * · 常规资源读本机 store；今日课表与当前课次在线时读数据库日格，
+ *   与大屏共用 `schedule_day_cells`，包含临时调课。离线时回退本机周课表。
  * · `stale`（手册 §6.4）：远程模式断网时 `true`（这份可能是旧缓存）；演示模式恒
  *   `false` —— 数据就在本机，没有"旧"可言。`read` **任何情况下都不 reject**：
  *   没数据回空形状，读不出来回空形状 + `stale:true`。
@@ -36,11 +35,12 @@ import { BAND_META, gradeStats } from '../lib/grading'
 import { ranked } from '../lib/wrongbook'
 import { loadDailyBundle, toDutyInput, todayDuty } from '../lib/daily'
 import { isoOffset } from '../lib/date'
-import { beijingNow } from '../lib/holiday'
+import { beijingNow, holidayOn, isRestDay, ymdOf } from '../lib/holiday'
 import { pickDailyQuote } from '../lib/quotes'
 import { isRemote, getSupabase } from '../lib/supabase'
 import { codeErr, LIMITS } from '../lib/pluginHost'
 import { PLUGIN_READ_TABLES } from '../lib/pluginTables'
+import { loadScheduleDay } from '../data/remote'
 import type { ResourceName } from '../lib/pluginHost'
 import type { ScheduleItem } from '../data/types'
 
@@ -68,6 +68,25 @@ export function toSlot(it: ScheduleItem | null, kind: 'current' | 'next', m: num
     start: it.start,
     end: it.end,
     minutesLeft: kind === 'current' ? toMinutes(it.end) - m : toMinutes(it.start) - m,
+  }
+}
+
+/** 今天的最终课表以数据库日格为准，包含临时调课；读不到才使用本机周课表。 */
+async function effectiveTodaySchedule(classId: string, base: ScheduleItem[], date: string): Promise<{
+  items: ScheduleItem[]; adjusted: Set<string>; stale: boolean
+}> {
+  if (!isRemote) return { items: base, adjusted: new Set(), stale: false }
+  const day = await loadScheduleDay(date)
+  if (day.status !== 'present') return { items: base, adjusted: new Set(), stale: true }
+  const cells = (day.cells ?? []).filter((c) => c.classId === classId && c.subject.trim())
+  return {
+    items: cells.map((c) => ({
+      id: `${date}:${classId}:${c.start}`,
+      classId, scope: 'class', weekday: base[0]?.weekday ?? 1,
+      start: c.start, end: c.end, title: c.subject, kind: 'class', notify: false,
+    })),
+    adjusted: new Set(cells.filter((c) => c.changed).map((c) => c.start)),
+    stale: false,
   }
 }
 
@@ -107,16 +126,44 @@ export async function readResource(resource: ResourceName, classId: string): Pro
       }
     }
 
+    case 'class.todaySchedule': {
+      const now = beijingNow()
+      const today = ymdOf(now)
+      const weekday = weekdayOf(now)
+      const base = s.schedule.filter((it) => it.scope === 'class' && it.classId === classId && it.weekday === weekday)
+      const effective = await effectiveTodaySchedule(classId, base, today)
+      const items = effective.items
+      const day = dayState(items, now, weekday)
+      let restDay = isRestDay(today)
+      let restName = holidayOn(today)?.name ?? ''
+      let calendarStale = false
+      try {
+        const calendar = await loadDailyBundle(classId, today, today)
+        calendarStale = calendar.state === 'unknown' || calendar.state === 'missing'
+        const override = calendar.calendar.find((item) => item.onDate === today)
+        if (override) { restDay = override.kind === 'off'; restName = '' }
+      } catch { calendarStale = true }
+      return { value: { weekday, restDay, restName, conflicts: [],
+        items: restDay ? [] : day.items.map((it) => {
+          const lesson = splitLessonTitle(it.title)
+          return { start: it.start, end: it.end, subject: lesson.subject,
+            teacherName: lesson.teacher, current: it.id === day.current?.id,
+            next: it.id === day.next?.id, adjusted: effective.adjusted.has(it.start) }
+        }) }, stale: stale || calendarStale || effective.stale, asOf }
+    }
+
     case 'class.slotNow': {
       const now = beijingNow()
       const wd = weekdayOf(now)
-      const raw = s.schedule.filter(
+      const base = s.schedule.filter(
         (it) => it.scope === 'class' && it.classId === classId && it.weekday === wd,
       )
+      const effective = await effectiveTodaySchedule(classId, base, ymdOf(now))
+      const raw = effective.items
       const d = dayState(raw, now, wd)
       return {
         value: { current: toSlot(d.current, 'current', nowMinutes(now)), next: toSlot(d.next, 'next', nowMinutes(now)) },
-        stale,
+        stale: stale || effective.stale,
         asOf,
       }
     }
@@ -271,7 +318,7 @@ export async function readResource(resource: ResourceName, classId: string): Pro
  *    其余读不到（断网、库还没跑这一段 SQL）一律回空数组 + `stale: true`，**不 reject** ——
  *    与 `readResource` 同一条口径（手册 §6.4：没数据不是错误）。
  */
-export async function readPluginTable(table: string, classId: string): Promise<ResourceResult> {
+export async function readPluginTable(table: string, classId: string, pluginId: string): Promise<ResourceResult> {
   const asOf = beijingNow().toISOString()
   const def = PLUGIN_READ_TABLES[table]
   if (!def) throw tableErr(`可读目录里没有这张表：${table}`)
@@ -292,6 +339,17 @@ export async function readPluginTable(table: string, classId: string): Promise<R
 
   const sb = getSupabase()
   if (!sb) return { value: { rows: [], truncated: false }, stale: true, asOf }
+
+  if (table === 'teachers') {
+    const { data, error } = await sb.rpc('plugin_teacher_directory', {
+      p_class_id: classId, p_plugin_id: pluginId,
+    })
+    const result = data as { ok?: boolean; rows?: unknown[]; code?: string } | null
+    if (error || !result?.ok) {
+      throw tableErr(error?.message ?? result?.code ?? '教师名单接口不可用')
+    }
+    return { value: { rows: result.rows ?? [] }, stale: false, asOf }
+  }
 
   /* 只读白名单列 —— 隐私列不是"读回来再删"，是压根不在 select 里。
      class 域强制按本班过滤；`class_ids` 是数组列（一场考试覆盖多个班），用 contains。 */
@@ -347,6 +405,30 @@ function localRows(table: string, classId: string): unknown[] {
         name: st.name,
         status: st.status,
       }))
+
+    case 'class_groups': {
+      try {
+        const groups = JSON.parse(localStorage.getItem(`shugao.class.groups.${classId}`) ?? '[]') as Array<{
+          id: string; name: string; leaderId: string; memberIds: string[]
+        }>
+        return groups.map((group) => ({
+          id: group.id, class_id: classId, name: group.name,
+          leader_id: group.leaderId, member_ids: group.memberIds,
+        }))
+      } catch { return [] }
+    }
+
+    case 'class_seats': {
+      try {
+        const seats = JSON.parse(localStorage.getItem(`shugao.class.seats.${classId}`) ?? '[]') as Array<{
+          studentId: string; row: number; col: number
+        }>
+        return seats.map((seat) => ({
+          class_id: classId, student_id: seat.studentId,
+          seat_row: seat.row, seat_col: seat.col,
+        }))
+      } catch { return [] }
+    }
 
     case 'assignments':
       return s.assignments

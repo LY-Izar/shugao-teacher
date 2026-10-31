@@ -24,7 +24,7 @@
 
 import type { CSSProperties } from 'react'
 import type { RoleCode, Teacher, TeacherRole } from '../data/types'
-import { teacherSubjectLabel } from './subjects'
+import { subjectName, teacherSubjectLabel } from './subjects'
 
 /** 身份的显示名。加一档身份 = 这里加一行 + schema 的 check 约束加一个值。
  *
@@ -289,7 +289,7 @@ export function managingRoleLabel(roles?: readonly TeacherRole[] | null): string
 /**
  * 🔴 **「当前身份」那个标签显示什么：有管理身份就显示身份，没有才显示学科。**
  *
- * 三处「我自己」的标签共用这一处实现（侧栏 `AppShell` / 工作台问候语 / 设置页身份卡）——
+ * 设置页的完整账号身份沿用这一处实现；侧栏按工作板块显示职责，见 `workspaceIdentityLabel()`。
  * 别再各写一句 `managingRoleLabel(myRoles) || teacherSubjectLabel(teacher)`：
  * 「同一件事只能有一个判定入口」是本仓库踩过四次的坑（§十）。
  *
@@ -307,9 +307,39 @@ export function currentIdentityLabel(
   return managingRoleLabel(roles) || teacherSubjectLabel(t, fallback)
 }
 
+/** 侧栏工作板块只显示该板块承担的职责；不参与权限判断。 */
+export function workspaceIdentityLabel(
+  workspace: 'subject' | 'class' | 'admin' | null,
+  roles?: readonly TeacherRole[] | null,
+  teacher?: Pick<Teacher, 'subject' | 'primarySubjectCode'> | null,
+  context?: { teachingGrade?: string; gradeName?: (id: string) => string | undefined },
+): string {
+  if (!workspace) return '选择工作板块'
+  const list = roles ?? []
+  if (workspace === 'class') return list.some((r) => r.role === 'head_teacher') ? '班主任' : '班级管理'
+  if (workspace === 'subject') {
+    const lead = list.find((r) => r.role === 'lesson_prep_lead') ?? list.find((r) => r.role === 'subject_lead')
+    const grade = lead?.scopeType === 'grade_subject' && lead.scopeId
+      ? context?.gradeName?.(lead.scopeId) : context?.teachingGrade
+    if (lead) return `${grade ?? ''}${subjectName(lead.subjectCode)}${roleName(lead.role)}`
+    if (list.some((r) => r.role === 'teacher') || (!list.length && teacher)) {
+      if (!teacher) return roleName('teacher')
+      const subject = teacherSubjectLabel(teacher)
+      return `${context?.teachingGrade ?? ''}${subject}${subject.endsWith('老师') ? '' : '老师'}`
+    }
+    const managing = MANAGING_ROLES.find((code) => list.some((r) => r.role === code))
+    return managing ? roleName(managing) : '学科管理'
+  }
+  const adminRoles: readonly RoleCode[] = [
+    'super', 'admin', 'principal', 'vice_principal', 'principal_assistant',
+    'office_head', 'moral_edu_head', 'grade_head',
+  ]
+  const administrative = adminRoles.find((code) => list.some((r) => r.role === code))
+  return administrative ? roleName(administrative) : '行政管理'
+}
+
 /**
- * 「当前身份」标签的**排版约束**——三个显示点共用这一处，别再各写一份内联样式
- * （同 `currentIdentityLabel()` 的理由：同一件事只有一个定义）。
+ * 设置页完整身份标签的**排版约束**。
  *
  * 为什么需要它（2026-09-27 改成"多身份全露"之后**实测**出来的，不是设想的）：
  *

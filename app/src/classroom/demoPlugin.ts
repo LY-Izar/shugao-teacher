@@ -27,7 +27,9 @@ export interface AvailablePlugin {
     deactivate?: () => unknown
   }
   /** P0b 只有内置演示这一种来源；真下载（壳侧 `downloadPlugin`）进来后加 `'downloaded'`。 */
-  source: 'bundled'
+  source: 'bundled' | 'downloaded'
+  /** Git commit；更换版本时让运行中的窗口卸载旧模块并启动新模块。 */
+  revision?: string
 }
 
 export const DEMO_MANIFEST: PluginManifest = {

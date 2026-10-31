@@ -978,6 +978,8 @@ await withLock(async () => {
       // 登录态 + 设备角色。**只在缺失时写**，否则每次导航都会把教室端自己写的存档盖掉
       await ctx.addInitScript(() => {
         try {
+          // 本脚本核对旧教室端的粘贴课表导入链路；新壳以数据库课表为唯一数据源。
+          window.localStorage.setItem('shugao.classroom.newShell', '0')
           if (!window.localStorage.getItem('shugao.deviceRole')) {
             window.localStorage.setItem('shugao.deviceRole', 'teacher')
           }
@@ -1006,6 +1008,10 @@ await withLock(async () => {
       say('【准备】打开教室端，用「粘贴课表」把班级课表（scope=class）录进去')
       await page.goto(`${BASE}/classroom`, { waitUntil: 'networkidle' })
       await waitSched(page)
+      const beforeClassCount = await page.evaluate((k) => {
+        const st = JSON.parse(localStorage.getItem(k) ?? '{}').state ?? {}
+        return (st.schedule ?? []).filter((s) => s.scope === 'class').length
+      }, CLS_KEY)
 
       // ① 先触发一次 store 变化，让 persist 快照真正落盘（本地模式下它不会在启动时自动写回）
       const before = await page.evaluate((k) => (localStorage.getItem(k) ?? '').length, CLS_KEY)
@@ -1069,9 +1075,10 @@ await withLock(async () => {
       console.log(`  · 课表落盘：共 ${saved.total} 条，其中 scope='class' ${saved.cls.length} 条 / scope='mine'（演示的教师课表）${saved.mine} 条`)
       for (const r of saved.cls) console.log(`      - 周${r[0]} ${r[1]}-${r[2]} 「${r[3]}」 classId=${r[4]}`)
       check(
-        saved.cls.length === 4 && saved.cls.every((r) => r[4] === DEMO_CLASS_ID),
-        '「粘贴课表」导入的 4 条是 scope=class，且班号认成了本班',
-        `class=${saved.cls.length} 条，班号 ${[...new Set(saved.cls.map((r) => r[4]))].join('/')}`,
+        saved.cls.length === beforeClassCount + 4 &&
+          saved.cls.slice(-4).every((r) => r[4] === DEMO_CLASS_ID),
+        '「粘贴课表」新增的 4 条是 scope=class，且班号认成了本班',
+        `导入前 ${beforeClassCount} 条、导入后 ${saved.cls.length} 条；新增班号 ${saved.cls.slice(-4).map((r) => r[4]).join('/')}`,
         `不写班名的话 matchClass 给不出 classId，教室端一条都不显示`,
       )
 
@@ -1127,8 +1134,10 @@ await withLock(async () => {
           short(review.banner, 160),
           '反向对照：去掉红横幅 → 这条当场红（就是把"粘了看不见"那件事咽回去）',
         )
+        const currentClassCount = saved.cls.filter((r) => r[4] === DEMO_CLASS_ID).length
         check(
-          /已有\s*4\s*条课/.test(review.dup) && /两批/.test(review.dup) && /先清掉旧/.test(review.dup),
+          new RegExp(`已有\\s*${currentClassCount}\\s*条课`).test(review.dup) &&
+            /两批/.test(review.dup) && /先清掉旧/.test(review.dup),
           '🔴 重复导入**不静默**：说清"本班已有 N 条课、再导会变成两批"，并给一条出路（清掉旧的）',
           short(review.dup, 180),
           '口径走 (b)：不去重（重贴一次就顶掉旧的会丢数据），明说 + 给出路',
@@ -1185,6 +1194,7 @@ await withLock(async () => {
           await iso.clock.install({ time: new Date(SEED_TIME) })
           await iso.addInitScript(() => {
             try {
+              localStorage.setItem('shugao.classroom.newShell', '0')
               localStorage.setItem('shugao.deviceRole', 'teacher')
               const cur = JSON.parse(localStorage.getItem('shugao.teacher.v1') ?? '{}')
               if (!cur?.state?.teacher) {

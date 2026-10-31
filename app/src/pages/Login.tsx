@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { IconChevronRight, IconWifi } from '../components/icons'
 import { Emblem } from '../components/Emblem'
@@ -46,6 +46,17 @@ export default function Login() {
   const accountRef = useRef<HTMLInputElement>(null)
   const pwdRef = useRef<HTMLInputElement>(null)
   const [busy, setBusy] = useState(false)
+
+  // 本地设计预览：直接打开三大板块的完整目录，不连接真实账号或数据库。
+  useEffect(() => {
+    if (!import.meta.env.DEV || isRemote) return
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('preview') !== 'full' || params.get('as') !== 'teacher,head_teacher,super') return
+    signIn('预览教师')
+    markLogin()
+    setDeviceRole('teacher')
+    navigate('/', { replace: true })
+  }, [navigate, signIn])
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()

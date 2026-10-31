@@ -1,7 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { liveValue } from '../lib/liveInput'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { Page } from '../components/AppShell'
+import { StudentTeachingPanel } from '../components/StudentTeachingPanel'
+import type { TeachingEntry } from '../lib/studentTeaching'
+import { WorkspaceContext } from '../workspaces/context'
 import {
   IconAlert,
   IconCamera,
@@ -118,6 +121,8 @@ async function fetchRoomAccount(
 }
 
 export default function ClassDetail() {
+  const subjectView = useContext(WorkspaceContext)?.id === 'subject'
+  const adminStudentView = useLocation().pathname.startsWith('/manage/students/')
   const { id = '' } = useParams()
   const navigate = useNavigate()
   const push = useToast((s) => s.push)
@@ -208,6 +213,16 @@ export default function ClassDetail() {
   const [profiles, setProfiles] = useState<Map<string, StudentProfile>>(new Map())
   const [profilesErr, setProfilesErr] = useState('')
   const [profileFor, setProfileFor] = useState<string | null>(null)
+  const [teachingStudentId, setTeachingStudentId] = useState<string | null>(null)
+  const [teachingEntries, setTeachingEntries] = useState<TeachingEntry[]>([])
+  const studentTags = useMemo(() => {
+    const byStudent = new Map<string, string[]>()
+    for (const entry of teachingEntries) {
+      if (entry.kind !== 'tag') continue
+      byStudent.set(entry.studentId, [...(byStudent.get(entry.studentId) ?? []), entry.body])
+    }
+    return byStudent
+  }, [teachingEntries])
   const [profileEdit, setProfileEdit] = useState(false)
   const [profileForm, setProfileForm] = useState<StudentProfile>(emptyProfile(''))
   const [profileSaving, setProfileSaving] = useState(false)
@@ -216,12 +231,13 @@ export default function ClassDetail() {
   /*
    * 🔴 **"这一个班归不归我管"只算一次**（`canEditClassFor` = 数据库 `can_manage_class_for()` 的前端影子：
    *    超管 / 教务处 ∪ 本年级年级主任 ∪ 本班班主任）。
+   *    学科板块里的班级情况只读；能管班的人到班级板块办理维护事项。
    *    它管两处入口：**学生档案那个块**（教室端账号那块在上面已经读过了）——
    *    各写一份就是"同一件事两个入口"（本项目最忌的那个形状）。
    * ⚠️ **这只是"摆不摆入口"**：真正那一刀在数据库 / 服务端（`mayManage()`），前端藏了也拦不住手打接口的人。
    * ⚠️ 它必须在下面那个 `if (!klass)` **之前**定义（那之前已有两处 effect 依赖它）。
    */
-  const canManageThis = canEditClassFor(myRoles, klass?.id ?? '', klass?.gradeId)
+  const canManageThis = !subjectView && canEditClassFor(myRoles, klass?.id ?? '', klass?.gradeId)
 
   /* ---- 🆕 教室端账号（`classroom_accounts`）：账号 + 重置密码 ----
      一个班一个账号，登录名是 `g2-4@shugao.local` 那种短名，挂在教室里那台大屏上。
@@ -742,15 +758,7 @@ export default function ClassDetail() {
     /* 数据库那一层读不到时（`missing` / `unknown`）**不摆任何格** ——
        "这一天排得开"与"没读到"是两件事（同 `loadScheduleDay` 的纪律） */
     if (adjDay && adjDay.status !== 'local') return []
-    const base0 = classRows.filter((r) => r.weekday === adjWeekday)
-    /* ⚠️ **只在演示模式**：班级课表那一份夹具挂在这些行上、但 `scope` 空着
-       （全平台按 `'mine'` 读）—— 一行都没有时退回"挂在这个班名下的那些行"，
-       否则演示里这一页永远说"这一天这个班没有课"（与课程管理页 `classRows()` 自相矛盾）。
-       真实模式只认 `scope='class'`。 */
-    const base =
-      base0.length || isRemote
-        ? base0
-        : schedule.filter((s) => s.classId === klass?.id && s.weekday === adjWeekday)
+    const base = classRows.filter((r) => r.weekday === adjWeekday)
     const mine = tempChanges.filter((t) => t.date === adjDate && t.classId === klass?.id)
     /* 后写的压先写的（同一节改第二次就是后写的那条说了算） */
     const at = (start: string) => [...mine].reverse().find((t) => t.start === start)
@@ -779,7 +787,7 @@ export default function ClassDetail() {
       })
     }
     return out.sort((a, b) => (a.start < b.start ? -1 : 1))
-  }, [adjDay, classRows, schedule, tempChanges, adjDate, adjWeekday, klass])
+  }, [adjDay, classRows, tempChanges, adjDate, adjWeekday, klass])
 
   const adjListable = adjDay === null || adjDay.status === 'present' || adjDay.status === 'local'
   const adjPicked = adjCells.find((c) => c.start === adjPick) ?? null
@@ -861,7 +869,7 @@ export default function ClassDetail() {
   if (!klass) {
     return (
       <>
-        <PageHead title="班级不存在" onBack={() => navigate('/classes')} />
+        <PageHead title="班级不存在" onBack={() => navigate(adminStudentView ? '/manage' : '/classes')} />
         <Page>
           <Panel bodyClass="p-6 text-center" >
             <div style={{ fontSize: 14, color: 'var(--color-ink3)' }}>该班级可能已被删除</div>
@@ -1126,9 +1134,11 @@ export default function ClassDetail() {
       <PageHead
         title={klass.name}
         sub={`${klass.grade} · ${klass.year}`}
-        onBack={() => navigate('/classes')}
+        onBack={() => navigate(adminStudentView ? '/manage' : '/classes')}
         right={
           <div className="flex items-center gap-2">
+            {subjectView ? <Button size="sm" variant="ghost" onClick={() => document.getElementById('student-roster')?.scrollIntoView({ behavior: 'smooth' })}>学生名单</Button> : null}
+            {subjectView ? <Button size="sm" variant="ghost" onClick={() => document.getElementById('subject-student-groups')?.scrollIntoView({ behavior: 'smooth' })}>学科组</Button> : null}
             {/*
               事务性呼叫的入口（Q32 = C）。🔴 **摆不摆只看服务端回的那一个布尔**
               （`canCall`）—— 前端**不在这里判角色**（见上面那一处注释）。
@@ -1257,7 +1267,9 @@ export default function ClassDetail() {
                 </span>
               ) : (
                 <span style={{ color: 'var(--color-ink2)' }}>
-                  还没有名单（0 人）—— 体检无从谈起。拍照或粘贴导入之后再来看这一块。
+                  {subjectView
+                    ? '还没有名单（0 人）—— 请由班级管理人员补充。'
+                    : '还没有名单（0 人）—— 体检无从谈起。拍照或粘贴导入之后再来看这一块。'}
                 </span>
               )}
             </div>
@@ -1266,7 +1278,7 @@ export default function ClassDetail() {
 
         {/* 操作 —— 🔴 **走班班不摆"录名单"那三个入口**：它的人来自选科（`class_members`），
             在这一页手工加/导都不该有路（摆着就是骗人）。 */}
-        {!isStream ? (
+        {!isStream && canManageThis ? (
         <div className="mb-3 flex gap-2">
           <Button
             size="sm"
@@ -1298,7 +1310,7 @@ export default function ClassDetail() {
         ) : null}
 
         {/* 名单 */}
-        <div>
+        <div id="student-roster">
           <Sect>
             {isStream ? '走班成员' : '学生名单'} ·{' '}
             {rosterState.kind === 'unknown' ? '人数没读到' : `${rosterState.count} 人`}
@@ -1331,7 +1343,7 @@ export default function ClassDetail() {
                 <div style={{ fontWeight: 600, color: 'var(--color-ink)' }}>
                   {roster.length === 0 ? (isStream ? '还没有成员' : '名单还是空的') : '没有匹配的学生'}
                 </div>
-                {roster.length === 0 && !isStream ? (
+                {roster.length === 0 && !isStream && canManageThis ? (
                   <div className="flex gap-2">
                     <Button
                       size="sm"
@@ -1366,7 +1378,7 @@ export default function ClassDetail() {
                       <th>姓名</th>
                       <th style={{ width: 74 }}>状态</th>
                       <th style={{ width: 52 }}>档案</th>
-                      <th style={{ width: 46 }} />
+                      {canManageThis ? <th style={{ width: 46 }} /> : null}
                     </tr>
                   </thead>
                   <tbody>
@@ -1387,7 +1399,15 @@ export default function ClassDetail() {
                         >
                           {s.serial || '—'}
                         </td>
-                        <td style={{ fontWeight: 550 }}>{s.name || '—'}</td>
+                        <td style={{ fontWeight: 550 }}>{subjectView ? (
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <button type="button" onClick={() => setTeachingStudentId(s.id)} style={{ color: 'var(--color-accent)', fontWeight: 600 }} aria-label={`查看 ${s.name || s.studentNo} 的学生情况`}>
+                              {s.name || '—'}
+                            </button>
+                            {(studentTags.get(s.id) ?? []).slice(0, 3).map((tag, i) => <span key={`${tag}-${i}`} className="rounded px-1.5 py-0.5" style={{ background: 'var(--color-accentsoft)', color: 'var(--color-accenttext)', fontSize: 11, fontWeight: 500 }}>{tag}</span>)}
+                            {(studentTags.get(s.id)?.length ?? 0) > 3 ? <span style={{ fontSize: 11, color: 'var(--color-ink3)' }}>+{(studentTags.get(s.id)?.length ?? 0) - 3}</span> : null}
+                          </div>
+                        ) : s.name || '—'}</td>
                         <td>
                           {/* 三档（Q28 = B）—— 显示名只有一处（`types.ts` 的映射） */}
                           <Tag tone={s.status === 'active' ? 'ok' : s.status === 'suspended' ? 'warn' : 'idle'}>
@@ -1414,7 +1434,7 @@ export default function ClassDetail() {
                             档案
                           </button>
                         </td>
-                        <td>
+                        {canManageThis ? <td>
                           {/*
                             🔴 走班班这一格 = **移出这个走班班**（不是"编辑学生"）。
                                走班班的人不在 `students.class_id` 上，而姓名 / 学号 / 状态
@@ -1447,7 +1467,7 @@ export default function ClassDetail() {
                               <IconPencil size={16} />
                             </button>
                           )}
-                        </td>
+                        </td> : null}
                       </tr>
                     ))}
                   </tbody>
@@ -1457,11 +1477,23 @@ export default function ClassDetail() {
           </Panel>
         </div>
 
-        <div className="mt-3 px-1" style={{ fontSize: 11.5, color: 'var(--color-ink4)', lineHeight: 1.7 }}>
+        {(subjectView || myRoles.some((r) => r.role === 'head_teacher' && r.scopeType === 'class' && r.scopeId === klass.id)) ? (
+          <StudentTeachingPanel
+            classId={klass.id}
+            roster={roster}
+            subjectView={subjectView}
+            selectedStudent={roster.find((s) => s.id === teachingStudentId) ?? null}
+            onCloseStudent={() => setTeachingStudentId(null)}
+            onOpenProfile={openProfile}
+            onEntriesChange={setTeachingEntries}
+          />
+        ) : null}
+
+        {!subjectView ? <div className="mt-3 px-1" style={{ fontSize: 11.5, color: 'var(--color-ink4)', lineHeight: 1.7 }}>
           {isStream
             ? '移出只是不上这门课了 —— 他还是行政班里的人，作业与成绩档案都留着。'
             : '转班学生请使用「设为已转出」而非删除，历史作业数据会随之保留。'}
-        </div>
+        </div> : null}
 
         {/*
           🆕 教室端账号（用户点名：把"班主任能管教室端账号"这个入口放进**班级档案**）。
@@ -2904,6 +2936,7 @@ type RegistryCard = {
   /** 放行的版本号；null = 还没放行（不能启动） */
   version: string | null
   revoked: boolean
+  gitReady: boolean
   permissions: string[]
   configFields: Array<{ key: string; type: string; label: string; default?: unknown; min?: number; max?: number; options?: Array<[string, string]>; maxLength?: number }>
 }
@@ -2926,7 +2959,7 @@ const BUNDLED_PLUGIN_IDS = new Set(
   BUNDLED_MANIFESTS.map((m) => m.id).filter((id) => !DEFAULT_OFF_BUNDLED.has(id)),
 )
 
-function ClassroomPluginsPanel({ classId }: { classId: string }) {
+export function ClassroomPluginsPanel({ classId }: { classId: string }) {
   const push = useToast((s) => s.push)
   const classrooms = useStore((s) => s.classrooms)
   const client = classrooms.find((c) => c.classId === classId)
@@ -2951,20 +2984,14 @@ function ClassroomPluginsPanel({ classId }: { classId: string }) {
     map: Record<string, Record<string, unknown>>
   }>({ forClass: '', map: {} })
   const [busyId, setBusyId] = useState('')
+  const [refreshTick, setRefreshTick] = useState(0)
   const isRemoteMode = isRemote
 
   useEffect(() => {
     let alive = true
     const load = async () => {
       // 启用清单两个模式都要读；登记表只有线上有
-      /*
-       * 🔴 2026-10-24 修（用户：「这里我根本看不见插件有什么，即便是默认官方插件」）：
-       *   原来**只有本地模式**拿 `BUNDLED_MANIFESTS` 顶上，线上模式**只读 `plugin_registry`** ——
-       *   而随包内置的那几个（班级课表 / 每日作业 / 每日祝福语 / 作业讲评）根本没进登记表，
-       *   于是线上这一块永远是「还没有插件」，老师既看不见也开不了，教室端自然只剩宿主那三块。
-       *   ⇒ 内置插件**两个模式都要列**，而且排在前面（它们是随包来的，与"装没装"无关）；
-       *      线上登记表里**多出来的**（从插件库装的）接在后面，同一个 id 不重复列。
-       */
+      /* 本地演示保留样例；远程模式只展示 Git 提交经管理端发布的插件。 */
       const cfgs = await loadPluginConfigs(classId)
       if (!alive) return
       const bundled: RegistryCard[] = BUNDLED_MANIFESTS.map((m) => ({
@@ -2973,6 +3000,7 @@ function ClassroomPluginsPanel({ classId }: { classId: string }) {
         description: m.description,
         version: m.version,
         revoked: false,
+        gitReady: true,
         permissions: [...m.permissions],
         configFields: [...(m.config?.fields ?? [])],
       }))
@@ -2982,21 +3010,20 @@ function ClassroomPluginsPanel({ classId }: { classId: string }) {
       } else {
         const sb = getSupabase()
         if (!sb) {
-          // 没有数据库连接：随包内置的那几个照常列（它们不需要数据库）
-          list = bundled
+          list = []
           if (alive) setErr({ forClass: classId, msg: '没有可用的数据库连接，装的插件列不出来。' })
         } else
         try {
           const { data, error } = await sb
             .from('plugin_registry')
             .select(
-              'plugin_id, name, description, stable_version, revoked_at, permissions, config_schema',
+              'plugin_id, name, description, stable_version, revoked_at, source_commit, permissions, config_schema',
             )
             .order('plugin_id')
           if (!alive) return
           if (error) {
             const msg = String(error.message ?? '')
-            list = bundled
+            list = []
             setErr({
               forClass: classId,
               msg: /does not exist/i.test(msg)
@@ -3004,12 +3031,10 @@ function ClassroomPluginsPanel({ classId }: { classId: string }) {
                 : msg,
             })
           } else {
-            const bundledIds = new Set(bundled.map((c) => c.pluginId))
+            const registered = (Array.isArray(data) ? (data as Array<Record<string, unknown>>) : [])
+              .filter((r) => r?.plugin_id)
             list = [
-              ...bundled,
-              ...(Array.isArray(data) ? (data as Array<Record<string, unknown>>) : [])
-                .filter((r) => r?.plugin_id && !bundledIds.has(String(r.plugin_id)))
-                .map((r) => {
+              ...registered.map((r) => {
                   const schema = (r.config_schema ?? {}) as { fields?: RegistryCard['configFields'] }
                   return {
                     pluginId: String(r.plugin_id),
@@ -3020,6 +3045,7 @@ function ClassroomPluginsPanel({ classId }: { classId: string }) {
                         ? r.stable_version
                         : null,
                     revoked: !!r.revoked_at,
+                    gitReady: typeof r.source_commit === 'string' && /^[a-f0-9]{40}$/i.test(r.source_commit),
                     permissions: Array.isArray(r.permissions) ? (r.permissions as string[]) : [],
                     configFields: Array.isArray(schema.fields) ? schema.fields : [],
                   }
@@ -3027,7 +3053,7 @@ function ClassroomPluginsPanel({ classId }: { classId: string }) {
             ]
           }
         } catch (e) {
-          list = bundled
+          list = []
           if (alive)
             setErr({ forClass: classId, msg: e instanceof Error ? e.message : '插件清单没读出来。' })
         }
@@ -3050,7 +3076,7 @@ function ClassroomPluginsPanel({ classId }: { classId: string }) {
     return () => {
       alive = false
     }
-  }, [classId, isRemoteMode])
+  }, [classId, isRemoteMode, refreshTick])
 
   const cards = loaded?.forClass === classId ? loaded.cards : null
   const enabledMap = loaded?.forClass === classId ? loaded.enabled : {}
@@ -3155,6 +3181,7 @@ function ClassroomPluginsPanel({ classId }: { classId: string }) {
           {online ? '教室端在线' : '教室端不在线'}
         </span>
         <span>改完它会自己跟上（在线几秒内，离线等上线）。</span>
+        <Button size="sm" onClick={() => setRefreshTick((n) => n + 1)}>获取可用插件</Button>
       </div>
 
       {noticeText ? (
@@ -3184,11 +3211,12 @@ function ClassroomPluginsPanel({ classId }: { classId: string }) {
                 <Tag tone="warn">还没有放行版本</Tag>
               )}
               {card.revoked ? <Tag tone="bad">已撤下</Tag> : null}
+              {!card.gitReady ? <Tag tone="warn">缺少 Git 发布记录</Tag> : null}
               <span className="flex-1" />
               <Button
                 size="sm"
                 variant={enabled ? 'ghost' : 'primary'}
-                disabled={busyId === card.pluginId || !card.version || card.revoked}
+                disabled={busyId === card.pluginId || !card.version || card.revoked || !card.gitReady}
                 onClick={() => void toggle(card)}
               >
                 {enabled ? '停用' : '启动'}

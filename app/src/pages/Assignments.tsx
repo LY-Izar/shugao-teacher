@@ -10,10 +10,8 @@ import {
   IconPencil,
   IconPlus,
   IconRefresh,
-  IconScan,
   IconTrash,
   IconUsers,
-  IconZap,
 } from '../components/icons'
 import { Button, Empty, PageHead, Panel, Sect, Sheet, Tag } from '../components/ui'
 import { useStore, useToast } from '../data/store'
@@ -145,13 +143,6 @@ function primaryPath(a: { id: string; status: AssignmentStatus; confirmedNos?: s
   if (gradingStarted(a)) return `/assignments/${a.id}/grade`
   if (a.status === 'collected') return `/assignments/${a.id}/grade`
   return `/assignments/${a.id}/collect`
-}
-
-function primaryLabel(a: { status: AssignmentStatus; confirmedNos?: string[] }): string {
-  if (a.status === 'graded' || a.status === 'reviewed') return '看统计'
-  if (gradingStarted(a)) return '继续批改'
-  if (a.status === 'collected') return '去批改'
-  return '拍照查缺'
 }
 
 export default function Assignments() {
@@ -482,7 +473,7 @@ export default function Assignments() {
   return (
     <>
       <PageHead
-        title="作业"
+        title="作业情况"
         sub={
           /*
            * 🔴 默认那一句**逐字不变**（`${assignments.length} 份档案 · ${pending} 份待收缴`）——
@@ -502,22 +493,13 @@ export default function Assignments() {
         }
         right={
           <div className="flex items-center gap-1">
-            {/*
-              考试入口放这里（而不是塞进底部导航）：底部只有 5 个位置，
-              而"考试"和"作业"本来就是同一件事的两个分支，放在一起最好找。
-              ⚠️ 这只是**入口**，作业的数据与语义一个字节都没动 ——
-              考试是独立的一条 /exams 路由族与两张独立的表。
-            */}
-            <Button size="sm" variant="ghost" icon={<IconHash size={14} />} onClick={() => navigate('/exams')}>
-              考试
-            </Button>
             <Button
               size="sm"
               variant="primary"
               icon={<IconPlus size={15} />}
               onClick={() => navigate('/assignments/new')}
             >
-              新建
+              新建作业
             </Button>
           </div>
         }
@@ -973,6 +955,7 @@ export default function Assignments() {
               }
               const { a, klass, stats } = it.r
               const started = gradingStarted(a)
+              const reviewReady = started || a.status === 'graded' || a.status === 'reviewed'
               return (
               <Panel key={it.key} className="overflow-hidden">
                 <button
@@ -1069,85 +1052,34 @@ export default function Assignments() {
                   </span>
                 </button>
 
-                {/*
-                  ⚠️ `data-card-actions` 是**手机端布局调整的挂点**（见 `index.css` 末尾那一节）：
-                     窄屏下这一排按钮多的时候（档案已批改 + 已起过草稿时会有 3 个）不允许
-                     把按钮压到文字被裁掉 —— 只**换行**、不缩字。桌面（≥ sm）那一段一个字都不改。
-                */}
-                <div
-                  data-card-actions
-                  className="flex items-center gap-1 px-3 py-2"
-                  style={{
-                    borderTop: '1px solid var(--color-line)',
-                    background: 'var(--color-surface2)',
-                  }}
-                >
-                  <Button
-                    size="sm"
-                    variant={a.status === 'graded' || a.status === 'reviewed' ? 'ghost' : 'primary'}
-                    icon={a.status === 'collected' ? <IconZap size={14} /> : <IconScan size={14} />}
-                    onClick={() => navigate(primaryPath(a))}
-                  >
-                    {primaryLabel(a)}
-                  </Button>
-
-                  {/* 已经临时保存过的：主入口是继续批，下面只留一个看统计的口子 */}
-                  {started && a.status !== 'graded' && a.status !== 'reviewed' ? (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => navigate(`/assignments/${a.id}/stats`)}
-                    >
-                      查看当前统计情况
-                    </Button>
-                  ) : null}
-
-                  {/* 还没动过批改才给「直接批改」——已经批过的人不需要 */}
-                  {a.status === 'open' && !started ? (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      icon={<IconZap size={14} />}
-                      onClick={() => navigate(`/assignments/${a.id}/grade`)}
-                    >
-                      直接批改
-                    </Button>
-                  ) : null}
-
-                  {a.status !== 'open' ? (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => navigate(`/assignments/${a.id}/collect`)}
-                    >
-                      收缴记录
-                    </Button>
-                  ) : null}
-
-                  {/* 确认完成批改之后才有改错登记。呼叫也在那一页里，档案下不再重复放 */}
-                  {a.status === 'graded' || a.status === 'reviewed' ? (
-                    <Button
-                      size="sm"
-                      variant={(a.correctionNos?.length ?? 0) > 0 ? 'primary' : 'ghost'}
-                      icon={<IconCheck size={14} />}
-                      onClick={() => navigate(`/assignments/${a.id}/correct`)}
-                    >
-                      改错登记
-                      {a.correctionNos?.length
-                        ? ` ${a.correctedNos?.length ?? 0}/${a.correctionNos.length}`
-                        : ''}
-                    </Button>
-                  ) : null}
-                  {/* 「补题目」「改日期」都挪到作业情况页右上角了 —— 那里才是档案的管理入口 */}
-                  <span className="flex-1" />
-                  <button
-                    type="button"
-                    aria-label="删除"
-                    onClick={() => setConfirmId(a.id)}
-                    style={{ color: 'var(--color-ink4)', padding: 6 }}
-                  >
-                    <IconTrash size={15} />
-                  </button>
+                <div className="assignment-stage-grid">
+                  <section className="assignment-stage">
+                    <div className="assignment-stage-heading assignment-stage-top"><span>上交统计</span><button type="button" onClick={() => navigate(`/assignments/${a.id}/collect#photo`)}>拍照清查</button></div>
+                    <div className="assignment-stage-value">{stats.registered ? `已交 ${stats.submitted}/${stats.total}` : '尚未登记'}</div>
+                    <div className="assignment-stage-actions">
+                      <button type="button" onClick={() => navigate(`/assignments/${a.id}/collect`)}>查看上交</button>
+                    </div>
+                  </section>
+                  <section className="assignment-stage">
+                    <div className="assignment-stage-heading">作业批改</div>
+                    <div className="assignment-stage-value">{reviewReady ? `已批 ${a.confirmedNos?.length ?? 0} 人` : '待批阅'}</div>
+                    <div className="assignment-stage-actions">
+                      <button type="button" onClick={() => navigate(`/assignments/${a.id}/grade`)}>{started ? '继续批改' : '进入批改'}</button>
+                    </div>
+                  </section>
+                  <section className="assignment-stage">
+                    <div className="assignment-stage-heading">{a.statsMode === 'simple' ? '等级统计' : '错题统计·过关'}</div>
+                    <div className="assignment-stage-value">{reviewReady ? (a.statsMode === 'simple' ? '查看等级分布' : `错题 ${wrongTotal(a)}`) : '批改后查看'}</div>
+                    <div className="assignment-stage-actions">
+                      <button type="button" disabled={!reviewReady} onClick={() => navigate(`/assignments/${a.id}/stats`)}>查看统计</button>
+                      {a.statsMode !== 'simple' && (a.status === 'graded' || a.status === 'reviewed') ? (
+                        <button type="button" onClick={() => navigate(`/assignments/${a.id}/correct`)}>改错过关</button>
+                      ) : null}
+                    </div>
+                  </section>
+                </div>
+                <div className="assignment-card-foot">
+                  <button type="button" aria-label="删除" onClick={() => setConfirmId(a.id)}><IconTrash size={15} /></button>
                 </div>
               </Panel>
               )

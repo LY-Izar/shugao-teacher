@@ -75,6 +75,7 @@ export const PAGES: PageRow[] = [
 
   /* ---------------- 页内（只能从父页点进来，没有自己的入口） ---------------- */
   { path: '/classes/:id', group: '班级', entry: null },
+  { path: '/class/:section', group: '班主任工作板块', entry: '/classes' },
   { path: '/classes/:id/import/photo', group: '班级', entry: null },
   { path: '/classes/:id/import/paste', group: '班级', entry: null },
   { path: '/assignments/new', group: '作业', entry: null },
@@ -190,6 +191,8 @@ export const PAGES: PageRow[] = [
    *    里**原来都没有这一行** → 两份文档各加一行，`MATRIX_SHAPE` / `MATRIX_SHAPE_13` 跟着改。
    */
   { path: '/manage', group: 'NAV（行政管理）', entry: '/manage' },
+  { path: '/manage/students/:id', group: '页内（行政管理 → 学生档案）', entry: '/manage/course' },
+  { path: '/manage/assignments', group: '旧地址重定向（课程管理 → 班级课表）', entry: '/manage/course' },
   /*
    * 🆕 2026-10-12「课程管理」`/manage/course`（第 3 轮）—— **一个独立地址**。
    *

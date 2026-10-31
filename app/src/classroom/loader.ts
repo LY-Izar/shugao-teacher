@@ -29,8 +29,10 @@ import {
   type ResourceName,
 } from '../lib/pluginHost'
 import { getSupabase, isRemote } from '../lib/supabase'
+import { subscribe } from '../lib/realtime'
 import { chime, isSilenced, softChime } from '../lib/tts'
 import { readPluginTable, readResource, watchResource } from './resources'
+import { refreshClassroomData } from './dataSync'
 import type { AvailablePlugin } from './demoPlugin'
 
 /**
@@ -38,10 +40,10 @@ import type { AvailablePlugin } from './demoPlugin'
  *
  * 🔴 它**不是** `APP_VERSION`（教师端发版号，`lib/version.ts`）：那是"网页产物第几版"，
  *    这个回答的是"这个壳有没有插件框架要的能力"。P0b 是第一个带插件框架的教室端壳，
- *    定 1.1.5（假插件的 `minShellVersion` 就是照它写的）；等壳侧作业落地，exe 的
+ *    初版定 1.1.5，现随即时数据通道升至 1.1.6；等壳侧作业落地，exe 的
  *    preload 会用真值盖掉它（严格值纪律：壳说了算，这里只是网页预览的兜底）。
  */
-export const PLUGIN_SHELL_VERSION = '1.1.5'
+export const PLUGIN_SHELL_VERSION = '1.1.6'
 
 /** 手册 §2.1：壳版本不够 ⇒ 不加载，只显示这一句。导出成常量让界面与判据同源。 */
 export const NEED_NEWER_SHELL = '需要更新的教室版程序'
@@ -145,34 +147,86 @@ class DemoSlot implements PluginSlot {
   }
 }
 
-/** 线上槽：本地镜像先行，RPC 写穿；断网排队重放（不 reject），配额错照抛。 */
+/** 线上槽：先把待上传值落到设备，再走 RPC；断网重放，配额错照抛。 */
 class RemoteSlot implements PluginSlot {
   private classId: string
   private pluginId: string
   private mem = new Map<string, unknown>()
-  private queue: Array<{ key: string; value: unknown }> = []
+  private queue: Array<{ id: string; key: string; value: unknown; before?: unknown; hadBefore: boolean }> = []
+  private readonly outboxKey: string
   private lastError: string | null = null
   private loaded = false
+  private loadGeneration = 0
+  private loadPromise: Promise<void> | null = null
+  private offRealtime: () => void
   private disposed = false
+  private flushPromise: Promise<void> | null = null
+  private retryTimer: number
 
   constructor(classId: string, pluginId: string) {
     this.classId = classId
     this.pluginId = pluginId
+    this.outboxKey = `shugao.plugin.outbox.${classId}.${pluginId}.`
+    try {
+      this.queue = this.readQueue()
+      for (const item of this.queue) this.mem.set(item.key, item.value)
+    } catch {
+      this.lastError = '待上传数据读取失败'
+    }
     window.addEventListener('online', this.flush)
     document.addEventListener('visibilitychange', this.flush)
+    this.offRealtime = subscribe((m) => {
+      if (m.type === 'realtimeReady' ||
+          (m.type === 'pluginStorage' && m.classId === this.classId && m.pluginId === this.pluginId)) {
+        this.loaded = false
+        this.loadGeneration += 1
+        void this.ensureLoaded()
+      }
+    })
+    this.retryTimer = window.setInterval(this.flush, 30_000)
+    if (this.queue.length) this.flush()
   }
 
   dispose() {
     this.disposed = true
     window.removeEventListener('online', this.flush)
     document.removeEventListener('visibilitychange', this.flush)
+    this.offRealtime()
+    window.clearInterval(this.retryTimer)
   }
 
   syncState() {
+    try { this.queue = this.readQueue() } catch { /* 仍显示最后一次已知状态 */ }
     return { pending: this.queue.length, lastError: this.lastError }
   }
 
-  /** 库还没跑 §45（函数不存在）⇒ 只落本地镜像，一次 warn（布局这类框架数据照用）。 */
+  private readQueue() {
+    const items: typeof this.queue = []
+    for (let i = 0; i < localStorage.length; i++) {
+      const name = localStorage.key(i)
+      if (!name?.startsWith(this.outboxKey)) continue
+      try {
+        const item = JSON.parse(localStorage.getItem(name) ?? '') as (typeof this.queue)[number]
+        if (item && typeof item.id === 'string' && typeof item.key === 'string' &&
+            name === this.outboxKey + item.id) items.push(item)
+      } catch { /* 损坏的单条不阻断其他待上传项 */ }
+    }
+    return items.sort((a, b) => a.id.localeCompare(b.id))
+  }
+
+  private savePending(item: (typeof this.queue)[number]) {
+    try {
+      localStorage.setItem(this.outboxKey + item.id, JSON.stringify(item))
+    } catch {
+      throw codeErr('E_STORAGE')
+    }
+  }
+
+  private removePending(item: (typeof this.queue)[number]) {
+    localStorage.removeItem(this.outboxKey + item.id)
+  }
+
+  /** RPC 请求结果由调用方区分：成功、服务端拒绝、网络或部署错误。 */
   private async rpc(
     fn: 'plugin_data_read' | 'plugin_data_write',
     args: Record<string, unknown>,
@@ -188,17 +242,27 @@ class RemoteSlot implements PluginSlot {
 
   private async ensureLoaded(): Promise<void> {
     if (this.loaded) return
-    this.loaded = true
-    const r = await this.rpc('plugin_data_read', {
-      p_class_id: this.classId,
-      p_plugin_id: this.pluginId,
-      p_key: null,
-    })
-    if (!r || r.error) return
-    const v = r.data as { ok?: boolean; rows?: Array<{ key: string; payload: unknown }> } | null
-    if (v?.ok && Array.isArray(v.rows)) {
-      for (const row of v.rows) this.mem.set(row.key, row.payload)
-    }
+    if (this.loadPromise) return this.loadPromise
+    this.loadPromise = (async () => {
+      while (!this.disposed && !this.loaded) {
+        const generation = this.loadGeneration
+        const r = await this.rpc('plugin_data_read', {
+          p_class_id: this.classId,
+          p_plugin_id: this.pluginId,
+          p_key: null,
+        })
+        if (generation !== this.loadGeneration) continue
+        if (!r || r.error) return
+        const v = r.data as { ok?: boolean; rows?: Array<{ key: string; payload: unknown }> } | null
+        if (!v?.ok || !Array.isArray(v.rows)) return
+        const pending = new Set(this.readQueue().map((item) => item.key))
+        const remoteKeys = new Set(v.rows.map((row) => row.key))
+        for (const key of this.mem.keys()) if (!pending.has(key) && !remoteKeys.has(key)) this.mem.delete(key)
+        for (const row of v.rows) if (!pending.has(row.key)) this.mem.set(row.key, row.payload)
+        this.loaded = true
+      }
+    })().finally(() => { this.loadPromise = null })
+    return this.loadPromise
   }
 
   async get(key: string): Promise<unknown> {
@@ -214,67 +278,86 @@ class RemoteSlot implements PluginSlot {
   async set(key: string, value: unknown): Promise<void> {
     const bad = preflightWrite(this.pluginId, key, value, this.mem.has(key) ? 0 : this.mem.size)
     if (bad) throw codeErr(bad)
-    const prev = this.mem.get(key)
-    this.mem.set(key, value) // 先落镜像：断网时 get 也要能读回最新（§6.4）
-    const r = await this.rpc('plugin_data_write', {
-      p_class_id: this.classId,
-      p_plugin_id: this.pluginId,
-      p_key: key,
-      p_payload: value,
-    })
-    if (!r) {
-      // 连 Supabase 客户端都没有（不该发生：RemoteSlot 只在 isRemote 下建）→ 排队等重放
-      this.enqueue(key, value)
-      return
+    const item = {
+      id: `${Date.now().toString(36).padStart(10, '0')}-${crypto.randomUUID()}`,
+      key, value, before: this.mem.get(key), hadBefore: this.mem.has(key),
     }
-    if (r.error) {
-      // 网络错 ⇒ 排队重放、**不 reject**；库没跑 §45 也走这里（框架槽降级为本地），
-      // 其余错误（表坏了等）同样先排队——重放时自然再报。
-      this.lastError = String((r.error as { message?: string }).message ?? r.error)
-      this.enqueue(key, value)
-      return
+    // 一笔一个浏览器存储项；主窗口和插件弹窗同时写也不会覆盖彼此的队列。
+    this.savePending(item)
+    this.queue = this.readQueue()
+    this.mem.set(key, value)
+    await this.flushNow()
+    // 刚好在队列读完、锁释放前入队时，再试一次，确保这笔写立即启动。
+    if (!this.disposed && !this.lastError && this.readQueue().some((q) => q.id === item.id)) await this.flushNow()
+    const receiptKey = this.outboxKey + 'rejected.' + item.id
+    const rejected = localStorage.getItem(receiptKey)
+    if (rejected) {
+      localStorage.removeItem(receiptKey)
+      throw codeErr(rejected)
     }
-    const v = r.data as { ok?: boolean; code?: string } | null
-    if (v && v.ok === false) {
-      // 数据库明确拒（配额/权限/命名空间）⇒ 回滚镜像 + 抛同一个码（§4.2：set 要 reject）
-      if (prev === undefined) this.mem.delete(key)
-      else this.mem.set(key, prev)
-      throw codeErr(v.code ?? 'E_FORBIDDEN')
-    }
-  }
-
-  private enqueue(key: string, value: unknown) {
-    // 同 key 只留最新一条 —— 重放的是"最终值"，不是历史
-    const rest = this.queue.filter((q) => q.key !== key)
-    rest.push({ key, value })
-    this.queue = rest
   }
 
   private flush = () => {
-    if (this.disposed || !this.queue.length || document.visibilityState !== 'visible') return
-    void (async () => {
-      while (this.queue.length) {
+    void this.flushNow().catch((error) => {
+      this.lastError = String((error as { message?: string })?.message ?? error)
+    })
+  }
+
+  private flushNow(): Promise<void> {
+    if (this.disposed) return Promise.resolve()
+    if (this.flushPromise) return this.flushPromise
+    this.flushPromise = (async () => {
+      const run = async () => {
+        while (!this.disposed) {
+        this.queue = this.readQueue()
+        if (!this.queue.length) return
+        // 离线期间同一槽只保留最后一次值，避免重连后撞写入频率配额。
+        const latest = new Map(this.queue.map((item) => [item.key, item.id]))
+        for (const item of this.queue) if (latest.get(item.key) !== item.id) this.removePending(item)
+        this.queue = this.readQueue()
         const head = this.queue[0]
-        const prev = this.mem.get(head.key)
         const r = await this.rpc('plugin_data_write', {
           p_class_id: this.classId,
           p_plugin_id: this.pluginId,
           p_key: head.key,
           p_payload: head.value,
         })
-        if (!r || r.error) return // 还是出不去：留着下次
+        if (!r || r.error) {
+          this.lastError = String((r?.error as { message?: string } | undefined)?.message ?? r?.error ?? '连接不可用')
+          return // 保留持久化队列，恢复连接后重放
+        }
         const v = r.data as { ok?: boolean; code?: string } | null
         if (v && v.ok === false) {
-          if (prev === undefined) this.mem.delete(head.key)
-          else this.mem.set(head.key, prev)
-          this.lastError = v.code ?? 'E_FORBIDDEN'
-          this.queue.shift() // 数据库明确拒的不重试（§4.3：配额错"不是重试一下就好"）
+          const code = v.code ?? 'E_FORBIDDEN'
+          this.lastError = code
+          this.removePending(head)
+          // 处理这笔写的可能是另一个窗口；用回执把服务端拒绝交给原调用者。
+          localStorage.setItem(this.outboxKey + 'rejected.' + head.id, code)
+          this.queue = this.readQueue()
+          if (!this.queue.some((q) => q.key === head.key) &&
+              JSON.stringify(this.mem.get(head.key)) === JSON.stringify(head.value)) {
+            if (head.hadBefore) this.mem.set(head.key, head.before)
+            else this.mem.delete(head.key)
+          }
           continue
         }
-        this.queue.shift()
+        if (v?.ok !== true) {
+          this.lastError = '上传接口未确认写入'
+          return
+        }
+        this.removePending(head)
+        this.queue = this.readQueue()
         this.lastError = null
+        }
       }
+      try {
+        // Chromium/Edge 的 Web Locks 跨主窗口与弹窗串行重传；无此 API 时
+        // 单条存储仍不会互相覆盖，重复 RPC 为幂等的同键写入。
+        if (navigator.locks) await navigator.locks.request(this.outboxKey, run)
+        else await run()
+      } finally { this.flushPromise = null }
     })()
+    return this.flushPromise
   }
 }
 
@@ -394,11 +477,31 @@ export function makeHostPorts(d: PortDeps): HostPorts {
 
   return {
     readResource: (resource: ResourceName) => readResource(resource, d.classId),
-    watchResource: (_resource: ResourceName, cb: () => void) =>
-      watchResource(crashGuard(cb)),
+    watchResource: (resource: ResourceName, cb: () => void) => {
+      const safe = crashGuard(cb)
+      const sources = resource === 'class.roster' ? ['students']
+        : resource === 'class.schedule' || resource === 'class.slotNow' || resource === 'class.todaySchedule'
+          ? ['schedule_items', 'schedule_temp_changes', 'school_calendar', 'school_calendar_events']
+        : resource === 'class.dailyHomework' ? ['daily_homework']
+        : resource === 'class.duty' ? ['duty_assignments', 'students', 'school_calendar', 'school_calendar_events']
+        : resource === 'class.assignments' || resource === 'class.gradedHomework' ? ['assignments', 'students']
+        : []
+      const offLocal = isRemote && sources.length ? () => {} : watchResource(safe)
+      const refresh = () => { void refreshClassroomData().then(safe).catch((error) => d.log('插件资源刷新失败', error)) }
+      const offRemote = sources.length && isRemote ? subscribe((m) => {
+        if ((m.type === 'pluginSource' && m.classId === d.classId && sources.includes(m.table)) || m.type === 'realtimeReady') {
+          refresh()
+        }
+      }) : () => {}
+      const fallback = sources.length && isRemote ? window.setInterval(() => {
+        if (document.visibilityState === 'visible') refresh()
+      }, 15 * 60_000) : undefined
+      return () => { offLocal(); offRemote(); if (fallback !== undefined) window.clearInterval(fallback) }
+    },
     storageGet: (key: string) => d.slot.get(key),
     storageSet: (key: string, value: unknown) => d.slot.set(key, value),
     storageKeys: () => d.slot.keys(),
+    storageSyncState: () => d.slot.syncState(),
     configGet: () => d.getConfig(),
     configOnChange: (cb) => d.onConfigChange(crashGuard(cb)),
     onDispose: (fn: () => void) => d.host.addDisposer(fn),
@@ -467,7 +570,7 @@ export function makeHostPorts(d: PortDeps): HostPorts {
      */
     readPluginTable: async (table, _opts) => {
       try {
-        const r = await readPluginTable(table, d.classId)
+        const r = await readPluginTable(table, d.classId, d.pluginId)
         const v = r.value as { rows?: unknown[]; truncated?: boolean }
         return {
           ok: true as const,
@@ -485,6 +588,17 @@ export function makeHostPorts(d: PortDeps): HostPorts {
           why: String((e as { message?: string })?.message ?? e),
         }
       }
+    },
+    watchPluginTable: (table, cb) => {
+      const safe = crashGuard(cb)
+      const offLocal = isRemote ? () => {} : watchResource(safe)
+      const offRemote = isRemote ? subscribe((m) => {
+        if ((m.type === 'pluginSource' && m.classId === d.classId && m.table === table) || m.type === 'realtimeReady') safe()
+      }) : () => {}
+      const fallback = isRemote ? window.setInterval(() => {
+        if (document.visibilityState === 'visible') safe()
+      }, 15 * 60_000) : undefined
+      return () => { offLocal(); offRemote(); if (fallback !== undefined) window.clearInterval(fallback) }
     },
   }
 }

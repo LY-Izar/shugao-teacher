@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Page } from '../components/AppShell'
 import {
@@ -36,10 +36,8 @@ import {
   canAssignRoles,
   canEditClassFor,
   canManageTeachers,
-  currentIdentityLabel,
   entryVisible,
   hasManagingRole,
-  IDENTITY_TAG_STYLE,
   isSuperAdmin,
   seesTeachingData,
   type EntryKey,
@@ -47,6 +45,9 @@ import {
 import { noticeScopeText } from '../lib/notices'
 import { pendingForMe, type TeachingRow } from '../lib/teaching'
 import { loadClassSubjects } from '../data/remote'
+import { beijingNow } from '../lib/holiday'
+import { availableWorkspaces, visibleDirectory, WORKSPACES } from '../workspaces'
+import { WorkspaceContext } from '../workspaces/context'
 
 const todoPath = (a: { id: string; status: string }) =>
   a.status === 'collected' ? `/assignments/${a.id}/grade` : `/assignments/${a.id}/collect`
@@ -57,7 +58,6 @@ function greeting() {
 
 export default function Workbench() {
   const teacher = useStore((s) => s.teacher)
-  /* 「当前身份」标签：有管理身份显示身份，没有才显示学科（与侧栏同一处实现，见 lib/roles.ts） */
   const myRoles = useStore((s) => s.myRoles)
   const classes = useStore((s) => s.classes)
   /*
@@ -73,6 +73,7 @@ export default function Workbench() {
   const clearAll = useStore((s) => s.clearAll)
   const addClass = useStore((s) => s.addClass)
   const navigate = useNavigate()
+  const chooseWorkspace = useContext(WorkspaceContext)?.select
   const push = useToast((s) => s.push)
   const [newOpen, setNewOpen] = useState(false)
   const [form, setForm] = useState({ name: '', grade: '高二', year: '2025-2026' })
@@ -133,7 +134,7 @@ export default function Workbench() {
 
   const health = useMemo(() => adminClasses.map((c) => ({ c, h: analyzeRoster(c.students) })), [adminClasses])
 
-  const today = new Date()
+  const today = beijingNow()
   const dateText = `${today.getMonth() + 1} 月 ${today.getDate()} 日 · 周${
     '日一二三四五六'[today.getDay()]
   }`
@@ -169,7 +170,9 @@ export default function Workbench() {
   }
 
   /* 「我的班」那一格要的那个班：班主任身份带的范围就是班 id（`canEditClassFor` 认它） */
-  const ledClass = adminClasses.find((c) => canEditClassFor(myRoles, c.id, c.gradeId))
+  const ledClass = adminClasses.find((c) => myRoles.some((role) => role.role === 'head_teacher' && role.scopeType === 'class' && role.scopeId === c.id))
+    ?? adminClasses.find((c) => canEditClassFor(myRoles, c.id, c.gradeId))
+  const ledHealth = ledClass ? analyzeRoster(ledClass.students) : null
 
   const T = {
     assignment: {
@@ -202,7 +205,7 @@ export default function Workbench() {
       icon: <IconUsers size={19} />,
       title: '我的班',
       desc: ledClass ? `${ledClass.name} · ${activeStudents(ledClass).length} 人` : '班级 · 名单',
-      onClick: () => navigate(ledClass ? `/classes/${ledClass.id}` : '/classes'),
+      onClick: () => navigate(ledClass ? '/class/roster' : '/classes'),
     },
     schedule: {
       key: 'schedule',
@@ -302,6 +305,48 @@ export default function Workbench() {
                 ]
   ).filter((t) => entryVisible(t.entry, myRoles))
 
+  const workspaces = availableWorkspaces(myRoles)
+  const overviewBoards = {
+    subject: {
+      work: [
+        todayItems.length ? `今日课程与安排 ${todayItems.length} 项` : '今日暂无课程安排',
+        pending.length ? `待处理作业 ${pending.length} 份` : '作业均已处理',
+      ],
+      reminder: pending.length ? `${pending.length} 份作业需要收缴或批改` : '暂无待处理作业',
+      links: [
+        { label: '作业', to: '/assignments', entry: '/assignments' as EntryKey },
+        { label: '考试', to: '/exams', entry: '/exams' as EntryKey },
+        { label: '日程', to: '/schedule', entry: '/schedule' as EntryKey },
+      ],
+    },
+    class: {
+      work: [
+        ledClass ? `${ledClass.name} · ${activeStudents(ledClass).length} 名学生` : '尚未分配班主任班级',
+        ledHealth ? (ledHealth.healthy ? '本班名单已核对' : '本班名单待核对') : '暂无班级名单',
+      ],
+      reminder: ledHealth && !ledHealth.healthy ? '本班名单存在缺号、重名或待核对项' : '本班名单暂无异常提醒',
+      links: [
+        { label: '学生名单', to: '/class/roster', entry: '/classes' as EntryKey },
+        { label: '课程管理', to: '/class/courses', entry: '/schedule' as EntryKey },
+        { label: '学习管理', to: '/class/learning', entry: '/classes' as EntryKey },
+        { label: '班级事务', to: '/class/affairs', entry: '/classes' as EntryKey },
+        { label: '教室操控', to: '/class/classroom', entry: '/files' as EntryKey },
+      ],
+    },
+    admin: {
+      work: [
+        `${adminClasses.length} 个班级 · ${total} 名学生`,
+        `当前身份可用 ${visibleDirectory('admin', myRoles).length} 项行政管理`,
+      ],
+      reminder: '可处理的范围以当前账号的身份和服务端权限为准',
+      links: [
+        { label: '学生管理', to: '/manage', entry: '/manage/course' as EntryKey },
+        { label: '教师管理', to: '/accounts', entry: '/accounts' as EntryKey },
+        { label: '课程管理', to: '/manage/calendar', entry: '/manage/calendar' as EntryKey },
+      ],
+    },
+  }
+
   return (
     <Page>
       {/* 氛围首栏：假期 / 夜深 / 周末 / 今天已完成 */}
@@ -322,15 +367,30 @@ export default function Workbench() {
           {greeting()}，{teacher?.name ?? '老师'}
         </h1>
         <div className="mt-2 flex flex-wrap items-center gap-2">
-          {/*
-            同上：有管理身份显示身份（**多个身份全露**，如「教务处 · 年级主任」），没有才显示学科。
-            这一行本来就是 `flex-wrap`，多身份时后面的标签整块落到下一行 —— 实测 3 / 4 个身份都不溢出。
-          */}
-          <span className="tag tag-accent" style={IDENTITY_TAG_STYLE}>
-            {currentIdentityLabel(myRoles, teacher)}
-          </span>
-          <Tag tone="idle">高二 · 2025-2026</Tag>
+          <Tag tone="idle">今日概览</Tag>
           {streakDays > 1 ? <Tag tone="ok">连续使用 {streakDays} 天</Tag> : null}
+        </div>
+      </div>
+
+      <div className="mb-4">
+        <Sect>我的工作板块</Sect>
+        <div className="overview-board-grid">
+          {workspaces.map((id) => {
+            const board = overviewBoards[id]
+            const links = board.links.filter((link) => entryVisible(link.entry, myRoles))
+            return <section key={id} className="overview-board" data-board={id}>
+              <div className="overview-board-head"><strong>{WORKSPACES[id].label}</strong><span>{links.length} 个直达入口</span></div>
+              <div className="overview-board-body">
+                <div className="overview-board-caption">今日工作安排</div>
+                {board.work.map((line) => <div className="overview-board-line" key={line}>{line}</div>)}
+                <div className="overview-board-caption mt-3">情况提醒</div>
+                <div className="overview-board-line">{board.reminder}</div>
+                <div className="overview-board-actions">
+                  {links.map((link) => <button key={link.to} type="button" onClick={() => { chooseWorkspace?.(id); navigate(link.to) }}>{link.label} →</button>)}
+                </div>
+              </div>
+            </section>
+          })}
         </div>
       </div>
 

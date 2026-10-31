@@ -7,8 +7,7 @@
  * 用户 2026-10-25 的原话：「除了隐私信息类的，其他每一个的表数据读取权限都**预留个接口**……
  * 并**确保这些端口仅有插件能调用**」。
  *
- * 所以 `schema.sql` 里**每一张表**都要在这里出现一次（2026-10-25 实测 49 张
- * `create table`；任务单写的是 48 —— 按实际 49 张全收，宁可多登记一张也不能漏）：
+ * 所以 `schema.sql` 里**每一张表**都要在这里出现一次：
  *   · 能给的表：写 `cols`（**只列可以给出的列**）、`scope`、以及 class 域的 `classCol`；
  *   · 不能给的表：写 `deny`（一句人话理由），`cols: []` —— 它在目录里，但永远读不到。
  *
@@ -40,16 +39,15 @@ export type PluginTableDef = {
 }
 
 /** `schema.sql` 里 `create table` 的张数（2026-10-25 实测）。改 schema 记得回来改这里。 */
-export const PLUGIN_READ_TABLE_COUNT = 49
+export const PLUGIN_READ_TABLE_COUNT = 55
 
 export const PLUGIN_READ_TABLES: Record<string, PluginTableDef> = {
   /* ---------------- 一、账号与隐私：一律不给 ---------------- */
 
   teachers: {
-    what: '教师账号与姓名',
-    cols: [],
+    what: '教师名单：姓名与任教学科，不含联系方式或登录信息',
+    cols: ['id', 'name', 'subject'],
     scope: 'school',
-    deny: '教师账号与姓名属个人信息，插件不该直接读',
   },
   teacher_profiles: {
     what: '教师联系方式（电话、邮箱、住址）',
@@ -279,6 +277,18 @@ export const PLUGIN_READ_TABLES: Record<string, PluginTableDef> = {
     scope: 'class',
     classCol: 'class_id',
   },
+  class_groups: {
+    what: '本班小组：组名、组长和成员学号对应的学生 ID',
+    cols: ['id', 'class_id', 'name', 'leader_id', 'member_ids'],
+    scope: 'class',
+    classCol: 'class_id',
+  },
+  class_seats: {
+    what: '本班座位表：学生与座位行列',
+    cols: ['class_id', 'student_id', 'seat_row', 'seat_col'],
+    scope: 'class',
+    classCol: 'class_id',
+  },
   teacher_departments: {
     what: '教师所属部门与主部门（只有部门归属，没有联系方式）',
     cols: ['teacher_id', 'department', 'primary'],
@@ -383,6 +393,10 @@ export const PLUGIN_READ_TABLES: Record<string, PluginTableDef> = {
     scope: 'school',
     deny: '插件数据只经 storage 端口读写自己的键，不开整表',
   },
+  plugin_sync_events: {
+    what: '插件数据变更信号', cols: [], scope: 'school',
+    deny: '实时同步内部账，只通过宿主的更新通知接口使用',
+  },
   plugin_quota: {
     what: '插件读写配额计数',
     cols: [],
@@ -394,6 +408,18 @@ export const PLUGIN_READ_TABLES: Record<string, PluginTableDef> = {
     cols: [],
     scope: 'school',
     deny: '插件启用与配置属平台内部账，插件不该读自己被谁启用',
+  },
+  student_teaching_entries: {
+    what: '教师私有的学生标签与批注', cols: [], scope: 'school',
+    deny: '教师私有批注不向教室插件开放',
+  },
+  subject_student_groups: {
+    what: '学科教师的学生分组', cols: [], scope: 'school',
+    deny: '学科教师分组可能只供作者和相关班主任查看；插件使用班级小组表',
+  },
+  subject_student_group_members: {
+    what: '学科教师分组成员', cols: [], scope: 'school',
+    deny: '学科教师分组成员只供作者和相关班主任查看；插件使用班级小组表',
   },
 }
 

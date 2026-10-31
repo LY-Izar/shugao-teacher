@@ -11291,6 +11291,14 @@ await withLock(async () => {
         ['plugin_configs:true', 'plugin_data:true', 'plugin_quota:true', 'plugin_registry:true'],
       )
 
+      const publishedPlugins = (await db.query(
+        `select tablename from pg_publication_tables
+          where pubname = 'supabase_realtime' and schemaname = 'public'
+            and tablename in ('plugin_configs', 'plugin_registry') order by tablename`,
+      )).rows
+      eq('§45/§46 插件版本与配置都加入 Realtime publication',
+        publishedPlugins.map((r) => r.tablename), ['plugin_configs', 'plugin_registry'])
+
       const pol = (
         await db.query(
           `select tablename, policyname, cmd from pg_policies
@@ -11685,6 +11693,177 @@ await withLock(async () => {
       eq('🔴 X4：教务处仍然只读（需求⑦ 的口径没被这次改动破掉）', await canWrite(U.admin, C.c1, 'physics', '物理'), false)
       eq('X5：年级主任仍然不能写', await canWrite(U.grade, C.c1, 'physics', '物理'), false)
       eq('X6：别班的任课老师写不了这个班', await canWrite(U.chn, C.c2, 'chinese', '语文'), false)
+    }
+
+    /* §47：私有教学记录与班主任共享组。真实 RLS + 真事务，不把测试数据写回正式库。 */
+    {
+      const db = B.db
+      section('§47 学科学生情况：私有记录与班主任共享组')
+      await db.query("update site_state set enabled = false where key = 'maintenance'")
+      const addNote = (uid, author, cls, sid, code) => attempt(db, uid,
+        `insert into student_teaching_entries (class_id, student_id, teacher_id, subject_code, kind, body)
+         values ($1,$2,$3,$4,'note','课堂观察') returning id`, [cls, sid, author, code])
+      eq('任课教师可给自己教的班和学科建立文字记录', (await addNote(U.phy, U.phy, C.c1, S.s1, 'physics')).outcome, 'ok')
+      eq('同班另一学科教师不能冒用作者身份', (await addNote(U.chn, U.phy, C.c1, S.s1, 'physics')).outcome, 'denied')
+      eq('任课教师不能写自己未任教的学科', (await addNote(U.phy, U.phy, C.c1, S.s1, 'chinese')).outcome, 'denied')
+      eq('不能把其他班学生记到本班', (await addNote(U.phy, U.phy, C.c1, S.s4, 'physics')).outcome, 'denied')
+      eq('教室端不能建立私有记录', (await addNote(U.room, U.room, C.c1, S.s1, 'physics')).outcome, 'denied')
+      const note = (await db.query(
+        `insert into student_teaching_entries (class_id, student_id, teacher_id, subject_code, kind, body)
+         values ($1,$2,$3,'physics','tag','需关注') returning id`, [C.c1, S.s1, U.phy])).rows[0].id
+      const readNote = (uid) => countAs(db, uid, 'select count(*)::int n from student_teaching_entries where id = $1', [note])
+      eq('作者可读自己的标签', await readNote(U.phy), 1)
+      eq('同班其他任课教师读不到私人标签', await readNote(U.chn), 0)
+      eq('本班班主任也读不到私人标签', await readNote(U.head), 0)
+      eq('教室端读不到私人标签', await readNote(U.room), 0)
+      eq('其他教师不能删除作者的记录', (await attempt(db, U.chn,
+        'delete from student_teaching_entries where id = $1 returning id', [note])).outcome, 'blocked')
+
+      const group = (await db.query(
+        `insert into subject_student_groups (class_id, teacher_id, subject_code, name)
+         values ($1,$2,'physics','实验探究组') returning id`, [C.c1, U.phy])).rows[0].id
+      await db.query('insert into subject_student_group_members (group_id, student_id) values ($1,$2),($1,$3)', [group, S.s1, S.s2])
+      const readGroup = (uid) => countAs(db, uid, 'select count(*)::int n from subject_student_groups where id = $1', [group])
+      eq('建组教师可读学生组', await readGroup(U.phy), 1)
+      eq('本班班主任同步可读学生组', await readGroup(U.head), 1)
+      eq('同班其他任课教师读不到学生组', await readGroup(U.chn), 0)
+      eq('教室端读不到学生组', await readGroup(U.room), 0)
+      eq('班主任可读组员', await countAs(db, U.head,
+        'select count(*)::int n from subject_student_group_members where group_id = $1', [group]), 2)
+      eq('其他任课教师读不到组员', await countAs(db, U.chn,
+        'select count(*)::int n from subject_student_group_members where group_id = $1', [group]), 0)
+      const groupChecks = await asUser(db, U.phy, async () => (await db.query(
+        `select auth.uid() = $1::uuid as owner, not is_classroom_account() as teacher,
+                teaches_subject($2::uuid,'physics','物理') as teaches,
+                not is_maintenance() as writable`, [U.phy, C.c1])).rows[0])
+      eq('建组判据：作者、教师账号、任教学科、非维护均成立', Object.values(groupChecks), [true, true, true, true])
+      const directGroup = await attempt(db, U.phy,
+        `insert into subject_student_groups (class_id, teacher_id, subject_code, name)
+         values ($1,$2,'physics','直接建组') returning id`, [C.c1, U.phy])
+      ok('作者可直接写入组主表', directGroup.outcome === 'ok', directGroup.detail)
+      const createGroup = await asUser(db, U.phy, async () => {
+        const r = await db.query('select create_subject_student_group($1,$2,$3,array[$4,$5]::uuid[]) as id',
+          [C.c1, 'physics', '互助组', S.s1, S.s2])
+        const members = await db.query('select count(*)::int n from subject_student_group_members where group_id = $1', [r.rows[0].id])
+        return [Boolean(r.rows[0].id), Number(members.rows[0].n)]
+      })
+      eq('组作者能在一个事务中创建组和两名成员', createGroup, [true, 2])
+      eq('跨班成员不能混进组', (await attempt(db, U.phy,
+        'select create_subject_student_group($1,$2,$3,array[$4]::uuid[]) as id',
+        [C.c1, 'physics', '错误组', S.s4])).outcome, 'denied')
+      eq('任课教师不能给未任教学科建组', (await attempt(db, U.phy,
+        'select create_subject_student_group($1,$2,$3,array[$4]::uuid[]) as id',
+        [C.c1, 'chinese', '错误学科组', S.s1])).outcome, 'denied')
+      eq('班主任可查看但不能删除教师组', (await attempt(db, U.head,
+        'delete from subject_student_groups where id = $1 returning id', [group])).outcome, 'blocked')
+      const classGroup = (await db.query(
+        `insert into class_groups (class_id,name,leader_id,member_ids)
+         values ($1,'第一组',$2,array[$2,$3]::uuid[]) returning id`, [C.c1, S.s1, S.s2])).rows[0].id
+      eq('班主任能保存本班分组', (await attempt(db, U.head,
+        `update class_groups set name='第一小组' where id = $1 returning id`, [classGroup])).outcome, 'ok')
+      eq('教室端只读本班分组', await countAs(db, U.room,
+        'select count(*)::int n from class_groups where id = $1', [classGroup]), 1)
+      eq('本班任课教师也能只读分组', await countAs(db, U.chn,
+        'select count(*)::int n from class_groups where id = $1', [classGroup]), 1)
+      eq('教室端不能改分组', (await attempt(db, U.room,
+        `update class_groups set name='越权修改' where id = $1 returning id`, [classGroup])).outcome, 'blocked')
+      eq('别班学生不能加入本班分组', (await attempt(db, U.head,
+        `insert into class_groups (class_id,name,leader_id,member_ids)
+         values ($1,'错误组',$2,array[$2,$3]::uuid[])`, [C.c1, S.s1, S.s4])).outcome, 'denied')
+      eq('班主任能保存本班座位', (await attempt(db, U.head,
+        `insert into class_seats (class_id,student_id,seat_row,seat_col) values ($1,$2,1,1)`, [C.c1, S.s1])).outcome, 'ok')
+      eq('教室端不能写座位', (await attempt(db, U.room,
+        `insert into class_seats (class_id,student_id,seat_row,seat_col) values ($1,$2,1,2)`, [C.c1, S.s2])).outcome, 'denied')
+      await db.query('insert into class_seats (class_id,student_id,seat_row,seat_col) values ($1,$2,1,1)', [C.c1, S.s1])
+      eq('教室端可读本班座位', await countAs(db, U.room,
+        'select count(*)::int n from class_seats where class_id = $1', [C.c1]), 1)
+      await db.query(`insert into plugin_registry (plugin_id,stable_version,approved_reads)
+        values ('demo.directory','1.0.0','["teachers"]'::jsonb)`)
+      const directory = await asUser(db, U.room, async () => {
+        const raw = (await db.query('select plugin_teacher_directory($1,$2) as value',
+          [C.c1, 'demo.directory'])).rows[0].value
+        return typeof raw === 'string' ? JSON.parse(raw) : raw
+      })
+      eq('审核通过后教室端可读教师姓名与学科', directory.ok, true)
+      eq('教师名单不含联系方式和超级管理员', directory.rows.every((x) =>
+        Object.keys(x).sort().join(',') === 'id,name,subject' && x.id !== U.super), true)
+      const deniedDirectory = await asUser(db, U.room, async () => {
+        const raw = (await db.query('select plugin_teacher_directory($1,$2) as value',
+          [C.c1, 'demo.abc'])).rows[0].value
+        return typeof raw === 'string' ? JSON.parse(raw) : raw
+      })
+      eq('未审核教师名单的插件无法读取', deniedDirectory.code, 'E_FORBIDDEN')
+      const gradeId = (await db.query('select grade_id from classes where id = $1', [C.c1])).rows[0].grade_id
+      const payloadRaw = (await db.query('select grade_backup_payload_json($1) as payload', [gradeId])).rows[0].payload
+      const payload = typeof payloadRaw === 'string' ? JSON.parse(payloadRaw) : payloadRaw
+      eq('毕业备份格式升级，避免旧程序静默忽略新记录', payload.format, 'grade-backup.v2')
+      eq('毕业备份带走私有记录', payload.tables.studentTeachingEntries.some((x) => x.id === note), true)
+      eq('毕业备份带走共享组和成员', [
+        payload.tables.subjectStudentGroups.some((x) => x.id === group),
+        payload.tables.subjectStudentGroupMembers.filter((x) => x.group_id === group).length,
+      ], [true, 2])
+      eq('毕业备份带走班级分组和座位', [
+        payload.tables.classGroups.some((x) => x.id === classGroup),
+        payload.tables.classSeats.some((x) => x.student_id === S.s1),
+      ], [true, true])
+
+      // 反向对照：撤掉私有读约束，其他任课教师当场能读到；随后恢复。
+      await db.exec('drop policy student_teaching_entries_read on student_teaching_entries')
+      await db.exec('create policy student_teaching_entries_read on student_teaching_entries for select to authenticated using (true)')
+      eq('反向对照：撤掉私有读约束后，其他教师确实能读到', await readNote(U.chn), 1)
+      await db.exec('drop policy student_teaching_entries_read on student_teaching_entries')
+      await db.exec(`create policy student_teaching_entries_read on student_teaching_entries for select to authenticated
+        using (teacher_id = (select auth.uid()) and not is_classroom_account())`)
+      eq('反向对照复原：其他教师再次读不到', await readNote(U.chn), 0)
+    }
+
+    {
+      const db = B.db
+      section('§48 插件数据实时信号与教师端结果权限')
+      const published = (await db.query(`select count(*)::int n from pg_publication_tables
+        where pubname = 'supabase_realtime' and tablename = 'plugin_sync_events'`)).rows[0].n
+      eq('变更信号表已加入 Realtime publication', published, 1)
+      eq('客户端没有修改变更信号的权限', (await db.query(`select has_table_privilege('authenticated',
+        'plugin_sync_events', 'INSERT') as allowed`)).rows[0].allowed, false)
+      const source = (await db.query(`select revision from plugin_sync_events
+        where class_id = $1 and kind = 'source' and name = 'class_seats'`, [C.c1])).rows[0]
+      ok('修改座位表会产生本班源数据变更信号', !!source && Number(source.revision) >= 1)
+      eq('临时调课也接入教室端即时失效信号', (await db.query(`select count(*)::int n
+        from pg_trigger where tgrelid = 'schedule_temp_changes'::regclass
+        and tgname = 'plugin_sync_notify' and not tgisinternal`)).rows[0].n, 1)
+      eq('别班教室账号看不到本班变更信号', await countAs(db, U.room,
+        `select count(*)::int n from plugin_sync_events where class_id = $1`, [C.c2]), 0)
+
+      await db.query(`update plugin_registry set results_schema = '[{"key":"summary","label":"汇总"}]'::jsonb
+        where plugin_id = 'demo.directory'`)
+      const write = await asUser(db, U.room, async () => {
+        const raw = (await db.query(`select plugin_data_write($1,$2,$3,$4::jsonb) as value`,
+          [C.c1, 'demo.directory', 'summary', '{"count":3}'])).rows[0].value
+        return typeof raw === 'string' ? JSON.parse(raw) : raw
+      })
+      eq('教室插件可写已发布结果槽', write.ok, true)
+      // asUser 会回滚写尝试；另插一行持久夹具，用于跨账号读取和变更信号断言。
+      await db.query(`insert into plugin_data (class_id,plugin_id,key,payload)
+        values ($1,'demo.directory','summary','{"count":3}'::jsonb)`, [C.c1])
+      const result = async (uid, key) => asUser(db, uid, async () => {
+        const raw = (await db.query(`select plugin_teacher_result($1,$2,$3) as value`,
+          [C.c1, 'demo.directory', key])).rows[0].value
+        return typeof raw === 'string' ? JSON.parse(raw) : raw
+      })
+      const approvedResult = await result(U.head, 'summary')
+      eq('教师能读审核声明的结果', approvedResult.payload?.count, 3)
+      eq('教师不能读未声明的插件槽', (await result(U.head, 'private')).code, 'E_RESULT_NOT_APPROVED')
+      eq('教室账号不能调教师结果接口', (await result(U.room, 'summary')).code, 'E_FORBIDDEN')
+      const event = (await db.query(`select changed_key from plugin_sync_events
+        where class_id = $1 and kind = 'result' and name = 'demo.directory'`, [C.c1])).rows[0]
+      eq('结果更新只广播槽名，不广播内容', event?.changed_key, 'summary')
+      eq('教室端能收到本班插件存储变更信号', await countAs(db, U.room,
+        `select count(*)::int n from plugin_sync_events
+         where class_id = $1 and kind = 'storage' and name = 'demo.directory'`, [C.c1]), 1)
+      eq('教室账号看不到教师结果变更信号', await countAs(db, U.room,
+        `select count(*)::int n from plugin_sync_events where class_id = $1 and kind = 'result'`, [C.c1]), 0)
+      await db.query(`update plugin_registry set results_schema = '[]'::jsonb where plugin_id = 'demo.directory'`)
+      eq('反向对照：撤掉结果声明后，教师马上读不到', (await result(U.head, 'summary')).code, 'E_RESULT_NOT_APPROVED')
     }
 
     await B.db.close()

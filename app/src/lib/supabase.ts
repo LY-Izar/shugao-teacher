@@ -36,7 +36,10 @@ const KEY = (import.meta.env.VITE_SUPABASE_ANON_KEY ?? '').trim()
 function resolveUrl(configured: string): string {
   if (!configured) return ''
   const host = typeof location === 'undefined' ? '' : location.hostname
-  if (/\.pages\.dev$/i.test(host)) return `${location.origin}/api/sb`
+  // Pages 的自定义域名同样提供 /api/sb。浏览器必须经同源中转，
+  // 否则 _headers 的 connect-src 'self' 会拦住 REST 和 Realtime。
+  if (typeof location !== 'undefined' && !/^(localhost|127\.0\.0\.1|\[?::1\]?|\d+\.\d+\.\d+\.\d+)$/i.test(host))
+    return `${location.origin}/api/sb`
   return configured
 }
 

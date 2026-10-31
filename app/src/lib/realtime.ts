@@ -21,6 +21,11 @@ export type BusMessage =
      只带 classId 不带清单本身 —— 清单由收方自己重读（`loadPluginConfigs`），
      消息只当"门铃"用：两个真相源（教师端写、教室端读）各走各的权限。 */
   | { type: 'pluginConfigs'; classId: string }
+  | { type: 'pluginRegistry' }
+  | { type: 'pluginSource'; classId: string; table: string }
+  | { type: 'pluginStorage'; classId: string; pluginId: string; key: string }
+  | { type: 'pluginResult'; classId: string; pluginId: string; key: string }
+  | { type: 'realtimeReady' }
 
 const CHANNEL = 'shugao.classroom.v1'
 const LOCAL_EVENT = 'shugao-bus'
@@ -107,7 +112,27 @@ const remoteBus: Fanout<BusMessage> | null = isRemote
                 remoteBus?.emit({ type: 'pluginConfigs', classId: row.class_id })
             },
           )
+          .on(
+            'postgres_changes',
+            { event: '*', schema: 'public', table: 'plugin_registry' },
+            () => remoteBus?.emit({ type: 'pluginRegistry' }),
+          )
+          .on(
+            'postgres_changes',
+            { event: '*', schema: 'public', table: 'plugin_sync_events' },
+            (p) => {
+              if (p.eventType === 'DELETE') return
+              const row = p.new as { class_id?: string; kind?: string; name?: string; changed_key?: string }
+              if (!row.class_id || !row.name) return
+              if (row.kind === 'source') remoteBus?.emit({ type: 'pluginSource', classId: row.class_id, table: row.name })
+              if (row.kind === 'storage' && row.changed_key)
+                remoteBus?.emit({ type: 'pluginStorage', classId: row.class_id, pluginId: row.name, key: row.changed_key })
+              if (row.kind === 'result' && row.changed_key)
+                remoteBus?.emit({ type: 'pluginResult', classId: row.class_id, pluginId: row.name, key: row.changed_key })
+            },
+          )
           .subscribe((status) => {
+            if (status === 'SUBSCRIBED') remoteBus?.emit({ type: 'realtimeReady' })
             if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
               console.warn('[realtime] 频道异常:', status)
             }

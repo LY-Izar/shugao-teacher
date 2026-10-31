@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useContext, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Page } from '../components/AppShell'
+import { WorkspaceContext } from '../workspaces/context'
 import {
   IconCamera,
   IconChevronRight,
@@ -511,6 +512,8 @@ export default function Classes() {
   const teacherId = useStore((s) => s.teacher?.id)
   const navigate = useNavigate()
   const push = useToast((s) => s.push)
+  const subjectView = useContext(WorkspaceContext)?.id === 'subject'
+  const adminView = useContext(WorkspaceContext)?.id === 'admin'
 
   const [open, setOpen] = useState(false)
   const [editing, setEditing] = useState<string | null>(null)
@@ -588,17 +591,17 @@ export default function Classes() {
   return (
     <>
       <PageHead
-        title="班级"
+        title={adminView ? '学生管理' : subjectView ? '班级情况' : '班级'}
         sub={
           `${adminClasses.length} 个班级 · ${totalStudents} 名学生` +
           /* 「另有 N 个走班班」只在真有走班班时才接上去 */
           (streamClasses.length ? ` · 另有 ${streamClasses.length} 个走班班` : '')
         }
-        right={
+        right={subjectView ? null : (
           <Button size="sm" variant="primary" icon={<IconPlus size={15} />} onClick={startNew}>
             新建
           </Button>
-        }
+        )}
       />
 
       <Page>
@@ -607,9 +610,9 @@ export default function Classes() {
             <div className="empty">
               <IconUsers size={26} />
               <div style={{ fontWeight: 600, color: 'var(--color-ink)' }}>还没有班级</div>
-              <Button variant="primary" size="sm" icon={<IconPlus size={15} />} onClick={startNew}>
+              {subjectView ? null : <Button variant="primary" size="sm" icon={<IconPlus size={15} />} onClick={startNew}>
                 新建班级
-              </Button>
+              </Button>}
             </div>
           </Panel>
         ) : (
@@ -619,8 +622,8 @@ export default function Classes() {
                 key={c.id}
                 klass={c}
                 rosterState={rosterStateOf(c.students, 'class')}
-                onOpen={() => navigate(`/classes/${c.id}`)}
-                onEdit={() => startEdit(c.id)}
+                onOpen={() => navigate(adminView ? `/manage/students/${c.id}` : `/classes/${c.id}`)}
+                onEdit={subjectView ? undefined : () => startEdit(c.id)}
               />
             ))}
           </div>
@@ -653,8 +656,8 @@ export default function Classes() {
                       streamMembersKnown,
                     )}
                     onOpen={() => navigate(`/classes/${c.id}`)}
-                    onEdit={mayManage ? () => setStreamEdit(c.id) : undefined}
-                    onDelete={mayManage ? () => setStreamEdit(c.id) : undefined}
+                    onEdit={!subjectView && mayManage ? () => setStreamEdit(c.id) : undefined}
+                    onDelete={!subjectView && mayManage ? () => setStreamEdit(c.id) : undefined}
                   />
                 )
               })}

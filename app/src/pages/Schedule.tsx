@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useContext, useEffect, useMemo, useState } from 'react'
 import { Page } from '../components/AppShell'
+import { WorkspaceContext } from '../workspaces/context'
 import {
   IconAlert,
   IconBell,
@@ -17,7 +17,6 @@ import { Button, PageHead, Panel, Sect, Sheet, Tag } from '../components/ui'
 import { useStore, useToast } from '../data/store'
 import { loadClassMembers, loadClassSubjects } from '../data/remote'
 import { WEEKDAY_TEXT, type ScheduleItem, type ScheduleKind } from '../data/types'
-import { goBackOr } from '../lib/back'
 import {
   notifyPermission,
   readNotifyPermission,
@@ -52,13 +51,13 @@ const BLANK: Omit<ScheduleItem, 'id'> = {
 }
 
 export default function Schedule() {
+  const subjectView = useContext(WorkspaceContext)?.id === 'subject'
   const schedule = useStore((s) => s.schedule)
   const classes = useStore((s) => s.classes)
   const addSchedule = useStore((s) => s.addSchedule)
   const addScheduleMany = useStore((s) => s.addScheduleMany)
   const updateSchedule = useStore((s) => s.updateSchedule)
   const removeSchedule = useStore((s) => s.removeSchedule)
-  const navigate = useNavigate()
   const push = useToast((s) => s.push)
 
   const [editing, setEditing] = useState<string | null>(null)
@@ -222,7 +221,7 @@ const [perm, setPerm] = useState<
     <>
       <PageHead
         /*
-         * 🔴 这一页叫「日程表」，不叫「课表」（2026-09-27 用户拍板）。
+         * 学科板块显示「个人教学安排」；从其他入口进入时沿用「日程表」。
          *
          * 因为平台里现在有**两套**课表数据，都叫"课表"就分不清谁是谁：
          *   · `scope='mine'` —— 教师自己的排课表（就是这一页），只影响"我什么时候上哪个班"；
@@ -230,14 +229,8 @@ const [perm, setPerm] = useState<
          * 只改了**显示名**：`scope` 的取值一个字都没动
          * （`schedule_items.scope` 的 check 只有 `'mine'` / `'class'`）。
          */
-        title="日程表"
+        title={subjectView ? '个人教学安排' : '日程表'}
         sub={`每周 ${mine.length} 项 · 今天 ${state.items.length} 项`}
-        /*
-         * 🔴 「返回」不写死路径：这一页**既是左栏/底部的顶层 tab，又从「我的」那一行进来**，
-         *    写死 `/settings` 会让"从 tab 进来"的那一半回错页。
-         *    形状与理由见 `lib/back.ts`（有上一页回上一页；书签/PWA 直开时回 `/`）。
-         */
-        onBack={() => goBackOr(navigate, '/')}
         right={
           <Button
             size="sm"

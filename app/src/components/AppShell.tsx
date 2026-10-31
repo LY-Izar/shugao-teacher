@@ -1,21 +1,22 @@
 // 🔴 `useLayoutEffect`：切页回顶部必须在**绘制之前**做（AppShell.tsx:2107 那段说明）
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { NavLink, useLocation, useNavigate } from 'react-router-dom'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { useStore, useToast } from '../data/store'
-import { WEEKDAY_TEXT, type Student, type TeacherRole } from '../data/types'
-import * as remote from '../data/remote'
+import { WEEKDAY_TEXT, type TeacherRole } from '../data/types'
 import { useClassroomPresence } from '../hooks/useClassroomPresence'
 import { useMood } from '../hooks/useMood'
 import { useScheduleReminder } from '../hooks/useScheduleReminder'
 import { useNoticeNotify } from '../hooks/useNoticeNotify'
 import { useFirstRunPermissions } from '../hooks/useFirstRunPermissions'
-import { rosterStateOf } from '../lib/roster'
-import { classKindOf } from '../lib/pick'
-import { currentIdentityLabel, ENTRIES, entryVisible, IDENTITY_TAG_STYLE } from '../lib/roles'
+import { ENTRIES, entryVisible, workspaceIdentityLabel } from '../lib/roles'
 import { awayText, toMinutes, weekdayOf } from '../lib/schedule'
 import { connectionMode } from '../lib/supabase'
 import { useTheme, type Accent } from '../lib/theme'
 import { APP_VERSION_LABEL } from '../lib/version'
+import { availableWorkspaces, visibleDirectory, workspaceForPath, WORKSPACES } from '../workspaces'
+import { WorkspaceContext } from '../workspaces/context'
+import { AssignmentFlow } from '../workspaces/subject/AssignmentFlow'
+import type { WorkspaceId, WorkspaceLink } from '../workspaces/types'
 import { DoneCelebration, MorningWelcome } from './MoodModals'
 import { AnnouncementStack } from './AnnouncementStack'
 import {
@@ -28,9 +29,9 @@ import {
   IconClipboard,
   IconGauge,
   IconGrid,
-  IconHash,
   IconInfo,
   IconMoon,
+  IconSliders,
   IconSun,
   IconTarget,
   IconUser,
@@ -294,48 +295,6 @@ export function ToastHost() {
 }
 
 /* ---------------- 导航项 ---------------- */
-
-function RailItem({ to, label, icon: Icon, end, dot }: NavItem & { dot?: boolean }) {
-  return (
-    <NavLink to={to} end={end} className="block" aria-label={label} data-nav={to}>
-      {({ isActive }) => (
-        <span
-          data-active={isActive}
-          className="relative flex items-center gap-3 px-3"
-          style={{
-            height: 40,
-            borderRadius: 6,
-            color: isActive ? 'var(--color-accentink)' : 'var(--color-ink2)',
-            fontWeight: isActive ? 600 : 500,
-            fontSize: 14,
-            transition: 'color .22s cubic-bezier(.22,.8,.24,1)',
-          }}
-        >
-          {isActive ? (
-            <i
-              className="absolute left-0"
-              style={{
-                top: 9,
-                bottom: 9,
-                width: 2,
-                background: 'var(--color-accent)',
-                borderRadius: '0 2px 2px 0',
-              }}
-            />
-          ) : null}
-          <span
-            className={cx('relative', isActive && 'tab-icon-on')}
-            style={{ display: 'grid', placeItems: 'center' }}
-          >
-            <Icon size={18} />
-            {dot ? <UnreadDot /> : null}
-          </span>
-          {label}
-        </span>
-      )}
-    </NavLink>
-  )
-}
 
 /**
  * 🆕 **未读小红点**（2026-09-28 通知）。
@@ -683,7 +642,7 @@ const RAIL_SPRING_DAMP = 0.66
  * 胶囊里的一个图标：可点区域 48×48，当前页高亮由父级的滑动胶囊负责。
  *
  * ⚠️ 类型上带着可选的 `dot`（`pinned.map((n) => <PinTab key={n.to} {...n} />)` 会把
- *    `RailItem` 那一侧的 `dot` 一起传进来），但**胶囊里不画那个点**：
+ *    入口对象里的 `dot` 一起传进来），但**胶囊里不画那个点**：
  *    胶囊只装三个"每天来回切"的入口，而通知**不在** `PIN_KEYS` 里 ——
  *    所以这里既不需要那个参数、也不该为它加分支（`dot` 只属于左栏与展开层）。
  *
@@ -696,12 +655,17 @@ const RAIL_SPRING_DAMP = 0.66
  *    数值见 §十五 15.1 的对比度表（**浅底 / 深底两组**）。
  *    ⛔ 别退回白色系（`#fff` / `rgb(255 255 255/.62)`）：那是配深底的。
  */
-function PinTab({ to, label, icon: Icon, end }: NavItem & { dot?: boolean }) {
+function mobileItemActive(item: NavItem, pathname: string, overviewActive: boolean): boolean {
+  if (item.to === '/') return overviewActive
+  return item.end ? pathname === item.to : pathname.startsWith(item.to)
+}
+
+function PinTab({ to, label, icon: Icon, active }: NavItem & { dot?: boolean; active: boolean }) {
   return (
-    <NavLink
+    <Link
       to={to}
-      end={end}
       aria-label={label}
+      aria-current={active ? 'page' : undefined}
       title={label}
       /* 🔴 链接默认是**可拖拽**的：在胶囊上按住横向滑动时，浏览器会改为拖这个链接
          （HTML5 拖放），指针事件直接停掉 —— 滑动跟手就永远不会发生（鼠标上必现）。
@@ -710,35 +674,36 @@ function PinTab({ to, label, icon: Icon, end }: NavItem & { dot?: boolean }) {
       className="relative block shrink-0"
       style={{ width: 48, height: 48 }}
     >
-      {({ isActive }) => (
+      <span
+        data-active={active}
+        className="grid h-full w-full place-items-center"
+        style={{
+          color: active ? 'var(--color-accentink)' : 'var(--color-ink2)',
+          transition: 'color .22s cubic-bezier(.22,.8,.24,1)',
+        }}
+      >
         <span
-          data-active={isActive}
-          className="grid h-full w-full place-items-center"
-          style={{
-            color: isActive ? 'var(--color-accentink)' : 'var(--color-ink2)',
-            transition: 'color .22s cubic-bezier(.22,.8,.24,1)',
-          }}
+          className={active ? 'tab-icon-on' : undefined}
+          style={{ display: 'grid', placeItems: 'center', filter: ICON_HALO }}
         >
-          <span
-            className={isActive ? 'tab-icon-on' : undefined}
-            style={{ display: 'grid', placeItems: 'center', filter: ICON_HALO }}
-          >
-            <Icon size={22} strokeWidth={isActive ? 1.9 : 1.6} />
-          </span>
+          <Icon size={22} strokeWidth={active ? 1.9 : 1.6} />
         </span>
-      )}
-    </NavLink>
+      </span>
+    </Link>
   )
 }
-function MobileNav() {
-  const { pathname } = useLocation()
+function MobileNav({ workspace, overviewActive }: { workspace: WorkspaceId; overviewActive: boolean }) {
+  const { pathname, search } = useLocation()
   const navigate = useNavigate()
   /*
    * 🔴 按身份过滤（方案 §4.3）：胶囊 / 展开层都从**这一份**取数。
    * `PIN_KEYS` 本身不动（N1），过滤在它之前（N2：过滤后某一格空着，不补位）。
    */
   const myRoles = useStore((s) => s.myRoles)
-  const visible = visibleNav(myRoles)
+  const boardEntries = new Set(visibleDirectory(workspace, myRoles).flatMap((group) => group.links.map((link) => link.entry)))
+  const visible = visibleNav(myRoles).filter((item) =>
+    item.to === '/' || item.to === '/settings' || boardEntries.has(item.to),
+  )
   const { pinned, collapsed } = splitPin(visible)
   /* 🆕 新通知的小红点（展开层里那一行用）—— 与桌面左栏**同一处判据**（服务端的 unread） */
   const hasUnreadNotice = useStore((s) =>
@@ -750,7 +715,8 @@ function MobileNav() {
    * 既不用在 effect 里 setState，浏览器前进/后退回来时也不会莫名弹着一张浮层。
    */
   const [moreAt, setMoreAt] = useState<string | null>(null)
-  const more = moreAt === pathname
+  const locationKey = `${pathname}${search}`
+  const more = moreAt === locationKey
   /*
    * 🔴 **两个实时滤镜开不开**（2026-10-01 第三轮）：特性检测 + 低端机 + 掉帧看门狗，
    * 见本文件上方那一大段（两个**共用同一个预算开关**，低端机上会一起关掉）。
@@ -770,10 +736,8 @@ function MobileNav() {
    * ⚠️ 这两处都**必须**跟着 `visible` 走（不是 `NAV`）：否则过滤之后
    *    某一格不在了，索引会错位、`moreActive` 会在错误的页面上亮起来。
    */
-  const pinIdx = pinned.findIndex((n) => (n.end ? pathname === n.to : pathname.startsWith(n.to)))
-  const moreActive = collapsed.some((n) =>
-    n.end ? pathname === n.to : pathname.startsWith(n.to),
-  )
+  const pinIdx = pinned.findIndex((n) => mobileItemActive(n, pathname, overviewActive))
+  const moreActive = collapsed.some((n) => mobileItemActive(n, pathname, overviewActive))
 
   /** 🔴 移动端底栏那一整条 `<nav>`：**只用来判"点面板外面"**（`contains(target)`，见下面的 effect） */
   const navRef = useRef<HTMLElement>(null)
@@ -1020,7 +984,7 @@ function MobileNav() {
     dragRef.current = { startX: e.clientX, active: false, boxes }
     /*
      * 🔴 **这里不能 setPointerCapture**：一旦在 pointerdown 就捕获，
-     * pointerup / mouseup / click 会被**重定向到胶囊本身**，里面的 <NavLink> 永远收不到 click
+     * pointerup / mouseup / click 会被**重定向到胶囊本身**，里面的链接永远收不到 click
      * —— 表现为"点图标没反应"（真机上点一下什么都不会发生）。已实测踩过，见 §十五。
      * 指针捕获改成**滑动超过阈值时**才拿（那时本来也不该触发点击）。
      */
@@ -1275,7 +1239,7 @@ function MobileNav() {
               }}
             />
             {pinned.map((n) => (
-              <PinTab key={n.to} {...n} />
+              <PinTab key={n.to} {...n} active={mobileItemActive(n, pathname, overviewActive)} />
             ))}
           </div>
 
@@ -1301,7 +1265,7 @@ function MobileNav() {
                  accent 一挂才对（为什么不取浅一档的 `--color-accent` 见下方注释）。 */}
           <button
             type="button"
-            onClick={() => setMoreAt(more ? null : pathname)}
+            onClick={() => setMoreAt(more ? null : locationKey)}
             aria-label={more ? '收起更多入口' : '展开更多入口'}
             aria-expanded={more}
             aria-haspopup="dialog"
@@ -1532,8 +1496,8 @@ function ClockPanel() {
        ⚠️ 顶栏窄屏下只有 50px 高，所以这一颗必须**比桌面那颗小一档**（见下面两个 size 常量）。
 
    ⚠️ **触控目标不许小于现在那些**（用户点过这一条）：
-     桌面 30×30、移动 34×34 —— 都**大于**左栏「当前班级」那个 34 高的 `select`，
-     也大于顶部那颗 23 高的班级标签；移动端 34 与 `Emblem` 那一格同级。
+     桌面 30×30、移动 34×34 —— 都**大于**顶部那颗 23 高的班级标签；
+     移动端 34 与 `Emblem` 那一格同级。
      （移动端导航胶囊里的图标格是 44×44，那是"手指每天点十几次"的东西；
        这一颗是**每次会话用一次**的显示开关，按 34 走，但**不许更小**。）
 
@@ -1794,18 +1758,9 @@ function ThemeToggle({
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const teacher = useStore((s) => s.teacher)
-  /*
-   * 「当前身份」那个标签：**有管理身份先显示身份，没有才显示学科**。
-   * `myRoles` 只覆盖"我自己" —— 而这个标签显示的正是当前登录者，够用（见 lib/roles.ts）。
-   * 它**只是显示**：判据一律在数据库（§13.5 I16）。
-   */
   const myRoles = useStore((s) => s.myRoles)
-  /*
-   * 🔴 **按身份过滤后的入口** —— 桌面左栏真正渲染的那一份（方案 §4.1）。
-   * 取数只有这一处，`activeIdx` 与渲染都从它来；`NAV`（全部入口）不再直接渲染。
-   * 见 `visibleNav()` 的注释：过滤必须在 PIN_KEYS 之前、三处索引一起换。
-   */
-  const visible = visibleNav(myRoles)
+  const allowedWorkspaces = availableWorkspaces(myRoles)
+  const [chosenWorkspace, setChosenWorkspace] = useState<WorkspaceId | null>(null)
   /**
    * 🆕 有没有**新通知**（导航上的那个小红点）。
    *
@@ -1819,6 +1774,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     s.notices.some((n) => n.unread && !n.revokedAt && !n.expired),
   )
   const classes = useStore((s) => s.classes)
+  const grades = useStore((s) => s.grades)
+  const schedule = useStore((s) => s.schedule)
   const currentClassId = useStore((s) => s.currentClassId)
   const setCurrentClass = useStore((s) => s.setCurrentClass)
   const push = useToast((s) => s.push)
@@ -1829,12 +1786,51 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const syncError = useStore((s) => s.syncError)
   const clearSyncError = useStore((s) => s.clearSyncError)
   const mode = connectionMode()
-  const totalStudents = classes.reduce(
-    (n, c) => n + c.students.filter((s) => s.status === 'active').length,
-    0,
-  )
-  const { pathname } = useLocation()
+  const { pathname, search } = useLocation()
   const navigate = useNavigate()
+  useEffect(() => {
+    if (pathname !== '/') return
+    const params = new URLSearchParams(search)
+    if (!params.has('workspace') && !params.has('group')) return
+    params.delete('workspace')
+    params.delete('group')
+    const remaining = params.toString()
+    navigate({ pathname: '/', search: remaining ? `?${remaining}` : '' }, { replace: true })
+  }, [pathname, search, navigate])
+  const workspace = pathname === '/' ? chosenWorkspace : workspaceForPath(pathname, allowedWorkspaces, chosenWorkspace ?? 'subject')
+  const taughtGrades = [...new Set(schedule.filter((item) => item.scope === 'class' && item.teacherId === teacher?.id)
+    .map((item) => classes.find((klass) => klass.id === item.classId)?.grade).filter((grade): grade is string => !!grade))]
+  const teachingGrade = taughtGrades.length === 1 ? taughtGrades[0] : undefined
+  const identity = workspaceIdentityLabel(workspace, myRoles, teacher, {
+    teachingGrade,
+    gradeName: (id) => grades.find((grade) => grade.id === id)?.name ?? classes.find((klass) => klass.gradeId === id)?.grade,
+  })
+  const directory = workspace ? visibleDirectory(workspace, myRoles) : []
+  const workspaceLinkPath = (link: WorkspaceLink) => {
+    if (!link.currentClass) return link.to
+    const openAdminClass = /^\/manage\/students\/([^/]+)/.exec(pathname)?.[1]
+    const classId = openAdminClass ?? currentClassId
+    return classId ? link.to.replace(':id', classId) : (workspace === 'admin' ? '/manage' : '/classes')
+  }
+  const groupForPath = (path: string) => directory.find((group) => group.links.some((link) => {
+    const to = workspaceLinkPath(link)
+    return path === to || (to !== '/' && to !== '/manage' && path.startsWith(`${to}/`))
+  }))
+  const currentGroup = pathname === '/' ? undefined : groupForPath(pathname)
+  const overviewActive = pathname === '/' && !chosenWorkspace
+  const assignmentRoute = workspace === 'subject' ? /^\/assignments\/([^/]+)\/(collect|grade|stats|correct|call|import)/.exec(pathname) : null
+  const openGroup = (group: (typeof directory)[number]) => {
+    setChosenWorkspace(workspace)
+    navigate(workspaceLinkPath(group.links[0]))
+  }
+  const enterWorkspace = (id: WorkspaceId) => {
+    setChosenWorkspace(id)
+    if (pathname !== '/') navigate('/')
+  }
+  const showOverview = () => {
+    setChosenWorkspace(null)
+    navigate('/')
+  }
   const current = classes.find((c) => c.id === currentClassId)
   /*
    * 🆕 亮 / 暗（2026-10-09 F4）+ 强调色（2026-10-10 F6）**两条正交给两根轴**。
@@ -1849,42 +1845,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     setAccent: pickAccent,
   } = useTheme(pathname)
 
-  /*
-   * 右栏「名单体检」要的那一份数据（2026-10-08 修「0 人的班被画成绿勾」）。
-   *
-   * 🔴 走班班的成员在 `class_members`（多对多，§27.5）—— **不进 `loadSnapshot()`**
-   *    （老库上没有那张表），所以这里**懒加载 + 先探针**，与班级页那两处同一条纪律。
-   * ⚠️ 读不到 → `sidKnown = false` → 屏上写「人数待读」，**绝不写 0 人**（§三.4 的三态）；
-   *    而写班名那一行只在**点数**，与"读没读到"无关（照旧按 `students.class_id` 数）。
-   */
-  const streamIdList = classes
-    .filter((c) => classKindOf(c) === 'stream')
-    .map((c) => c.id)
-  const sidKey = streamIdList.join(',')
-  const [sidList, setSidList] = useState<Record<string, Student[]>>({})
-  const [sidKnown, setSidKnown] = useState(false)
-  useEffect(() => {
-    if (!sidKey) return
-    let alive = true
-    void remote.loadClassMembersFull(sidKey.split(',')).then((r) => {
-      if (!alive) return
-      setSidKnown(r.known)
-      const by: Record<string, Student[]> = {}
-      for (const [k, list] of Object.entries(r.by)) {
-        by[k] = list.map((p, i) => ({
-          id: p.id,
-          name: p.name,
-          studentNo: p.studentNo,
-          status: p.status,
-          createdAt: i,
-        }))
-      }
-      setSidList(by)
-    })
-    return () => {
-      alive = false
-    }
-  }, [sidKey])  /** 🔴 动效敏感的人：左栏那层高亮也**直接跳、不带弹簧**（与移动端同一条纪律） */
+  /** 🔴 动效敏感的人：左栏那层高亮也**直接跳、不带弹簧**（与移动端同一条纪律） */
   const reduced = useReducedMotion()
   /** 左栏高亮要不要走弹簧（`false` = 直接跳） */
   const railFlow = !reduced
@@ -1908,59 +1869,25 @@ export function AppShell({ children }: { children: React.ReactNode }) {
    * 🔴 **三条纪律（都容易被漏）**：
    *   ① **首屏不许播动画**：`st.init` 为假时**直接定位**（否则一进页面高亮从顶部飞下来，很怪）；
    *   ② **`prefers-reduced-motion: reduce` → 直接跳、无弹簧**（与移动端同一条）；
-   *   ③ **窗口尺寸 / 左栏自己滚动 / 栏内高度变化之后要重算**（否则高亮会指错项）——
+   *   ③ **窗口尺寸 / 页面滚动 / 栏内高度变化之后要重算**（否则高亮会指错项）——
    *      见下面 `measure()` 里的 `resize` + `scroll` + `ResizeObserver`。
-   * ⚠️ 2026-10-08：**同一个 `measure()` 还负责算"滚动到哪一边"**（`railScroll` → 渐隐），
-   *    因为导航项那一块现在溢出时自己滚（`.rail-nav`）。两者共用一套触发，
-   *    ⛔ 别为渐隐再挂一套监听（同一件事两个触发口径 = 本仓库踩过四次的坑）。
    * ⚠️ 选中态的三个信号**一个都没删**（竖条 / 高亮底 / 文字与图标变蓝）：
    *    用户明确要求"可辨识性不许降低"，`shots.mjs` 里有一条专门钉"至少还有两个"。
    */
   const railNavRef = useRef<HTMLElement>(null)
   const railPillRef = useRef<HTMLSpanElement>(null)
   const [railInd, setRailInd] = useState({ top: 0, height: 40, show: false })
-  /**
-   * 🔴 **导航项那一块滚到哪儿了**（2026-10-08 追加：用户要"溢出了就自动变成能滚动的，交界处要有过渡"）。
-   *
-   * 值说的是**哪一边还要渐隐**（不是"滚到哪"）：
-   *   · `none`   —— 放得下，**既没有滚动条也没有渐隐**；
-   *   · `bottom` —— 在顶端、底下还有内容 → **底下渐隐**；
-   *   · `top`    —— 在底端、顶上还有内容 → **顶上渐隐**；
-   *   · `both`   —— 中间，两头都还有内容。
-   * CSS 按这个属性选择器决定 `mask-image`（见 `index.css` 的 `.rail-nav`）。
-   * ⚠️ **它由下面那个 `measure()` 写** —— 与高亮重算**同一处、同一套触发**（`resize` /
-   *    `scroll` 按帧合并 / `ResizeObserver`），**没有另起一套监听**。
-   */
-  const [railScroll, setRailScroll] = useState<'none' | 'top' | 'bottom' | 'both'>('none')
   /** 量出来的**目标**（弹簧按它跑；`measure()` 之外没人写） */
   const railTarget = useRef({ top: 0, height: 40 })
   /** 弹簧自己的状态：位置 / 高度 / 两个速度 / 跑没跑过（首屏靠它判断"直接定位"） */
   const railSpring = useRef({ top: 0, height: 40, v: 0, vh: 0, init: false, raf: 0 })
 
-  const activeIdx = visible.findIndex((n) =>
-    n.end ? pathname === n.to : pathname.startsWith(n.to),
-  )
+  const activeIdx = currentGroup ? directory.indexOf(currentGroup) : -1
 
   useEffect(() => {
     const measure = () => {
       const rw = railNavRef.current
       if (!rw) return
-      /*
-       * 🔴 先算**溢出方向**（跟高亮**共用这一次测量**，所以下面那三个触发就是它的触发）。
-       *    `scrollHeight - clientHeight <= 1` = 放得下 → `none`（不出滚动条、不出渐隐）。
-       * ⚠️ 两端各留 1px 容差：`scrollTop` 是整数而 `scrollHeight` 可能是小数，
-       *    没这个容差会在"刚好滚到底"时闪一下渐隐。
-       */
-      const over = rw.scrollHeight - rw.clientHeight
-      const next: 'none' | 'top' | 'bottom' | 'both' =
-        over <= 1
-          ? 'none'
-          : rw.scrollTop <= 1
-            ? 'bottom'
-            : rw.scrollTop >= over - 1
-              ? 'top'
-              : 'both'
-      setRailScroll((v) => (v === next ? v : next))
       const el = rw.querySelector<HTMLElement>('[data-active="true"]')
       if (!el) {
         /* T5（2026-10-02）：已经藏着就别再发新对象 —— 每帧一个新引用 = 整个壳重渲染 */
@@ -1969,16 +1896,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       }
       const r = el.getBoundingClientRect()
       const pr = rw.getBoundingClientRect()
-      /*
-       * 🔴 **必须加 `rw.scrollTop`**（2026-10-08 加上"导航项那一块自己滚"之后的新口径）：
-       *    高亮那一片是**绝对定位在 `nav` 里**的，也就是**滚动内容的一部分** —— 它跟着内容
-       *    一起被卷走。而 `r.top - pr.top` 量到的是**卷过之后**的视口相对值，
-       *    直接写进去就**少算了一个 `scrollTop`**。
-       *    实测（脚本探针）：滚到底时高亮整片飞到可见区外 330px，而且量一次动一次。
-       *    ⚠️ 横竖都别退回 `r.top - pr.top`：不滚时 `scrollTop` 是 0，两条式子等价；
-       *       一滚起来只有这条对。`left` 不由这里管（`left/right: 0` 是 CSS 定的）。
-       */
-      const top = r.top - pr.top + rw.scrollTop
+      const top = r.top - pr.top
       const height = r.height
       railTarget.current = { top, height }
       /*
@@ -1992,7 +1910,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     }
     measure()
     const t = window.setTimeout(measure, 80)
-    /* 🔴 **重算的三种触发**（用户点名要的第三条）：窗口尺寸、左栏自己滚动、栏内高度变化
+    /* 🔴 **重算的三种触发**：窗口尺寸、页面滚动、栏内高度变化
        （字体变大 / 身份标签换行 / 顶部公告条让位都会改高度）。
        ⚠️ 滚动那条要**按帧合并**：`scroll` 一秒钟能来上百次，每次都量一遍 = 布局抖动。 */
     let queued = false
@@ -2007,17 +1925,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     const nav = railNavRef.current
     window.addEventListener('resize', measure)
     window.addEventListener('scroll', onScroll, { passive: true })
-    nav?.addEventListener('scroll', onScroll, { passive: true })
     const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure)
     if (nav) ro?.observe(nav)
     return () => {
       window.clearTimeout(t)
       window.removeEventListener('resize', measure)
       window.removeEventListener('scroll', onScroll)
-      nav?.removeEventListener('scroll', onScroll)
       ro?.disconnect()
     }
-  }, [pathname])
+  }, [pathname, workspace])
 
   /* 🔴 桌面左栏那一层高亮**怎么动**：见上面那段注释（弹簧 / 首屏直接定位 / reduced 直接跳） */
   useEffect(() => {
@@ -2136,7 +2052,8 @@ useLayoutEffect(() => {
      * ⚠️ `relative` 留着（页面里那些 `absolute` 的东西要按它定位）。
      */
     <div
-      className="relative mx-auto flex min-h-full w-full"
+      className="teacher-workspace relative mx-auto flex min-h-full w-full"
+      data-workspace={overviewActive ? 'overview' : workspace}
       /*
        * 🆕 顶部让位（2026-09-28 公告轮）：公告条 + 同步出错横幅都是**固定**的，
        * 所以内容必须自己往下让出那一段（高度由 `AnnouncementStack` 实测后写进
@@ -2158,7 +2075,7 @@ useLayoutEffect(() => {
            */
           style={{
             top: 'calc(var(--top-stack-h, 0px) + 14px)',
-            height: 'calc(100vh - 28px - var(--top-stack-h, 0px))',
+            minHeight: 'calc(100vh - 28px - var(--top-stack-h, 0px))',
           }}
         >
           {/*
@@ -2190,49 +2107,26 @@ useLayoutEffect(() => {
             />
           </div>
 
+          <nav className={`workspace-overview mb-3 ${overviewActive ? 'active' : ''}`} aria-label="概览入口">
+            <button type="button" className="workspace-overview-button" aria-label="今日概览"
+              aria-current={overviewActive ? 'page' : undefined} onClick={showOverview}>
+              <IconGauge size={18} />今日概览
+            </button>
+          </nav>
+
           <div className="rail-block">
             <div style={{ fontSize: 11, color: 'var(--color-ink3)', letterSpacing: '.08em' }}>
               当前身份
             </div>
-            <div className="mt-1 flex flex-wrap items-center gap-2">
-              {/*
-                ⚠️ 姓名这一格必须 `white-space: nowrap`：标签是 `nowrap` 又有 `min-width: auto`，
-                不禁住姓名的话，多身份时被压缩的是**姓名**（「王老师」会变成竖排三个字，实测）。
-                折行交给容器（`flex-wrap`），标签内部只在分隔符处折 —— 见 IDENTITY_TAG_STYLE。
-              */}
-              <span style={{ fontSize: 15, fontWeight: 620, whiteSpace: 'nowrap' }}>
-                {teacher?.name ?? '未登录'}
-              </span>
-              {/*
-                学科是"教什么"，身份是"是谁" —— 有管理身份的人先答"是谁"。
-                ⛔ 别退回 `teacherSubjectLabel(teacher)`：`teachers.subject` 有列默认值
-                「物理」，每个账号都有值，管理员会被挂上"物理"（2026-09-25 用户截图）。
-              */}
-              <span className="tag tag-accent" style={IDENTITY_TAG_STYLE}>
-                {currentIdentityLabel(myRoles, teacher)}
-              </span>
-            </div>
-            <div
-              className="mt-2.5"
-              style={{ borderTop: '1px solid var(--color-line)', paddingTop: 8 }}
-            >
-              <div style={{ fontSize: 11, color: 'var(--color-ink3)', letterSpacing: '.08em' }}>
-                当前班级
-              </div>
-              <select
-                className="input mt-1"
-                style={{ height: 34, fontSize: 13 }}
-                value={currentClassId ?? ''}
-                onChange={(e) => setCurrentClass(e.target.value || null)}
-              >
-                {classes.length === 0 ? <option value="">暂无班级</option> : null}
-                {classes.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name}
-                  </option>
+            <div className="mt-1" data-workspace-identity={workspace ?? 'overview'} style={{ fontSize: 15, fontWeight: 620, color: 'var(--color-accentink)' }}>{identity}</div>
+            {allowedWorkspaces.length > 1 ? (
+              <div className="workspace-switch mt-3" role="group" aria-label="工作板块">
+                {allowedWorkspaces.map((id) => (
+                  <button key={id} type="button" className={workspace === id ? 'active' : ''}
+                    onClick={() => enterWorkspace(id)}>{WORKSPACES[id].short}</button>
                 ))}
-              </select>
-            </div>
+              </div>
+            ) : null}
           </div>
 
           <nav
@@ -2241,16 +2135,11 @@ useLayoutEffect(() => {
                ⚠️ 别用样式类名当选择器（§15.5 的教训：`nav.nav-frost` 已经配不上，
                `boundingBox()` 直接超时）。移动端那颗胶囊用的是 `aria-label="主导航"`。 */
             aria-label="主导航 · 桌面"
+            aria-hidden={!workspace}
             data-rail-flow={railFlow ? 'on' : 'off'}
-            /* 滚到哪儿了 → CSS 决定哪一边渐隐（见 `index.css` 的 `.rail-nav`） */
-            data-rail-scroll={railScroll}
-            /*
-             * 🔴 放不下时**只有这一块滚**（`min-h-0` 是关键：flex 子项默认 `min-height: auto`
-             *    会撑住不肯缩，那样滚的不是它、而是把底下那两行顶出去）。
-             *    ⚠️ 底部的「已连接云端」「N 个班级」在 `nav` **外面** → 它们固定在底部不跟着滚。
-             */
-            className="rail-nav relative mt-3 flex min-h-0 flex-1 flex-col gap-0.5 pt-3"
-            style={{ borderTop: '1px solid var(--color-line)' }}
+            /* 目录与侧栏自然增高，不在目录内部滚动。 */
+            className="rail-nav relative mt-3 flex flex-1 flex-col gap-0.5 pt-3"
+            style={{ borderTop: '1px solid var(--color-line)', visibility: workspace ? 'visible' : 'hidden' }}
           >
             {/*
               🔴 这一层高亮的 `top` / `height` / `transform` 由**上面那个 rAF 弹簧**逐帧写
@@ -2262,14 +2151,18 @@ useLayoutEffect(() => {
               className="rail-pill"
               style={{ opacity: railInd.show ? 1 : 0 }}
             />
-            {visible.map((n) => (
-              <RailItem key={n.to} {...n} dot={n.to === '/notices' && hasUnreadNotice} />
+            {directory.map((group) => (
+              <button key={group.label} type="button" data-active={currentGroup === group}
+                className={`workspace-primary-link ${currentGroup === group ? 'active' : ''}`}
+                onClick={() => openGroup(group)} aria-label={group.label}>
+                <span>{group.label}</span>
+                <span className="flex items-center gap-1">{hasUnreadNotice && group.links.some((link) => link.to === '/notices') ? <UnreadDot /> : null}<IconChevronRight size={14} /></span>
+              </button>
             ))}
           </nav>
 
           <div
-            /* 稳定选择器（回归脚本按它取"底部那两行"，见 shots.mjs 的「左栏导航溢出可滚」）：
-               🔴 它在 `nav` **外面** —— 滚的只有导航项，这两行固定在底部。 */
+            /* 账号与设置入口保留在目录下方。 */
             data-rail-foot
             className="mt-3 flex flex-col gap-2 px-1 pt-3"
             style={{ borderTop: '1px solid var(--color-line)' }}
@@ -2297,9 +2190,18 @@ useLayoutEffect(() => {
               />
               {mode === 'remote' ? '已连接云端' : isDemo ? '本地演示数据' : '本地存储 · 未接后端'}
             </button>
-            <div style={{ fontSize: 11, color: 'var(--color-ink4)' }}>
-              {classes.length} 个班级 · {totalStudents} 名学生
+            <div className="rail-account">
+              <span className="rail-account-icon"><IconUser size={18} /></span>
+              <span className="min-w-0">
+                <span className="rail-account-caption">当前账号</span>
+                <strong className="rail-account-name">{teacher?.name ?? '未登录'}</strong>
+              </span>
             </div>
+            <button type="button" className="rail-settings-link"
+              aria-current={pathname === '/settings' ? 'page' : undefined}
+              onClick={() => navigate('/settings')}>
+              <IconSliders size={16} /><span>我的设置</span><IconChevronRight size={14} />
+            </button>
           </div>
         </div>
       </aside>
@@ -2352,7 +2254,33 @@ useLayoutEffect(() => {
           ) : null}
         </header>
 
+        <div className="workspace-mobile-bar lg:hidden">
+          <button type="button" className={overviewActive ? 'active' : ''} onClick={showOverview}>今日概览</button>
+          {allowedWorkspaces.length > 1 ? allowedWorkspaces.map((id) => (
+            <button key={id} type="button" className={workspace === id ? 'active' : ''}
+              onClick={() => enterWorkspace(id)}>{WORKSPACES[id].short}</button>
+          )) : null}
+        </div>
+        {workspace ? <div className="workspace-mobile-directory lg:hidden">
+          {directory.map((group) => (
+            <button key={group.label} type="button" className={currentGroup === group ? 'active' : ''}
+              onClick={() => openGroup(group)}>{group.label}</button>
+          ))}
+        </div> : null}
+
         <main key={pathname} className="page-enter flex-1 pb-24 lg:pb-8">
+          {assignmentRoute ? <AssignmentFlow id={assignmentRoute[1]} step={assignmentRoute[2]} /> : null}
+          {currentGroup && !assignmentRoute ? <div className="workspace-secondary-wrap">
+            <nav className="workspace-secondary" aria-label={`${currentGroup.label} · 页面目录`}>
+              <span className="workspace-secondary-label">{currentGroup.label}</span>
+              {currentGroup.links.map((link) => {
+                if (workspace === 'admin' && link.currentClass && !pathname.startsWith('/manage/students/')) return null
+                const to = workspaceLinkPath(link)
+                return <button key={link.label} type="button" className={pathname === to ? 'active' : ''}
+                  onClick={() => navigate(to)}>{link.label}</button>
+              })}
+            </nav>
+          </div> : null}
           {syncError ? (
             <button
               type="button"
@@ -2384,7 +2312,9 @@ useLayoutEffect(() => {
               </span>
             </button>
           ) : null}
-          {children}
+          <WorkspaceContext.Provider value={{ id: workspace ?? allowedWorkspaces[0] ?? 'subject', select: setChosenWorkspace }}>
+            {children}
+          </WorkspaceContext.Provider>
         </main>
       </div>
 
@@ -2396,78 +2326,6 @@ useLayoutEffect(() => {
           style={{ top: 'var(--top-stack-h, 0px)', height: 'calc(100vh - var(--top-stack-h, 0px))' }}
         >
           <ClockPanel />
-
-          <section className="panel p-3">
-            <div className="mb-2.5 flex items-center gap-2">
-              <span style={{ fontSize: 11, letterSpacing: '.08em', color: 'var(--color-ink3)' }}>
-                名单体检
-              </span>
-              <span className="flex-1" />
-              <IconHash size={14} />
-            </div>
-            <div className="flex flex-col gap-2.5">
-              {classes.length === 0 ? (
-                <div style={{ fontSize: 12.5, color: 'var(--color-ink3)' }}>还没有班级</div>
-              ) : (
-                classes.map((c) => {
-                  /*
-                   * 🔴 **人数从哪儿读，取决于这是哪种班**（2026-10-08 修）。
-                   *
-                   *   走班班是 `classes` 里 `kind='stream'` 的一行，它的人来自
-                   *   `class_members`（**多对多**）—— 在 `students.class_id` 上**永远没有他们**。
-                   *   这里原来对两种班都算 `analyzeRoster(c.students)`，于是走班班恒为 0 人，
-                   *   而 0 人又恰好"没有缺号、没有重号" → 右栏给它画一个**绿勾**。
-                   *   同一份数据在班级页说 2 人、在这里画勾 —— 两个页面自相矛盾。
-                   *
-                   * 🔴 判据只有一处：`lib/roster.ts` 的 `rosterStateOf()`（四态）。
-                   *    这一块**不许**自己写 `count === 0`，也不许拿 `analyzeRoster` 的
-                   *    `healthy` 直接当"正常" —— 0 人不是"完整"。
-                   */
-                  const stream = classKindOf(c) === 'stream'
-                  const known = stream ? sidKnown : true
-                  const rs = rosterStateOf(
-                    stream ? (sidList[c.id] ?? []) : c.students,
-                    stream ? 'members' : 'class',
-                    known,
-                  )
-                  /* 绿勾只在**真的完整**时画；"还没有名单"/"没读到"/"待核对"都不是绿勾 */
-                  const issues = rs.health
-                    ? rs.health.gaps.length + rs.health.dupNos.length + rs.health.dupNames.length
-                    : 0
-                  const good = rs.kind === 'ok'
-                  return (
-                    <div key={c.id} className="flex items-center gap-2">
-                      <span
-                        style={{
-                          color: good ? 'var(--color-ok)' : 'var(--color-warn)',
-                          display: 'grid',
-                          placeItems: 'center',
-                        }}
-                      >
-                        {good ? <IconCheck size={14} /> : <IconAlert size={14} />}
-                      </span>
-                      <span className="flex-1 truncate" style={{ fontSize: 12.5, fontWeight: 550 }}>
-                        {c.name}
-                      </span>
-                      <span
-                        className="num"
-                        style={{
-                          fontSize: 12,
-                          color: !good && issues === 0 ? 'var(--color-warn)' : 'var(--color-ink3)',
-                        }}
-                      >
-                        {rs.kind === 'unknown'
-                          ? '人数待读'
-                          : rs.kind === 'nobody'
-                            ? '还没有名单'
-                            : `${rs.count} 人`}
-                      </span>
-                    </div>
-                  )
-                })
-              )}
-            </div>
-          </section>
 
           {/* 当天日程 —— 右栏最该看的东西 */}
           <section className="panel p-3">
@@ -2553,7 +2411,7 @@ useLayoutEffect(() => {
       </aside>
 
       {/* 移动端导航 —— 悬浮的**亮色**液态玻璃胶囊 + 展开按钮（形态见 MobileNav 上方的说明） */}
-      <MobileNav />
+      <MobileNav workspace={workspace ?? allowedWorkspaces[0] ?? 'subject'} overviewActive={overviewActive} />
 
       {/* 切换班级 */}
       <Sheet

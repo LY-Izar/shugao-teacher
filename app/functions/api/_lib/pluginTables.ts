@@ -11,7 +11,7 @@
  *
  * 🔴 **它不是第二个可以单独改的地方。**
  * `scripts/plugin-framework-checks.mjs` 的 `readTablesMirrorChecks()` 会逐张比对
- * 表名集合、`what`、`cols`（逐项且按顺序）、`deny`（原文），并钉住总数为 49。
+ * 表名集合、`what`、`cols`（逐项且按顺序）、`deny`（原文），并钉住总数为 54。
  * 任何一项漂移 ⇒ 门禁当场变红。改目录**两处一起改，以 `src/lib/pluginTables.ts` 为准**。
  *
  * 只保留探针需要的三样：`what` / `cols` / `deny`。
@@ -30,7 +30,7 @@ export type ReadTableMirrorDef = {
 export const READ_TABLE_MIRROR: Record<string, ReadTableMirrorDef> = {
   /* ---------------- 一、账号与隐私：一律不给 ---------------- */
 
-  teachers: { what: '教师账号与姓名', cols: [], deny: '教师账号与姓名属个人信息，插件不该直接读' },
+  teachers: { what: '教师名单：姓名与任教学科，不含联系方式或登录信息', cols: ['id', 'name', 'subject'] },
   teacher_profiles: { what: '教师联系方式（电话、邮箱、住址）', cols: [], deny: '含联系电话、邮箱、住址等联系方式' },
   student_profiles: {
     what: '学生隐私档案（出生年月、监护人电话、住址）',
@@ -164,6 +164,14 @@ export const READ_TABLE_MIRROR: Record<string, ReadTableMirrorDef> = {
     what: '值日安排：哪天谁值日',
     cols: ['id', 'class_id', 'on_date', 'student_id', 'source'],
   },
+  class_groups: {
+    what: '本班小组：组名、组长和成员学号对应的学生 ID',
+    cols: ['id', 'class_id', 'name', 'leader_id', 'member_ids'],
+  },
+  class_seats: {
+    what: '本班座位表：学生与座位行列',
+    cols: ['class_id', 'student_id', 'seat_row', 'seat_col'],
+  },
   teacher_departments: {
     what: '教师所属部门与主部门（只有部门归属，没有联系方式）',
     cols: ['teacher_id', 'department', 'primary'],
@@ -203,10 +211,23 @@ export const READ_TABLE_MIRROR: Record<string, ReadTableMirrorDef> = {
   push_tokens: { what: '推送令牌与邮箱', cols: [], deny: '推送令牌与邮箱属凭据与个人隐私' },
   plugin_registry: { what: '插件登记与审核记录', cols: [], deny: '插件登记与审核记录，属平台内部账' },
   plugin_data: { what: '插件自己的键值槽', cols: [], deny: '插件数据只经 storage 端口读写自己的键，不开整表' },
+  plugin_sync_events: { what: '插件数据变更信号', cols: [], deny: '实时同步内部账，只通过宿主的更新通知接口使用' },
   plugin_quota: { what: '插件读写配额计数', cols: [], deny: '配额计数属平台内部账' },
   plugin_configs: {
     what: '教师对插件的配置与启用状态',
     cols: [],
     deny: '插件启用与配置属平台内部账，插件不该读自己被谁启用',
+  },
+  student_teaching_entries: {
+    what: '教师私有的学生标签与批注', cols: [],
+    deny: '教师私有批注不向教室插件开放',
+  },
+  subject_student_groups: {
+    what: '学科教师的学生分组', cols: [],
+    deny: '学科教师分组可能只供作者和相关班主任查看；插件使用班级小组表',
+  },
+  subject_student_group_members: {
+    what: '学科教师分组成员', cols: [],
+    deny: '学科教师分组成员只供作者和相关班主任查看；插件使用班级小组表',
   },
 }

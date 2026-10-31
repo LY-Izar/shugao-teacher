@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { Page } from '../components/AppShell'
 import {
   IconAlert,
@@ -110,6 +110,7 @@ function MockStack({ highlight }: { highlight?: string }) {
 
 export default function AssignmentCollect() {
   const { id = '' } = useParams()
+  const { hash } = useLocation()
   const navigate = useNavigate()
   const push = useToast((s) => s.push)
 
@@ -117,6 +118,11 @@ export default function AssignmentCollect() {
   const klass = useStore((s) => s.classes.find((c) => c.id === assignment?.classId))
   const setCollection = useStore((s) => s.setCollection)
   const updateAssignment = useStore((s) => s.updateAssignment)
+  useEffect(() => {
+    if (hash !== '#photo') return
+    const frame = window.requestAnimationFrame(() => document.getElementById('assignment-photo')?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
+    return () => window.cancelAnimationFrame(frame)
+  }, [hash, id])
 
   const students: Student[] = useMemo(
     () =>
@@ -433,7 +439,7 @@ export default function AssignmentCollect() {
 
         {/* 拍照区 */}
         {stage !== 'done' ? (
-          <div className="mb-4">
+          <div id="assignment-photo" className="mb-4">
             <Sect>拍一摞作业的侧面</Sect>
             <Panel bodyClass="p-3">
               <div

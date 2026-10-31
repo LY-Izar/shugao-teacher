@@ -104,10 +104,11 @@ import {
   preflightPlugin,
   type PluginSlot,
 } from '../classroom/loader'
-import { DEMO_MANIFEST, availablePlugins, type AvailablePlugin } from '../classroom/demoPlugin'
+import { BUNDLED_MANIFESTS, DEMO_MANIFEST, type AvailablePlugin } from '../classroom/demoPlugin'
+import { useRepositoryPlugins } from '../classroom/repositoryPlugins'
 import { toSlot } from '../classroom/resources'
+import { refreshClassroomData } from '../classroom/dataSync'
 import { configDefaults, loadPluginConfigs } from '../classroom/configs'
-import { getSupabase } from '../lib/supabase'
 
 /** 与旧教室端同一个键：一台机器两个壳记住的是同一个班。 */
 const CLASS_KEY = 'shugao.classroom.classId'
@@ -141,9 +142,10 @@ const HOST_BLOCK_IDS = new Set(['__clock', '__calls', '__files', '__closing'])
  *    旧固定版没有这一块，默认开它就多占一扇窗。想用就去教师端把它启动起来。
  */
 const DEFAULT_OFF_BUNDLED = new Set([DEMO_MANIFEST.id, 'shugao.exams'])
+const BUNDLED_MANIFEST_IDS = new Set(BUNDLED_MANIFESTS.map((m) => m.id))
 
 const isBundledPlugin = (p: AvailablePlugin): boolean =>
-  p.source === 'bundled' && !DEFAULT_OFF_BUNDLED.has(p.manifest.id)
+  (p.source === 'bundled' || BUNDLED_MANIFEST_IDS.has(p.manifest.id)) && !DEFAULT_OFF_BUNDLED.has(p.manifest.id)
 
 type TempDayCell = { subject: string; teacherId: string | null; end: string }
 
@@ -860,10 +862,8 @@ function PluginPopupBody({ pluginId }: { pluginId: string }) {
     }
   })
   const klass = classes.find((c) => c.id === classId) ?? classes[0]
-  const plugin = useMemo(
-    () => availablePlugins().find((p) => p.manifest.id === pluginId) ?? null,
-    [pluginId],
-  )
+  const repositoryPlugins = useRepositoryPlugins()
+  const plugin = repositoryPlugins.find((p) => p.manifest.id === pluginId) ?? null
 
   /* 本班配置：**只读一次**（弹窗里不轮询；实时跟随由主屏那一份负责） */
   const [configs, setConfigs] = useState<Record<string, { enabled: boolean; config: Record<string, unknown> }>>({})
@@ -968,6 +968,7 @@ function PluginPopupBody({ pluginId }: { pluginId: string }) {
   return (
     <div data-cps-popup={pluginId} className="h-full w-full overflow-auto">
       <PluginWindow
+        key={`${plugin.manifest.id}:${plugin.revision ?? plugin.manifest.version}`}
         plugin={plugin}
         classId={klass.id}
         className={klass.name}
@@ -1029,6 +1030,35 @@ function ClassroomShellMain() {
   const klass = classes.find((c) => c.id === classId) ?? classes[0]
   const client = classrooms.find((c) => c.classId === klass?.id)
 
+  // 教室主屏与插件共用当前快照。Realtime 只通知发生变化，实际内容重新走 RLS 读取。
+  useEffect(() => {
+    if (!isRemote || !klass?.id) return
+    let pending: number | undefined
+    const refresh = () => {
+      if (pending !== undefined) window.clearTimeout(pending)
+      pending = window.setTimeout(() => {
+        pending = undefined
+        void refreshClassroomData().catch((error) => console.warn('[classroom] 数据刷新失败', error))
+      }, 100)
+    }
+    const onVisible = () => { if (document.visibilityState === 'visible') refresh() }
+    const off = subscribe((m) => {
+      if (m.type === 'realtimeReady' ||
+          (m.type === 'pluginSource' && m.classId === klass.id &&
+            ['students', 'schedule_items', 'assignments', 'class_subjects'].includes(m.table))) refresh()
+    })
+    window.addEventListener('online', refresh)
+    document.addEventListener('visibilitychange', onVisible)
+    const safety = window.setInterval(() => { if (document.visibilityState === 'visible') refresh() }, 15 * 60_000)
+    return () => {
+      off()
+      window.removeEventListener('online', refresh)
+      document.removeEventListener('visibilitychange', onVisible)
+      window.clearInterval(safety)
+      if (pending !== undefined) window.clearTimeout(pending)
+    }
+  }, [klass?.id])
+
   /* 记住选的是哪个班（与旧教室端同一语义） */
   useEffect(() => {
     if (!klass) return
@@ -1086,9 +1116,11 @@ function ClassroomShellMain() {
   useEffect(() => {
     if (!isRemote || !klass?.id) return
     let alive = true
+    let generation = 0
     const load = () => {
+      const current = ++generation
       void remote.loadScheduleDay(todayIso).then((r) => {
-        if (!alive || r.status !== 'present') return
+        if (!alive || current !== generation || r.status !== 'present') return
         const m: Record<string, TempDayCell> = {}
         for (const c of r.cells ?? []) {
           if (c.changed && c.classId === klass.id) {
@@ -1099,9 +1131,20 @@ function ClassroomShellMain() {
       })
     }
     load()
-    const t = window.setInterval(load, 60_000)
+    const off = subscribe((m) => {
+      if (m.type === 'realtimeReady' ||
+          (m.type === 'pluginSource' && m.classId === klass.id &&
+            ['schedule_items', 'schedule_temp_changes'].includes(m.table))) load()
+    })
+    const onVisible = () => { if (document.visibilityState === 'visible') load() }
+    window.addEventListener('online', load)
+    document.addEventListener('visibilitychange', onVisible)
+    const t = window.setInterval(() => { if (document.visibilityState === 'visible') load() }, 15 * 60_000)
     return () => {
       alive = false
+      off()
+      window.removeEventListener('online', load)
+      document.removeEventListener('visibilitychange', onVisible)
       window.clearInterval(t)
     }
   }, [klass?.id, todayIso])
@@ -1409,7 +1452,7 @@ function ClassroomShellMain() {
   const [demoPlugin] = useState(
     () => typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('demoPlugin'),
   )
-  const plugins = useMemo(() => availablePlugins(), [])
+  const plugins = useRepositoryPlugins()
   const bus = useMemo(() => new LocalBus(), [])
 
   const streamMode = klass ? isStreamClass(klass) : false
@@ -1419,8 +1462,8 @@ function ClassroomShellMain() {
      ------------------------------------------------------------
      · 出现/消失：目录里只进"教师启用 + 登记表放行"的插件 —— 教师一关，
        窗口整扇撤掉（PluginWindow 卸载 → deactivate，手册 §3 的"停用"那一行）。
-     · 实时跟随：Realtime（`pluginConfigs` 门铃）+ 30s 轮询兜底（websocket 会
-       悄悄断，旧教室端对呼叫也是这两条一起走的）。
+     · 实时跟随：Realtime 门铃；首次连接、重连、恢复网络和前台恢复时重读，
+       15 分钟校准一次漏掉的事件。
      · 离线态：读失败**保留上一份清单**照跑（§6.4 的免疫力 —— 断网不许把屏清空），
        `loadPluginConfigs` 回 `unknown` 时这里直接不用它。
      ============================================================ */
@@ -1428,6 +1471,9 @@ function ClassroomShellMain() {
     Record<string, { enabled: boolean; config: Record<string, unknown> }>
   >({})
   const configsRef = useRef(configsMap)
+  const configGenerationRef = useRef(0)
+  const currentClassIdRef = useRef(klass?.id)
+  currentClassIdRef.current = klass?.id
   const configListenersRef = useRef(new Map<string, Set<(v: Record<string, unknown>) => void>>())
   const prevConfigJsonRef = useRef<Record<string, string>>({})
 
@@ -1454,8 +1500,9 @@ function ClassroomShellMain() {
   const reloadConfigs = useCallback(async () => {
     const cid = klass?.id
     if (!cid) return
+    const generation = ++configGenerationRef.current
     const r = await loadPluginConfigs(cid)
-    if (r.state !== 'ok') return
+    if (r.state !== 'ok' || generation !== configGenerationRef.current || cid !== currentClassIdRef.current) return
     const next: Record<string, { enabled: boolean; config: Record<string, unknown> }> = {}
     for (const row of r.rows) next[row.pluginId] = { enabled: row.enabled, config: row.config }
     configsRef.current = next
@@ -1473,49 +1520,28 @@ function ClassroomShellMain() {
   }, [klass?.id, mergedConfig])
 
   useEffect(() => {
-    void reloadConfigs()
-    const t = window.setInterval(() => void reloadConfigs(), 30_000)
+    let pending: number | undefined
+    const schedule = () => {
+      if (pending !== undefined) window.clearTimeout(pending)
+      pending = window.setTimeout(() => { pending = undefined; void reloadConfigs() }, 100)
+    }
+    const onVisibility = () => { if (document.visibilityState === 'visible') schedule() }
     const off = subscribe((m) => {
-      if (m.type === 'pluginConfigs' && m.classId === klass?.id) void reloadConfigs()
+      if ((m.type === 'pluginConfigs' && m.classId === klass?.id) || m.type === 'realtimeReady') schedule()
     })
+    window.addEventListener('online', schedule)
+    document.addEventListener('visibilitychange', onVisibility)
+    schedule()
+    const safety = window.setInterval(schedule, 15 * 60_000)
     return () => {
-      window.clearInterval(t)
+      configGenerationRef.current += 1
       off()
+      window.removeEventListener('online', schedule)
+      document.removeEventListener('visibilitychange', onVisibility)
+      window.clearInterval(safety)
+      if (pending !== undefined) window.clearTimeout(pending)
     }
   }, [reloadConfigs, klass?.id])
-
-  /* 登记表（§45.1，全员读）：放行且没撤下的插件才允许激活（手册 §3"停用"那一行）。 */
-  const [liveIds, setLiveIds] = useState<Set<string> | null>(null)
-  useEffect(() => {
-    if (!isRemote) {
-      setLiveIds(null)
-      return
-    }
-    let alive = true
-    const load = async () => {
-      const sb = getSupabase()
-      if (!sb) return
-      try {
-        const { data, error } = await sb
-          .from('plugin_registry')
-          .select('plugin_id, stable_version, revoked_at')
-        if (!alive || error) return
-        const set = new Set<string>()
-        for (const r of Array.isArray(data) ? (data as Array<Record<string, unknown>>) : []) {
-          if (r?.plugin_id && r.stable_version && !r.revoked_at) set.add(String(r.plugin_id))
-        }
-        setLiveIds(set)
-      } catch {
-        /* 读不到保持现状 —— 不把活着的插件停掉 */
-      }
-    }
-    void load()
-    const t = window.setInterval(() => void load(), 60_000)
-    return () => {
-      alive = false
-      window.clearInterval(t)
-    }
-  }, [])
 
   /** 插件状态上报（功能块清单上要显示"已停用/出错"）。 */
   const [pluginStatus, setPluginStatus] = useState<Record<string, { ui: PluginUiState; reason: string | null }>>({})
@@ -1550,20 +1576,11 @@ function ClassroomShellMain() {
        *    （stable_version 有值、没撤下）。两个条件缺一个就不进目录 —— 窗口随之消失。
        * 🆕 2026-10-24：**没有配置行 = 没被教师改过 ⇒ 随包内置的默认开**（远程插件默认关）；
        *    只有显式 `enabled: false` 才关。判定见 `isBundledPlugin()` 的注释。
-       * ⚠️ 登记表那条**照旧判**：`liveIds === null`（没读到）放行；读到了且没有它就不放行。
+       * 远程插件只由 `useRepositoryPlugins()` 返回已发布且未撤下的版本。
        */
       const configured = configsMap[p.manifest.id]?.enabled
       const on = configured ?? isBundledPlugin(p)
-      /*
-       * 🔴 登记表（`plugin_registry`）只管**从插件库装的**那些：随包内置的插件是跟着 exe 来的，
-       *    没有"发布/撤下"这回事 —— 原来把内置的也拿 `liveIds` 筛，而线上登记表里只有
-       *    从插件库发布过的那几条 ⇒ **内置四块全被筛掉**，教室屏上只剩宿主三块
-       *    （用户 2026-10-24 截图：「怎么还是只有这几个」）。
-       *    远程插件照旧：`liveIds === null`（没读到）放行，读到了且没有它就不放行。
-       */
-      const bundled = p.source === 'bundled'
-      const live = bundled || liveIds === null || liveIds.has(p.manifest.id)
-      const enabled = demoPlugin || (on && live)
+      const enabled = demoPlugin || on
       if (!enabled) continue
       const gate = preflightPlugin(p)
       list.push({
@@ -1577,7 +1594,7 @@ function ClassroomShellMain() {
       })
     }
     return list
-  }, [klass?.id, streamMode, closing, plugins, demoPlugin, configsMap, liveIds]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [klass?.id, streamMode, closing, plugins, demoPlugin, configsMap]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const catalogById = useMemo(() => new Map(catalog.map((d) => [d.id, d])), [catalog])
   /* 布局归一化的"合法 id"要**稳定**（收尾语那扇时有时无，不能因为它把旧布局判成坏） */
@@ -1736,7 +1753,7 @@ function ClassroomShellMain() {
           (d) =>
             d.kind === 'plugin' &&
             !d.blocked &&
-            d.plugin?.source === 'bundled' &&
+            BUNDLED_MANIFEST_IDS.has(d.id) &&
             !NOT_IN_DEFAULT_TEMPLATE.has(d.id),
         )
         .map((d) => ({ id: d.id, w: d.suggest.w, h: d.suggest.h }))
@@ -2139,7 +2156,7 @@ function ClassroomShellMain() {
                     </div>
                   ) : (
                     <PluginWindow
-                      key={`${klass.id}:${def.id}`}
+                      key={`${klass.id}:${def.id}:${def.plugin.revision ?? def.plugin.manifest.version}`}
                       plugin={def.plugin}
                       classId={klass.id}
                       className={klassName}

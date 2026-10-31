@@ -24,7 +24,7 @@ import type { StudentProfile } from '../lib/studentProfile'
 import type { TeacherProfile } from '../lib/teacherProfile'
 import * as noticeApi from '../lib/notices'
 import * as annApi from '../lib/announcements'
-import { makeClassrooms, makeDemoAssignments, makeDemoClasses, makeDemoExams, makeDemoSchedule, makeTemplates } from './seed'
+import { makeClassrooms, makeCourseAdminDemoSchedule, makeDemoAssignments, makeDemoClasses, makeDemoExams, makeDemoSchedule, makeTemplates } from './seed'
 import type { Exam, ExamScore } from './examTypes'
 import type {
   Announcement,
@@ -660,7 +660,7 @@ function freshDemo() {
     assignments: makeDemoAssignments(classes),
     classrooms: makeClassrooms(classes),
     calls: [] as CallRecord[],
-    schedule: makeDemoSchedule(classes),
+    schedule: [...makeDemoSchedule(classes), ...makeCourseAdminDemoSchedule(classes)],
     /* 🆕 推迟提醒：本地演示模式没有 `schedule_snoozes` 表 —— 先落在内存里（刷新即回初始） */
     scheduleSnoozes: {} as Record<string, number>,
     /* 本地演示模式没有 §38 那两张表可写 —— 临时调课先落在内存里（刷新即回初始） */

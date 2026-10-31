@@ -37,6 +37,7 @@ const AssignmentStats = lazy(() => import('./pages/AssignmentStats'))
 const Assignments = lazy(() => import('./pages/Assignments'))
 const Calls = lazy(() => import('./pages/Calls'))
 const ClassDetail = lazy(() => import('./pages/ClassDetail'))
+const ClassWorkspace = lazy(() => import('./pages/ClassWorkspace'))
 const Classroom = lazy(() => import('./pages/Classroom'))
 const ClassroomPluginShell = lazy(() => import('./pages/ClassroomPluginShell'))
 const Classes = lazy(() => import('./pages/Classes'))
@@ -480,8 +481,20 @@ function BootScreen() {  return (
 function useDevInjection() {
   const search = typeof location === 'undefined' ? '' : location.search
   useLayoutEffect(() => {
-    if (!search) return
-    const roles: TeacherRole[] | null = devInjectedRoles(search)
+    if (!import.meta.env.DEV) return
+    const previewRolesQuery = 'teacher,head_teacher,super'
+    const previewKey = 'shugao.full-permission-preview'
+    const params = new URLSearchParams(search)
+    const previewRequested = !isRemote && params.get('preview') === 'full' && params.get('as') === previewRolesQuery
+    let previewActive = previewRequested
+    if (!isRemote) {
+      try {
+        if (previewRequested) sessionStorage.setItem(previewKey, '1')
+        previewActive = sessionStorage.getItem(previewKey) === '1'
+      } catch { /* 浏览器禁用会话存储时，当前页面仍可预览 */ }
+    }
+    const injectedRoles: TeacherRole[] | null = devInjectedRoles(search)
+    const previewRoles = previewActive ? devInjectedRoles(`?as=${previewRolesQuery}`) : null
     const kind = devInjectedAccountKind(search)
     /*
      * 🆕 `?sync=…`（2026-09-28 公告轮）：把一条 `syncError` 塞进 store ——
@@ -490,9 +503,18 @@ function useDevInjection() {
      * `devInjectedSyncError()` 上。
      */
     const sync = devInjectedSyncError(search)
-    if (!roles && !kind && !sync) return
+    if (!injectedRoles && !previewRoles && !kind && !sync) return
+    let hadTeacher = !!useStore.getState().teacher
     const apply = () => {
       const s = useStore.getState()
+      if (previewActive) {
+        if (s.teacher) hadTeacher = true
+        else if (hadTeacher) {
+          previewActive = false
+          try { sessionStorage.removeItem(previewKey) } catch { /* 会话存储不可用 */ }
+        }
+      }
+      const roles = previewActive ? previewRoles : (previewRequested ? null : injectedRoles)
       const patch: { myRoles?: TeacherRole[]; accountKind?: 'classroom'; syncError?: string } = {}
       if (roles && JSON.stringify(s.myRoles) !== JSON.stringify(roles)) patch.myRoles = roles
       if (kind && s.accountKind !== kind) patch.accountKind = kind
@@ -636,6 +658,14 @@ export default function App() {
           element={
             <Guard>
               <ClassDetail />
+            </Guard>
+          }
+        />
+        <Route
+          path="/class/:section"
+          element={
+            <Guard>
+              <ClassWorkspace />
             </Guard>
           }
         />
@@ -940,22 +970,7 @@ export default function App() {
             </Guard>
           }
         />
-        {/*
-          🆕 2026-10-01「行政管理」`/manage`。
-
-          🔴 **它是一个入口合集，不是一条权限线**：三张卡各自跳去**早就存在**的那一页
-            （`/grades` 年级管理 · `/grades/promote` 档案管理 · `/accounts` 教师管理），
-            而那三页各自的判据**一个字都没动**（照旧由服务端与 RLS 判）。
-            所以这一页**刻意不套额外守卫**（与上面那几条同款）：手打 URL 进得来，
-            然后它自己只回答"摆不摆那三张卡"（`entryVisible()` 那一张表），
-            三张都摆不出来时给一句说明（不白屏、不静默）—— 见 `Administration.tsx`。
-
-          ⚠️ **别把它和 `/admin`（平台运维）混起来**：那一条是**超管专属**、
-            不套 `Guard`/`AppShell`、用来救"设备被标成教室端"这类故障的；
-            这一条是**行政事务**（教务处 / 年级主任 / 办公室主任这一层）。
-            两条线的地址、读者、职责都不同，**入口也不在同一处**
-            （`/admin` 仍是「我的」页里那一行）。
-        */}
+        {/* 行政的学生名单与档案；教师管理在 /accounts，课程管理在下方两条路由。 */}
         <Route
           path="/manage"
           element={
@@ -964,20 +979,23 @@ export default function App() {
             </Guard>
           }
         />
-        {/*
-          🆕 2026-10-12「课程管理」`/manage/course`（第 3 轮：**独立页面**）。
-
-          🔴 上一轮它是**就地展开**在 `/manage` 那张卡下面 —— 因为新地址要**同时**登记四处
-            （`App.tsx` · `PAGES` · `按身份显示导航方案.md` §2.2 · `管理架构与角色权限方案.md` §4.2），
-            而那时候的施工单只允许动"页面 + 类型 + 数据读写"。这一轮四处一起落。
-
-          ⚠️ **`/manage` 那张卡保留**（点卡仍然就地展开）：那是"到这一页的一条入口"，
-            多一条入口不是多一套判据 —— 两边渲染的是**同一个组件**（`CourseAdmin`）。
-
-          ⚠️ 刻意**不套额外守卫**（与 `/manage` / `/grades` / `/accounts` 同款）：
-            手打 URL 进得来，然后页面自己只回答"摆不摆那一段"（`hasManagingRole`），
-            而写入口的闸门在数据库（`can_manage_schedule()` + §38.1.1 的触发器）。
-        */}
+        <Route
+          path="/manage/students/:id"
+          element={
+            <Guard>
+              <ClassDetail />
+            </Guard>
+          }
+        />
+        <Route
+          path="/manage/assignments"
+          element={
+            <Guard>
+              <Navigate to="/manage/course" replace />
+            </Guard>
+          }
+        />
+        {/* 班级课表与校历在课程管理的顶部页签中。 */}
         <Route
           path="/manage/course"
           element={
@@ -986,18 +1004,7 @@ export default function App() {
             </Guard>
           }
         />
-        {/*
-          🆕 2026-10-XX「校历」`/manage/calendar`（教室端改造那一轮）——
-          「行政管理」那一页的**第五张卡**。
-
-          🔴 为什么单独一页而不是塞在课程管理里：校历是**全校一张**（法定节假日 + 调休 +
-            学校自己改的日子），跟"哪个年级哪节课"不是一件事；谁改得动也差一档
-            （校历只有教务处/超管，课表还有年级主任与班主任）。
-
-          ⚠️ 与 `/manage/course` 同款：**刻意不套额外守卫** —— 手打 URL 进得来，
-            然后页面自己回答"摆不摆那一段"，写入口的闸门在数据库
-            （`school_calendar_write` = `is_school_admin()`）。
-        */}
+        {/* 全校校历单独渲染，编辑权限继续由原有校历逻辑控制。 */}
         <Route
           path="/manage/calendar"
           element={

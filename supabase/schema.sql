@@ -410,6 +410,7 @@ begin
   end;
 end $$;
 
+
 -- 让 Realtime 的 UPDATE/DELETE 事件带上完整旧行，便于前端对账
 alter table calls replica identity full;
 
@@ -7688,7 +7689,7 @@ end $$;
 --     后者会被 PostgreSQL 解析成 `expr = ANY (子查询)`（= `IN (子查询)`），
 --     子查询那一列是 **uuid[]**，于是报 `operator does not exist: uuid = uuid[]`
 --     （实测：建函数那一刻就断，整份 schema 跑不过去）。`array(子查询)` 才是"数组表达式"。
-create or replace function public.grade_backup_payload_json(p_grade_id uuid)
+create or replace function public.grade_backup_payload_json_base(p_grade_id uuid)
 returns jsonb
 language sql
 stable
@@ -7769,6 +7770,13 @@ as $$
     )
   );
 $$;
+
+-- §47 在新表建好后会扩展这一层；此处先保持旧备份内容可用。
+create or replace function public.grade_backup_payload_json(p_grade_id uuid)
+returns jsonb language sql stable security definer set search_path = public as $$
+  select public.grade_backup_payload_json_base(p_grade_id);
+$$;
+revoke all on function public.grade_backup_payload_json_base(uuid) from public, anon, authenticated;
 
 -- -------- 29.6 🔑 生成备份（**一个事务**：payload + 链接令牌 + 状态行）--------
 --  ① 谁：教导处 / 最高管理员（备份是防呆的第一步，不是删除本身）
@@ -8196,6 +8204,8 @@ revoke all on function public.grade_delete(uuid, uuid, text) from public, anon, 
 revoke all on function public.grade_backup_payload(uuid, uuid) from public, anon, authenticated;
 revoke all on function public.grade_backup_by_token(text) from public, anon, authenticated;
 revoke all on function public.grade_backup_payload_json(uuid) from public, anon, authenticated;
+
+
 
 grant execute on function public.academic_year_name_of(date) to authenticated;
 grant execute on function public.current_academic_year() to authenticated;
@@ -12046,6 +12056,8 @@ create table if not exists plugin_registry (
      `.../plugins/<id>/index.js?ref=<这一列>` 取，旧版本才不会跟着 main 漂
      （不带 ref 就只能拿到最新内容，撤版回退 = 回退到新版，那就不叫钉死）。 */
   source_commit  text,
+  /* 超管审核后的读表清单；只能是该 Git 版本 manifest.reads 的子集。 */
+  approved_reads jsonb not null default '[]'::jsonb,
   released_at    timestamptz,
   revoked_at     timestamptz,
   updated_at     timestamptz not null default now(),
@@ -12063,6 +12075,8 @@ alter table plugin_registry add column if not exists description text not null d
 alter table plugin_registry add column if not exists config_schema jsonb not null default '{}'::jsonb;
 /* 🆕 2026-10-24：方案 A 的"发布钉 commit"。老库同样用 if not exists 补，整份脚本照旧幂等 */
 alter table plugin_registry add column if not exists source_commit text;
+alter table plugin_registry add column if not exists approved_reads jsonb not null default '[]'::jsonb;
+alter table plugin_registry add column if not exists results_schema jsonb not null default '[]'::jsonb;
 
 -- -------- 45.2 通用数据槽（键值对，按 班级 × 插件 隔离）--------
 --  ⚠️ `plugin_id` **故意不建外键**：撤版/删登记不该连带删掉一个班的现场数据
@@ -12313,6 +12327,15 @@ create policy plugin_registry_write on plugin_registry for all to authenticated
   using (is_super_admin())
   with check (is_super_admin());
 
+-- 插件发布、撤版、读表授权变更即时通知教室端；通知只作失效信号，客户端重新读取登记表。
+do $$
+begin
+  begin
+    alter publication supabase_realtime add table plugin_registry;
+  exception when duplicate_object then null;
+  end;
+end $$;
+
 -- 数据槽：🔴 **一条策略都不建**（与 §40.4 的 `class_rep_pins` 同款）——
 --   客户端连 select/insert/update 的表权限都没有（见段首 ②），读写只走
 --   `plugin_data_write()` / `plugin_data_read()`。
@@ -12464,3 +12487,419 @@ end $$;
 --  ⑤ 教室端账号的 JWT：读 → 1 行；**写 → 被拒**（policy 不给它写那一档）。
 --  ⑥ 幂等：整份脚本跑两遍，表 / 3 条策略 / 触发器数量不变。
 -- ============================================================
+
+-- ============================================================
+--  47. 学科班级情况：教师私有标签和文字记录、与班主任共享的学生组
+--  新表均不回填旧学生数据；上线前重跑整份幂等 schema.sql（§29 的备份基函数是前置依赖）。
+-- ============================================================
+
+create table if not exists student_teaching_entries (
+  id           uuid primary key default gen_random_uuid(),
+  class_id     uuid not null references classes(id) on delete cascade,
+  student_id   uuid not null references students(id) on delete cascade,
+  teacher_id   uuid not null references teachers(id) on delete cascade,
+  subject_code text not null references subjects(code),
+  kind         text not null check (kind in ('tag', 'note')),
+  body         text not null check (length(btrim(body)) between 1 and 2000
+    and (kind <> 'tag' or length(btrim(body)) <= 24)),
+  created_at   timestamptz not null default now()
+);
+create index if not exists student_teaching_entries_owner_idx
+  on student_teaching_entries (teacher_id, class_id, student_id, created_at desc);
+
+create table if not exists subject_student_groups (
+  id           uuid primary key default gen_random_uuid(),
+  class_id     uuid not null references classes(id) on delete cascade,
+  teacher_id   uuid not null references teachers(id) on delete cascade,
+  subject_code text not null references subjects(code),
+  name         text not null check (length(btrim(name)) between 1 and 50),
+  created_at   timestamptz not null default now()
+);
+create index if not exists subject_student_groups_class_idx on subject_student_groups (class_id);
+create index if not exists subject_student_groups_owner_idx on subject_student_groups (teacher_id);
+
+create table if not exists subject_student_group_members (
+  group_id   uuid not null references subject_student_groups(id) on delete cascade,
+  student_id uuid not null references students(id) on delete cascade,
+  primary key (group_id, student_id)
+);
+create index if not exists subject_student_group_members_student_idx
+  on subject_student_group_members (student_id, group_id);
+
+alter table student_teaching_entries enable row level security;
+alter table subject_student_groups enable row level security;
+alter table subject_student_group_members enable row level security;
+
+revoke all on student_teaching_entries, subject_student_groups, subject_student_group_members from anon, authenticated;
+grant select, insert, delete on student_teaching_entries to authenticated;
+grant select, insert, delete on subject_student_groups to authenticated;
+grant select, insert on subject_student_group_members to authenticated;
+
+-- 用属主身份核对学生是否真的属于当前教学班；走班成员来自 class_members。
+create or replace function public.student_in_teaching_class(p_class_id uuid, p_student_id uuid)
+returns boolean language sql stable security definer set search_path = public as $$
+  select exists (select 1 from students s where s.id = p_student_id and s.class_id = p_class_id)
+      or exists (select 1 from class_members m where m.student_id = p_student_id and m.class_id = p_class_id);
+$$;
+revoke all on function public.student_in_teaching_class(uuid, uuid) from public, anon, authenticated;
+grant execute on function public.student_in_teaching_class(uuid, uuid) to authenticated;
+
+-- 仅作者和相关班主任可读组。属主函数避免组与成员策略互相引用造成递归。
+create or replace function public.can_read_subject_student_group(p_group_id uuid)
+returns boolean language sql stable security definer set search_path = public as $$
+  select exists (
+    select 1 from subject_student_groups g
+    where g.id = p_group_id and (
+      g.teacher_id = auth.uid()
+      or exists (select 1 from teacher_roles r
+                 where r.teacher_id = auth.uid() and r.role = 'head_teacher'
+                   and r.scope_type = 'class' and r.scope_id = g.class_id)
+      or exists (select 1 from subject_student_group_members m
+                   join students s on s.id = m.student_id
+                   join teacher_roles r on r.scope_id = s.class_id
+                 where m.group_id = g.id and r.teacher_id = auth.uid()
+                   and r.role = 'head_teacher' and r.scope_type = 'class')
+    )
+  );
+$$;
+revoke all on function public.can_read_subject_student_group(uuid) from public, anon, authenticated;
+grant execute on function public.can_read_subject_student_group(uuid) to authenticated;
+
+drop policy if exists student_teaching_entries_read on student_teaching_entries;
+create policy student_teaching_entries_read on student_teaching_entries for select to authenticated
+  using (teacher_id = (select auth.uid()) and not is_classroom_account());
+drop policy if exists student_teaching_entries_insert on student_teaching_entries;
+create policy student_teaching_entries_insert on student_teaching_entries for insert to authenticated
+  with check (teacher_id = (select auth.uid()) and not is_classroom_account()
+    and public.student_in_teaching_class(class_id, student_id)
+    and public.teaches_subject(class_id, subject_code,
+      (select s.name from subjects s where s.code = subject_code)));
+drop policy if exists student_teaching_entries_delete on student_teaching_entries;
+create policy student_teaching_entries_delete on student_teaching_entries for delete to authenticated
+  using (teacher_id = (select auth.uid()) and not is_classroom_account());
+
+drop policy if exists subject_student_groups_read on subject_student_groups;
+create policy subject_student_groups_read on subject_student_groups for select to authenticated
+  using (not is_classroom_account() and
+    (teacher_id = (select auth.uid()) or public.can_read_subject_student_group(id)));
+drop policy if exists subject_student_groups_insert on subject_student_groups;
+create policy subject_student_groups_insert on subject_student_groups for insert to authenticated
+  with check (teacher_id = (select auth.uid()) and not is_classroom_account()
+    and public.teaches_subject(class_id, subject_code,
+      (select s.name from subjects s where s.code = subject_code)));
+drop policy if exists subject_student_groups_delete on subject_student_groups;
+create policy subject_student_groups_delete on subject_student_groups for delete to authenticated
+  using (teacher_id = (select auth.uid()) and not is_classroom_account());
+
+drop policy if exists subject_student_group_members_read on subject_student_group_members;
+create policy subject_student_group_members_read on subject_student_group_members for select to authenticated
+  using (not is_classroom_account() and (
+    exists (select 1 from subject_student_groups g
+            where g.id = group_id and g.teacher_id = (select auth.uid()))
+    or exists (select 1 from students s join teacher_roles r on r.scope_id = s.class_id
+               where s.id = student_id and r.teacher_id = (select auth.uid())
+                 and r.role = 'head_teacher' and r.scope_type = 'class')
+  ));
+drop policy if exists subject_student_group_members_insert on subject_student_group_members;
+create policy subject_student_group_members_insert on subject_student_group_members for insert to authenticated
+  with check (not is_classroom_account() and exists (
+    select 1 from subject_student_groups g where g.id = group_id
+      and g.teacher_id = (select auth.uid())
+      and public.student_in_teaching_class(g.class_id, student_id)
+  ));
+
+-- 一个事务内创建组和成员，任一成员不属于教学班时整次失败，不留空组。
+create or replace function public.create_subject_student_group(
+  p_class_id uuid, p_subject_code text, p_name text, p_student_ids uuid[]
+)
+returns uuid language plpgsql security invoker set search_path = public as $$
+declare v_id uuid;
+begin
+  if p_name is null or length(btrim(p_name)) not between 1 and 50
+     or p_student_ids is null or cardinality(p_student_ids) not between 1 and 100
+     or exists (select 1 from unnest(p_student_ids) x where x is null
+                  or not public.student_in_teaching_class(p_class_id, x)) then
+    raise exception '组名或成员无效';
+  end if;
+  insert into subject_student_groups (class_id, teacher_id, subject_code, name)
+  values (p_class_id, auth.uid(), p_subject_code, btrim(p_name)) returning id into v_id;
+  insert into subject_student_group_members (group_id, student_id)
+  select v_id, x from (select distinct unnest(p_student_ids) x) members;
+  return v_id;
+end $$;
+revoke all on function public.create_subject_student_group(uuid, text, text, uuid[]) from public, anon, authenticated;
+grant execute on function public.create_subject_student_group(uuid, text, text, uuid[]) to authenticated;
+
+-- 新增的三个客户端写入口同样服从 §42 维护窗口。
+do $$
+declare t text; op text;
+begin
+  for t, op in select * from (values
+    ('student_teaching_entries','insert'), ('student_teaching_entries','delete'),
+    ('subject_student_groups','insert'), ('subject_student_groups','delete'),
+    ('subject_student_group_members','insert')
+  ) v(t, op) loop
+    execute format('drop policy if exists %I on %I', t || '_maintenance_' || op, t);
+    execute format('create policy %I on %I as restrictive for %s to authenticated %s',
+      t || '_maintenance_' || op, t, op,
+      case when op = 'insert' then 'with check (not public.is_maintenance())'
+           else 'using (not public.is_maintenance())' end);
+  end loop;
+end $$;
+
+-- 班主任维护的班级分组和座位；与学科教师的私有分组分开存。
+create table if not exists class_groups (
+  id uuid primary key default gen_random_uuid(),
+  class_id uuid not null references classes(id) on delete cascade,
+  name text not null check (length(btrim(name)) between 1 and 50),
+  leader_id uuid references students(id) on delete set null,
+  member_ids uuid[] not null default '{}',
+  updated_at timestamptz not null default now(),
+  check (leader_id is null or leader_id = any(member_ids))
+);
+create index if not exists class_groups_class_idx on class_groups(class_id);
+
+create table if not exists class_seats (
+  class_id uuid not null references classes(id) on delete cascade,
+  student_id uuid not null references students(id) on delete cascade,
+  seat_row integer not null check (seat_row between 1 and 30),
+  seat_col integer not null check (seat_col between 1 and 30),
+  updated_at timestamptz not null default now(),
+  primary key (class_id, student_id),
+  unique (class_id, seat_row, seat_col)
+);
+
+create or replace function public.validate_class_layout_members()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  if tg_table_name = 'class_groups' then
+    if exists (select 1 from unnest(new.member_ids) m
+               where m is null or not exists (select 1 from students s where s.id = m and s.class_id = new.class_id))
+       or (select count(*) from unnest(new.member_ids)) <> (select count(distinct m) from unnest(new.member_ids) m) then
+      raise exception '分组成员必须是本班学生且不能重复';
+    end if;
+  elsif not exists (select 1 from students s where s.id = new.student_id and s.class_id = new.class_id) then
+    raise exception '座位只能分配给本班学生';
+  end if;
+  new.updated_at := now();
+  return new;
+end $$;
+drop trigger if exists class_groups_validate on class_groups;
+create trigger class_groups_validate before insert or update on class_groups
+  for each row execute function public.validate_class_layout_members();
+drop trigger if exists class_seats_validate on class_seats;
+create trigger class_seats_validate before insert or update on class_seats
+  for each row execute function public.validate_class_layout_members();
+revoke all on function public.validate_class_layout_members() from public, anon, authenticated;
+
+alter table class_groups enable row level security;
+alter table class_seats enable row level security;
+grant select, insert, update, delete on class_groups, class_seats to authenticated;
+revoke all on class_groups, class_seats from anon;
+drop policy if exists class_groups_read on class_groups;
+create policy class_groups_read on class_groups for select to authenticated
+  using (class_id in (select visible_class_ids()));
+drop policy if exists class_groups_write on class_groups;
+create policy class_groups_write on class_groups for all to authenticated
+  using (public.can_manage_class(class_id)) with check (public.can_manage_class(class_id));
+drop policy if exists class_seats_read on class_seats;
+create policy class_seats_read on class_seats for select to authenticated
+  using (class_id in (select visible_class_ids()));
+drop policy if exists class_seats_write on class_seats;
+create policy class_seats_write on class_seats for all to authenticated
+  using (public.can_manage_class(class_id)) with check (public.can_manage_class(class_id));
+drop policy if exists class_groups_maintenance_insert on class_groups;
+create policy class_groups_maintenance_insert on class_groups as restrictive for insert to authenticated
+  with check (not public.is_maintenance());
+drop policy if exists class_groups_maintenance_update on class_groups;
+create policy class_groups_maintenance_update on class_groups as restrictive for update to authenticated
+  using (not public.is_maintenance()) with check (not public.is_maintenance());
+drop policy if exists class_groups_maintenance_delete on class_groups;
+create policy class_groups_maintenance_delete on class_groups as restrictive for delete to authenticated
+  using (not public.is_maintenance());
+drop policy if exists class_seats_maintenance_insert on class_seats;
+create policy class_seats_maintenance_insert on class_seats as restrictive for insert to authenticated
+  with check (not public.is_maintenance());
+drop policy if exists class_seats_maintenance_update on class_seats;
+create policy class_seats_maintenance_update on class_seats as restrictive for update to authenticated
+  using (not public.is_maintenance()) with check (not public.is_maintenance());
+drop policy if exists class_seats_maintenance_delete on class_seats;
+create policy class_seats_maintenance_delete on class_seats as restrictive for delete to authenticated
+  using (not public.is_maintenance());
+
+-- 教师名单只通过安全定义函数给已审核插件：姓名、学科和 ID，不含联系方式或账号。
+create or replace function public.plugin_teacher_directory(p_class_id uuid, p_plugin_id text)
+returns jsonb language plpgsql stable security definer set search_path = public as $$
+declare v_rows jsonb;
+begin
+  if not public.is_classroom_of_class_for(auth.uid(), p_class_id)
+     or not exists (select 1 from plugin_registry r where r.plugin_id = p_plugin_id
+                    and r.stable_version is not null and r.revoked_at is null
+                    and r.approved_reads ? 'teachers') then
+    return jsonb_build_object('ok', false, 'code', 'E_FORBIDDEN');
+  end if;
+  select coalesce(jsonb_agg(jsonb_build_object('id', t.id, 'name', t.name,
+         'subject', t.subject) order by t.name), '[]'::jsonb) into v_rows
+  from teachers t where not exists (select 1 from classroom_accounts a where a.id = t.id)
+    and not public.is_super_admin_teacher(t.id);
+  return jsonb_build_object('ok', true, 'rows', v_rows);
+end $$;
+revoke all on function public.plugin_teacher_directory(uuid, text) from public, anon;
+grant execute on function public.plugin_teacher_directory(uuid, text) to authenticated;
+
+-- 年级毕业备份带走被级联删除的私有记录、共享组和成员。
+-- 只给 §29 原始 payload 加字段，已有各表的备份口径不变。
+create or replace function public.grade_backup_payload_json(p_grade_id uuid)
+returns jsonb language sql stable security definer set search_path = public as $$
+  with base as (select public.grade_backup_payload_json_base(p_grade_id) as payload),
+  scope as (
+    select array(select id from classes where grade_id = p_grade_id) as class_ids,
+           array(select s.id from students s join classes c on c.id = s.class_id
+                  where c.grade_id = p_grade_id) as student_ids
+  ), touched_groups as (
+    select g.id from subject_student_groups g, scope
+    where g.class_id = any(scope.class_ids)
+       or exists (select 1 from subject_student_group_members m
+                  where m.group_id = g.id and m.student_id = any(scope.student_ids))
+  ), entries as (
+    select e.* from student_teaching_entries e, scope
+    where e.class_id = any(scope.class_ids) or e.student_id = any(scope.student_ids)
+  ), groups as (
+    select g.* from subject_student_groups g where g.id in (select id from touched_groups)
+  ), members as (
+    select m.* from subject_student_group_members m, scope
+    where m.group_id in (select id from touched_groups)
+       or m.student_id = any(scope.student_ids)
+  ), class_group_rows as (
+    select g.* from class_groups g, scope where g.class_id = any(scope.class_ids)
+  ), class_seat_rows as (
+    select s.* from class_seats s, scope where s.class_id = any(scope.class_ids)
+  )
+  select base.payload || jsonb_build_object(
+    'format', 'grade-backup.v2',
+    'counts', (base.payload -> 'counts') || jsonb_build_object(
+      'studentTeachingEntries', (select count(*) from entries),
+      'subjectStudentGroups', (select count(*) from groups),
+      'subjectStudentGroupMembers', (select count(*) from members),
+      'classGroups', (select count(*) from class_group_rows),
+      'classSeats', (select count(*) from class_seat_rows)),
+    'tables', (base.payload -> 'tables') || jsonb_build_object(
+      'studentTeachingEntries', coalesce((select jsonb_agg(to_jsonb(e)) from entries e), '[]'::jsonb),
+      'subjectStudentGroups', coalesce((select jsonb_agg(to_jsonb(g)) from groups g), '[]'::jsonb),
+      'subjectStudentGroupMembers', coalesce((select jsonb_agg(to_jsonb(m)) from members m), '[]'::jsonb),
+      'classGroups', coalesce((select jsonb_agg(to_jsonb(g)) from class_group_rows g), '[]'::jsonb),
+      'classSeats', coalesce((select jsonb_agg(to_jsonb(s)) from class_seat_rows s), '[]'::jsonb))
+  ) from base;
+$$;
+revoke all on function public.grade_backup_payload_json(uuid) from public, anon, authenticated;
+
+-- ============================================================
+--  48. 插件源数据与教师端结果的即时失效信号
+-- ============================================================
+-- Realtime 只传班级、表名或插件/槽名；实际内容仍由原 RLS / RPC 读取。
+create table if not exists plugin_sync_events (
+  class_id uuid not null references classes(id) on delete cascade,
+  kind text not null check (kind in ('source', 'storage', 'result')),
+  name text not null,
+  changed_key text,
+  revision bigint not null default 1,
+  updated_at timestamptz not null default now(),
+  primary key (class_id, kind, name)
+);
+alter table plugin_sync_events add column if not exists changed_key text;
+alter table plugin_sync_events drop constraint if exists plugin_sync_events_kind_check;
+alter table plugin_sync_events add constraint plugin_sync_events_kind_check
+  check (kind in ('source', 'storage', 'result'));
+alter table plugin_sync_events enable row level security;
+grant select on plugin_sync_events to authenticated;
+revoke all on plugin_sync_events from anon;
+revoke insert, update, delete on plugin_sync_events from authenticated;
+drop policy if exists plugin_sync_events_read on plugin_sync_events;
+create policy plugin_sync_events_read on plugin_sync_events for select to authenticated
+  using (class_id in (select public.visible_class_ids())
+    and (kind in ('source', 'storage') or not public.is_classroom_account()));
+
+create or replace function public.plugin_sync_bump(p_class_id uuid, p_kind text, p_name text, p_key text default null)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  if p_class_id is null or not exists (select 1 from classes where id = p_class_id) then return; end if;
+  insert into plugin_sync_events(class_id, kind, name, changed_key)
+  values (p_class_id, p_kind, p_name, p_key)
+  on conflict (class_id, kind, name) do update
+    set revision = plugin_sync_events.revision + 1, changed_key = excluded.changed_key, updated_at = now();
+end $$;
+revoke all on function public.plugin_sync_bump(uuid, text, text, text) from public, anon, authenticated;
+
+create or replace function public.plugin_sync_changed()
+returns trigger language plpgsql security definer set search_path = public as $$
+declare
+  v_new_class uuid;
+  v_old_class uuid;
+  v_name text := tg_table_name;
+  v_row jsonb;
+begin
+  v_row := case when tg_op = 'DELETE' then to_jsonb(old) else to_jsonb(new) end;
+  if tg_table_name = 'plugin_data' then
+    if v_row->>'plugin_id' <> '__framework' then
+      perform public.plugin_sync_bump((v_row->>'class_id')::uuid, 'storage', v_row->>'plugin_id', v_row->>'key');
+      perform public.plugin_sync_bump((v_row->>'class_id')::uuid, 'result', v_row->>'plugin_id', v_row->>'key');
+    end if;
+    return case when tg_op = 'DELETE' then old else new end;
+  end if;
+  if tg_table_name in ('teachers', 'school_calendar', 'school_calendar_events') then
+    perform public.plugin_sync_bump(id, 'source', v_name) from classes;
+    return case when tg_op = 'DELETE' then old else new end;
+  end if;
+  if tg_op <> 'DELETE' then v_new_class := (to_jsonb(new)->>'class_id')::uuid; end if;
+  if tg_op <> 'INSERT' then v_old_class := (to_jsonb(old)->>'class_id')::uuid; end if;
+  perform public.plugin_sync_bump(v_new_class, 'source', v_name);
+  if v_old_class is distinct from v_new_class then
+    perform public.plugin_sync_bump(v_old_class, 'source', v_name);
+  end if;
+  return case when tg_op = 'DELETE' then old else new end;
+end $$;
+revoke all on function public.plugin_sync_changed() from public, anon, authenticated;
+
+do $$
+declare v_table text;
+begin
+  foreach v_table in array array[
+    'plugin_data', 'students', 'schedule_items', 'school_calendar',
+    'school_calendar_events', 'class_groups', 'class_seats', 'teachers',
+    'daily_homework', 'duty_assignments', 'assignments', 'class_subjects',
+    'schedule_temp_changes'
+  ] loop
+    execute format('drop trigger if exists plugin_sync_notify on public.%I', v_table);
+    execute format('create trigger plugin_sync_notify after insert or update or delete on public.%I '
+                   || 'for each row execute function public.plugin_sync_changed()', v_table);
+  end loop;
+  begin
+    alter publication supabase_realtime add table plugin_sync_events;
+  exception when duplicate_object then null;
+  end;
+end $$;
+
+-- 教师端只读审核时声明的结果槽。插件可记录私有槽，但不会自动展示给教师。
+create or replace function public.plugin_teacher_result(p_class_id uuid, p_plugin_id text, p_key text)
+returns jsonb language plpgsql volatile security definer set search_path = public as $$
+declare v_payload jsonb; v_at timestamptz;
+begin
+  if auth.uid() is null or public.is_classroom_account()
+     or not exists (select 1 from teachers where id = auth.uid())
+     or p_class_id not in (select public.visible_class_ids()) then
+    return jsonb_build_object('ok', false, 'code', 'E_FORBIDDEN');
+  end if;
+  if not exists (select 1 from plugin_registry r where r.plugin_id = p_plugin_id
+      and r.stable_version is not null and r.revoked_at is null
+      and r.results_schema @> jsonb_build_array(jsonb_build_object('key', p_key))) then
+    return jsonb_build_object('ok', false, 'code', 'E_RESULT_NOT_APPROVED');
+  end if;
+  if public.plugin_quota_hit(p_class_id, p_plugin_id, 'r') > 600 then
+    return jsonb_build_object('ok', false, 'code', 'E_QUOTA_RATE');
+  end if;
+  select payload, updated_at into v_payload, v_at from plugin_data
+    where class_id = p_class_id and plugin_id = p_plugin_id and key = p_key;
+  return jsonb_build_object('ok', true, 'present', found, 'payload', v_payload, 'updated_at', v_at);
+end $$;
+revoke all on function public.plugin_teacher_result(uuid, text, text) from public, anon;
+grant execute on function public.plugin_teacher_result(uuid, text, text) to authenticated;

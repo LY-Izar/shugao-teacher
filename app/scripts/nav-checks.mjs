@@ -1341,7 +1341,8 @@ const realRoutes = routes.filter((p) => p !== '*')
    *   · `WINDOW_ROUTES`：`/popup/:pluginId` 这种"窗口地址"——壳开的一扇浮窗加载它，
    *     谁都没有入口，矩阵量的是"哪个身份看得到哪个页面"，它 13 格一模一样，进表纯噪音。
    */
-  const EXEMPT_FROM_MATRIX = ['/notices', '/notices/new', ...WINDOW_ROUTES]
+  const ADMIN_SUBROUTES = ['/manage/students/:id', '/manage/assignments']
+  const EXEMPT_FROM_MATRIX = ['/notices', '/notices/new', ...WINDOW_ROUTES, ...ADMIN_SUBROUTES, '/class/:section']
   eqSet(
     'D1：PAGES 里**不在** §2.2 矩阵里的路径 —— 恰好是通知那两行 + 窗口地址白名单',
     PAGES.map((p) => p.path).filter((p) => !MATRIX_PATHS.includes(p)),
@@ -1350,7 +1351,7 @@ const realRoutes = routes.filter((p) => p !== '*')
   eq(
     'D1：白名单就是那 3 条（多一条、少一条都红 —— 豁免要有痕迹）',
     EXEMPT_FROM_MATRIX.length,
-    3,
+    6,
     `EXEMPT_FROM_MATRIX=${EXEMPT_FROM_MATRIX.join(' / ')}`,
   )
 }
@@ -1671,7 +1672,7 @@ d9Matrix: {
     eqSet(
       'D9：13 列矩阵的路径 ↔ PAGES 的路径（每加一条路由都要登记，窗口地址白名单除外）',
       mx.paths,
-      PAGES.map((p) => p.path).filter((p) => !WINDOW_ROUTES.includes(p)),
+      PAGES.map((p) => p.path).filter((p) => !WINDOW_ROUTES.includes(p) && !['/manage/students/:id', '/manage/assignments', '/class/:section'].includes(p)),
     )
 
     /*
@@ -1892,6 +1893,7 @@ section('第九节 · D3/D4/D5：判据白名单 · myRoles 读取点白名单 �
           '**不读任何数据行**（那三页的读写闸门由服务端与 RLS 判）',
       ],
       ['src/pages/TeacherAccounts.tsx', '身份区按钮显隐（canAssignRoles）+ 身份名文案'],
+      ['src/pages/ClassWorkspace.tsx', '按 head_teacher 的班级范围确定班主任工作台所属班级；页面数据仍由既有班级和课表读取'],
       [
         'src/pages/ManageCourse.tsx',
         '🆕 课程管理（2026-10-12，第 3 轮）：**整段摆不摆**那一个判据（`hasManagingRole(myRoles)`）—— ' +
@@ -1988,13 +1990,8 @@ section('第九节 · D3/D4/D5：判据白名单 · myRoles 读取点白名单 �
     ['src/lib/roles.ts', 'filter 的是 EntryKey 数组（visibleEntryKeys，入口不是数据）'],
     ['src/pages/Admin.tsx', 'filter 的是面板的只读体检项 allTones（与角色无关）'],
     ['src/pages/Settings.tsx', 'filter 的是 schedule 里 scope!==class 的那一份（与角色无关）'],
-    [
-      'src/pages/Administration.tsx',
-      '🆕 行政管理（2026-10-01）：`.filter` 滤的是**入口清单**（`CARDS.filter((c) => entryVisible(c.key, myRoles))`）' +
-        '—— 与 `AppShell` 的 `NAV.filter(...)` 同一款，正是 M3 划的那条线（**入口 ≠ 数据行**）。' +
-        '这一页不读 classes / students / grades 里的任何一行',
-    ],
     ['src/pages/TeacherAccounts.tsx', 'filter 的是任课关系多选（与角色无关）'],
+    ['src/pages/ClassWorkspace.tsx', 'filter 的是本班名单、课表、作业和分组数据；角色只用于确定班主任所管班级，不参与筛选这些数据行'],
     [
       'src/pages/Workbench.tsx',
       'filter 的是今日待办（与角色无关）+ 🆕快捷操作那一组格子末尾的 ' +

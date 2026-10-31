@@ -88,6 +88,7 @@ function makeWorld({ offline = false, pipOk = true, rateLimitAfter = Infinity } 
       store.set(k, v)
     },
     storageKeys: async () => [...store.keys()],
+    storageSyncState: () => ({ pending: 0, lastError: null }),
     configGet: () => ({ ...cfg }),
     configOnChange: (cb) => {
       cfgWatchers.push(cb)
@@ -394,7 +395,7 @@ async function runChecks(dir, { quiet = false } = {}) {
     }
     /* planCard 是**能力一致**判据：申请了 pip 而壳不支持 ⇒ 说"要教室版程序"；
        没申请 ⇒ 卡片就该是可用的（reason null）——两档都是"照实说"。 */
-    const cardNoPip = planCard(manifest, { shellSupportsPip: false, shellVersion: '1.1.5' })
+    const cardNoPip = planCard(manifest, { shellSupportsPip: false, shellVersion: manifest.minShellVersion })
     ok(
       'CF-13',
       '网页预览下卡片照实说：申请 pip ⇒「要教室版程序」，没申请 ⇒ 可用',
@@ -520,8 +521,8 @@ async function readTablesMirrorChecks() {
 
   ok(
     'RT-05',
-    '总条数 = 49（源头与镜像各 49）',
-    srcNames.length === 49 && mirrorNames.length === 49,
+    '总条数 = 55（源头与镜像各 55）',
+    srcNames.length === 55 && mirrorNames.length === 55,
     `源头 ${srcNames.length} / 镜像 ${mirrorNames.length}`,
   )
 
@@ -616,6 +617,21 @@ const target = argOf('--plugin') ? resolve(process.cwd(), argOf('--plugin')) : F
 const { failures: f } = await runChecks(target)
 publishPathChecks()
 await readTablesMirrorChecks()
+{
+  const resultManifest = baseManifest({ permissions: ['storage'], teacherResults: [{ key: 'summary', label: '汇总' }] })
+  ok('RESULT', '插件可声明教师端结果槽', validateManifest(resultManifest.id, resultManifest).ok)
+  const withoutStorage = { ...resultManifest, permissions: ['clock'] }
+  ok('RESULT', '没申请 storage 不能声明教师端结果', !validateManifest(withoutStorage.id, withoutStorage).ok)
+  const duplicate = { ...resultManifest, teacherResults: [resultManifest.teacherResults[0], resultManifest.teacherResults[0]] }
+  ok('RESULT', '教师端结果槽名重复会被拒', !validateManifest(duplicate.id, duplicate).ok)
+  const readManifest = baseManifest({ permissions: ['read'], reads: [{ table: 'students', why: '读取本班名单' }] })
+  const ctx = buildContext({ manifest: readManifest, classId: 'c1', className: '测试班', now: () => new Date(),
+    container: {}, ports: { ...makeWorld().ports, watchPluginTable: () => () => {} }, log: () => {} })
+  ok('RESULT', '已声明的读表可以监听更新', typeof ctx.data.watchTable('students', () => {}) === 'function')
+  let denied = false
+  try { ctx.data.watchTable('teachers', () => {}) } catch (error) { denied = error?.code === 'E_TABLE_NOT_READABLE' }
+  ok('RESULT', '没声明的读表不能监听更新', denied)
+}
 let selfBad = 0
 if (argv.includes('--selftest')) selfBad = selftest()
 

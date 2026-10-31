@@ -3,7 +3,6 @@ import { liveValue } from '../lib/liveInput'
 import { IconCheck, IconChevronRight, IconGrid, IconStack, IconSwap } from '../components/icons'
 import { Button, Empty, Modal, Panel, Sect, Tag } from '../components/ui'
 import * as remote from '../data/remote'
-import { makeCourseAdminDemoSchedule } from '../data/seed'
 import { useStore, useToast } from '../data/store'
 import { WEEKDAY_TEXT, type Klass, type ScheduleItem } from '../data/types'
 import { beijingNow, ymdOf } from '../lib/holiday'
@@ -52,17 +51,7 @@ import { slotTextOf } from '../lib/stream'
  *    远程模式下这一支一个字节都不会跑到（`loadScheduleDay()` 回 `'present'`）。
  */
 
-/**
- * 🔴 **"挂在班上就算这个班的课"这一支开不开** —— **只有本地演示模式开**。
- *
- * 理由（2026-10-12 实测 S27 ⑫：`2026-09-14` 摆出 0 格）：
- *   演示夹具 = `seed.ts` 造的那一份**教师个人排课表**（`scope` 空着 → 按 `'mine'` 读），
- *   而这一页只要 `scope='class'` → 一个班一行都没有。同一份数据 `/schedule` 上摆得出来、
- *   这里摆不出来，两份界面自相矛盾。
- * ⚠️ **不许为此放宽 `scope='class'` 这条语义**：教室端（`Classroom.tsx:465`）读的就是它，
- *   放宽 = 把"不是班级课表的行"也送到教室大屏上。所以退回**只准发生在演示模式**，
- *   真实模式（`isRemote`）下这里恒为 `false`，仍然只认 `scope='class'`。
- */
+/** 本地演示没有按日期读课表的服务端接口，临时调课由内存中的周课表与改动合成。 */
 const DEMO_FALLBACK = !isRemote
 
 /** 一个年级条（`grades` 读不到时退回"按班上的年级名分组"） */
@@ -511,6 +500,7 @@ export default function CourseAdmin() {
   const [openGrade, setOpenGrade] = useState<string | null>(null)
   /** 选中的那个班（点班级行才出现右边那块课表） */
   const [classId, setClassId] = useState<string | null>(null)
+  const pendingAdjustClass = useRef<string | null>(null)
   /** 服务端回的"能不能改这个班的课表"（**带班 id**：换班时不把上一个班的结论当成这个班的） */
   const [capFor, setCapFor] = useState<{ id: string; state: remote.CanManageScheduleState } | null>(
     null,
@@ -617,42 +607,13 @@ export default function CourseAdmin() {
     return names.map((n) => ({ key: n, name: n, cohort: '' }))
   }, [grades, classes])
 
-  /**
-   * 🔴 **课程管理专用的班级课表演示夹具**（`seed.ts:makeCourseAdminDemoSchedule`）。
-   *
-   * 为什么要有它（2026-10-12 实测 S27 ㉛㉜㉝㉞㊲）：`store.schedule` 那一批是**教师个人排课表**
-   * （`scope` 空着 = `'mine'`），里面"同一个老师同一时段两个班 / 同一个班同一时段两节"
-   * **天然构造不出来** → 冲突区永远是"没有。"，那五条断言就永远红。
-   *
-   * ⚠️ **它只在这一页、只在本地演示模式**（`DEMO_FALLBACK`）：
-   *    · **不进 store**、也不改 `makeDemoSchedule` —— `/schedule` 与教室端（读 `scope='class'`）看不到它，
-   *      所以不需要"跑完再清干净"；
-   *    · 真实模式（`isRemote`）下这一支一个字节都跑不到。
-   */
-  const demoRows = useMemo<ScheduleItem[]>(
-    () => (DEMO_FALLBACK ? makeCourseAdminDemoSchedule(classes) : []),
-    [classes],
-  )
-  /** 这一页真正读的那份课表 = 库/内存里那一份 + 演示夹具（见上） */
-  const scheduleAll = useMemo<ScheduleItem[]>(
-    () => (demoRows.length ? [...schedule, ...demoRows] : schedule),
-    [schedule, demoRows],
-  )
+  /** 班级课表和教师端、教室端共用同一份 schedule；演示课表也在初始化时进入它。 */
+  const scheduleAll = schedule
 
-  /**
-   * 这个班**教室端那一份**课表。
-   * 🔴 首选 `scope='class'` 那一批（教室端那块屏读的正是它 —— §17 把教室端的写收窄到 `scope='class'`）。
-   * ⚠️ **退回那一支**：本地演示模式的夹具挂在班上、但 `scope` 空着（全平台按 `'mine'` 读），
-   *    所以"这个班一行都没有"时退回"挂在它名下的那些行" —— 否则这一页会说"两个班都没录过课表"，
-   *    而 `/schedule` 上明明摆着同一批课（两份界面自相矛盾）。
-   *    退回时**只是读了同一批行的另一个标签**，判据仍然只有"这一行挂不挂在这个班上"。
-   */
+  /** 班级课表只读取 `scope='class'`，与教室端共用同一批课表行。 */
   const classRows = (cid: string): ScheduleItem[] => {
-    const all = scheduleAll.filter((s) => s.classId === cid)
-    const cls = all.filter((s) => s.scope === 'class')
-    /* ⚠️ 退回那一支**只在演示模式**（见 `DEMO_FALLBACK`）：真实模式只认 `scope='class'` */
-    const hit = cls.length || !DEMO_FALLBACK ? cls : all
-    return hit
+    return scheduleAll
+      .filter((s) => s.classId === cid && s.scope === 'class')
       .slice()
       .sort((a, b) => a.weekday - b.weekday || a.start.localeCompare(b.start))
   }
@@ -684,6 +645,17 @@ export default function CourseAdmin() {
    *    所以它**可反向对照**：把这一个三元的 `:null` 去掉，点已选中的班就又变回"选中"。
    */
   const toggleClass = (id: string) => pickClass(classId === id ? null : id)
+  const openTemporaryAdjust = (id: string) => {
+    pendingAdjustClass.current = id
+    setTweak('temp')
+    setPermAck(false)
+    setPicked([])
+    if (classId !== id) pickClass(id)
+    else {
+      pendingAdjustClass.current = null
+      document.querySelector('[data-course-adjust-anchor]')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }
+  }
 
   /**
    * 展/收一个年级（用户实测指出的第②个 bug：
@@ -712,6 +684,14 @@ export default function CourseAdmin() {
   }, [classId])
 
   const cap = capFor && capFor.id === classId ? capFor.state : null
+  useEffect(() => {
+    if (pendingAdjustClass.current !== classId || !cap?.canManage || !rows.length) return
+    const frame = window.requestAnimationFrame(() => {
+      document.querySelector('[data-course-adjust-anchor]')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      pendingAdjustClass.current = null
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [classId, cap?.canManage, rows.length])
 
   /**
    * 这一天实际上什么课 + 三类冲突 —— **读一次，两处用**。
@@ -737,23 +717,12 @@ export default function CourseAdmin() {
   /** 每个班有几条课表 —— 与 `rows` **同一处口径**（年级副标题与班级行的"x 节 / 未录"都读它） */
   const countByClass = useMemo(() => {
     const m = new Map<string, number>()
-    const explicit = new Set<string>()
     for (const s of scheduleAll) {
       if (!s.classId || s.scope !== 'class') continue
-      explicit.add(s.classId)
       m.set(s.classId, (m.get(s.classId) ?? 0) + 1)
     }
-    /* 退回那一支（本地演示模式的夹具 `scope` 空着）：**逐个班**判，不是"一个都没有才退回"；
-       ⚠️ **只在演示模式** —— 真实模式只认 `scope='class'`（与 `buildDayCells` / `classRows` 同一处口径） */
-    if (DEMO_FALLBACK) {
-      for (const s of scheduleAll) {
-        if (!s.classId || explicit.has(s.classId)) continue
-        m.set(s.classId, (m.get(s.classId) ?? 0) + 1)
-      }
-    }
     return m
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scheduleAll, classId])
+  }, [scheduleAll])
 
   /** 这个年级的班（行政班 / 走班班分开 —— 与 `/classes` 同一处 `splitByKind`） */
   const byGrade = useMemo(() => {
@@ -1226,6 +1195,18 @@ const planSlot = (m: SwapPlan, which: 'a' | 'b'): DaySlot | undefined => {
     changed = false,
   ): string | null => teacherOf(teacherId) ?? (changed ? null : titleTeacherAt(wd, start))
 
+  /** 课程清单只从本班周课表汇总，不另维护一份课程名单。 */
+  const classCourses = [...rows.reduce((out, row) => {
+    const { subject, teacher } = splitLessonTitle(row.title)
+    if (!subject) return out
+    const item = out.get(subject) ?? { subject, count: 0, teachers: new Set<string>() }
+    item.count += 1
+    const name = teacher || teacherOf(row.teacherId ?? null)
+    if (name) item.teachers.add(name)
+    out.set(subject, item)
+    return out
+  }, new Map<string, { subject: string; count: number; teachers: Set<string> }>()).values()]
+
   /**
    * 「只换老师」那几格能换成谁。
    * ⚠️ 走的是**这个班现有老师** + 演示任课表（本地演示模式没有老师名册可问）——
@@ -1544,7 +1525,7 @@ const planSlot = (m: SwapPlan, which: 'a' | 'b'): DaySlot | undefined => {
     <div data-course-admin="1">
       <Panel bodyClass="p-3">
         <div style={{ fontSize: 12, color: 'var(--color-ink3)', lineHeight: 1.7, marginBottom: 8 }}>
-          看每个班的课表、核对教室里显示的那一份、调课。
+          看每个班的课表、任课教师和临时调课；班级课表与教室端使用同一份数据。
         </div>
 
         {groups.map((g) => {
@@ -1603,13 +1584,15 @@ const planSlot = (m: SwapPlan, which: 'a' | 'b'): DaySlot | undefined => {
                           <Sect>行政班</Sect>
                           <div className="flex flex-col gap-1">
                             {split.admin.map((k) => (
-                              <ClassRow
-                                key={k.id}
-                                klass={k}
-                                on={k.id === classId}
-                                count={countByClass.get(k.id) ?? 0}
-                                onPick={() => toggleClass(k.id)}
-                              />
+                              <div key={k.id} className="flex items-center gap-2">
+                                <div className="min-w-0 flex-1"><ClassRow
+                                  klass={k}
+                                  on={k.id === classId}
+                                  count={countByClass.get(k.id) ?? 0}
+                                  onPick={() => toggleClass(k.id)}
+                                /></div>
+                                {(countByClass.get(k.id) ?? 0) > 0 ? <Button size="sm" onClick={() => openTemporaryAdjust(k.id)}>临时调课</Button> : null}
+                              </div>
                             ))}
                           </div>
                         </>
@@ -1617,17 +1600,19 @@ const planSlot = (m: SwapPlan, which: 'a' | 'b'): DaySlot | undefined => {
                       {split.stream.length ? (
                         <div className={split.admin.length ? 'mt-2.5' : ''}>
                           <Sect>走班班</Sect>
-                          <div className="flex flex-col gap-1">
-                            {split.stream.map((k) => (
-                              <ClassRow
-                                key={k.id}
-                                klass={k}
-                                on={k.id === classId}
-                                count={countByClass.get(k.id) ?? 0}
-                                onPick={() => toggleClass(k.id)}
-                              />
-                            ))}
-                          </div>
+                            <div className="flex flex-col gap-1">
+                              {split.stream.map((k) => (
+                                <div key={k.id} className="flex items-center gap-2">
+                                  <div className="min-w-0 flex-1"><ClassRow
+                                    klass={k}
+                                    on={k.id === classId}
+                                    count={countByClass.get(k.id) ?? 0}
+                                    onPick={() => toggleClass(k.id)}
+                                  /></div>
+                                  {(countByClass.get(k.id) ?? 0) > 0 ? <Button size="sm" onClick={() => openTemporaryAdjust(k.id)}>临时调课</Button> : null}
+                                </div>
+                              ))}
+                            </div>
                         </div>
                       ) : null}
                     </>
@@ -1684,6 +1669,7 @@ const planSlot = (m: SwapPlan, which: 'a' | 'b'): DaySlot | undefined => {
                 ) : (
                   <Tag tone="idle">还没录</Tag>
                 )}
+                {cap?.canManage && rows.length ? <Button size="sm" variant="primary" onClick={() => openTemporaryAdjust(klass.id)}>临时调课</Button> : null}
                 {/* 🔴 一枚**明确的"收起"**：不看说明也知道怎么回到"什么都没选"
                     （用户 2026-10-12 指出的第①个 bug 的另一半） */}
                 <Button size="sm" data-course-close="1" onClick={() => pickClass(null)}>
@@ -2229,9 +2215,27 @@ const planSlot = (m: SwapPlan, which: 'a' | 'b'): DaySlot | undefined => {
             )}
           </Panel>
 
+          <Panel head="班级课程与教师分配" className="mt-2">
+            <div data-course-assignments={klass.id}>
+            <div style={{ fontSize: 12, color: 'var(--color-ink3)', lineHeight: 1.7, marginBottom: 8 }}>
+              以下课程从本班周课表汇总，不另建课程名单。
+            </div>
+            {classCourses.length ? classCourses.map((course) => (
+              <div key={course.subject} className="row" style={{ padding: '8px 10px' }}>
+                <span className="min-w-0 flex-1" style={{ fontWeight: 600 }}>{course.subject}</span>
+                <span style={{ color: 'var(--color-ink3)', fontSize: 12, marginRight: 12 }}>{course.count} 节 / 周</span>
+                <span style={{ fontSize: 12 }}>{[...course.teachers].join('、') || '待分配教师'}</span>
+              </div>
+            )) : <div style={{ color: 'var(--color-ink3)', fontSize: 12 }}>这个班还没有课表，导入后会显示课程与任课教师。</div>}
+            <div style={{ color: 'var(--color-ink4)', fontSize: 11.5, marginTop: 8 }}>
+              教师分配与排课规则的编辑功能预留。
+            </div>
+            </div>
+          </Panel>
+
           {/* ============ 第 3 轮：调课 · 冲突 · 建议（**照着 v3 预览**） ============ */}
           {cap?.canManage && rows.length ? (
-            <AdjustPanel
+            <div data-course-adjust-anchor="1" style={{ scrollMarginTop: 100 }}><AdjustPanel
               klass={klass}
               date={date}
               onDate={setDate}
@@ -2277,7 +2281,7 @@ const planSlot = (m: SwapPlan, which: 'a' | 'b'): DaySlot | undefined => {
               onApply={() => setConfirmOpen(true)}
               tempCount={tempChanges.filter((c) => c.date === date && c.classId === klass.id).length}
               teacherOptions={teacherOptions}
-            />
+            /></div>
           ) : null}
 
           {cap?.canManage && rows.length ? (

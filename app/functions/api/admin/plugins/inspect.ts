@@ -19,7 +19,8 @@ export const onRequestGet: PagesFunction<PluginEnv> = async ({ request, env }) =
   const url = new URL(request.url)
   const id = (url.searchParams.get('id') ?? '').trim()
   const ref = (url.searchParams.get('ref') ?? '').trim()
-  if (!id || !ref) return json({ ok: false, why: '缺 id 或 ref' }, 400)
+  if (!id || !/^[a-f0-9]{40}$/i.test(ref))
+    return json({ ok: false, why: '需要插件 Git 提交的完整 40 位 SHA' }, 400)
 
   /* 当前已放行的版本：给"版本只增"那一条当对照 */
   let prev: string | null = null
@@ -41,6 +42,7 @@ export const onRequestGet: PagesFunction<PluginEnv> = async ({ request, env }) =
     name: String(f.files.manifest.name ?? ''),
     description: String(f.files.manifest.description ?? ''),
     permissions: Array.isArray(f.files.manifest.permissions) ? f.files.manifest.permissions : [],
+    reads: Array.isArray(f.files.manifest.reads) ? f.files.manifest.reads : [],
     sha256: f.files.actualSha,
     declaredSha: f.files.declaredSha,
     lines,

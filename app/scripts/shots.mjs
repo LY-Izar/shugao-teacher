@@ -356,7 +356,7 @@ const EXPECTED_FILES = [
   //  111 = 宽视口下 `/classes` 的**右栏「名单体检」**：0 人的班写「还没有名单」而**不画绿勾**，
   //        走班班那一行写「人数待读」（成员在 `class_members` 上，本地读不到 → 不许写 0 人）。
   //  112 = 走班班的**编辑面板**（改名 / 换走班老师 / 手工增删成员 + 删除入口）。
-  '111-classes-health-zero.png',
+  '111-classes-no-health-rail.png',
   '112-stream-edit-sheet.png',
   // 🆕 2026-10-09 F4：**暗色主题**（见最后那一节）。
   //  ⚠️ 这四张是**暗色**（前 112 张仍是亮色，一张都不许变）：
@@ -982,7 +982,9 @@ await withLock(async () => {
       await ctx.clock.install({ time: new Date('2026-09-19T10:00:00') })
 
       await ctx.addInitScript((s) => {
-        window.localStorage.setItem('shugao.teacher.v1', JSON.stringify(s))
+        const roles = new URLSearchParams(location.search).get('roles')
+        const state = roles ? { ...s.state, myRoles: JSON.parse(roles) } : s.state
+        window.localStorage.setItem('shugao.teacher.v1', JSON.stringify({ ...s, state }))
         // 设备角色：这台是教师端。教室端那一段跑完会被产品标成 classroom，
         // 到那一步之后再显式改回来（见 S5 那一节的注释）。
         window.localStorage.setItem('shugao.deviceRole', 'teacher')
@@ -1527,7 +1529,8 @@ await withLock(async () => {
        * 再去收缴页看那份档案 —— 未交的人必须还是"同一个孩子"，只是屏上号码变了。
        * 跑完**改回原样**，后面的步骤看到的仍是 7 号。
        */
-      await goto(page, '09b 改班内学号', '/classes/c-demo-1', {
+      // 此步验的是行政班档案写入口；给演示账号注入可管理该班的身份。
+      await goto(page, '09b 改班内学号', '/manage/students/c-demo-1?roles=%5B%7B%22role%22%3A%22super%22%7D%5D', {
         markers: ['学生名单 · 45 人', '序列号'],
       })
       await shot(page, '09b 改班内学号', '09b-roster-serial', { full: true })
@@ -3171,27 +3174,8 @@ await withLock(async () => {
         if (m.type() === 'error') errors.push(`CONSOLE(${S10}) :: ${m.text()}`)
       })
 
-      /** 右栏「名单体检」那一块：每行 = `名称|文字|是哪一颗图标`（**按 svg 的 path 认**，不按"有没有 svg"） */
-      const healthRows = () =>
-        s10Page.evaluate(() => {
-          const sec = [...document.querySelectorAll('section.panel')].find((s) =>
-            (s.textContent ?? '').includes('名单体检'),
-          )
-          if (!sec) return []
-          return [...sec.querySelectorAll('div.flex.items-center.gap-2')].map((d) => {
-            const svg = d.querySelector('svg')
-            /* 绿勾只有那一条 path（`IconCheck`）；`IconAlert` 是别的形状 ——
-               ⚠️ **不能**用"有没有 svg"当判据：两个图标都是 svg，那样量出来恒为 true（第一版就这么栽的） */
-            const html = svg ? svg.innerHTML : ''
-            return {
-              text: (d.innerText ?? '').replace(/\s+/g, ' ').trim(),
-              icon: !svg ? 'none' : /4\.9 12\.6/.test(html) ? 'check' : 'alert',
-            }
-          })
-        })
-
       await step(S10, async () => {
-        /* ---------- ① 右栏名单体检：0 人的班不许是绿勾 ---------- */
+        /* ---------- ① 用户已移除右栏名单体检，班级入口仍须可用 ---------- */
         await s10Page.goto(`${BASE}/classes?roles=${encodeURIComponent('[{"role":"super"}]')}`, {
           waitUntil: 'networkidle',
         })
@@ -3201,35 +3185,18 @@ await withLock(async () => {
           `${S10}：这一遍**真的落在 /classes**（不是被 Guard 踢回登录页 —— 那样后面的断言会假绿）`,
           s10Page.url(),
         )
-        const rows = await healthRows()
+        const classesText = await bodyText(s10Page)
         check(
-          rows.length >= 3,
-          `${S10}：右栏「名单体检」这一块**真的渲染了**（不然下面两条是假绿）`,
-          `读到 ${rows.length} 行：${rows.map((r) => r.text).join(' / ')}`,
-        )
-        const zeroRow = rows.find((r) => r.text.includes(S10_ZERO))
-        check(
-          Boolean(zeroRow) && /还没有名单/.test(zeroRow.text),
-          `${S10} 🔴 0 人的班（${S10_ZERO}）右栏写**「还没有名单」**，不写「0 人」`,
-          zeroRow ? zeroRow.text : '右栏里找不到这一行',
+          classesText.includes(S10_ZERO) && classesText.includes(S10_STREAM),
+          `${S10}：零人班和走班班仍列在班级页`,
+          short(classesText, 180),
         )
         check(
-          Boolean(zeroRow) && zeroRow.icon !== 'check',
-          `${S10} 🔴 **0 人的班不许画绿勾**（反向对照：把右栏改回 issues === 0 ? <IconCheck/> → 这条红）`,
-          zeroRow ? `图标=${zeroRow.icon} · 文字=${zeroRow.text}` : '右栏里找不到这一行',
+          !classesText.includes('名单体检'),
+          `${S10}：右栏不再显示名单体检`,
+          short(classesText, 180),
         )
-        const streamRow = rows.find((r) => r.text.includes(S10_STREAM))
-        check(
-          Boolean(streamRow) && /人数待读|还没有名单|名单没读到/.test(streamRow.text),
-          `${S10}：走班班那一行的人数**从 ` + '`class_members`' + ` 来** —— 本地读不到就写「人数待读」，**绝不写 0 人**`,
-          streamRow ? `图标=${streamRow.icon} · 文字=${streamRow.text}` : '右栏里找不到这一行',
-        )
-        check(
-          Boolean(streamRow) && streamRow.icon !== 'check',
-          `${S10} 🔴 走班班**名单没读到**时也不许画绿勾（同一条：没有数据 ≠ 一切正常）`,
-          streamRow ? `图标=${streamRow.icon} · 文字=${streamRow.text}` : '右栏里找不到这一行',
-        )
-        await shot(s10Page, S10, '111-classes-health-zero', { full: true })
+        await shot(s10Page, S10, '111-classes-no-health-rail', { full: true })
 
         /* ---------- ② 走班班的编辑 / 删除入口（摆不摆 = 判据的前端影子） ---------- */
         const entries = () =>
@@ -3269,10 +3236,7 @@ await withLock(async () => {
         )
 
         /* ---------- ③ 面板真的打得开：这三件事都在里面 ---------- */
-        await s10Page.goto(`${BASE}/classes?roles=${encodeURIComponent('[{"role":"super"}]')}`, {
-          waitUntil: 'networkidle',
-        })
-        await s10Page.waitForTimeout(600)
+        // 上一步已确认本年级主任有入口，直接使用同一页面打开编辑面板。
         await s10Page.click('[data-stream-edit="1"]')
         await s10Page.waitForTimeout(500)
         const sheet = await bodyText(s10Page)

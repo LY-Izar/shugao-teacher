@@ -1,5 +1,110 @@
 @import 'tailwindcss';
 
+/* 教师端工作板块沿用原有蓝、青、校色紫与发丝线。 */
+.teacher-workspace[data-workspace='class'] {
+  --color-accent: #008fa7;
+  --color-accentink: #006d83;
+  --color-accenttext: #007d94;
+  --color-accentsoft: #e2f6f9;
+}
+.teacher-workspace[data-workspace='admin'] {
+  --color-accent: #6d2b7a;
+  --color-accentink: #572164;
+  --color-accenttext: #6d2b7a;
+  --color-accentsoft: #f4ebf6;
+}
+:root[data-theme='dark'] .teacher-workspace[data-workspace='class'] {
+  --color-accent: #40c8da;
+  --color-accentink: #8ee2ec;
+  --color-accenttext: #69d6e4;
+  --color-accentsoft: #133640;
+}
+:root[data-theme='dark'] .teacher-workspace[data-workspace='admin'] {
+  --color-accent: #c68bd5;
+  --color-accentink: #e2b9ea;
+  --color-accenttext: #d7a5e2;
+  --color-accentsoft: #38233d;
+}
+.workspace-switch { display: flex; gap: 3px; padding: 3px; border: 1px solid var(--color-line); border-radius: 6px; background: var(--color-surface2); }
+.workspace-switch button { flex: 1; min-width: 0; min-height: 32px; border-radius: 4px; color: var(--color-ink2); font-size: 12px; font-weight: 600; }
+.workspace-switch button.active { background: var(--color-surface); color: var(--color-accentink); box-shadow: 0 1px 3px rgb(var(--color-shadow) / .12); }
+.workspace-overview { border: 1px solid var(--color-line); border-radius: 6px; background: var(--color-surface); }
+.workspace-overview.active { border-color: var(--color-accent); background: var(--color-accentsoft); }
+.workspace-overview:hover { border-color: var(--color-accent); }
+.workspace-overview-button { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 48px; padding: 0 12px; color: var(--color-ink2); font-size: 14px; font-weight: 500; text-align: left; }
+.workspace-overview.active .workspace-overview-button { color: var(--color-accentink); font-weight: 600; }
+.workspace-primary-link { position: relative; display: flex; align-items: center; justify-content: space-between; width: 100%; min-height: 42px; padding: 0 12px; border-radius: 6px; color: var(--color-ink2); text-align: left; font-size: 13.5px; font-weight: 560; }
+.workspace-primary-link:hover { color: var(--color-accentink); }
+.workspace-primary-link.active { color: var(--color-accentink); font-weight: 650; }
+.workspace-primary-link.active::before { content: ''; position: absolute; left: 0; top: 10px; bottom: 10px; width: 2px; border-radius: 0 2px 2px 0; background: var(--color-accent); }
+.rail-account { display: flex; align-items: center; gap: 9px; min-width: 0; margin-top: 7px; padding-top: 12px; border-top: 1px solid var(--color-line); }
+.rail-account-icon { display: grid; flex: none; place-items: center; width: 32px; height: 32px; border-radius: 50%; background: var(--color-accentsoft); color: var(--color-accentink); }
+.rail-account-caption { display: block; color: var(--color-ink3); font-size: 10.5px; }
+.rail-account-name { display: block; overflow: hidden; color: var(--color-ink); font-size: 13px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.rail-settings-link { display: flex; align-items: center; gap: 9px; min-height: 36px; padding: 0 9px; border-radius: 5px; color: var(--color-ink2); text-align: left; font-size: 12.5px; }
+.rail-settings-link span { flex: 1; }
+.rail-settings-link:hover, .rail-settings-link[aria-current='page'] { background: var(--color-accentsoft); color: var(--color-accentink); }
+.workspace-secondary-wrap { max-width: 640px; margin: 0 auto; padding: 12px 16px 0; }
+.workspace-secondary { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; padding: 8px; border: 1px solid var(--color-line); border-radius: 6px; background: var(--color-surface); }
+.workspace-secondary-label { margin: 0 5px; padding-right: 9px; border-right: 1px solid var(--color-line); color: var(--color-ink3); font-size: 11px; font-weight: 650; }
+.workspace-secondary button { padding: 7px 9px; border-radius: 4px; color: var(--color-ink2); font-size: 12px; }
+.workspace-secondary button:hover { background: var(--color-surface2); }
+.workspace-secondary button.active { background: var(--color-accentsoft); color: var(--color-accentink); font-weight: 650; }
+.assignment-flow-wrap { max-width: 640px; margin: 0 auto; padding: 12px 16px 0; }
+.assignment-flow { overflow: hidden; border: 1px solid var(--color-line); border-radius: 6px; background: var(--color-surface); }
+.assignment-flow-title { display: flex; justify-content: space-between; gap: 8px; padding: 9px 12px; border-bottom: 1px solid var(--color-line); color: var(--color-ink2); font-size: 11.5px; }
+.assignment-flow-title span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.assignment-flow-title button { flex: none; color: var(--color-accentink); }
+.assignment-flow-steps, .assignment-stage-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.assignment-flow-steps > div { display: flex; flex-direction: column; align-items: flex-start; justify-content: center; min-height: 60px; padding: 7px 12px; border-right: 1px solid var(--color-line); }
+.assignment-flow-steps > div:last-child, .assignment-stage:last-child { border-right: 0; }
+.assignment-flow-steps > div.active { background: var(--color-accentsoft); }
+.assignment-flow-steps .assignment-flow-main { color: var(--color-ink); font-size: 12.5px; font-weight: 650; text-align: left; }
+.assignment-flow-steps > div.active .assignment-flow-main { color: var(--color-accentink); }
+.assignment-flow-small { margin-top: 3px; color: var(--color-ink3); font-size: 10.5px; text-align: left; }
+button.assignment-flow-small { color: var(--color-accentink); }
+.assignment-stage-grid { border-top: 1px solid var(--color-line); background: var(--color-surface2); }
+.assignment-stage { min-width: 0; padding: 11px 12px; border-right: 1px solid var(--color-line); }
+.assignment-stage-heading { color: var(--color-ink2); font-size: 11px; font-weight: 650; }
+.assignment-stage-top { display: flex; align-items: center; justify-content: space-between; gap: 4px; }
+.assignment-stage-top button { color: var(--color-accentink); white-space: nowrap; font-size: 10.5px; }
+.assignment-stage-value { margin-top: 5px; color: var(--color-ink); font-size: 13px; font-weight: 650; }
+.assignment-stage-actions { display: flex; flex-wrap: wrap; gap: 6px 10px; margin-top: 8px; }
+.assignment-stage-actions button { color: var(--color-accentink); font-size: 11px; font-weight: 600; }
+.assignment-stage-actions button:hover { text-decoration: underline; }
+.assignment-stage-actions button:disabled { color: var(--color-ink4); cursor: default; text-decoration: none; }
+.assignment-card-foot { display: flex; justify-content: flex-end; padding: 3px 8px; border-top: 1px solid var(--color-line); background: var(--color-surface2); }
+.assignment-card-foot button { padding: 5px; color: var(--color-ink4); }
+@media (max-width: 540px) {
+  .assignment-stage-grid { grid-template-columns: 1fr; }
+  .assignment-stage { border-right: 0; border-bottom: 1px solid var(--color-line); }
+  .assignment-stage:last-child { border-bottom: 0; }
+  .assignment-flow-steps > div { padding: 7px; }
+  .assignment-flow-steps .assignment-flow-main { font-size: 11px; }
+  .assignment-flow-small { font-size: 10px; }
+}
+.workspace-mobile-bar, .workspace-mobile-directory { display: flex; gap: 5px; overflow-x: auto; scrollbar-width: none; padding: 7px 12px; border-bottom: 1px solid var(--color-line); background: var(--color-surface); }
+.workspace-mobile-bar button, .workspace-mobile-directory button { flex: none; padding: 6px 10px; border-radius: 4px; color: var(--color-ink2); white-space: nowrap; font-size: 12px; }
+.workspace-mobile-bar button.active, .workspace-mobile-directory button.active { background: var(--color-accentsoft); color: var(--color-accentink); font-weight: 650; }
+.workspace-mobile-directory { background: var(--color-surface2); }
+@media (min-width: 1024px) {
+  .workspace-mobile-bar,
+  .workspace-mobile-directory { display: none; }
+}
+.overview-board-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(205px, 1fr)); gap: 10px; }
+.overview-board { --board-color: #0b5cf0; --board-soft: #e9f0fe; overflow: hidden; border: 1px solid var(--color-line); border-top: 3px solid var(--board-color); border-radius: 6px; background: var(--color-surface); }
+.overview-board[data-board='class'] { --board-color: #008fa7; --board-soft: #e2f6f9; }
+.overview-board[data-board='admin'] { --board-color: #6d2b7a; --board-soft: #f4ebf6; }
+.overview-board-head { display: flex; align-items: center; justify-content: space-between; padding: 13px 14px; border-bottom: 1px solid var(--color-line); }
+.overview-board-head strong { font-size: 14px; }
+.overview-board-head span { color: var(--board-color); font-size: 11px; font-weight: 650; }
+.overview-board-body { padding: 13px 14px; }
+.overview-board-caption { margin-bottom: 6px; color: var(--color-ink3); font-size: 11px; letter-spacing: .04em; }
+.overview-board-line { padding: 4px 0; color: var(--color-ink2); font-size: 12px; line-height: 1.5; }
+.overview-board-actions { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 12px; }
+.overview-board-actions button { padding: 6px 8px; border: 1px solid var(--color-line); border-radius: 4px; color: var(--board-color); font-size: 11px; font-weight: 620; }
+.overview-board-actions button:hover { background: var(--board-soft); }
+
 /* ============================================================
    开屏用的自托管字体（SIL OFL 1.1，授权文本在同目录）
    · Playfair Display 900 —— 英文「SD Education」
@@ -1802,59 +1907,9 @@ body::before {
     animation: sheen 6s cubic-bezier(0.4, 0, 0.2, 1) infinite alternate;
   }
 
-  /* ---------- 左栏的**导航项那一块**：放不下时自己滚 + 交界处渐隐 ----------
-   *
-   * 🔴 用户原话（2026-10-08）：「为了避免这里的选项**在部分不同大小的电脑**上不一致，
-   *    这里加一个**可以滚动的**，**溢出了就自动变成能滚动的**，**交界处要有过渡**」。
-   *
-   * 口径三条（改动前先读这段）：
-   *   ① **只有导航项滚** —— 底部的「已连接云端 / N 个班级 · M 名学生」在 `nav` **外面**，
-   *      固定在底部、不跟着滚；界线就是 `nav` 上/下那两条分隔线（`AppShell.tsx` 两处 `borderTop`）。
-   *   ② **放得下时什么也不出现**（没有滚动条、也没有渐隐）——"有些电脑放得下、有些放不下"
-   *      两种都要正常，所以用 `overflow-y: auto`（不是 `scroll`，后者会一直留着一条轨道）。
-   *   ③ 渐隐**用 `mask-image`，⛔ 不是盖一层纯色渐变** —— 侧栏是**液态玻璃**（`.floating-rail`），
-   *      盖色会在玻璃上糊出一块死色。渐隐量 **22px**（只是"提示还有内容"，不是装饰），
-   *      而且**滚到哪一边到头，那一边的渐隐就收掉**（一直亮着会让人以为"下面还有"）。
-   *
-   * ⚠️ `data-rail-scroll`（`none` / `top` / `bottom` / `both`）说的是**哪一边还要渐隐**，
-   *    由 `AppShell.tsx` 的 `measure()` 写 —— 与高亮重算**同一处、同一套触发**。
-   */
+  /* 左栏目录随侧栏自然增高，避免目录内部出现滚动条。 */
   .rail-nav {
-    /* 🔴 `auto`：放得下就不出滚动条 */
-    overflow-y: auto;
-    /* 横向不许滚（导航项是定宽的一列，横向滚只会是布局出错的症状） */
-    overflow-x: hidden;
-    /* 到底之后别把滚动甩给整页（滚轮 / 触控板继续滑不该动主体） */
-    overscroll-behavior: contain;
-  }
-  /* 顶上还有内容 → 顶上渐隐 */
-  .rail-nav[data-rail-scroll='top'],
-  .rail-nav[data-rail-scroll='both'] {
-    -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 22px);
-    mask-image: linear-gradient(180deg, transparent 0, #000 22px);
-  }
-  /* 底下还有内容 → 底下渐隐 */
-  .rail-nav[data-rail-scroll='bottom'],
-  .rail-nav[data-rail-scroll='both'] {
-    -webkit-mask-image: linear-gradient(180deg, #000 calc(100% - 22px), transparent 100%);
-    mask-image: linear-gradient(180deg, #000 calc(100% - 22px), transparent 100%);
-  }
-  /* ⚠️ 这条必须排在上面两条**之后**：两头都要渐隐时它是最终生效的那条 */
-  .rail-nav[data-rail-scroll='both'] {
-    -webkit-mask-image: linear-gradient(
-      180deg,
-      transparent 0,
-      #000 22px,
-      #000 calc(100% - 22px),
-      transparent 100%
-    );
-    mask-image: linear-gradient(
-      180deg,
-      transparent 0,
-      #000 22px,
-      #000 calc(100% - 22px),
-      transparent 100%
-    );
+    overflow: visible;
   }
 }
 

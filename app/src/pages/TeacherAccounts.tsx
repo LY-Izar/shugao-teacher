@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
 import { liveValue } from '../lib/liveInput'
-import { useNavigate } from 'react-router-dom'
 import { Page } from '../components/AppShell'
 import { IconAlert, IconCheck, IconPlus, IconRefresh, IconTrash, IconUser, IconX } from '../components/icons'
 import { Button, Empty, Panel, PageHead, Sect, Sheet, Tag } from '../components/ui'
@@ -20,9 +19,10 @@ import {
   type DirTeacher,
 } from '../lib/accounts'
 import { DEPARTMENTS, departmentName } from '../lib/departments'
-import { goBackOr } from '../lib/back'
 import { canAssignRoles, canManageTeachers, roleName } from '../lib/roles'
 import { SUBJECTS, asSubjectCode, subjectName } from '../lib/subjects'
+import { isRemote } from '../lib/supabase'
+import DemoTeacherManagement from './DemoTeacherManagement'
 import {
   deleteTeacherAccount,
   probeTeacherDelete,
@@ -112,8 +112,11 @@ const ROLE_SCOPE: Record<string, 'none' | 'grade' | 'class' | 'subject' | 'grade
   lesson_prep_lead: 'grade_subject',
 }
 
-export default function TeacherAccounts() {
-  const navigate = useNavigate()
+export default function TeacherAccounts({ assignmentOnly = false }: { assignmentOnly?: boolean }) {
+  return !isRemote ? <DemoTeacherManagement assignmentOnly={assignmentOnly} /> : <ActualTeacherAccounts assignmentOnly={assignmentOnly} />
+}
+
+function ActualTeacherAccounts({ assignmentOnly }: { assignmentOnly: boolean }) {
   const push = useToast((s) => s.push)
   const myRoles = useStore((s) => s.myRoles)
   const userId = useStore((s) => s.userId)
@@ -214,15 +217,8 @@ export default function TeacherAccounts() {
   return (
     <>
       <PageHead
-        title="教师管理"
-        sub="建号 · 学科 · 任课关系 · 身份 · 部门"
-        /*
-         * 🔴 **不许裸用 `navigate(-1)`**（`lib/back.ts` 的纪律）：这一页能从
-         *    「行政管理」那一行点进来，**也能直接打开**（书签 / 手打地址）——
-         *    直开时这个 SPA 内部没有上一页，裸 `-1` 会把老师**带出应用**。
-         *    有上一页就回上一页；没有（`history.state.idx === 0`）就回「我的」。
-         */
-        onBack={() => goBackOr(navigate, '/settings')}
+        title={assignmentOnly ? '任课老师分派' : '教师管理'}
+        sub={assignmentOnly ? '选择教师，编辑任课班级与学科' : '账号注册 · 教师档案 · 任课关系'}
       />
       <Page>
         {err ? (
@@ -259,7 +255,7 @@ export default function TeacherAccounts() {
 
         {dir ? (
           <>
-            <div className="mb-4">
+            {!assignmentOnly ? <div className="mb-4">
               <Sect>建号</Sect>
               <Panel bodyClass="p-3">
                 <Button
@@ -274,10 +270,10 @@ export default function TeacherAccounts() {
                   给老师建账号
                 </Button>
               </Panel>
-            </div>
+            </div> : null}
 
             <div className="mb-4">
-              <Sect>教师 · {dir.teachers.length} 人</Sect>
+              <Sect>{assignmentOnly ? '选择任课老师' : '教师'} · {dir.teachers.length} 人</Sect>
               <Panel className="overflow-hidden">
                 {dir.teachers.length === 0 ? (
                   <div className="p-4">
@@ -354,7 +350,7 @@ export default function TeacherAccounts() {
             </div>
 
             {/* 🆕 部门归属 · 批量（开学时一次分几十位老师 —— 用户的口径是"不要手工点几百下"） */}
-            <DepartmentBatch dir={dir} canManage={canManage} onDone={load} />
+            {!assignmentOnly ? <DepartmentBatch dir={dir} canManage={canManage} onDone={load} /> : null}
           </>
         ) : null}
       </Page>

@@ -187,7 +187,7 @@ export function BackupExtraActions() {
             })
             return
           }
-          const res = await notifyBackupDone(`本机备份已导出：${backupSummary(r.plain)}`, `文件：树高备份-${ymdOf(beijingNow())}.json`)
+           const res = await notifyBackupDone(`本机备份已导出：${backupSummary(r.plain)}`, `文件：树高备份-${ymdOf(beijingNow())}.json；学科标签、文字记录和学生组请以整库备份为准`)
           setBkNotifyBusy(false)
           /* 🔴 终态取**真结果**：`res.ok` 是绿勾、否则红叉（红叉停住不回到 `pending`） */
           setBackupMark(res.ok ? 'done' : 'failed')
@@ -195,7 +195,7 @@ export function BackupExtraActions() {
             push({
               text: '本机备份已导出 · 通知邮件已发出',
               tone: 'ok',
-              ...(r.issues.length ? { desc: `档案没能读到（${r.issues[0]}）—— 业务数据这份是全的` } : {}),
+               desc: `${r.issues.length ? `档案没能读到（${r.issues[0]}）。` : ''}这份本机文件不含学科标签、文字记录和学生组；请保留整库备份。`,
             })
             /* ✅ 绿勾亮满 `STATUS_MARK_HOLD_MS` 再回到常态（时长只有共享常量那一处） */
             backupMarkTimer.current = window.setTimeout(

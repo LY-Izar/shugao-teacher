@@ -126,6 +126,7 @@ export type Permission = (typeof PLUGIN_PERMISSIONS)[number]
 export const RESOURCE_PERMISSION = {
   'class.roster': 'data.roster',
   'class.schedule': 'data.schedule',
+  'class.todaySchedule': 'data.schedule',
   'class.slotNow': 'data.schedule',
   'class.dailyHomework': 'data.dailyHomework',
   'class.duty': 'data.duty',
@@ -182,6 +183,8 @@ export interface PluginManifest {
   writes?: PluginWriteDecl[]
   /** 🆕 2026-10-25：申请 `read` 能力时**必须**逐张声明要读的表（最多 12 张，见 `Permission`） */
   reads?: PluginReadDecl[]
+  /** 教师端可见的插件结果槽；只有列在这里的 storage key 才会展示。 */
+  teacherResults?: Array<{ key: string; label: string }>
   requiresShell?: string[]
   window?: { w: number; h: number; min?: { w: number; h: number } }
   config?: { fields: ConfigField[] }
@@ -320,6 +323,24 @@ export function validateManifest(dirName: string, raw: unknown): { ok: boolean; 
         errors.push(`reads 最多声明 ${LIMITS.readTablesPerPlugin} 张表（现在 ${reads.length} 张）`)
       }
       if (!wantsRead) errors.push('声明了 reads 但没申请 read 能力')
+    }
+  }
+
+  if (m.teacherResults !== undefined) {
+    const results = m.teacherResults
+    if (!Array.isArray(results) || results.length > 12) errors.push('teacherResults 必须是至多 12 项的数组')
+    else {
+      const seen = new Set<string>()
+      for (const [i, result] of results.entries()) {
+        const item = result as { key?: unknown; label?: unknown }
+        if (typeof item?.key !== 'string' || !validateKey(item.key).ok || seen.has(item.key))
+          errors.push(`teacherResults[${i}].key 无效或重复`)
+        else seen.add(item.key)
+        if (typeof item?.label !== 'string' || !item.label.trim() || item.label.length > 24)
+          errors.push(`teacherResults[${i}].label 必须为 1–24 字`)
+      }
+      if (results.length && (!Array.isArray(perms) || !perms.includes('storage')))
+        errors.push('teacherResults 需要 storage 能力')
     }
   }
 
@@ -480,6 +501,7 @@ export interface HostPorts {
   storageGet(key: string): Promise<unknown>
   storageSet(key: string, value: unknown): Promise<void>
   storageKeys(): Promise<string[]>
+  storageSyncState(): { pending: number; lastError: string | null }
   /**
    * 🆕 P1（配置通道，手册 §2.3）：`ctx.config.get()` 的后盾。
    * **合并默认值是端口的事**（教师设置 ∪ manifest `config.fields[].default`）——
@@ -508,6 +530,7 @@ export interface HostPorts {
    *    `opts.classId` 由宿主递入，插件改不了它。
    */
   readPluginTable?(table: string, opts: { classId: string }): Promise<ReadTableResult>
+  watchPluginTable?(table: string, cb: () => void): () => void
 }
 
 export interface ContextOptions {
@@ -618,6 +641,12 @@ export function buildContext(o: ContextOptions): Record<string, unknown> {
         asOf: r.asOf,
       }
     }
+    data.watchTable = (table: string, cb: () => void) => {
+      if (typeof table !== 'string' || !declaredRead.has(table) || !PLUGIN_READ_TABLES[table] || PLUGIN_READ_TABLES[table].deny)
+        throw fail('E_TABLE_NOT_READABLE', `manifest.reads 里没有获批的 ${String(table)}`)
+      if (!o.ports.watchPluginTable) throw fail('E_TABLE_NOT_READABLE', '这台设备没有接读表更新端口')
+      return o.ports.watchPluginTable(table, cb)
+    }
   }
 
   if (Object.keys(data).length) ctx.data = data
@@ -637,7 +666,7 @@ export function buildContext(o: ContextOptions): Record<string, unknown> {
         return o.ports.storageSet(key, value)
       },
       keys: () => o.ports.storageKeys(),
-      syncState: () => ({ pending: 0, lastError: null }),
+      syncState: () => o.ports.storageSyncState(),
     }
   }
 

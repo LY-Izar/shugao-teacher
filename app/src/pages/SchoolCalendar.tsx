@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { Page } from '../components/AppShell'
 import {
   IconChevronLeft,
@@ -108,7 +107,6 @@ function csvCell(s: string): string {
 }
 
 export default function SchoolCalendar() {
-  const navigate = useNavigate()
   const push = useToast((s) => s.push)
   const teacher = useStore((s) => s.teacher)
 
@@ -290,8 +288,7 @@ export default function SchoolCalendar() {
     <>
       <PageHead
         title="校历"
-        sub="法定节假日 · 调休 · 学校自己改的日子"
-        onBack={() => navigate('/manage')}
+        sub="月历 · 调休 · 放假 · 大型考试"
       />
       <Page>
         <Panel
@@ -512,7 +509,7 @@ export default function SchoolCalendar() {
           {/* 🆕 2026-10-24：当天还有什么（活动 / 考试）。⚠️ 它**不改**上面"上不上课"那一档 */}
           <div className="mt-4" data-cal-events>
             <div className="flex items-center gap-2">
-              <span style={{ fontSize: 12.5, fontWeight: 650 }}>当天的活动 / 考试</span>
+              <span style={{ fontSize: 12.5, fontWeight: 650 }}>当天的活动 / 大型考试</span>
               <span className="flex-1" />
               {evState === 'missing' ? (
                 <span style={{ fontSize: 11.5, color: 'var(--color-badink)' }}>库里还没有这张表</span>

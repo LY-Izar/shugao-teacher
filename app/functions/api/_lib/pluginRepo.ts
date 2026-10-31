@@ -288,6 +288,7 @@ export function stripComments(s: string): string {
 }
 
 const BANNED: Array<[RegExp, string]> = [
+  [/\bimport\s*(?:\(|['"{*])/, '单文件插件不能导入其他模块'],
   [/window\.__shell_out/, '碰了壳桥 __shell_out'],
   [/\bfetch\s*\(/, '自己联网 fetch('],
   [/\bXMLHttpRequest\b/, '自己联网 XMLHttpRequest'],
@@ -447,6 +448,26 @@ export function probe(files: PluginFiles, prevVersion: string | null): CheckLine
         typeof m.minShellVersion === 'string' && m.minShellVersion ? m.minShellVersion : '?'
       } · 能力 ${perms?.length ?? 0} 项`,
     })
+  }
+  {
+    const raw = m.teacherResults
+    const results = Array.isArray(raw) ? raw as Array<{ key?: unknown; label?: unknown }> : []
+    const keys = new Set<string>()
+    const bad: string[] = []
+    if (raw !== undefined && !Array.isArray(raw)) bad.push('teacherResults 必须是数组')
+    if (results.length > 12) bad.push('教师端结果最多 12 项')
+    if (results.length && !perms?.includes('storage')) bad.push('教师端结果需要 storage 能力')
+    for (const item of results) {
+      const key = item?.key
+      const label = item?.label
+      if (typeof key !== 'string' || !/^[a-z0-9][a-z0-9_.-]{0,63}$/.test(key) || keys.has(key))
+        bad.push(`结果槽名无效或重复：${String(key)}`)
+      else keys.add(key)
+      if (typeof label !== 'string' || !label.trim() || label.length > 24)
+        bad.push(`结果 ${String(key)} 的展示名称无效`)
+    }
+    lines.push({ id: 'CF-13', name: results.length ? `教师端展示 ${results.length} 项插件结果` : '不向教师端展示插件结果',
+      ok: bad.length === 0, detail: bad.length ? bad.join('；') : results.map((r) => `${r.key} → ${r.label}`).join('；') })
   }
   return lines
 }

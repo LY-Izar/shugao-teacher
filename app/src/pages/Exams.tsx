@@ -271,16 +271,15 @@ export default function Exams() {
   return (
     <>
       <PageHead
-        title="考试"
+        title="考试情况"
         sub={`${exams.length} 份档案 · ${groups.length} 场考试`}
-        onBack={() => navigate('/assignments')}
         right={
           <div className="flex items-center gap-1">
             <Button size="sm" variant="ghost" icon={<IconUpload size={14} />} onClick={() => setImportOpen(true)}>
-              导入
+              导入考试
             </Button>
             <Button size="sm" variant="primary" icon={<IconPlus size={15} />} onClick={() => navigate('/exams/new')}>
-              新建
+              新建考试
             </Button>
           </div>
         }

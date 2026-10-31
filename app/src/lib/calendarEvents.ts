@@ -16,7 +16,7 @@ export type CalendarEventKind = 'activity' | 'exam' | 'other'
 
 export const EVENT_KIND_TEXT: Record<CalendarEventKind, string> = {
   activity: '活动',
-  exam: '考试',
+  exam: '大型考试',
   other: '其他',
 }
 
